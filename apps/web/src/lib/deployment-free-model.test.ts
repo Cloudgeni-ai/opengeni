@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { expect, test } from "bun:test";
 import type { ClientModel, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
@@ -21,7 +22,7 @@ function catalogModel(
   } as WorkspaceModelCatalogModel;
 }
 
-const rows = projectPickerRows([
+const rows = projectPickerRows(t, [
   catalogModel({ id: "openrouter/free-default", cost: "free" }),
   catalogModel({ id: "openai/gpt-credits", cost: "credits" }),
   // A workspace's own OpenRouter account, even on an upstream free model.

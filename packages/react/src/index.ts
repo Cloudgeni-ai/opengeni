@@ -47,6 +47,23 @@ export type {
 } from "./client";
 export { OpenGeniProvider } from "./provider";
 export type { OpenGeniProviderProps, ErrorMessageFormatter } from "./provider";
+export {
+  createOpenGeniText,
+  OpenGeniMessagesProvider,
+  useOpenGeniLocale,
+  useOpenGeniText,
+} from "./messages/runtime";
+export type {
+  MessageParamValue,
+  OpenGeniMessageCatalog,
+  OpenGeniMessageKey,
+  OpenGeniMessageParams,
+  OpenGeniMessages,
+  OpenGeniMessagesProviderProps,
+  OpenGeniText,
+  PluralCategory,
+} from "./messages/runtime";
+export { englishMessages } from "./messages/en";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";

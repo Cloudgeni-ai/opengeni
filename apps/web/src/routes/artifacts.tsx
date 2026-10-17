@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
 import type {
   SiteViewer,
@@ -125,7 +126,7 @@ function SiteLoadError({
 }) {
   if (accessDenied)
     return <Notice title="You can't open this Site">{ARTIFACT_ACCESS_REQUIRED}</Notice>;
-  const view = artifactLoadErrorView(error, "site");
+  const view = artifactLoadErrorView(t, error, "site");
   return (
     <Notice
       tone="failed"
@@ -141,7 +142,7 @@ function SiteLoadError({
         ) : undefined
       }
     >
-      {artifactLoadErrorMessage(view)}
+      {artifactLoadErrorMessage(t, view)}
     </Notice>
   );
 }

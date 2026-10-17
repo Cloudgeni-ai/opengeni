@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import {
   buildTimeline,
   parseProviderRecovery,
@@ -26,7 +27,7 @@ export function projectSessionTimeline(
   creationClientEventId?: string,
   projectedItems?: TimelineItem[],
 ): TimelineItem[] {
-  const items = projectedItems ?? buildTimeline(events);
+  const items = projectedItems ?? buildTimeline(t, events);
   if (creationClientEventId) {
     const reconciliationKey = `user-message:${creationClientEventId}`;
     if (
@@ -147,7 +148,7 @@ export function summarizeSessionFailure(
       diagnostics?.payload && typeof diagnostics.payload === "object"
         ? (diagnostics.payload as Record<string, unknown>)
         : {};
-    const presentation = presentFailure(payload);
+    const presentation = presentFailure(t, payload);
     return {
       reason:
         presentation.reason ??
@@ -185,7 +186,7 @@ export function summarizeSessionFailure(
           ? (event.payload as Record<string, unknown>)
           : {};
       consecutiveRecoveryCount = failureRecoveryStreak(payload);
-      const presentation = presentFailure(payload);
+      const presentation = presentFailure(t, payload);
       reason = presentation.reason;
       safetyRefusal = presentation.safetyRefusal;
       failedAt = event.occurredAt;
@@ -204,7 +205,7 @@ export function summarizeSessionFailure(
         // new failure boundary, never evidence that an older provider error
         // happened again. Preserve a paired same-turn diagnostic when present.
         consecutiveRecoveryCount = failureRecoveryStreak(payload);
-        const presentation = presentFailure(payload);
+        const presentation = presentFailure(t, payload);
         reason =
           presentation.reason ??
           "The session failed before a turn could start. No error details were recorded.";

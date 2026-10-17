@@ -3,6 +3,7 @@ import { CopyIcon, ExternalLinkIcon, LaptopIcon, TerminalIcon } from "lucide-rea
 import { cn } from "../lib/cn";
 import type { MachineState } from "../types/machines";
 import { ConnectionStatusPill } from "./machine-status-pill";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** The poll state of an in-flight device-flow enrollment. */
 export type DeviceFlowPhase = "pending" | "authorized" | "denied" | "expired" | "disabled";
@@ -34,12 +35,13 @@ const PHASE_TO_STATE: Record<DeviceFlowPhase, MachineState> = {
 };
 
 function PhaseLabel({ phase }: { phase: DeviceFlowPhase }): ReactNode {
+  const t = useOpenGeniText();
   const text: Record<DeviceFlowPhase, string> = {
-    pending: "Waiting for approval",
-    authorized: "Connected",
-    denied: "Denied",
-    expired: "Code expired",
-    disabled: "Enrollment disabled",
+    pending: t("enrollmentDeviceFlow.waitingForApproval"),
+    authorized: t("enrollmentDeviceFlow.connected"),
+    denied: t("enrollmentDeviceFlow.denied"),
+    expired: t("enrollmentDeviceFlow.codeExpired"),
+    disabled: t("enrollmentDeviceFlow.enrollmentDisabled"),
   };
   return <span>{text[phase]}</span>;
 }
@@ -63,6 +65,7 @@ export function EnrollmentDeviceFlow({
   onOpenVerification,
   className,
 }: EnrollmentDeviceFlowProps) {
+  const t = useOpenGeniText();
   const href = verificationUriComplete ?? verificationUri;
   // Before the one-liner runs the caller passes a placeholder (dashes) for the
   // code — surface that as an explicit waiting state rather than dashes that look
@@ -82,7 +85,9 @@ export function EnrollmentDeviceFlow({
           <span className="flex size-7 items-center justify-center rounded-full bg-og-surface-2 text-og-fg-muted">
             <LaptopIcon className="size-4" aria-hidden />
           </span>
-          <h2 className="text-og-menu font-semibold text-og-fg">Connect a machine</h2>
+          <h2 className="text-og-menu font-semibold text-og-fg">
+            {t("enrollmentDeviceFlow.connectAMachine")}
+          </h2>
         </div>
         <ConnectionStatusPill
           status={
@@ -100,7 +105,7 @@ export function EnrollmentDeviceFlow({
       {installCommand ? (
         <div className="flex flex-col gap-1.5">
           <span className="text-[11px] font-medium uppercase tracking-wide text-og-fg-subtle">
-            1 · Run on the machine
+            {t("enrollmentDeviceFlow.n1RunOnTheMachine")}
           </span>
           <div className="flex items-center justify-between gap-2 overflow-hidden rounded-og-md border border-og-border bg-og-bg px-2.5 py-1.5">
             <code className="flex min-w-0 items-center gap-2 overflow-x-auto font-og-mono text-[12px] text-og-fg">
@@ -111,7 +116,7 @@ export function EnrollmentDeviceFlow({
               type="button"
               data-copy-install
               onClick={onCopyInstall}
-              title="Copy command"
+              title={t("enrollmentDeviceFlow.copyCommand")}
               className="shrink-0 rounded-og-sm p-1.5 text-og-fg-subtle transition-colors hover:bg-og-surface-2 hover:text-og-fg"
             >
               <CopyIcon className="size-4" aria-hidden />
@@ -122,12 +127,14 @@ export function EnrollmentDeviceFlow({
 
       <div className="flex flex-col gap-1.5">
         <span className="text-[11px] font-medium uppercase tracking-wide text-og-fg-subtle">
-          {installCommand ? "2 · Approve the machine" : "Approve the machine"}
+          {installCommand
+            ? t("enrollmentDeviceFlow.n2ApproveTheMachine")
+            : t("enrollmentDeviceFlow.approveTheMachine")}
         </span>
         <div className="flex items-center justify-between gap-3 rounded-og-md border border-og-border bg-og-bg px-3 py-2.5">
           {awaitingCode ? (
             <span data-user-code className="font-og-mono text-[13px] text-og-fg-subtle">
-              Run the command above — your code appears here
+              {t("enrollmentDeviceFlow.runTheCommandAboveYour")}
             </span>
           ) : (
             <span
@@ -142,7 +149,7 @@ export function EnrollmentDeviceFlow({
             data-copy-code
             onClick={onCopyCode}
             disabled={awaitingCode}
-            title="Copy code"
+            title={t("enrollmentDeviceFlow.copyCode")}
             className="shrink-0 rounded-og-sm p-1.5 text-og-fg-subtle transition-colors hover:bg-og-surface-2 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-og-fg-subtle"
           >
             <CopyIcon className="size-4" aria-hidden />
@@ -158,24 +165,29 @@ export function EnrollmentDeviceFlow({
         onClick={onOpenVerification}
         className="inline-flex items-center justify-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-2 text-og-menu font-medium transition-colors hover:bg-og-primary-hover"
       >
-        Open approval page
+        {t("enrollmentDeviceFlow.openApprovalPage")}
         <ExternalLinkIcon className="size-3.5" aria-hidden />
       </a>
 
       <p className="text-center text-[11px] text-og-fg-subtle">
         {awaitingCode ? (
           <>
-            The one-liner prints a short code. Open{" "}
-            <span className="font-og-mono text-og-fg-muted">{verificationUri}</span> and confirm the
-            code shown there matches.
+            {t("enrollmentDeviceFlow.theOneLinerPrintsA")}{" "}
+            <span className="font-og-mono text-og-fg-muted">{verificationUri}</span>{" "}
+            {t("enrollmentDeviceFlow.andConfirmTheCodeShown")}
           </>
         ) : (
           <>
-            Confirm code <span className="font-og-mono text-og-fg-muted">{userCode}</span> — the one
-            printed by the one-liner — at{" "}
+            {t("enrollmentDeviceFlow.confirmCode")}{" "}
+            <span className="font-og-mono text-og-fg-muted">{userCode}</span>{" "}
+            {t("enrollmentDeviceFlow.theOnePrintedByThe")}{" "}
             <span className="font-og-mono text-og-fg-muted">{verificationUri}</span>.
             {typeof expiresInSeconds === "number" ? (
-              <> Expires in {Math.max(0, Math.round(expiresInSeconds / 60))} min.</>
+              <>
+                {" "}
+                {t("enrollmentDeviceFlow.expiresIn")}{" "}
+                {Math.max(0, Math.round(expiresInSeconds / 60))} {t("enrollmentDeviceFlow.min")}
+              </>
             ) : null}
           </>
         )}

@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type {
   ClientModel,
@@ -90,7 +91,7 @@ export function preferredConnectedModelId(
   models: readonly WorkspaceModelCatalogModel[],
   family?: ConnectedModelFamily,
 ): string | null {
-  const rows = projectPickerRows([...models]).filter((row) => row.selectable);
+  const rows = projectPickerRows(t, [...models]).filter((row) => row.selectable);
   if (family) return rows.find((row) => rowMatchesFamily(row, family))?.id ?? null;
   const sorted = sortPickerRows(rows);
   return (
@@ -137,14 +138,14 @@ export async function applyConnectedModelToNewSessionDraft(
       ? [catalog.defaultSelection, catalog.creditsSelection].find(
           (selection) =>
             selection &&
-            projectPickerRows(catalog.models).some(
+            projectPickerRows(t, catalog.models).some(
               (row) =>
                 row.id === selection.model && row.selectable && rowMatchesFamily(row, "credits"),
             ),
         )
       : undefined;
   const modelId = preferredModelId
-    ? (projectPickerRows(catalog.models).find(
+    ? (projectPickerRows(t, catalog.models).find(
         (row) =>
           row.id === preferredModelId &&
           row.selectable &&

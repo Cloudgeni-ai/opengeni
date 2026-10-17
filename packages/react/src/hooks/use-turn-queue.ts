@@ -17,6 +17,7 @@ import {
   useSessionEventTrigger,
   type SessionEventFeedOptions,
 } from "./internal";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** Events that can change the authoritative prompt queue or effective control. */
 export function isTurnQueueEvent(event: Pick<SessionEvent, "type">): boolean {
@@ -102,6 +103,7 @@ export function useTurnQueue(
   sessionId: string | null | undefined,
   options: UseTurnQueueOptions = {},
 ): UseTurnQueueResult {
+  const t = useOpenGeniText();
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSession(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
@@ -351,7 +353,7 @@ export function useTurnQueue(
       const turn = snapshotRef.current?.items.find((candidate) => candidate.id === turnId);
       if (targetKeyRef.current !== ownedTargetKey) return false;
       if (!turn) {
-        setMutationError(new Error("That queued prompt changed before Steer could be sent."));
+        setMutationError(new Error(t("hooks.useTurnQueue.thatQueuedPromptChangedBefore")));
         await load();
         return false;
       }
@@ -404,7 +406,7 @@ export function useTurnQueue(
       );
       return accepted;
     },
-    [client, load, mutate, sessionId, targetKey, workspaceId],
+    [client, load, mutate, sessionId, targetKey, workspaceId, t],
   );
 
   const removeTurn = useCallback(

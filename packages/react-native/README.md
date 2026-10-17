@@ -19,6 +19,27 @@ import { createExpoOpenGeniAdapters } from "@opengeni/react-native/expo";
 </OpenGeniReactNativeProvider>;
 ```
 
+### Labels and languages
+
+The native components read their text from the same catalog as
+`@opengeni/react` (native-only text lives under `native.*` keys). Wrap the app in
+`OpenGeniMessagesProvider` from `@opengeni/react/messages` with your `locale` and
+`messages`; see the `@opengeni/react` README for keys, plurals and fallback.
+
+```tsx
+import { OpenGeniMessagesProvider } from "@opengeni/react/messages";
+
+<OpenGeniMessagesProvider locale="nb" messages={norwegian}>
+  <OpenGeniReactNativeProvider adapters={adapters}>{children}</OpenGeniReactNativeProvider>
+</OpenGeniMessagesProvider>;
+```
+
+The per-surface label props and providers (`NativeTimelineMessagesProvider`,
+`labels` on the timeline and call components) still override individual
+strings. Their defaults are now functions of the translator
+(`defaultNativeTimelineMessages(t)`, `DEFAULT_OPENGENI_NATIVE_LABELS(t)`), so
+pass `useOpenGeniText()` when you build on them.
+
 ## Voice calls with your agent
 
 A call is the web's realtime voice session on native WebRTC, reported to the system as a phone call (CallKit on iOS). It keeps working with the phone locked, follows AirPods and CarPlay, shows in the Phone app's recents, and ends from the lock screen or a headset.

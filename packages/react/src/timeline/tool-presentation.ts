@@ -18,6 +18,7 @@ import {
 import { rawTypeOf } from "./registry";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
 import type { ToolCallItem } from "./types";
+import { type OpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
    Tool row presentation model (renderer-neutral)
@@ -184,6 +185,7 @@ function textPreview(text: string, running?: boolean): ToolPreview {
 /* ---- exec_command ---------------------------------------------------------- */
 
 export function execPresentation(
+  t: OpenGeniText,
   item: ToolCallItem,
   context: ToolPresentationContext = {},
 ): ToolRowPresentation {
@@ -206,14 +208,14 @@ export function execPresentation(
     return {
       ...base,
       iconTone: "failed",
-      chip: { tone: "bad", text: "failed" },
+      chip: { tone: "bad", text: t("timeline.chip.failed") },
       preview: textPreview(
-        withComputePreview(computeLabel, "output lost — NUL byte could not be stored"),
+        withComputePreview(computeLabel, t("timeline.toolPresentation.outputLostNulByteCould")),
       ),
       body: {
         kind: "note",
         tone: "error",
-        text: "output contained a NUL byte and could not be stored; the turn failed on this tool's output insert — no output event ever arrived.",
+        text: t("timeline.toolPresentation.outputContainedANulByte"),
       },
     };
   }
@@ -222,12 +224,14 @@ export function execPresentation(
     return {
       ...base,
       iconTone: "failed",
-      chip: { tone: "bad", text: "failed" },
-      preview: textPreview(withComputePreview(computeLabel, "tool call failed")),
+      chip: { tone: "bad", text: t("timeline.chip.failed") },
+      preview: textPreview(
+        withComputePreview(computeLabel, t("timeline.toolPresentation.toolCallFailed")),
+      ),
       body: {
         kind: "note",
         tone: "error",
-        text: "the tool call failed with no output.",
+        text: t("timeline.toolPresentation.theToolCallFailedWith"),
       },
     };
   }
@@ -266,9 +270,14 @@ export function execPresentation(
     iconTone = "failed";
   }
 
-  const peek = binary ? "binary output" : tailPeek(stripped) || "(no output)";
+  const peek = binary
+    ? t("timeline.toolPresentation.binaryOutput")
+    : tailPeek(stripped) || t("timeline.toolPresentation.noOutput");
   const truncated = execTruncated(text);
-  const preview = withComputePreview(computeLabel, truncated ? `⋯ truncated · ${peek}` : peek);
+  const preview = withComputePreview(
+    computeLabel,
+    truncated ? t("timeline.toolPresentation.truncatedPeek", { peek }) : peek,
+  );
   return {
     ...base,
     iconTone,
@@ -280,11 +289,11 @@ export function execPresentation(
       kind: "term",
       command: null,
       workdir,
-      output: binary ? "(binary output suppressed)" : stripped,
+      output: binary ? t("timeline.toolPresentation.binaryOutputSuppressed") : stripped,
       failed: item.status === "failed" || (exitCode != null && exitCode !== 0),
       ...(bgSession != null
         ? {
-            note: `↳ session ${bgSession} — a later write_stdin can target this PTY.`,
+            note: t("timeline.toolPresentation.sessionBgsessionALaterWrite", { bgSession }),
           }
         : {}),
     },
@@ -293,7 +302,7 @@ export function execPresentation(
 
 /* ---- write_stdin ----------------------------------------------------------- */
 
-export function writeStdinPresentation(item: ToolCallItem): ToolRowPresentation {
+export function writeStdinPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
   const args = parseToolArgs(item.arguments);
   const sessionId =
     typeof args.session_id === "string" || typeof args.session_id === "number"
@@ -318,13 +327,16 @@ export function writeStdinPresentation(item: ToolCallItem): ToolRowPresentation 
       iconTone: "running",
       running: true,
       preview: textPreview("sending…", true),
-      body: { kind: "note", text: `sending input to session ${sessionId}…` },
+      body: {
+        kind: "note",
+        text: t("timeline.toolPresentation.sendingInputToSessionSessionid", { sessionId }),
+      },
     };
   }
 
   let chip: ToolChip | undefined;
   if (lost) {
-    chip = { tone: "bad", text: "lost" };
+    chip = { tone: "bad", text: t("timeline.chip.lost") };
   } else if (exitCode != null && exitCode !== 0) {
     chip = { tone: "bad", text: `exit ${exitCode}` };
   }
@@ -335,7 +347,11 @@ export function writeStdinPresentation(item: ToolCallItem): ToolRowPresentation 
     ...(chip ? { chip } : {}),
     failed: item.status === "failed",
     cancelled: item.status === "cancelled",
-    preview: textPreview(lost ? `session ${sessionId} PTY vanished` : tailPeek(stripped) || "sent"),
+    preview: textPreview(
+      lost
+        ? t("timeline.toolPresentation.sessionSessionidPtyVanished", { sessionId })
+        : tailPeek(stripped) || "sent",
+    ),
     body: lost
       ? { kind: "note", tone: "error", text: stripped || text }
       : {
@@ -349,17 +365,17 @@ export function writeStdinPresentation(item: ToolCallItem): ToolRowPresentation 
 
 /* ---- apply_patch ----------------------------------------------------------- */
 
-export function patchVerb(op: ApplyPatchOperation | undefined): string {
+export function patchVerb(t: OpenGeniText, op: ApplyPatchOperation | undefined): string {
   if (!op) {
-    return "Edited";
+    return t("timeline.toolPresentation.edited");
   }
   return op.type === "create_file"
-    ? "Created"
+    ? t("timeline.toolPresentation.created")
     : op.type === "delete_file"
-      ? "Deleted"
+      ? t("timeline.toolPresentation.deleted")
       : op.moveTo
-        ? "Renamed"
-        : "Edited";
+        ? t("timeline.toolPresentation.renamed")
+        : t("timeline.toolPresentation.edited");
 }
 
 export function pathBasename(path: string): string {
@@ -393,7 +409,10 @@ function patchFiles(
 }
 
 /** Returns null when a settled patch has no op (renderers fall back to generic). */
-export function applyPatchPresentation(item: ToolCallItem): ToolRowPresentation | null {
+export function applyPatchPresentation(
+  t: OpenGeniText,
+  item: ToolCallItem,
+): ToolRowPresentation | null {
   const ops = applyPatchOpsFromToolItem(item);
   const cancelled = item.status === "cancelled";
   const firstOp = ops[0];
@@ -402,11 +421,18 @@ export function applyPatchPresentation(item: ToolCallItem): ToolRowPresentation 
   if (item.status === "running") {
     // Show the patch structure from the arguments, marked clearly in-progress.
     const fileCount = ops.length;
-    const titleVerb = firstOp ? `Applying ${pathBasename(firstOp.path)}` : "Applying patch";
+    const titleVerb = firstOp
+      ? t("timeline.toolPresentation.applyingPathbasename", {
+          pathBasename: pathBasename(firstOp.path),
+        })
+      : t("timeline.toolPresentation.applyingPatch");
     return {
       ...base,
       iconTone: "running",
-      title: fileCount > 1 ? `Applying ${fileCount} files` : titleVerb,
+      title:
+        fileCount > 1
+          ? t("timeline.toolPresentation.applyingFilecountFiles", { fileCount })
+          : titleVerb,
       running: true,
       preview: textPreview(
         fileCount > 1 ? `${fileCount} files` : firstOp ? firstOp.path : "applying…",
@@ -420,12 +446,14 @@ export function applyPatchPresentation(item: ToolCallItem): ToolRowPresentation 
     return {
       ...base,
       iconTone: "failed",
-      title: firstOp ? `${patchVerb(firstOp)} ${pathBasename(firstOp.path)}` : "apply_patch",
-      chip: { tone: "bad", text: "failed" },
-      preview: textPreview(typeof item.output === "string" ? item.output : "patch failed"),
+      title: firstOp ? `${patchVerb(t, firstOp)} ${pathBasename(firstOp.path)}` : "apply_patch",
+      chip: { tone: "bad", text: t("timeline.chip.failed") },
+      preview: textPreview(
+        typeof item.output === "string" ? item.output : t("timeline.toolPresentation.patchFailed"),
+      ),
       body: {
         kind: "payloads",
-        blocks: [{ label: "Error", value: item.output, failed: true }],
+        blocks: [{ label: t("timeline.toolPresentation.error"), value: item.output, failed: true }],
       },
     };
   }
@@ -439,7 +467,7 @@ export function applyPatchPresentation(item: ToolCallItem): ToolRowPresentation 
     return {
       ...base,
       iconTone: "accent",
-      title: `Edited ${ops.length} files`,
+      title: t("timeline.toolPresentation.editedLengthFiles", { length: ops.length }),
       cancelled,
       preview: { kind: "files", count: ops.length, add, del },
       body: { kind: "patch", files: patchFiles(ops, parsed) },
@@ -453,10 +481,12 @@ export function applyPatchPresentation(item: ToolCallItem): ToolRowPresentation 
     return {
       ...base,
       iconTone: "failed",
-      title: `Deleted ${pathBasename(firstOp.path)}`,
+      title: t("timeline.toolPresentation.deletedPathbasename", {
+        pathBasename: pathBasename(firstOp.path),
+      }),
       cancelled,
       preview: { kind: "path", path: firstOp.path },
-      body: { kind: "note", text: "File deleted — no diff to show." },
+      body: { kind: "note", text: t("timeline.toolPresentation.fileDeletedNoDiffTo") },
     };
   }
 
@@ -465,7 +495,7 @@ export function applyPatchPresentation(item: ToolCallItem): ToolRowPresentation 
     return {
       ...base,
       iconTone: "accent",
-      title: `${patchVerb(firstOp)} ${pathBasename(firstOp.path)}`,
+      title: `${patchVerb(t, firstOp)} ${pathBasename(firstOp.path)}`,
       cancelled,
       preview: { kind: "malformed", name: pathBasename(firstOp.path) },
       body: { kind: "patch", files: patchFiles([firstOp], [null]), bare: true },
@@ -475,7 +505,7 @@ export function applyPatchPresentation(item: ToolCallItem): ToolRowPresentation 
   return {
     ...base,
     iconTone: "accent",
-    title: `${patchVerb(firstOp)} ${pathBasename(file.path)}`,
+    title: `${patchVerb(t, firstOp)} ${pathBasename(file.path)}`,
     cancelled,
     preview: {
       kind: "path",
@@ -519,7 +549,7 @@ export function webSearchQueryFromArguments(args: unknown): string | null {
   return null;
 }
 
-export function webSearchPresentation(item: ToolCallItem): ToolRowPresentation {
+export function webSearchPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
   const raw = (item.raw ?? {}) as {
     providerData?: {
       action?: {
@@ -543,13 +573,13 @@ export function webSearchPresentation(item: ToolCallItem): ToolRowPresentation {
   const running = item.status === "running";
   const query =
     actionType === "open_page"
-      ? (action.url ?? "(page unavailable)")
+      ? (action.url ?? t("timeline.toolPresentation.pageUnavailable"))
       : actionType === "find_in_page"
         ? action.pattern && action.url
           ? `"${action.pattern}" in ${action.url}`
-          : (action.pattern ?? action.url ?? "(page unavailable)")
+          : (action.pattern ?? action.url ?? t("timeline.toolPresentation.pageUnavailable"))
         : // Codex often emits the live card before action.query/queries land.
-          (searchQuery ?? (running ? "…" : "(query unavailable)"));
+          (searchQuery ?? (running ? "…" : t("timeline.toolPresentation.queryUnavailable")));
   const variants = queries.length > 1 ? ` +${queries.length - 1} variants` : "";
   const base = { tool: "web_search" as const, icon: "search" as const };
 
@@ -559,15 +589,15 @@ export function webSearchPresentation(item: ToolCallItem): ToolRowPresentation {
       iconTone: "running",
       title:
         actionType === "open_page"
-          ? "Opening web page"
+          ? t("timeline.toolPresentation.openingWebPage")
           : actionType === "find_in_page"
-            ? "Searching within page"
-            : "Searching the web",
+            ? t("timeline.toolPresentation.searchingWithinPage")
+            : t("timeline.toolPresentation.searchingTheWeb"),
       running: true,
       preview: textPreview(`${query}${variants}`, true),
       body: {
         kind: "note",
-        text: "searching… results fold into the model context (no output event).",
+        text: t("timeline.toolPresentation.searchingResultsFoldIntoThe"),
       },
     };
   }
@@ -581,10 +611,10 @@ export function webSearchPresentation(item: ToolCallItem): ToolRowPresentation {
     iconTone: "muted",
     title:
       actionType === "open_page"
-        ? "Opened web page"
+        ? t("timeline.toolPresentation.openedWebPage")
         : actionType === "find_in_page"
-          ? "Searched within page"
-          : "Searched the web",
+          ? t("timeline.toolPresentation.searchedWithinPage")
+          : t("timeline.toolPresentation.searchedTheWeb"),
     preview: textPreview(`${query}${variants}`),
     failed: item.status === "failed",
     cancelled: item.status === "cancelled",
@@ -741,7 +771,11 @@ type McpRowOptions = {
   plainRunningPreview?: boolean | undefined;
 };
 
-function mcpRowPresentation(item: ToolCallItem, options: McpRowOptions): ToolRowPresentation {
+function mcpRowPresentation(
+  t: OpenGeniText,
+  item: ToolCallItem,
+  options: McpRowOptions,
+): ToolRowPresentation {
   const args = parseToolArgs(item.arguments);
   const base = { tool: options.tool, icon: options.icon, title: options.title };
   if (item.status === "running") {
@@ -753,7 +787,10 @@ function mcpRowPresentation(item: ToolCallItem, options: McpRowOptions): ToolRow
         options.runningPreview != null && options.plainRunningPreview
           ? textPreview(options.runningPreview)
           : textPreview(options.runningPreview ?? options.runningFallback, true),
-      body: { kind: "payloads", blocks: [{ label: "Arguments", value: args }] },
+      body: {
+        kind: "payloads",
+        blocks: [{ label: t("timeline.toolPresentation.arguments"), value: args }],
+      },
     };
   }
   const { text: outText, isError } = unwrapMcpOutput(item.output);
@@ -763,13 +800,15 @@ function mcpRowPresentation(item: ToolCallItem, options: McpRowOptions): ToolRow
     return {
       ...base,
       iconTone: "failed",
-      chip: { tone: "bad", text: "error" },
-      preview: textPreview(truncatePreview(outText, 80) || errorFallback || "Error"),
+      chip: { tone: "bad", text: t("timeline.chip.error") },
+      preview: textPreview(
+        truncatePreview(outText, 80) || errorFallback || t("timeline.toolPresentation.error"),
+      ),
       body: {
         kind: "payloads",
         blocks: [
-          { label: "Arguments", value: args },
-          { label: "Error", value: outText, failed: true },
+          { label: t("timeline.toolPresentation.arguments"), value: args },
+          { label: t("timeline.toolPresentation.error"), value: outText, failed: true },
         ],
       },
     };
@@ -787,37 +826,39 @@ function mcpRowPresentation(item: ToolCallItem, options: McpRowOptions): ToolRow
       kind: "payloads",
       blocks:
         options.omitEmptyResult && !outText
-          ? [{ label: "Arguments", value: args }]
+          ? [{ label: t("timeline.toolPresentation.arguments"), value: args }]
           : [
-              { label: "Arguments", value: args },
-              { label: "Result", value: outText },
+              { label: t("timeline.toolPresentation.arguments"), value: args },
+              { label: t("timeline.toolPresentation.result"), value: outText },
             ],
     },
   };
 }
 
-export function askPresentation(item: ToolCallItem): ToolRowPresentation {
+export function askPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
   const preview = askToolPreview(parseToolArgs(item.arguments));
-  return mcpRowPresentation(item, {
+  return mcpRowPresentation(t, item, {
     tool: "ask",
     icon: "question",
-    title: "Ask",
+    title: t("timeline.toolPresentation.ask"),
     runningPreview: preview,
-    runningFallback: "Waiting…",
+    runningFallback: t("timeline.toolPresentation.waiting"),
     settledPreview: preview,
     omitEmptyResult: true,
   });
 }
 
-export function runOnPresentation(item: ToolCallItem): ToolRowPresentation {
+export function runOnPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
   const targetName = runOnTargetName(item.output);
   const opPreview = runOnOpPreview(parseToolArgs(item.arguments));
-  return mcpRowPresentation(item, {
+  return mcpRowPresentation(t, item, {
     tool: "run_on",
     icon: "server",
-    title: targetName ? `Run on ${targetName}` : "Run on",
+    title: targetName
+      ? t("timeline.toolPresentation.runOnTargetname", { targetName })
+      : t("timeline.toolPresentation.runOn"),
     runningPreview: opPreview,
-    runningFallback: "Running…",
+    runningFallback: t("timeline.toolPresentation.running"),
     settledPreview: opPreview,
     omitEmptyResult: true,
   });
@@ -827,14 +868,14 @@ export function runOnPresentation(item: ToolCallItem): ToolRowPresentation {
  * Baseline craft for unmatched tools: family icon + title-cased leaf + honest
  * status preview (Running… / Done / error snippet).
  */
-export function genericToolPresentation(item: ToolCallItem): ToolRowPresentation {
+export function genericToolPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
   const goalPreview = goalToolPreview(item.name, parseToolArgs(item.arguments));
   if (item.status !== "running") {
     const { text: outText, isError } = unwrapMcpOutput(item.output);
     const base = {
       tool: "generic" as const,
       icon: genericToolIconKind(item.name),
-      title: toolDisplayName(item.name, item.display),
+      title: toolDisplayName(t, item.name, item.display),
     };
     const args = parseToolArgs(item.arguments);
     // A permission Block is a decision, not a tool failure: say so plainly instead
@@ -843,12 +884,12 @@ export function genericToolPresentation(item: ToolCallItem): ToolRowPresentation
       return {
         ...base,
         iconTone: "muted",
-        chip: { tone: "interrupted", text: "blocked" },
-        preview: textPreview("Blocked by your permission settings"),
+        chip: { tone: "interrupted", text: t("timeline.chip.blocked") },
+        preview: textPreview(t("timeline.toolPresentation.blockedByYourPermissionSettings")),
         body: {
           kind: "payloads",
-          note: "Your permission settings block this action, so it did not run. You can change this in the integration's tool permissions.",
-          blocks: [{ label: "Arguments", value: args }],
+          note: t("timeline.toolPresentation.yourPermissionSettingsBlockThis"),
+          blocks: [{ label: t("timeline.toolPresentation.arguments"), value: args }],
         },
       };
     }
@@ -857,24 +898,24 @@ export function genericToolPresentation(item: ToolCallItem): ToolRowPresentation
       return {
         ...base,
         iconTone: "failed",
-        chip: { tone: "bad", text: "outcome unknown" },
-        preview: textPreview("It may have run"),
+        chip: { tone: "bad", text: t("timeline.toolPresentation.outcomeUnknown") },
+        preview: textPreview(t("timeline.toolPresentation.itMayHaveRun")),
         body: {
           kind: "payloads",
-          note: "This action may have run. Check the result in the connected app before trying again.",
-          blocks: [{ label: "Arguments", value: args }],
+          note: t("timeline.toolPresentation.thisActionMayHaveRun"),
+          blocks: [{ label: t("timeline.toolPresentation.arguments"), value: args }],
         },
       };
     }
   }
-  return mcpRowPresentation(item, {
+  return mcpRowPresentation(t, item, {
     tool: "generic",
     icon: genericToolIconKind(item.name),
-    title: toolDisplayName(item.name, item.display),
+    title: toolDisplayName(t, item.name, item.display),
     runningPreview: goalPreview,
-    runningFallback: "Running…",
+    runningFallback: t("timeline.toolPresentation.running"),
     settledPreview: goalPreview,
-    settledFallback: "Done",
+    settledFallback: t("timeline.toolPresentation.done"),
     plainRunningPreview: true,
   });
 }
@@ -987,6 +1028,7 @@ export function parseDisclosedTools(output: unknown): DisclosedTool[] | null {
 }
 
 export function toolSearchPreview(
+  t: OpenGeniText,
   tools: DisclosedTool[] | null,
   cancelled: boolean,
 ): string | undefined {
@@ -994,19 +1036,22 @@ export function toolSearchPreview(
     return undefined;
   }
   if (!tools) {
-    return "Done";
+    return t("timeline.toolPresentation.done");
   }
   if (tools.length === 0) {
-    return "No matches";
+    return t("timeline.toolPresentation.noMatches");
   }
   if (tools.length === 1) {
     return tools[0]!.leaf;
   }
   const head = tools[0]!.leaf;
-  return `${tools.length} tools · ${truncatePreview(head, 28)}`;
+  return t("timeline.toolPresentation.lengthToolsTruncatepreview", {
+    length: tools.length,
+    truncatePreview: truncatePreview(head, 28),
+  });
 }
 
-export function toolSearchPresentation(item: ToolCallItem): ToolRowPresentation {
+export function toolSearchPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
   const query = toolSearchQuery(item);
   const queryPreview = query ? truncatePreview(query, 64) : "";
   const note = query ? `capability query: ${query}` : undefined;
@@ -1016,10 +1061,18 @@ export function toolSearchPresentation(item: ToolCallItem): ToolRowPresentation 
     return {
       ...base,
       iconTone: "running",
-      title: "Looking up tools",
+      title: t("timeline.toolPresentation.lookingUpTools"),
       running: true,
-      preview: textPreview(queryPreview || "Matching capabilities…", true),
-      body: { kind: "listing", note, entries: [], blocks: [{ label: "Arguments", value: args }] },
+      preview: textPreview(
+        queryPreview || t("timeline.toolPresentation.matchingCapabilities"),
+        true,
+      ),
+      body: {
+        kind: "listing",
+        note,
+        entries: [],
+        blocks: [{ label: t("timeline.toolPresentation.arguments"), value: args }],
+      },
     };
   }
   const { text: outText, isError } = unwrapMcpOutput(item.output);
@@ -1027,26 +1080,28 @@ export function toolSearchPresentation(item: ToolCallItem): ToolRowPresentation 
     return {
       ...base,
       iconTone: "failed",
-      title: "Tool lookup failed",
+      title: t("timeline.toolPresentation.toolLookupFailed"),
       failed: true,
-      preview: textPreview(truncatePreview(outText, 80) || queryPreview || "Lookup failed"),
+      preview: textPreview(
+        truncatePreview(outText, 80) || queryPreview || t("timeline.toolPresentation.lookupFailed"),
+      ),
       body: {
         kind: "listing",
         note,
         entries: [],
         blocks: [
-          { label: "Arguments", value: args },
-          { label: "Error", value: outText, failed: true },
+          { label: t("timeline.toolPresentation.arguments"), value: args },
+          { label: t("timeline.toolPresentation.error"), value: outText, failed: true },
         ],
       },
     };
   }
   const tools = parseDisclosedTools(item.output);
-  const preview = toolSearchPreview(tools, item.status === "cancelled");
+  const preview = toolSearchPreview(t, tools, item.status === "cancelled");
   return {
     ...base,
     iconTone: "muted",
-    title: "Looked up tools",
+    title: t("timeline.toolPresentation.lookedUpTools"),
     cancelled: item.status === "cancelled",
     ...(preview ? { preview: textPreview(preview) } : {}),
     body: {
@@ -1061,15 +1116,15 @@ export function toolSearchPresentation(item: ToolCallItem): ToolRowPresentation 
       more: tools && tools.length > 12 ? tools.length - 12 : undefined,
       empty:
         tools && tools.length === 0
-          ? "no deferred tools matched this capability query."
+          ? t("timeline.toolPresentation.noDeferredToolsMatchedThis")
           : undefined,
       blocks:
         tools == null && outText
           ? [
-              { label: "Arguments", value: args },
-              { label: "Result", value: outText },
+              { label: t("timeline.toolPresentation.arguments"), value: args },
+              { label: t("timeline.toolPresentation.result"), value: outText },
             ]
-          : [{ label: "Arguments", value: args }],
+          : [{ label: t("timeline.toolPresentation.arguments"), value: args }],
     },
   };
 }
@@ -1078,7 +1133,7 @@ export function toolSearchPresentation(item: ToolCallItem): ToolRowPresentation 
 
 export type SearchHit = { title: string; snippet: string };
 
-export function parseSearchHits(outText: string): SearchHit[] | null {
+export function parseSearchHits(t: OpenGeniText, outText: string): SearchHit[] | null {
   const parsed = tryParseJson(outText);
   if (parsed == null) {
     return null;
@@ -1103,7 +1158,7 @@ export function parseSearchHits(outText: string): SearchHit[] | null {
       (typeof r.documentTitle === "string" && r.documentTitle) ||
       (typeof r.path === "string" && r.path) ||
       (typeof r.id === "string" && r.id) ||
-      "Result";
+      t("timeline.toolPresentation.result");
     const snippet =
       (typeof r.snippet === "string" && r.snippet) ||
       (typeof r.text === "string" && r.text) ||
@@ -1113,23 +1168,28 @@ export function parseSearchHits(outText: string): SearchHit[] | null {
   });
 }
 
-export function docsSearchPresentation(item: ToolCallItem): ToolRowPresentation {
+export function docsSearchPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
   const args = parseToolArgs(item.arguments);
   const query = typeof args.query === "string" ? args.query.trim() : "";
   const base = {
     tool: "docs_search" as const,
     icon: "file-search" as const,
     title: query
-      ? `Search \u201c${truncatePreview(query, 48)}\u201d`
-      : toolDisplayName(item.name, item.display),
+      ? t("timeline.toolPresentation.searchTruncatepreview", {
+          truncatePreview: truncatePreview(query, 48),
+        })
+      : toolDisplayName(t, item.name, item.display),
   };
   if (item.status === "running") {
     return {
       ...base,
       iconTone: "running",
       running: true,
-      preview: textPreview("Searching…", true),
-      body: { kind: "payloads", blocks: [{ label: "Arguments", value: args }] },
+      preview: textPreview(t("timeline.toolPresentation.searching"), true),
+      body: {
+        kind: "payloads",
+        blocks: [{ label: t("timeline.toolPresentation.arguments"), value: args }],
+      },
     };
   }
   const { text: outText, isError } = unwrapMcpOutput(item.output);
@@ -1138,25 +1198,27 @@ export function docsSearchPresentation(item: ToolCallItem): ToolRowPresentation 
       ...base,
       iconTone: "failed",
       failed: true,
-      preview: textPreview(truncatePreview(outText, 80) || "Search failed"),
+      preview: textPreview(
+        truncatePreview(outText, 80) || t("timeline.toolPresentation.searchFailed"),
+      ),
       body: {
         kind: "payloads",
         blocks: [
-          { label: "Arguments", value: args },
-          { label: "Error", value: outText, failed: true },
+          { label: t("timeline.toolPresentation.arguments"), value: args },
+          { label: t("timeline.toolPresentation.error"), value: outText, failed: true },
         ],
       },
     };
   }
-  const hits = parseSearchHits(outText);
+  const hits = parseSearchHits(t, outText);
   const preview =
     item.status === "cancelled"
       ? undefined
       : hits
         ? hits.length === 0
-          ? "No hits"
-          : `${hits.length} hit${hits.length === 1 ? "" : "s"}`
-        : "Done";
+          ? t("timeline.toolPresentation.noHits")
+          : t("counts.hits", { count: hits.length })
+        : t("timeline.toolPresentation.done");
   return {
     ...base,
     iconTone: "muted",
@@ -1170,8 +1232,8 @@ export function docsSearchPresentation(item: ToolCallItem): ToolRowPresentation 
         snippet: hit.snippet || undefined,
       })),
       blocks: [
-        { label: "Arguments", value: args },
-        { label: "Result", value: outText },
+        { label: t("timeline.toolPresentation.arguments"), value: args },
+        { label: t("timeline.toolPresentation.result"), value: outText },
       ],
     },
   };
@@ -1179,22 +1241,25 @@ export function docsSearchPresentation(item: ToolCallItem): ToolRowPresentation 
 
 /* ---- set_session_title / set_other_session_title --------------------------- */
 
-export function sessionTitlePresentation(item: ToolCallItem): ToolRowPresentation {
+export function sessionTitlePresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
   const args = parseToolArgs(item.arguments);
   const titleArg = typeof args.title === "string" ? args.title.trim() : "";
   const previewTitle = titleArg ? truncatePreview(titleArg, 72) : "";
   const base = {
     tool: "session_title" as const,
     icon: "sessions" as const,
-    title: toolDisplayName(item.name, item.display),
+    title: toolDisplayName(t, item.name, item.display),
   };
   if (item.status === "running") {
     return {
       ...base,
       iconTone: "running",
       running: true,
-      preview: textPreview(previewTitle || "Setting title…", true),
-      body: { kind: "payloads", blocks: [{ label: "Arguments", value: args }] },
+      preview: textPreview(previewTitle || t("timeline.toolPresentation.settingTitle"), true),
+      body: {
+        kind: "payloads",
+        blocks: [{ label: t("timeline.toolPresentation.arguments"), value: args }],
+      },
     };
   }
   const { text: outText, isError } = unwrapMcpOutput(item.output);
@@ -1203,12 +1268,14 @@ export function sessionTitlePresentation(item: ToolCallItem): ToolRowPresentatio
       ...base,
       iconTone: "failed",
       failed: true,
-      preview: textPreview(truncatePreview(outText, 80) || "Rename failed"),
+      preview: textPreview(
+        truncatePreview(outText, 80) || t("timeline.toolPresentation.renameFailed"),
+      ),
       body: {
         kind: "payloads",
         blocks: [
-          { label: "Arguments", value: args },
-          { label: "Error", value: outText, failed: true },
+          { label: t("timeline.toolPresentation.arguments"), value: args },
+          { label: t("timeline.toolPresentation.error"), value: outText, failed: true },
         ],
       },
     };
@@ -1233,10 +1300,10 @@ export function sessionTitlePresentation(item: ToolCallItem): ToolRowPresentatio
       kind: "payloads",
       blocks: outText
         ? [
-            { label: "Arguments", value: args },
-            { label: "Result", value: outText },
+            { label: t("timeline.toolPresentation.arguments"), value: args },
+            { label: t("timeline.toolPresentation.result"), value: outText },
           ]
-        : [{ label: "Arguments", value: args }],
+        : [{ label: t("timeline.toolPresentation.arguments"), value: args }],
     },
   };
 }
@@ -1288,29 +1355,30 @@ export function presentedToolKind(item: ToolCallItem): PresentedToolKind {
 }
 
 export function toolRowPresentation(
+  t: OpenGeniText,
   item: ToolCallItem,
   context: ToolPresentationContext = {},
 ): ToolRowPresentation {
   switch (presentedToolKind(item)) {
     case "exec":
-      return execPresentation(item, context);
+      return execPresentation(t, item, context);
     case "write_stdin":
-      return writeStdinPresentation(item);
+      return writeStdinPresentation(t, item);
     case "apply_patch":
-      return applyPatchPresentation(item) ?? genericToolPresentation(item);
+      return applyPatchPresentation(t, item) ?? genericToolPresentation(t, item);
     case "web_search":
-      return webSearchPresentation(item);
+      return webSearchPresentation(t, item);
     case "ask":
-      return askPresentation(item);
+      return askPresentation(t, item);
     case "run_on":
-      return runOnPresentation(item);
+      return runOnPresentation(t, item);
     case "tool_search":
-      return toolSearchPresentation(item);
+      return toolSearchPresentation(t, item);
     case "docs_search":
-      return docsSearchPresentation(item);
+      return docsSearchPresentation(t, item);
     case "session_title":
-      return sessionTitlePresentation(item);
+      return sessionTitlePresentation(t, item);
     default:
-      return genericToolPresentation(item);
+      return genericToolPresentation(t, item);
   }
 }

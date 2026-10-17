@@ -4,6 +4,7 @@ import type { PluginDiscoveryItem, PluginDiscoveryPage } from "@opengeni/sdk";
 import { BoxesIcon } from "lucide-react";
 import { CapabilityCatalogRow } from "./capability-catalog-row";
 import { ConnectionLogo } from "./connection-logo";
+import { useOpenGeniText } from "./messages/runtime";
 
 const discoveryCache = createDiscoveryCache<PluginDiscoveryPage>();
 const spacedName = (name: string) => name.replace(/-/g, " ");
@@ -31,21 +32,28 @@ export type PluginDiscoveryProps = {
   renderIcon?: (item: PluginDiscoveryItem) => ReactNode;
 };
 export function PluginDiscovery(props: PluginDiscoveryProps) {
+  const t = useOpenGeniText();
   const [provider, setProvider] = useState(props.defaultProvider ?? "");
   return (
     <section
       className={`og-plugin-discovery ${props.resultLimit ? "og-catalog-overview" : ""}`}
-      aria-label="Discover plugins"
+      aria-label={t("pluginDiscovery.discoverPlugins")}
     >
       <header>
-        <h3>{props.resultLimit ? "Plugins" : "Browse plugins"}</h3>
+        <h3>
+          {props.resultLimit ? t("pluginDiscovery.plugins") : t("pluginDiscovery.browsePlugins")}
+        </h3>
         {!props.resultLimit ? (
-          <div className="og-plugin-filters" role="group" aria-label="Plugin registry">
+          <div
+            className="og-plugin-filters"
+            role="group"
+            aria-label={t("pluginDiscovery.pluginRegistry")}
+          >
             {(
               [
-                { value: "", label: "All" },
-                { value: "openai", label: "OpenAI plugin registry" },
-                { value: "anthropic", label: "Anthropic plugin registry" },
+                { value: "", label: t("pluginDiscovery.all") },
+                { value: "openai", label: t("pluginDiscovery.openaiPluginRegistry") },
+                { value: "anthropic", label: t("pluginDiscovery.anthropicPluginRegistry") },
               ] as const
             ).map((option) => (
               <button
@@ -80,6 +88,7 @@ function Results({
   formatName = spacedName,
   renderIcon,
 }: PluginDiscoveryProps & { provider: string }) {
+  const t = useOpenGeniText();
   const initial = discoveryCache.peek(client, JSON.stringify([workspaceId, query, provider, 0]));
   const [items, setItems] = useState<PluginDiscoveryItem[]>(initial?.items ?? []);
   const [offset, setOffset] = useState(0);
@@ -140,10 +149,10 @@ function Results({
       {!loading && !error ? (
         <p role="status">
           {total
-            ? "Bundles of skills and connections"
+            ? t("pluginDiscovery.bundlesOfSkillsAndConnections")
             : query.trim()
-              ? `No matches for “${query.trim()}”.`
-              : "No plugins in this registry."}
+              ? t("pluginDiscovery.noMatchesForTrim", { trim: query.trim() })
+              : t("pluginDiscovery.noPluginsInThisRegistry")}
         </p>
       ) : null}
       <div className="og-plugin-discovery-grid">
@@ -154,7 +163,11 @@ function Results({
             name={formatName(item.displayName)}
             description={item.description}
             status={installedIds.has(item.id) ? "added" : "available"}
-            statusLabel={installedIds.has(item.id) ? "Installed" : "Available to install"}
+            statusLabel={
+              installedIds.has(item.id)
+                ? t("pluginDiscovery.installed")
+                : t("pluginDiscovery.availableToInstall")
+            }
             onOpen={() => onOpen(item)}
             icon={
               renderIcon ? (
@@ -170,24 +183,24 @@ function Results({
           />
         ))}
       </div>
-      {loading ? <p role="status">Loading plugins…</p> : null}
+      {loading ? <p role="status">{t("pluginDiscovery.loadingPlugins")}</p> : null}
       {error ? (
         <p role="alert">
-          Couldn’t load plugins.{" "}
+          {t("pluginDiscovery.couldnTLoadPlugins")}{" "}
           <button type="button" onClick={() => setRetry((value) => value + 1)}>
-            Retry
+            {t("pluginDiscovery.retry")}
           </button>
         </p>
       ) : null}
       {resultLimit && !loading && !error && total > resultLimit ? (
         <button className="og-catalog-more" type="button" onClick={onShowMore}>
-          View all plugins
+          {t("pluginDiscovery.viewAllPlugins")}
         </button>
       ) : null}
       <div ref={sentinel}>
         {!resultLimit && next !== null && !loading && !error ? (
           <button className="og-plugin-more" type="button" onClick={() => setOffset(next)}>
-            Show more plugins
+            {t("pluginDiscovery.showMorePlugins")}
           </button>
         ) : null}
       </div>

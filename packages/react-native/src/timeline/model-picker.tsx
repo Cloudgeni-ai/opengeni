@@ -8,6 +8,7 @@ import {
   type ModelPickerInput,
 } from "@opengeni/react/model-picker-model";
 import { labelReasoningEffort, type PickerBillingClass } from "@opengeni/react/model-policy";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { Icon, type NativeIconName } from "./icon";
@@ -67,8 +68,9 @@ function GroupMark(props: {
 export function ModelPickerSheet(props: ModelPickerSheetProps) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  const t = useOpenGeniText();
   const [query, setQuery] = useState("");
-  const view = modelPickerMenuView(props, query);
+  const view = modelPickerMenuView(t, props, query);
   const { messages, groups, thinking } = view;
   const close = () => {
     setQuery("");
@@ -105,12 +107,14 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
         </Text>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Done"
+          accessibilityLabel={t("native.timeline.modelPicker.done")}
           onPress={close}
           hitSlop={8}
           style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: 4 }}
         >
-          <Text style={{ ...fontStyle(theme, 600), fontSize: 16, color: c.accent }}>Done</Text>
+          <Text style={{ ...fontStyle(theme, 600), fontSize: 16, color: c.accent }}>
+            {t("native.timeline.modelPicker.done")}
+          </Text>
         </Pressable>
       </View>
       {view.anySelectable ? (
@@ -397,7 +401,7 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
                       <Pressable
                         key={effort}
                         accessibilityRole="radio"
-                        accessibilityLabel={labelReasoningEffort(effort)}
+                        accessibilityLabel={labelReasoningEffort(t, effort)}
                         accessibilityState={{ checked, disabled }}
                         disabled={disabled}
                         onPress={() => {
@@ -432,7 +436,7 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
                             color: checked ? c.fg : c["fg-muted"],
                           }}
                         >
-                          {compactEffortLabel(effort, labelReasoningEffort(effort))}
+                          {compactEffortLabel(t, effort, labelReasoningEffort(t, effort))}
                         </Text>
                       </Pressable>
                     );

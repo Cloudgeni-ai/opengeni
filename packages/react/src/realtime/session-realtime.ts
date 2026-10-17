@@ -18,6 +18,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { EmbeddedRealtimeSessionClientLike } from "../client";
 import { useEmbeddedRealtimeSession } from "../session-context";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /** An abort reason that works where DOMException is missing (React Native). */
 function abortError(message: string): Error {
@@ -39,15 +40,15 @@ export type RealtimeModelOption = {
   recommended: boolean;
 };
 
-export const CODEX_LIVE_MODEL: RealtimeModelOption = {
+export const CODEX_LIVE_MODEL = (t: OpenGeniText): RealtimeModelOption => ({
   id: "gpt-live-1-boulder-alpha",
-  label: "Codex Live",
+  label: t("realtime.sessionRealtime.codexLive"),
   provider: "Connected Codex",
-  description: "Deep session integration",
+  description: t("realtime.sessionRealtime.deepSessionIntegration"),
   available: false,
-  unavailableReason: "Connect Codex to use this voice model",
+  unavailableReason: t("realtime.sessionRealtime.connectCodexToUseThis"),
   recommended: false,
-};
+});
 
 const REALTIME_MODEL_STORAGE_PREFIX = "opengeni:realtime-model";
 const REALTIME_MODEL_CATALOG_CACHE_TTL_MS = 60_000;
@@ -73,12 +74,12 @@ const realtimeModelCatalogCache = new WeakMap<
   Map<string, RealtimeModelCatalogCacheEntry>
 >();
 
-function realtimeModelFallback(codexConnected: boolean): RealtimeModelOption[] {
+function realtimeModelFallback(t: OpenGeniText, codexConnected: boolean): RealtimeModelOption[] {
   return [
     {
-      ...CODEX_LIVE_MODEL,
+      ...CODEX_LIVE_MODEL(t),
       available: codexConnected,
-      unavailableReason: codexConnected ? null : CODEX_LIVE_MODEL.unavailableReason,
+      unavailableReason: codexConnected ? null : CODEX_LIVE_MODEL(t).unavailableReason,
     },
   ];
 }
@@ -211,16 +212,21 @@ type AdmissionInput = {
   lifecycleActive: boolean;
 };
 
-export function codexRealtimeAdmissionAllowed(input: AdmissionInput): boolean {
-  return codexRealtimeAdmissionBlocker(input) === null;
+export function codexRealtimeAdmissionAllowed(t: OpenGeniText, input: AdmissionInput): boolean {
+  return codexRealtimeAdmissionBlocker(t, input) === null;
 }
 
-export function codexRealtimeAdmissionBlocker(input: AdmissionInput): string | null {
-  if (input.sessionStatus === "cancelled") return "This session was cancelled.";
-  if (input.controlState !== "active") return "Resume this session before starting voice.";
-  if (input.settlement !== null) return "Wait for the current session transition to finish.";
-  if (!input.codexConnected) return "Connect Codex to use this voice model.";
-  if (input.lifecycleActive) return "Voice is already active for this session.";
+export function codexRealtimeAdmissionBlocker(
+  t: OpenGeniText,
+  input: AdmissionInput,
+): string | null {
+  if (input.sessionStatus === "cancelled")
+    return t("realtime.sessionRealtime.thisSessionWasCancelled");
+  if (input.controlState !== "active")
+    return t("realtime.sessionRealtime.resumeThisSessionBeforeStarting");
+  if (input.settlement !== null) return t("realtime.sessionRealtime.waitForTheCurrentSession");
+  if (!input.codexConnected) return t("realtime.sessionRealtime.connectCodexToUseThis2");
+  if (input.lifecycleActive) return t("realtime.sessionRealtime.voiceIsAlreadyActiveFor");
   return null;
 }
 
@@ -241,11 +247,12 @@ export function useSessionRealtime(options: {
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
+  const t = useOpenGeniText();
   const { client, workspaceId } = useEmbeddedRealtimeSession({
     client: options.client,
     workspaceId: options.workspaceId,
   });
-  const model = options.model ?? CODEX_LIVE_MODEL.id;
+  const model = options.model ?? CODEX_LIVE_MODEL(t).id;
   const audioRef = useRef<HTMLAudioElement>(null);
   const controllerRef = useRef<SessionRealtimeController | null>(null);
   const controllerModelRef = useRef<SessionRealtimeModel | null>(null);
@@ -320,13 +327,17 @@ export function useSessionRealtime(options: {
           diagnostic: {
             kind: "negotiation_failure",
             message:
-              error instanceof Error ? error.message : "Codex realtime controller failed to load",
+              error instanceof Error
+                ? error.message
+                : t("realtime.sessionRealtime.codexRealtimeControllerFailedTo"),
             recoverable: false,
             connectionGeneration: 0,
             attempt: 0,
           },
           error:
-            error instanceof Error ? error.message : "Codex realtime controller failed to load",
+            error instanceof Error
+              ? error.message
+              : t("realtime.sessionRealtime.codexRealtimeControllerFailedTo"),
         });
       });
     return () => {
@@ -338,7 +349,7 @@ export function useSessionRealtime(options: {
         controllerModelRef.current = null;
       }
     };
-  }, [client, model, options.controllerFactory, options.sessionId, workspaceId]);
+  }, [client, model, options.controllerFactory, options.sessionId, workspaceId, t]);
 
   useEffect(() => {
     if (!options.eventsReady) return;
@@ -348,10 +359,10 @@ export function useSessionRealtime(options: {
   const start = useCallback(async () => {
     const controller = controllerRef.current;
     if (!controller || controllerModelRef.current !== model) {
-      throw new Error("The selected voice model is still preparing");
+      throw new Error(t("realtime.sessionRealtime.theSelectedVoiceModelIs"));
     }
     await controller.start();
-  }, [model]);
+  }, [model, t]);
   const stop = useCallback(async () => {
     await controllerRef.current?.stop();
   }, []);
@@ -376,8 +387,9 @@ export function useSessionRealtime(options: {
   } satisfies AdmissionInput;
   const admissionBlocker =
     options.modelAvailable === false
-      ? (options.modelUnavailableReason ?? "This voice model is unavailable.")
-      : codexRealtimeAdmissionBlocker(admissionInput);
+      ? (options.modelUnavailableReason ??
+        t("realtime.sessionRealtime.thisVoiceModelIsUnavailable"))
+      : codexRealtimeAdmissionBlocker(t, admissionInput);
   const canStart =
     controllerRef.current !== null &&
     controllerModelRef.current === model &&
@@ -412,11 +424,14 @@ export function sessionRealtimeLifecycleIsActive(
  * First available model; otherwise the model whose blocker the user can act on
  * (for example adding credits) rather than an unrelated "connect" prompt.
  */
-function fallbackRealtimeModelId(models: readonly RealtimeModelOption[]): SessionRealtimeModel {
+function fallbackRealtimeModelId(
+  t: OpenGeniText,
+  models: readonly RealtimeModelOption[],
+): SessionRealtimeModel {
   return (
     models.find((model) => model.available)?.id ??
     models.find((model) => model.unavailableCode)?.id ??
-    CODEX_LIVE_MODEL.id
+    CODEX_LIVE_MODEL(t).id
   );
 }
 
@@ -426,6 +441,7 @@ export function useRealtimeModelSelection(options: {
   codexConnected: boolean;
   activeModel?: SessionRealtimeModel | null | undefined;
 }) {
+  const t = useOpenGeniText();
   const { client, workspaceId } = useEmbeddedRealtimeSession({
     client: options.client,
     workspaceId: options.workspaceId,
@@ -433,7 +449,7 @@ export function useRealtimeModelSelection(options: {
   const activeModel = options.activeModel;
   const initialCachedCatalog = readCachedRealtimeModelCatalog(client, workspaceId);
   const [catalog, setCatalog] = useState<RealtimeModelOption[]>(
-    () => initialCachedCatalog ?? realtimeModelFallback(options.codexConnected),
+    () => initialCachedCatalog ?? realtimeModelFallback(t, options.codexConnected),
   );
   const catalogScopeRef = useRef({
     client,
@@ -447,12 +463,12 @@ export function useRealtimeModelSelection(options: {
     workspaceId: string;
   } | null>(null);
   const [selectedModelId, setSelectedModelId] = useState<SessionRealtimeModel>(() => {
-    const preferred = readRealtimeModelPreference(workspaceId) ?? CODEX_LIVE_MODEL.id;
+    const preferred = readRealtimeModelPreference(workspaceId) ?? CODEX_LIVE_MODEL(t).id;
     if (!initialCachedCatalog) return preferred;
     if (initialCachedCatalog.some((model) => model.id === preferred && model.available)) {
       return preferred;
     }
-    return fallbackRealtimeModelId(initialCachedCatalog);
+    return fallbackRealtimeModelId(t, initialCachedCatalog);
   });
 
   useEffect(() => {
@@ -463,7 +479,7 @@ export function useRealtimeModelSelection(options: {
       setCatalog(models);
       setSelectedModelId((current) => {
         if (models.some((model) => model.id === current && model.available)) return current;
-        return fallbackRealtimeModelId(models);
+        return fallbackRealtimeModelId(t, models);
       });
     };
     const cached = readCachedRealtimeModelCatalog(client, workspaceId);
@@ -495,7 +511,7 @@ export function useRealtimeModelSelection(options: {
       disposed = true;
       requestAbort.abort();
     };
-  }, [client, workspaceId]);
+  }, [client, workspaceId, t]);
 
   useEffect(() => {
     if (activeModel) setSelectedModelId(activeModel);
@@ -504,9 +520,9 @@ export function useRealtimeModelSelection(options: {
   const selectedModel =
     catalog.find((model) => model.id === selectedModelId) ??
     ({
-      ...CODEX_LIVE_MODEL,
+      ...CODEX_LIVE_MODEL(t),
       available: options.codexConnected,
-      unavailableReason: options.codexConnected ? null : CODEX_LIVE_MODEL.unavailableReason,
+      unavailableReason: options.codexConnected ? null : CODEX_LIVE_MODEL(t).unavailableReason,
     } satisfies RealtimeModelOption);
   const selectModel = useCallback(
     (value: string) => {

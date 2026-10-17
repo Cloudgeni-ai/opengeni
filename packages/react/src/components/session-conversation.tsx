@@ -57,6 +57,7 @@ import {
   type HostSurfacePreference,
   type HostThemePreference,
 } from "../lib/host-theme";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type SessionConversationLabels = {
   /** Banner action after a refresh failure; the conversation stays mounted. */
@@ -67,11 +68,11 @@ export type SessionConversationLabels = {
   sitePreviewUnavailable: string;
 };
 
-const DEFAULT_CONVERSATION_LABELS: SessionConversationLabels = {
-  retry: "Retry",
-  tryAgain: "Try again",
-  sitePreviewUnavailable: "Site preview unavailable",
-};
+const DEFAULT_CONVERSATION_LABELS = (t: OpenGeniText): SessionConversationLabels => ({
+  retry: t("sessionConversation.retry"),
+  tryAgain: t("sessionConversation.tryAgain"),
+  sitePreviewUnavailable: t("sessionConversation.sitePreviewUnavailable"),
+});
 
 export type SessionConversationProps = ClientOverride &
   SessionProxyBaseUrl & {
@@ -317,6 +318,7 @@ function ConversationView({
   approvalProps,
   onRetry,
 }: SessionConversationViewProps & { onRetry: () => void }) {
+  const t = useOpenGeniText();
   const {
     sessionId,
     config,
@@ -347,7 +349,7 @@ function ConversationView({
     context.workspaceId,
     sessionId,
     config.artifacts,
-    labelOverrides?.sitePreviewUnavailable ?? DEFAULT_CONVERSATION_LABELS.sitePreviewUnavailable,
+    labelOverrides?.sitePreviewUnavailable ?? DEFAULT_CONVERSATION_LABELS(t).sitePreviewUnavailable,
   );
   const retainedLoaders = useRetainedLoaders(context.client, context.workspaceId, sessionId);
   const transcription = useComposerTranscription(
@@ -358,13 +360,13 @@ function ConversationView({
   const inheritedLinks = useOpenGeniLinkResolver();
   const defaultLinks = useMemo(
     () =>
-      sessionLinkResolver({
+      sessionLinkResolver(t, {
         client: context.client,
         workspaceId: context.workspaceId,
         sessionId,
         sandboxFiles: config.sandboxFiles,
       }),
-    [context.client, context.workspaceId, sessionId, config.sandboxFiles],
+    [context.client, context.workspaceId, sessionId, config.sandboxFiles, t],
   );
   const onOpenArtifactRef = useRef(onOpenArtifact);
   onOpenArtifactRef.current = onOpenArtifact;
@@ -383,10 +385,10 @@ function ConversationView({
     () => chainLinkResolvers(resolveLink, viewerLinks, inheritedLinks, defaultLinks) ?? undefined,
     [resolveLink, viewerLinks, inheritedLinks, defaultLinks],
   );
-  const labels = { ...DEFAULT_CONVERSATION_LABELS, ...labelOverrides };
+  const labels = { ...DEFAULT_CONVERSATION_LABELS(t), ...labelOverrides };
   const retryInPlace = () => void conversation.retry();
   const realtimeVoiceRequested = realtimeVoiceProp ?? config.realtimeVoiceOffered;
-  const loadingOptions = useMemo(() => embeddedGenieLoading(genieLoading), [genieLoading]);
+  const loadingOptions = useMemo(() => embeddedGenieLoading(t, genieLoading), [genieLoading, t]);
   const providerRecovery = useMemo(
     () =>
       detail.session
@@ -526,7 +528,7 @@ function ConversationView({
       )}
       {importedArchive ? (
         <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
-          Archived conversation · Read only
+          {t("sessionConversation.archivedConversationReadOnly")}
         </p>
       ) : (
         <>
@@ -566,7 +568,7 @@ function ConversationView({
                 // `respond` reports a failed send as null. Reject so the card
                 // keeps what was typed (including a secret) for a retry.
                 if (!(await human.respond(id, response))) {
-                  throw new Error("Your answer wasn't sent. Try again.");
+                  throw new Error(t("sessionConversation.yourAnswerWasnTSent"));
                 }
               }}
               respondingRequestId={human.respondingRequestId}
@@ -659,13 +661,16 @@ function ConversationView({
 }
 
 /** Neutral embedded defaults under the host's overrides; an empty phrase list keeps them. */
-function embeddedGenieLoading(options: GenieLoadingOptions | undefined): GenieLoadingOptions {
-  if (!options) return EMBEDDED_GENIE_LOADING;
+function embeddedGenieLoading(
+  t: OpenGeniText,
+  options: GenieLoadingOptions | undefined,
+): GenieLoadingOptions {
+  if (!options) return EMBEDDED_GENIE_LOADING(t);
   return {
-    ...EMBEDDED_GENIE_LOADING,
+    ...EMBEDDED_GENIE_LOADING(t),
     ...options,
-    phrases: options.phrases?.length ? options.phrases : EMBEDDED_GENIE_LOADING.phrases,
-    messages: { ...EMBEDDED_GENIE_LOADING.messages, ...options.messages },
+    phrases: options.phrases?.length ? options.phrases : EMBEDDED_GENIE_LOADING(t).phrases,
+    messages: { ...EMBEDDED_GENIE_LOADING(t).messages, ...options.messages },
   };
 }
 
@@ -719,6 +724,7 @@ function useDefaultInteractiveBlock(
   sitesAvailable: boolean,
   sitePreviewUnavailable: string,
 ): NonNullable<MessageTimelineProps["renderInteractiveBlock"]> {
+  const t = useOpenGeniText();
   // Scope lazily: only a rendered preview reads, and some clients (a Site's
   // own client) cannot add headers.
   const scoped = useMemo((): SiteSnapshotClient => {
@@ -746,11 +752,11 @@ function useDefaultInteractiveBlock(
           {sitePreviewUnavailable}
         </div>
       ) : (
-        <Suspense fallback={<span role="status">Loading preview…</span>}>
+        <Suspense fallback={<span role="status">{t("sessionConversation.loadingPreview")}</span>}>
           <LazyChatInteractiveBlock workspaceId={workspaceId} client={scoped} {...block} />
         </Suspense>
       ),
-    [scoped, workspaceId, sitesAvailable, sitePreviewUnavailable],
+    [scoped, workspaceId, sitesAvailable, sitePreviewUnavailable, t],
   );
 }
 

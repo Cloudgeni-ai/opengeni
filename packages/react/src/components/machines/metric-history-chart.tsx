@@ -12,6 +12,7 @@
 // ----------------------------------------------------------------------------
 import { useLayoutEffect, useRef, useState } from "react";
 import { cn } from "../../lib/cn";
+import { useOpenGeniText } from "../../messages/runtime";
 
 export type SeriesPoint = { t: number; v: number | null };
 
@@ -75,9 +76,12 @@ export function MetricHistoryChart({
   color = "var(--og-color-accent)",
   thresholds,
   height = 132,
-  rangeLabel = "in this range",
+  rangeLabel: rangeLabelProp,
   className,
 }: MetricHistoryChartProps) {
+  const msg = useOpenGeniText();
+  const rangeLabel =
+    rangeLabelProp === undefined ? msg("machines.metricHistoryChart.inThisRange") : rangeLabelProp;
   const ref = useRef<HTMLDivElement>(null);
   const [w, setW] = useState(560);
   const [hover, setHover] = useState<number | null>(null);
@@ -138,7 +142,9 @@ export function MetricHistoryChart({
     >
       {valued.length === 0 ? (
         <div className="absolute inset-0 flex items-center justify-center">
-          <span className="text-og-xs text-og-fg-subtle">No samples {rangeLabel}</span>
+          <span className="text-og-xs text-og-fg-subtle">
+            {msg("machines.metricHistoryChart.noSamplesRangelabel", { rangeLabel })}
+          </span>
         </div>
       ) : (
         <svg

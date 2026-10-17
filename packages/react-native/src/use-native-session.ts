@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 import {
   groupTimeline,
@@ -176,7 +177,8 @@ export function useOpenGeniNativeSession(input: {
     pollIntervalMs: 30_000,
   });
   const approvals = useMemo(() => projectPendingApprovals(events.events), [events.events]);
-  const timelineGroups = useMemo(() => groupTimeline(events.timeline), [events.timeline]);
+  const t = useOpenGeniText();
+  const timelineGroups = useMemo(() => groupTimeline(t, events.timeline), [t, events.timeline]);
   useNativeReadAcknowledgement({
     client: input.client,
     workspaceId: input.workspaceId,

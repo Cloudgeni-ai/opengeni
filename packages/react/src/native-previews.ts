@@ -4,6 +4,7 @@
  * chat uses, as strings and pure functions.
  */
 import { PREVIEW_LOADING_COLORS } from "./preview-loading-paint";
+import { type OpenGeniText } from "./messages/runtime";
 
 export { inlineHtmlDocument } from "./components/artifacts/inline-html-document";
 export {
@@ -74,14 +75,17 @@ const escapeHtml = (value: string) =>
  * ripple filling the page with a steady label, for a web view while the
  * assistant is still writing the preview. Never contains the unfinished fence.
  */
-export function previewLoadingDocument(options: {
-  scheme: "light" | "dark";
-  label?: string;
-  labelColor?: string;
-  reducedMotion?: boolean;
-}): string {
+export function previewLoadingDocument(
+  t: OpenGeniText,
+  options: {
+    scheme: "light" | "dark";
+    label?: string;
+    labelColor?: string;
+    reducedMotion?: boolean;
+  },
+): string {
   const colors = PREVIEW_LOADING_COLORS[options.scheme];
-  const label = escapeHtml(options.label ?? "Preparing preview…");
+  const label = escapeHtml(options.label ?? t("nativePreviews.preparingPreview"));
   const labelColor = options.labelColor ?? (options.scheme === "dark" ? "#a1a1a1" : "#6b6b6b");
   return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><style>
 html,body{margin:0;height:100%;overflow:hidden;background:${colors.background};-webkit-user-select:none;user-select:none}

@@ -23,12 +23,14 @@ import {
   type ModelPolicyPickerProps,
 } from "./model-policy-picker";
 import { ModelMark } from "./model-mark";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
 
 /** Model selection stays flat; reasoning never becomes a navigation destination. */
 export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
+  const t = useOpenGeniText();
   const [query, setQuery] = useState("");
-  const view = modelPickerMenuView(props, query);
+  const view = modelPickerMenuView(t, props, query);
   const { messages, rows, groups } = view;
   const selected = view.selected;
   const choose = (row: ClientPickerModelRow) => {
@@ -197,21 +199,32 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
   );
 }
 
-const CONNECT_MODEL_OPTIONS: Array<{
+const CONNECT_MODEL_OPTIONS = (
+  t: OpenGeniText,
+): Array<{
   billingClass: "codex_subscription" | "supergrok_subscription" | "byok" | "external";
   title: string;
   detail: string;
-}> = [
-  { billingClass: "codex_subscription", title: "Codex", detail: "ChatGPT" },
+}> => [
+  {
+    billingClass: "codex_subscription",
+    title: t("modelPolicyPickerMenu.codex"),
+    detail: "ChatGPT",
+  },
   { billingClass: "supergrok_subscription", title: "SuperGrok", detail: "xAI" },
-  { billingClass: "byok", title: "AI Gateway", detail: "Vercel" },
-  { billingClass: "external", title: "OpenRouter", detail: "API key" },
+  {
+    billingClass: "byok",
+    title: t("modelPolicyPickerMenu.aiGateway"),
+    detail: t("modelPolicyPickerMenu.vercel"),
+  },
+  { billingClass: "external", title: "OpenRouter", detail: t("modelPolicyPickerMenu.apiKey") },
 ];
 
 function ConnectModelsPanel(props: {
   href: string | undefined;
-  messages: typeof defaultModelPolicyPickerMessages;
+  messages: ReturnType<typeof defaultModelPolicyPickerMessages>;
 }) {
+  const t = useOpenGeniText();
   return (
     <div className="px-1.5 pb-1.5 pt-2" data-testid="model-picker-connect">
       <div className="px-1.5 pb-3">
@@ -223,7 +236,7 @@ function ConnectModelsPanel(props: {
         </p>
       </div>
       <div className="grid grid-cols-2 gap-1">
-        {CONNECT_MODEL_OPTIONS.map((option) => {
+        {CONNECT_MODEL_OPTIONS(t).map((option) => {
           const content = (
             <>
               <span className="flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-surface-2 text-og-fg">
@@ -272,7 +285,8 @@ function ConnectModelsPanel(props: {
 }
 
 function ModelThinkingControls(props: ModelPolicyPickerProps) {
-  const view = modelPickerMenuView(props, "");
+  const t = useOpenGeniText();
+  const view = modelPickerMenuView(t, props, "");
   const thinking = view.thinking;
   if (!view.selected || !thinking) return null;
   const messages = view.messages;
@@ -314,11 +328,11 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
             <RadioGroup.Item
               key={effort}
               value={effort}
-              aria-label={labelReasoningEffort(effort)}
-              title={labelReasoningEffort(effort)}
+              aria-label={labelReasoningEffort(t, effort)}
+              title={labelReasoningEffort(t, effort)}
               className="min-h-8 min-w-10 flex-1 cursor-pointer whitespace-nowrap rounded-og-sm px-1.5 text-og-control text-og-fg-muted outline-hidden transition-colors hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 data-[state=checked]:bg-og-surface-1 data-[state=checked]:text-og-fg data-[state=checked]:shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {compactEffortLabel(effort, labelReasoningEffort(effort))}
+              {compactEffortLabel(t, effort, labelReasoningEffort(t, effort))}
             </RadioGroup.Item>
           ))}
         </RadioGroup.Root>

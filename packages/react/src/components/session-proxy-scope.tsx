@@ -7,6 +7,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SessionClientLike } from "../client";
 import { OpenGeniProvider } from "../provider";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /** Request headers for every proxy call: static, or computed per request. */
 export type SessionProxyHeaders = Record<string, string> | (() => Record<string, string>);
@@ -38,16 +39,21 @@ export type SessionProxyBaseUrl = {
  * A host's own 401 from `resolve` carries no Opengeni code and still reads as
  * "Sign in to continue."
  */
-function proxyLoadErrorMessage(error: unknown): string {
+function proxyLoadErrorMessage(t: OpenGeniText, error: unknown): string {
   if (
     error instanceof OpenGeniApiError &&
     error.status === 401 &&
     error.code === "unauthenticated"
   ) {
-    const message = "Chat is unavailable right now. Ask an administrator for help.";
-    return error.correlationId ? `${message} Reference: ${error.correlationId}.` : message;
+    const message = t("sessionProxyScope.chatIsUnavailableRightNow");
+    return error.correlationId
+      ? t("sessionProxyScope.messageReferenceCorrelationid", {
+          message,
+          correlationId: error.correlationId,
+        })
+      : message;
   }
-  return formatErrorMessage(error, "Could not load the conversation.");
+  return formatErrorMessage(error, t("sessionProxyScope.couldNotLoadTheConversation"));
 }
 
 type ScopeState =
@@ -73,6 +79,7 @@ export function SessionProxyScope({
   client?: SessionClientLike | undefined;
   children: ReactNode;
 }) {
+  const t = useOpenGeniText();
   if (suppliedClient && (headers !== undefined || fetch !== undefined)) {
     throw new TypeError(
       "@opengeni/react: pass headers/fetch either to your own client or as props, not both.",
@@ -120,20 +127,19 @@ export function SessionProxyScope({
             ? { status: "ready", workspaceId: config.workspaceId }
             : {
                 status: "error",
-                message:
-                  "This server does not report its workspace. Update @opengeni/sdk on the server, or pass workspaceId.",
+                message: t("sessionProxyScope.thisServerDoesNotReport"),
               },
         );
       },
       (error: unknown) => {
         if (!active) return;
-        setState({ status: "error", message: proxyLoadErrorMessage(error) });
+        setState({ status: "error", message: proxyLoadErrorMessage(t, error) });
       },
     );
     return () => {
       active = false;
     };
-  }, [client, workspaceId]);
+  }, [client, workspaceId, t]);
 
   if (state.status === "error") {
     return (

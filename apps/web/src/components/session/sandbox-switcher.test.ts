@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { describe, expect, test } from "bun:test";
 import {
   machineDisplayName,
@@ -16,19 +17,19 @@ describe("sessionSupportsFleetSwitching", () => {
 describe("session compute labels", () => {
   test("managed providers read as a neutral cloud sandbox, never a vendor name", () => {
     for (const backend of ["modal", "daytona", "e2b", "vercel", "opensandbox"] as const) {
-      expect(sessionSandboxLabel(backend)).toBe("Cloud sandbox");
+      expect(sessionSandboxLabel(t, backend)).toBe("Cloud sandbox");
     }
-    expect(sessionSandboxLabel("docker")).toBe("Local sandbox");
-    expect(sessionSandboxLabel("local")).toBe("this computer");
-    expect(sessionSandboxLabel("none")).toBe("No sandbox");
+    expect(sessionSandboxLabel(t, "docker")).toBe("Local sandbox");
+    expect(sessionSandboxLabel(t, "local")).toBe("this computer");
+    expect(sessionSandboxLabel(t, "none")).toBe("No sandbox");
   });
 
   test("the session's own box hides its vendor while Connected Machines keep their names", () => {
-    expect(machineDisplayName({ isSessionGroup: true, kind: "modal", name: "Modal" })).toBe(
+    expect(machineDisplayName(t, { isSessionGroup: true, kind: "modal", name: "Modal" })).toBe(
       "Cloud sandbox",
     );
     expect(
-      machineDisplayName({ isSessionGroup: false, kind: "selfhosted", name: "Build box" }),
+      machineDisplayName(t, { isSessionGroup: false, kind: "selfhosted", name: "Build box" }),
     ).toBe("Build box");
   });
 });

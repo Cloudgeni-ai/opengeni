@@ -24,6 +24,9 @@ import {
   sessionChromeGoalPillExplanation,
   sessionChromeGoalPillLabel,
 } from "../src/components/session-chrome";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 const { SessionUsageLimitNotice } = await import("../src/usage");
@@ -79,13 +82,16 @@ const stopPayload = {
 
 describe("summarizeSessionUsageLimit", () => {
   test("known usage reads as used of limit, and overshoot stays in the text", () => {
-    expect(summarizeSessionUsageLimit(usage())).toMatchObject({
+    expect(summarizeSessionUsageLimit(englishText, usage())).toMatchObject({
       state: "within",
       amountText: "$12.34 of $50.00",
       partial: false,
       notes: [],
     });
-    const over = summarizeSessionUsageLimit(usage({ status: "reached", usedMicros: 52_100_000 }));
+    const over = summarizeSessionUsageLimit(
+      englishText,
+      usage({ status: "reached", usedMicros: 52_100_000 }),
+    );
     expect(over.state).toBe("reached");
     expect(over.amountText).toBe("$52.10 of $50.00");
     expect(over.barFraction).toBe(1);
@@ -93,18 +99,27 @@ describe("summarizeSessionUsageLimit", () => {
   });
 
   test("80% is near; a zero limit is reached before any usage", () => {
-    expect(summarizeSessionUsageLimit(usage({ usedMicros: 40_000_000 })).state).toBe("near");
+    expect(summarizeSessionUsageLimit(englishText, usage({ usedMicros: 40_000_000 })).state).toBe(
+      "near",
+    );
     expect(sessionUsageLimitPercent(0.999)).toBe("99");
     expect(
-      summarizeSessionUsageLimit(usage({ limitMicros: 0, usedMicros: 0, status: "reached" })).state,
+      summarizeSessionUsageLimit(
+        englishText,
+        usage({ limitMicros: 0, usedMicros: 0, status: "reached" }),
+      ).state,
     ).toBe("reached");
   });
 
   test("partial coverage says at least, with the reason", () => {
-    const unpriced = summarizeSessionUsageLimit(usage({ coverage: "partial", unpricedCalls: 2 }));
+    const unpriced = summarizeSessionUsageLimit(
+      englishText,
+      usage({ coverage: "partial", unpricedCalls: 2 }),
+    );
     expect(unpriced.amountText).toBe("At least $12.34 of $50.00");
     expect(unpriced.notes.join(" ")).toContain("no known price");
     const legacy = summarizeSessionUsageLimit(
+      englishText,
       usage({
         history: "legacy_partial",
         coverage: "partial",
@@ -119,10 +134,12 @@ describe("summarizeSessionUsageLimit", () => {
 
   test("unknown usage never renders as $0", () => {
     const preparing = summarizeSessionUsageLimit(
+      englishText,
       usage({ status: "preparing", usedMicros: null, history: "preparing", coverage: "partial" }),
     );
     expect(preparing).toMatchObject({ state: "preparing", amountText: "Preparing usage" });
     const unavailable = summarizeSessionUsageLimit(
+      englishText,
       usage({ status: "unavailable", usedMicros: null }),
     );
     expect(unavailable).toMatchObject({ state: "unavailable", amountText: "Usage unavailable" });
@@ -130,14 +147,14 @@ describe("summarizeSessionUsageLimit", () => {
       expect(JSON.stringify(summary)).not.toContain("$0");
       expect(summary.usedMicros).toBeNull();
     }
-    expect(summarizeSessionUsageLimit(undefined).state).toBe("unknown");
+    expect(summarizeSessionUsageLimit(englishText, undefined).state).toBe("unknown");
   });
 });
 
 describe("usage-limit stop in the timeline", () => {
   test("renders a neutral non-failure stop with the typed amounts only", () => {
     const completed = event(2, "turn.completed", stopPayload);
-    const items = buildTimeline([
+    const items = buildTimeline(englishText, [
       event(1, "agent.message.completed", { messageId: "m", text: "Working" }),
       completed,
     ]);
@@ -158,7 +175,7 @@ describe("usage-limit stop in the timeline", () => {
   });
 
   test("a malformed marker is still the same neutral stop", () => {
-    const items = buildTimeline([
+    const items = buildTimeline(englishText, [
       event(1, "turn.completed", { output: "", segmentLimit: "session_usage_limit" }),
     ]);
     expect(items.find((item) => item.kind === "notice")).toMatchObject({
@@ -169,7 +186,7 @@ describe("usage-limit stop in the timeline", () => {
 
   test("unknown segment limits never fall back to credit exhaustion", () => {
     const completed = event(1, "turn.completed", { output: "", segmentLimit: "future_limit" });
-    const items = buildTimeline([completed]);
+    const items = buildTimeline(englishText, [completed]);
     expect(JSON.stringify(items)).not.toMatch(/credit/i);
     expect(items.some((item) => item.kind === "notice" && item.tone === "failed")).toBe(false);
     expect(creditExhaustedFromEvents([completed])).toBe(false);
@@ -210,7 +227,7 @@ describe("composer refusal", () => {
     const error = new OpenGeniSessionUsageLimitReachedError(402, body);
     expect(isSessionUsageLimitSubmissionError(error)).toBe(true);
     expect(composerSubmissionCanRetry(error)).toBe(false);
-    const message = composerSubmissionErrorMessage(error);
+    const message = composerSubmissionErrorMessage(englishText, error);
     expect(message).toBe(COMPOSER_SESSION_USAGE_LIMIT_MESSAGE);
     expect(message).toContain("Your message is saved.");
     // What happened only: the one recovery action lives in the notice.
@@ -235,8 +252,8 @@ describe("composer refusal", () => {
 describe("goal pause reason", () => {
   test("explains the task usage limit without credits wording", () => {
     const record = { status: "paused" as const, pausedReason: "session_usage_limit" as const };
-    expect(sessionChromeGoalPillLabel("paused", record)).toBe("Paused · usage limit");
-    const explanation = sessionChromeGoalPillExplanation("paused", record) ?? "";
+    expect(sessionChromeGoalPillLabel(englishText, "paused", record)).toBe("Paused · usage limit");
+    const explanation = sessionChromeGoalPillExplanation(englishText, "paused", record) ?? "";
     expect(explanation).toBe(
       "Paused at the task's usage limit. Raise or remove the limit, then resume.",
     );
@@ -309,7 +326,9 @@ describe("SessionUsageLimitNotice", () => {
 
   test("after a failed refresh the last known reached amount stays, labelled out of date", async () => {
     const reached = usage({ status: "reached", usedMicros: 52_100_000 });
-    expect(summarizeSessionUsageLimit(reached, undefined, { stale: true })).toMatchObject({
+    expect(
+      summarizeSessionUsageLimit(englishText, reached, undefined, { stale: true }),
+    ).toMatchObject({
       state: "reached",
       stale: true,
       amountText: "$52.10 of $50.00",
@@ -324,7 +343,7 @@ describe("SessionUsageLimitNotice", () => {
     expect(text).not.toContain("$0.00");
     await view.unmount();
     // Fresh reads carry no note.
-    expect(summarizeSessionUsageLimit(reached).notes).toEqual([]);
+    expect(summarizeSessionUsageLimit(englishText, reached).notes).toEqual([]);
   });
 
   test("near is dismissible per limit version", async () => {

@@ -17,6 +17,7 @@ import {
 import { EditableArtifactView, type EditableArtifactRuntimes } from "./editable-artifact-view";
 import type { SiteToolBridgeFactory } from "./chat-interactive-block";
 import { SiteView } from "./site-view";
+import { useOpenGeniText } from "../../messages/runtime";
 
 /** An artifact opened from a session: the targets agent links and Site previews name. */
 export type SessionArtifactTarget = Readonly<
@@ -195,6 +196,7 @@ function EditableBody({
   onOpened: (title: string, modality: ArtifactKind) => void;
   onUnavailable: () => void;
 }) {
+  const t = useOpenGeniText();
   const labels = useArtifactLabels();
   const clientKey = viewerClientKey(client);
   const [retryEpoch, setRetryEpoch] = useState(0);
@@ -314,7 +316,7 @@ function EditableBody({
   if (current.kind === "error") {
     return (
       <ArtifactProblem
-        view={artifactLoadErrorView(current.error, "editable", labels)}
+        view={artifactLoadErrorView(t, current.error, "editable", labels)}
         onRetry={() => setRetryEpoch((value) => value + 1)}
       />
     );

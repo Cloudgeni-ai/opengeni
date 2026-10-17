@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { Fragment } from "react";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
 import { enableSandboxTerminal } from "@opengeni/react/terminal";
@@ -922,7 +923,7 @@ export function SessionRoute({
         });
         return;
       }
-      await attachSessionCapability(capabilityClient, workspaceId, sessionId, connected);
+      await attachSessionCapability(t, capabilityClient, workspaceId, sessionId, connected);
       toast.success(`${item.name} connected`, {
         description: "It is available to new tool calls in this session.",
       });
@@ -954,6 +955,7 @@ export function SessionRoute({
       void (async () => {
         await refreshCapabilityCatalog(workspaceId);
         await completeSessionCapabilityOAuth(
+          t,
           capabilityClient,
           workspaceId,
           sessionId,
@@ -1979,7 +1981,7 @@ function SessionChatPane(props: {
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
   });
-  const computeLabel = sessionComputeLabel(fleet.machines);
+  const computeLabel = sessionComputeLabel(t, fleet.machines);
   const loadRetainedScreenshot = useMemo(
     () =>
       createSessionRetainedScreenshotLoader(
@@ -2065,7 +2067,7 @@ function SessionChatPane(props: {
     props.session.workspaceId,
     terminal,
   ]);
-  const agentsSignal = useMemo(() => sessionAgentsSignal(props.agentNodes), [props.agentNodes]);
+  const agentsSignal = useMemo(() => sessionAgentsSignal(t, props.agentNodes), [props.agentNodes]);
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
@@ -2276,7 +2278,7 @@ function SessionChatPane(props: {
     (item: AuthNeededItem) => {
       const recommendation = item.setupRequest
         ? item
-        : sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
+        : sessionAuthRecommendation(t, item, context.workspaceCapabilityCatalog);
       return recommendation ? (
         <Suspense
           fallback={

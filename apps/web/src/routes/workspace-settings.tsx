@@ -2,6 +2,7 @@
 // (components/settings/workspace-settings-shell.tsx): General, Access,
 // API keys and Developer. Models lives in Organization settings (a
 // workspace's Models URL redirects there), as does the org/billing console.
+import { t } from "@/lib/console-text";
 import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { PencilIcon, Trash2Icon, UserIcon } from "lucide-react";
@@ -145,7 +146,7 @@ function OperationalWorkspaceSettingsRoute({
   // The real name when known (an admin reads it from the organization overview).
   const organizationName = useOrganizationName(accountId, administersOrganization);
   const organizationLabel = accountId
-    ? (organizationName ?? orgLabel(accountId, context.accessContext.accountGrants))
+    ? (organizationName ?? orgLabel(t, accountId, context.accessContext.accountGrants))
     : "Organization";
   const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
   const canManageSettings = canManageWorkspaceSettings(

@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import type { AccessContext, Workspace } from "@/types";
 
 import type { ManagedSelfContext } from "./managed-self-context";
@@ -82,7 +83,7 @@ export function resolveWorkspaceScopeContext(input: {
 
   return {
     organizationId: workspace.accountId,
-    organizationLabel: orgLabel(workspace.accountId, accessContext.accountGrants),
+    organizationLabel: orgLabel(t, workspace.accountId, accessContext.accountGrants),
     workspaceId: workspace.id,
     workspaceLabel: workspace.name,
     workspaceKind: workspace.kind,

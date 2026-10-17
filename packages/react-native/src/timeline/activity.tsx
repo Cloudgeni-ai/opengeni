@@ -22,6 +22,7 @@ import {
   type ToolRowPresentation,
   type WebSearchResult,
 } from "@opengeni/react/timeline-model";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { createContext, useContext, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { Icon, type NativeIconName } from "./icon";
@@ -97,6 +98,7 @@ const TOOL_ICON: Record<ToolIconKind, NativeIconName> = {
 };
 
 function PreviewNode({ preview, compact }: { preview: ToolPreview; compact: boolean }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const mono = { ...fontStyle(theme, 400, "mono"), fontSize: theme.size.sm, lineHeight: 18 };
   switch (preview.kind) {
@@ -124,7 +126,9 @@ function PreviewNode({ preview, compact }: { preview: ToolPreview; compact: bool
     case "files":
       return (
         <Text numberOfLines={1} style={mono}>
-          <Text style={{ color: theme.colors["fg-muted"] }}>{preview.count} files</Text>
+          <Text style={{ color: theme.colors["fg-muted"] }}>
+            {t("native.timeline.activity.countvalueFiles", { countValue: preview.count })}
+          </Text>
           <Text
             style={{ color: theme.colors["fg-subtle"] }}
           >{`  +${preview.add} −${preview.del}`}</Text>
@@ -156,6 +160,7 @@ function keyedResults(results: readonly WebSearchResult[]) {
 }
 
 function ToolBodyView({ body }: { body: ToolBody }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   switch (body.kind) {
     case "term":
@@ -196,7 +201,7 @@ function ToolBodyView({ body }: { body: ToolBody }) {
       );
     case "web-results":
       if (!body.results?.length) {
-        return <BodyNote>results folded into model context — no list available.</BodyNote>;
+        return <BodyNote>{t("native.timeline.activity.resultsFoldedIntoModelContext")}</BodyNote>;
       }
       return (
         <View style={{ gap: 8 }}>
@@ -283,7 +288,7 @@ function ToolBodyView({ body }: { body: ToolBody }) {
                     color: theme.colors["fg-muted"],
                   }}
                 >
-                  +{body.more} more
+                  {t("native.timeline.activity.moreMore", { more: body.more })}
                 </Text>
               ) : null}
             </View>
@@ -398,8 +403,9 @@ export function PresentedToolRow({
 }
 
 function ToolCallRow({ item, compact }: { item: ToolCallItem; compact: boolean }) {
+  const t = useOpenGeniText();
   const options = useNativeActivityOptions();
-  const presentation = toolRowPresentation(item, { computeLabel: options.computeLabel ?? null });
+  const presentation = toolRowPresentation(t, item, { computeLabel: options.computeLabel ?? null });
   const leaf = item.name.includes("__")
     ? item.name.slice(item.name.lastIndexOf("__") + 2)
     : item.name;
@@ -413,6 +419,7 @@ function ToolCallRow({ item, compact }: { item: ToolCallItem; compact: boolean }
 }
 
 function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const options = useNativeActivityOptions();
@@ -435,7 +442,7 @@ function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean
       title={
         item.streaming ? (
           <ShimmerText style={titleStyle} numberOfLines={1}>
-            Thinking
+            {t("native.timeline.activity.thinking")}
           </ShimmerText>
         ) : (
           <Text
@@ -447,7 +454,7 @@ function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean
               color: theme.colors["fg-subtle"],
             }}
           >
-            Thought
+            {t("native.timeline.activity.thought")}
           </Text>
         )
       }
@@ -474,13 +481,14 @@ function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean
 
 function SandboxRow({ item, compact }: { item: SandboxItem; compact: boolean }) {
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   return (
     <ActivityDisclosure
       icon="square-terminal"
       iconTone={
         item.status === "failed" ? "failed" : item.status === "running" ? "running" : "muted"
       }
-      title={sandboxRowTitle(item, (name) => toolDisplayName(name))}
+      title={sandboxRowTitle(t, item, (name) => toolDisplayName(t, name))}
       running={item.status === "running"}
       failed={item.status === "failed"}
       cancelled={item.status === "cancelled"}
@@ -502,6 +510,7 @@ function StartupPhaseRow({
 }) {
   const m = useNativeTimelineMessages();
   const failed = item.status === "failed";
+  const t = useOpenGeniText();
   const running = item.status === "running";
   const duration = startupDuration(item.durationMs);
   return (
@@ -510,8 +519,8 @@ function StartupPhaseRow({
       iconTone={failed ? "failed" : running ? "running" : "muted"}
       title={
         item.blockedReason
-          ? STARTUP_WAIT_TITLES[item.blockedReason]
-          : startupPhaseTitle(item.phase, item.status, item.outcome)
+          ? STARTUP_WAIT_TITLES(t)[item.blockedReason]
+          : startupPhaseTitle(t, item.phase, item.status, item.outcome)
       }
       preview={item.phase === "model_preparation" ? m.startupDetail : undefined}
       running={running}
@@ -525,12 +534,13 @@ function StartupPhaseRow({
 }
 
 function WorkerRow({ item, compact }: { item: WorkerItem; compact: boolean }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const options = useNativeActivityOptions();
   const running = item.status === "running";
   const failed = item.status === "failed";
   const cancelled = item.status === "cancelled";
-  const title = workerRowTitle(item);
+  const title = workerRowTitle(t, item);
   if (compact) {
     return (
       <ActivityDisclosure

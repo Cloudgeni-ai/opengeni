@@ -38,6 +38,7 @@ import type {
 
 import { cn } from "../../lib/cn";
 import { ArtifactSurface } from "./artifact-surface";
+import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 4;
@@ -484,13 +485,14 @@ function PresentationEditorCore({
   onCommandError,
   onZoomChange,
 }: PresentationEditorProps) {
+  const t = useOpenGeniText();
   const mutationsBlocked = readOnly || authoringBlockedReason !== undefined;
   const authoringStatus = readOnly
     ? null
     : authoringBlockedReason === "pending_conflict"
-      ? "An earlier change needs attention"
+      ? t("artifacts.presentationEditor.anEarlierChangeNeedsAttention")
       : authoringBlockedReason === "prior_writer"
-        ? "Saving earlier changes…"
+        ? t("artifacts.presentationEditor.savingEarlierChanges")
         : null;
   const slides = presentation.slides.items;
   const firstSlideId = slides[0]?.id ?? null;
@@ -826,7 +828,7 @@ function PresentationEditorCore({
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !activeSlide) return;
-    paintSlideCanvas({
+    paintSlideCanvas(t, {
       canvas,
       slide: activeSlide,
       slideSize: presentation.slideSize,
@@ -847,6 +849,7 @@ function PresentationEditorCore({
     visibleObjectIndexes,
     visibleSlideRegion,
     zoom,
+    t,
   ]);
 
   const selectObject = useCallback(
@@ -1374,13 +1377,13 @@ function PresentationEditorCore({
     >
       <div
         role="toolbar"
-        aria-label="Presentation controls"
+        aria-label={t("artifacts.presentationEditor.presentationControls")}
         className="flex h-10 shrink-0 items-center border-b border-og-border bg-og-surface-2"
       >
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <button
             type="button"
-            aria-label="Previous slide"
+            aria-label={t("artifacts.presentationEditor.previousSlide")}
             disabled={activeIndex <= 0}
             onClick={() => changeSlideBy(-1)}
             className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg disabled:opacity-35 [&>svg]:size-3.5"
@@ -1390,7 +1393,7 @@ function PresentationEditorCore({
           <button
             ref={mobileSelectorTriggerRef}
             type="button"
-            aria-label="Choose slide"
+            aria-label={t("artifacts.presentationEditor.chooseSlide")}
             aria-haspopup="listbox"
             aria-expanded={mobileSelectorOpen}
             aria-controls={mobileSelectorOpen ? `${domId}-mobile-slides` : undefined}
@@ -1406,7 +1409,7 @@ function PresentationEditorCore({
           </span>
           <button
             type="button"
-            aria-label="Next slide"
+            aria-label={t("artifacts.presentationEditor.nextSlide")}
             disabled={activeIndex < 0 || activeIndex >= slides.length - 1}
             onClick={() => changeSlideBy(1)}
             className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg disabled:opacity-35 [&>svg]:size-3.5"
@@ -1415,7 +1418,7 @@ function PresentationEditorCore({
           </button>
           <button
             type="button"
-            aria-label="Add slide"
+            aria-label={t("artifacts.presentationEditor.addSlide")}
             disabled={mutationsBlocked}
             onClick={insertSlide}
             className="ml-0.5 grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg disabled:opacity-35 [&>svg]:size-3.5"
@@ -1424,7 +1427,7 @@ function PresentationEditorCore({
           </button>
           <button
             type="button"
-            aria-label="Delete slide"
+            aria-label={t("artifacts.presentationEditor.deleteSlide")}
             disabled={mutationsBlocked || !activeSlide}
             onClick={deleteSlide}
             className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-status-failed disabled:opacity-35 [&>svg]:size-3.5"
@@ -1434,7 +1437,7 @@ function PresentationEditorCore({
           <span className="mx-1 h-4 w-px shrink-0 bg-og-border" />
           <button
             type="button"
-            aria-label="Zoom out"
+            aria-label={t("artifacts.presentationEditor.zoomOut")}
             onClick={() => changeZoom(zoom / 1.15)}
             className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg [&>svg]:size-3.5"
           >
@@ -1445,7 +1448,7 @@ function PresentationEditorCore({
           </span>
           <button
             type="button"
-            aria-label="Zoom in"
+            aria-label={t("artifacts.presentationEditor.zoomIn")}
             onClick={() => changeZoom(zoom * 1.15)}
             className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg [&>svg]:size-3.5"
           >
@@ -1453,7 +1456,7 @@ function PresentationEditorCore({
           </button>
           <button
             type="button"
-            aria-label="Fit slide"
+            aria-label={t("artifacts.presentationEditor.fitSlide")}
             onClick={fitSlide}
             className="ml-0.5 grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg [&>svg]:size-3.5"
           >
@@ -1462,7 +1465,7 @@ function PresentationEditorCore({
           <span className="mx-1 h-4 w-px shrink-0 bg-og-border" />
           <button
             type="button"
-            aria-label="Add text box"
+            aria-label={t("artifacts.presentationEditor.addTextBox")}
             disabled={mutationsBlocked || !activeSlide}
             onClick={insertTextBox}
             className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg disabled:opacity-35 [&>svg]:size-3.5"
@@ -1471,7 +1474,7 @@ function PresentationEditorCore({
           </button>
           <button
             type="button"
-            aria-label="Delete selected object"
+            aria-label={t("artifacts.presentationEditor.deleteSelectedObject")}
             disabled={mutationsBlocked || !selected || selected.readOnly}
             onClick={deleteObject}
             className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-status-failed disabled:opacity-35 [&>svg]:size-3.5"
@@ -1483,36 +1486,36 @@ function PresentationEditorCore({
           className="hidden max-w-44 shrink-0 truncate border-l border-og-border px-2 text-og-xs text-og-fg-subtle sm:block"
           title={
             commandFailure
-              ? "Change not saved"
+              ? t("artifacts.presentationEditor.changeNotSaved")
               : authoringStatus
                 ? authoringStatus
                 : pendingCommands > 0
-                  ? "Saving…"
+                  ? t("artifacts.presentationEditor.saving")
                   : mutationsBlocked
-                    ? "View only"
+                    ? t("artifacts.presentationEditor.viewOnly")
                     : selected
-                      ? `${objectLabel(selected)}${selected.readOnly ? " · View only" : ""}`
-                      : "Select an object to edit"
+                      ? `${objectLabel(t, selected)}${selected.readOnly ? " · View only" : ""}`
+                      : t("artifacts.presentationEditor.selectAnObjectToEdit")
           }
         >
           {commandFailure
-            ? "Change not saved"
+            ? t("artifacts.presentationEditor.changeNotSaved")
             : authoringStatus
               ? authoringStatus
               : pendingCommands > 0
-                ? "Saving…"
+                ? t("artifacts.presentationEditor.saving")
                 : mutationsBlocked
-                  ? "View only"
+                  ? t("artifacts.presentationEditor.viewOnly")
                   : selected
-                    ? `${objectLabel(selected)}${selected.readOnly ? " · View only" : ""}`
-                    : "Select an object to edit"}
+                    ? `${objectLabel(t, selected)}${selected.readOnly ? " · View only" : ""}`
+                    : t("artifacts.presentationEditor.selectAnObjectToEdit")}
         </span>
       </div>
 
       <div role="status" aria-live="polite" className="sr-only">
         {commandFailure?.message ??
           authoringStatus ??
-          (pendingCommands > 0 ? "Saving presentation changes" : "")}
+          (pendingCommands > 0 ? t("artifacts.presentationEditor.savingPresentationChanges") : "")}
       </div>
 
       <div className="relative flex min-h-0 min-w-0 flex-1">
@@ -1520,7 +1523,7 @@ function PresentationEditorCore({
           ref={railRef}
           role="listbox"
           tabIndex={0}
-          aria-label="Slides"
+          aria-label={t("artifacts.presentationEditor.slides")}
           aria-orientation="vertical"
           aria-activedescendant={
             activeSlide && activeIndex >= railStart && activeIndex < railEnd
@@ -1559,7 +1562,10 @@ function PresentationEditorCore({
                   role="option"
                   tabIndex={-1}
                   aria-selected={active}
-                  aria-label={`Slide ${index + 1}${slide.title ? `: ${slide.title}` : ""}`}
+                  aria-label={t("artifacts.presentationEditor.slideIndexValue", {
+                    index: index + 1,
+                    value: slide.title ? `: ${slide.title}` : "",
+                  })}
                   onClick={() => selectSlide(slide, index)}
                   className={cn(
                     "absolute left-0 flex w-full items-start gap-2 px-2 py-2 text-left transition-colors",
@@ -1604,7 +1610,7 @@ function PresentationEditorCore({
               id={`${domId}-mobile-slides`}
               role="listbox"
               tabIndex={0}
-              aria-label="Slides"
+              aria-label={t("artifacts.presentationEditor.slides")}
               aria-orientation="vertical"
               aria-activedescendant={
                 activeSlide && activeIndex >= mobileRailStart && activeIndex < mobileRailEnd
@@ -1660,7 +1666,10 @@ function PresentationEditorCore({
                       role="option"
                       tabIndex={-1}
                       aria-selected={active}
-                      aria-label={`Slide ${index + 1}${slide.title ? `: ${slide.title}` : ""}`}
+                      aria-label={t("artifacts.presentationEditor.slideIndexValue", {
+                        index: index + 1,
+                        value: slide.title ? `: ${slide.title}` : "",
+                      })}
                       onClick={() => chooseMobileSlide(slide, index)}
                       className={cn(
                         "absolute left-0 flex min-h-11 w-full items-center gap-2 px-2 text-left",
@@ -1678,7 +1687,8 @@ function PresentationEditorCore({
                         {index + 1}
                       </span>
                       <span className="min-w-0 flex-1 truncate text-og-sm">
-                        {slide.title || `Slide ${index + 1}`}
+                        {slide.title ||
+                          t("artifacts.presentationEditor.slideIndex", { index: index + 1 })}
                       </span>
                     </button>
                   );
@@ -1723,7 +1733,7 @@ function PresentationEditorCore({
                 }}
                 className="shrink-0 rounded-og-xs px-1.5 py-0.5 font-medium outline-hidden hover:bg-og-surface-3 focus-visible:ring-2 focus-visible:ring-og-accent"
               >
-                Retry
+                {t("artifacts.presentationEditor.retry")}
               </button>
             </div>
           ) : null}
@@ -1747,7 +1757,9 @@ function PresentationEditorCore({
                 ref={overlayRef}
                 role="application"
                 tabIndex={0}
-                aria-label={`Slide ${activeIndex + 1} editor`}
+                aria-label={t("artifacts.presentationEditor.slideActiveindexEditor", {
+                  activeIndex: activeIndex + 1,
+                })}
                 aria-describedby={
                   selected ? `${instructionsId} ${selectionProxyId}` : instructionsId
                 }
@@ -1797,19 +1809,20 @@ function PresentationEditorCore({
 
               {selected ? (
                 <span id={selectionProxyId} role="status" aria-live="polite" className="sr-only">
-                  {accessibleObjectLabel(selected)}
+                  {accessibleObjectLabel(t, selected)}
                 </span>
               ) : null}
 
               <span id={instructionsId} className="sr-only">
-                Use bracket keys to select objects, arrows to move, Alt plus arrows to resize, Enter
-                to edit text, and Page Up or Page Down to change slides.
+                {t("artifacts.presentationEditor.useBracketKeysToSelect")}
               </span>
 
               {textEdit && selected?.id === textEdit.shape.id && effectiveSelectedPosition ? (
                 <textarea
                   ref={editorRef}
-                  aria-label={`Edit ${textEdit.shape.name}`}
+                  aria-label={t("artifacts.presentationEditor.editName", {
+                    name: textEdit.shape.name,
+                  })}
                   value={textDraft}
                   readOnly={mutationsBlocked}
                   maxLength={1_000_000}
@@ -1853,7 +1866,7 @@ function PresentationEditorCore({
             </div>
           ) : (
             <div className="grid size-full min-h-72 place-items-center text-og-sm text-og-fg-muted">
-              This presentation has no slides.
+              {t("artifacts.presentationEditor.thisPresentationHasNoSlides")}
             </div>
           )}
         </div>
@@ -1865,7 +1878,7 @@ function PresentationEditorCore({
 /** Artifact chrome plus the editor, for drop-in SDK embedding. */
 export function PresentationArtifactSurface({
   presentation,
-  title = "Presentation",
+  title: titleProp,
   showHeader,
   subtitle,
   actions,
@@ -1873,13 +1886,16 @@ export function PresentationArtifactSurface({
   className,
   ...editorProps
 }: PresentationArtifactSurfaceProps) {
+  const t = useOpenGeniText();
+  const title =
+    titleProp === undefined ? t("artifacts.presentationEditor.presentation") : titleProp;
   const count = presentation.slides.items.length;
   return (
     <ArtifactSurface
       modality="presentation"
       title={title}
       showHeader={showHeader}
-      subtitle={subtitle ?? `${count} slide${count === 1 ? "" : "s"}`}
+      subtitle={subtitle ?? t("counts.slides", { count })}
       actions={actions}
       busy={busy}
       className={className}
@@ -1892,7 +1908,7 @@ export function PresentationArtifactSurface({
 /** Artifact chrome over the projection-first editor. */
 export function PresentationProjectionArtifactSurface({
   projection,
-  title = "Presentation",
+  title: titleProp,
   showHeader,
   subtitle,
   actions,
@@ -1900,13 +1916,16 @@ export function PresentationProjectionArtifactSurface({
   className,
   ...editorProps
 }: PresentationProjectionArtifactSurfaceProps) {
+  const t = useOpenGeniText();
+  const title =
+    titleProp === undefined ? t("artifacts.presentationEditor.presentation") : titleProp;
   const count = projection.slides.length;
   return (
     <ArtifactSurface
       modality="presentation"
       title={title}
       showHeader={showHeader}
-      subtitle={subtitle ?? `${count} slide${count === 1 ? "" : "s"}`}
+      subtitle={subtitle ?? t("counts.slides", { count })}
       actions={actions}
       busy={busy}
       className={className}
@@ -1927,6 +1946,7 @@ function SlideThumbnail({
   height: number;
   paintRevision: string;
 }) {
+  const t = useOpenGeniText();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageCacheRef = useRef(new Map<string, CanvasImageEntry>());
   const [paintEpoch, setPaintEpoch] = useState(0);
@@ -1949,6 +1969,7 @@ function SlideThumbnail({
     const usedImageSources = new Set<string>();
     for (const entry of objects) {
       drawObject(
+        t,
         context,
         entry,
         entry.object.position,
@@ -1960,7 +1981,7 @@ function SlideThumbnail({
       );
     }
     disposeUnusedCanvasImages(imageCacheRef.current, usedImageSources);
-  }, [height, paintEpoch, paintRevision, slide, width]);
+  }, [height, paintEpoch, paintRevision, slide, width, t]);
   return <canvas ref={canvasRef} aria-hidden className="block size-full" />;
 }
 
@@ -2277,18 +2298,21 @@ function querySpatialIndex(index: SpatialIndex, viewport: PresentationPosition):
     .sort((a, b) => a - b);
 }
 
-function paintSlideCanvas(options: {
-  canvas: HTMLCanvasElement;
-  slide: Slide;
-  slideSize: { width: number; height: number };
-  zoom: number;
-  objects: DisplayObject[];
-  objectIndexes: number[];
-  renderRegion: PresentationPosition;
-  draftPosition: DraftPosition | null;
-  imageCache: Map<string, CanvasImageEntry>;
-  requestRepaint: () => void;
-}): void {
+function paintSlideCanvas(
+  t: OpenGeniText,
+  options: {
+    canvas: HTMLCanvasElement;
+    slide: Slide;
+    slideSize: { width: number; height: number };
+    zoom: number;
+    objects: DisplayObject[];
+    objectIndexes: number[];
+    renderRegion: PresentationPosition;
+    draftPosition: DraftPosition | null;
+    imageCache: Map<string, CanvasImageEntry>;
+    requestRepaint: () => void;
+  },
+): void {
   const { canvas, slide, slideSize, zoom } = options;
   const context = canvas.getContext("2d");
   if (!context) return;
@@ -2321,6 +2345,7 @@ function paintSlideCanvas(options: {
         ? options.draftPosition.position
         : entry.object.position;
     drawObject(
+      t,
       context,
       entry,
       position,
@@ -2335,6 +2360,7 @@ function paintSlideCanvas(options: {
 }
 
 function drawObject(
+  t: OpenGeniText,
   context: CanvasRenderingContext2D,
   entry: DisplayObject,
   position: PresentationPosition,
@@ -2346,13 +2372,14 @@ function drawObject(
 ): void {
   switch (entry.kind) {
     case "shape":
-      drawShape(context, entry.object as PresentationShape, position);
+      drawShape(t, context, entry.object as PresentationShape, position);
       return;
     case "chart":
-      drawChart(context, entry.object as PresentationChart, position);
+      drawChart(t, context, entry.object as PresentationChart, position);
       return;
     case "image": {
       const source = drawImage(
+        t,
         context,
         entry.object as PresentationImage,
         position,
@@ -2363,10 +2390,11 @@ function drawObject(
       return;
     }
     case "table":
-      drawTable(context, entry.object as PresentationTable, position, renderRegion, pixelScale);
+      drawTable(t, context, entry.object as PresentationTable, position, renderRegion, pixelScale);
       return;
     case "group":
       drawGroup(
+        t,
         context,
         entry.object as PresentationGroup,
         position,
@@ -2380,6 +2408,7 @@ function drawObject(
 }
 
 function drawTable(
+  t: OpenGeniText,
   context: CanvasRenderingContext2D,
   table: PresentationTable,
   position: PresentationPosition,
@@ -2426,7 +2455,7 @@ function drawTable(
       context.rect(left, top, width, height);
       applyFillAndLine(context, cell.fill, table.line, false);
       if (width * pixelScale >= 8 && height * pixelScale >= 8) {
-        drawText(context, cell.text.toString(), cell.text.style, {
+        drawText(t, context, cell.text.toString(), cell.text.style, {
           left: left + 4,
           top: top + 2,
           width: Math.max(1, width - 8),
@@ -2504,6 +2533,7 @@ function cumulativeOffsets(tracks: readonly number[], start: number): number[] {
 }
 
 function drawGroup(
+  t: OpenGeniText,
   context: CanvasRenderingContext2D,
   group: PresentationGroup,
   position: PresentationPosition,
@@ -2531,6 +2561,7 @@ function drawGroup(
     const entry = displayObjectFromElement(child);
     if (!intersects(objectBounds(entry), childRenderRegion)) continue;
     drawObject(
+      t,
       context,
       entry,
       child.position,
@@ -2585,6 +2616,7 @@ function inverseGroupRegion(
 }
 
 function drawShape(
+  t: OpenGeniText,
   context: CanvasRenderingContext2D,
   shape: PresentationShape,
   position: PresentationPosition,
@@ -2637,7 +2669,7 @@ function drawShape(
   applyFillAndLine(context, shape.fill, shape.line, shape.geometry === "line");
   const text = shape.text.toString();
   if (text)
-    drawText(context, text, shape.text.style, {
+    drawText(t, context, text, shape.text.style, {
       left: x,
       top: y,
       width: position.width,
@@ -2647,6 +2679,7 @@ function drawShape(
 }
 
 function drawChart(
+  t: OpenGeniText,
   context: CanvasRenderingContext2D,
   chart: PresentationChart,
   position: PresentationPosition,
@@ -2659,6 +2692,7 @@ function drawChart(
   context.strokeRect(position.left, position.top, position.width, position.height);
   if (chart.title) {
     drawText(
+      t,
       context,
       chart.title,
       { fontSize: 18, bold: true, alignment: "center" },
@@ -2788,6 +2822,7 @@ function drawChart(
         context.fillRect(left, Math.min(baseline, valueY), Math.max(1, barWidth), height);
         if (chart.dataLabels?.showValue) {
           drawText(
+            t,
             context,
             String(value),
             { fontSize: 11, alignment: "center" },
@@ -2884,6 +2919,7 @@ function drawRadarChart(
 }
 
 function drawImage(
+  t: OpenGeniText,
   context: CanvasRenderingContext2D,
   image: PresentationImage,
   position: PresentationPosition,
@@ -2928,8 +2964,9 @@ function drawImage(
   context.stroke();
   context.setLineDash([]);
   drawText(
+    t,
     context,
-    image.alt || image.prompt || "Image",
+    image.alt || image.prompt || t("artifacts.presentationEditor.image"),
     { fontSize: 14, color: "slate-600" },
     {
       left: position.left + 12,
@@ -3040,6 +3077,7 @@ function disposeCanvasImageEntry(entry: CanvasImageEntry): void {
 }
 
 function drawText(
+  t: OpenGeniText,
   context: CanvasRenderingContext2D,
   text: string,
   style: PresentationTextStyle,
@@ -3048,7 +3086,7 @@ function drawText(
   const fontSize = style.fontSize ?? 18;
   const fontStyle = style.italic ? "italic " : "";
   const fontWeight = style.bold ? "700 " : "400 ";
-  context.font = `${fontStyle}${fontWeight}${fontSize}px ${style.fontFamily ?? "Arial, sans-serif"}`;
+  context.font = `${fontStyle}${fontWeight}${fontSize}px ${style.fontFamily ?? t("artifacts.presentationEditor.arialSansSerif")}`;
   context.fillStyle = resolveColor(style.color ?? "slate-950");
   context.textAlign =
     style.alignment === "center" ? "center" : style.alignment === "right" ? "right" : "left";
@@ -3202,21 +3240,27 @@ function objectRotation(entry: DisplayObject): number {
   return 0;
 }
 
-function objectLabel(entry: DisplayObject): string {
+function objectLabel(t: OpenGeniText, entry: DisplayObject): string {
   const object = entry.object;
   if (entry.kind === "shape") {
     const shape = object as PresentationShape;
-    return shape.text.toString().trim() || shape.name || "Shape";
+    return shape.text.toString().trim() || shape.name || t("artifacts.presentationEditor.shape");
   }
-  if (entry.kind === "chart") return (object as PresentationChart).title || object.name || "Chart";
-  if (entry.kind === "image") return (object as PresentationImage).alt || object.name || "Image";
-  if (entry.kind === "table") return object.name || "Table";
-  return object.name || "Group";
+  if (entry.kind === "chart")
+    return (
+      (object as PresentationChart).title || object.name || t("artifacts.presentationEditor.chart")
+    );
+  if (entry.kind === "image")
+    return (
+      (object as PresentationImage).alt || object.name || t("artifacts.presentationEditor.image")
+    );
+  if (entry.kind === "table") return object.name || t("artifacts.presentationEditor.table");
+  return object.name || t("artifacts.presentationEditor.group");
 }
 
-function accessibleObjectLabel(entry: DisplayObject): string {
+function accessibleObjectLabel(t: OpenGeniText, entry: DisplayObject): string {
   const position = entry.object.position;
-  return `${objectLabel(entry)}. Position ${Math.round(position.left)}, ${Math.round(position.top)}. Size ${Math.round(position.width)} by ${Math.round(position.height)}.`;
+  return `${objectLabel(t, entry)}. Position ${Math.round(position.left)}, ${Math.round(position.top)}. Size ${Math.round(position.width)} by ${Math.round(position.height)}.`;
 }
 
 function nextTextBoxPosition(

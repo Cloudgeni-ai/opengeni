@@ -49,6 +49,7 @@ import {
   useOpenGeniLinkResolver,
   type OpenGeniLinkResolver,
 } from "./open-geni-links";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /**
  * The default renderer for chat message bodies in {@link MessageTimeline}.
@@ -259,23 +260,25 @@ const MarkdownLinkContext = createContext<
   Pick<MarkdownProps, "onSandboxFile" | "artifactHref" | "resolveLink">
 >({});
 
-const UNAVAILABLE_LABEL: Record<Exclude<OpenGeniLinkTarget["kind"], "sandbox-file">, string> = {
-  file: "This file needs a workspace-aware host to open",
-  "editable-artifact": "This artifact needs a workspace-aware host to open",
-  site: "This Site needs a workspace-aware host to open",
-};
+const UNAVAILABLE_LABEL = (
+  t: OpenGeniText,
+): Record<Exclude<OpenGeniLinkTarget["kind"], "sandbox-file">, string> => ({
+  file: t("markdown.thisFileNeedsAWorkspace"),
+  "editable-artifact": t("markdown.thisArtifactNeedsAWorkspace"),
+  site: t("markdown.thisSiteNeedsAWorkspace"),
+});
 
-function linkActionTitle(target: OpenGeniLinkTarget): string {
+function linkActionTitle(t: OpenGeniText, target: OpenGeniLinkTarget): string {
   if (target.kind === "sandbox-file") {
     return target.line !== null
-      ? `Open ${target.path} at line ${target.line}`
-      : `Open ${target.path}`;
+      ? t("markdown.openPathAtLineLine", { path: target.path, line: target.line })
+      : t("markdown.openPath", { path: target.path });
   }
   return target.kind === "file"
-    ? "Open file"
+    ? t("markdown.openFile")
     : target.kind === "site"
-      ? "Open Site"
-      : "Open artifact";
+      ? t("markdown.openSite")
+      : t("markdown.openArtifact");
 }
 
 /** A `rehypeSecretRefs` placeholder becomes a chip; every other span passes through. */
@@ -296,6 +299,8 @@ function MarkdownSecretRef({ raw, children }: { raw: string; children?: ReactNod
   return <SecretRefChip reference={token.reference} />;
 }
 
+// Module-level so react-markdown keeps stable component identities across
+// renders; renderers that need host text read it through the hook.
 const markdownComponents: Components = {
   ...baseComponents,
   span: MarkdownSpan,
@@ -315,6 +320,7 @@ const markdownComponents: Components = {
     );
   },
   a: ({ children, href, ...props }) => {
+    const t = useOpenGeniText();
     const { onSandboxFile, artifactHref, resolveLink } = useContext(MarkdownLinkContext);
     const inherited = useOpenGeniLinkResolver();
     const target = parseOpenGeniLink(href);
@@ -354,7 +360,7 @@ const markdownComponents: Components = {
       }
       if (resolution?.open) {
         return (
-          <ActionMarkdownLink title={linkActionTitle(target)} onOpen={resolution.open}>
+          <ActionMarkdownLink title={linkActionTitle(t, target)} onOpen={resolution.open}>
             {children}
           </ActionMarkdownLink>
         );
@@ -364,7 +370,7 @@ const markdownComponents: Components = {
           <span
             className="break-words font-medium text-og-fg-subtle underline decoration-dotted underline-offset-2"
             aria-disabled="true"
-            title="This sandbox file requires a session-aware handler"
+            title={t("markdown.thisSandboxFileRequiresA")}
           >
             {children}
           </span>
@@ -372,8 +378,8 @@ const markdownComponents: Components = {
       }
       // Never navigate: a console path resolves against the host origin and 404s.
       return (
-        <span title={UNAVAILABLE_LABEL[target.kind]} data-og-link-unavailable={target.kind}>
-          {children} (artifact unavailable)
+        <span title={UNAVAILABLE_LABEL(t)[target.kind]} data-og-link-unavailable={target.kind}>
+          {children} {t("markdown.artifactUnavailable")}
         </span>
       );
     }
@@ -384,11 +390,11 @@ const markdownComponents: Components = {
           aria-disabled="true"
           title={
             isSandboxHref(href)
-              ? "This sandbox file reference is invalid"
-              : "This link is unavailable"
+              ? t("markdown.thisSandboxFileReferenceIs")
+              : t("markdown.thisLinkIsUnavailable")
           }
         >
-          {children} (link unavailable)
+          {children} {t("markdown.linkUnavailable")}
         </span>
       );
     }
@@ -415,6 +421,7 @@ function ActionMarkdownLink({
   onOpen: () => void | Promise<void>;
   children: ReactNode;
 }) {
+  const t = useOpenGeniText();
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
   return (
     <button
@@ -427,7 +434,7 @@ function ActionMarkdownLink({
       // so a host viewer could not return focus to the link that opened it.
       aria-disabled={state === "loading" || undefined}
       aria-busy={state === "loading"}
-      title={state === "error" ? "Couldn't open this file. Select to retry." : title}
+      title={state === "error" ? t("markdown.couldnTOpenThisFile") : title}
       onClick={() => {
         if (state === "loading") return;
         setState("loading");
@@ -468,15 +475,22 @@ export function retainedImageId(src: string): string | null {
   return parseRetainedFileReference(src);
 }
 function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
+  const t = useOpenGeniText();
   const { renderImage, suppressImages } = useContext(InteractiveContext);
   if (suppressImages)
-    return <span data-og-image-placeholder="">{alt || "Image"} (preview unavailable)</span>;
-  if (!src) return <span>{alt ?? "Image unavailable"}</span>;
+    return (
+      <span data-og-image-placeholder="">
+        {alt || t("markdown.image")} {t("markdown.previewUnavailable")}
+      </span>
+    );
+  if (!src) return <span>{alt ?? t("markdown.imageUnavailable")}</span>;
   if (retainedImageId(src))
     return renderImage ? (
       <>{renderImage({ src, alt: alt ?? "" })}</>
     ) : (
-      <span>{alt || "Image"} (preview unavailable)</span>
+      <span>
+        {alt || t("markdown.image")} {t("markdown.previewUnavailable")}
+      </span>
     );
   return <img src={src} alt={alt ?? ""} loading="lazy" className="my-3 max-w-full rounded-og-md" />;
 }
@@ -524,6 +538,7 @@ function fenceLanguage(children: ReactNode): string | null {
 }
 
 function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"> & ExtraProps) {
+  const t = useOpenGeniText();
   const { source, render, streaming } = useContext(InteractiveContext);
   const language = fenceLanguage(children);
   if (render && (language === "opengeni-html" || language === "opengeni-site")) {
@@ -554,10 +569,10 @@ function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"
           ) : (
             <ActivityDisclosure
               icon={<PanelsTopLeftIcon aria-hidden className="size-3.5" />}
-              title="Preview incomplete"
+              title={t("markdown.previewIncomplete")}
               running={false}
               expandable={false}
-              preview="Generation stopped before the preview was ready."
+              preview={t("markdown.generationStoppedBeforeThePreview")}
             />
           )}
         </div>
@@ -576,6 +591,7 @@ function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"
 }
 
 function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
+  const t = useOpenGeniText();
   const code = nodeText(children).replace(/\n$/, "");
   const language = fenceLanguage(children);
   // mt-only (no mb / last:mb-0): next sibling streaming in used to flip a
@@ -591,7 +607,7 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
           </span>
         ) : null}
         <div className="pointer-events-auto">
-          <CopyButton text={code} label="Copy code" reveal="group-hover" />
+          <CopyButton text={code} label={t("markdown.copyCode")} reveal="group-hover" />
         </div>
       </div>
       <pre
@@ -605,6 +621,7 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
 }
 
 function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutRef<"table">) {
+  const t = useOpenGeniText();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const tableRef = useRef<HTMLTableElement>(null);
   const layoutRef = useRef<ReturnType<typeof observeMarkdownTableLayout>>(undefined);
@@ -643,7 +660,7 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
         <div className="pointer-events-auto">
           <CopyButton
             text={() => tableElementToTsv(tableRef.current)}
-            label="Copy table"
+            label={t("markdown.copyTable")}
             reveal="group-hover"
           />
         </div>
@@ -833,6 +850,7 @@ function MarkdownImpl({
 
 /** Memoized so streaming re-renders of the parent don't re-parse settled bodies. */
 export const Markdown = memo(function SearchableMarkdown(props: MarkdownProps) {
+  const t = useOpenGeniText();
   const [retained, setRetained] = useState<{ text: string; target: TimelineSearchTarget } | null>(
     null,
   );
@@ -849,7 +867,7 @@ export const Markdown = memo(function SearchableMarkdown(props: MarkdownProps) {
   const offset = searchMatchOffset(props.children, target);
   if (offset < 0)
     return props.searchTarget ? (
-      <div role="status">This match is no longer in the message source.</div>
+      <div role="status">{t("markdown.thisMatchIsNoLonger")}</div>
     ) : (
       <MarkdownImpl {...props} />
     );
@@ -863,15 +881,15 @@ export const Markdown = memo(function SearchableMarkdown(props: MarkdownProps) {
   return (
     <div className={cn("og-markdown-body min-w-0 break-words", props.className)}>
       <div data-og-annotation-chrome="" className="text-xs opacity-70">
-        Match in message source · Excerpt stays in place when Find closes
+        {t("markdown.matchInMessageSourceExcerpt")}
         <button
           type="button"
           disabled={!!props.searchTarget}
-          title={props.searchTarget ? "Close Find to show the formatted message" : undefined}
+          title={props.searchTarget ? t("markdown.closeFindToShowThe") : undefined}
           className="ml-2 inline-flex min-h-7 items-center rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-hidden hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:min-h-11 disabled:opacity-50"
           onClick={() => setRetained(null)}
         >
-          Show formatted message
+          {t("markdown.showFormattedMessage")}
         </button>
       </div>
       <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>

@@ -1,4 +1,5 @@
 import { OpenGeniApiError } from "@opengeni/sdk";
+import { type OpenGeniText } from "../messages/runtime";
 
 /*
  * A deploy, failover or database restart makes the API answer 502/503/504 (or a
@@ -14,7 +15,8 @@ export const TRANSIENT_RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 3_000
 export const TRANSIENT_RECONNECT_INTERVAL_MS = 3_000;
 
 /** The one line shown while Opengeni is briefly unreachable. */
-export const OPENGENI_UPDATING_NOTICE = "Opengeni is updating. We'll reconnect automatically.";
+export const OPENGENI_UPDATING_NOTICE = (t: OpenGeniText) =>
+  t("lib.transientRetry.opengeniIsUpdatingWeLl");
 
 const NETWORK_FAILURE =
   /failed to fetch|fetch failed|networkerror|load failed|network request failed/iu;

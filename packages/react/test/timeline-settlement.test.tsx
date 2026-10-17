@@ -3,6 +3,9 @@ import { captureTimelineSettlement } from "../src/components/timeline-settlement
 import { buildTimeline, groupTimeline } from "../src/timeline";
 import type { SessionEvent } from "@opengeni/sdk";
 import { registerDom } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -29,7 +32,9 @@ test("an earlier pending row cannot mask a later retained answer settling", () =
     turnId,
     occurredAt: new Date(index * 1000).toISOString(),
   })) as SessionEvent[];
-  const groups = groupTimeline(buildTimeline(events), { readableTurns: true }).map((group) => ({
+  const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+    readableTurns: true,
+  }).map((group) => ({
     key: group.kind === "item" ? group.item.id : group.id,
     group,
   }));

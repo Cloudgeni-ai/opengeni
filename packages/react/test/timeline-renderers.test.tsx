@@ -14,6 +14,9 @@ import type {
   ToolRegistry,
   TimelineItem,
 } from "../src/timeline";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 /* ----------------------------------------------------------------------------
    Renderer integration tests for Issue-2 (multi-file apply_patch count) and
@@ -174,7 +177,7 @@ describe("allowance refusal rendering", () => {
           ? "An organization admin can raise the workspace budget."
           : "A workspace admin can raise this limit.",
       );
-      expect(text).toContain(`Resets ${formatAllowanceDate(refusal.resetsAt)}.`);
+      expect(text).toContain(`Resets ${formatAllowanceDate(englishText, refusal.resetsAt)}.`);
       expect(r.container.querySelectorAll("[data-og-allowance-exhausted]")).toHaveLength(1);
       expect(r.container.querySelector("[data-og-allowance-exhausted]")?.getAttribute("role")).toBe(
         "status",

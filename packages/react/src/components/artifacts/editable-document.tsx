@@ -28,6 +28,7 @@ import {
   EditableArtifactMessage,
   useEditableArtifactView,
 } from "./editable-artifact-ui";
+import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 
 const DOCUMENT_PAGE_ITEMS = 512;
 const DOCUMENT_MAX_BLOCKS = 4_096;
@@ -78,6 +79,7 @@ export function EditableDocumentArtifactSurface({
   onCommandError,
   ...surfaceProps
 }: EditableDocumentArtifactSurfaceProps) {
+  const t = useOpenGeniText();
   const view = useEditableArtifactView(session);
   const invalidator = editableArtifactProjectionKey(view);
   const [retryEpoch, setRetryEpoch] = useState(0);
@@ -115,7 +117,7 @@ export function EditableDocumentArtifactSurface({
       commandStateRef.current !== commandState;
     scheduleLoad(async () => {
       if (superseded()) return;
-      await composeDocumentEditorProjection(session).then(
+      await composeDocumentEditorProjection(t, session).then(
         (projection) => {
           if (superseded()) return;
           const nextParagraphText = paragraphTextById(projection);
@@ -135,7 +137,10 @@ export function EditableDocumentArtifactSurface({
             session,
             projection: null,
             loading: false,
-            error: asEditableArtifactError(cause, "Could not open this document"),
+            error: asEditableArtifactError(
+              cause,
+              t("artifacts.editableDocument.couldNotOpenThisDocument"),
+            ),
           });
         },
       );
@@ -143,7 +148,7 @@ export function EditableDocumentArtifactSurface({
     return () => {
       cancelled = true;
     };
-  }, [commandState, invalidator, retryEpoch, scheduleLoad, session]);
+  }, [commandState, invalidator, retryEpoch, scheduleLoad, session, t]);
 
   const refresh = useCallback(() => setRetryEpoch((value) => value + 1), []);
   const writable = !readOnly && view.writable;
@@ -151,27 +156,28 @@ export function EditableDocumentArtifactSurface({
     (commit: DocumentCommit): Promise<void> => {
       const projection = state.session === session ? state.projection : null;
       if (!projection) return Promise.reject(new Error("Document projection is not ready"));
-      if (!writable) return Promise.reject(new Error("This document is read only"));
+      if (!writable)
+        return Promise.reject(new Error(t("artifacts.editableDocument.thisDocumentIsReadOnly")));
       if (String(commit.revision) !== String(projection.revision)) {
         return Promise.reject(
-          new Error("The document changed; retry this edit on the latest version"),
+          new Error(t("artifacts.editableDocument.theDocumentChangedRetryThis")),
         );
       }
 
       const execute = async () => {
         if (commandStateRef.current !== commandState) {
-          throw new Error("The document session changed before this edit could be saved");
+          throw new Error(t("artifacts.editableDocument.theDocumentSessionChangedBefore"));
         }
 
         const allocateLocalParagraph = async (localId: string): Promise<string> => {
           const allocated = commandState.optimisticParagraphIds.get(localId);
           if (allocated !== undefined) return allocated;
           if (!commandState.localParagraphIds.has(localId)) {
-            throw new Error("The edited paragraph is no longer available");
+            throw new Error(t("artifacts.editableDocument.theEditedParagraphIsNo"));
           }
           const created = await session.createDocumentParagraph();
           if (commandStateRef.current !== commandState) {
-            throw new Error("The document session changed before this edit could be saved");
+            throw new Error(t("artifacts.editableDocument.theDocumentSessionChangedBefore"));
           }
           commandState.optimisticParagraphIds.set(localId, created.paragraphId);
           commandState.paragraphText.set(created.paragraphId, "");
@@ -181,7 +187,7 @@ export function EditableDocumentArtifactSurface({
         if (commit.kind === "insert-paragraph") {
           commandState.localParagraphIds.add(commit.blockId);
           await allocateLocalParagraph(commit.blockId);
-          notifyDocumentCommit(onCommit, onCommandError, commit);
+          notifyDocumentCommit(t, onCommit, onCommandError, commit);
           refresh();
           return;
         }
@@ -194,7 +200,7 @@ export function EditableDocumentArtifactSurface({
         if (commit.kind === "text") {
           const before = commandState.paragraphText.get(targetId);
           if (before === undefined) {
-            throw new Error("The edited paragraph is no longer available");
+            throw new Error(t("artifacts.editableDocument.theEditedParagraphIsNo"));
           }
           const edit = minimalUtf16TextEdit(before, commit.text);
           if (!edit) return;
@@ -227,7 +233,7 @@ export function EditableDocumentArtifactSurface({
             commands: [command],
           });
           if (commandStateRef.current !== commandState) return;
-          notifyDocumentCommit(onCommit, onCommandError, commit);
+          notifyDocumentCommit(t, onCommit, onCommandError, commit);
           refresh();
         } catch (cause) {
           rollbackText?.();
@@ -249,11 +255,11 @@ export function EditableDocumentArtifactSurface({
       );
       return operation;
     },
-    [commandState, onCommandError, onCommit, refresh, session, state, writable],
+    [commandState, onCommandError, onCommit, refresh, session, state, writable, t],
   );
 
   const projection = state.session === session ? state.projection : null;
-  const status = editableArtifactStatusLabel(view);
+  const status = editableArtifactStatusLabel(t, view);
   const accessRevoked = editableArtifactAccessRevoked(view);
   return projection && !accessRevoked ? (
     <DocumentProjectionArtifactSurface
@@ -261,8 +267,11 @@ export function EditableDocumentArtifactSurface({
       title={title}
       showHeader={showHeader}
       subtitle={
-        subtitle ??
-        `${projection.blocks.length} block${projection.blocks.length === 1 ? "" : "s"}${writable ? "" : " · Read only"}`
+        (subtitle ?? writable)
+          ? t("counts.blocks", { count: projection.blocks.length })
+          : t("artifacts.readOnlySubtitle", {
+              subtitle: t("counts.blocks", { count: projection.blocks.length }),
+            })
       }
       projection={projection}
       commit={writable ? applyCommit : undefined}
@@ -282,10 +291,10 @@ export function EditableDocumentArtifactSurface({
       <EditableArtifactMessage
         title={
           accessRevoked
-            ? "Access changed"
+            ? t("artifacts.editableDocument.accessChanged")
             : state.error
-              ? "Could not open this document"
-              : "Opening document"
+              ? t("artifacts.editableDocument.couldNotOpenThisDocument")
+              : t("artifacts.editableDocument.openingDocument")
         }
         detail={accessRevoked ? status : (state.error?.message ?? status)}
         retry={!accessRevoked && state.error ? refresh : undefined}
@@ -296,6 +305,7 @@ export function EditableDocumentArtifactSurface({
 
 /** Deterministically composes summary/body/sections/review at one Worker revision. */
 export async function composeDocumentEditorProjection(
+  t: OpenGeniText,
   session: EditableArtifactSession,
 ): Promise<DocumentEditorProjection> {
   if (session.modality !== "document") throw new Error("Expected a document artifact session");
@@ -304,7 +314,10 @@ export async function composeDocumentEditorProjection(
     try {
       return await composeDocumentAttempt(session);
     } catch (cause) {
-      const error = asEditableArtifactError(cause, "Could not project this document");
+      const error = asEditableArtifactError(
+        cause,
+        t("artifacts.editableDocument.couldNotProjectThisDocument"),
+      );
       if (!isRevisionDrift(error) || attempt === DOCUMENT_COMPOSITION_ATTEMPTS - 1) throw error;
       lastRevisionError = error;
     }
@@ -641,6 +654,7 @@ function isRevisionDrift(error: Error): boolean {
 }
 
 function notifyDocumentCommit(
+  t: OpenGeniText,
   observer: DocumentCommitHandler | undefined,
   onError: ((error: Error) => void) | undefined,
   commit: DocumentCommit,
@@ -649,10 +663,17 @@ function notifyDocumentCommit(
     const result = observer?.(commit);
     if (result && typeof result.then === "function") {
       void Promise.resolve(result).catch((cause) =>
-        onError?.(asEditableArtifactError(cause, "Document commit observer failed")),
+        onError?.(
+          asEditableArtifactError(
+            cause,
+            t("artifacts.editableDocument.documentCommitObserverFailed"),
+          ),
+        ),
       );
     }
   } catch (cause) {
-    onError?.(asEditableArtifactError(cause, "Document commit observer failed"));
+    onError?.(
+      asEditableArtifactError(cause, t("artifacts.editableDocument.documentCommitObserverFailed")),
+    );
   }
 }

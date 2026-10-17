@@ -11,6 +11,7 @@ import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner } from "./internal";
 import { EMPTY_MACHINES, useSharedMachinesList } from "./shared-machines-list";
 import type { MachinesResponse, MachineView, MetricSample } from "../types/machines";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /** Dashboard list: cheap heartbeat read, keep the pill reasonably fresh. */
 export const MACHINES_DASHBOARD_POLL_MS = 10_000;
@@ -145,25 +146,25 @@ export type UseMachinesResult = {
   clearMutationError: () => void;
 };
 
-function swapFailureMessage(result: SwapActiveSandboxResponse): string {
+function swapFailureMessage(t: OpenGeniText, result: SwapActiveSandboxResponse): string {
   if (result.reason?.trim()) return result.reason;
   switch (result.code) {
     case "recovery_in_progress":
-      return "The managed sandbox is still recovering. Try again shortly.";
+      return t("hooks.useMachines.theManagedSandboxIsStill");
     case "recovery_degraded":
-      return "The managed sandbox recovery is degraded and needs attention.";
+      return t("hooks.useMachines.theManagedSandboxRecoveryIs");
     case "recovery_unrecoverable":
-      return "The managed sandbox could not be recovered.";
+      return t("hooks.useMachines.theManagedSandboxCouldNot");
     case "offline_enrollment":
-      return "The selected machine is offline.";
+      return t("hooks.useMachines.theSelectedMachineIsOffline");
     case "concurrent_swap":
-      return "The session route changed concurrently. Refresh and try again.";
+      return t("hooks.useMachines.theSessionRouteChangedConcurrently");
     case "personal_machine_permission_required":
-      return "The machine's owner has not allowed this chat to use it.";
+      return t("hooks.useMachines.theMachineSOwnerHas");
     case "personal_machine_not_permitted":
-      return "Only the machine's owner can use it in this chat.";
+      return t("hooks.useMachines.onlyTheMachineSOwner");
     default:
-      return "The session stayed on its current sandbox.";
+      return t("hooks.useMachines.theSessionStayedOnIts");
   }
 }
 
@@ -176,6 +177,7 @@ function swapFailureMessage(result: SwapActiveSandboxResponse): string {
  * frontend (each provides its own client/adapter).
  */
 export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult {
+  const t = useOpenGeniText();
   const { client, workspaceId } = useOpenGeni(options);
   const machinesClient = (options.machinesClient ??
     (client as unknown as MachinesClientLike)) satisfies MachinesClientLike;
@@ -261,7 +263,7 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
           "swapped" in response &&
           response.swapped === false
         ) {
-          throw new Error(swapFailureMessage(response as SwapActiveSandboxResponse));
+          throw new Error(swapFailureMessage(t, response as SwapActiveSandboxResponse));
         }
         return true;
       });
@@ -271,7 +273,7 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
       }
       return result === true;
     },
-    [machinesClient, workspaceId, sessionId, identityKey, run, refresh],
+    [machinesClient, workspaceId, sessionId, identityKey, run, refresh, t],
   );
 
   const fetchSeries = useCallback(

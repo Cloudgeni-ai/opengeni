@@ -19,6 +19,7 @@ import {
   type OpenGeniLinkTarget,
   type RetainedArtifactReference,
 } from "@opengeni/sdk";
+import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AccessibilityInfo,
@@ -68,21 +69,21 @@ export interface NativePreviewLabels {
   close: string;
 }
 
-const DEFAULT_LABELS: NativePreviewLabels = {
-  preparing: "Preparing preview…",
-  incompleteTitle: "Preview incomplete",
-  incompleteBody: "Generation stopped before the preview was ready.",
-  previewFailed: "The preview couldn't load.",
-  siteLoading: "Loading Site…",
-  siteFailed: "The Site couldn't load.",
-  siteUnpublished: "This Site has no published version.",
-  siteInvalid: "This Site reference is invalid.",
-  imageUnavailable: "Image unavailable",
-  retry: "Retry",
-  open: "Open",
-  expand: "Full screen",
-  close: "Close",
-};
+const DEFAULT_LABELS = (t: OpenGeniText): NativePreviewLabels => ({
+  preparing: t("native.timeline.previews.preparingPreview"),
+  incompleteTitle: t("native.timeline.previews.previewIncomplete"),
+  incompleteBody: t("native.timeline.previews.generationStoppedBeforeThePreview"),
+  previewFailed: t("native.timeline.previews.thePreviewCouldnTLoad"),
+  siteLoading: t("native.timeline.previews.loadingSite"),
+  siteFailed: t("native.timeline.previews.theSiteCouldnTLoad"),
+  siteUnpublished: t("native.timeline.previews.thisSiteHasNoPublished"),
+  siteInvalid: t("native.timeline.previews.thisSiteReferenceIsInvalid"),
+  imageUnavailable: t("native.timeline.previews.imageUnavailable"),
+  retry: t("native.timeline.previews.retry"),
+  open: t("native.timeline.previews.open"),
+  expand: t("native.timeline.previews.fullScreen"),
+  close: t("native.timeline.previews.close"),
+});
 
 /** Inline html grows with its content up to this height, then scrolls inside. */
 const HTML_MAX_HEIGHT = 640;
@@ -91,11 +92,14 @@ const SITE_HEIGHT = 420;
 const LOADING_HEIGHT = 260;
 
 /** `renderImage` and `renderInteractiveBlock` for `createWebMarkdownRenderer`. */
-export function createNativePreviewRenderers(options: NativePreviewOptions): {
+export function createNativePreviewRenderers(
+  t: OpenGeniText,
+  options: NativePreviewOptions,
+): {
   renderImage: (image: { src: string; alt: string }) => ReactNode;
   renderInteractiveBlock: (block: NativeInteractiveBlock) => ReactNode;
 } {
-  const labels = { ...DEFAULT_LABELS, ...options.labels };
+  const labels = { ...DEFAULT_LABELS(t), ...options.labels };
   return {
     renderImage: ({ src, alt }) => {
       const artifactId = parseRetainedFileReference(src);
@@ -150,17 +154,18 @@ function useReducedMotion(): boolean {
 
 /** The web's preview-preparation ripple, drawn by the same canvas code. */
 function PreparingPreview({ label }: { label: string }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const reducedMotion = useReducedMotion();
   const html = useMemo(
     () =>
-      previewLoadingDocument({
+      previewLoadingDocument(t, {
         scheme: theme.scheme,
         label,
         labelColor: theme.colors["fg-muted"],
         reducedMotion,
       }),
-    [label, reducedMotion, theme.colors, theme.scheme],
+    [t, label, reducedMotion, theme.colors, theme.scheme],
   );
   return (
     <View
@@ -754,6 +759,7 @@ function RetainedImage({
   artifactId: string;
   alt: string;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const { client, workspaceId, onOpenLink } = options;
   const [state, setState] = useState<ImageState>({ status: "loading", ratio: null });
@@ -793,7 +799,7 @@ function RetainedImage({
     return () => abort.abort();
   }, [artifactId, attempt, client, reveal, workspaceId]);
 
-  const label = alt || "Image";
+  const label = alt || t("native.timeline.previews.image");
   if (state.status === "failed") {
     return (
       <Pressable

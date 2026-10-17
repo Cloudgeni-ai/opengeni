@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createOpenGeniText } from "@opengeni/react/messages";
 import type { HumanInputQuestion, HumanInputSecretSpec } from "@opengeni/sdk";
 import {
   applePasswordRules,
@@ -238,9 +239,9 @@ describe("saved answer", () => {
   const saved = (vault: string, item: string) => `Saved to ${vault} › ${item}`;
 
   test("the chip names the vault and item, never a value", () => {
-    expect(secretSavedLabel({ vaultName: "Private", itemName: "GitHub" })).toBe(
-      "Saved to Private › GitHub",
-    );
+    expect(
+      secretSavedLabel(createOpenGeniText(), { vaultName: "Private", itemName: "GitHub" }),
+    ).toBe("Saved to Private › GitHub");
   });
 
   test("answer lines replace a secret answer with where it was saved", () => {

@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { providerRecoverySubject } from "@opengeni/react";
 import type { SessionFailureSummary } from "./events";
 
@@ -243,7 +244,7 @@ export function failedSessionCopy(
     !failure.safetyRefusal &&
     !failure.quotaScope
   ) {
-    const subject = providerRecoverySubject(recovery);
+    const subject = providerRecoverySubject(t, recovery);
     return {
       reason: modelChanged
         ? `${subject}. Retry to continue with the selected model.`
