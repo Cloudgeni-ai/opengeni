@@ -6,6 +6,16 @@ thread_local! {
     pub(super) static FAILPOINT: Cell<Option<&'static str>> = const { Cell::new(None) };
 }
 
+impl Images {
+    /// [`Images::recover`], as the good current generation, if any.
+    fn recover_current(&self) -> io::Result<Option<Generation>> {
+        Ok(match self.recover()? {
+            Recovered::Good(generation) => Some(generation),
+            Recovered::Absent | Recovered::Damaged { .. } => None,
+        })
+    }
+}
+
 const PAGE: u64 = 4096;
 const PAGE_BYTES: usize = 4096;
 /// Small images keep the tests fast; three and a half chunks, so the
@@ -248,17 +258,62 @@ fn recovery_keeps_an_image_it_cannot_read_for_now() {
     let generation = image.generation();
     let state = images.state(generation);
     fs::set_permissions(&state, fs::Permissions::from_mode(0o000)).unwrap();
-    assert!(images.recover().is_err(), "unreadable is no verdict");
+    assert!(
+        images.recover_current().is_err(),
+        "unreadable is no verdict"
+    );
     assert_eq!(images.current().unwrap(), Some(generation));
     fs::set_permissions(&state, fs::Permissions::from_mode(0o444)).unwrap();
-    assert_eq!(
-        images.recover().unwrap().map(|image| image.generation()),
-        Some(generation)
-    );
+    assert_eq!(images.recover_current().unwrap(), Some(generation));
     // A missing part is a verdict: the image goes to quarantine.
     fs::remove_file(&state).unwrap();
-    assert!(images.recover().unwrap().is_none());
+    let recovered = images.recover().unwrap();
+    assert!(
+        matches!(
+            recovered,
+            Recovered::Damaged {
+                quarantined: true,
+                ..
+            }
+        ),
+        "{recovered:?}"
+    );
     assert_eq!(images.current().unwrap(), None);
+    assert!(matches!(images.recover().unwrap(), Recovered::Absent));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn an_image_gone_whole_is_damaged_but_nothing_is_kept() {
+    let dir = scratch("gone");
+    let images = Images::new(dir.join("images"));
+    let (memory, state) = (dir.join("memory"), dir.join("state"));
+    write_diff(&memory, &[(1, 7)]);
+    write_state(&state, b"s");
+    let image = images
+        .publish(Parts::Whole {
+            state: &state,
+            memory: &memory,
+            len: LEN,
+        })
+        .unwrap();
+    fs::remove_dir_all(images.path(image.generation())).unwrap();
+    let recovered = images.recover().unwrap();
+    assert!(
+        matches!(
+            recovered,
+            Recovered::Damaged {
+                quarantined: false,
+                ..
+            }
+        ),
+        "{recovered:?}"
+    );
+    assert_eq!(images.current().unwrap(), None);
+    assert_eq!(
+        fs::read_dir(images.dir().join(QUARANTINE)).map_or(0, Iterator::count),
+        0
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -340,7 +395,7 @@ fn crashes_and_corruption_never_lose_or_misuse_the_committed_image() {
                 fs::write(&victim, bytes).unwrap();
                 damaged = true;
             }
-            let recovered = images.recover().unwrap();
+            let recovered = images.recover_current().unwrap();
             match (&committed, recovered) {
                 (Some(_), None) => {
                     assert!(damaged, "seed {seed}: a good committed image was lost");
@@ -351,11 +406,11 @@ fn crashes_and_corruption_never_lose_or_misuse_the_committed_image() {
                     committed = None;
                     model.fill(0);
                 }
-                (Some(expected), Some(image)) => {
+                (Some(expected), Some(generation)) => {
                     assert!(!damaged, "seed {seed}: a damaged image was trusted");
-                    assert_eq!(&content(&images, image.generation()), expected);
-                    images.verify(image.generation(), Depth::Deep).unwrap();
-                    assert_eq!(images.generations().unwrap(), vec![image.generation()]);
+                    assert_eq!(&content(&images, generation), expected);
+                    images.verify(generation, Depth::Deep).unwrap();
+                    assert_eq!(images.generations().unwrap(), vec![generation]);
                 }
                 (None, None) => {}
                 (None, Some(_)) => panic!("seed {seed}: an uncommitted image became current"),

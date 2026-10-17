@@ -307,8 +307,8 @@ impl Cgroup {
     }
 }
 
-/// A group's zswap traffic and memory pressure; see
-/// [`Cgroup::memory_stats`].
+/// A group's zswap traffic, memory pressure and major faults; see
+/// [`Cgroup::memory_stats`]. Every count starts at zero with the group.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MemoryStats {
     /// Pages compressed into zswap since the group was created.
@@ -318,31 +318,49 @@ pub struct MemoryStats {
     /// Share of the last ten seconds in which some of the group's processes
     /// waited for memory, in percent (`some avg10` in `memory.pressure`).
     pub pressure_some_avg10: Option<f64>,
+    /// Microseconds in which some of the group's processes waited for
+    /// memory (`some total` in `memory.pressure`); `None` without pressure
+    /// stall information.
+    pub pressure_some_us: Option<u64>,
+    /// Microseconds in which all of them did at once (`full total`).
+    pub pressure_full_us: Option<u64>,
+    /// Page faults that had to wait for a page to be read in or brought
+    /// back from zswap (`pgmajfault` in `memory.stat`).
+    pub major_faults: Option<u64>,
 }
 
 fn parse_memory_stats(stat: &str, pressure: Option<&str>) -> MemoryStats {
-    let pressure_some_avg10 = pressure.and_then(|pressure| {
-        pressure
-            .lines()
-            .find_map(|line| line.strip_prefix("some "))?
-            .split_whitespace()
-            .find_map(|pair| pair.strip_prefix("avg10="))?
-            .parse()
-            .ok()
-    });
-    MemoryStats {
-        zswpout: stat_field(stat, "zswpout"),
-        zswpin: stat_field(stat, "zswpin"),
-        pressure_some_avg10,
+    // Every running VM is read every second, so each file is walked once.
+    let mut stats = MemoryStats::default();
+    for line in stat.lines() {
+        let Some((name, value)) = line.split_once(' ') else {
+            continue;
+        };
+        let value = || value.trim().parse().ok();
+        match name {
+            "zswpout" => stats.zswpout = value().unwrap_or(0),
+            "zswpin" => stats.zswpin = value().unwrap_or(0),
+            "pgmajfault" => stats.major_faults = value(),
+            _ => {}
+        }
     }
-}
-
-/// Field `name` of a `memory.stat`, or 0 if it has none.
-fn stat_field(stat: &str, name: &str) -> u64 {
-    stat.lines()
-        .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(0)
+    for line in pressure.into_iter().flat_map(str::lines) {
+        let Some((kind, pairs)) = line.split_once(' ') else {
+            continue;
+        };
+        for (key, value) in pairs
+            .split_whitespace()
+            .filter_map(|pair| pair.split_once('='))
+        {
+            match (kind, key) {
+                ("some", "avg10") => stats.pressure_some_avg10 = value.parse().ok(),
+                ("some", "total") => stats.pressure_some_us = value.parse().ok(),
+                ("full", "total") => stats.pressure_full_us = value.parse().ok(),
+                _ => {}
+            }
+        }
+    }
+    stats
 }
 
 /// Bytes of huge pages a process maps, from its `/proc/<pid>/status`.
@@ -469,7 +487,8 @@ mod tests {
 
     #[test]
     fn reads_zswap_traffic_and_pressure() {
-        let stat = "anon 4096\nzswap 0\nzswapped 0\nzswpin 3\nzswpout 17\nzswpwb 0\n";
+        let stat = "anon 4096\nzswap 0\nzswapped 0\nzswpin 3\nzswpout 17\nzswpwb 0\n\
+                    pgfault 900\npgmajfault 42\n";
         let pressure = "some avg10=1.25 avg60=0.40 avg300=0.08 total=12345\n\
                         full avg10=0.50 avg60=0.10 avg300=0.02 total=4567\n";
         assert_eq!(
@@ -478,9 +497,13 @@ mod tests {
                 zswpout: 17,
                 zswpin: 3,
                 pressure_some_avg10: Some(1.25),
+                pressure_some_us: Some(12_345),
+                pressure_full_us: Some(4567),
+                major_faults: Some(42),
             }
         );
-        // Without zswap or pressure stall information.
+        // Without zswap, fault counts or pressure stall information: absent,
+        // not zero.
         assert_eq!(
             parse_memory_stats("anon 4096\n", None),
             MemoryStats::default()

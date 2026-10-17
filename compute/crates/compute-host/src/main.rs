@@ -1,9 +1,11 @@
 //! `compute-host`: run the host agent, or talk to one.
 
 mod bench;
+mod observing;
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -13,6 +15,8 @@ use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::net::{Ipv4Net, NetworkConfig};
+use compute_host::observe::StoreAlarms;
+use compute_host::observe::canary::{self, CanaryConfig};
 use compute_host::protocol::{
     About, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
 };
@@ -20,6 +24,7 @@ use compute_host::{
     BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, Keep, NoStore, PagerConfig,
     PoolConfig, Store, Threads, serve,
 };
+use tokio::signal::unix::SignalKind;
 
 use crate::bench::{BenchArgs, bench, exec};
 
@@ -296,6 +301,8 @@ struct ServeArgs {
     /// to 8.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     compress_threads: Option<u32>,
+    #[command(flatten)]
+    observe: observing::ObserveArgs,
 }
 
 impl ServeArgs {
@@ -585,36 +592,16 @@ fn pool_config(args: &ServeArgs) -> Option<PoolConfig> {
     })
 }
 
-async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
-    let pool = pool_config(&args);
-    let threads = args.threads();
-    tracing::info!(?threads, "thread counts");
-    let memory_profile = if let Some(profile) = args.memory_profile {
-        profile
-    } else {
-        let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").context("reading /proc/cpuinfo")?;
-        let profile = MemoryProfile::for_cpuinfo(&cpuinfo);
-        tracing::info!(%profile, "memory profile chosen from the CPU's hypervisor flag");
-        profile
-    };
-    let engine = Firecracker::new(FirecrackerConfig {
-        firecracker: args.firecracker,
-        retained: args.retained_firecracker,
-        jailer: args.jailer,
-        cgroup_parent: args.cgroup.clone(),
-    })
-    .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
-    .with_memory_profile(memory_profile)
-    .with_context(|| format!("memory profile {memory_profile}"))?;
-    check_huge_pages(memory_profile)?;
-    check_zswap(memory_profile.compress && !args.no_compress)?;
-    raise_open_file_limit();
-    protect_from_oom()?;
+/// What the host may do, from its flags.
+fn host_policy(
+    args: &ServeArgs,
+    memory_profile: MemoryProfile,
+    sample_every: Duration,
+) -> anyhow::Result<HostPolicy> {
     let mut policy = HostPolicy::default();
-    for (step, limit) in args.limits {
+    for &(step, limit) in &args.limits {
         policy.limits = policy.limits.with(step, limit);
     }
-    let sample_every = Duration::from_secs(1);
     let budget = admission_budget(
         memory_profile,
         args.memory_capacity_mib,
@@ -642,7 +629,39 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         args.disk_reserve_mib,
         args.disk_reserve_inodes,
     )?);
+    Ok(policy)
+}
+
+async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
+    let pool = pool_config(&args);
+    let threads = args.threads();
+    tracing::info!(?threads, "thread counts");
+    let memory_profile = if let Some(profile) = args.memory_profile {
+        profile
+    } else {
+        let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").context("reading /proc/cpuinfo")?;
+        let profile = MemoryProfile::for_cpuinfo(&cpuinfo);
+        tracing::info!(%profile, "memory profile chosen from the CPU's hypervisor flag");
+        profile
+    };
+    let sample_every = Duration::from_secs(1);
+    let policy = host_policy(&args, memory_profile, sample_every)?;
+    let engine = Firecracker::new(FirecrackerConfig {
+        firecracker: args.firecracker,
+        retained: args.retained_firecracker,
+        jailer: args.jailer,
+        cgroup_parent: args.cgroup.clone(),
+    })
+    .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
+    .with_memory_profile(memory_profile)
+    .with_context(|| format!("memory profile {memory_profile}"))?;
+    check_huge_pages(memory_profile)?;
+    check_zswap(memory_profile.compress && !args.no_compress)?;
+    raise_open_file_limit();
+    protect_from_oom()?;
     let about = describe(memory_profile, &args.base_image);
+    let observer = args.observe.observer(&about)?;
+    let canary = args.observe.canary(&args.root, args.store.is_some())?;
     let config = HostConfig {
         root: args.root,
         kernel: args.kernel,
@@ -677,8 +696,14 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
             record_for: Duration::from_millis(args.pager_record_ms),
         },
         about,
+        observer: observer.clone(),
+        summary_every: HostConfig::SUMMARY_EVERY,
     };
-    run_with_store(config, engine, args.store, threads, socket).await
+    // Boxed: the agent and everything it was given are large.
+    Box::pin(run_with_store(
+        config, engine, args.store, threads, socket, canary,
+    ))
+    .await
 }
 
 /// Runs the agent with the store `store` names, if any.
@@ -688,9 +713,10 @@ async fn run_with_store(
     store: Option<String>,
     threads: Threads,
     socket: PathBuf,
+    canary: Option<CanaryConfig>,
 ) -> anyhow::Result<()> {
     let Some(store) = store else {
-        return run_agent(config, engine, NoStore, socket).await;
+        return run_agent(config, engine, NoStore, socket, canary).await;
     };
     if let Some(chunked) = Chunked::from_url(&store)? {
         let chunked = chunked.with_compress_threads(threads.compress);
@@ -698,12 +724,13 @@ async fn run_with_store(
             .refuse_unreadable()
             .await
             .with_context(|| format!("opening {store}"))?;
-        return run_agent(config, engine, chunked, socket).await;
+        let chunked = chunked.with_watch(Arc::new(StoreAlarms(config.observer.clone())));
+        return run_agent(config, engine, chunked, socket, canary).await;
     }
     // Fine for tests and a single machine, but an archive there does not
     // survive losing this host.
     tracing::warn!(%store, "archives go to a directory on this host, not off it");
-    run_agent(config, engine, Directory::new(store), socket).await
+    run_agent(config, engine, Directory::new(store), socket, canary).await
 }
 
 async fn run_agent<S: Store>(
@@ -711,15 +738,33 @@ async fn run_agent<S: Store>(
     engine: Firecracker,
     store: S,
     socket: PathBuf,
+    canary: Option<CanaryConfig>,
 ) -> anyhow::Result<()> {
+    let observer = config.observer.clone();
     let (handle, agent) = HostAgent::start(config, engine, store).await?;
-    tokio::select! {
-        result = serve(handle, &socket) => result.context("serving")?,
-        result = tokio::signal::ctrl_c() => result?,
-        result = agent => result?,
+    if let Some(canary) = canary {
+        tokio::spawn(canary::run(handle.clone(), canary));
     }
-    Ok(())
+    let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
+    let result = tokio::select! {
+        result = serve(handle, &socket) => result.context("serving"),
+        result = tokio::signal::ctrl_c() => result.map_err(Into::into),
+        _ = terminate.recv() => Ok(()),
+        result = agent => result.map_err(Into::into),
+    };
+    // What happened last, often why it stopped, still reaches the
+    // collector; a collector that is away does not hold the stop up long.
+    if tokio::time::timeout(FLUSH_WITHIN, observer.flush())
+        .await
+        .is_err()
+    {
+        tracing::warn!("stopping before every event reached the collector");
+    }
+    result
 }
+
+/// How long a stopping agent waits for its last events to be exported.
+const FLUSH_WITHIN: Duration = Duration::from_secs(5);
 
 /// Lets the agent hold as many open files as the system allows it. Every VM
 /// keeps several open here (its process, pager, image files and store
