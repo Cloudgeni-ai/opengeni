@@ -815,7 +815,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             // is not in the registry, served by the built-in OpenAI/Azure Responses
             // client).
             {
-              promptCacheKey: input.sessionId,
+              promptCacheKey: promptCacheKey ?? input.sessionId,
             }),
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
         skillCatalog: deps.skillCatalog,

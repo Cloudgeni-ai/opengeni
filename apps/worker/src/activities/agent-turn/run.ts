@@ -86,7 +86,7 @@ import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 
-import { codexWorkspaceMetricKey } from "./codex";
+import { codexWorkspaceMetricKey, promptCacheKeyForTurn } from "./codex";
 import {
   filterUnmaterializedSandboxFileDownloads,
   sandboxFileMaterializationOutcome,
@@ -820,13 +820,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   };
                   return {
                     clientVersion: CODEX_CLIENT_VERSION,
-                    // Backend sticky cache-routing key — the SAME id as the body's
-                    // prompt_cache_key (set from input.sessionId for codex turns),
-                    // so routing and cache key agree. Without this header on the
+                    // Backend sticky cache-routing key — the SAME value as the body's
+                    // prompt_cache_key (promptCacheKeyForTurn, also used by
+                    // prepareCompaction), so routing and cache key agree. Without this header on the
                     // wire, byte-identical resends hit the prompt cache ~50%
                     // (per-request shard lottery = prod's measured 48.6% on sol);
                     // with it, resends pin to the warm shard (Codex CLI parity).
-                    sessionId: input.sessionId,
+                    sessionId:
+                      promptCacheKeyForTurn({
+                        resolvedModel,
+                        workspaceId: input.workspaceId,
+                        sessionId: input.sessionId,
+                        rootSessionId: session.rootSessionId,
+                        groups: capabilitySettings.promptCacheKeyGroups,
+                      }) ?? input.sessionId,
+                    conversationId: input.sessionId,
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),

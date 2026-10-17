@@ -12,6 +12,7 @@
 // WebSockets) goes over HTTP unchanged.
 
 import type { FetchLike } from "./fetch";
+import { codexRequestStorage } from "./request-context";
 
 export const CODEX_RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 
@@ -421,7 +422,14 @@ export function codexResponsesTransport(
     }
     handshake["openai-beta"] = CODEX_RESPONSES_WEBSOCKET_BETA;
     const wsUrl = url.replace(/^https:/, "wss:");
-    return { wsUrl, handshake, key: JSON.stringify([wsUrl, Object.entries(handshake).sort()]) };
+    // One connection per conversation even when conversations share the
+    // session_id cache-routing header; the partition is local only.
+    const conversation = codexRequestStorage.getStore()?.conversationId ?? null;
+    return {
+      wsUrl,
+      handshake,
+      key: JSON.stringify([wsUrl, Object.entries(handshake).sort(), conversation]),
+    };
   };
 
   // The pooled connection a request may start on, retiring one that closed or

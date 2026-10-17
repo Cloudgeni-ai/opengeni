@@ -8,6 +8,7 @@ import {
   type CodexWebSocketLike,
 } from "../src/responses-websocket";
 import { parseCodexUsageHeaders } from "../src/fetch";
+import { codexRequestStorage, type CodexRequestContext } from "../src/request-context";
 
 const URL = "https://chatgpt.example/backend-api/codex/responses";
 
@@ -296,6 +297,34 @@ test("a concurrent request of the same conversation uses HTTP while the socket i
   expect(httpCalls).toEqual([URL]);
   socket.emit({ type: "response.completed", response: {} });
   await (await first).text();
+});
+
+test("conversations sharing a cache-routing session_id get their own connections", async () => {
+  const { transport, sockets, httpCalls } = harness();
+  const inConversation = <T>(conversationId: string, fn: () => Promise<T>) =>
+    codexRequestStorage.run({ conversationId } as CodexRequestContext, fn);
+  const first = inConversation("chat-a", () => transport(URL, request()));
+  const socketA = await nextSend(() => sockets[0]);
+  // Same session_id header (a shared routing key) but another conversation:
+  // it opens its own socket instead of queueing behind or falling to HTTP.
+  const second = inConversation("chat-b", () => transport(URL, request()));
+  const socketB = await nextSend(() => sockets[1]);
+  expect(socketA).not.toBe(socketB);
+  expect(socketB.headers.session_id).toBe("conversation");
+  socketA.emit({ type: "response.completed", response: {} });
+  socketB.emit({ type: "response.completed", response: {} });
+  for (const pending of [first, second]) {
+    const response = await pending;
+    expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toStartWith("websocket;");
+    await response.text();
+  }
+  expect(httpCalls).toEqual([]);
+  // The same conversation reuses its connection.
+  const again = inConversation("chat-a", () => transport(URL, request()));
+  await Bun.sleep(5);
+  expect(sockets).toHaveLength(2);
+  socketA.emit({ type: "response.completed", response: {} });
+  await (await again).text();
 });
 
 test("a failed handshake falls back to HTTP and backs off", async () => {

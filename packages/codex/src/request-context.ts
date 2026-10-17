@@ -110,6 +110,13 @@ export type CodexRequestContext = {
    * prompt_cache_key (the Opengeni sessionId) so routing and cache key agree.
    */
   sessionId?: string;
+  /**
+   * The conversation this request belongs to. Never sent upstream. It
+   * partitions the Responses WebSocket pool, so conversations that share a
+   * cache-routing `sessionId` (prompt-cache key groups) never share, or queue
+   * behind, one connection. Defaults to `sessionId` when absent.
+   */
+  conversationId?: string;
   /** Worker-supplied: proactive refresh + single-flight + db persist. */
   getToken: () => Promise<CodexTokenSnapshot>;
   /** Forced refresh used for the 401 retry. */

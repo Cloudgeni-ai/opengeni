@@ -963,6 +963,14 @@ const SettingsSchema = z.object({
   // request per step. Requests the socket cannot carry fall back to HTTP.
   // OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED
   codexResponsesWebSocketEnabled: EnvBoolean.default(true),
+  // Prompt-cache routing groups for OpenAI-family requests (OpenAI/Azure
+  // Responses and the Codex subscription backend). 0 keeps one routing key per
+  // conversation. N > 0 routes every conversation in a workspace through one of
+  // N stable keys chosen from its root conversation, so a new chat's first
+  // request lands where the workspace's shared prompt prefix is already cached,
+  // later requests keep their own key, and load is spread over N keys.
+  // OPENGENI_PROMPT_CACHE_KEY_GROUPS
+  promptCacheKeyGroups: z.coerce.number().int().min(0).max(64).default(0),
   // Provider-neutral progressive disclosure for direct OpenAI/Azure native
   // client search and ordinary-function generic dispatch. Kept separate from
   // the Codex rollout so an emergency Codex opt-out cannot disable every model.
@@ -4898,6 +4906,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     codexResponsesWebSocketEnabled: optional("OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED"),
+    promptCacheKeyGroups: optional("OPENGENI_PROMPT_CACHE_KEY_GROUPS"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
