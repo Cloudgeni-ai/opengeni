@@ -1,16 +1,18 @@
-// Responses WebSocket transport for the Codex subscription backend.
+// Responses WebSocket transport for OpenAI Responses endpoints: the Codex
+// subscription backend, the OpenAI API and Azure OpenAI's v1 API.
 //
-// The backend accepts the same Responses request over a persistent WebSocket
+// Each accepts the same Responses request over a persistent WebSocket
 // (`response.create` messages) and streams the same events back. Keeping one
 // warm connection per conversation removes the per-request HTTP setup from
 // every agent step (about 0.6 s of time-to-first-event measured against the
 // SSE endpoint). This module is a drop-in FetchLike: it turns a streaming POST
-// to /codex/responses into a `response.create` message and synthesizes the
-// SSE Response the rest of the Codex transport already validates, audits and
-// times out. Anything it cannot carry (busy connection, failed handshake,
-// non-streaming or unexpected requests, runtimes without header-capable
-// WebSockets) goes over HTTP unchanged.
+// to the endpoint's responses URL into a `response.create` message and
+// synthesizes the SSE Response the rest of the model transport already
+// validates, audits and times out. Anything it cannot carry (busy connection,
+// failed handshake, non-streaming or unexpected requests, runtimes without
+// header-capable WebSockets) goes over HTTP unchanged.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { FetchLike } from "./fetch";
 
 export const CODEX_RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
@@ -152,6 +154,8 @@ export type CodexResponsesTransportOptions = {
   /** After repeated mid-response drops, use HTTP for this conversation for this long. */
   dropFallbackMs?: number;
   now?: () => number;
+  /** Which Responses endpoint this transport serves; the Codex backend by default. */
+  endpoint?: ResponsesWebSocketEndpoint;
 };
 
 const DEFAULT_IDLE_MS = 5 * 60_000;
@@ -187,10 +191,62 @@ function isPerRequestHeader(name: string): boolean {
 const CODEX_RESPONSES_URL = /^https:\/\/[^/]+\/.*\/codex\/responses(?:\?|$)/;
 
 /**
- * A Codex Responses FetchLike that can also open a conversation's connection
- * before its first request. `warm` takes the URL and headers that request will
- * carry; it never throws, and the request reuses the connection (or waits for
- * its handshake to finish) instead of opening its own.
+ * A Responses endpoint that also accepts WebSocket mode, and what its
+ * handshake and `response.create` messages need.
+ */
+export type ResponsesWebSocketEndpoint = {
+  /** Names the provider in transport errors, for example "Codex". */
+  label: string;
+  /** Streaming POSTs to matching URLs may be carried over the socket. */
+  url: RegExp;
+  /** `OpenAI-Beta` value the handshake carries, when the endpoint needs one. */
+  beta?: string;
+  /** HTTP-only body fields left out of `response.create` (WebSocket mode always streams). */
+  httpOnlyFields?: readonly string[];
+  /**
+   * Give each conversation (see {@link withResponsesConversation}) its own
+   * connection, and leave requests outside a conversation on HTTP. Needed
+   * where nothing in the request headers already tells conversations apart;
+   * the Codex backend's headers carry the session id.
+   */
+  conversationScoped?: boolean;
+};
+
+/** The ChatGPT/Codex subscription backend. */
+export const CODEX_RESPONSES_WEBSOCKET_ENDPOINT: ResponsesWebSocketEndpoint = {
+  label: "Codex",
+  url: CODEX_RESPONSES_URL,
+  beta: CODEX_RESPONSES_WEBSOCKET_BETA,
+};
+
+/**
+ * The OpenAI API (`/v1/responses`) and Azure OpenAI's v1 API
+ * (`/openai/v1/responses`). Other OpenAI-compatible hosts (gateways, local
+ * servers) are not assumed to support WebSocket mode and stay on HTTP.
+ */
+export const OPENAI_RESPONSES_WEBSOCKET_ENDPOINT: ResponsesWebSocketEndpoint = {
+  label: "OpenAI",
+  url: /^https:\/\/(?:api\.openai\.com\/v1|[a-z0-9-]+\.(?:openai\.azure\.com|cognitiveservices\.azure\.com|services\.ai\.azure\.com)\/openai\/v1)\/responses(?:\?|$)/i,
+  httpOnlyFields: ["stream", "background"],
+  conversationScoped: true,
+};
+
+const responsesConversation = new AsyncLocalStorage<string>();
+
+/**
+ * Run `fn` as part of one conversation, so its Responses requests share that
+ * conversation's WebSocket connection (and can continue its previous response)
+ * without sharing it with other conversations.
+ */
+export function withResponsesConversation<T>(conversationId: string | undefined, fn: () => T): T {
+  return conversationId ? responsesConversation.run(conversationId, fn) : fn();
+}
+
+/**
+ * A Responses FetchLike that can also open a conversation's connection before
+ * its first request. `warm` takes the URL and headers that request will carry;
+ * it never throws, and the request reuses the connection (or waits for its
+ * handshake to finish) instead of opening its own.
  */
 export type CodexResponsesTransport = FetchLike & {
   warm(url: string, headers: HeadersInit): void;
@@ -442,6 +498,7 @@ export function codexResponsesTransport(
   const handshakeBackoffMs = options.handshakeBackoffMs ?? DEFAULT_HANDSHAKE_BACKOFF_MS;
   const dropFallbackMs = options.dropFallbackMs ?? DEFAULT_DROP_FALLBACK_MS;
   const now = options.now ?? Date.now;
+  const endpoint = options.endpoint ?? CODEX_RESPONSES_WEBSOCKET_ENDPOINT;
   const pool = new Map<string, Connection>();
   const backoffUntil = new Map<string, number>();
   const recentDrops = new Map<string, { count: number; at: number }>();
@@ -532,13 +589,15 @@ export function codexResponsesTransport(
         if (connection.idleTimer) clearTimeout(connection.idleTimer);
         if (!opened) {
           reject(
-            new Error(`Codex response WebSocket handshake failed (${event?.code ?? "closed"})`),
+            new Error(
+              `${endpoint.label} response WebSocket handshake failed (${event?.code ?? "closed"})`,
+            ),
           );
           return;
         }
         connection.onClose?.(
           new Error(
-            `Codex response WebSocket closed before the response finished (${event?.code ?? "closed"})`,
+            `${endpoint.label} response WebSocket closed before the response finished (${event?.code ?? "closed"})`,
           ),
         );
       };
@@ -562,9 +621,19 @@ export function codexResponsesTransport(
     for (const [name, value] of new Headers(headers).entries()) {
       if (!isPerRequestHeader(name)) handshake[name] = value;
     }
-    handshake["openai-beta"] = CODEX_RESPONSES_WEBSOCKET_BETA;
+    if (endpoint.beta) handshake["openai-beta"] = endpoint.beta;
     const wsUrl = url.replace(/^https:/, "wss:");
-    return { wsUrl, handshake, key: JSON.stringify([wsUrl, Object.entries(handshake).sort()]) };
+    const conversation = endpoint.conversationScoped ? responsesConversation.getStore() : undefined;
+    if (endpoint.conversationScoped && !conversation) return null;
+    return {
+      wsUrl,
+      handshake,
+      key: JSON.stringify([
+        wsUrl,
+        Object.entries(handshake).sort(),
+        ...(conversation ? [conversation] : []),
+      ]),
+    };
   };
 
   // The pooled connection a request may start on, retiring one that closed or
@@ -580,8 +649,10 @@ export function codexResponsesTransport(
 
   const warm = (url: string, headers: HeadersInit): void => {
     try {
-      if (!CODEX_RESPONSES_URL.test(url)) return;
-      const { wsUrl, handshake, key } = identity(url, headers);
+      if (!endpoint.url.test(url)) return;
+      const target = identity(url, headers);
+      if (!target) return;
+      const { wsUrl, handshake, key } = target;
       if (
         (backoffUntil.get(key) ?? 0) > now() ||
         droppedRecently(key) ||
@@ -620,7 +691,7 @@ export function codexResponsesTransport(
     const url = requestUrl(input);
     const method = (init?.method ?? "GET").toUpperCase();
     const body = init?.body;
-    if (!url || method !== "POST" || !CODEX_RESPONSES_URL.test(url)) {
+    if (!url || method !== "POST" || !endpoint.url.test(url)) {
       return await http(input, init);
     }
     // The model client streams its JSON body so it can be sent again; a socket
@@ -642,7 +713,9 @@ export function codexResponsesTransport(
     }
     if (payload.stream !== true) return await viaHttp("not_eligible");
 
-    const { wsUrl, handshake, key } = identity(url, init?.headers);
+    const target = identity(url, init?.headers);
+    if (!target) return await viaHttp("not_eligible");
+    const { wsUrl, handshake, key } = target;
     let handshakeMs: number | undefined;
     const opening = warming.get(key);
     if (opening && !pool.has(key)) {
@@ -769,7 +842,9 @@ export function codexResponsesTransport(
 
       const sendMessage = (message: Record<string, unknown>) => {
         try {
-          active.socket.send(JSON.stringify({ ...message, type: "response.create" }));
+          const fields = { ...message };
+          for (const field of endpoint.httpOnlyFields ?? []) delete fields[field];
+          active.socket.send(JSON.stringify({ ...fields, type: "response.create" }));
         } catch (error) {
           finish(error);
         }

@@ -5,7 +5,10 @@ import {
   codexResponsesTransport,
   formatCodexRequestTransport,
   parseCodexRequestTransport,
+  OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+  withResponsesConversation,
   type CodexWebSocketLike,
+  type ResponsesWebSocketEndpoint,
 } from "../src/responses-websocket";
 import { parseCodexUsageHeaders } from "../src/fetch";
 
@@ -46,7 +49,9 @@ class FakeSocket implements CodexWebSocketLike {
   }
 }
 
-function harness(options: { autoOpen?: boolean; now?: () => number } = {}) {
+function harness(
+  options: { autoOpen?: boolean; now?: () => number; endpoint?: ResponsesWebSocketEndpoint } = {},
+) {
   const sockets: FakeSocket[] = [];
   const httpCalls: string[] = [];
   const transport = codexResponsesTransport(
@@ -64,6 +69,7 @@ function harness(options: { autoOpen?: boolean; now?: () => number } = {}) {
       connectTimeoutMs: 1_000,
       // A fixed clock by default: a new connection's handshake reports 0 ms.
       now: options.now ?? (() => 1_000),
+      ...(options.endpoint ? { endpoint: options.endpoint } : {}),
     },
   );
   return { transport, sockets, httpCalls };
@@ -389,7 +395,7 @@ test("a conversation whose socket keeps dropping mid-response falls back to HTTP
   const fresh = await nextSend(() => sockets[3]);
   fresh.emit({ type: "response.completed", response: {} });
   expect((await again).headers.get(CODEX_TRANSPORT_HEADER)).toBe(
-    "websocket; connection=new; handshake_ms=0",
+    "websocket; connection=new; input=full; handshake_ms=0",
   );
   expect(parseCodexRequestTransport("http; reason=stream_dropped")).toEqual({
     kind: "http",
@@ -670,5 +676,111 @@ describe("continuing the previous response on a connection", () => {
     const response = await pending;
     expect(response.status).toBe(429);
     expect(socket.sent).toHaveLength(2);
+  });
+});
+
+describe("OpenAI API and Azure OpenAI endpoints", () => {
+  const OPENAI_URL = "https://api.openai.com/v1/responses";
+  const AZURE_URL = "https://example-resource.openai.azure.com/openai/v1/responses";
+  const openAIRequest = (body: Record<string, unknown> = { model: "m", input: [], stream: true }) =>
+    ({
+      method: "POST",
+      headers: {
+        authorization: "Bearer key",
+        "idempotency-key": `req-${Math.random()}`,
+        accept: "text/event-stream",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }) satisfies RequestInit;
+
+  test("matches only the OpenAI API and Azure v1 responses URLs", () => {
+    const { url } = OPENAI_RESPONSES_WEBSOCKET_ENDPOINT;
+    expect(url.test(OPENAI_URL)).toBe(true);
+    expect(url.test(AZURE_URL)).toBe(true);
+    expect(url.test("https://r.cognitiveservices.azure.com/openai/v1/responses")).toBe(true);
+    expect(url.test("https://r.openai.azure.com/openai/deployments/d/responses")).toBe(false);
+    expect(url.test("https://openrouter.ai/api/v1/responses")).toBe(false);
+    expect(url.test("https://ai-gateway.vercel.sh/v1/responses")).toBe(false);
+    expect(url.test("https://api.openai.com/v1/responses/compact")).toBe(false);
+  });
+
+  test("requests outside a conversation stay on HTTP", async () => {
+    const { transport, sockets, httpCalls } = harness({
+      endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+    });
+    const response = await transport(OPENAI_URL, openAIRequest());
+    expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=not_eligible");
+    transport.warm(OPENAI_URL, openAIRequest().headers);
+    expect(sockets).toHaveLength(0);
+    expect(httpCalls).toEqual([OPENAI_URL]);
+  });
+
+  test("each conversation gets its own connection and continues its previous response", async () => {
+    const { transport, sockets, httpCalls } = harness({
+      endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+    });
+    const user = { type: "message", role: "user", content: "hi" };
+    const call = { type: "function_call", call_id: "c1", name: "f", arguments: "{}" };
+    const result = { type: "function_call_output", call_id: "c1", output: "ok" };
+
+    const first = withResponsesConversation("chat-a", () =>
+      transport(AZURE_URL, openAIRequest({ model: "m", input: [user], stream: true })),
+    );
+    const socket = await nextSend(() => sockets[0]);
+    expect(socket.url).toBe("wss://example-resource.openai.azure.com/openai/v1/responses");
+    expect(socket.headers["openai-beta"]).toBeUndefined();
+    expect(socket.headers.authorization).toBe("Bearer key");
+    // WebSocket mode always streams; the HTTP-only field is not sent.
+    expect(socket.sent[0]).toEqual({ type: "response.create", model: "m", input: [user] });
+    socket.emit({ type: "response.output_item.done", item: { id: "fc_1", ...call } });
+    socket.emit({ type: "response.completed", response: { id: "resp_1" } });
+    await (await first).text();
+
+    // Another conversation never shares, or continues, chat-a's connection.
+    const other = withResponsesConversation("chat-b", () =>
+      transport(AZURE_URL, openAIRequest({ model: "m", input: [user], stream: true })),
+    );
+    const otherSocket = await nextSend(() => sockets[1]);
+    expect(otherSocket).not.toBe(socket);
+    expect(otherSocket.sent[0]).toEqual({ type: "response.create", model: "m", input: [user] });
+    otherSocket.emit({ type: "response.completed", response: { id: "resp_b" } });
+    await (await other).text();
+
+    const second = withResponsesConversation("chat-a", () =>
+      transport(
+        AZURE_URL,
+        openAIRequest({ model: "m", input: [user, call, result], stream: true }),
+      ),
+    );
+    for (let i = 0; i < 50 && socket.sent.length < 2; i++) await Bun.sleep(1);
+    expect(socket.sent[1]).toEqual({
+      type: "response.create",
+      model: "m",
+      previous_response_id: "resp_1",
+      input: [result],
+    });
+    socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+    const continued = await second;
+    expect(continued.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+      "websocket; connection=reused; input=incremental",
+    );
+    await continued.text();
+    expect(sockets).toHaveLength(2);
+    expect(httpCalls).toEqual([]);
+  });
+
+  test("a dropped OpenAI socket names the provider in the stream error", async () => {
+    const { transport, sockets } = harness({ endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT });
+    const pending = withResponsesConversation("chat-a", () =>
+      transport(OPENAI_URL, openAIRequest()),
+    );
+    const socket = await nextSend(() => sockets[0]);
+    socket.emit({ type: "response.created", response: { id: "r1" } });
+    const response = await pending;
+    socket.drop(1006);
+    await expect(response.text()).rejects.toThrow(
+      "OpenAI response WebSocket closed before the response finished (1006)",
+    );
   });
 });

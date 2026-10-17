@@ -302,6 +302,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     codexConnectedAppsEnabled: false,
     codexToolSearchEnabled: false,
     codexResponsesWebSocketEnabled: false,
+    openaiResponsesWebSocketEnabled: false,
     lazyToolSearchEnabled: false,
     codexFleetPolicyShadowEnabled: false,
     // Off by default in tests so existing suites keep their exact database

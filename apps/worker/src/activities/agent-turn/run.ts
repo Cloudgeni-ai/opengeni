@@ -44,6 +44,7 @@ import {
   CODEX_CLIENT_VERSION,
   codexRequestStorage,
   withCodexRequestOverrides,
+  withResponsesConversation,
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
@@ -1234,11 +1235,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             claudeCore ? withClaudeCoreLane("titleRequests")(fn) : fn();
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
+          // The turn's model requests belong to this session's conversation,
+          // so OpenAI/Azure Responses requests can share one WebSocket
+          // connection and continue the previous response on it.
           const withProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeUsage(() =>
-              providerTurn.xaiRequestContext
-                ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
-                : withCodex(fn),
+            withResponsesConversation(input.sessionId, () =>
+              withClaudeUsage(() =>
+                providerTurn.xaiRequestContext
+                  ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
+                  : withCodex(fn),
+              ),
             );
           let codexSessionTitleRequestSequence = 0;
           let xaiSessionTitleRequestSequence = 0;

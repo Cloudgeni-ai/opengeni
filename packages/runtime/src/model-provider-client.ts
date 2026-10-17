@@ -11,6 +11,7 @@ import {
   CODEX_PROVIDER_BASE_URL,
   codexResponsesTransport,
   codexSubscriptionFetch,
+  OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
   warmCodexResponsesConnection,
   type CodexResponsesTransport,
 } from "@opengeni/codex";
@@ -116,7 +117,7 @@ export function buildOpenAIClientFromSettings(
           streamIdleTimeoutModelFetch(
             providerId,
             modelStreamIdlePolicy(settings),
-            instrumentedModelFetch(providerId, globalThis.fetch),
+            instrumentedModelFetch(providerId, openAIResponsesFetch(settings)),
           ),
         ),
       },
@@ -136,7 +137,7 @@ export function buildOpenAIClientFromSettings(
         streamIdleTimeoutModelFetch(
           providerId,
           modelStreamIdlePolicy(settings),
-          instrumentedModelFetch(providerId, globalThis.fetch),
+          instrumentedModelFetch(providerId, openAIResponsesFetch(settings)),
         ),
       ),
     },
@@ -190,6 +191,19 @@ function sharedCodexWebSocketTransport(): CodexResponsesTransport {
     globalThis.fetch(input, init),
   );
   return codexWebSocketTransport;
+}
+
+// The same pool for the OpenAI API and Azure OpenAI's v1 API. Requests run
+// inside withResponsesConversation get one connection per conversation; any
+// other request, and any other host, goes over HTTP.
+let openaiWebSocketTransport: CodexResponsesTransport | undefined;
+function openAIResponsesFetch(settings: Settings): typeof globalThis.fetch {
+  if (!settings.openaiResponsesWebSocketEnabled) return globalThis.fetch;
+  openaiWebSocketTransport ??= codexResponsesTransport(
+    (input, init) => globalThis.fetch(input, init),
+    { endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT },
+  );
+  return openaiWebSocketTransport as unknown as typeof globalThis.fetch;
 }
 
 /**
@@ -265,7 +279,7 @@ function providerClientCacheKey(
         streamIdlePolicy: modelStreamIdlePolicy(settings, provider),
         ...(provider.kind === "codex-subscription"
           ? { codexResponsesWebSocket: settings.codexResponsesWebSocketEnabled }
-          : {}),
+          : { openaiResponsesWebSocket: settings.openaiResponsesWebSocketEnabled }),
         builtin:
           provider.builtin && settings.openaiProvider === "azure"
             ? {
@@ -521,7 +535,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                           instrumentedModelFetch(provider.id, globalThis.fetch),
                           gatewayPolicies,
                         )
-                      : instrumentedModelFetch(provider.id, globalThis.fetch),
+                      : instrumentedModelFetch(provider.id, openAIResponsesFetch(settings)),
                 ),
               ),
             },

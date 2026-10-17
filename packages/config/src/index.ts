@@ -963,6 +963,12 @@ const SettingsSchema = z.object({
   // request per step. Requests the socket cannot carry fall back to HTTP.
   // OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED
   codexResponsesWebSocketEnabled: EnvBoolean.default(true),
+  // The same transport for the OpenAI API (/v1/responses) and Azure OpenAI's
+  // v1 API (/openai/v1/responses): one connection per conversation, each step
+  // continuing the previous response with only its new input. Other
+  // OpenAI-compatible hosts always use HTTP.
+  // OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED
+  openaiResponsesWebSocketEnabled: EnvBoolean.default(true),
   // Provider-neutral progressive disclosure for direct OpenAI/Azure native
   // client search and ordinary-function generic dispatch. Kept separate from
   // the Codex rollout so an emergency Codex opt-out cannot disable every model.
@@ -4898,6 +4904,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     codexResponsesWebSocketEnabled: optional("OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED"),
+    openaiResponsesWebSocketEnabled: optional("OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),

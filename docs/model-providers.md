@@ -1655,6 +1655,20 @@ socket drops mid-response twice within ten minutes uses HTTP for the next
 30 minutes (`http; reason=stream_dropped`), as the Codex CLI falls back to
 HTTPS after repeated WebSocket failures.
 
+When a request extends the last completed response on its connection exactly
+(same request fields, the same earlier input, then that response's output),
+the transport sends `previous_response_id` and only the new input items, as
+the Codex CLI does; otherwise, or when the provider no longer holds that
+response, it sends the full request.
+
+The same transport serves the OpenAI API (`https://api.openai.com/v1/responses`)
+and Azure OpenAI's v1 API (`https://<resource>.openai.azure.com/openai/v1/responses`).
+There, each agent turn's model requests run as one conversation with its own
+connection; requests outside a turn (titles, summaries) and every other
+OpenAI-compatible host use HTTP. Azure's legacy deployment URLs
+(`/openai/deployments/...`) stay on HTTP. `OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED=false`
+turns this off.
+
 Pricing is keyed by product model ID. A tiered schedule selects the greatest
 `minimumInputTokens` threshold not exceeding the current input count. Billing
 classification comes from the accepted policy: `external` usage must not spend
