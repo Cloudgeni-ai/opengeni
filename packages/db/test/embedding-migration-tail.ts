@@ -297,4 +297,10 @@ export const embeddingMigrationTail = [
   "0809_session_open_settlement_index.sql",
   "0811_session_events_usage_source_key_backfill.sql",
   "0821_session_history_owner_backfill_repair.sql",
+  // The schedule-defaults repair takes workspace fences through the inventory
+  // helpers installed by withheld 0345; replay after it.
+  "0832_schedule_defaults_and_turn_notifications.sql",
+  // Replaces the 0345 tenancy fence and adds a WHEN clause over the 0275
+  // scheduled-run accepted execution snapshot; replay after both.
+  "0836_cheaper_session_write_fences.sql",
 ];
