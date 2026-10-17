@@ -15,7 +15,7 @@ import { E2b } from "./e2b.ts";
 import { Gke } from "./gke.ts";
 import { poissonArrivals, RestingSet, runOpenLoop, seededRandom } from "./load.ts";
 import { Ours } from "./ours.ts";
-import { DEFAULT_CRITERIA, judgeStep, searchSustainedRate } from "./search.ts";
+import { DEFAULT_CRITERIA, judgeStep, searchSustainedRate, stepWindow } from "./search.ts";
 import { formatMs, summarize } from "./stats.ts";
 import { type CreateKind, READ_STATE_SCRIPT, type RunResult, type Sandbox, type System, WrongOutputError, writeStateScript } from "./system.ts";
 
@@ -198,6 +198,8 @@ interface RateSettings {
   parallel: number;
   /** The p99 a step must stay under; see docs/benchmark.md for when it is not 1 s. */
   p99LimitMs: number;
+  /** Quiet time between putting the N to rest and the first step. */
+  settleMs: number;
 }
 
 async function rate(system: System, settings: RateSettings, record: Recorder) {
@@ -207,6 +209,9 @@ async function rate(system: System, settings: RateSettings, record: Recorder) {
   const sandboxes = prepared.map(({ sandbox }) => sandbox);
   let restErrors = 0;
   try {
+    // Let the system finish what putting N to rest started, such as writing it out.
+    record.write({ kind: "settle", seconds: settings.settleMs / 1000 });
+    await Bun.sleep(settings.settleMs);
     const random = seededRandom(settings.seed);
     const resting = new RestingSet(sandboxes, random);
     let stepIndex = 0;
@@ -214,7 +219,8 @@ async function rate(system: System, settings: RateSettings, record: Recorder) {
       settings.ladder,
       async (offered) => {
         stepIndex += 1;
-        const arrivals = poissonArrivals(offered, settings.stepMs, seededRandom(settings.seed * 1000 + stepIndex));
+        const window = stepWindow(offered, settings.stepMs - settings.warmupMs, settings.warmupMs);
+        const arrivals = poissonArrivals(offered, window.stepMs, seededRandom(settings.seed * 1000 + stepIndex));
         const outcomes = await runOpenLoop(arrivals, async (scheduledAt) => {
           const sandbox = resting.take();
           try {
@@ -235,7 +241,7 @@ async function rate(system: System, settings: RateSettings, record: Recorder) {
         // Steps never overlap: wait until every sandbox rests again.
         const settleBy = performance.now() + 300_000;
         while (resting.size + restErrors < sandboxes.length && performance.now() < settleBy) await Bun.sleep(100);
-        const step = judgeStep(offered, outcomes, settings.warmupMs, settings.stepMs - settings.warmupMs, {
+        const step = judgeStep(offered, outcomes, settings.warmupMs, window.measuredMs, {
           ...DEFAULT_CRITERIA,
           p99LimitMs: settings.p99LimitMs,
         });
@@ -305,6 +311,7 @@ async function main() {
       refinements: { type: "string", default: "3" },
       seed: { type: "string", default: "1" },
       "p99-limit-ms": { type: "string", default: String(DEFAULT_CRITERIA.p99LimitMs) },
+      "settle-seconds": { type: "string", default: "120" },
       out: { type: "string", default: "results.jsonl" },
       note: { type: "string", default: "" },
     },
@@ -351,6 +358,7 @@ async function main() {
           seed: Number(values.seed),
           parallel: settings.parallel,
           p99LimitMs: Number(values["p99-limit-ms"]),
+          settleMs: Number(values["settle-seconds"]) * 1000,
         },
         record,
       );

@@ -25,19 +25,32 @@ export interface StepResult {
 export interface Criteria {
   /** The p99 a step must stay under, in milliseconds. */
   p99LimitMs: number;
-  /** The share of the offered rate a step must complete. */
-  minCompletedShare: number;
   /** Fewest measured operations for a step to count. */
   minSamples: number;
 }
 
-export const DEFAULT_CRITERIA: Criteria = { p99LimitMs: 1000, minCompletedShare: 0.95, minSamples: 20 };
+export const DEFAULT_CRITERIA: Criteria = { p99LimitMs: 1000, minSamples: 20 };
+
+/** Arrivals a step's measured window should expect, so a low rate is not judged on a handful. */
+export const MIN_EXPECTED_SAMPLES = 40;
+
+/**
+ * How long one step offers `rate`: the warm-up, then a measured window of
+ * at least `measuredMs`, longer at low rates so that it expects
+ * `MIN_EXPECTED_SAMPLES` arrivals.
+ */
+export function stepWindow(rate: number, measuredMs: number, warmupMs: number): { stepMs: number; measuredMs: number } {
+  const measured = Math.max(measuredMs, Math.ceil((MIN_EXPECTED_SAMPLES / rate) * 1000));
+  return { stepMs: warmupMs + measured, measuredMs: measured };
+}
 
 /**
  * Judges one step from its outcomes. Only arrivals scheduled at or after
- * `warmupMs` count, and `measuredMs` is the length of that window. An
- * operation counts as completed in the window if it succeeded, whenever it
- * finished: a backlog shows up in the p99 instead.
+ * `warmupMs` count, and `measuredMs` is the length of that window. Every
+ * arrival is waited for, so a system that falls behind shows it in the
+ * p99, not in how many completed. The completed rate is reported, not
+ * judged: Poisson arrivals at a low rate often fall short of the nominal
+ * rate by chance (40 expected arrivals vary by about 6).
  */
 export function judgeStep(
   rate: number,
@@ -60,9 +73,6 @@ export function judgeStep(
   if (errors > 0) return { ...base, holds: false, reason: `${errors} errors` };
   if (!latency || latency.p99 >= criteria.p99LimitMs) {
     return { ...base, holds: false, reason: `p99 ${Math.round(latency?.p99 ?? Number.POSITIVE_INFINITY)} ms` };
-  }
-  if (completedRate < criteria.minCompletedShare * rate) {
-    return { ...base, holds: false, reason: `completed ${completedRate.toFixed(1)}/s of ${rate}/s` };
   }
   return { ...base, holds: true };
 }

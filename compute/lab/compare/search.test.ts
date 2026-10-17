@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Outcome } from "./load.ts";
-import { judgeStep, roundRate, searchSustainedRate, type StepResult } from "./search.ts";
+import { judgeStep, MIN_EXPECTED_SAMPLES, roundRate, searchSustainedRate, type StepResult, stepWindow } from "./search.ts";
 
 function outcomes(count: number, windowMs: number, latencyMs: number, extra: Partial<Outcome> = {}): Outcome[] {
   return Array.from({ length: count }, (_, i) => ({ at: (i * windowMs) / count, ok: true, latencyMs, lagMs: 0, ...extra }));
@@ -34,11 +34,12 @@ test("one error fails a step", () => {
   expect(step).toMatchObject({ holds: false, errors: 1, sampleErrors: ["host full"] });
 });
 
-test("too few completions fail a step", () => {
-  const all = outcomes(400, 50_000, 100).map((o) => ({ ...o, at: o.at + 10_000 }));
-  const step = judgeStep(10, all, 10_000, 50_000);
-  expect(step.completedRate).toBe(8);
-  expect(step.holds).toBe(false);
+test("fewer arrivals than the nominal rate is chance, not a failure", () => {
+  // 0.3/s over 133 s expects 40; 34 is about one standard deviation short.
+  const all = outcomes(34, 133_000, 3000).map((o) => ({ ...o, at: o.at + 10_000 }));
+  const step = judgeStep(0.3, all, 10_000, 133_000, { p99LimitMs: 8000, minSamples: 20 });
+  expect(step.completedRate).toBeCloseTo(0.256, 3);
+  expect(step.holds).toBe(true);
 });
 
 test("starvation is the client's limit", () => {
@@ -91,4 +92,12 @@ test("the ladder must ascend", async () => {
 test("rates round sensibly", () => {
   expect(roundRate(7.25)).toBe(7.3);
   expect(roundRate(37.5)).toBe(38);
+});
+
+test("low rates get a longer step so the window expects enough arrivals", () => {
+  expect(stepWindow(10, 50_000, 10_000)).toEqual({ stepMs: 60_000, measuredMs: 50_000 });
+  const slow = stepWindow(0.5, 50_000, 10_000);
+  expect(slow.measuredMs).toBe(80_000);
+  expect(slow.stepMs).toBe(90_000);
+  expect((slow.measuredMs / 1000) * 0.5).toBe(MIN_EXPECTED_SAMPLES);
 });

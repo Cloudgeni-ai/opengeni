@@ -74,9 +74,11 @@ few samples it errs high, which is the safe side for a tail.
 ## Activations per second
 
 N sandboxes are created and put to rest, each as soon as it is made, so a
-host never has to hold all N awake at once. The client then offers
-activations as an open-loop Poisson process: arrival times are drawn from an
-exponential distribution at the offered rate, fixed before the step starts,
+host never has to hold all N awake at once. The client then waits two
+minutes, so whatever putting them to rest started (writing memory images
+out, uploading snapshots) is done, and offers activations as an open-loop
+Poisson process: arrival times are drawn from an exponential distribution
+at the offered rate, fixed before the step starts,
 and each arrival is sent at its time whether or not earlier ones have
 finished. Each arrival picks a resting sandbox at random, activates it with
 `echo`, then puts it back to rest; it rests again before it can be picked
@@ -85,18 +87,25 @@ when the client got round to sending it, so a client that falls behind
 cannot hide queueing (coordinated omission).
 
 The offered rate steps up a ladder, 60 seconds per step with the first 10
-seconds discarded. A step **holds** when every activation succeeded, p99 is
-under 1 second, and the completed rate is at least 95 percent of the
-offered rate. After the first step that does not hold, the search halves
+seconds discarded; at rates under 0.8 a second the measured part is
+longer, so that it expects 40 arrivals. A step **holds** when every
+activation succeeded, at least 20 were measured, and p99 is under 1
+second. Every arrival is waited for, so a system that falls behind shows
+it in the p99; the completed rate is reported but not judged, since
+Poisson arrivals at a low rate often fall short of the nominal rate by
+chance. After the first step that does not hold, the search halves
 the gap between the last step that held and the first that did not, three
 times. A resting state whose activation p99 without load is already above
-half a second is judged against twice that p99, rounded up to the next
-second, instead of 1 second; the bound is reported with its result. Its
+half a second is judged against twice that p99 (the higher of the `echo`
+and state p99s), rounded up to the next second, instead of 1 second; the
+bound is reported with its result. Its
 number then says how many activations a second it sustains without
 queueing, not that it is fast. The result is the highest rate that held,
 and separately the lowest rate at which any error appeared. If no resting
 sandbox is free when an arrival comes, the step is reported as
 client-limited and N is raised; it never counts as the system's limit.
+Neither does an error the client raises itself, such as running out of
+local ports for new connections; the client is tuned and the step rerun.
 
 N is large enough that, at the highest rate tried, a sandbox is picked
 about once every 30 seconds, so most of the time between uses is rest.
