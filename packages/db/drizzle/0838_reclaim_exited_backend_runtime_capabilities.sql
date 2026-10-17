@@ -19,13 +19,18 @@
 -- 3. Every grant additionally removes a few rows of any backend whose
 --    transaction ended before the oldest running transaction began
 --    (transaction_id below the snapshot xmin). A running transaction's own
---    xid is never below xmin, so live grants are untouched. Rows are claimed
---    with SKIP LOCKED, so concurrent grants never wait on each other. The
---    sweep runs only under READ COMMITTED: under REPEATABLE READ or
---    SERIALIZABLE, locking a row that another grant just removed would raise
---    a serialization failure in the caller's transaction. Each grant removes
---    up to eight finished rows and each backend leaks at most one, so the
---    sweep keeps up with any rate of connection churn.
+--    xid is never below xmin, and its uncommitted rows are invisible to
+--    other backends, so live grants are untouched. Each grant removes up to
+--    eight finished rows and each backend leaks at most one, so the sweep
+--    keeps up with any rate of connection churn.
+--
+-- Rows can now be removed by a backend other than their owner, so both
+-- deletes claim rows with SKIP LOCKED: a grant never waits for another
+-- grant's transaction, and two grants never deadlock. Reclaiming runs only
+-- under READ COMMITTED. Under REPEATABLE READ or SERIALIZABLE, deleting or
+-- locking a row that another grant removed after the snapshot was taken
+-- raises a serialization failure, so such a grant leaves finished rows to
+-- the next READ COMMITTED grant.
 SET LOCAL lock_timeout = '5s';
 
 TRUNCATE opengeni_private.subscription_runtime_capabilities;
@@ -40,21 +45,30 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $body$
 BEGIN
-  DELETE FROM opengeni_private.subscription_runtime_capabilities finished
-  WHERE finished.backend_pid = NEW.backend_pid
-    AND finished.transaction_id < NEW.transaction_id;
-  IF pg_catalog.current_setting('transaction_isolation') = 'read committed' THEN
-    DELETE FROM opengeni_private.subscription_runtime_capabilities finished
-    WHERE finished.ctid = ANY (ARRAY(
-      SELECT stale.ctid
-      FROM opengeni_private.subscription_runtime_capabilities stale
-      WHERE stale.transaction_id
-        < pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())
-      ORDER BY stale.transaction_id
-      LIMIT 8
-      FOR UPDATE SKIP LOCKED
-    ));
+  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+    RETURN NEW;
   END IF;
+  -- This backend's rows from its earlier transactions.
+  DELETE FROM opengeni_private.subscription_runtime_capabilities finished
+  WHERE finished.ctid = ANY (ARRAY(
+    SELECT own.ctid
+    FROM opengeni_private.subscription_runtime_capabilities own
+    WHERE own.backend_pid = NEW.backend_pid
+      AND own.transaction_id < NEW.transaction_id
+    FOR UPDATE SKIP LOCKED
+  ));
+  -- A few rows of any backend's ended transactions, including backends that
+  -- have disconnected.
+  DELETE FROM opengeni_private.subscription_runtime_capabilities finished
+  WHERE finished.ctid = ANY (ARRAY(
+    SELECT stale.ctid
+    FROM opengeni_private.subscription_runtime_capabilities stale
+    WHERE stale.transaction_id
+      < pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())
+    ORDER BY stale.transaction_id
+    LIMIT 8
+    FOR UPDATE SKIP LOCKED
+  ));
   RETURN NEW;
 END
 $body$;

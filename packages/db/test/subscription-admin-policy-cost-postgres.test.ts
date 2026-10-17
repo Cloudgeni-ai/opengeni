@@ -215,7 +215,8 @@ describe.skipIf(!realDb)("subscription admin policies", () => {
         values (pg_backend_pid(), pg_current_xact_id(), 'lifecycle', ${accountId}::uuid)`;
       await granter`commit`;
 
-      const remaining = await shared!.admin<{ pid: number }[]>`
+      // Read from the running transaction, the only one that sees its grant.
+      const remaining = await holder<{ pid: number }[]>`
         select backend_pid as pid from opengeni_private.subscription_runtime_capabilities
         where account_id = ${accountId}::uuid and backend_pid in (${exitedPid}, ${held!.pid})
         order by backend_pid`;
@@ -231,30 +232,79 @@ describe.skipIf(!realDb)("subscription admin policies", () => {
     }
   });
 
-  test("a grant under REPEATABLE READ leaves other backends' rows alone", async () => {
+  test("a grant under REPEATABLE READ leaves finished rows to later grants", async () => {
     const accountId = crypto.randomUUID();
     const exitedPid = 2_000_000_001;
     const granter = await shared!.admin.reserve();
     try {
-      await shared!.admin`insert into opengeni_private.subscription_runtime_capabilities
+      const [backend] = await granter<{ pid: number }[]>`select pg_backend_pid() as pid`;
+      // Seeded under REPEATABLE READ too, so the seeding reclaims nothing.
+      await granter`begin isolation level repeatable read`;
+      await granter`insert into opengeni_private.subscription_runtime_capabilities
         (backend_pid, transaction_id, capability_kind, account_id)
-        values (${exitedPid}, '3'::xid8, 'lifecycle', ${accountId}::uuid)`;
-      // Locking a row another grant removed concurrently would raise a
-      // serialization failure here, so such a transaction does not sweep.
+        values (${exitedPid}, '3'::xid8, 'lifecycle', ${accountId}::uuid),
+          (${backend!.pid}, '4'::xid8, 'lifecycle', ${accountId}::uuid)`;
+      await granter`commit`;
+      // Removing a row another grant removed concurrently would raise a
+      // serialization failure here, so such a transaction reclaims nothing.
       await granter`begin isolation level repeatable read`;
       await granter`insert into opengeni_private.subscription_runtime_capabilities
         (backend_pid, transaction_id, capability_kind, account_id)
         values (pg_backend_pid(), pg_current_xact_id(), 'lifecycle', ${accountId}::uuid)`;
       const [left] = await granter<{ count: number }[]>`
         select count(*)::int as count from opengeni_private.subscription_runtime_capabilities
-        where account_id = ${accountId}::uuid and backend_pid = ${exitedPid}`;
+        where account_id = ${accountId}::uuid and transaction_id in ('3'::xid8, '4'::xid8)`;
       await granter`commit`;
-      expect(left!.count).toBe(1);
+      expect(left!.count).toBe(2);
     } finally {
       await granter`rollback`.catch(() => undefined);
       await shared!.admin`delete from opengeni_private.subscription_runtime_capabilities
         where account_id = ${accountId}::uuid`;
       granter.release();
+    }
+  });
+
+  test("a grant never waits for, or fails on, a row another grant is reclaiming", async () => {
+    const accountId = crypto.randomUUID();
+    const owner = await shared!.admin.reserve();
+    const sweeper = await shared!.admin.reserve();
+    try {
+      const [backend] = await owner<{ pid: number }[]>`select pg_backend_pid() as pid`;
+      // The owner's grant from an earlier, finished transaction.
+      await shared!.admin`insert into opengeni_private.subscription_runtime_capabilities
+        (backend_pid, transaction_id, capability_kind, account_id)
+        values (${backend!.pid}, '3'::xid8, 'lifecycle', ${accountId}::uuid)`;
+      // Another backend's grant reclaims it and keeps its transaction open.
+      await sweeper`begin isolation level read committed`;
+      await sweeper`insert into opengeni_private.subscription_runtime_capabilities
+        (backend_pid, transaction_id, capability_kind, account_id)
+        values (pg_backend_pid(), pg_current_xact_id(), 'lifecycle', ${accountId}::uuid)`;
+      const [claimed] = await shared!.admin<{ locked: boolean }[]>`
+        select exists (
+          select 1 from opengeni_private.subscription_runtime_capabilities
+          where account_id = ${accountId}::uuid and transaction_id = '3'::xid8
+          for update skip locked
+        ) = false as locked`;
+      expect(claimed!.locked).toBe(true);
+
+      // The owner's next grants finish at once under either isolation level.
+      await owner`set statement_timeout = '3s'`;
+      for (const isolation of ["read committed", "repeatable read"] as const) {
+        await owner.unsafe(`begin isolation level ${isolation}`);
+        await owner`insert into opengeni_private.subscription_runtime_capabilities
+          (backend_pid, transaction_id, capability_kind, account_id)
+          values (pg_backend_pid(), pg_current_xact_id(), 'lifecycle', ${accountId}::uuid)`;
+        await owner`commit`;
+      }
+      await sweeper`commit`;
+    } finally {
+      await owner`rollback`.catch(() => undefined);
+      await sweeper`rollback`.catch(() => undefined);
+      await owner`reset statement_timeout`.catch(() => undefined);
+      await shared!.admin`delete from opengeni_private.subscription_runtime_capabilities
+        where account_id = ${accountId}::uuid`;
+      owner.release();
+      sweeper.release();
     }
   });
 
