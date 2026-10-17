@@ -20,7 +20,12 @@ type Scope = {
   detailsSharedWorkspaces?: boolean;
 };
 
-/** Read-only cache invalidation through the current database visibility snapshot.
+/** Read-only cache invalidation through committed session activity.
+ * Every session write stamps sessions.activity_xid with its writer's xid, so the
+ * (count, max, sum) fingerprint of the workspace's visible activity xids changes
+ * whenever a session is created, written, or deleted, including a late commit of
+ * a lower xid. The cluster-wide snapshot is not used: unrelated writes anywhere
+ * would change it and the cache would never hit.
  * No cached authorization: callers must establish the normal scope on every read.
  * Missing/denied clock metadata disables caching rather than reusing an old result.
  */
@@ -51,7 +56,13 @@ export async function readInsightsResponseCacheFence(
           return await cacheMetadataRead(scoped, async (bounded) =>
             rows<{ revision: string; projects: unknown; schedules: unknown }>(
               await bounded.execute(sql`
-          select pg_current_snapshot()::text as revision,
+          select (
+              select count(*)::text || ':'
+                || coalesce(max(s.activity_xid::text::numeric), 0)::text || ':'
+                || coalesce(sum(s.activity_xid::text::numeric), 0)::text
+              from sessions s
+              where s.account_id=${scope.accountId}::uuid and s.workspace_id=${workspace.id}::uuid
+            ) as revision,
             (select coalesce(jsonb_agg(jsonb_build_array(c.id,c.name) order by c.id),'[]')
               from channels c where c.account_id=${scope.accountId}::uuid and c.workspace_id=${workspace.id}::uuid) projects,
             (select coalesce(jsonb_agg(jsonb_build_array(t.id,t.name,t.deleted_at) order by t.id),'[]')

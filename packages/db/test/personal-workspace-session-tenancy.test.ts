@@ -912,7 +912,11 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     }
     expect(updateState).toBe("42501");
 
+    // The capability is single-use: the first private insert consumes it, so the
+    // replay in the same transaction must be refused by the authority guard itself.
+    let firstInsertSucceeded = false;
     let secondInsertState: string | null = null;
+    let secondInsertMessage = "";
     try {
       await withRlsContext(
         client.db,
@@ -940,13 +944,19 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
               )).*
               from sessions source where source.id = ${existingSessionId}::uuid`);
           await insertRequestedPrivateSession();
+          firstInsertSucceeded = true;
           await insertRequestedPrivateSession();
         },
       );
     } catch (error) {
       secondInsertState = nestedPostgresSqlState(error);
+      secondInsertMessage = String((error as { cause?: unknown }).cause ?? error);
     }
-    expect(secondInsertState).toBe("55000");
+    expect(firstInsertSucceeded).toBe(true);
+    expect(secondInsertState).toBe("42501");
+    expect(secondInsertMessage).toContain(
+      "non-default session authority requires the lifecycle capability",
+    );
 
     let immutableState: string | null = null;
     try {
