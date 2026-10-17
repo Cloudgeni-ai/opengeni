@@ -186,3 +186,122 @@ together came to 348 MiB stored. The working-set pack holds at most
 | Remote | its compressed memory image, working-set pack and disk chunks beyond the common part (about 0.1 GiB together) | about $0.002 for this live footprint; older copies until they are collected and a share of the common part come on top |
 
 A running sandbox costs what its memory and processors use.
+
+## Admission gaps (2026-10-17)
+
+Measured on 2026-10-17 on branch `feat/compute-gaps`, on one Azure
+Standard_D32ds_v5 in swedencentral: 32 vCPUs and 128 GiB, a VM with nested
+virtualization, its local temporary disk as XFS for the state root, and
+Azure Blob storage in the same region. Host kernel 7.0, guest kernel
+6.18.54, Firecracker v1.17.0 under its jailer. The smoke guest image, as in
+the gate.
+
+### Huge pages and free page reporting
+
+A 1 vCPU, 2 GiB sandbox on the nested profile; its guest touched 1.5 GiB
+and exited, and the host's huge-page pool was read from `/proc/meminfo`:
+
+| VM | Before | Guest holding 1.5 GiB | 2 s after it freed it | 30 s after |
+| --- | --- | --- | --- | --- |
+| Booted | 182 MiB | 1724 MiB | 1582 MiB | 232 MiB |
+| Restored from Saved | 152 MiB | 1522 MiB | | 226 MiB |
+
+Firecracker maps guest memory as private anonymous huge pages in both
+cases, so a range the guest reports free frees the whole huge pages inside
+it. A balloon of 1500 MiB on the same VM, with the guest's memory full of
+tmpfs data and page cache, took the guest's free memory from 868 to 56 MiB
+and returned nothing to the pool (1716 MiB before, 1738 MiB after): it gives
+back 4 KiB pages, and a huge page is freed only whole.
+
+### Ready sandboxes and their fill booking
+
+Four ready sandboxes of 1 vCPU and 512 MiB, 10 s after they were filled,
+next to the non-zero part of their template's memory image (what a fill
+books, with 64 MiB more):
+
+| Profile | Template footprint | Each ready sandbox holds |
+| --- | --- | --- |
+| Bare metal | 131 MiB | 43 MiB |
+| Nested | 145 MiB | 149 MiB (huge pages) |
+
+On bare metal a restored guest maps its image and holds only what it
+touches; with huge pages the pager fills what the guest touched before the
+snapshot, rounded to whole huge pages. Either way a ready sandbox holds
+less than footprint plus 64 MiB; nested hosts book fills whole anyway.
+
+### Agent threads
+
+The agent's async workers, blocking threads and concurrent compressions at
+four settings, on the nested profile with Azure Blob storage. Each run
+created 40 sandboxes of 1 vCPU and 512 MiB, wrote 96 MiB of random data and
+92 MiB of text into each one's `/tmp`, put all 40 to sleep at Remote at
+once, then woke them all at once and read the text back
+(`compute-host bench --count 40 --level remote`). Agent processor time is
+the agent process's user and system time over the whole run, so it
+includes the creates and wakes; its average is that time over the run's
+wall time.
+
+| Workers, blocking, compressions | All 40 at Remote | Each at Remote, p50 | Remote wake, first byte p50 / p90 | Agent processor time | Processors on average | Agent threads at most |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2, 66, 2 | 238 s | 146 s | 8.7 s / 9.0 s | 549 s | 2.2 | 73 |
+| 4, 68, 4 | 152 s | 97 s | 5.0 s / 5.2 s | 576 s | 3.5 | 77 |
+| 8, 72, 8 (the default on this host) | 110 s | 71 s | 3.1 s / 3.2 s | 614 s | 5.1 | 87 |
+| 32, 512, 512 (the previous default) | 44 s | 33 s | 2.3 s / 2.4 s | 816 s | 15.0 | 561 |
+
+Archiving is processor-bound: hashing and compressing each chunk, so the
+number of compressions at once sets how fast sandboxes reach Remote. The
+previous default archived 40 sandboxes in a third of the time by taking
+half the host's processors from its sandboxes for most of a minute, and
+spent a third more processor time doing it. The default keeps the agent
+near a sixth of this host while a mass wake still reaches its first byte
+in about 3 s. Archiving happens after a sandbox has been idle for minutes,
+so a slower archive costs local disk for longer, not a user's wait;
+`--compress-threads` raises it on hosts whose archives fall behind.
+
+### Noisy neighbours
+
+What the agent sets to keep sandboxes apart: each VM's cgroup gets
+`cpu.weight` 100 per processor requested (`cpu_request_millis`, all its
+vCPUs unless set lower), `memory.low` at its memory request and no swap.
+It sets no limit on disk or network bandwidth and no processor ceiling
+beyond the VM's vCPU count.
+
+One busy sandbox next to one other, on the same host as above with
+networking on: a victim of 1 vCPU and 2 GiB measured alone, then again
+3 s after an aggressor of 4 vCPUs and 4 GiB started a 45 s load. Each
+number is the victim's, higher is better.
+
+| What the aggressor ran | Victim's probe | Alone | Next to the aggressor |
+| --- | --- | --- | --- |
+| 4 processes spinning | `openssl speed sha256`, 16 KiB blocks | 1454 MB/s | 1448 MB/s |
+| 4 processes copying 512 MiB buffers | copying a 512 MiB buffer 8 times in Python | 1.81 GB/s | 1.80 GB/s |
+| `fio` random 64 KiB reads and writes, direct, 4 jobs at depth 64 | `fio` 4 KiB random reads, direct, depth 32 | 125,574 IOPS | 122,985 IOPS |
+| the same | `fio` 1 MiB sequential writes, direct, depth 16 | 1382 MiB/s | 3819 MiB/s |
+| 8 loops downloading a 1 GiB blob from the same region | downloading the same blob | 206 MiB/s | 199 MiB/s |
+
+A single 4-vCPU sandbox cannot saturate this 32-vCPU host's processors or
+memory bandwidth, and both sandboxes' disks are files on the host, so a
+guest's direct I/O still goes through the host's page cache: the files fit
+in it, and the sequential-write numbers vary with the host's writeback, not
+with the neighbour. The network loop shared the host's link and lost 3 %.
+A sandbox that writes more than the host caches, or saturates the link,
+would slow its neighbours, since neither has a per-sandbox limit.
+
+Processors are where neighbours collide first, so the weights were
+measured with 16 aggressors of 4 vCPUs each spinning on every vCPU, twice
+the host's processors, the host 99 % busy during each probe:
+
+| Victim | Aggressors' request each | Alone | Next to the aggressors | Share of alone |
+| --- | --- | --- | --- | --- |
+| 4 vCPU, weight 400 | 4000 millis, weight 400 | 5812 MB/s | 2561 MB/s | 44 % |
+| 4 vCPU, weight 400 | 1000 millis, weight 100 | 5815 MB/s | 5338 MB/s | 92 % |
+| 1 vCPU, weight 100 | 4000 millis, weight 400 | 1456 MB/s | 671 MB/s | 46 % |
+
+With equal requests per vCPU the victim gets close to its weighted share:
+400 of 6800 weight is 1.9 of the host's 32 processors, 47 % of its 4 (and
+49 % for the 1-vCPU victim). Sandboxes that request less than
+their vCPUs give way: against aggressors requesting a quarter of theirs,
+the victim kept 92 % of its speed. A processor request is a guarantee
+under contention, not a cap, so a sandbox requesting little still runs at
+full speed on an idle host.
+

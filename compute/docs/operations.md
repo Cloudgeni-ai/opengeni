@@ -135,6 +135,16 @@ and what we chose not to build.
   disk live only in object storage. The final measurements report agent
   memory and open files per archived sandbox; placement must count records,
   not only running VMs.
+- **The agent's processors come out of the sandboxes'.** The agent runs a
+  quarter of the host's processors, from 2 to 8, as async workers, and
+  compresses as many chunks at once for object storage; blocking threads,
+  which mostly wait on local disk, are 64 more than that. Archiving is the
+  agent's only long processor-bound work, so `--compress-threads` sets how
+  fast idle sandboxes reach object storage against how much processor
+  time their neighbours lose (see the agent threads measurement in
+  [measurements](measurements.md)). Raise it where saved sandboxes wait
+  long for their archive and local disk runs short; `--worker-threads` and
+  `--blocking-threads` rarely need changing.
 - **Busy is busy.** A sandbox that keeps computing stays awake, whether it
   builds code or mines coins. Sleep policy does not decide who pays: usage
   for billing and account budgets belongs to the layer above.
