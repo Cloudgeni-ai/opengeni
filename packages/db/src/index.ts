@@ -954,6 +954,7 @@ import {
   type SQL,
   type SQLWrapper,
 } from "drizzle-orm";
+import { anyOf } from "./sql-arrays";
 import type { PgTransactionConfig } from "drizzle-orm/pg-core";
 import { getLiveSessionAttemptTurn } from "./live-session-attempt";
 import {
@@ -19007,7 +19008,7 @@ export async function scheduledSessionIds(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
           isNull(schema.scheduledTasks.deletedAt),
           inArray(schema.scheduledTasks.runMode, ["existing_session", "reusable_session"]),
-          inArray(schema.scheduledTasks.reusableSessionId, sessionIds),
+          anyOf(schema.scheduledTasks.reusableSessionId, sessionIds),
         ),
       );
     return new Set(rows.flatMap((row) => (row.sessionId ? [row.sessionId] : [])));
@@ -32014,10 +32015,7 @@ export function currentSessionInputWaitTurnsQuery(
     .from(schema.sessions)
     .leftJoinLateral(latest, sql`true`)
     .where(
-      and(
-        eq(schema.sessions.workspaceId, workspaceId),
-        inArray(schema.sessions.id, [...sessionIds]),
-      ),
+      and(eq(schema.sessions.workspaceId, workspaceId), anyOf(schema.sessions.id, [...sessionIds])),
     );
 }
 
@@ -32046,7 +32044,7 @@ async function canonicalSessionRowsFromEventCursors(
     .where(
       and(
         eq(schema.sessionEventCursors.workspaceId, workspaceId),
-        inArray(schema.sessionEventCursors.sessionId, sessionIds),
+        anyOf(schema.sessionEventCursors.sessionId, sessionIds),
       ),
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
@@ -32471,7 +32469,7 @@ export async function sessionTreeStatsForSessions(
         from counted
       ) stats
       where root.workspace_id = ${workspaceId}
-        and ${inArray(sql`root.id`, uniqueRootIds)}
+        and ${anyOf(sql`root.id`, uniqueRootIds, "uuid")}
     `,
   );
   return new Map(
@@ -32992,7 +32990,7 @@ async function sessionIdsCoveredByAuthorizationRoots(
     .where(
       and(
         eq(schema.sessions.workspaceId, workspaceId),
-        inArray(schema.sessions.id, sessionIds),
+        anyOf(schema.sessions.id, sessionIds),
         sessionAuthorizationScopeFilter(
           scope.kind === "all"
             ? scope
@@ -33588,7 +33586,7 @@ async function readSessionListForSubject(
                 .where(
                   and(
                     eq(schema.sessions.workspaceId, workspaceId),
-                    inArray(schema.sessions.id, candidates),
+                    anyOf(schema.sessions.id, candidates),
                     sql`${schema.sessions.siteAccessRootId} is null`,
                     ...(options.authorizationScope
                       ? [sessionAuthorizationScopeFilter(options.authorizationScope)]
@@ -33774,7 +33772,7 @@ async function readSessionListForSubject(
                 .where(
                   and(
                     eq(schema.sessions.workspaceId, workspaceId),
-                    inArray(schema.sessions.id, pageIds),
+                    anyOf(schema.sessions.id, pageIds),
                     ...(options.authorizationScope
                       ? [sessionAuthorizationScopeFilter(options.authorizationScope)]
                       : []),
@@ -36251,7 +36249,7 @@ export async function getSessionLineage(
     const rows = await scopedDb
       .select()
       .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), inArray(schema.sessions.id, ids)));
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), anyOf(schema.sessions.id, ids)));
     const canonicalRows = await canonicalSessionRowsFromEventCursors(scopedDb, workspaceId, rows);
     const grouped = await sessionMcpServerMetadataForSessions(
       scopedDb,

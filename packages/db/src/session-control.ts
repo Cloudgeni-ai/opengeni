@@ -11,6 +11,7 @@ import {
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { anyOf } from "./sql-arrays";
 import type { Database, SessionActivityDatabase } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
@@ -773,7 +774,7 @@ export async function lockSessionEventWriteRows(
           .where(
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),
-              inArray(schema.sessions.id, sessionIds),
+              anyOf(schema.sessions.id, sessionIds),
             ),
           )
           .orderBy(schema.sessions.id)
@@ -814,7 +815,7 @@ export async function lockSessionEventWriteRows(
       .where(
         and(
           eq(schema.sessions.workspaceId, input.workspaceId),
-          inArray(schema.sessions.id, sessionIds),
+          anyOf(schema.sessions.id, sessionIds),
         ),
       )
       .orderBy(schema.sessions.id)
@@ -853,7 +854,7 @@ export async function lockSessionEventWriteRows(
           .where(
             and(
               eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              inArray(schema.sessionTurns.id, turnIds),
+              anyOf(schema.sessionTurns.id, turnIds),
             ),
           )
           .orderBy(schema.sessionTurns.id)
@@ -869,7 +870,7 @@ export async function lockSessionEventWriteRows(
           .where(
             and(
               eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-              inArray(schema.sessionTurnAttempts.id, attemptIds),
+              anyOf(schema.sessionTurnAttempts.id, attemptIds),
             ),
           )
           .orderBy(schema.sessionTurnAttempts.id)

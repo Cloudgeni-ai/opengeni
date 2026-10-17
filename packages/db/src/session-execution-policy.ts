@@ -1,5 +1,6 @@
-import { and, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./database";
+import { anyOf } from "./sql-arrays";
 import * as schema from "./schema";
 
 /** Actual execution evidence, independent of later default-setting commands. */
@@ -145,10 +146,7 @@ export function effectiveSessionPolicyQuery(
     .from(schema.sessions)
     .leftJoinLateral(latest, sql`true`)
     .where(
-      and(
-        eq(schema.sessions.workspaceId, workspaceId),
-        inArray(schema.sessions.id, [...sessionIds]),
-      ),
+      and(eq(schema.sessions.workspaceId, workspaceId), anyOf(schema.sessions.id, [...sessionIds])),
     );
 }
 
@@ -224,7 +222,7 @@ export async function withSessionListModelPolicy<T extends PolicyRow>(
     .where(
       and(
         eq(schema.sessions.workspaceId, workspaceId),
-        inArray(schema.sessions.id, [...new Set(rows.map((row) => row.id))]),
+        anyOf(schema.sessions.id, [...new Set(rows.map((row) => row.id))]),
       ),
     );
   const byId = new Map(policies.map((policy) => [policy.id, policy]));
