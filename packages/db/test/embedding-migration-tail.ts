@@ -1,4 +1,5 @@
 import { allowanceMigrationTail } from "./allowance-migration-tail";
+import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
 
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
@@ -39,6 +40,7 @@ export const embeddingMigrationTail = [
   "0469_knowledge_source_discovery.sql",
   // Patches the read function from withheld 0461; replay after its creation.
   "0640_knowledge_entry_created_since.sql",
+  ...knowledgeActorMigrationTail,
   "0478_sender_owned_connections.sql",
   // Replayed 0402/0433 still consume historical Pack tables. Remove them only
   // after those earlier accepted-work and Skill cutovers have completed.
@@ -100,6 +102,11 @@ export const embeddingMigrationTail = [
   "0598_claude_subscription_account_pools.sql",
   // Uses the existing session inventory/capability routines withheld by these fixtures.
   "0604_insights_raw_usage_api.sql",
+  // Hourly rollups consume 0604's usage-payer and scoped reader functions.
+  "0815_insights_usage_hourly.sql",
+  "0816_insights_usage_hourly_queue.sql",
+  "0817_insights_usage_hourly_backfill.sql",
+  "0818_insights_usage_hourly_reader.sql",
   // 0793 backfills while disabling the fence trigger introduced by withheld
   // 0345. 0794 patches 0604's two scoped readers and requires all nine;
   // 0795 extends 0793's audience predicate. Replay the dependency chain intact.
@@ -118,6 +125,8 @@ export const embeddingMigrationTail = [
   // M2 extends the membership finalizer to revoke legacy Claude rows; replay
   // only after the deliberately withheld 0598 Claude tables are restored.
   "0642_shared_subscription_core.sql",
+  // Reclaims capabilities from withheld 0642; replay after that table exists.
+  "0807_subscription_rls_admin_once_per_statement.sql",
   "0643_model_call_facts_subscription_connection_index.sql",
   "0644_subscription_inference_source_settings.sql",
   "0645_subscription_core_runtime.sql",
@@ -283,20 +292,9 @@ export const embeddingMigrationTail = [
   // Rewrites the session-tenancy fence registry and its capability routines
   // from withheld 0345; replay after it.
   "0800_session_tenancy_fence_registry_schema_name.sql",
-  // Cleans and adds a trigger to the shared-core capability table from 0642.
-  "0807_subscription_rls_admin_once_per_statement.sql",
-  // Their owner backfill paths disable/use the tenancy guards installed by
-  // withheld 0345; the repair must follow those guarded tables too.
+  // The history repair runner uses the tenancy trigger and workspace fences
+  // installed by withheld 0345, including its historical 0809 compatibility SQL.
   "0809_session_open_settlement_index.sql",
   "0811_session_events_usage_source_key_backfill.sql",
   "0821_session_history_owner_backfill_repair.sql",
-  // Rewrite the Knowledge/Skill actor and lifecycle routines from 0461.
-  "0813_preserve_accepted_learning_scope.sql",
-  "0819_explicit_workspace_learning_destination.sql",
-  "0824_explicit_learning_destination_symmetry.sql",
-  // The hourly rollup value function calls the payer classifier from 0604.
-  "0815_insights_usage_hourly.sql",
-  "0816_insights_usage_hourly_queue.sql",
-  "0817_insights_usage_hourly_backfill.sql",
-  "0818_insights_usage_hourly_reader.sql",
 ];

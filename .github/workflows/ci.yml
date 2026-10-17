@@ -51,7 +51,11 @@ concurrency:
   # next, so rapid merges cannot pile up dozens of queued runs.
   # Version-PR merge commits keep their own run: stable releases require a
   # successful CI run for that exact SHA.
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'version packages') == false && 'ci-main-push' || format('ci-{0}', github.run_id) }}
+  # Only a push's first attempt joins the main queue. A group holds one pending
+  # run, so a manual re-run of an older main run would otherwise enter as the
+  # pending run and cancel the newest push waiting behind the running build.
+  # A re-run is an explicit request for that exact SHA and runs on its own.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'version packages') == false && github.run_attempt == '1' && 'ci-main-push' || format('ci-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
 
 permissions:

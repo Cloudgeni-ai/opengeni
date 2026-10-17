@@ -49,6 +49,7 @@ import {
 import { knowledgeMigrationId } from "../src/knowledge-migration";
 import { toPostgresLosslessText } from "../src/lossless-json";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
+import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
 
 const migration = "0461_unified_knowledge.sql";
 const forwardMigrations = [
@@ -57,6 +58,7 @@ const forwardMigrations = [
   "0468_knowledge_relationship_projection.sql",
   "0469_knowledge_source_discovery.sql",
   "0640_knowledge_entry_created_since.sql",
+  ...knowledgeActorMigrationTail,
   // Requires the post-0461 Skill lifecycle, including confirm_response.
   "0488_permanent_skill_removal.sql",
   // Rewrites the original-file policy introduced by 0461.
