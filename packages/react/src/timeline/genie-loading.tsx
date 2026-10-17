@@ -79,16 +79,21 @@ export function GenieLoading({
   const [phrase, setPhrase] = useState(0);
   const [showDetails, setShowDetails] = useState(false);
   const [slow, setSlow] = useState(false);
+  // Only the number of phrases matters to the rotation. The phrase list is a
+  // fresh array on every render (translated text, or an inline host option),
+  // so depending on its identity would restart the timer and re-pick a phrase
+  // after every render, chaining renders until the random pick repeats.
+  const phraseCount = phrases.length;
   useEffect(() => {
     const update = () => {
       setShowDetails(Date.now() - Date.parse(startedAt) >= 30_000);
       setSlow(Date.now() - Date.parse(startedAt) >= 60_000);
-      if (!document.hidden) setPhrase(Math.floor(Math.random() * phrases.length));
+      if (!document.hidden) setPhrase(Math.floor(Math.random() * phraseCount));
     };
     update();
     const timer = window.setInterval(update, 5_000);
     return () => window.clearInterval(timer);
-  }, [startedAt, phrases]);
+  }, [startedAt, phraseCount]);
   if (options?.render && !notice)
     return options.render({ startedAt, phase, detailsOpen, onShowDetails });
   return (
