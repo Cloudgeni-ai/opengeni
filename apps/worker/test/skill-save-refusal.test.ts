@@ -433,6 +433,34 @@ describe("explicit workspace Skill destination from a chat that learns for its p
     expect(head?.scope).toBe("workspace");
   }, 120_000);
 
+  test("an edit naming another scope is a correction for the agent, not a notice", async () => {
+    if (!app || !shared) return;
+    const fixture = await skillSaveFixture(app.db, {
+      skillScope: "workspace",
+      learning: "personal",
+      modes: { personal: "automatic", workspace: "automatic" },
+    });
+    // An edit that names another scope is the agent's to correct, not a notice.
+    const result = (await fixture.skillSave.execute(
+      {
+        operationId: crypto.randomUUID(),
+        skillId: fixture.skillId,
+        expectedRevisionId: fixture.saved.revisionId,
+        expectedScopeVersion: 1,
+        scope: "personal",
+        files: [{ path: "notes.md", content: "Use metric units in reports." }],
+        reason: "The person wants this rule",
+      },
+      { operationId: crypto.randomUUID(), caller: { kind: "model" } } as never,
+    )) as SkillSaveResult;
+    expect(result.isError).toBe(true);
+    const text = result.content.map((part) => part.text).join("\n");
+    expect(text).toContain("an edit keeps the Skill's own scope");
+    expect(text).not.toContain("isn't allowed");
+    expect(result._meta?.[LEARNING_REFUSAL_META_KEY]).toBeUndefined();
+    expect((await fixture.readNotes())?.revisionId).toBe(fixture.saved.revisionId);
+  }, 120_000);
+
   test("a shared chat without a person cannot choose a personal destination", async () => {
     if (!app || !shared) return;
     const fixture = await skillSaveFixture(app.db, {

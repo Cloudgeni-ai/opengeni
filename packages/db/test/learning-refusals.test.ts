@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { classifyLearningRefusal, nestedAuthorityRefusalMessage } from "../src/learning-refusals";
+import {
+  classifyLearningRefusal,
+  learningSaveCorrection,
+  nestedAuthorityRefusalMessage,
+} from "../src/learning-refusals";
 
 describe("classifyLearningRefusal", () => {
   test("names the reason a person can act on", () => {
@@ -45,6 +49,20 @@ describe("classifyLearningRefusal", () => {
     ]) {
       expect(classifyLearningRefusal({ destination: "knowledge", message })).toBe(null);
     }
+  });
+
+  test("corrections the agent can make itself are not a refusal to show", () => {
+    for (const [message, correction] of [
+      ["Instruction evidence is unavailable to workspace readers", "evidence_not_shared"],
+      ["Knowledge reference would widen source access", "evidence_not_shared"],
+      ["Knowledge reference unavailable", "reference_unavailable"],
+      ["Skill scope differs from the requested scope", "skill_scope_kept"],
+    ] as const) {
+      expect(learningSaveCorrection(message)).toBe(correction);
+      expect(classifyLearningRefusal({ destination: "knowledge", message })).toBe(null);
+    }
+    // An unknown refusal is still shown: none is ever lost silently.
+    expect(learningSaveCorrection("Some new policy refusal")).toBe(null);
   });
 
   test("finds the authority refusal inside a wrapped driver error", () => {

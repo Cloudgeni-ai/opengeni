@@ -52,7 +52,7 @@ export function activityEvents(): SessionEvent[] {
   push("agent.toolCall.created", {
     id: "remember-rule",
     name: "skill_save",
-    arguments: { skillId: "21a78814-7662-4252-b40a-b57971b244e7" },
+    arguments: { skillId: "1b496aec-f6a2-410c-be19-68070edb7080" },
   });
   push("agent.toolCall.output", {
     id: "remember-rule",
@@ -63,7 +63,7 @@ export function activityEvents(): SessionEvent[] {
         "opengeni/learningRefusal": {
           destination: "skill",
           reason: "learning_off",
-          skillId: "21a78814-7662-4252-b40a-b57971b244e7",
+          skillId: "1b496aec-f6a2-410c-be19-68070edb7080",
         },
       },
     },

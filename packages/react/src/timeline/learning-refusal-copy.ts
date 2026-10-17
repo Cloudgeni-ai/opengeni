@@ -1,7 +1,7 @@
 import type { LearningRefusal } from "@opengeni/sdk/learning-refusal";
 import type { OpenGeniText } from "../messages/runtime";
 
-/** Where a person can make the refused change themselves. */
+/** Where the notice links: the item, its list, or Agent learning settings. */
 export type LearningRefusalPlace =
   | { kind: "skill"; skillId: string }
   | { kind: "skills" }

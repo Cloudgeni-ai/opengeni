@@ -9,6 +9,7 @@ import {
   assertSkillReadAttempt,
   classifyLearningRefusal,
   getActiveSessionFunctionToolResults,
+  learningSaveCorrection,
   skillReviewResolution,
   installPortableSkill,
   replayPortableSkillInstall,
@@ -60,11 +61,30 @@ import type { AttemptToolDefinition } from "@opengeni/codemode";
 
 const TELL_PERSON =
   "Tell the person in your reply that it was not saved, why, and what would make it work; your other work can continue.";
+const TELL_PERSON_WHY =
+  "Tell the person in your reply that it was not saved and why; your other work can continue.";
+
+/** Plain reasons for the genuine refusals the person is shown. */
+const NOT_PERMITTED_REASONS: ReadonlyMap<string, string> = new Map([
+  [
+    "Skill outside accepted learning scope",
+    "the Skill belongs to another person or the organization, or this chat can't remove it (a private chat removes only personal Skills, a shared chat only workspace Skills)",
+  ],
+  [
+    "Skill scope is not available to this chat",
+    "no person started this chat, so there is no one to save a personal Skill for",
+  ],
+  [
+    "Agents cannot review Skills or install workspace plugins from personal learning",
+    "a private chat can save and edit workspace Skills, but reviewing Skills and installing plugins needs a shared chat",
+  ],
+]);
 
 /**
  * What a refused Skill change means for the agent, in words it can act on.
  * `refusal` is the same classification the person's timeline notice uses, so
- * the agent's account and the notice agree.
+ * the agent's account and the notice agree. A correction the agent can make
+ * itself carries no notice and says how to retry.
  */
 export function skillRefusalMessage(
   error: SkillLifecycleRefusedError,
@@ -73,11 +93,22 @@ export function skillRefusalMessage(
   if (error.code === "40001" || error.code === "23505") {
     return `Nothing was saved: ${error.message}. Read the Skill again for its current revision and scope version, then retry with a new operation ID if the change still applies.`;
   }
+  switch (learningSaveCorrection(error.message)) {
+    case "skill_scope_kept":
+      return "Nothing was saved: an edit keeps the Skill's own scope. Retry without scope, with a new operation ID.";
+    case "reference_unavailable":
+      return "Nothing was saved: this Skill revision is unavailable. Read the Skill again for its current revision and scope version, then retry with a new operation ID if the change still applies.";
+    case "evidence_not_shared":
+    case null:
+      break;
+  }
   switch (refusal?.reason) {
+    case "site_agent":
+      return `Nothing was saved. ${error.message}. ${TELL_PERSON_WHY}`;
     case "learning_off":
-      return `Nothing was saved. Agent learning for Skills is Off for this change, in this chat's or the workspace's settings. Turning it on in Agent learning settings would let you save it. ${TELL_PERSON}`;
+      return `Nothing was saved. Agent learning for Skills is Off where this change would be saved (this chat's, the workspace's or the person's own setting). Turning it on in Agent learning settings would let you save it. ${TELL_PERSON}`;
     case "not_permitted":
-      return `Nothing was saved: ${error.message}. This chat isn't allowed to make this Skill change. ${TELL_PERSON}`;
+      return `Nothing was saved. This chat isn't allowed to make this Skill change: ${NOT_PERMITTED_REASONS.get(error.message) ?? error.message}. ${TELL_PERSON}`;
     default:
       return `Nothing was saved: ${error.message}.`;
   }

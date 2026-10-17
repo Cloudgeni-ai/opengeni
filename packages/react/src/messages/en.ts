@@ -3079,11 +3079,11 @@ export const englishMessages = {
   "timeline.knowledgeReceipt.viewInKnowledge": "View in Knowledge",
   "timeline.learningRefusal.agentLearningSettings": "Agent learning settings",
   "timeline.learningRefusal.instructionLearningOff":
-    "Agent learning for workspace instructions is off here. Turn it on in Agent learning settings, then ask again.",
+    "Agent learning for workspace instructions is off where this would be saved. Turn it on in Agent learning settings, then ask again.",
   "timeline.learningRefusal.instructionNotPermitted":
-    "This chat isn't allowed to change workspace instructions. A workspace admin can make the change.",
+    "This chat isn't allowed to change workspace instructions.",
   "timeline.learningRefusal.knowledgeLearningOff":
-    "Agent learning for Knowledge is off here. Turn it on in Agent learning settings, then ask again.",
+    "Agent learning for Knowledge is off where this would be saved. Turn it on in Agent learning settings, then ask again.",
   "timeline.learningRefusal.knowledgeNotPermitted":
     "This chat isn't allowed to make this change in Knowledge.",
   "timeline.learningRefusal.notSavedToKnowledge": "Not saved to Knowledge",
@@ -3096,7 +3096,7 @@ export const englishMessages = {
   "timeline.learningRefusal.siteAgent":
     "Agents started from a Site page don't save Skills, instructions, or Knowledge.",
   "timeline.learningRefusal.skillLearningOff":
-    "Agent learning for Skills is off here. Turn it on in Agent learning settings, then ask again.",
+    "Agent learning for Skills is off where this would be saved. Turn it on in Agent learning settings, then ask again.",
   "timeline.learningRefusal.skillNotPermitted": "This chat isn't allowed to change this Skill.",
   "timeline.noticePresentation.waitedElapsed": "Waited · {elapsed}",
   "timeline.noticePresentation.waitedForAgentsElapsed_one": "Waited for {count} agent · {elapsed}",

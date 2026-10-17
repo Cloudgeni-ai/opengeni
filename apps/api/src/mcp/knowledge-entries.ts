@@ -25,6 +25,7 @@ import {
 import {
   archiveKnowledgeEntry,
   classifyLearningRefusal,
+  learningSaveCorrection,
   confirmLegacyKnowledge,
   confirmLegacyInstruction,
   getKnowledgeEntry,
@@ -45,17 +46,22 @@ import { z } from "zod";
 
 const TELL_PERSON =
   "Tell the person in your reply that it was not saved, why, and what would make it work; your other work can continue.";
+const TELL_PERSON_WHY =
+  "Tell the person in your reply that it was not saved and why; your other work can continue.";
 const TELL_PERSON_IF_ASKED =
   "If the person asked you to save or remember this, tell them in your reply that it was not saved and why; your other work can continue.";
 
 /**
  * What an authority refusal means for the agent, in words it can act on.
  * `refusal` is the same classification the person's timeline notice uses, so
- * the agent's account and the notice agree.
+ * the agent's account and the notice agree. A correction the agent can make
+ * itself, or a fence on a stale attempt, carries no notice and says how to
+ * retry.
  */
 function refusalAgentMessage(
   surface: "knowledge" | "instruction",
   mode: "read" | "write",
+  refusalMessage: string | null,
   refusal: LearningRefusal | null,
 ): string {
   if (mode === "read") {
@@ -63,14 +69,29 @@ function refusalAgentMessage(
       ? "This instruction is unavailable in this task's scope."
       : "The entry or reference is unavailable in this task's scope and Agent learning policy.";
   }
-  if (surface === "instruction") {
-    return refusal?.reason === "learning_off"
-      ? `Nothing was saved. Agent learning for workspace instructions is Off for this change, in this chat's or the workspace's settings. Turning it on in Agent learning settings would let you save it. ${TELL_PERSON}`
-      : `Nothing was saved. This chat isn't allowed to change workspace instructions. ${TELL_PERSON}`;
+  const tell = surface === "instruction" ? TELL_PERSON : TELL_PERSON_IF_ASKED;
+  const what = surface === "instruction" ? "workspace instructions" : "Knowledge";
+  switch (refusalMessage ? learningSaveCorrection(refusalMessage) : null) {
+    case "evidence_not_shared":
+      return "Nothing was saved: cited evidence or a source is personal or not yet published, so readers of this destination couldn't see it. Retry without it, or cite a published entry they can read, with a new operation ID.";
+    case "reference_unavailable":
+      return "Nothing was saved: a referenced entry, revision or source is unavailable. Check the referenced IDs and current versions, then retry with a new operation ID.";
+    case "skill_scope_kept":
+    case null:
+      break;
   }
-  return refusal?.reason === "learning_off"
-    ? `Nothing was saved. Agent learning for Knowledge is Off for this change, in this chat's or the workspace's settings. Turning it on in Agent learning settings would let you save it. ${TELL_PERSON_IF_ASKED}`
-    : `Nothing was saved. The entry, reference, or write is not available in this chat's scope or Agent learning policy. ${TELL_PERSON_IF_ASKED}`;
+  if (!refusal)
+    return "Nothing was saved: this attempt is no longer current. Your other work can continue; retry with the same operation ID if the change still applies.";
+  switch (refusal.reason) {
+    case "site_agent":
+      return `Nothing was saved. ${siteClampedAgentMessage(what)}. ${surface === "instruction" ? TELL_PERSON_WHY : TELL_PERSON_IF_ASKED}`;
+    case "learning_off":
+      return `Nothing was saved. Agent learning for ${what} is Off where this change would be saved (this chat's or the workspace's setting). Turning it on in Agent learning settings would let you save it. ${tell}`;
+    case "not_permitted":
+      return surface === "instruction"
+        ? `Nothing was saved. This chat isn't allowed to change workspace instructions. ${tell}`
+        : `Nothing was saved. This chat isn't allowed to make this Knowledge change. ${tell}`;
+  }
 }
 
 /** One structured write and retrieval path, independent of the legacy Memory toggle. */
@@ -89,9 +110,10 @@ export function registerKnowledgeEntryTools(
     // An agent started from a Site page does not learn: it reads Knowledge
     // and instructions but never writes them.
     if (mode === "write" && (await siteAgentClamp(deps.db, grant))?.clamped) {
-      const message = siteClampedAgentMessage(
-        surface === "instruction" ? "workspace instructions" : "Knowledge",
-      );
+      const message = refusalAgentMessage(surface, mode, null, {
+        destination: surface,
+        reason: "site_agent",
+      });
       return withLearningRefusalMeta(
         {
           isError: true,
@@ -154,7 +176,7 @@ export function registerKnowledgeEntryTools(
             : state === "23505"
               ? "This instruction operation ID was already used with different input. Reuse it only for an exact retry."
               : state === "42501"
-                ? refusalAgentMessage(surface, mode, refusal)
+                ? refusalAgentMessage(surface, mode, refusalMessage, refusal)
                 : state === "22023" || state === "23514"
                   ? `Invalid instruction change. Read the current instruction, use append for a new rule, or edit with one localized exact oldText match to update or remove text. Agents cannot replace the complete instruction. Each supplied text and the resulting instruction must stay within ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters, the same limit as the human editor.`
                   : "Workspace instructions are temporarily unavailable. Retry the same operation ID only if the prior change may have succeeded."
@@ -163,7 +185,7 @@ export function registerKnowledgeEntryTools(
             : state === "23505"
               ? "This operation ID was already used with different input. Reuse it only for an exact retry."
               : state === "42501"
-                ? refusalAgentMessage(surface, mode, refusal)
+                ? refusalAgentMessage(surface, mode, refusalMessage, refusal)
                 : state === "22023" || state === "23514"
                   ? "Invalid Knowledge entry or relationship. Check the referenced IDs and revision before retrying."
                   : "Knowledge is temporarily unavailable. Your task can continue; retry the same operation ID if saving may have succeeded.";

@@ -5,7 +5,7 @@ import {
   withLearningRefusalMeta,
 } from "../src/learning-refusal";
 
-const skillId = "21a78814-7662-4252-b40a-b57971b244e7";
+const skillId = "1b496aec-f6a2-410c-be19-68070edb7080";
 
 describe("learning refusal fact", () => {
   test("is added to `_meta` without touching the model-visible result", () => {

@@ -5,7 +5,7 @@ import { buildTimeline, groupTimeline } from "../src/timeline/projection";
 import { createOpenGeniText } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
-const skillId = "21a78814-7662-4252-b40a-b57971b244e7";
+const skillId = "1b496aec-f6a2-410c-be19-68070edb7080";
 let sequence = 0;
 
 function event(type: string, payload: unknown): SessionEvent {
@@ -40,7 +40,7 @@ describe("learning refusal timeline notice", () => {
   test("a refused save is told to the person once per turn, outside the work row", () => {
     const fact = { destination: "skill", reason: "not_permitted", skillId } as const;
     const items = buildTimeline(englishText, [
-      event("user.message", { text: "Always remember to pick the smaller model for grunt work" }),
+      event("user.message", { text: "Always remember to use metric units in reports" }),
       event("agent.toolCall.created", { id: "read", name: "skill_read", arguments: {} }),
       event("agent.toolCall.output", { id: "read", output: "Skill text" }),
       event("agent.message.completed", { text: "Updating the Skill.", phase: "commentary" }),
