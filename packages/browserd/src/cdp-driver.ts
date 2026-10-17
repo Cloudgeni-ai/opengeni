@@ -3241,6 +3241,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       case "select": {
         const node = await this.resolveActionLocator(state, action.locator);
+        const inspected = await this.callOnNode(
+          state,
+          node.backendDOMNodeId,
+          SELECT_TARGET_FUNCTION,
+          [],
+        );
+        if (isRecord(inspected) && inspected.kind === "popup") {
+          await this.selectPopupOptions(state, node, inspected, action.values);
+          return;
+        }
         const result = await this.callOnNode(
           state,
           node.backendDOMNodeId,
@@ -3250,7 +3260,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (result !== true) {
           throw new InteractionDefiniteDriverError(
             "invalid_action",
-            "browser locator is not a selectable control",
+            isRecord(inspected) && inspected.kind === "native"
+              ? "this select has no enabled option with that value or label, or takes only one option"
+              : "browser locator is not a selectable control",
           );
         }
         // This function returns false before any change for an invalid control.
@@ -4303,9 +4315,120 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                     : "click"
               } instead`
             : inspected.kind === "popup"
-              ? `this ${role} is not a text field; click it to open its options, then click the option`
+              ? `this ${role} is not a text field; use the select action with the option's label`
               : `browser fill needs a text input, textarea or editable element, and this ${role} is not one`;
     throw new InteractionDefiniteDriverError("invalid_action", message);
+  }
+
+  /**
+   * Chooses options of a custom combobox, listbox or listbox button by their
+   * visible label, as a person would: open the popup when the option is not
+   * showing, then click the option. A popup already in the document that has
+   * no such option is refused before any input.
+   */
+  private async selectPopupOptions(
+    state: TargetState,
+    node: CdpAccessibilityEntry,
+    inspected: Readonly<Record<string, unknown>>,
+    values: readonly string[],
+  ): Promise<void> {
+    const role = typeof inspected.role === "string" ? inspected.role : "combobox";
+    if (inspected.disabled === true) {
+      throw new InteractionDefiniteDriverError("invalid_action", `this ${role} is disabled`);
+    }
+    if (values.length > 1 && inspected.multiple !== true) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `this ${role} takes one option; pass a single value`,
+      );
+    }
+    const listed = stringList(inspected.options);
+    if (listed.length > 0) {
+      const missing = values.find(
+        (value) => !listed.some((label) => sameOptionLabel(label, value)),
+      );
+      if (missing !== undefined) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          `this ${role} has no option labeled ${JSON.stringify(missing)}; its options are ${optionList(listed)}`,
+        );
+      }
+    }
+    const frameId = node.frameId ?? state.frame.id;
+    for (const value of values) {
+      let option = await this.popupOptionNode(state, node.backendDOMNodeId, value);
+      if (
+        option === null &&
+        role !== "listbox" &&
+        (await this.callOnNode(state, node.backendDOMNodeId, POPUP_EXPANDED_FUNCTION, [])) !== true
+      ) {
+        await this.clickNode(state, node.backendDOMNodeId, "left", 1, frameId);
+        const deadline = Date.now() + POPUP_OPTION_WAIT_MS;
+        while (option === null && Date.now() < deadline) {
+          await delay(50);
+          option = await this.popupOptionNode(state, node.backendDOMNodeId, value);
+        }
+      }
+      if (option === null) {
+        const showing = stringList(
+          await this.callOnNode(state, node.backendDOMNodeId, POPUP_OPTION_FUNCTION, [
+            { value: null },
+          ]),
+        );
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          showing.length > 0
+            ? `no option labeled ${JSON.stringify(value)} is showing; the showing options are ${optionList(showing)}`
+            : `no option labeled ${JSON.stringify(value)} appeared after opening this ${role}; if it filters as you type, type part of the label first, then select`,
+        );
+      }
+      await this.clickNode(state, option, "left", 1, frameId);
+    }
+  }
+
+  /** The showing option of a popup control whose label matches, or null. */
+  private async popupOptionNode(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    label: string,
+  ): Promise<number | null> {
+    if (backendDOMNodeId === null) return null;
+    const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
+      backendNodeId: backendDOMNodeId,
+    });
+    if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") {
+      throw new InteractionDefiniteDriverError(
+        "locator_not_found",
+        "browser element is no longer present",
+      );
+    }
+    const objectIds = [resolved.object.objectId];
+    try {
+      const result = await this.sendActionTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+        state,
+        "Runtime.callFunctionOn",
+        {
+          objectId: resolved.object.objectId,
+          functionDeclaration: POPUP_OPTION_FUNCTION,
+          arguments: [{ value: label }],
+          returnByValue: false,
+        },
+        { potentialEffect: false },
+      );
+      if (result.exceptionDetails) throw new Error("browser element function failed");
+      if (!isRecord(result.result) || typeof result.result.objectId !== "string") return null;
+      objectIds.push(result.result.objectId);
+      const described = await this.sendTarget<{ node?: unknown }>(state, "DOM.describeNode", {
+        objectId: result.result.objectId,
+      });
+      return isRecord(described.node) && typeof described.node.backendNodeId === "number"
+        ? described.node.backendNodeId
+        : null;
+    } finally {
+      for (const objectId of objectIds) {
+        await this.sendTarget(state, "Runtime.releaseObject", { objectId }).catch(() => undefined);
+      }
+    }
   }
 
   private async selectAllAndDelete(
@@ -5614,6 +5737,96 @@ const SELECT_OPTIONS_FUNCTION = `function(values) {
   this.dispatchEvent(new Event("change", { bubbles: true }));
   return true;
 }`;
+
+/** How long select waits for a custom popup's option to show after opening it. */
+const POPUP_OPTION_WAIT_MS = 2_000;
+
+// A custom popup control's options: the elements its aria-controls or
+// aria-owns name (or the listbox itself), else every option in the document.
+// Labels are the accessible label or collapsed text.
+const POPUP_SOURCE = `
+  const popupLabel = (element) => {
+    const label = element.getAttribute("aria-label");
+    return String(label && label.trim() ? label : element.textContent || "").replace(/\\s+/g, " ").trim();
+  };
+  const popupRoots = (control) => {
+    if (String(control.getAttribute("role") || "").toLowerCase() === "listbox") return { roots: [control], explicit: true };
+    const root = control.getRootNode();
+    const lookup = (id) => (typeof root.getElementById === "function" && root.getElementById(id)) || control.ownerDocument.getElementById(id);
+    const ids = [control.getAttribute("aria-controls"), control.getAttribute("aria-owns")].join(" ").split(/\\s+/).filter(Boolean);
+    const roots = ids.map(lookup).filter(Boolean);
+    return roots.length > 0 ? { roots, explicit: true } : { roots: [control.ownerDocument], explicit: false };
+  };
+  const popupOptions = (control) => {
+    const { roots, explicit } = popupRoots(control);
+    const options = [];
+    for (const root of roots) {
+      if (root !== control.ownerDocument && root.getAttribute("role") === "option") options.push(root);
+      for (const option of root.querySelectorAll('[role="option"]')) if (!options.includes(option)) options.push(option);
+    }
+    return { roots, options, explicit };
+  };
+  const optionShowing = (option) => {
+    if (!option.isConnected || option.getAttribute("aria-disabled") === "true") return false;
+    if (typeof option.checkVisibility === "function" && !option.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+    const rect = option.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+`;
+
+// What select acts on: a native select, a custom popup control (with the
+// options its popup already holds, when it names one), or neither.
+const SELECT_TARGET_FUNCTION = `function() {
+  ${POPUP_SOURCE}
+  if (!(this instanceof Element) || !this.isConnected) return { kind: "other" };
+  if (String(this.tagName || "").toLowerCase() === "select") return { kind: "native" };
+  const role = String(this.getAttribute("role") || "").toLowerCase();
+  const popup = String(this.getAttribute("aria-haspopup") || "").toLowerCase();
+  if (role !== "combobox" && role !== "listbox" && popup !== "listbox") return { kind: "other" };
+  const { roots, options, explicit } = popupOptions(this);
+  const multiple = roots.some((root) => root !== this.ownerDocument && root.getAttribute("aria-multiselectable") === "true");
+  return {
+    kind: "popup",
+    role: role || "button",
+    disabled: this.matches(":disabled") || this.getAttribute("aria-disabled") === "true",
+    multiple,
+    options: explicit ? options.filter((option) => option.getAttribute("aria-disabled") !== "true").map(popupLabel).slice(0, 500) : [],
+  };
+}`;
+
+// With a label: the first showing option with that label (exact, then
+// case-insensitive), or null. With null: the showing options' labels.
+const POPUP_OPTION_FUNCTION = `function(label) {
+  ${POPUP_SOURCE}
+  const showing = popupOptions(this).options.filter(optionShowing);
+  if (label === null) return showing.map(popupLabel).slice(0, 500);
+  const wanted = String(label);
+  return showing.find((option) => popupLabel(option) === wanted) ||
+    showing.find((option) => popupLabel(option).toLowerCase() === wanted.trim().toLowerCase()) ||
+    null;
+}`;
+
+const POPUP_EXPANDED_FUNCTION = `function() {
+  return this instanceof Element && this.getAttribute("aria-expanded") === "true";
+}`;
+
+function sameOptionLabel(label: string, value: string): boolean {
+  return label === value || label.toLowerCase() === value.trim().toLowerCase();
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function optionList(labels: readonly string[]): string {
+  const shown = labels
+    .slice(0, 25)
+    .map((label) => JSON.stringify(label))
+    .join(", ");
+  return labels.length > 25 ? `${shown} and ${labels.length - 25} more` : shown;
+}
 
 /** Scroll the nearest box around the element that can move in each requested
  * direction, crossing shadow roots and slots like a wheel event would. Only
