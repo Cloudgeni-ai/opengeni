@@ -32268,17 +32268,26 @@ export async function sessionTreeStatsForSessions(
       join ${schema.workspaceInferenceControls} workspace_control
         on workspace_control.workspace_id = root.workspace_id
       cross join lateral (
+        -- Every node has exactly one parent, so a walk down child links can
+        -- only revisit its own start node (when that start sits on a legacy
+        -- parent cycle). Excluding the start therefore keeps the walk acyclic
+        -- without carrying a path, and the depth bound caps the work.
         with recursive descendants(
           id,
           status,
+          active_turn_id,
+          input_wait_until,
+          input_wait_turn_id,
           last_sequence,
           effective_pause_revision,
-          depth,
-          path
+          depth
         ) as (
           select
             root.id,
             root.status,
+            root.active_turn_id,
+            root.input_wait_until,
+            root.input_wait_turn_id,
             root_cursor.last_meaningful_sequence,
             greatest(
               case
@@ -32296,14 +32305,16 @@ export async function sessionTreeStatsForSessions(
                 else null
               end
             ),
-            0,
-            array[root.id]::uuid[]
+            0
 
           union all
 
           select
             child.id,
             child.status,
+            child.active_turn_id,
+            child.input_wait_until,
+            child.input_wait_turn_id,
             child_cursor.last_meaningful_sequence,
             greatest(
               case
@@ -32323,133 +32334,89 @@ export async function sessionTreeStatsForSessions(
                 else null
               end
             ),
-            descendants.depth + 1,
-            descendants.path || child.id
+            descendants.depth + 1
           from descendants
-          join ${schema.sessions} child on child.parent_session_id = descendants.id
+          join ${schema.sessions} child
+            on child.workspace_id = ${workspaceId}
+           and child.parent_session_id = descendants.id
           join ${schema.sessionEventCursors} child_cursor
             on child_cursor.account_id = child.account_id
            and child_cursor.workspace_id = child.workspace_id
            and child_cursor.session_id = child.id
-          where child.workspace_id = ${workspaceId}
-            and descendants.depth < ${SESSION_TREE_STATS_MAX_DEPTH}
-            -- Parent links are expected to form a tree, but legacy/manual rows
-            -- can be cyclic. The path is depth-bounded above, so cycle defense
-            -- cannot grow independently of this query's fixed work budget.
-            and not child.id = any(descendants.path)
+          where descendants.depth < ${SESSION_TREE_STATS_MAX_DEPTH}
+            and child.id <> root.id
         ), bounded as materialized (
           -- PostgreSQL evaluates the recursive producer only as far as this
           -- unsorted LIMIT is consumed. One extra descendant is lookahead.
-          select id, status, last_sequence, effective_pause_revision, depth, path
+          select id, status, active_turn_id, input_wait_until, input_wait_turn_id,
+            last_sequence, effective_pause_revision, depth
           from descendants
           limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
         ), numbered as (
           select
-            id,
-            status,
-            last_sequence,
-            effective_pause_revision,
-            depth,
-            path,
+            bounded.*,
             row_number() over () as ordinal
           from bounded
+        ), counted as (
+          -- The subject's personal state is read once per counted descendant.
+          select
+            numbered.*,
+            personal.session_id is not null and personal.actively_working as actively_working,
+            ${subjectId ?? null}::text is not null and numbered.last_sequence > coalesce(
+              case
+                when personal.manually_unread_through is not null then -1
+                else personal.acknowledged_sequence
+              end,
+              0
+            ) as unread
+          from numbered
+          left join ${schema.sessionPins} personal
+            on ${subjectId ?? null}::text is not null
+           and personal.workspace_id = ${workspaceId}
+           and personal.subject_id = ${subjectId ?? null}
+           and personal.session_id = numbered.id
+          where numbered.ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+            and numbered.depth > 0
         )
         select
+          count(*) filter (where depth = 1)::int as "directChildren",
+          count(*)::int as "totalDescendants",
           count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1} and depth = 1
-          )::int as "directChildren",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1} and depth > 0
-          )::int as "totalDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0
-              and effective_pause_revision is null
+            where effective_pause_revision is null
               and status in ('running', 'recovering')
           )::int as "runningDescendants",
           count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0
-              and effective_pause_revision is null
+            where effective_pause_revision is null
               and status in ('queued', 'waiting_capacity')
           )::int as "queuedDescendants",
           count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status = 'idle' and effective_pause_revision is null
-              and exists (
-                select 1 from ${schema.sessions} waiting_session
-                where waiting_session.workspace_id = ${workspaceId} and waiting_session.id = numbered.id
-                  and waiting_session.active_turn_id is null
-                  and waiting_session.input_wait_until is not null
-                  and waiting_session.input_wait_turn_id = (
-                    select finished.id from ${schema.sessionTurns} finished
-                    where finished.workspace_id = ${workspaceId} and finished.session_id = numbered.id
-                      and finished.finished_at is not null
-                      and ${sessionInputWaitDecidingTurnSql(
-                        {
-                          id: sql`finished.id`,
-                          source: sql`finished.source`,
-                          workspaceId: sql`finished.workspace_id`,
-                          sessionId: sql`finished.session_id`,
-                          finishedAt: sql`finished.finished_at`,
-                          metadata: sql`finished.metadata`,
-                        },
-                        sql`waiting_session.input_wait_turn_id`,
-                      )}
-                    order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
-                  )
+            where status = 'idle' and effective_pause_revision is null
+              and active_turn_id is null
+              and input_wait_until is not null
+              and input_wait_turn_id = (
+                select finished.id from ${schema.sessionTurns} finished
+                where finished.workspace_id = ${workspaceId} and finished.session_id = counted.id
+                  and finished.finished_at is not null
+                  and ${sessionInputWaitDecidingTurnSql(
+                    {
+                      id: sql`finished.id`,
+                      source: sql`finished.source`,
+                      workspaceId: sql`finished.workspace_id`,
+                      sessionId: sql`finished.session_id`,
+                      finishedAt: sql`finished.finished_at`,
+                      metadata: sql`finished.metadata`,
+                    },
+                    sql`counted.input_wait_turn_id`,
+                  )}
+                order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
               )
           )::int as "waitingDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status = 'requires_action'
-          )::int as "attentionDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and effective_pause_revision is not null
-          )::int as "pausedDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status = 'failed'
-          )::int as "failedDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0
-              and status = 'failed'
-              and ${subjectId ?? null}::text is not null
-              and last_sequence > coalesce((
-                select case when personal.manually_unread_through is not null then -1 else personal.acknowledged_sequence end
-                from ${schema.sessionPins} personal
-                where personal.workspace_id = ${workspaceId}
-                  and personal.subject_id = ${subjectId ?? null}
-                  and personal.session_id = numbered.id
-              ), 0)
-          )::int as "unreadFailedDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0
-              and ${subjectId ?? null}::text is not null
-              and last_sequence > coalesce((
-                select case when personal.manually_unread_through is not null then -1 else personal.acknowledged_sequence end
-                from ${schema.sessionPins} personal
-                where personal.workspace_id = ${workspaceId}
-                  and personal.subject_id = ${subjectId ?? null}
-                  and personal.session_id = numbered.id
-              ), 0)
-          )::int as "unreadDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0
-              and ${subjectId ?? null}::text is not null
-              and exists (
-                select 1
-                from ${schema.sessionPins} personal
-                where personal.workspace_id = ${workspaceId}
-                  and personal.subject_id = ${subjectId ?? null}
-                  and personal.session_id = numbered.id
-                  and personal.actively_working
-              )
-          )::int as "activelyWorkingDescendants",
+          count(*) filter (where status = 'requires_action')::int as "attentionDescendants",
+          count(*) filter (where effective_pause_revision is not null)::int as "pausedDescendants",
+          count(*) filter (where status = 'failed')::int as "failedDescendants",
+          count(*) filter (where status = 'failed' and unread)::int as "unreadFailedDescendants",
+          count(*) filter (where unread)::int as "unreadDescendants",
+          count(*) filter (where actively_working)::int as "activelyWorkingDescendants",
           -- Oldest still-open requires_action turn among the counted attention
           -- descendants. The correlated lookup runs only for rows passing the
           -- FILTER and walks session_turns_workspace_queue_idx
@@ -32458,36 +32425,36 @@ export async function sessionTreeStatsForSessions(
             select min(waiting_turn.updated_at)
             from ${schema.sessionTurns} waiting_turn
             where waiting_turn.workspace_id = ${workspaceId}
-              and waiting_turn.session_id = numbered.id
+              and waiting_turn.session_id = counted.id
               and waiting_turn.status = 'requires_action'
-          )) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status = 'requires_action'
-          ) as "attentionSince",
-          coalesce(bool_or(
-            ordinal > ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+          )) filter (where status = 'requires_action') as "attentionSince",
+          (
+            -- The lookahead row proves more descendants than the budget.
+            exists (
+              select 1 from numbered
+              where numbered.ordinal > ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+            )
+            -- A start node on a legacy parent cycle has an edge back to it
+            -- from one of its descendants, which the walk refuses to follow.
             or (
-              ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth = ${SESSION_TREE_STATS_MAX_DEPTH}
+              root.parent_session_id is not null
               and exists (
-                select 1
-                from ${schema.sessions} deeper
-                where deeper.workspace_id = ${workspaceId}
-                  and deeper.parent_session_id = numbered.id
+                select 1 from numbered
+                where numbered.ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+                  and numbered.id = root.parent_session_id
               )
             )
-            or (
-              ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and exists (
-                select 1
-                from ${schema.sessions} cycle_edge
-                where cycle_edge.workspace_id = ${workspaceId}
-                  and cycle_edge.parent_session_id = numbered.id
-                  and cycle_edge.id = any(numbered.path)
-              )
+            or exists (
+              select 1
+              from numbered
+              join ${schema.sessions} deeper
+                on deeper.workspace_id = ${workspaceId}
+               and deeper.parent_session_id = numbered.id
+              where numbered.ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+                and numbered.depth = ${SESSION_TREE_STATS_MAX_DEPTH}
             )
-          ), false) as truncated
-        from numbered
+          ) as truncated
+        from counted
       ) stats
       where root.workspace_id = ${workspaceId}
         and ${inArray(sql`root.id`, uniqueRootIds)}
@@ -32650,12 +32617,7 @@ async function sessionListTotalsInScope(
   const rows = await rawRows<{ needsYouCount: number; groups: SessionListTotals["groups"] }>(
     db,
     sql`
-    with recursive tree_sessions as materialized (
-      select id, account_id, parent_session_id, status, direct_control_state,
-        direct_pause_revision, subtree_run_override_revision,
-        active_turn_id, input_wait_until, input_wait_turn_id
-      from ${schema.sessions} where workspace_id = ${workspaceId}
-    ), personal_state as materialized (
+    with recursive personal_state as materialized (
       select workspace_id, subject_id, session_id, pinned, archived,
         acknowledged_sequence, manually_unread_through, actively_working
       from ${schema.sessionPins}
@@ -32701,7 +32663,8 @@ async function sessionListTotalsInScope(
           case when child.direct_control_state = 'paused' then child.direct_pause_revision end
         ),
         parent.pinned_path or coalesce(personal.pinned, false), parent.related
-      from nodes parent join tree_sessions child on child.parent_session_id = parent.id
+      from nodes parent join ${schema.sessions} child
+        on child.workspace_id = ${workspaceId} and child.parent_session_id = parent.id
       left join personal_state personal on personal.session_id = child.id
       where parent.related
     ), attention_roots as (
@@ -32747,9 +32710,12 @@ async function sessionListTotalsInScope(
         and cursor.session_id = nodes.id and cursor.account_id = nodes.account_id
       left join personal_state personal on personal.session_id = nodes.id
       join roots root on root.id = nodes.root_id
-      join root_attention attention on attention.id = nodes.root_id
       where not root.archived and not nodes.pinned_path
-        and (not ${Boolean(options.needsYouOnly)} or attention.needs_you)
+        ${
+          options.needsYouOnly
+            ? sql`and nodes.root_id in (select id from root_attention where needs_you)`
+            : sql``
+        }
     ), grouped as (
       select channel_id as "channelId", count(*)::int as total,
         count(*) filter (where status = 'requires_action')::int as attention,
