@@ -107,7 +107,10 @@ can be built and tested.
   the moment the reset is done, while its local disk, and the sandboxes
   on it that were never archived, stay for the host to offer back when it
   registers again. One already stopped or deleted needs nothing; one being
-  created or started is reset as well; a suspended one is stopped. A
+  created, started or resumed is waited for and reset once it runs (a
+  resuming instance passes through the same states as a starting one,
+  with its memory kept, so neither is taken as fenced); a suspended one is
+  stopped. A
   fence the cloud does not confirm in two minutes, or that fails, keeps
   the host live and is tried again five seconds later, so nothing is
   handed on from a host whose VMs might still run. Once given up on, a
@@ -238,8 +241,10 @@ can be built and tested.
   and the host must register again), it raises the owner epoch of each of
   its sandboxes and clears their owner. Each comes back on its next wake,
   from its latest archive, on another host. A sandbox never archived is
-  lost with its host, so the service asks for an early archive of every
-  new sandbox. A lost host that comes back gets back each sandbox nobody
+  lost with its host. Early copies, a first archive soon after a sandbox
+  is created and periodic checkpoints while it runs, are planned as their
+  own piece; until they land, a sandbox survives the loss of its host
+  only once it has been archived. A lost host that comes back gets back each sandbox nobody
   adopted since, with its local state, which is at least as new as the
   archive, and drops the rest.
 - **Moves while asleep.** To drain or rebalance a host, the service sends

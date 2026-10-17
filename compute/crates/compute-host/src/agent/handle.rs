@@ -162,7 +162,7 @@ impl Handle {
         owner: OwnerEpoch,
     ) -> Result<(), HostError> {
         self.fleet_only("adopt")?;
-        self.send_unfenced(|reply| Command::Adopt {
+        self.send_naming_owner(|reply| Command::Adopt {
             id,
             config,
             owner,
@@ -175,25 +175,41 @@ impl Handle {
     /// no longer has it; see [`crate::protocol::Request::HandOff`].
     pub async fn hand_off(&self, id: Id, owner: OwnerEpoch) -> Result<(), HostError> {
         self.fleet_only("hand off")?;
-        self.send_unfenced(|reply| Command::HandOff { id, owner, reply })
+        self.send_naming_owner(|reply| Command::HandOff { id, owner, reply })
             .await?
     }
 
     /// Takes in the fleet service's rulings on the sandboxes the host
     /// listed when it registered, and returns once every sandbox the
     /// rulings do not keep is gone (see [`compute_protocol::fleet::Registered`]).
+    /// The renewer sends these itself, under the registration they answer,
+    /// so they carry no admission.
     pub async fn reconcile(&self, rulings: Vec<(Id, Verdict)>) -> Result<(), HostError> {
-        self.send_unfenced(|reply| Command::Reconcile { rulings, reply })
-            .await?
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::Reconcile { rulings, reply })?;
+        answer.await.map_err(|_| HostError::Stopped)?
     }
 
-    /// Sends a request that names its owner epoch itself.
-    async fn send_unfenced<T>(
+    /// Sends a request that names its owner epoch itself. One the fleet
+    /// listener admitted still carries its admission, and the agent carries
+    /// it out only while the lease would still admit it, as for every other
+    /// request the listener admits ([`Handle::admitted`]): an adopt or
+    /// hand-off that waited past a renewal window, or across a new
+    /// registration, does nothing.
+    async fn send_naming_owner<T>(
         &self,
         make: impl FnOnce(oneshot::Sender<T>) -> Command,
     ) -> Result<T, HostError> {
         let (reply, answer) = oneshot::channel();
-        self.send(make(reply))?;
+        let command = match self.origin {
+            Origin::Fleet(owner, Some(admission)) => Command::Owned {
+                owner,
+                admission: Some(admission),
+                command: Box::new(make(reply)),
+            },
+            Origin::Fleet(_, None) | Origin::Local | Origin::LocalToFleet => make(reply),
+        };
+        self.send(command)?;
         answer.await.map_err(|_| HostError::Stopped)
     }
 

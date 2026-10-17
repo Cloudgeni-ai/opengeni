@@ -405,6 +405,16 @@ async fn a_request_that_waited_past_its_admission_does_nothing() {
         stale.touch(sandbox, None, Priority::Interactive).await,
         Err(HostError::NotAdmitted)
     ));
+    // An adopt or hand-off names its owner itself, and is still held to
+    // its admission.
+    assert!(matches!(
+        stale.adopt(other, config(NEVER), OwnerEpoch(2)).await,
+        Err(HostError::NotAdmitted)
+    ));
+    assert!(matches!(
+        stale.hand_off(sandbox, OwnerEpoch::FIRST).await,
+        Err(HostError::NotAdmitted)
+    ));
     assert!(
         admitted(3, 11)
             .touch(sandbox, None, Priority::Interactive)
@@ -419,6 +429,16 @@ async fn a_request_that_waited_past_its_admission_does_nothing() {
         ),
         "nothing sent under an earlier registration acts"
     );
+    assert!(matches!(
+        admitted(3, 13)
+            .adopt(other, config(NEVER), OwnerEpoch(2))
+            .await,
+        Err(HostError::NotAdmitted)
+    ));
+    assert!(matches!(
+        admitted(3, 13).hand_off(sandbox, OwnerEpoch::FIRST).await,
+        Err(HostError::NotAdmitted)
+    ));
     assert!(
         admitted(4, 1)
             .touch(sandbox, None, Priority::Interactive)

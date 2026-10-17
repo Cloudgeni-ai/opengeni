@@ -281,6 +281,46 @@ async fn a_lapsed_host_of_the_group_is_reset_before_it_is_given_up_on() {
     );
 }
 
+/// An instance on its way to running, as when it resumes from a suspend
+/// with its memory kept, is not taken as fenced: the leader waits until it
+/// runs, resets it, and only then gives up on its host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resuming_host_of_the_group_is_reset_once_it_runs_before_it_is_given_up_on() {
+    let (fleet, compute) = fleet(&[("hosts-a1b2", "RUNNING")]).await;
+    let host = fleet.host("hosts-a1b2").await;
+    let set = |status: &str| {
+        compute
+            .instances
+            .lock()
+            .unwrap()
+            .insert("hosts-a1b2".into(), status.into());
+    };
+    set("PROVISIONING");
+    host.renewing(false);
+    tokio::time::sleep(past_lapse(&fleet) + Duration::from_secs(2)).await;
+    assert!(
+        counted(&fleet, &host).await,
+        "given up on while provisioning: {:?}",
+        compute.asked()
+    );
+    set("STAGING");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        counted(&fleet, &host).await,
+        "given up on while staging: {:?}",
+        compute.asked()
+    );
+    assert!(compute.asked().is_empty(), "{:?}", compute.asked());
+    set("RUNNING");
+    until(
+        Duration::from_secs(10),
+        "the host is given up on",
+        async || !counted(&fleet, &host).await,
+    )
+    .await;
+    assert_eq!(compute.asked(), ["reset hosts-a1b2"]);
+}
+
 /// While its fence fails, a host is never given up on; once one succeeds,
 /// it is.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

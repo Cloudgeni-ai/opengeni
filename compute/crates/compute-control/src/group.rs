@@ -267,10 +267,13 @@ impl GcpGroup {
     }
 
     /// Makes sure nothing that ran on instance `name` runs any more, within
-    /// `within`: resets it if it runs, stops it if it is suspended (which
-    /// would keep its memory), waits while it stops or suspends, and finds
-    /// it already fenced if it is stopped, starting or gone. An error
-    /// proves nothing: the host may still run.
+    /// `within`: resets it once it runs, stops it if it is suspended (which
+    /// would keep its memory), and finds it already fenced only if it is
+    /// stopped or gone. Meanwhile it waits: while the instance starts,
+    /// stops, suspends or is repaired. A starting instance is not taken as
+    /// fenced, since one resuming from a suspend passes through the same
+    /// states with its memory kept. An error proves nothing: the host may
+    /// still run.
     pub async fn fence(&self, name: &str, within: Duration) -> anyhow::Result<Fenced> {
         let deadline = Instant::now() + within;
         loop {
@@ -279,8 +282,6 @@ impl GcpGroup {
             };
             match status.as_str() {
                 "TERMINATED" => return Ok(Fenced::Stopped),
-                // Starting from stopped: what ran before is gone.
-                "PROVISIONING" | "STAGING" => return Ok(Fenced::Reset),
                 "RUNNING" => {
                     let operation = self.act(name, "reset").await?;
                     self.finish(operation, deadline).await?;
@@ -290,7 +291,8 @@ impl GcpGroup {
                     let operation = self.act(name, "stop").await?;
                     self.finish(operation, deadline).await?;
                 }
-                // Stopping, suspending or being repaired: look again.
+                // Starting or resuming (`PROVISIONING`, `STAGING`),
+                // stopping, suspending or being repaired: look again.
                 _ => {}
             }
             anyhow::ensure!(

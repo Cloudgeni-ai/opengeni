@@ -145,7 +145,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// since, so it is carried out only if the lease would still admit it.
     /// Nothing sent under a registration the host no longer holds then
     /// acts here, and no create or adopt starts once the host lists what
-    /// it holds to register again.
+    /// it holds to register again. An adopt or hand-off, which names its
+    /// owner itself, goes on to its own checks once admitted.
     pub(super) fn owned(
         &mut self,
         owner: OwnerEpoch,

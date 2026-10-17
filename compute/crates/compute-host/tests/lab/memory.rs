@@ -18,7 +18,16 @@ pub(super) fn meminfo(field: &str) -> u64 {
 
 const POOL: &str = "/proc/sys/vm/nr_hugepages";
 
-/// Shrinks the huge-page pool to `free` free pages for as long as it lives.
+/// Free huge pages a guest can fault in. A guest maps its memory without
+/// reserving pages, so pages another process reserved (such as a database
+/// on the host mapping its shared memory with huge pages) are counted free
+/// but are not its to take.
+fn unreserved_free() -> u64 {
+    meminfo("HugePages_Free:").saturating_sub(meminfo("HugePages_Rsvd:"))
+}
+
+/// Shrinks the huge-page pool to `free` free pages a guest can fault in,
+/// for as long as it lives.
 struct ShrunkPool {
     total: u64,
 }
@@ -26,8 +35,8 @@ struct ShrunkPool {
 impl ShrunkPool {
     fn leaving(free: u64) -> Self {
         let total = meminfo("HugePages_Total:");
-        let used = total - meminfo("HugePages_Free:");
-        std::fs::write(POOL, (used + free).to_string()).unwrap();
+        let taken = total - unreserved_free();
+        std::fs::write(POOL, (taken + free).to_string()).unwrap();
         Self { total }
     }
 }
@@ -109,7 +118,7 @@ async fn a_guest_stalls_while_the_huge_page_pool_is_empty_and_resumes_after() {
     );
     sleep(Duration::from_secs(10)).await;
     assert!(!fill.is_finished(), "the guest went on without pages");
-    assert_eq!(meminfo("HugePages_Free:"), 0);
+    assert_eq!(unreserved_free(), 0);
     let status = agent.status().await;
     let stalled = status.sandboxes.iter().find(|s| s.id == sandbox).unwrap();
     assert_eq!(
