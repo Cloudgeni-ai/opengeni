@@ -420,12 +420,36 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       qual: `scoped_compute_policy_capability_active((CURRENT_USER)::text, '${owned.ownerRole}'::text, NULL::text)`,
       check: null,
     };
+    // 0823 allows account-bound scoped-compute row locks, not writes. Normalize
+    // the expected initplan with PostgreSQL rather than hard-coding whitespace.
+    await owner.unsafe(`CREATE POLICY expected_scoped_compute_lock ON session_turns
+      FOR UPDATE USING (
+        account_id = nullif(current_setting('opengeni.account_id', true), '')::uuid
+        AND (SELECT scoped_compute_policy_capability_active(
+          current_user, '${owned.ownerRole.replaceAll("'", "''")}', NULL))
+      ) WITH CHECK (false)`);
+    const [normalizedLock] = await owner`
+      select pg_get_expr(polqual, polrelid) as qual,
+        pg_get_expr(polwithcheck, polrelid) as check
+      from pg_policy where polrelid = 'session_turns'::regclass
+        and polname = 'expected_scoped_compute_lock'`;
+    await owner`DROP POLICY expected_scoped_compute_lock ON session_turns`;
+    const scopedComputeLock = {
+      relname: "session_turns",
+      polname: "scoped_compute_capability_lock",
+      polcmd: "w",
+      polpermissive: true,
+      roles: "{0}",
+      qual: normalizedLock!.qual,
+      check: normalizedLock!.check,
+    };
     const plannedWithVaults = byPolicy([
       ...plannedPolicies,
       vaultRead("scheduled_task_runs"),
       vaultRead("session_turns"),
       exhaustedScheduleRead,
       scopedComputeRead,
+      scopedComputeLock,
     ]);
     // ...and 0805, which inlines every session_reference_visible() call as
     // the same EXISTS probe of sessions, kept per-row by 0827's OFFSET 0. Let

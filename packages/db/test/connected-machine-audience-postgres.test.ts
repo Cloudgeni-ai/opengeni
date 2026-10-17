@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import {
   acceptOrganizationInvitation,
   changeMachineAudience,
@@ -19,6 +23,7 @@ import {
   recoverSessionDispatch,
   setActiveSandbox,
   settleSessionAttemptInterruptions,
+  withRlsContext,
   type DbClient,
   type MachineAudienceItem,
   type MachineAudiencePreviewRecord,
@@ -27,18 +32,23 @@ import {
 // Who can use a Connected Machine (Workspace or Only me) changes in place: the
 // same enrollment, sandbox, credentials and live connection stay, so chats,
 // schedules and the installed agent are never re-registered. These tests run
-// the real migrated schema under the FORCE-RLS app role.
-let shared: SharedTestDatabase;
+// the real migrated schema with both a non-BYPASSRLS schema owner and runtime.
+let shared: RestrictedRuntimeTestDatabase;
 let client: DbClient;
 let app: postgres.Sql;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("connected-machine-audience");
+  const acquired = await acquireRestrictedRuntimeTestDatabase("connected-machine-audience");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
-  client = createDb(shared.appUrl, { max: 4 });
-  app = postgres(shared.appUrl, { max: 2, prepare: false, onnotice: () => undefined });
-}, 180_000);
+  client = createDb(shared.appUrl, { max: 4, searchPath: shared.schema });
+  app = postgres(shared.appUrl, {
+    max: 2,
+    prepare: false,
+    connection: { search_path: shared.schema },
+    onnotice: () => undefined,
+  });
+}, 900_000);
 
 afterAll(async () => {
   await app?.end({ timeout: 1 }).catch(() => undefined);
@@ -372,6 +382,38 @@ async function turnRow(turnId: string) {
 }
 
 describe("changing who can use a Connected Machine in place", () => {
+  test("private preview is redacted and releases its read capabilities before returning", async () => {
+    const org = await organization();
+    const machine = await workspaceMachine(org);
+    const privateChat = await chatOnMachine(
+      org,
+      machine,
+      org.member,
+      "user_private",
+      "Private build notes",
+    );
+    await withRlsContext(client.db, org, async (tx) => {
+      await tx.execute(sql`select set_config('opengeni.subject_id', ${org.owner}, true)`);
+      const [row] = await tx.execute<{ value: MachineAudiencePreviewRecord }>(sql`
+        select preview_connected_machine_audience_change(
+          ${org.accountId}::uuid, ${org.workspaceId}::uuid, ${machine.enrollmentId}::uuid,
+          'user', ${org.owner}, true
+        ) as value`);
+      expect(itemFor(row!.value.items, privateChat.id)).toMatchObject({
+        action: "move_off",
+        title: null,
+        ownerSubjectId: null,
+      });
+      const [capabilities] = await tx.execute(sql`
+        select scoped_compute_policy_capability_active(current_user, current_user, null) as compute,
+          session_tenancy_fence_owner_policy_active(current_user, current_user,
+            ${shared.schema}::regnamespace::oid, ${org.workspaceId}::uuid, true) as inventory`);
+      expect(capabilities).toMatchObject({ compute: false, inventory: false });
+      const hidden = await tx.execute(sql`select id from sessions where id = ${privateChat.id}`);
+      expect(hidden).toHaveLength(0);
+    });
+  });
+
   test("one confirmation narrows to Only me and applies every default", async () => {
     const org = await organization();
     const machine = await workspaceMachine(org);
