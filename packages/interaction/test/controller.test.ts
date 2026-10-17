@@ -697,6 +697,38 @@ describe("resolved action targets", () => {
     expect(await untraced.run(command(1))).not.toHaveProperty("targets");
   });
 
+  test("returns the page a driver observed after a failure", async () => {
+    for (const failure of [
+      new InteractionDefiniteDriverError("locator_not_found", "fixture stale ref"),
+      new InteractionOutcomeUnknownDriverError("outcome_unknown", "fixture unknown"),
+    ]) {
+      failure.observation = observation(target());
+      const controller = tracedController(async () => {
+        throw failure;
+      }, []);
+      const receipt = await controller.run(command(1));
+      expect(receipt.state).toBe(
+        failure instanceof InteractionDefiniteDriverError ? "failed" : "outcome_unknown",
+      );
+      expect(receipt.error?.code).toBe(failure.code);
+      expect(receipt.observation?.target.id).toBe("target-1");
+    }
+
+    // An observation of another target, or one that does not parse, is dropped
+    // without changing the failure.
+    for (const invalid of [observation(target("target-2")), { bogus: true }]) {
+      const failure = new InteractionDefiniteDriverError("invalid_action", "fixture refusal");
+      failure.observation = invalid;
+      const controller = tracedController(async () => {
+        throw failure;
+      }, []);
+      const receipt = await controller.run(command(1));
+      expect(receipt.state).toBe("failed");
+      expect(receipt.error?.code).toBe("invalid_action");
+      expect(receipt.observation).toBeNull();
+    }
+  });
+
   test("bounds recorded targets", async () => {
     const controller = tracedController(async (_command, trace) => {
       for (let index = 0; index < 500; index += 1) {

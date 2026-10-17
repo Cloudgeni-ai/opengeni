@@ -175,7 +175,7 @@ export function normalizeCdpAccessibilityTree(options: {
       role: entry.role,
       ...(entry.name !== null ? { name: entry.name.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
       ...(description ? { description: description.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
-      ...safeValue(raw, entry.role),
+      ...safeValue(raw, entry.role, entry.states),
       states: entry.states,
       actions: entry.actions,
       ...(children.length > 0 ? { children } : {}),
@@ -245,9 +245,17 @@ export function accessibilityContainer(
 function safeValue(
   node: CdpAxNode,
   role: string,
+  states: readonly string[],
 ): { value?: string | { redacted: true; reason: "password" } } {
   const value = stringValue(node.value);
   if (!value) return {};
+  // Text typed into a field may hold a secret, so editable values stay out of
+  // observations. A non-editable combobox (a native select or a custom
+  // picker) only shows the option chosen on the page, which the agent needs
+  // to confirm a selection.
+  if (role === "combobox" && !states.some((state) => state.startsWith("editable"))) {
+    return { value: value.slice(0, SEMANTIC_VALUE_MAX_CHARS) };
+  }
   if (["textbox", "searchbox", "combobox", "spinbutton"].includes(role)) return {};
   return { value: value.slice(0, SEMANTIC_VALUE_MAX_CHARS) };
 }
