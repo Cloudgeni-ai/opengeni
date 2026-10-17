@@ -8885,6 +8885,9 @@ export const sessionAttemptInterruptions = pgTable(
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
     settledAt: timestamp("settled_at", { withTimezone: true }),
+    // Monotonic hint maintained by triggers from the attempt's quiesced_at.
+    // Indexes the open settlement set only; readers still check the attempt.
+    attemptQuiesced: boolean("attempt_quiesced").notNull().default(false),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -8914,6 +8917,11 @@ export const sessionAttemptInterruptions = pgTable(
     unsettled: index("session_attempt_interruptions_unsettled_idx")
       .on(table.workspaceId, table.sessionId, table.requestedAt)
       .where(sql`${table.state} in ('pending', 'delivered', 'acknowledged')`),
+    openSettlement: index("session_attempt_interruptions_open_settlement_idx")
+      .on(table.workspaceId, table.sessionId)
+      .where(
+        sql`${table.state} in ('pending', 'delivered', 'acknowledged') or not ${table.attemptQuiesced}`,
+      ),
     kindValid: check(
       "session_attempt_interruptions_kind_check",
       sql`${table.kind} in ('session_pause', 'workspace_pause', 'steer', 'maintenance', 'authority_change', 'organization_membership_revoked')`,
