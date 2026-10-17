@@ -173,12 +173,19 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     const [owner] = await fixture.admin`select scope_subject_id from knowledge_entries
       where account_id=${org.accountId}::uuid and id=${saved.entryId}::uuid`;
     expect(owner?.scope_subject_id).toBe(org.subjectId);
-    const widened = await saveKnowledgeEntry(fixture.client.db, context(next), {
+    // An explicit destination remains available under its own accepted policy;
+    // sharing alone must not change the default used above or the frozen policy.
+    const explicit = await saveKnowledgeEntry(fixture.client.db, context(next), {
       ...request,
       operationId: crypto.randomUUID(),
       scope: "workspace",
-    }).catch((error: unknown) => error);
-    expect(nestedPostgresSqlState(widened)).toBe("42501");
+    });
+    expect(
+      await getKnowledgeEntry(fixture.client.db, context(next), explicit.entryId),
+    ).toMatchObject({
+      scope: "workspace",
+    });
+    expect(await learning(next)).toEqual(accepted);
     const stale = await learning(work).catch((error: unknown) => error);
     expect(nestedPostgresSqlState(stale)).toBe("42501");
     expect(
