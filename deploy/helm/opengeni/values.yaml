@@ -924,6 +924,11 @@ postgres:
   # starts the new server. Plan a short outage and a backup first. fromImage
   # must be the old major on the same OS release as postgres.image, and every
   # extension library the old databases use must exist in postgres.image.
+  # Before Helm changes the StatefulSet, a pre-upgrade hook Job rehearses the
+  # upgrade: it copies the running server's schema (no rows) into a scratch
+  # cluster of the old major and runs the new pg_upgrade --check against it.
+  # If the check fails, the release fails and the running server keeps
+  # serving; the Job's log names the objects to change.
   # After the upgrade, run `vacuumdb --all --analyze-in-stages
   # --missing-stats-only`, then `vacuumdb --all --analyze-only`, and ALTER
   # EXTENSION ... UPDATE for each extension, then turn this off again.
@@ -932,6 +937,9 @@ postgres:
     fromImage:
       repository: pgvector/pgvector
       tag: pg17
+    preflight:
+      activeDeadlineSeconds: 1800
+      resources: {}
   auth:
     database: opengeni
     username: opengeni

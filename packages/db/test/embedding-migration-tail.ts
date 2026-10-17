@@ -277,4 +277,7 @@ export const embeddingMigrationTail = [
   // Installs an inventory read policy with the session-tenancy fence helper
   // from withheld 0345; replay after it.
   "0792_scheduled_task_blocker_reviews.sql",
+  // Rewrites the session-tenancy fence registry and its capability routines
+  // from withheld 0345; replay after it.
+  "0800_session_tenancy_fence_registry_schema_name.sql",
 ];
