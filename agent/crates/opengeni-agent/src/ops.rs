@@ -409,26 +409,28 @@ pub(crate) fn frame_publisher(
 }
 
 /// Publish terminal proof even when there is no output consumer or send credit.
-/// A lost event is recoverable through OpQuery; it never acknowledges output.
+/// The bulk publisher retries retained, unacknowledged completions independently
+/// of frame credit; this immediate hook never acknowledges output.
 pub(crate) fn completion_publisher(
     publish: Option<FrameSink>,
     op_id: String,
 ) -> impl FnOnce(Option<u64>, &JobExit) + Send + 'static {
     move |_, exit| {
         if let Some(publish) = publish {
-            publish(
-                v1::AgentEvent {
-                    agent_id: String::new(),
-                    event: Some(v1::agent_event::Event::OperationCompleted(
-                        v1::OperationCompleted {
-                            op_id,
-                            exit: Some(wire_exit(exit)),
-                        },
-                    )),
-                }
-                .encode_to_vec(),
-            );
+            publish(completion_event(op_id, exit).encode_to_vec());
         }
+    }
+}
+
+pub(crate) fn completion_event(op_id: String, exit: &JobExit) -> v1::AgentEvent {
+    v1::AgentEvent {
+        agent_id: String::new(),
+        event: Some(v1::agent_event::Event::OperationCompleted(
+            v1::OperationCompleted {
+                op_id,
+                exit: Some(wire_exit(exit)),
+            },
+        )),
     }
 }
 
@@ -900,6 +902,16 @@ mod tests {
             "wire digest proves byte-exact assembly"
         );
         assert_eq!(exit.totals.get("stdout"), Some(&4));
+        // No completion sink was supplied: even a completely lost immediate
+        // notification remains recoverable from this connection's retained truth.
+        let retry = rig.engine.retained_completions("default");
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].0, "op-1");
+        assert_eq!(wire_exit(&retry[0].1).exit_code, 3);
+        assert_eq!(
+            rig.engine.retained_completions("another-connection"),
+            vec![]
+        );
 
         // Query answers COMPLETE with the same record.
         let q = serve_op_query(
@@ -1053,6 +1065,7 @@ mod tests {
                 .route_command(&op, JobCommand::Detach { completed: None }),
             "pump ended after the final ack"
         );
+        assert_eq!(rig.engine.retained_completions("default"), vec![]);
         assert!(matches!(
             rig.engine.query(&op),
             QueryAnswer::Complete {

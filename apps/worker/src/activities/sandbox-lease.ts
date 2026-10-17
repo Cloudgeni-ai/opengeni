@@ -83,7 +83,7 @@ import {
   retainedProcessReconciliationProof,
   retainedProcessSettlementIdentity,
   recoverManagedSessionBackgroundCommand,
-  settleClaimedConnectedMachineBackgroundCommand,
+  settleCollectedConnectedMachineBackgroundCommand,
   settleSandboxCheckpointArtifactGc,
   rlsContextForWorkspace,
   settleRetainedProcess,
@@ -97,7 +97,6 @@ import {
   claimConnectedCommandOutputReleases,
   claimConnectedMachineSessionBackgroundCommands,
   deferConnectedMachineBackgroundCommandReconciliation,
-  recordConnectedMachineBackgroundCommandProof,
   recordConnectedCommandOutputConsumption,
   settleConnectedCommandOutputReleaseClaim,
   type ConnectedMachineBackgroundCommandClaim,
@@ -1703,48 +1702,37 @@ export async function reconcileConnectedMachineBackgroundCommands(
         } finally {
           finishFirstProbe?.();
         }
-
-        try {
-          await recordConnectedMachineBackgroundCommandProof(db, { claim, proof });
-          recordConnectedCommandReconciliation(observability, `proof_${proof.outcome}`);
-        } catch (error) {
-          recordConnectedCommandReconciliation(observability, "proof_checkpoint_failed");
-          observability.warn("sandbox reaper: connected-command proof checkpoint failed", {
-            commandId: claim.commandId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          return;
-        }
       }
 
       try {
-        const settlement = await settleClaimedConnectedMachineBackgroundCommand(db, { claim });
-        if (!settlement.settled) {
-          throw new Error("Connected command settlement lost its exact claim or proof");
-        }
         const receipt =
           outputReplay?.outputReceipt ??
           (outputReplay?.status === "running" ? outputReplay.terminal?.outputReceipt : undefined);
         const terminal =
           outputReplay?.status === "completed" ? outputReplay : outputReplay?.terminal;
-        if (proof.outcome === "exited" && receipt && terminal) {
-          await recordConnectedCommandOutputConsumption(db, {
-            ...claim,
-            receipt,
-            exitCode: terminal.outcome.response.exitCode,
-          });
-        }
-        if (settlement.events.length > 0) {
-          try {
-            await bus.publish(claim.workspaceId, claim.sessionId, settlement.events);
-          } catch (error) {
-            observability.warn("sandbox reaper: connected-command event fanout failed", {
-              commandId: claim.commandId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
-        recordConnectedCommandReconciliation(observability, `settled_${proof.outcome}`);
+        if (
+          terminal &&
+          proof.outcome === "exited" &&
+          terminal.outcome.response.exitCode !== proof.exitCode
+        )
+          throw new Error("Connected command replay conflicts with terminal provider proof");
+        const settled = await settleCollectedConnectedMachineBackgroundCommand(db, {
+          claim,
+          proof,
+          receipt,
+          publish: async (events) => {
+            try {
+              await bus.publish(claim.workspaceId, claim.sessionId, events);
+            } catch (error) {
+              observability.warn("sandbox reaper: connected-command event fanout failed", {
+                commandId: claim.commandId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          },
+        });
+        if (settled)
+          recordConnectedCommandReconciliation(observability, `settled_${proof.outcome}`);
       } catch (error) {
         recordConnectedCommandReconciliation(observability, "settlement_failed");
         observability.warn("sandbox reaper: connected-command settlement failed", {

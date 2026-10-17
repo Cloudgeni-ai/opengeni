@@ -61,6 +61,36 @@ function rpc(answer: OpStatus) {
 }
 
 describe("Connected Machine background-command reconciliation", () => {
+  test("a large captured batch checks collector ownership between durable writes", async () => {
+    let now = 0;
+    let writes = 0;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      await expect(
+        replayConnectedCommandOutput(
+          {
+            readExisting: async (_op, _wait, capture) => {
+              await capture([
+                { sequence: "1", stream: "stdout", chunk: "first" },
+                { sequence: "2", stream: "stdout", chunk: "second" },
+              ]);
+              throw new Error("must yield before a second write");
+            },
+          },
+          "op",
+          true,
+          async () => {
+            writes++;
+            now = 1_000;
+          },
+          1_000,
+        ),
+      ).rejects.toThrow("claim deadline");
+      expect(writes).toBe(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
   test("a push collector relinquishes its existing claim budget even while replay advances", async () => {
     let reads = 0;
     const clock = spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(1_000);

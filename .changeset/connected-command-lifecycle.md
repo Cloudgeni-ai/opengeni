@@ -5,5 +5,6 @@
 ---
 
 Settle Connected Machine background commands promptly from authenticated runner
-completion events after verified output capture, with reconciliation as fallback
-and independently retryable output release.
+completion events after verified output capture, with retained notification replay
+across reconnects, independent liveness capacity, shared race-safe settlement,
+reconciliation as fallback and independently retryable output release.

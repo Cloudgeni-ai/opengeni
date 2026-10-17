@@ -242,8 +242,11 @@ Terminal proof atomically commits settlement/audit. Connected Machine runners
 push `OperationCompleted` independently of output attachment and credit; API
 ingestion claims the original process/operation, captures retained output through
 its verified exit frontier, then uses the same fenced settlement. Pushes cannot
-steal an active reaper claim; a racing push preserves an immediate retry. Reaping
-remains the lost-event fallback. The event alone does not grant output custody
+steal an active reaper claim; a racing push preserves an immediate retry. The runner
+retries unacknowledged terminal records on reconnect and its existing heartbeat
+cadence over the bulk connection. Completion collectors use independent ingestion
+capacity and yield before their claim expires, preserving heartbeat/control liveness.
+Reaping remains the unavailable-runner fallback. The event alone does not grant output custody
 or acknowledge retained bytes. Unobserved nonterminal
 sessions receive fallback input. Terminal reads suppress pending notifications,
 not history; running reads suppress neither. Failed/cancelled sessions retain

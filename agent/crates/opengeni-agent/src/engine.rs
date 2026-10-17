@@ -936,6 +936,24 @@ impl Engine {
         self.registry.lock().expect("registry lock").counters()
     }
 
+    /// Replayable terminal notifications for this exact connection only. Keep
+    /// retrying until output custody is acknowledged, including across link loss.
+    #[must_use]
+    pub fn retained_completions(&self, scope: &str) -> Vec<(String, JobExit)> {
+        let prefix = format!("{scope}:");
+        self.registry
+            .lock()
+            .expect("registry lock")
+            .unacknowledged_completed()
+            .filter_map(|(id, handles)| {
+                Some((
+                    id.as_str().strip_prefix(&prefix)?.to_string(),
+                    handles.exit.get()?.clone(),
+                ))
+            })
+            .collect()
+    }
+
     /// Detaches only jobs owned by one deployment/workspace link. Other links
     /// continue streaming uninterrupted when this transport reconnects.
     pub async fn detach_scope(&self, scope: &str) {

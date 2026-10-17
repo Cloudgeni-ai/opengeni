@@ -148,6 +148,8 @@ export interface OpStreamExecClientDeps {
  *  telemetry the session folds into its op observation. */
 export interface OpStreamExecOutcome {
   response: ExecResponse;
+  /** Verified retained exit, for collectors; never projected into shell output. */
+  terminalExit?: OpExit;
   /** Runner transport failure is independent of the process exit code. */
   failure?: Pick<OpExit, "failureCode" | "failureDetail">;
   /** Attach/query heals that occurred after streaming began (gap replays,
@@ -775,6 +777,7 @@ class OpConsumer {
     const { stdout, stderr } = this.assembleAndVerify(exit);
     if (adopted || exec === null) await yieldOptions?.captureOutput?.(this.outputFrames.splice(0));
     const outcome: OpStreamExecOutcome = {
+      terminalExit: exit,
       ...(exit.failureCode
         ? { failure: { failureCode: exit.failureCode, failureDetail: exit.failureDetail } }
         : {}),

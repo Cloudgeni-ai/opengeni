@@ -1,13 +1,11 @@
 import type { OperationCompleted } from "@opengeni/agent-proto";
-import { settleClaimedConnectedMachineBackgroundCommand, type Database } from "@opengeni/db";
+import { settleCollectedConnectedMachineBackgroundCommand, type Database } from "@opengeni/db";
 import {
   locateConnectedCommandCompletion,
   claimPushedConnectedCommandCompletion,
-  recordConnectedMachineBackgroundCommandProof,
-  recordConnectedCommandOutputConsumption,
   deferConnectedMachineBackgroundCommandReconciliation,
 } from "@opengeni/db/session-background-commands";
-import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
+import { createConnectedCommandOutputCapture } from "@opengeni/db/session-command-output";
 import type { EventBus } from "@opengeni/events";
 import {
   NatsControlRpc,
@@ -72,46 +70,40 @@ export async function ingestConnectedCommandCompletion(
         retryClock: defaultSelfhostedRetryClock,
         journal: { attachGeneration: () => String(Date.now()), persistSettled: () => {} },
       });
+    const capture = createConnectedCommandOutputCapture(
+      db,
+      command,
+      bus
+        ? async (events) => {
+            await bus.publish(command.workspaceId, command.sessionId, events);
+          }
+        : undefined,
+    );
     const replay = await replayConnectedCommandOutput(
       client,
       claim.opId,
       true,
-      async (frames) => {
-        for (const frame of frames) {
-          const events = await appendSessionCommandOutput(db, {
-            ...command,
-            chunkId: `op-frame:${frame.sequence}`,
-            stream: frame.stream,
-            chunk: frame.chunk,
-          });
-          if (bus && events.length)
-            await bus
-              .publish(command.workspaceId, command.sessionId, events)
-              .catch(() => undefined);
-        }
-      },
+      async (frames) => capture(command.commandId, frames),
       replayDeadlineAt,
     );
     const terminal = replay.status === "completed" ? replay : replay.terminal;
     const receipt =
       replay.outputReceipt ??
       (replay.status === "running" ? replay.terminal?.outputReceipt : undefined);
-    if (!terminal || !receipt || terminal.outcome.response.exitCode !== completed.exit.exitCode)
+    if (!terminal || !receipt || !terminal.outcome.terminalExit)
       throw new Error("Connected command completion does not match its captured exit frontier");
-    const exit = completed.exit;
-    await recordConnectedMachineBackgroundCommandProof(db, {
+    // The event is a wake hint. Only verified retained truth supplies proof,
+    // including cancellation, timeout and failure details, not just exit code.
+    const exit = terminal.outcome.terminalExit;
+    await settleCollectedConnectedMachineBackgroundCommand(db, {
       claim,
       proof: connectedCommandExitProof(exit, new Date()),
-    });
-    const settlement = await settleClaimedConnectedMachineBackgroundCommand(db, { claim });
-    if (!settlement.settled) return; // An attached owner may have settled after capture.
-    // Custody checkpoint failure must not suppress the already committed event.
-    if (bus) await bus.publish(command.workspaceId, command.sessionId, settlement.events);
-    await recordConnectedCommandOutputConsumption(db, {
-      ...command,
-      ...identity,
       receipt,
-      exitCode: exit.exitCode,
+      publish: bus
+        ? async (events) => {
+            await bus.publish(command.workspaceId, command.sessionId, events);
+          }
+        : undefined,
     });
     // Final ACK remains the separately retryable custody obligation, never the
     // model's observation. All bytes are durable before terminal fanout.

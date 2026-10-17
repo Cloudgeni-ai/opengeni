@@ -688,8 +688,12 @@ authenticated control-workspace/enrollment/connection subject and operation ID
 to claim the original adopted command, even after its session changes routes.
 The collector durably captures retained output through the verified exit frontier
 before settlement, so a terminal read cannot race ahead of the final output.
-Duplicate events cannot steal an active collector's claim. Missed events, older
-agents and lost connections remain covered by reconciliation. Terminal publication
+Duplicate events cannot steal an active collector's claim. The runner republishes
+unacknowledged terminal records on connection establishment and at its existing
+heartbeat cadence over the independent bulk connection, healing a full send queue
+or reconnect without waiting for reaper backoff. Retention and final acknowledgement
+own this retry inventory. Older agents and lost connections remain covered by
+reconciliation. Terminal publication
 does not discard retained output; release remains separately retryable after custody.
 Completion collectors have independent ingestion capacity, so even a saturated
 collection queue cannot delay machine heartbeats. A collector yields to reconciliation

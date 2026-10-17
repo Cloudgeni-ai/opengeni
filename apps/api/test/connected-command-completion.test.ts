@@ -15,6 +15,8 @@ import {
   createWorkspace,
   initializeSessionStartAtomically,
   listSessionEvents,
+  settleConnectedMachineSessionBackgroundCommand,
+  settleCollectedConnectedMachineBackgroundCommand,
 } from "@opengeni/db";
 import {
   getSessionBackgroundCommand,
@@ -23,13 +25,15 @@ import {
   claimPushedConnectedCommandCompletion,
   deferConnectedMachineBackgroundCommandReconciliation,
 } from "@opengeni/db/session-background-commands";
+import { createConnectedCommandOutputCapture } from "@opengeni/db/session-command-output";
 import { handleAgentEventPayload } from "../src/sandbox/metrics-ingestion";
 import { ingestConnectedCommandCompletion } from "../src/sandbox/command-completion";
 
 function reader(
-  exitCode: number,
+  exitCode: number | OpExit,
   chunk = "final output\n",
 ): Pick<OpStreamExecClient, "readExisting"> {
+  const exit = typeof exitCode === "number" ? OpExit.fromPartial({ exitCode }) : exitCode;
   return {
     readExisting: async (_opId, _yieldMs, capture) => {
       await capture([{ sequence: "1", stream: "stdout", chunk }]);
@@ -38,7 +42,8 @@ function reader(
         replaySequence: "2",
         outputReceipt: { exitSeq: "2", attachGeneration: "1" },
         outcome: {
-          response: ExecResponse.fromPartial({ exitCode }),
+          response: ExecResponse.fromPartial({ exitCode: exit.exitCode, timedOut: exit.timedOut }),
+          terminalExit: exit,
           heals: 0,
           startRetries: 0,
           replyBytes: chunk.length,
@@ -67,7 +72,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await client?.close();
   await shared?.release();
-}, 60_000);
+}, 180_000);
 
 async function fixture(crossWorkspace = false) {
   const suffix = crypto.randomUUID();
@@ -154,10 +159,22 @@ test("pushed terminal proof settles the original command once despite route chan
     opId: command.opId,
     exit: OpExit.fromPartial({ exitCode: -1, cancelled: true }),
   };
-  await ingestConnectedCommandCompletion(client.db, ids(command), completed, bus, reader(-1));
+  await ingestConnectedCommandCompletion(
+    client.db,
+    ids(command),
+    completed,
+    bus,
+    reader(completed.exit),
+  );
   const result = await getSessionBackgroundCommand(client.db, command);
   expect(result).toMatchObject({ state: "exited", exitCode: -1, settlementReason: "op_cancelled" });
-  await ingestConnectedCommandCompletion(client.db, ids(command), completed, bus, reader(-1));
+  await ingestConnectedCommandCompletion(
+    client.db,
+    ids(command),
+    completed,
+    bus,
+    reader(completed.exit),
+  );
   expect(
     (await listSessionEvents(client.db, command.workspaceId, command.sessionId)).filter(
       (event) => event.type === "session.command.finished",
@@ -212,7 +229,7 @@ test("runner failures keep their typed detail and a missing exit is not terminal
       ids(command),
       { opId: command.opId, exit },
       undefined,
-      reader(-1),
+      reader(exit ?? -1),
     );
     const result = await getSessionBackgroundCommand(client.db, command);
     expect(result?.state).toBe(exit ? "exited" : "running");
@@ -299,4 +316,76 @@ test("push cannot steal an active collector and preserves its wake through a con
   const [row] =
     await shared.admin`select reconcile_after <= now() as due from session_background_commands where id = ${command.commandId}`;
   expect(row.due).toBe(true);
+});
+
+test("verified replay supplies the exit proof, not a disagreeing event payload", async () => {
+  const command = await fixture();
+  await ingestConnectedCommandCompletion(
+    client.db,
+    ids(command),
+    {
+      opId: command.opId,
+      exit: OpExit.fromPartial({ exitCode: 9, cancelled: true, failureCode: "STALE" }),
+    },
+    undefined,
+    reader(0),
+  );
+  expect(await getSessionBackgroundCommand(client.db, command)).toMatchObject({
+    state: "exited",
+    exitCode: 0,
+    settlementReason: "op_exit",
+  });
+});
+
+test("an attached owner winning settlement is benign and the collector keeps its output receipt", async () => {
+  const command = await fixture();
+  const claim = await claimPushedConnectedCommandCompletion(client.db, {
+    ...command,
+    claimTtlMs: 300_000,
+  });
+  await createConnectedCommandOutputCapture(client.db, command)(command.commandId, [
+    { sequence: "1", stream: "stdout", chunk: "captured" },
+  ]);
+  await settleConnectedMachineSessionBackgroundCommand(client.db, {
+    ...command,
+    outcome: "exited",
+    exitCode: 0,
+    reason: "op_exit",
+  });
+  expect(
+    await settleCollectedConnectedMachineBackgroundCommand(client.db, {
+      claim: claim!,
+      proof: { outcome: "exited", exitCode: 0, reason: "op_exit", observedAt: new Date() },
+      receipt: { exitSeq: "2", attachGeneration: "1" },
+    }),
+  ).toBe(false);
+  const [row] =
+    await shared.admin`select output_consumed_at from session_background_commands where id = ${command.commandId}`;
+  expect(row.output_consumed_at).not.toBeNull();
+  expect(
+    (await listSessionEvents(client.db, command.workspaceId, command.sessionId)).filter(
+      (event) => event.type === "session.command.finished",
+    ),
+  ).toHaveLength(1);
+});
+
+test("custody checkpoint failure cannot suppress already committed terminal fanout", async () => {
+  const command = await fixture();
+  const claim = await claimPushedConnectedCommandCompletion(client.db, {
+    ...command,
+    claimTtlMs: 300_000,
+  });
+  let published = 0;
+  await expect(
+    settleCollectedConnectedMachineBackgroundCommand(client.db, {
+      claim: claim!,
+      proof: { outcome: "exited", exitCode: 0, reason: "op_exit", observedAt: new Date() },
+      receipt: { exitSeq: "invalid", attachGeneration: "1" },
+      publish: async (events) => {
+        published += events.filter((event) => event.type === "session.command.finished").length;
+      },
+    }),
+  ).rejects.toThrow("invalid frontier");
+  expect(published).toBe(1);
+  expect(await getSessionBackgroundCommand(client.db, command)).toMatchObject({ state: "exited" });
 });

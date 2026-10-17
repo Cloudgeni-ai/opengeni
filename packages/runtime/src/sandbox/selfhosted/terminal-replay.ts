@@ -28,14 +28,28 @@ export async function replayConnectedCommandOutput(
   capture: Parameters<OpStreamExecClient["readExisting"]>[2],
   deadlineAt?: number,
 ): Promise<Awaited<ReturnType<OpStreamExecClient["readExisting"]>>> {
+  const checkDeadline = () => {
+    if (deadlineAt !== undefined && Date.now() >= deadlineAt)
+      throw new Error("Connected command output collector reached its claim deadline");
+  };
+  const boundedCapture: typeof capture =
+    deadlineAt === undefined
+      ? capture
+      : async (frames) => {
+          for (const frame of frames) {
+            checkDeadline();
+            await capture([frame]);
+          }
+          checkDeadline();
+        };
   let capturedThrough = 0n;
   while (true) {
     // Only collector ownership is bounded, never the native command. The push
     // caller reserves an in-flight read window before its existing claim expires.
-    if (deadlineAt !== undefined && Date.now() >= deadlineAt)
-      throw new Error("Connected command output collector reached its claim deadline");
+    checkDeadline();
     const before = capturedThrough;
-    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, capture);
+    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, boundedCapture);
+    checkDeadline();
     if (!terminalKnown || replay.status === "completed" || replay.terminal) return replay;
     // Heartbeats and partial UTF-8 advance the contiguous protocol frontier
     // even when no decoded output chunk is produced.

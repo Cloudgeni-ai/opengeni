@@ -1053,6 +1053,11 @@ import {
   unobservableRetainedProcessOutcomeSql,
   UNREACHABLE_MACHINE_STOP_REQUESTER,
   type ConnectedMachineBackgroundCommandClaim,
+  type ConnectedMachineBackgroundCommandProof,
+  type ConnectedCommandOutputReceipt,
+  getSessionBackgroundCommand,
+  recordConnectedMachineBackgroundCommandProof,
+  recordConnectedCommandOutputConsumption,
 } from "./session-background-commands";
 import {
   isSessionRealtimeDelegationTurnMetadata,
@@ -83227,6 +83232,57 @@ export async function settleClaimedConnectedMachineBackgroundCommand(
     mutation,
   );
   return { settled, events: settled ? [...mutation.events] : [] };
+}
+
+/** Shared push/reaper terminal commit after output capture. A concurrent attached
+ * owner finishing the same command is success, not a reconciliation failure. */
+export async function settleCollectedConnectedMachineBackgroundCommand(
+  db: Database,
+  input: {
+    claim: ConnectedMachineBackgroundCommandClaim;
+    proof: ConnectedMachineBackgroundCommandProof;
+    receipt?: ConnectedCommandOutputReceipt | undefined;
+    publish?: ((events: SessionEvent[]) => Promise<void>) | undefined;
+  },
+): Promise<boolean> {
+  const terminal = async () => {
+    const command = await getSessionBackgroundCommand(db, input.claim);
+    return command?.state === "exited" || command?.state === "lost" ? command : null;
+  };
+  let alreadyTerminal = false;
+  if (!input.claim.proof) {
+    try {
+      await recordConnectedMachineBackgroundCommandProof(db, input);
+    } catch (error) {
+      if (!(await terminal())) throw error;
+      alreadyTerminal = true;
+    }
+  }
+  const settlement = alreadyTerminal
+    ? { settled: false, events: [] }
+    : await settleClaimedConnectedMachineBackgroundCommand(db, input);
+  const command = settlement.settled ? null : await terminal();
+  if (!settlement.settled && !command)
+    throw new Error("Connected command settlement lost its exact claim or proof");
+  try {
+    if (
+      input.proof.outcome === "exited" &&
+      input.receipt &&
+      input.proof.exitCode !== null &&
+      (settlement.settled ||
+        (command?.state === "exited" && command.exitCode === input.proof.exitCode))
+    ) {
+      await recordConnectedCommandOutputConsumption(db, {
+        ...input.claim,
+        receipt: input.receipt,
+        exitCode: input.proof.exitCode,
+      });
+    }
+  } finally {
+    // A custody-checkpoint error must never suppress already committed fanout.
+    if (settlement.events.length) await input.publish?.(settlement.events);
+  }
+  return settlement.settled;
 }
 
 /**
