@@ -51,6 +51,17 @@ beforeAll(async () => {
     });
     await owner`insert into schema_migrations(name) values(${file}) on conflict do nothing`;
   }
+  // Current session writers use the additive 0834 activity xid column and
+  // trigger instead of the legacy workspace commit gate. Apply that real,
+  // independent expand migration so the previous ledger accepts today's writers.
+  const activityXid = "0834_session_activity_xid.sql";
+  await executeMigrationFile(
+    owner,
+    activityXid,
+    await readFile(new URL(activityXid, directory), "utf8"),
+    { preinstalledVector: true },
+  );
+  await owner`insert into schema_migrations(name) values(${activityXid})`;
   appRole = `approval_app_${crypto.randomUUID().replaceAll("-", "")}`;
   await provisionRoles(owned.adminUrl, { appRole, appPassword: owned.appPassword });
   const url = new URL(owned.adminUrl);

@@ -10,7 +10,6 @@ import {
   listSessionDiscoverySummaries,
   listSessionsForSubject,
   decodeSessionListCursor,
-  withRlsContext,
   withSessionActivityRlsContext,
   type Database,
 } from "../src/index";
