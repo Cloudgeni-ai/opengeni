@@ -104,6 +104,9 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     // ...and the 0755 connection-account intent columns.
     await stageConnectionAccountIntentColumns(owned.ownerUrl);
     await stageSiteSessionAudienceColumns(owned.ownerUrl);
+    // The current event adapter projects 0810's nullable key. Only stage the
+    // reader column for seeding; the real migration must create/backfill it.
+    await owner`alter table session_events add column usage_source_key text`;
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -234,6 +237,12 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     await owner`alter table scheduled_tasks drop column vault_policy`;
     await dropConnectionAccountIntentColumns(owned.ownerUrl);
     await dropSiteSessionAudienceColumns(owned.ownerUrl);
+    await owner`alter table session_events drop column usage_source_key`;
+    expect(
+      await owner`select column_name from information_schema.columns
+      where table_schema=current_schema() and table_name='session_events'
+        and column_name='usage_source_key'`,
+    ).toHaveLength(0);
     // The real runner commits one file at a time: the rolling default may
     // succeed, but activation must refuse a still-connected runtime login.
     await expect(
@@ -271,6 +280,11 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     const afterRequests = [
       ...(await owned.admin`select to_jsonb(r) - 'review_arguments' - 'review_context' as row from connector_action_requests r order by id`),
     ];
+    expect([
+      ...(await owner`select data_type from information_schema.columns
+      where table_schema=current_schema() and table_name='session_events'
+        and column_name='usage_source_key'`),
+    ]).toEqual([{ data_type: "text" }]);
     const afterCalls = [
       ...(await owned.admin`select to_jsonb(c) - 'durable_approval' - 'approval_request_id' - 'effect_digest' - 'execution_attempt_id' - 'execution_attempt_generation' - 'execution_catalog_digest' as row from session_attempt_codemode_calls c order by operation_id`),
     ];
