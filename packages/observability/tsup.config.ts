@@ -7,4 +7,6 @@ export default defineConfig({
   dts: true,
   sourcemap: true,
   clean: true,
+  // CPU sampling loads Bun's built-in profiler at run time.
+  external: ["bun:jsc"],
 });

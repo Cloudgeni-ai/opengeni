@@ -401,7 +401,7 @@ describe("ComputerSupervisor", () => {
           ...options(),
           computerSessionId: "33333333-3333-4333-8333-333333333333",
         }),
-      ).rejects.toMatchObject({ code: "resource_unavailable", retryable: true });
+      ).rejects.toMatchObject({ code: "capacity_exhausted", retryable: false });
     } finally {
       await supervisor.close();
       await rm(rootDirectory, { recursive: true, force: true });
