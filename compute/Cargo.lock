@@ -306,6 +306,7 @@ dependencies = [
  "clap",
  "compute-core",
  "compute-engine",
+ "compute-fleet",
  "compute-pager",
  "compute-storage",
  "futures",
