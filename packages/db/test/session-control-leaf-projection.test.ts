@@ -230,11 +230,65 @@ test("nonleaf root/child retain recursive summaries including grandchildren", as
     const read = await expectBulkParity(grant, id, unrelated.id);
     expect(read.recursive).toHaveLength(recursiveCount);
     expect(read.queries).toHaveLength(recursiveCount + 2);
-    expect(read.recursive.some((q) => q.includes("descendant_sessions"))).toBe(true);
-    expect(read.recursive.some((q) => q.includes("descendants(target_id"))).toBe(true);
+    expect(read.recursive.some((q) => q.includes("open_interruptions as materialized"))).toBe(true);
+    expect(read.recursive.some((q) => q.includes("stopping as materialized"))).toBe(true);
     expect(read.controls.get(id)?.settlement?.attemptCount).toBe(1);
     expect(read.controls.get(id)?.backgroundCommandSettlement?.commandCount).toBe(1);
   }
+});
+
+test("nonleaf summaries start from open work and keep the quiescence hint exact", async () => {
+  const { grant, root, unrelated } = await fixture();
+  const child = await session(grant, root.id);
+  const grandchild = await session(grant, child.id);
+  const sibling = await session(grant, root.id);
+  const attemptId = await interrupted(grant, grandchild.id);
+  const hint = async () =>
+    (
+      await shared.admin<{ attemptQuiesced: boolean }[]>`
+        select attempt_quiesced as "attemptQuiesced" from session_attempt_interruptions
+        where attempt_id = ${attemptId}`
+    ).map((row) => row.attemptQuiesced);
+  expect(await hint()).toEqual([false]);
+
+  // Settled before quiescence: still stopping for every ancestor, never for a sibling.
+  await shared.admin`update session_attempt_interruptions set state = 'settled', settled_at = now()
+    where attempt_id = ${attemptId}`;
+  const settled = await project(grant, [root.id, child.id, sibling.id, unrelated.id]);
+  for (const id of [root.id, child.id]) {
+    expect(settled.controls.get(id)?.settlement).toEqual({
+      state: "stopping",
+      attemptCount: 1,
+      interruptionPendingCount: 0,
+      quiescencePendingCount: 1,
+    });
+  }
+  expect(settled.controls.get(sibling.id)?.settlement).toBeNull();
+  expect(settled.controls.get(unrelated.id)?.settlement).toBeNull();
+
+  // Quiescence propagates to the hint, which removes the row from the open index.
+  await shared.admin`update session_turn_attempts set quiesced_at = now() where id = ${attemptId}`;
+  expect(await hint()).toEqual([true]);
+  const quiesced = await project(grant, [root.id, child.id]);
+  expect(quiesced.controls.get(root.id)?.settlement).toBeNull();
+  expect(quiesced.controls.get(child.id)?.settlement).toBeNull();
+
+  // A later interruption of an already quiesced attempt starts with the hint set,
+  // while its unsettled state still counts as open work.
+  const resumed = await control(grant, grandchild.id, "resume");
+  await shared.admin`
+    insert into session_attempt_interruptions (
+      account_id, workspace_id, session_id, operation_id, attempt_id, kind, control_revision
+    ) select account_id, workspace_id, session_id, ${resumed.receipt.id}, attempt_id,
+      kind, control_revision
+      from session_attempt_interruptions where attempt_id = ${attemptId} limit 1`;
+  expect(await hint()).toEqual([true, true]);
+  const reopened = await project(grant, [root.id, child.id]);
+  expect(reopened.controls.get(root.id)?.settlement).toMatchObject({
+    attemptCount: 1,
+    interruptionPendingCount: 1,
+    quiescencePendingCount: 0,
+  });
 });
 
 test("missing roots and other-workspace targets still fail closed", async () => {
