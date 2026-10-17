@@ -89,7 +89,8 @@ for activity ([3](0003-activity-idle-and-sleep-levels.md)).
   totals the sampler reads. A reading is taken at the start of each step
   that has a live VM, except a wake. A sandbox whose VM was replaced
   starts counting again from zero. Host pressure is exported as the
-  cumulative `some` and `full` totals, as sums.
+  cumulative `some` and `full` totals, as sums whose start time is the
+  host's boot, since the kernel counts from then.
 - **Store alarms name the object.** A stored object that failed its
   checksum names its key, not a sandbox: chunks are shared.
 - **Canary.** It uses two fixed sandbox ids of its own (ending in `01` for
@@ -105,6 +106,8 @@ for activity ([3](0003-activity-idle-and-sleep-levels.md)).
   times out after 10 s, and retries stop after a minute. When the buffer is
   full the oldest event goes. `compute.export.dropped` counts what was
   dropped, by signal and reason (`buffer_full`, `rejected`, `failed`).
+  An agent told to stop (SIGINT or SIGTERM) sends what is left, each
+  request with a single attempt, and waits at most 5 s for it.
   Compatibility was checked against OpenTelemetry Collector 0.163.1.
 
 ## Consequences

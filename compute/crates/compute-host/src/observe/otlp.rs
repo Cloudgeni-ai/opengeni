@@ -76,6 +76,9 @@ pub(crate) struct Origin {
     /// When the agent started, which cumulative metrics count from, in
     /// nanoseconds since the Unix epoch.
     pub started_unix_nanos: u64,
+    /// When the host booted, which the kernel's own counts start from;
+    /// unknown, the agent's start stands in.
+    pub booted_unix_nanos: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -326,6 +329,7 @@ fn describe(name: &str) -> (&'static str, &'static str) {
 struct Collect {
     now: u64,
     start: u64,
+    boot: u64,
     metrics: Vec<Metric>,
     points: usize,
 }
@@ -369,11 +373,14 @@ impl Collect {
             gauge.data_points.push(point);
         }
     }
-}
 
-impl Visitor for Collect {
-    fn sum(&mut self, name: &'static str, labels: &[(&'static str, &'static str)], value: u64) {
-        let start = self.start;
+    fn sum_from(
+        &mut self,
+        start: u64,
+        name: &'static str,
+        labels: &[(&'static str, &'static str)],
+        value: u64,
+    ) {
         let point = NumberPoint {
             attributes: self::labels(labels),
             start_time_unix_nano: Some(Int(start)),
@@ -390,6 +397,21 @@ impl Visitor for Collect {
         if let Data::Sum(sum) = self.metric(name, empty) {
             sum.data_points.push(point);
         }
+    }
+}
+
+impl Visitor for Collect {
+    fn sum(&mut self, name: &'static str, labels: &[(&'static str, &'static str)], value: u64) {
+        self.sum_from(self.start, name, labels, value);
+    }
+
+    fn sum_since_boot(
+        &mut self,
+        name: &'static str,
+        labels: &[(&'static str, &'static str)],
+        value: u64,
+    ) {
+        self.sum_from(self.boot, name, labels, value);
     }
 
     fn gauge(&mut self, name: &'static str, labels: &[(&'static str, &'static str)], value: u64) {
@@ -452,6 +474,9 @@ pub(crate) fn metrics(
     let mut collect = Collect {
         now: now_unix_nanos,
         start: origin.started_unix_nanos,
+        boot: origin
+            .booted_unix_nanos
+            .unwrap_or(origin.started_unix_nanos),
         metrics: Vec::with_capacity(32),
         points: 0,
     };

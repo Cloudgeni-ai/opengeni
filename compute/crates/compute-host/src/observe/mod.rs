@@ -12,7 +12,9 @@
 
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+use export::Message;
 
 pub mod canary;
 mod event;
@@ -71,7 +73,7 @@ impl Default for ObserveConfig {
 #[derive(Clone, Debug, Default)]
 pub struct Observer {
     metrics: Arc<Metrics>,
-    events: Option<mpsc::Sender<Event>>,
+    events: Option<mpsc::Sender<Message>>,
 }
 
 impl Observer {
@@ -87,6 +89,7 @@ impl Observer {
                 resource: config.resource,
                 version: config.version,
                 started_unix_nanos: unix_nanos_now(),
+                booted_unix_nanos: booted_unix_nanos(),
             },
             export: config.export,
             journal: config.journal,
@@ -103,9 +106,20 @@ impl Observer {
     /// dropped and counted.
     pub fn emit(&self, event: Event) {
         if let Some(events) = &self.events
-            && events.try_send(event).is_err()
+            && events.try_send(Message::Event(event)).is_err()
         {
             self.metrics.dropped(Signal::Logs, DropReason::Full, 1);
+        }
+    }
+
+    /// Sends every event emitted so far, and the metrics, to the collector
+    /// now, each with a single attempt; returns once they went or failed.
+    /// For an agent about to stop, which bounds how long it waits.
+    pub async fn flush(&self) {
+        let Some(events) = &self.events else { return };
+        let (done, sent) = oneshot::channel();
+        if events.send(Message::Flush(done)).await.is_ok() {
+            let _ = sent.await;
         }
     }
 
@@ -120,6 +134,18 @@ impl Observer {
     pub fn metrics(&self) -> &Metrics {
         &self.metrics
     }
+}
+
+/// When the host booted, from `btime` in `/proc/stat`.
+fn booted_unix_nanos() -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let seconds: u64 = stat
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    seconds.checked_mul(1_000_000_000)
 }
 
 /// An alarm event: severity error, with `what` as its message.

@@ -24,6 +24,7 @@ use compute_host::{
     BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, Keep, NoStore, PagerConfig,
     PoolConfig, Store, serve,
 };
+use tokio::signal::unix::SignalKind;
 
 use crate::bench::{BenchArgs, bench, exec};
 
@@ -685,17 +686,31 @@ async fn run_agent<S: Store>(
     socket: PathBuf,
     canary: Option<CanaryConfig>,
 ) -> anyhow::Result<()> {
+    let observer = config.observer.clone();
     let (handle, agent) = HostAgent::start(config, engine, store).await?;
     if let Some(canary) = canary {
         tokio::spawn(canary::run(handle.clone(), canary));
     }
-    tokio::select! {
-        result = serve(handle, &socket) => result.context("serving")?,
-        result = tokio::signal::ctrl_c() => result?,
-        result = agent => result?,
+    let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
+    let result = tokio::select! {
+        result = serve(handle, &socket) => result.context("serving"),
+        result = tokio::signal::ctrl_c() => result.map_err(Into::into),
+        _ = terminate.recv() => Ok(()),
+        result = agent => result.map_err(Into::into),
+    };
+    // What happened last, often why it stopped, still reaches the
+    // collector; a collector that is away does not hold the stop up long.
+    if tokio::time::timeout(FLUSH_WITHIN, observer.flush())
+        .await
+        .is_err()
+    {
+        tracing::warn!("stopping before every event reached the collector");
     }
-    Ok(())
+    result
 }
+
+/// How long a stopping agent waits for its last events to be exported.
+const FLUSH_WITHIN: Duration = Duration::from_secs(5);
 
 /// Lets the agent hold as many open files as the system allows it. Every VM
 /// keeps several open here (its process, pager, image files and store

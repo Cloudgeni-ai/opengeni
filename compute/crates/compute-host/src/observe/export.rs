@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::event::{Event, unix_nanos_now};
@@ -78,6 +78,14 @@ pub(crate) struct Sinks {
     pub tap: Option<mpsc::Sender<Event>>,
 }
 
+/// What the observer hands the exporter task.
+pub(crate) enum Message {
+    /// An event to journal and export.
+    Event(Event),
+    /// Send everything now, then say so: the agent is stopping.
+    Flush(oneshot::Sender<()>),
+}
+
 /// One request in flight, with how many records or points it carries.
 struct InFlight(JoinHandle<Sent>, u64);
 
@@ -95,8 +103,12 @@ async fn finished(slot: &mut Option<InFlight>) -> (Sent, u64) {
 }
 
 /// Runs until every [`super::Observer`] is gone, then sends what is left
-/// once.
-pub(crate) async fn run(sinks: Sinks, metrics: Arc<Metrics>, mut events: mpsc::Receiver<Event>) {
+/// once; a flush does the same and goes on.
+pub(crate) async fn run(
+    sinks: Sinks,
+    metrics: Arc<Metrics>,
+    mut messages: mpsc::Receiver<Message>,
+) {
     let client = sinks.export.as_ref().and_then(|export| {
         reqwest::Client::builder()
             .timeout(export.timeout)
@@ -126,9 +138,21 @@ pub(crate) async fn run(sinks: Sinks, metrics: Arc<Metrics>, mut events: mpsc::R
     metrics_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            event = events.recv() => {
-                let Some(event) = event else { break };
-                deliver(&sinks, event, client.as_ref().map(|_| (&mut pending, capacity)), &metrics);
+            message = messages.recv() => {
+                match message {
+                    Some(Message::Event(event)) => {
+                        let buffer = client.as_ref().map(|_| (&mut pending, capacity));
+                        deliver(&sinks, event, buffer, &metrics);
+                    }
+                    Some(Message::Flush(done)) => {
+                        if let Some(exporter) = &client {
+                            drain(exporter, [&mut logs, &mut points], &mut pending, &metrics)
+                                .await;
+                        }
+                        let _ = done.send(());
+                    }
+                    None => break,
+                }
             }
             _ = logs_tick.tick(), if client.is_some() && logs.is_none() && !pending.is_empty() => {
                 if let Some(exporter) = &client {
@@ -150,25 +174,36 @@ pub(crate) async fn run(sinks: Sinks, metrics: Arc<Metrics>, mut events: mpsc::R
             }
         }
     }
-    let Some(exporter) = client else { return };
-    // The agent is stopping: whatever is in flight finishes, then what is
-    // left goes once, without retries beyond a single attempt's time.
-    for (slot, signal) in [(&mut logs, Signal::Logs), (&mut points, Signal::Metrics)] {
+    if let Some(exporter) = &client {
+        drain(exporter, [&mut logs, &mut points], &mut pending, &metrics).await;
+    }
+}
+
+/// Lets the requests in flight finish, then sends every waiting event and
+/// the metrics once each, with a single attempt per request.
+async fn drain(
+    exporter: &Exporter,
+    in_flight: [&mut Option<InFlight>; 2],
+    pending: &mut VecDeque<Event>,
+    metrics: &Metrics,
+) {
+    for (slot, signal) in in_flight.into_iter().zip([Signal::Logs, Signal::Metrics]) {
         if slot.is_some() {
             let (sent, count) = finished(slot).await;
-            account(&metrics, signal, sent, count);
+            account(metrics, signal, sent, count);
+            *slot = None;
         }
     }
-    let mut exporter = exporter;
+    let mut exporter = exporter.clone();
     exporter.config.retry_for = Duration::ZERO;
     while !pending.is_empty() {
-        let mut last = Some(exporter.send_logs(&mut pending));
+        let mut last = Some(exporter.send_logs(pending));
         let (sent, count) = finished(&mut last).await;
-        account(&metrics, Signal::Logs, sent, count);
+        account(metrics, Signal::Logs, sent, count);
     }
     let mut last = Some(exporter.send_metrics());
     let (sent, count) = finished(&mut last).await;
-    account(&metrics, Signal::Metrics, sent, count);
+    account(metrics, Signal::Metrics, sent, count);
 }
 
 /// Hands one event to the journal, the tap and the collector's buffer,

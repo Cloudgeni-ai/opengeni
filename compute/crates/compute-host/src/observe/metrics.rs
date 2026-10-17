@@ -787,7 +787,7 @@ fn visit_gauges(gauges: &Gauges, each: &mut impl Visitor) {
     for (resource, kinds) in PRESSURE_RESOURCES.iter().zip(&gauges.pressure) {
         for (kind, total) in ["some", "full"].iter().zip(kinds) {
             if let Some(total) = total {
-                each.sum(
+                each.sum_since_boot(
                     "compute.host.pressure.stall",
                     &[("compute.resource", resource), ("compute.pressure", kind)],
                     *total,
@@ -799,8 +799,16 @@ fn visit_gauges(gauges: &Gauges, each: &mut impl Visitor) {
 
 /// Receives every data point of [`Metrics::visit`].
 pub(crate) trait Visitor {
-    /// A cumulative, monotonic count.
+    /// A cumulative, monotonic count since the agent started.
     fn sum(&mut self, name: &'static str, labels: &[(&'static str, &'static str)], value: u64);
+    /// A cumulative, monotonic count the kernel keeps since the host
+    /// booted.
+    fn sum_since_boot(
+        &mut self,
+        name: &'static str,
+        labels: &[(&'static str, &'static str)],
+        value: u64,
+    );
     /// A whole-number reading.
     fn gauge(&mut self, name: &'static str, labels: &[(&'static str, &'static str)], value: u64);
     /// A reading in seconds.

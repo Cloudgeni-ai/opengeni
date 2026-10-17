@@ -91,6 +91,7 @@ fn origin() -> Origin {
         resource: Vec::new(),
         version: String::new(),
         started_unix_nanos: 0,
+        booted_unix_nanos: None,
     }
 }
 
@@ -309,4 +310,45 @@ async fn the_observer_exports_events_and_metrics_and_flushes_when_dropped() {
     }
     assert_eq!(logged, 2, "both events, once each");
     assert!(metrics >= 1, "metrics go once more when stopping");
+}
+
+#[tokio::test]
+async fn a_flush_sends_everything_now_and_the_observer_goes_on() {
+    let (endpoint, mut received) = collector(Vec::new()).await;
+    let mut export = ExportConfig::new(endpoint);
+    export.logs_every = Duration::from_secs(3600);
+    export.metrics_every = Duration::from_secs(3600);
+    let observer = Observer::start(ObserveConfig {
+        export: Some(export),
+        journal: false,
+        ..ObserveConfig::default()
+    });
+    // The first metrics go at once; no events wait yet.
+    let first = tokio::time::timeout(Duration::from_secs(5), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.path, "/v1/metrics");
+
+    observer.emit(Event::new("compute.step", Severity::Info));
+    observer.emit(Event::new("compute.request", Severity::Info));
+    tokio::time::timeout(Duration::from_secs(5), observer.flush())
+        .await
+        .expect("the flush ends");
+    let mut logged = 0;
+    let mut metrics = 0;
+    while let Ok(request) = received.try_recv() {
+        match request.path.as_str() {
+            "/v1/logs" => logged += records(&request),
+            "/v1/metrics" => metrics += 1,
+            other => panic!("unexpected path {other}"),
+        }
+    }
+    assert_eq!(logged, 2, "both events went before the flush returned");
+    assert_eq!(metrics, 1, "and the metrics once");
+
+    observer.emit(Event::new("compute.step", Severity::Info));
+    observer.flush().await;
+    let request = received.try_recv().expect("the observer still exports");
+    assert_eq!(records(&request), 1);
 }

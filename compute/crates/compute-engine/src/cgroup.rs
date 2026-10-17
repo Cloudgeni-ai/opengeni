@@ -313,33 +313,37 @@ pub struct MemoryStats {
 }
 
 fn parse_memory_stats(stat: &str, pressure: Option<&str>) -> MemoryStats {
-    // `kind` is `some` or `full`, `key` such as `avg10` or `total`.
-    let field = |kind: &str, key: &str| -> Option<&str> {
-        pressure?
-            .lines()
-            .find_map(|line| line.strip_prefix(kind)?.strip_prefix(' '))?
-            .split_whitespace()
-            .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
-    };
-    MemoryStats {
-        zswpout: stat_field(stat, "zswpout"),
-        zswpin: stat_field(stat, "zswpin"),
-        pressure_some_avg10: field("some", "avg10").and_then(|value| value.parse().ok()),
-        pressure_some_us: field("some", "total").and_then(|value| value.parse().ok()),
-        pressure_full_us: field("full", "total").and_then(|value| value.parse().ok()),
-        major_faults: stat
-            .lines()
-            .find_map(|line| line.strip_prefix("pgmajfault "))
-            .and_then(|value| value.trim().parse().ok()),
+    // Every running VM is read every second, so each file is walked once.
+    let mut stats = MemoryStats::default();
+    for line in stat.lines() {
+        let Some((name, value)) = line.split_once(' ') else {
+            continue;
+        };
+        let value = || value.trim().parse().ok();
+        match name {
+            "zswpout" => stats.zswpout = value().unwrap_or(0),
+            "zswpin" => stats.zswpin = value().unwrap_or(0),
+            "pgmajfault" => stats.major_faults = value(),
+            _ => {}
+        }
     }
-}
-
-/// Field `name` of a `memory.stat`, or 0 if it has none.
-fn stat_field(stat: &str, name: &str) -> u64 {
-    stat.lines()
-        .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(0)
+    for line in pressure.into_iter().flat_map(str::lines) {
+        let Some((kind, pairs)) = line.split_once(' ') else {
+            continue;
+        };
+        for (key, value) in pairs
+            .split_whitespace()
+            .filter_map(|pair| pair.split_once('='))
+        {
+            match (kind, key) {
+                ("some", "avg10") => stats.pressure_some_avg10 = value.parse().ok(),
+                ("some", "total") => stats.pressure_some_us = value.parse().ok(),
+                ("full", "total") => stats.pressure_full_us = value.parse().ok(),
+                _ => {}
+            }
+        }
+    }
+    stats
 }
 
 /// Bytes of huge pages a process maps, from its `/proc/<pid>/status`.

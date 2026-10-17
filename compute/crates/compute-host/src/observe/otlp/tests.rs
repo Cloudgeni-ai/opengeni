@@ -14,6 +14,7 @@ fn origin() -> Origin {
         ],
         version: "0.1.0".into(),
         started_unix_nanos: 1_000,
+        booted_unix_nanos: Some(500),
     }
 }
 
@@ -144,6 +145,10 @@ fn metrics_carry_sums_gauges_and_histograms() {
         .as_array()
         .unwrap();
     assert_eq!(stall.len(), 3, "only the totals read");
+    assert_eq!(
+        stall[0]["startTimeUnixNano"], "500",
+        "the kernel counts from the host's boot"
+    );
 
     let age = &metric(&body, "compute.sample.age").unwrap()["gauge"]["dataPoints"][0];
     assert_eq!(age["asDouble"], 1.0, "sampled at 9 s, exported at 10 s");
