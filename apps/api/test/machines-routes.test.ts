@@ -19,6 +19,7 @@ import {
   activateBrowserSession,
   advanceEnrollmentAgentUpdate,
   claimEnrollmentConnection,
+  claimSessionWorkForAttempt,
   beginEnrollmentAgentUpdate,
   createDb,
   createEnrollment,
@@ -26,6 +27,7 @@ import {
   createScheduledTask,
   createSession,
   getEnrollment,
+  initializeSessionStartAtomically,
   listSandboxes,
   prepareBrowserSessionCreate,
   revokeEnrollment,
@@ -513,6 +515,73 @@ async function openManagedBrowser(
 }
 
 describe("M10 GET /machines — dashboard list + states + metrics", () => {
+  test("the owner's human move request consents to a running personal-machine route", async () => {
+    if (!available) return;
+    const {
+      accountId,
+      originWorkspaceId,
+      targetWorkspaceId: workspaceId,
+      enrollmentId,
+    } = await seedCrossWorkspaceScopedMachine("user");
+    await admin`insert into session_tenancy_activations(account_id, activation_version, inventory_digest, parity_digest, activated_by)
+      values (${accountId}, 1, ${"a".repeat(64)}, ${"b".repeat(64)}, 'machine-move-test')`;
+    await admin`update enrollments set workspace_root = '/srv/build', connection_lease_expires_at = now() + interval '1 hour'
+      where id = ${enrollmentId}`;
+    const [sandbox] = await admin<
+      Array<{ id: string }>
+    >`select id from sandboxes where enrollment_id = ${enrollmentId}`;
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "Run the build",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: "user-m10" },
+      subjectId: "user-m10",
+      visibility: "workspace_shared",
+    });
+    await initializeSessionStartAtomically(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    const app = appFor(
+      busWithAgent({ workspaceId: originWorkspaceId, agentId: enrollmentId, online: true }),
+    );
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/sessions/${session.id}/active-sandbox`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["sessions:control"])}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ target: sandbox!.id }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ swapped: true, activeSandboxId: sandbox!.id });
+    const receipts = await admin`select consent.consenting_subject_id, binding.attempt_id
+      from session_turn_machine_consents consent join session_attempt_machine_consents binding on binding.consent_id = consent.id
+      where consent.session_id = ${session.id}`;
+    expect([...receipts]).toEqual([{ consenting_subject_id: "user-m10", attempt_id: attemptId }]);
+  }, 120_000);
   test("a backend:none session exposes its machine fleet without a synthetic home", async () => {
     if (!available) return;
     const { accountId, workspaceId, session, sandbox, bus } = await seed({

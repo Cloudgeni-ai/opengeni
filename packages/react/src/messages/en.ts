@@ -1110,8 +1110,6 @@ export const englishMessages = {
   "hooks.useMachineChip.waking": "Waking…",
   "hooks.useMachines.itWasMovedSomewhere":
     "It was moved somewhere else at the same moment. Try again.",
-  "hooks.useMachines.itsInTheMiddle":
-    "It's in the middle of a reply, and a personal machine can only take over between replies. Wait for it to finish or pause it, then try again.",
   "hooks.useMachines.thatMachineIsOffline": "That machine is offline.",
   "hooks.useMachines.thatMachineIsNoLonger": "That machine is no longer connected.",
   "hooks.useMachines.thatMachineCouldntBeReached": "That machine couldn't be reached. Try again.",
@@ -3079,6 +3077,36 @@ export const englishMessages = {
   "timeline.knowledgeReceipt.theOriginalFileRemainsAttached":
     "The original file remains attached. Searchable text has not been retained.",
   "timeline.knowledgeReceipt.viewInKnowledge": "View in Knowledge",
+  "timeline.learningRefusal.agentLearningSettings": "Agent learning settings",
+  "timeline.learningRefusal.instructionLearningOff":
+    "Agent learning for workspace instructions is off for this chat. Turn it on in Agent learning settings, or add it yourself in workspace instructions.",
+  "timeline.learningRefusal.instructionNotPermitted":
+    "This chat isn't allowed to change workspace instructions. Make the change yourself, or ask a workspace admin.",
+  "timeline.learningRefusal.instructionPersonalChat":
+    "This chat saves what it learns only for you, so it can't change workspace instructions, which everyone in the workspace shares. Make the change yourself, or ask in a shared chat.",
+  "timeline.learningRefusal.knowledgeLearningOff":
+    "Agent learning for Knowledge is off for this chat. Turn it on in Agent learning settings, or add it yourself in Knowledge.",
+  "timeline.learningRefusal.knowledgeNotPermitted":
+    "This chat isn't allowed to make this change. Make it yourself in Knowledge, or ask a workspace admin.",
+  "timeline.learningRefusal.knowledgePersonalChat":
+    "This chat saves what it learns only for you, so it can't change Knowledge shared with the workspace. Make the change yourself in Knowledge, or ask in a shared chat.",
+  "timeline.learningRefusal.notSavedToKnowledge": "Not saved to Knowledge",
+  "timeline.learningRefusal.notSavedToSkills": "Not saved to Skills",
+  "timeline.learningRefusal.notSavedToWorkspaceInstructions": "Not saved to workspace instructions",
+  "timeline.learningRefusal.openKnowledge": "Open Knowledge",
+  "timeline.learningRefusal.openSkill": "Open Skill",
+  "timeline.learningRefusal.openSkills": "Open Skills",
+  "timeline.learningRefusal.openWorkspaceInstructions": "Open workspace instructions",
+  "timeline.learningRefusal.siteAgent":
+    "Agents started from a Site page don't save Skills, instructions, or Knowledge.",
+  "timeline.learningRefusal.skillLearningOff":
+    "Agent learning for Skills is off for this chat. Turn it on in Agent learning settings, or make the change yourself in Skills.",
+  "timeline.learningRefusal.skillNotPermitted":
+    "This chat isn't allowed to change this Skill. Make the change yourself in Skills, or ask a workspace admin.",
+  "timeline.learningRefusal.skillPersonalChat":
+    "This chat saves what it learns only for you, so it can't change a Skill shared with the workspace. Make the change yourself in Skills, or ask in a shared chat.",
+  "timeline.learningRefusal.skillPersonalTarget":
+    "This chat saves what it learns for the whole workspace, so it can't change your personal Skill. Make the change yourself in Skills, or ask in a private chat.",
   "timeline.noticePresentation.waitedElapsed": "Waited · {elapsed}",
   "timeline.noticePresentation.waitedForAgentsElapsed_one": "Waited for {count} agent · {elapsed}",
   "timeline.noticePresentation.waitedForAgentsElapsed_other":

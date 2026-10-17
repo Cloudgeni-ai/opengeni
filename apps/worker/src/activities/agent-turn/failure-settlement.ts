@@ -1,6 +1,7 @@
 import { recordSessionUsageLimitEvent } from "@opengeni/core";
+import { shouldFallbackModelSocket } from "./persistent-transport-recovery";
 import {
-  requestSessionTurnRecovery,
+  requestSessionTurnRecovery as persistSessionTurnRecovery,
   recordUsageEvent,
   getActiveSessionHistoryItemsPaged,
   readLease,
@@ -211,6 +212,19 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     acknowledgeLostAttemptOwnership,
     acknowledgeRecoveryQuiescence,
   } = deps;
+  // A refused socket applies to the entire logical turn, including recovery
+  // caused later by a lease, tool, or worker interruption rather than a model.
+  const requestTurnRecovery: typeof persistSessionTurnRecovery = (
+    database,
+    workspaceId,
+    recovery,
+  ) =>
+    persistSessionTurnRecovery(database, workspaceId, {
+      ...recovery,
+      ...(providerTurn.persistentModelTransportHttpOnly
+        ? { persistentModelTransportHttpOnly: true as const }
+        : {}),
+    });
   // Capture before any recovery/checkpoint DB operation can fail again.
   if (isSessionEventPersistenceError(error)) {
     try {
@@ -265,13 +279,13 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     attempt.triggerEventId &&
     attempt.executionGeneration > 0
   ) {
-    let recovery: Awaited<ReturnType<typeof requestSessionTurnRecovery>>;
+    let recovery: Awaited<ReturnType<typeof requestTurnRecovery>>;
     try {
       if (eventing.turnStartedPublished) {
         await flushRuntimeBatcher();
         await historySink.reconcileConversationTruth({ requireDurable: true });
       }
-      recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId,
@@ -350,7 +364,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         transitionPending && !sandboxLifecycleWait
           ? sandboxDeadlineRotationRecoveryDelayMs(settings)
           : undefined;
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
@@ -419,11 +433,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     eventing.turnStartedPublished
   ) {
     recordSessionUsageLimitEvent(observability, "between_calls", "unavailable");
-    let recovery: Awaited<ReturnType<typeof requestSessionTurnRecovery>>;
+    let recovery: Awaited<ReturnType<typeof requestTurnRecovery>>;
     try {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
-      recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId,
@@ -473,7 +487,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     try {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
@@ -514,7 +528,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
       const rotation = sandboxRotationController.signal.reason;
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
@@ -563,7 +577,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       // action crosses the durable execution-admission fence before provider
       // invocation, so a consumed step resumes as already-executed or
       // outcome-unknown rather than calling MCP again.
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
@@ -815,7 +829,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
     }
-    const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+    const recovery = await requestTurnRecovery(db, input.workspaceId, {
       sessionId: input.sessionId,
       turnId: attempt.turnId,
       triggerEventId: attempt.triggerEventId!,
@@ -965,11 +979,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       Date.now(),
       Math.random(),
     );
-    let recovery: Awaited<ReturnType<typeof requestSessionTurnRecovery>>;
+    let recovery: Awaited<ReturnType<typeof requestTurnRecovery>>;
     try {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
-      recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: attempt.turnId,
         triggerEventId: attempt.triggerEventId!,
@@ -1211,7 +1225,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       providerTurn.lastCodexRequestOpaqueArtifacts.length > 0
         ? historySink.providerArtifactCandidates.runStateId
         : undefined;
-    const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+    const recovery = await requestTurnRecovery(db, input.workspaceId, {
       sessionId: input.sessionId,
       turnId: attempt.turnId,
       triggerEventId: attempt.triggerEventId!,
@@ -1365,6 +1379,17 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       retryAfterMs: providerRetryAfterMs(error),
       jitterSample: Math.random(),
     });
+    if (
+      shouldFallbackModelSocket({
+        error,
+        recovery: recoveryResult,
+        httpOnly: providerTurn.persistentModelTransportHttpOnly === true,
+        nextRecoveryCount: nextProviderRecoveryCount,
+        recoveryLimit: providerRecoveryLimit(recoveryCode),
+      })
+    ) {
+      providerTurn.persistentModelTransportHttpOnly = true;
+    }
     const setupRecoveryExhausted =
       earlyCommandStartUnavailable &&
       recoveryResult.status === "exhausted" &&
@@ -1373,7 +1398,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       if (setupRecoveryExhausted) {
         // This is positive pre-dispatch proof, not an ambiguous command. Park
         // the SAME accepted turn without resetting or advancing its budget.
-        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+        const recovery = await requestTurnRecovery(db, input.workspaceId, {
           sessionId: input.sessionId,
           turnId: attempt.turnId,
           triggerEventId: attempt.triggerEventId!,
@@ -1409,7 +1434,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           await flushRuntimeBatcher();
           await historySink.reconcileConversationTruth({ requireDurable: true });
         }
-        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+        const recovery = await requestTurnRecovery(db, input.workspaceId, {
           sessionId: input.sessionId,
           turnId: attempt.turnId,
           triggerEventId: attempt.triggerEventId!,

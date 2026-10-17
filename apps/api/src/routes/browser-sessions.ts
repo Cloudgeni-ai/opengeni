@@ -110,6 +110,8 @@ import {
   findBrowserSessionControlRecordByOperation,
   findBrowserDownloadSave,
   getBrowserSessionControlRecord,
+  getRetainedBrowserDownload,
+  listRetainedBrowserDownloads,
   getComputerSessionControlRecord,
   getBrowserIdentity,
   getBrowserPrivateCheckpointAuthority,
@@ -168,6 +170,7 @@ import {
   SessionAuthorizationUnavailableError,
   type ApiRouteDeps,
   type ResolvedSessionAuthorization,
+  retainCompletedBrowserDownloads,
 } from "@opengeni/core";
 import {
   BrowserControlProtocolError,
@@ -254,7 +257,10 @@ import {
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
-import { retireFormerPlacementControllers } from "../former-placement-retirement";
+import {
+  retireFormerPlacementControllers,
+  retireSourceFormerPlacements,
+} from "../former-placement-retirement";
 import { sanitizeFilename } from "./files";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 import {
@@ -803,6 +809,19 @@ export function registerBrowserSessionRoutes(
         context,
         "sessions:read",
       );
+      const retained = await retainedDownloadsFor(grant, workspaceId, browserSessionId);
+      if (retained.notRunning) {
+        if (retained.downloads.length === 0) {
+          throw new BrowserSessionStateError("BrowserSession is not active");
+        }
+        return context.json(
+          BrowserDownloadListResponse.parse({
+            browserSessionId,
+            controllerGeneration: retained.downloads.at(-1)!.download.controllerGeneration,
+            downloads: retained.downloads.map((entry) => entry.download),
+          }),
+        );
+      }
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -812,7 +831,18 @@ export function registerBrowserSessionRoutes(
         "browser.read",
         async ({ sessionClient }) => await sessionClient.listDownloads(),
       );
-      return context.json(BrowserDownloadListResponse.parse(result));
+      // Downloads kept from before an earlier suspension stay listed after
+      // the browser resumed; the running controller only knows its own.
+      const live = new Set(result.downloads.map((download) => download.id));
+      const earlier = retained.downloads
+        .map((entry) => entry.download)
+        .filter((download) => !live.has(download.id));
+      return context.json(
+        BrowserDownloadListResponse.parse({
+          ...result,
+          downloads: [...earlier, ...result.downloads],
+        }),
+      );
     },
   );
 
@@ -824,6 +854,12 @@ export function registerBrowserSessionRoutes(
         "sessions:read",
       );
       const downloadId = requireUuidParam(context, "downloadId");
+      const retained = await retainedDownloadsFor(grant, workspaceId, browserSessionId, downloadId);
+      const kept = retained.downloads[0];
+      if (kept && (retained.notRunning || kept.download.status === "completed")) {
+        return context.json(BrowserDownload.parse(kept.download));
+      }
+      if (retained.notRunning) throw new BrowserSessionStateError("BrowserSession is not active");
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -870,6 +906,43 @@ export function registerBrowserSessionRoutes(
           );
         }
 
+        if (!save) {
+          // A download kept as a workspace file before its browser stopped
+          // running is saved from that file, wherever the task runs now.
+          const kept = await getRetainedBrowserDownload(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+            downloadId,
+          });
+          if (kept) {
+            const keptRecord = await getBrowserSessionControlRecord(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              browserSessionId,
+            });
+            await authorizeSourceSession(
+              deps,
+              grant,
+              keptRecord.sourceSessionId,
+              "session.control",
+            );
+            save = await prepareBrowserDownloadSave(deps.db, {
+              ...identity,
+              sourceSessionId: keptRecord.sourceSessionId,
+              download: kept.download,
+              fileId: kept.fileId,
+              safeFilename: kept.safeFilename,
+              contentType: kept.contentType,
+              bucket: objectStorage.bucket,
+              objectKey: kept.objectKey,
+              uploadExpiresAt: new Date(
+                Date.now() + BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS * 1_000,
+              ),
+              retained: { fileId: kept.fileId, uploadId: kept.uploadId },
+            });
+          }
+        }
         if (!save) {
           const source = await withActiveBrowserController(
             context,
@@ -1007,12 +1080,17 @@ export function registerBrowserSessionRoutes(
         if (upload.file.status !== "ready") {
           throw new InteractionResourceStateError("Browser download file is not ready");
         }
+        const sourceSession = await requireSourceSession(deps, workspaceId, save.sourceSessionId);
+        // The task's current placement imports the file: a Connected Machine
+        // the task moved to reads a public URL even when the browser ran in
+        // a sandbox.
         const get = await objectStorage.createGetUrl({
           key: upload.file.objectKey,
           expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
-          audience: signedUrlAudienceForPlacement(controllerRecord.session.placement),
+          audience: sourceSession.activeSandboxId
+            ? "public"
+            : signedUrlAudienceForPlacement(controllerRecord.session.placement),
         });
-        const sourceSession = await requireSourceSession(deps, workspaceId, save.sourceSessionId);
         await authorizeSourceSession(deps, grant, save.sourceSessionId, "session.control");
         const dispatched = await dispatchBrowserDownloadSave(deps.db, identity);
         const imported = await withChannelA(
@@ -2252,6 +2330,9 @@ export function registerBrowserSessionRoutes(
                 audience: signedUrlAudienceForPlacement(record.session.placement),
               });
               const client = await provisionController(deps, grant, record, placement, origin);
+              // Suspension removes the browser's working directory, and with
+              // it every download. Keep completed ones as workspace files.
+              await retainBrowserDownloads(grant, workspaceId, record, binding, placement, client);
               let receipt: PlacementBrowserStateCaptureReceipt;
               try {
                 receipt = await withInteractionHolderHeartbeat(
@@ -3444,6 +3525,87 @@ export function registerBrowserSessionRoutes(
     });
   }
 
+  /** Downloads kept as workspace files for this browser, and whether no
+   * controller runs it now (so only kept downloads can be read). */
+  async function retainedDownloadsFor(
+    grant: AccessGrant,
+    workspaceId: string,
+    browserSessionId: string,
+    downloadId?: string,
+  ) {
+    const record = await getBrowserSessionControlRecord(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    const notRunning = record.session.lifecycle !== "active" || !record.session.controller;
+    if (notRunning) {
+      await authorizeSourceSession(deps, grant, record.sourceSessionId, "session.read");
+    }
+    const scope = { accountId: grant.accountId, workspaceId, browserSessionId };
+    const downloads = downloadId
+      ? [await getRetainedBrowserDownload(deps.db, { ...scope, downloadId })].filter(
+          (entry) => entry !== null,
+        )
+      : await listRetainedBrowserDownloads(deps.db, scope);
+    return { notRunning, downloads };
+  }
+
+  /** Keep a running browser's completed downloads as workspace files before
+   * suspension removes its working directory. Never blocks the suspension. */
+  async function retainBrowserDownloads(
+    grant: AccessGrant,
+    workspaceId: string,
+    record: BrowserSessionControlRecord,
+    binding: NonNullable<BrowserSessionControlRecord["session"]["controller"]>,
+    placement: BrowserPlacement,
+    client: BrowserControlClient,
+  ): Promise<void> {
+    const objectStorage = deps.objectStorage;
+    if (!objectStorage || !record.session.capabilities.downloads) return;
+    const browserSessionId = record.session.id;
+    try {
+      const source = client.sessionClient({
+        reference: { browserSessionId, controllerGeneration: binding.controllerGeneration },
+        ...deriveBrowserSessionControllerTokens({
+          rootSecret: browserAuthorityRoot(deps),
+          accountId: grant.accountId,
+          workspaceId,
+          placement: record.session.placement,
+          placementInstanceId: placement.placementInstanceId,
+          browserSessionId,
+          controllerGeneration: binding.controllerGeneration,
+          tokenGeneration: record.tokenGeneration,
+        }),
+      });
+      const result = await retainCompletedBrowserDownloads(
+        { db: deps.db, settings: deps.settings, objectStorage },
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          browserSessionId,
+          source,
+          uploadAudience: signedUrlAudienceForPlacement(record.session.placement),
+        },
+      );
+      for (const failure of result.failed) {
+        console.warn("browser.download_retention_failed", {
+          workspaceId,
+          browserSessionId,
+          ...failure,
+        });
+      }
+    } catch (error) {
+      console.warn("browser.download_retention_failed", {
+        workspaceId,
+        browserSessionId,
+        downloadId: null,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   async function withActiveBrowserController<T>(
     context: Context,
     grant: AccessGrant,
@@ -3709,14 +3871,12 @@ export function registerBrowserSessionRoutes(
       connectedSandboxId,
     });
     if (reconciliation.sourcePlacementChanged) {
-      // End what the move left running on the former machine without making
-      // this request wait for it; a failure leaves the binding for `end`.
-      void retireFormerPlacementControllers(channelServices, {
+      // End what the move left running on its former machines without making
+      // this request wait for it. Earlier failed retirements of this task's
+      // resources are retried too; a failure leaves the binding for later.
+      void retireSourceFormerPlacements(channelServices, {
         grant,
         sourceSessionId,
-        connectedSandboxId,
-        browserSessionIds: reconciliation.browserSessionIds,
-        computerSessionIds: reconciliation.computerSessionIds,
         origin: null,
       });
       throw sourcePlacementChangedApiError("browser_session");

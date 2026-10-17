@@ -1057,7 +1057,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * cached backend; if it moved (a swap) we re-resolve and update the cache. This
    * is THE per-call re-read that makes a mid-turn swap land on the next op.
    */
-  private async resolve(): Promise<ResolvedActiveBackend> {
+  private async resolve(
+    remainingFenceRetries = this.maxFenceRetries,
+  ): Promise<ResolvedActiveBackend> {
     const pointer = await this.deps.readPointer();
     if (
       this.boundActiveRoute &&
@@ -1077,10 +1079,11 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     // Concurrent first operations must join that preparation, including its
     // failure, instead of each resuming/preparing the replacement independently.
     // Explicit machine routes retain their existing resolution behavior.
-    if (pointer.activeSandboxId !== null) return await this.resolvePointer(pointer);
+    if (pointer.activeSandboxId !== null)
+      return await this.resolvePointer(pointer, remainingFenceRetries);
     const pending = this.homeResolutions.get(pointer.activeEpoch);
     if (pending) return await pending;
-    const resolution = this.resolvePointer(pointer);
+    const resolution = this.resolvePointer(pointer, remainingFenceRetries);
     this.homeResolutions.set(pointer.activeEpoch, resolution);
     try {
       return await resolution;
@@ -1089,9 +1092,30 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     }
   }
 
-  private async resolvePointer(pointer: ActivePointer): Promise<ResolvedActiveBackend> {
+  private async resolvePointer(
+    pointer: ActivePointer,
+    remainingFenceRetries: number,
+  ): Promise<ResolvedActiveBackend> {
     const fromEpoch = this.cachedEpoch ?? pointer.activeEpoch;
-    const resolved = await this.deps.resolveActiveBackend(pointer);
+    let resolved: ResolvedActiveBackend;
+    try {
+      resolved = await this.deps.resolveActiveBackend(pointer);
+    } catch (error) {
+      // A human move can retire personal-machine authority between the pointer
+      // read and connection resolution. Nothing has dispatched yet. Retry only
+      // when the durable route really moved, within the existing fence budget;
+      // unchanged-route revocation/errors must still fail closed.
+      if (remainingFenceRetries > 0) {
+        const current = await this.deps.readPointer();
+        if (
+          current.activeEpoch !== pointer.activeEpoch ||
+          current.activeSandboxId !== pointer.activeSandboxId
+        ) {
+          return await this.resolve(remainingFenceRetries - 1);
+        }
+      }
+      throw error;
+    }
     // Re-entrancy guard: a resolver that returns THIS proxy as the active backend
     // makes every op (exec/readFile/…) dispatch back into resolve() -> the same
     // backend -> forever (a silent async infinite recursion that HANGS the turn,

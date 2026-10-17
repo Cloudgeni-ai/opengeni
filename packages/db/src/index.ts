@@ -1060,6 +1060,11 @@ import {
   unobservableRetainedProcessOutcomeSql,
   UNREACHABLE_MACHINE_STOP_REQUESTER,
   type ConnectedMachineBackgroundCommandClaim,
+  type ConnectedMachineBackgroundCommandProof,
+  type ConnectedCommandOutputReceipt,
+  getSessionBackgroundCommand,
+  recordConnectedMachineBackgroundCommandProof,
+  recordConnectedCommandOutputConsumption,
 } from "./session-background-commands";
 import {
   isSessionRealtimeDelegationTurnMetadata,
@@ -1175,6 +1180,7 @@ export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
 export * from "./skills";
+export * from "./learning-refusals";
 export * from "./session-tool-results";
 export type { SkillSourceReleaseReceipt } from "./skill-source-release";
 export { SkillSourceRemovalAuthorityError } from "./skill-source-release";
@@ -8525,51 +8531,6 @@ export async function getRetainedScreenshotArtifact(
   });
 }
 
-/**
- * Lifecycle state of a session-qualified screenshot whose file row the current
- * file authority hides, such as another member's private image in a shared
- * session. The file foreign key restricts deleting a file while its artifact
- * row exists, so an artifact row without a visible file is an authority
- * exclusion, never a deletion. Returns null when the artifact is absent or its
- * file is readable. Exposes only workspace-visible lifecycle state: no file,
- * object key or bytes, and the authority boundary is unchanged.
- */
-export async function getWithheldRetainedScreenshotArtifactState(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  artifactId: string,
-): Promise<{ status: RetainedScreenshotArtifactStatus; retentionExpiresAt: Date } | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        status: schema.retainedScreenshotArtifacts.status,
-        retentionExpiresAt: schema.retainedScreenshotArtifacts.retentionExpiresAt,
-      })
-      .from(schema.retainedScreenshotArtifacts)
-      .leftJoin(
-        schema.files,
-        and(
-          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
-          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
-        ),
-      )
-      .where(
-        and(
-          retainedScreenshotSessionArtifactPredicate(workspaceId, sessionId, artifactId),
-          isNull(schema.files.id),
-        ),
-      )
-      .limit(1);
-    return row
-      ? {
-          status: row.status as RetainedScreenshotArtifactStatus,
-          retentionExpiresAt: row.retentionExpiresAt,
-        }
-      : null;
-  });
-}
-
 function retainedScreenshotSessionArtifactPredicate(
   workspaceId: string,
   sessionId: string,
@@ -8643,9 +8604,10 @@ export async function getRetainedScreenshotArtifactForToolCall(
 }
 
 /** Recover a legacy damaged receipt's artifact id when its tool call has one
- * exact screenshot in this session whose file the current file authority hides
- * (see getWithheldRetainedScreenshotArtifactState). Returns only the id; the
- * caller still applies the withheld lifecycle checks. */
+ * exact screenshot in this session whose file the current file authority hides.
+ * The file foreign key restricts deleting a file while its artifact row exists,
+ * so such a row is an authority exclusion, never a deletion. Returns only the
+ * id; the caller projects it as a neutral receipt without bytes. */
 export async function getWithheldRetainedScreenshotArtifactIdForToolCall(
   db: Database,
   workspaceId: string,
@@ -8816,10 +8778,18 @@ export async function completeRetainedScreenshotMaintenance(
         !(claim.claimId === null && claim.status === input.outcome)
       )
         return false;
+      // Maintenance runs without an acting subject, which keeps every session
+      // in the workspace visible, including another member's private chat. A
+      // service subject would hide user-private sessions, and with them their
+      // screenshot rows, so expiry could never settle. Only an image held as
+      // a private file needs an actor, and then it acts as that file's owner:
+      // the owner's own private sessions stay visible to it.
+      if (!claim?.owner) return completeRetainedScreenshotMaintenanceInOwnerScope(tx, input);
       return withSessionRlsActorContext(
         {
           subjectId: "service:retained-screenshot-maintenance",
-          privateFileOwnerSubjectId: claim?.owner ?? null,
+          initiatingHumanSubjectId: claim.owner,
+          privateFileOwnerSubjectId: claim.owner,
         },
         () => completeRetainedScreenshotMaintenanceInOwnerScope(tx, input),
       );
@@ -32277,17 +32247,26 @@ export async function sessionTreeStatsForSessions(
       join ${schema.workspaceInferenceControls} workspace_control
         on workspace_control.workspace_id = root.workspace_id
       cross join lateral (
+        -- Every node has exactly one parent, so a walk down child links can
+        -- only revisit its own start node (when that start sits on a legacy
+        -- parent cycle). Excluding the start therefore keeps the walk acyclic
+        -- without carrying a path, and the depth bound caps the work.
         with recursive descendants(
           id,
           status,
+          active_turn_id,
+          input_wait_until,
+          input_wait_turn_id,
           last_sequence,
           effective_pause_revision,
-          depth,
-          path
+          depth
         ) as (
           select
             root.id,
             root.status,
+            root.active_turn_id,
+            root.input_wait_until,
+            root.input_wait_turn_id,
             root_cursor.last_meaningful_sequence,
             greatest(
               case
@@ -32305,14 +32284,16 @@ export async function sessionTreeStatsForSessions(
                 else null
               end
             ),
-            0,
-            array[root.id]::uuid[]
+            0
 
           union all
 
           select
             child.id,
             child.status,
+            child.active_turn_id,
+            child.input_wait_until,
+            child.input_wait_turn_id,
             child_cursor.last_meaningful_sequence,
             greatest(
               case
@@ -32332,133 +32313,89 @@ export async function sessionTreeStatsForSessions(
                 else null
               end
             ),
-            descendants.depth + 1,
-            descendants.path || child.id
+            descendants.depth + 1
           from descendants
-          join ${schema.sessions} child on child.parent_session_id = descendants.id
+          join ${schema.sessions} child
+            on child.workspace_id = ${workspaceId}
+           and child.parent_session_id = descendants.id
           join ${schema.sessionEventCursors} child_cursor
             on child_cursor.account_id = child.account_id
            and child_cursor.workspace_id = child.workspace_id
            and child_cursor.session_id = child.id
-          where child.workspace_id = ${workspaceId}
-            and descendants.depth < ${SESSION_TREE_STATS_MAX_DEPTH}
-            -- Parent links are expected to form a tree, but legacy/manual rows
-            -- can be cyclic. The path is depth-bounded above, so cycle defense
-            -- cannot grow independently of this query's fixed work budget.
-            and not child.id = any(descendants.path)
+          where descendants.depth < ${SESSION_TREE_STATS_MAX_DEPTH}
+            and child.id <> root.id
         ), bounded as materialized (
           -- PostgreSQL evaluates the recursive producer only as far as this
           -- unsorted LIMIT is consumed. One extra descendant is lookahead.
-          select id, status, last_sequence, effective_pause_revision, depth, path
+          select id, status, active_turn_id, input_wait_until, input_wait_turn_id,
+            last_sequence, effective_pause_revision, depth
           from descendants
           limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
         ), numbered as (
           select
-            id,
-            status,
-            last_sequence,
-            effective_pause_revision,
-            depth,
-            path,
+            bounded.*,
             row_number() over () as ordinal
           from bounded
+        ), counted as (
+          -- The subject's personal state is read once per counted descendant.
+          select
+            numbered.*,
+            personal.session_id is not null and personal.actively_working as actively_working,
+            ${subjectId ?? null}::text is not null and numbered.last_sequence > coalesce(
+              case
+                when personal.manually_unread_through is not null then -1
+                else personal.acknowledged_sequence
+              end,
+              0
+            ) as unread
+          from numbered
+          left join ${schema.sessionPins} personal
+            on ${subjectId ?? null}::text is not null
+           and personal.workspace_id = ${workspaceId}
+           and personal.subject_id = ${subjectId ?? null}
+           and personal.session_id = numbered.id
+          where numbered.ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+            and numbered.depth > 0
         )
         select
+          count(*) filter (where depth = 1)::int as "directChildren",
+          count(*)::int as "totalDescendants",
           count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1} and depth = 1
-          )::int as "directChildren",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1} and depth > 0
-          )::int as "totalDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0
-              and effective_pause_revision is null
+            where effective_pause_revision is null
               and status in ('running', 'recovering')
           )::int as "runningDescendants",
           count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0
-              and effective_pause_revision is null
+            where effective_pause_revision is null
               and status in ('queued', 'waiting_capacity')
           )::int as "queuedDescendants",
           count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status = 'idle' and effective_pause_revision is null
-              and exists (
-                select 1 from ${schema.sessions} waiting_session
-                where waiting_session.workspace_id = ${workspaceId} and waiting_session.id = numbered.id
-                  and waiting_session.active_turn_id is null
-                  and waiting_session.input_wait_until is not null
-                  and waiting_session.input_wait_turn_id = (
-                    select finished.id from ${schema.sessionTurns} finished
-                    where finished.workspace_id = ${workspaceId} and finished.session_id = numbered.id
-                      and finished.finished_at is not null
-                      and ${sessionInputWaitDecidingTurnSql(
-                        {
-                          id: sql`finished.id`,
-                          source: sql`finished.source`,
-                          workspaceId: sql`finished.workspace_id`,
-                          sessionId: sql`finished.session_id`,
-                          finishedAt: sql`finished.finished_at`,
-                          metadata: sql`finished.metadata`,
-                        },
-                        sql`waiting_session.input_wait_turn_id`,
-                      )}
-                    order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
-                  )
+            where status = 'idle' and effective_pause_revision is null
+              and active_turn_id is null
+              and input_wait_until is not null
+              and input_wait_turn_id = (
+                select finished.id from ${schema.sessionTurns} finished
+                where finished.workspace_id = ${workspaceId} and finished.session_id = counted.id
+                  and finished.finished_at is not null
+                  and ${sessionInputWaitDecidingTurnSql(
+                    {
+                      id: sql`finished.id`,
+                      source: sql`finished.source`,
+                      workspaceId: sql`finished.workspace_id`,
+                      sessionId: sql`finished.session_id`,
+                      finishedAt: sql`finished.finished_at`,
+                      metadata: sql`finished.metadata`,
+                    },
+                    sql`counted.input_wait_turn_id`,
+                  )}
+                order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
               )
           )::int as "waitingDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status = 'requires_action'
-          )::int as "attentionDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and effective_pause_revision is not null
-          )::int as "pausedDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status = 'failed'
-          )::int as "failedDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0
-              and status = 'failed'
-              and ${subjectId ?? null}::text is not null
-              and last_sequence > coalesce((
-                select case when personal.manually_unread_through is not null then -1 else personal.acknowledged_sequence end
-                from ${schema.sessionPins} personal
-                where personal.workspace_id = ${workspaceId}
-                  and personal.subject_id = ${subjectId ?? null}
-                  and personal.session_id = numbered.id
-              ), 0)
-          )::int as "unreadFailedDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0
-              and ${subjectId ?? null}::text is not null
-              and last_sequence > coalesce((
-                select case when personal.manually_unread_through is not null then -1 else personal.acknowledged_sequence end
-                from ${schema.sessionPins} personal
-                where personal.workspace_id = ${workspaceId}
-                  and personal.subject_id = ${subjectId ?? null}
-                  and personal.session_id = numbered.id
-              ), 0)
-          )::int as "unreadDescendants",
-          count(*) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0
-              and ${subjectId ?? null}::text is not null
-              and exists (
-                select 1
-                from ${schema.sessionPins} personal
-                where personal.workspace_id = ${workspaceId}
-                  and personal.subject_id = ${subjectId ?? null}
-                  and personal.session_id = numbered.id
-                  and personal.actively_working
-              )
-          )::int as "activelyWorkingDescendants",
+          count(*) filter (where status = 'requires_action')::int as "attentionDescendants",
+          count(*) filter (where effective_pause_revision is not null)::int as "pausedDescendants",
+          count(*) filter (where status = 'failed')::int as "failedDescendants",
+          count(*) filter (where status = 'failed' and unread)::int as "unreadFailedDescendants",
+          count(*) filter (where unread)::int as "unreadDescendants",
+          count(*) filter (where actively_working)::int as "activelyWorkingDescendants",
           -- Oldest still-open requires_action turn among the counted attention
           -- descendants. The correlated lookup runs only for rows passing the
           -- FILTER and walks session_turns_workspace_queue_idx
@@ -32467,36 +32404,36 @@ export async function sessionTreeStatsForSessions(
             select min(waiting_turn.updated_at)
             from ${schema.sessionTurns} waiting_turn
             where waiting_turn.workspace_id = ${workspaceId}
-              and waiting_turn.session_id = numbered.id
+              and waiting_turn.session_id = counted.id
               and waiting_turn.status = 'requires_action'
-          )) filter (
-            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status = 'requires_action'
-          ) as "attentionSince",
-          coalesce(bool_or(
-            ordinal > ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+          )) filter (where status = 'requires_action') as "attentionSince",
+          (
+            -- The lookahead row proves more descendants than the budget.
+            exists (
+              select 1 from numbered
+              where numbered.ordinal > ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+            )
+            -- A start node on a legacy parent cycle has an edge back to it
+            -- from one of its descendants, which the walk refuses to follow.
             or (
-              ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth = ${SESSION_TREE_STATS_MAX_DEPTH}
+              root.parent_session_id is not null
               and exists (
-                select 1
-                from ${schema.sessions} deeper
-                where deeper.workspace_id = ${workspaceId}
-                  and deeper.parent_session_id = numbered.id
+                select 1 from numbered
+                where numbered.ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+                  and numbered.id = root.parent_session_id
               )
             )
-            or (
-              ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and exists (
-                select 1
-                from ${schema.sessions} cycle_edge
-                where cycle_edge.workspace_id = ${workspaceId}
-                  and cycle_edge.parent_session_id = numbered.id
-                  and cycle_edge.id = any(numbered.path)
-              )
+            or exists (
+              select 1
+              from numbered
+              join ${schema.sessions} deeper
+                on deeper.workspace_id = ${workspaceId}
+               and deeper.parent_session_id = numbered.id
+              where numbered.ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+                and numbered.depth = ${SESSION_TREE_STATS_MAX_DEPTH}
             )
-          ), false) as truncated
-        from numbered
+          ) as truncated
+        from counted
       ) stats
       where root.workspace_id = ${workspaceId}
         and ${inArray(sql`root.id`, uniqueRootIds)}
@@ -32659,16 +32596,20 @@ async function sessionListTotalsInScope(
   const rows = await rawRows<{ needsYouCount: number; groups: SessionListTotals["groups"] }>(
     db,
     sql`
-    with recursive tree_sessions as materialized (
-      select id, account_id, parent_session_id, status, direct_control_state,
-        direct_pause_revision, subtree_run_override_revision,
-        active_turn_id, input_wait_until, input_wait_turn_id
-      from ${schema.sessions} where workspace_id = ${workspaceId}
-    ), personal_state as materialized (
+    with recursive personal_state as materialized (
       select workspace_id, subject_id, session_id, pinned, archived,
         acknowledged_sequence, manually_unread_through, actively_working
       from ${schema.sessionPins}
       where workspace_id = ${workspaceId} and subject_id = ${options.subjectId}
+    ), visible_children as materialized (
+      -- Keep the recursive join off the base table: a hash-join plan otherwise
+      -- scans the whole workspace and rechecks RLS at every tree depth. This
+      -- narrow projection uses the same caller's RLS in the same statement.
+      select id, parent_session_id, account_id, status, active_turn_id,
+        input_wait_until, input_wait_turn_id, subtree_run_override_revision,
+        direct_control_state, direct_pause_revision
+      from ${schema.sessions}
+      where workspace_id = ${workspaceId} and parent_session_id is not null
     ), roots as materialized (
       select ${schema.sessions.id} as id, ${schema.sessions.channelId} as channel_id,
         ${schema.sessions.accountId} as account_id,
@@ -32710,7 +32651,8 @@ async function sessionListTotalsInScope(
           case when child.direct_control_state = 'paused' then child.direct_pause_revision end
         ),
         parent.pinned_path or coalesce(personal.pinned, false), parent.related
-      from nodes parent join tree_sessions child on child.parent_session_id = parent.id
+      from nodes parent join visible_children child
+        on child.parent_session_id = parent.id
       left join personal_state personal on personal.session_id = child.id
       where parent.related
     ), attention_roots as (
@@ -32756,9 +32698,12 @@ async function sessionListTotalsInScope(
         and cursor.session_id = nodes.id and cursor.account_id = nodes.account_id
       left join personal_state personal on personal.session_id = nodes.id
       join roots root on root.id = nodes.root_id
-      join root_attention attention on attention.id = nodes.root_id
       where not root.archived and not nodes.pinned_path
-        and (not ${Boolean(options.needsYouOnly)} or attention.needs_you)
+        ${
+          options.needsYouOnly
+            ? sql`and nodes.root_id in (select id from root_attention where needs_you)`
+            : sql``
+        }
     ), grouped as (
       select channel_id as "channelId", count(*)::int as total,
         count(*) filter (where status = 'requires_action')::int as attention,
@@ -41032,6 +40977,38 @@ export async function nextSessionHistoryPosition(
     const max = row?.maxPosition;
     return max === null || max === undefined ? 0 : Math.floor(Number(max)) + 1;
   });
+}
+
+/** Persist socket refusal before HTTP dispatch, under the current attempt fence.
+ * Every recovery path and worker replacement then inherits the same turn policy. */
+export async function markSessionTurnModelTransportHttpOnly(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+): Promise<boolean> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (tx) => {
+      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      if (!fence.allowed) return false;
+      await tx
+        .update(schema.sessionTurns)
+        .set({
+          metadata: sql`${schema.sessionTurns.metadata} || '{"persistentModelTransportHttpOnly":true}'::jsonb`,
+        })
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        );
+      return true;
+    }),
+  );
 }
 
 /**
@@ -60142,7 +60119,7 @@ export async function assertPersonalMachineForAttempt(
   input: {
     accountId: string;
     workspaceId: string;
-    subjectId: string;
+    subjectId: string | null;
     sessionId: string;
     turnId: string;
     attemptId: string;
@@ -60152,10 +60129,7 @@ export async function assertPersonalMachineForAttempt(
   },
 ): Promise<boolean> {
   return await withRlsContext(db, input, async (scopedDb) => {
-    await setSubjectRlsContext(scopedDb, input.subjectId);
-    await scopedDb.execute(sql`select set_config(
-      'opengeni.initiating_human_subject_id', ${input.subjectId}, true
-    )`);
+    await setMachineAttemptSubject(scopedDb, input.subjectId);
     const [row] = await rawRows<{ authorized: boolean }>(
       scopedDb,
       sql`select assert_session_attempt_personal_machine(
@@ -60178,7 +60152,7 @@ export async function resolvePersonalMachineConnectionForAttempt(
   input: {
     accountId: string;
     workspaceId: string;
-    subjectId: string;
+    subjectId: string | null;
     sessionId: string;
     turnId: string;
     attemptId: string;
@@ -60187,33 +60161,33 @@ export async function resolvePersonalMachineConnectionForAttempt(
     requireActiveSandbox?: boolean;
   },
 ): Promise<EnrollmentRecord | null> {
+  return (await resolvePersonalMachineRouteForAttempt(db, input))?.liveConnection ?? null;
+}
+
+/** Preserve authorized machine metadata while its runner is offline. Admission
+ * and liveness are separate: startup may bind the normal offline transport. */
+export async function resolvePersonalMachineRouteForAttempt(
+  db: Database,
+  input: Parameters<typeof resolvePersonalMachineConnectionForAttempt>[1],
+): Promise<{ enrollment: EnrollmentRecord; liveConnection: EnrollmentRecord | null } | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
-    await setSubjectRlsContext(scopedDb, input.subjectId);
-    await scopedDb.execute(sql`select set_config(
-      'opengeni.initiating_human_subject_id', ${input.subjectId}, true
-    )`);
-    const [row] = await rawRows<{ value: EnrollmentRecord }>(
+    await setMachineAttemptSubject(scopedDb, input.subjectId);
+    const [row] = await rawRows<{ value: EnrollmentRecord | null; live: boolean | null }>(
       scopedDb,
-      sql`select enrollment.value
-        from (
-          select assert_session_attempt_personal_machine(
+      sql`select machine.value->'enrollment' as value,
+          nullif(machine.value->'enrollment'->>'connectionInstanceId', '') is not null
+          and nullif(machine.value->'enrollment'->>'connectionLeaseExpiresAt', '')::timestamptz
+            > clock_timestamp() as live
+        from get_session_attempt_machine(
             ${input.accountId}::uuid, ${input.workspaceId}::uuid,
             ${input.sessionId}::uuid, ${input.turnId}::uuid,
             ${input.attemptId}::uuid, ${input.executionGeneration}::integer,
-            ${input.enrollmentId}::uuid, ${input.requireActiveSandbox !== false}
-          ) as authorized
-        ) authority
-        cross join lateral list_scoped_enrollments(
-          ${input.accountId}::uuid, ${input.workspaceId}::uuid, null, 'active'
-        ) enrollment(value)
-        where authority.authorized
-          and enrollment.value->>'id' = ${input.enrollmentId}
-          and nullif(enrollment.value->>'connectionInstanceId', '') is not null
-          and nullif(enrollment.value->>'connectionLeaseExpiresAt', '')::timestamptz
-            > clock_timestamp()
+            null, ${input.enrollmentId}::uuid, ${input.requireActiveSandbox !== false}, false
+        ) machine(value)
         limit 1`,
     );
-    return row?.value ?? null;
+    if (!row?.value) return null;
+    return { enrollment: row.value, liveConnection: row.live ? row.value : null };
   });
 }
 
@@ -62596,6 +62570,54 @@ export async function getSandbox(
   });
 }
 
+/** Exact-turn machine consent can expose one route without exposing the owner's
+ * machine list or borrowing their authority for any other resource. */
+export async function getSandboxForAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+  },
+  sandboxId: string,
+): Promise<SandboxRecord | null> {
+  const projection = await withRlsContext(db, input, async (scopedDb) => {
+    await setMachineAttemptSubject(scopedDb, input.subjectId);
+    const [row] = await rawRows<{ value: { sandbox: SandboxRecord | null } | null }>(
+      scopedDb,
+      sql`select get_session_attempt_machine(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+        ${input.sessionId}::uuid, ${input.turnId}::uuid,
+        ${input.attemptId}::uuid, ${input.executionGeneration}::integer,
+        ${sandboxId}::uuid, null, false, true
+      ) as value`,
+    );
+    return row?.value ?? null;
+  });
+  if (projection) return projection.sandbox;
+  return await getSandbox(
+    db,
+    input.subjectId
+      ? { accountId: input.accountId, workspaceId: input.workspaceId, subjectId: input.subjectId }
+      : input.workspaceId,
+    sandboxId,
+  );
+}
+
+async function setMachineAttemptSubject(db: Database, subjectId: string | null): Promise<void> {
+  if (subjectId) await setSubjectRlsContext(db, subjectId);
+  // A service turn has no human. Explicitly clear any ambient actor rather than
+  // borrowing the owner who consented to its machine route.
+  await db.execute(sql`select
+    set_config('opengeni.subject_id', ${subjectId ?? ""}, true),
+    set_config('opengeni.initiating_human_subject_id', ${subjectId ?? ""}, true)
+  `);
+}
+
 // List a workspace's sandboxes, newest first (the sandboxes_list tool surface).
 export async function listSandboxes(db: Database, workspaceId: string): Promise<SandboxRecord[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -62624,7 +62646,6 @@ export type ActiveSandboxPointer = {
  */
 export type ActiveSandboxSwapRefusal =
   | "epoch_changed"
-  | "chat_busy"
   | "chat_unavailable"
   | "not_permitted"
   | "target_unavailable";
@@ -62713,6 +62734,8 @@ export async function setActiveSandbox(
     targetSandboxId: string | null;
     expectedEpoch: number;
     subjectId?: string;
+    /** Explicit owner click, never implicit create-time or scheduled seeding. */
+    consentToCurrentTurn?: boolean;
     personalMachineAttempt?: {
       turnId: string;
       attemptId: string;
@@ -62735,6 +62758,20 @@ export async function setActiveSandbox(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       let personalEnrollmentId: string | null = null;
+      // Take the session lock before machine locks, matching attempt claim.
+      // A lost CAS must not leave behind consent for a move that did not happen.
+      const [session] = await scopedDb.execute<{
+        active_epoch: number;
+        active_turn_id: string | null;
+      }>(sql`
+        select active_epoch, active_turn_id from sessions
+        where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
+        for no key update
+      `);
+      if (!session) return { swapped: false, pointer: null, refusal: "chat_unavailable" };
+      if (Number(session.active_epoch) !== input.expectedEpoch) {
+        return { swapped: false, pointer: null, refusal: "epoch_changed" };
+      }
       if (input.targetSandboxId !== null) {
         if (input.subjectId) {
           await setSubjectRlsContext(scopedDb, input.subjectId);
@@ -62771,6 +62808,16 @@ export async function setActiveSandbox(
               return { swapped: false, pointer: null, refusal: "target_unavailable" };
             }
             personalEnrollmentId = target.value.enrollmentId;
+            if (!input.personalMachineAttempt && !input.consentToCurrentTurn) {
+              const [recovering] = await scopedDb.execute<{ present: boolean }>(sql`
+                select exists(select 1 from session_turns
+                  where workspace_id = ${input.workspaceId} and session_id = ${input.sessionId}
+                    and status = 'recovering') as present
+              `);
+              if (session.active_turn_id || recovering?.present) {
+                return { swapped: false, pointer: null, refusal: "not_permitted" };
+              }
+            }
             if (input.personalMachineAttempt) {
               const [admission] = await rawRows<{ authorized: boolean }>(
                 scopedDb,
@@ -62784,23 +62831,6 @@ export async function setActiveSandbox(
               );
               if (admission?.authorized !== true) {
                 return { swapped: false, pointer: null, refusal: "not_permitted" };
-              }
-            } else {
-              const [session] = await scopedDb.execute<{
-                active_turn_id: string | null;
-              }>(sql`
-                select active_turn_id from sessions
-                where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
-                for no key update
-              `);
-              if (!session) {
-                return { swapped: false, pointer: null, refusal: "chat_unavailable" };
-              }
-              // Consent to use a personal machine travels with the person's next
-              // message, so a turn that is already running has none. The chat
-              // moves once that turn has settled.
-              if (session.active_turn_id !== null) {
-                return { swapped: false, pointer: null, refusal: "chat_busy" };
               }
             }
           }
@@ -62853,6 +62883,12 @@ export async function setActiveSandbox(
       const row = rows[0];
       if (!row) {
         return { swapped: false, pointer: null, refusal: "epoch_changed" };
+      }
+      if (personalEnrollmentId && input.consentToCurrentTurn && !input.personalMachineAttempt) {
+        await scopedDb.execute(sql`select consent_session_turn_personal_machine(
+          ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+          ${input.sessionId}::uuid, ${personalEnrollmentId}::uuid
+        )`);
       }
       if (personalEnrollmentId && input.personalMachineAttempt) {
         const [preUse] = await rawRows<{ authorized: boolean }>(
@@ -79058,6 +79094,8 @@ import { stageSubscriptionCorePendingServingPolicyTx } from "./subscription-core
 import { assertSubscriptionServingRecoverySettledTx } from "./subscription-core/serving-runtime";
 
 export type RequestSessionTurnRecoveryInput = {
+  /** Route selection only: keep this logical turn on HTTP after socket refusal/exhaustion. */
+  persistentModelTransportHttpOnly?: true;
   /** C2 only: proposal is persisted atomically with recovery, never placement. */
   subscriptionServingTarget?: {
     crossProviderFailoverEnabled: true;
@@ -79490,6 +79528,9 @@ export async function requestSessionTurnRecovery(
           version: turn.version + 1,
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
+            ...(input.persistentModelTransportHttpOnly
+              ? { persistentModelTransportHttpOnly: true }
+              : {}),
             ...(retryNotBefore
               ? {
                   [RECOVERY_RETRY_METADATA_KEY]: {
@@ -83237,6 +83278,57 @@ export async function settleClaimedConnectedMachineBackgroundCommand(
     mutation,
   );
   return { settled, events: settled ? [...mutation.events] : [] };
+}
+
+/** Shared push/reaper terminal commit after output capture. A concurrent attached
+ * owner finishing the same command is success, not a reconciliation failure. */
+export async function settleCollectedConnectedMachineBackgroundCommand(
+  db: Database,
+  input: {
+    claim: ConnectedMachineBackgroundCommandClaim;
+    proof: ConnectedMachineBackgroundCommandProof;
+    receipt?: ConnectedCommandOutputReceipt | undefined;
+    publish?: ((events: SessionEvent[]) => Promise<void>) | undefined;
+  },
+): Promise<boolean> {
+  const terminal = async () => {
+    const command = await getSessionBackgroundCommand(db, input.claim);
+    return command?.state === "exited" || command?.state === "lost" ? command : null;
+  };
+  let alreadyTerminal = false;
+  if (!input.claim.proof) {
+    try {
+      await recordConnectedMachineBackgroundCommandProof(db, input);
+    } catch (error) {
+      if (!(await terminal())) throw error;
+      alreadyTerminal = true;
+    }
+  }
+  const settlement = alreadyTerminal
+    ? { settled: false, events: [] }
+    : await settleClaimedConnectedMachineBackgroundCommand(db, input);
+  const command = settlement.settled ? null : await terminal();
+  if (!settlement.settled && !command)
+    throw new Error("Connected command settlement lost its exact claim or proof");
+  try {
+    if (
+      input.proof.outcome === "exited" &&
+      input.receipt &&
+      input.proof.exitCode !== null &&
+      (settlement.settled ||
+        (command?.state === "exited" && command.exitCode === input.proof.exitCode))
+    ) {
+      await recordConnectedCommandOutputConsumption(db, {
+        ...input.claim,
+        receipt: input.receipt,
+        exitCode: input.proof.exitCode,
+      });
+    }
+  } finally {
+    // A custody-checkpoint error must never suppress already committed fanout.
+    if (settlement.events.length) await input.publish?.(settlement.events);
+  }
+  return settlement.settled;
 }
 
 /**

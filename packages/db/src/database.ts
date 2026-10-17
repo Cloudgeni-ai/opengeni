@@ -482,13 +482,15 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
       application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
       ...(options.searchPath ? { search_path: options.searchPath } : {}),
       ...(options.isolationLevel ? { default_transaction_isolation: options.isolationLevel } : {}),
-      // Prepared statements are for skipping the Describe round trip and the
-      // re-parse. Keep planning per execution: a cached generic plan cannot see
-      // bound values, so it cannot choose a partial index whose predicate names a
-      // parameterized value, nor the selectivity of one workspace or subject.
-      // Only direct connections prepare, so this startup parameter never reaches
-      // a transaction pooler.
-      ...(preparedStatements ? { plan_cache_mode: "force_custom_plan" } : {}),
+      // plan_cache_mode stays at the server default (auto). Planning a statement
+      // under row-level security expands every policy on every table it reads,
+      // which often costs ten times its execution; auto lets a prepared statement,
+      // and every statement inside a PL/pgSQL routine or trigger, reuse a generic
+      // plan once Postgres finds it no costlier than planning per execution, and
+      // keeps custom plans where bound values matter (a partial index on a bound
+      // value makes the custom plan cheaper, so auto keeps choosing it). Routines
+      // whose plans must always see their arguments pin force_custom_plan in
+      // their own SET clause.
     },
   });
   const db = drizzle(preparedStatements ? preparingUnsafe(client) : client, { schema });

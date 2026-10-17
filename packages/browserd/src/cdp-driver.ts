@@ -267,6 +267,14 @@ type TargetState = {
   emulatedViewport?: { width: number; height: number; deviceScaleFactor: number } | undefined;
 };
 
+/** A page size the agent set with the viewport action. */
+type ViewportEmulation = {
+  width: number;
+  height: number;
+  deviceScaleFactor: number;
+  mobile: boolean;
+};
+
 type OopifSession = {
   frameId: string;
   sessionId: string;
@@ -417,6 +425,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly downloadEvents: AgentBrowserDriverOptions["downloadEvents"];
   private readonly connect: (endpoint: string) => Promise<BrowserCdpConnection>;
   private readonly states = new Map<string, TargetState>();
+  /** The size the agent last set. Tabs that open afterwards get it too, as
+   * they would from a resized window; tabs that already existed keep theirs. */
+  private sessionViewport: { viewport: ViewportEmulation; preexisting: Set<string> } | null = null;
+  /** Each tab's own emulated size, re-applied when the tab is attached again
+   * (Chromium drops the override with the attachment). */
+  private readonly targetViewports = new Map<string, ViewportEmulation>();
   private readonly firstSeenAt = new Map<string, string>();
   private readonly attaching = new Map<string, Promise<TargetState>>();
   private readonly attachingSessions = new Map<string, string>();
@@ -1373,7 +1387,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             error instanceof InteractionDefiniteDriverError
               ? new InteractionOutcomeUnknownDriverError(
                   "outcome_unknown",
-                  `browser action sent input or completed ${completedActions} action(s) before a later failure (${error.code}: ${error.message}); check the current page before continuing and do not replay the completed actions automatically`,
+                  `browser action ${actions.length > 1 ? `#${actionIndex} (${action.type}) ` : ""}failed after it sent input or completed ${completedActions} action(s) (${error.code}: ${error.message}); check the current page before continuing and do not replay the completed actions automatically`,
                 )
               : error,
             requestsBeforeActions,
@@ -2041,6 +2055,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // replace the real initialization outcome.
     void connection.send("Inspector.enable", {}, { sessionId }).catch(() => undefined);
     let frame: MainFrame;
+    const viewport = this.viewportFor(info.targetId);
     try {
       const initialized = (async () => {
         await Promise.all([
@@ -2052,6 +2067,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           connection.send("Log.enable", {}, { sessionId }),
         ]);
         await this.applyEmulation(connection, sessionId);
+        if (viewport) await this.applyViewport(connection, sessionId, viewport);
         return await this.mainFrame(sessionId);
       })();
       const outcome = await Promise.race([initialized, crashed]);
@@ -2127,6 +2143,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       unsubscribe: [],
       oopifs: new Map(),
       nodeRoute: null,
+      ...(viewport
+        ? {
+            emulatedViewport: {
+              width: viewport.width,
+              height: viewport.height,
+              deviceScaleFactor: viewport.deviceScaleFactor,
+            },
+          }
+        : {}),
     };
     state.unsubscribe.push(
       connection.on("Inspector.targetCrashed", () => this.onTargetCrashed(state), sessionId),
@@ -2529,6 +2554,41 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         { sessionId: frame.parentSessionId },
       );
     }
+  }
+
+  /** The size a tab being attached should have: its own, or the session's
+   * when the tab opened after the agent set one. */
+  private viewportFor(targetId: string): ViewportEmulation | null {
+    const own = this.targetViewports.get(targetId);
+    if (own) return own;
+    const session = this.sessionViewport;
+    if (!session || session.preexisting.has(targetId)) return null;
+    this.targetViewports.set(targetId, session.viewport);
+    return session.viewport;
+  }
+
+  private async applyViewport(
+    connection: BrowserCdpConnection,
+    sessionId: string,
+    viewport: ViewportEmulation,
+  ): Promise<void> {
+    await connection.send(
+      "Emulation.setDeviceMetricsOverride",
+      {
+        width: viewport.width,
+        height: viewport.height,
+        deviceScaleFactor: viewport.deviceScaleFactor,
+        mobile: viewport.mobile,
+        screenWidth: viewport.width,
+        screenHeight: viewport.height,
+      },
+      { sessionId },
+    );
+    await connection.send(
+      "Emulation.setTouchEmulationEnabled",
+      { enabled: viewport.mobile, ...(viewport.mobile ? { maxTouchPoints: 1 } : {}) },
+      { sessionId },
+    );
   }
 
   private async applyEmulation(connection: BrowserCdpConnection, sessionId: string): Promise<void> {
@@ -3346,6 +3406,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           height: action.height,
           deviceScaleFactor: action.deviceScaleFactor ?? 1,
         };
+        {
+          const viewport = { ...state.emulatedViewport, mobile: action.mobile };
+          this.targetViewports.set(state.targetId, viewport);
+          this.sessionViewport = {
+            viewport,
+            preexisting: new Set([...this.firstSeenAt.keys(), ...this.states.keys()]),
+          };
+        }
         // Let the page lay out and present one frame at the new size, so the
         // next read or capture sees it. Bounded: a throttled page never blocks.
         await this.sendTarget(
@@ -4073,13 +4141,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase()),
       );
     }
-    const unique = uniqueEntries(matches);
+    const needle = locator.kind === "role" ? locator.name : locator.text;
+    // "Save" also matches "Save as draft". When exactly one candidate's whole
+    // name is the requested text, that is the element the caller named.
+    const unique =
+      uniqueEntries(matches) ??
+      (needle !== undefined && !(locator.kind === "role" && locator.exact)
+        ? uniqueEntries(matches.filter((entry) => sameAccessibleName(entry.name, needle)))
+        : null);
     if (!unique) {
       throw new InteractionDefiniteDriverError(
         matches.length === 0 ? "locator_not_found" : "locator_ambiguous",
         matches.length === 0
           ? "browser locator found no element"
-          : "browser locator matched multiple elements",
+          : ambiguousLocatorMessage(matches),
       );
     }
     return unique;
@@ -4281,9 +4356,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
         (await this.revealByHover(state, backendDOMNodeId, frameId, point));
       if (!revealed) {
+        const cover = await this.coveringElement(state, backendDOMNodeId);
         throw new InteractionDefiniteDriverError(
           "invalid_action",
-          "browser element is covered or not pointer-actionable",
+          cover
+            ? `browser element is covered by ${cover} at its center`
+            : "browser element is covered or not pointer-actionable",
           true,
         );
       }
@@ -4330,6 +4408,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async hitsAtCenter(state: TargetState, backendDOMNodeId: number): Promise<boolean> {
     return (await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, [])) === true;
+  }
+
+  /** A short role-and-label description of what receives pointer input at the
+   * target's center instead of the target, or null when nothing else does. */
+  private async coveringElement(
+    state: TargetState,
+    backendDOMNodeId: number,
+  ): Promise<string | null> {
+    try {
+      const value = await this.callOnNode(state, backendDOMNodeId, COVER_DESCRIPTION_FUNCTION, []);
+      return typeof value === "string" && value ? value.slice(0, 160) : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -5480,7 +5572,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.failAllScreencasts(state, new CdpTransportError("browser target closed"));
     for (const unsubscribe of state.unsubscribe) unsubscribe();
     this.states.delete(targetId);
-    if (!preserveFirstSeen) this.firstSeenAt.delete(targetId);
+    if (!preserveFirstSeen) {
+      this.firstSeenAt.delete(targetId);
+      this.targetViewports.delete(targetId);
+    }
   }
 
   /**
@@ -5634,6 +5729,35 @@ function uniqueEntries(entries: CdpAccessibilityEntry[]): CdpAccessibilityEntry 
     if (entry.backendDOMNodeId !== null) byBackend.set(entry.backendDOMNodeId, entry);
   }
   return byBackend.size === 1 ? [...byBackend.values()][0]! : null;
+}
+
+function sameAccessibleName(name: string | null, requested: string): boolean {
+  const normalize = (value: string) => value.replace(/\s+/gu, " ").trim().toLocaleLowerCase();
+  return name !== null && normalize(name) === normalize(requested);
+}
+
+const AMBIGUOUS_LOCATOR_LISTED_MATCHES = 5;
+
+/** Name the candidates so the caller can act on one ref instead of guessing. */
+function ambiguousLocatorMessage(matches: readonly CdpAccessibilityEntry[]): string {
+  const byBackend = new Map<number, CdpAccessibilityEntry>();
+  for (const entry of matches) {
+    if (entry.backendDOMNodeId !== null && !byBackend.has(entry.backendDOMNodeId))
+      byBackend.set(entry.backendDOMNodeId, entry);
+  }
+  const distinct = [...byBackend.values()];
+  const listed = distinct
+    .slice(0, AMBIGUOUS_LOCATOR_LISTED_MATCHES)
+    .map((entry) => {
+      const name = boundedTargetText(entry.name);
+      return `${entry.role}${name ? ` ${JSON.stringify(name)}` : ""} [${entry.ref}]`;
+    })
+    .join(", ");
+  const more =
+    distinct.length > AMBIGUOUS_LOCATOR_LISTED_MATCHES
+      ? ` and ${distinct.length - AMBIGUOUS_LOCATOR_LISTED_MATCHES} more`
+      : "";
+  return `browser locator matched ${distinct.length} elements: ${listed}${more}; act on one ref or make the locator exact`;
 }
 
 function boundedTargetText(value: string | null): string | null {
@@ -5899,6 +6023,33 @@ const HIT_TEST_FUNCTION = `function() {
   const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
   const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
   return Boolean(hit && (element === hit || element.contains?.(hit)));
+}`;
+
+// Describes the element on top at the target's centre by its nearest
+// labelled ancestor: role (or tag) and accessible label. Text content is
+// read only from non-editable elements and bounded; input values never are.
+const COVER_DESCRIPTION_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return null;
+  const rect = element.getBoundingClientRect();
+  const root = element.getRootNode();
+  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
+  const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  if (!hit || hit === element || element.contains(hit) || hit.contains(element)) return null;
+  const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+  let node = hit;
+  for (let depth = 0; node instanceof Element && depth < 6; depth += 1) {
+    const role = node.getAttribute("role");
+    const label = clean(node.getAttribute("aria-label") || node.getAttribute("title"));
+    if (role || label) {
+      const kind = role || node.tagName.toLowerCase();
+      return label ? kind + " " + JSON.stringify(label.slice(0, 80)) : kind;
+    }
+    node = node.parentElement;
+  }
+  const editable = hit.closest("input, textarea, select, [contenteditable]");
+  const text = editable ? "" : clean(hit.textContent).slice(0, 60);
+  return hit.tagName.toLowerCase() + (text ? " " + JSON.stringify(text) : "");
 }`;
 
 // Whether pointer input at the target's centre falls through it to one of its

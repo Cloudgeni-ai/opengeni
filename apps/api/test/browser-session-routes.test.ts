@@ -1272,6 +1272,13 @@ describe("BrowserSession route discipline", () => {
     expect(route).toContain('operation: "browser.download.save"');
     expect(route).toContain("mayReplaceExisting: save.overwrite && dispatched.dispatchedNow");
     expect(route).toContain("createParents: true");
+    // A download kept as a workspace file is saved from that file first, so
+    // it needs no running browser.
+    expect(route.indexOf("getRetainedBrowserDownload")).toBeGreaterThanOrEqual(0);
+    expect(route.indexOf("getRetainedBrowserDownload")).toBeLessThan(
+      route.indexOf("sessionClient.download(downloadId)"),
+    );
+    expect(route).toContain("retained: { fileId: kept.fileId, uploadId: kept.uploadId }");
   });
 
   test("resolves linked browsers through the exact active ComputerSession placement", async () => {
@@ -1450,6 +1457,12 @@ describe("BrowserSession route discipline", () => {
     );
     expect(suspend.indexOf("stateUpload")).toBeLessThan(suspend.indexOf("createPutUrl"));
     expect(suspend.indexOf("createPutUrl")).toBeLessThan(suspend.indexOf("client.captureState"));
+    // Suspension removes the working directory: completed downloads are kept
+    // as workspace files before the capture stops the browser.
+    expect(suspend.indexOf("retainBrowserDownloads(")).toBeGreaterThanOrEqual(0);
+    expect(suspend.indexOf("retainBrowserDownloads(")).toBeLessThan(
+      suspend.indexOf("client.captureState"),
+    );
     expect(suspend).toContain('afterCapture: "stop"');
     expect(suspend.indexOf("client.captureState")).toBeLessThan(
       suspend.indexOf("commitBrowserSessionSuspension"),

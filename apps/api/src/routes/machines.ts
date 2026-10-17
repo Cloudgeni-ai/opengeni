@@ -449,6 +449,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       sessionId,
       subjectId: grant.subjectId,
     });
+    ctx.consentToCurrentTurn = !grantHasAgentAttemptAuthority(grant);
     const result = await swapActiveSandbox(
       {
         db,

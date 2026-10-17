@@ -129,6 +129,8 @@ pub struct OpHandles {
     pub watermark: Arc<AtomicU64>,
     /// The terminal record, set exactly once at completion.
     pub exit: Arc<OnceLock<JobExit>>,
+    /// Notification delivery only, independent of retained output custody.
+    pub completion_received: Arc<std::sync::atomic::AtomicBool>,
     /// The legacy adapter's encoded `ControlResponse`, for dedup replays.
     pub legacy_reply: Arc<OnceLock<Vec<u8>>>,
     /// The send window granted at OpStart — the fallback for an `OpAttach`
@@ -756,6 +758,7 @@ impl Engine {
         child: Result<Option<ContainedExec>, String>,
         emit: impl Fn(Frame) + Send + 'static,
         encode_exit: impl Fn(&JobExit) -> Vec<u8> + Send + 'static,
+        on_exit: impl FnOnce(Option<u64>, &JobExit) + Send + 'static,
     ) {
         let HandedOverOp { tag, job } = handed;
         let op_id = scoped_op_id(&tag.scope, &tag.request_id);
@@ -814,6 +817,7 @@ impl Engine {
                     engine.now_ms(),
                 );
                 drop(ticket);
+                on_exit(exit_seq, exit);
             })
         };
         let (mailbox_tx, mailbox_rx) = mpsc::channel(JOB_MAILBOX_DEPTH);
@@ -932,6 +936,36 @@ impl Engine {
     #[must_use]
     pub fn registry_counters(&self) -> RegistryCounters {
         self.registry.lock().expect("registry lock").counters()
+    }
+
+    /// Replayable terminal notifications for this exact connection only. Keep
+    /// retrying until delivery is acknowledged, independently of output custody.
+    #[must_use]
+    pub fn retained_completions(&self, scope: &str) -> Vec<(String, JobExit)> {
+        let prefix = format!("{scope}:");
+        self.registry
+            .lock()
+            .expect("registry lock")
+            .unacknowledged_completed()
+            .filter_map(|(id, handles)| {
+                if handles.completion_received.load(Ordering::Acquire) {
+                    return None;
+                }
+                Some((
+                    id.as_str().strip_prefix(&prefix)?.to_string(),
+                    handles.exit.get()?.clone(),
+                ))
+            })
+            .collect()
+    }
+
+    /// Accept an exact-connection notification receipt without touching output.
+    pub fn acknowledge_completion(&self, scope: &str, op_id: &str) {
+        if let Some(handles) = self.handles(&scoped_op_id(scope, op_id)) {
+            if handles.exit.get().is_some() {
+                handles.completion_received.store(true, Ordering::Release);
+            }
+        }
     }
 
     /// Detaches only jobs owned by one deployment/workspace link. Other links

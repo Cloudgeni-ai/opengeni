@@ -1964,6 +1964,9 @@ async function createRlsAppRole(
   // snapshot validators are invoker-rights; the latter evaluate immutable
   // snapshot CHECK constraints on ordinary session inserts.
   await db.execute(
+    dbSql.raw(`GRANT EXECUTE ON FUNCTION public.session_private_actor_visible_keys() TO "${role}"`),
+  );
+  await db.execute(
     dbSql.raw(
       `GRANT EXECUTE ON FUNCTION public.session_private_actor_visible(uuid, uuid, uuid, text) TO "${role}"`,
     ),

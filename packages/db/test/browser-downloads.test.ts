@@ -4,15 +4,20 @@ import {
   activateBrowserSession,
   bootstrapWorkspace,
   completeBrowserDownloadSave,
+  completeFileUpload,
   createDb,
+  createFileUpload,
   createSession,
   dispatchBrowserDownloadSave,
   dispatchBrowserSessionOperation,
   findBrowserDownloadSave,
+  getRetainedBrowserDownload,
   InteractionResourceConflictError,
   InteractionResourceStateError,
+  listRetainedBrowserDownloads,
   prepareBrowserDownloadSave,
   prepareBrowserSessionCreate,
+  recordRetainedBrowserDownload,
   settleBrowserDownloadSaveFailure,
 } from "../src";
 
@@ -242,5 +247,95 @@ describe("browser download saves", () => {
         actorSubjectId: `${input.actorSubjectId}:other`,
       }),
     ).rejects.toBeInstanceOf(InteractionResourceConflictError);
+  });
+});
+
+describe("retained browser downloads", () => {
+  async function retainedFile(scope: Awaited<ReturnType<typeof fixture>>, ready: boolean) {
+    const fileId = crypto.randomUUID();
+    const created = await createFileUpload(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      fileId,
+      filename: "report.pdf",
+      safeFilename: "report.pdf",
+      contentType: "application/octet-stream",
+      sizeBytes: scope.download.receivedBytes,
+      sha256: scope.download.sha256,
+      bucket: "test-files",
+      objectKey: `workspaces/${scope.workspaceId}/files/${fileId}/original/report.pdf`,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    if (ready) await completeFileUpload(client.db, scope.workspaceId, created.uploadId);
+    return { fileId, uploadId: created.uploadId };
+  }
+
+  test("keeps a completed download saveable after its controller generation is gone", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    // The download came from an earlier controller generation, as after a
+    // suspension and resume: the live-controller save path refuses it.
+    const download = { ...scope.download, controllerGeneration: crypto.randomUUID() };
+    const live = preparation({ ...scope, download });
+    await expect(prepareBrowserDownloadSave(client.db, live)).rejects.toBeInstanceOf(
+      InteractionResourceStateError,
+    );
+
+    const file = await retainedFile(scope, true);
+    const kept = await recordRetainedBrowserDownload(client.db, { ...scope, download, ...file });
+    expect(kept).toMatchObject({
+      fileId: file.fileId,
+      uploadId: file.uploadId,
+      safeFilename: "report.pdf",
+      download: { id: scope.downloadId, controllerGeneration: download.controllerGeneration },
+    });
+    // The first retained file wins; a second retention of the same download is ignored.
+    const other = await retainedFile(scope, true);
+    expect(
+      await recordRetainedBrowserDownload(client.db, { ...scope, download, ...other }),
+    ).toMatchObject({ fileId: file.fileId });
+    expect(await listRetainedBrowserDownloads(client.db, scope)).toHaveLength(1);
+    expect(await getRetainedBrowserDownload(client.db, scope)).toMatchObject({
+      fileId: file.fileId,
+    });
+
+    const saved = await prepareBrowserDownloadSave(client.db, {
+      ...live,
+      fileId: kept.fileId,
+      objectKey: kept.objectKey,
+      retained: file,
+    });
+    expect(saved).toMatchObject({
+      state: "prepared",
+      fileId: file.fileId,
+      uploadId: file.uploadId,
+    });
+    await expect(
+      prepareBrowserDownloadSave(client.db, {
+        ...preparation({ ...scope, download }),
+        fileId: other.fileId,
+        objectKey: `workspaces/${scope.workspaceId}/files/${other.fileId}/original/report.pdf`,
+        retained: other,
+      }),
+    ).rejects.toBeInstanceOf(InteractionResourceStateError);
+  });
+
+  test("lists only downloads whose retained file is ready, and only completed ones", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const pending = await retainedFile(scope, false);
+    // A file still being uploaded is never presented as retained.
+    await expect(
+      recordRetainedBrowserDownload(client.db, { ...scope, ...pending }),
+    ).rejects.toThrow();
+    expect(await listRetainedBrowserDownloads(client.db, scope)).toEqual([]);
+    expect(await getRetainedBrowserDownload(client.db, scope)).toBeNull();
+    await expect(
+      recordRetainedBrowserDownload(client.db, {
+        ...scope,
+        download: { ...scope.download, status: "failed" },
+        ...(await retainedFile(scope, true)),
+      }),
+    ).rejects.toThrow();
   });
 });

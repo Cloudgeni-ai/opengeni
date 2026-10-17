@@ -11,9 +11,12 @@ import {
   createSession,
   ensureManagedAccessForUser,
   getLiveEnrollmentConnection,
+  getSandbox,
+  getSandboxForAttempt,
   initializeSessionStartAtomically,
   previewMachineAudienceChange,
   resolvePersonalMachineConnectionForAttempt,
+  recoverSessionDispatch,
   setActiveSandbox,
   settleSessionAttemptInterruptions,
   type DbClient,
@@ -955,6 +958,7 @@ describe("changing who can use a Connected Machine in place", () => {
         sessionId: session.id,
         targetSandboxId: machine.sandboxId,
         expectedEpoch,
+        consentToCurrentTurn: true,
         subjectId,
       });
     const [before] = await shared.admin<Array<{ epoch: number }>>`
@@ -967,16 +971,8 @@ describe("changing who can use a Connected Machine in place", () => {
       refusal: "not_permitted",
     });
 
-    // The owner is turned down only while a turn runs, and is told so.
-    await runTurn(org, session.id);
-    expect(await move(org.owner, before!.epoch)).toEqual({
-      swapped: false,
-      pointer: null,
-      refusal: "chat_busy",
-    });
-
     // A stale epoch is the only refusal that is a lost race.
-    await shared.admin`update sessions set active_turn_id = null where id = ${session.id}`;
+    const attempt = await runTurn(org, session.id);
     expect(await move(org.owner, before!.epoch + 7)).toEqual({
       swapped: false,
       pointer: null,
@@ -985,5 +981,161 @@ describe("changing who can use a Connected Machine in place", () => {
     const moved = await move(org.owner, before!.epoch);
     expect(moved.swapped).toBe(true);
     expect(moved.pointer?.activeSandboxId).toBe(machine.sandboxId);
+    expect(
+      await resolvePersonalMachineConnectionForAttempt(client.db, {
+        ...org,
+        subjectId: org.owner,
+        sessionId: session.id,
+        ...attempt,
+        enrollmentId: machine.enrollmentId,
+      }),
+    ).toMatchObject({ id: machine.enrollmentId, connectionInstanceId: "connection-1" });
   }, 120_000);
+
+  for (const starter of ["owner", "member", "service"] as const) {
+    test(`owner click authorizes a ${starter}-initiated running turn and its recovery only`, async () => {
+      const org = await organization();
+      const machine = await workspaceMachine(org);
+      expect(
+        (await change(org, machine, { target: "only_me", expectedGeneration: 1 })).outcome,
+      ).toBe("changed");
+      const subjectId = starter === "service" ? null : org[starter];
+      const session = await createSession(client.db, {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        initialMessage: "Continue on the selected machine",
+        resources: [],
+        metadata: {},
+        createdBy: subjectId
+          ? { kind: "subject", subjectId }
+          : { kind: "service", subjectId: "service:machine-consent-test" },
+        subjectId: subjectId ?? org.owner,
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        visibility: "workspace_shared",
+      } as never);
+      await initializeSessionStartAtomically(client.db, {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        sessionId: session.id,
+        reasoningEffortFallback: "medium",
+        createdEventPayload: {},
+      } as never);
+      const first = await runTurn(org, session.id);
+      const move = (clicker: string, expectedEpoch = session.activeEpoch) =>
+        setActiveSandbox(client.db, {
+          accountId: org.accountId,
+          workspaceId: org.workspaceId,
+          sessionId: session.id,
+          subjectId: clicker,
+          targetSandboxId: machine.sandboxId,
+          expectedEpoch,
+          consentToCurrentTurn: true,
+        });
+      expect(await move(org.member)).toMatchObject({ swapped: false, refusal: "not_permitted" });
+      expect(await move(org.owner, session.activeEpoch + 5)).toMatchObject({
+        swapped: false,
+        refusal: "epoch_changed",
+      });
+      expect(
+        await shared.admin`select id from session_turn_machine_consents where turn_id = ${first.turnId}`,
+      ).toHaveLength(0);
+      expect(await move(org.owner)).toMatchObject({
+        swapped: true,
+        pointer: { activeSandboxId: machine.sandboxId },
+      });
+      const access = {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        subjectId,
+        sessionId: session.id,
+        ...first,
+      };
+      expect(await getSandboxForAttempt(client.db, access, machine.sandboxId)).toMatchObject({
+        id: machine.sandboxId,
+        scope: "user",
+      });
+      expect(
+        await resolvePersonalMachineConnectionForAttempt(client.db, {
+          ...access,
+          enrollmentId: machine.enrollmentId,
+        }),
+      ).toMatchObject({ id: machine.enrollmentId });
+      await expect(
+        resolvePersonalMachineConnectionForAttempt(client.db, {
+          ...access,
+          subjectId: subjectId === org.owner ? org.member : org.owner,
+          enrollmentId: machine.enrollmentId,
+        }),
+      ).rejects.toThrow();
+      // Runtime projection must not widen the member's ordinary discovery.
+      expect(
+        await getSandbox(client.db, { ...org, subjectId: org.member }, machine.sandboxId),
+      ).toBeNull();
+      const [consent] =
+        await shared.admin`select consenting_subject_id, turn_id from session_turn_machine_consents where turn_id = ${first.turnId}`;
+      expect(consent).toMatchObject({ consenting_subject_id: org.owner, turn_id: first.turnId });
+      const [identity] =
+        await shared.admin`select initiating_human_subject_id from session_turns where id = ${first.turnId}`;
+      expect(identity?.initiating_human_subject_id).toBe(subjectId);
+
+      const recovery = await recoverSessionDispatch(client.db, org.workspaceId, {
+        sessionId: session.id,
+        attemptId: first.attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      });
+      expect(recovery.action).toBe("recovering");
+      const second = await runTurn(org, session.id);
+      expect(second.turnId).toBe(first.turnId);
+      expect(second.attemptId).not.toBe(first.attemptId);
+      const bindings =
+        await shared.admin`select binding.attempt_id from session_attempt_machine_consents binding
+        join session_turn_machine_consents consent on consent.id = binding.consent_id
+        where consent.turn_id = ${first.turnId}`;
+      expect(bindings.map((binding) => binding.attempt_id).sort()).toEqual(
+        [first.attemptId, second.attemptId].sort(),
+      );
+      expect(
+        await resolvePersonalMachineConnectionForAttempt(client.db, {
+          ...access,
+          ...second,
+          enrollmentId: machine.enrollmentId,
+        }),
+      ).toMatchObject({ id: machine.enrollmentId });
+      await expect(
+        resolvePersonalMachineConnectionForAttempt(client.db, {
+          ...access,
+          enrollmentId: machine.enrollmentId,
+        }),
+      ).rejects.toThrow();
+
+      // A still-connected machine does not override revoked owner authority.
+      await shared.admin`update organization_memberships set authorization_revision = authorization_revision + 1
+        where account_id = ${org.accountId} and subject_id = ${org.owner}`;
+      expect(
+        await resolvePersonalMachineConnectionForAttempt(client.db, {
+          ...access,
+          ...second,
+          enrollmentId: machine.enrollmentId,
+        }),
+      ).toBeNull();
+    }, 120_000);
+  }
+
+  test("consent receipts and internal admission helpers are not app-role writable", async () => {
+    const [privileges] = await app`select
+      has_table_privilege(current_user, 'session_turn_machine_consents', 'INSERT') as turn_insert,
+      has_table_privilege(current_user, 'session_attempt_machine_consents', 'INSERT') as attempt_insert,
+      has_function_privilege(current_user, 'bind_session_attempt_machine_consent(uuid,uuid,uuid)', 'EXECUTE') as bind,
+      has_function_privilege(current_user, 'live_session_turn_machine_consent(uuid)', 'EXECUTE') as validate`;
+    expect(privileges).toEqual({
+      turn_insert: false,
+      attempt_insert: false,
+      bind: false,
+      validate: false,
+    });
+  });
 });

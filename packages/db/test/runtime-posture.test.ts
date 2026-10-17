@@ -1516,6 +1516,8 @@ describe("runtime database posture evaluator", () => {
         "session_attempt_personal_resource_admissions",
         "session_attempt_personal_resource_snapshots",
         "session_attempt_connected_machine_authorizations",
+        "session_attempt_machine_consents",
+        "session_turn_machine_consents",
         "turn_personal_resource_attachment_receipts",
         "turn_personal_resource_once_receipts",
         "turn_personal_resource_snapshots",
@@ -1719,6 +1721,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0820 adds retained browser downloads: read, insert and update, FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1761,7 +1769,8 @@ describe("runtime database posture evaluator", () => {
         4 + // 0790 Site platform usage tables: full-DML, FORCE-RLS.
         1 + // 0792 schedule blocker reviews: full-DML, FORCE-RLS.
         2 + // 0797 subscription plan state and periods: read-only, FORCE-RLS.
-        1; // 0796 subscription operation receipts: read-only, FORCE-RLS.
+        1 + // 0796 subscription operation receipts: read-only, FORCE-RLS.
+        1; // 0820 retained browser downloads: read, insert and update, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_FULL_DML_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_TABLE_PRIVILEGES.organization_model_defaults).toEqual([
@@ -2420,6 +2429,7 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("scoped_sandbox") ||
         routine.name.includes("scoped_machine_dependent_sessions") ||
         routine.name.includes("personal_machine") ||
+        routine.name.startsWith("get_session_attempt_machine(") ||
         routine.name.includes("connected_machine_audience") ||
         routine.name.includes("subscription_codex_refresh") ||
         routine.name.includes("authorize_subscription_ownerless_session_access") ||

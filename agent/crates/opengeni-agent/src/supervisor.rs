@@ -82,6 +82,45 @@ const BULK_CHANNEL_DEPTH: usize = 1024;
 /// pairs toward the bulk publisher task. `None` between generations.
 type BulkLane = Arc<std::sync::RwLock<Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>>>;
 
+async fn publish_bulk_lane(
+    engine: Arc<Engine>,
+    client: async_nats::Client,
+    mut receiver: tokio::sync::mpsc::Receiver<(String, Vec<u8>)>,
+    transport_lost: TransportLossSignal,
+    scope: String,
+    completion_subject: String,
+) {
+    let mut retries = tokio::time::interval(DEFAULT_HEARTBEAT);
+    retries.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let next = tokio::select! {
+            // First tick is immediate on reconnect. Retained truth survives a
+            // full send queue; bulk backpressure cannot block control liveness.
+            _ = retries.tick() => {
+                for (op_id, exit) in engine.retained_completions(&scope) {
+                    let event = crate::ops::completion_event(op_id, &exit);
+                    if let Err(error) = client.publish(completion_subject.clone(), event.encode_to_vec().into()).await {
+                        warn!(%error, "completion replay failed; retained proof retries after reconnect");
+                        transport_lost.request(TransportLossKind::Disconnected);
+                        return;
+                    }
+                }
+                continue;
+            }
+            next = receiver.recv() => next,
+        };
+        let Some((subject, bytes)) = next else {
+            return;
+        };
+        if let Err(error) = client.publish(subject, bytes.into()).await {
+            engine.note_frame_dropped();
+            warn!(%error, "op frame publish failed (replay heals)");
+            transport_lost.request(TransportLossKind::Disconnected);
+            return;
+        }
+    }
+}
+
 /// A link's frame scope: its connection and process subject prefix.
 type LaneKey = (String, String);
 
@@ -178,7 +217,11 @@ fn adopt_ops<P: Platform>(
         let lane = lanes
             .lock()
             .expect("frame lanes")
-            .lane_for((op.tag.scope.clone(), prefix));
+            .lane_for((op.tag.scope.clone(), prefix.clone()));
+        let completion_sink =
+            bulk_frame_sink(lane.clone(), format!("{prefix}.events"), engine.clone());
+        let on_exit =
+            crate::ops::completion_publisher(Some(completion_sink), op.tag.request_id.clone());
         let sink = bulk_frame_sink(lane, op.tag.subject.clone(), engine.clone());
         let emit = crate::ops::frame_publisher(sink, op.tag.request_id.clone());
         let child = match op.job.exec.as_ref() {
@@ -189,9 +232,13 @@ fn adopt_ops<P: Platform>(
                 .map_err(|error| format!("could not adopt the command's process: {error}")),
         };
         info!(op = %op.tag.request_id, running = op.job.exec.is_some(), "continuing a handed-over command");
-        engine.adopt_job(op, child, emit, |exit| {
-            crate::ops::wire_exit(exit).encode_to_vec()
-        });
+        engine.adopt_job(
+            op,
+            child,
+            emit,
+            |exit| crate::ops::wire_exit(exit).encode_to_vec(),
+            on_exit,
+        );
     }
 }
 
@@ -1084,23 +1131,16 @@ impl<P: Platform + 'static> Supervisor<P> {
             Ok(connection) => connection,
             Err(e) => return ConnectionOutcome::Disconnected(format!("bulk dial failed: {e}")),
         };
-        let (bulk_tx, mut bulk_rx) =
+        let (bulk_tx, bulk_rx) =
             tokio::sync::mpsc::channel::<(String, Vec<u8>)>(BULK_CHANNEL_DEPTH);
-        let publisher_engine = self.engine.clone();
-        let publisher_transport_lost = bulk_transport_lost.clone();
-        let publisher = tokio::spawn(async move {
-            while let Some((subject, bytes)) = bulk_rx.recv().await {
-                if let Err(error) = bulk_client.publish(subject, bytes.into()).await {
-                    // Fire-and-forget: a lost frame is healed by gap-detect +
-                    // OpAttach replay; never a reason to fail the op — but the
-                    // drop is RECORDED (FAILURE-VISIBILITY healed-fault rule).
-                    publisher_engine.note_frame_dropped();
-                    warn!(%error, "op frame publish failed (replay heals)");
-                    publisher_transport_lost.request(TransportLossKind::Disconnected);
-                    break;
-                }
-            }
-        });
+        let publisher = tokio::spawn(publish_bulk_lane(
+            self.engine.clone(),
+            bulk_client,
+            bulk_rx,
+            bulk_transport_lost.clone(),
+            link.connection_id.clone(),
+            link.events_subject(),
+        ));
         *link.bulk_tx.write().expect("bulk lock") = Some(bulk_tx);
 
         // T-derived sizing becomes active only after every generation seam is
@@ -1198,6 +1238,9 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // served inline.
                 ack = ack_subscription.next() => match ack {
                     Some(message) => {
+                        if crate::ops::handle_completion_ack_scoped(&self.engine, &link.connection_id, message.payload.as_ref()) {
+                            continue;
+                        }
                         match v1::OpAck::decode(message.payload.as_ref()) {
                             Ok(ack) => crate::ops::handle_op_ack_scoped(
                                 &self.engine,
@@ -1948,6 +1991,11 @@ impl<P: Platform + 'static> Supervisor<P> {
         // Only a link that can continue jobs across an update tags them.
         let frame_subject = self.handover_enabled().then(|| subject.clone());
         let sink = bulk_frame_sink(link.bulk_tx.clone(), subject, self.engine.clone());
+        let completion_sink = bulk_frame_sink(
+            link.bulk_tx.clone(),
+            link.events_subject(),
+            self.engine.clone(),
+        );
         spawn_admitted_rpc(rpc_tasks, reservation, async move {
             let response = if request_epoch != 0 && request_epoch < held_epoch {
                 dispatch::fenced_reply(request_id, request_epoch, held_epoch)
@@ -1961,6 +2009,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     start,
                     resource_policy,
                     frame_subject,
+                    Some(completion_sink),
                 )
                 .await
             };
@@ -3085,6 +3134,102 @@ mod tests {
             started,
             sequence.expect("retained terminal frame"),
         )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completion_retry_heals_a_full_queue_and_reconnect_until_delivery_ack() {
+        let Some(bin) = it::find_nats_server() else {
+            eprintln!("SKIP completion retry: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&bin, port);
+        let client =
+            it::connect_with_retry(&format!("nats://127.0.0.1:{port}"), Duration::from_secs(5))
+                .await;
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            directory.path().join("spool"),
+            opengeni_agent_engine::HostCapacity::default(),
+        );
+        let (operation, started, sequence) =
+            retained_update_result(&engine, &Arc::new(UpdateDrain::default()), "scope-a").await;
+        let subject = "test.completion.retry";
+        let mut events = client.subscribe(subject).await.unwrap();
+        client.flush().await.unwrap();
+        for generation in 0..3 {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tx.try_send(("unused.frame".into(), vec![])).unwrap();
+            assert!(
+                tx.try_send((subject.into(), vec![])).is_err(),
+                "original notification was dropped"
+            );
+            let publisher = tokio::spawn(publish_bulk_lane(
+                engine.clone(),
+                client.clone(),
+                rx,
+                TransportLossSignal::default(),
+                "scope-a".into(),
+                subject.into(),
+            ));
+            if generation < 2 {
+                let message = tokio::time::timeout(Duration::from_secs(2), events.next())
+                    .await
+                    .expect("immediate replay after connect")
+                    .unwrap();
+                let event = AgentEvent::decode(message.payload).unwrap();
+                assert!(
+                    matches!(event.event, Some(Event::OperationCompleted(ref completed))
+                    if completed.op_id == "synthetic-command" && completed.exit.as_ref().unwrap().exit_code == 0)
+                );
+                if generation == 0 {
+                    tokio::time::timeout(DEFAULT_HEARTBEAT + Duration::from_secs(2), events.next())
+                        .await
+                        .expect("unacknowledged completion retries on an intact connection")
+                        .unwrap();
+                }
+            } else {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), events.next())
+                        .await
+                        .is_err(),
+                    "acknowledged completions are no longer republished"
+                );
+            }
+            publisher.abort();
+            let _ = publisher.await;
+            if generation == 1 {
+                let ack = v1::AgentEventAck {
+                    ack: Some(v1::agent_event_ack::Ack::OperationCompleted(
+                        v1::OperationCompletedAck {
+                            op_id: "synthetic-command".into(),
+                        },
+                    )),
+                }
+                .encode_to_vec();
+                assert!(crate::ops::handle_completion_ack_scoped(
+                    &engine,
+                    "other-scope",
+                    &ack
+                ));
+                assert_eq!(engine.retained_completions("scope-a").len(), 1);
+                assert!(crate::ops::handle_completion_ack_scoped(
+                    &engine, "scope-a", &ack
+                ));
+                assert!(
+                    matches!(
+                        engine.query(&operation),
+                        opengeni_agent_engine::registry::QueryAnswer::Complete {
+                            final_acked: false,
+                            ..
+                        }
+                    ),
+                    "delivery receipt never releases output"
+                );
+            }
+        }
+        acknowledge_update_result(&engine, &operation, &started, sequence).await;
     }
 
     #[cfg(unix)]

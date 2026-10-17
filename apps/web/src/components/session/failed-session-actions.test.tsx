@@ -38,6 +38,22 @@ const failure = {
 };
 const actions = { onRetry: async () => true, retryBlocker: null };
 
+test("an incompatible accepted Knowledge scope offers a new message, never Retry", async () => {
+  const reason =
+    "This turn's Knowledge scope no longer matches this chat. Send a new message to continue with the current settings.";
+  const scopedFailure = { ...failure, failureCode: "knowledge_learning_scope_changed", reason };
+  const container = await render(<FailedSessionBanner failure={scopedFailure} actions={actions} />);
+  expect(container.textContent).toContain(reason);
+  expect(container.querySelector("button")).toBeNull();
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={scopedFailure} actions={actions} modelChanged canChooseModel />,
+    ),
+  );
+  expect(container.textContent).toContain(reason);
+  expect(container.querySelector("button")).toBeNull();
+});
+
 test("compact row offers one ghost Retry without duplicate controls or guidance", async () => {
   const container = await render(<FailedSessionBanner failure={failure} actions={actions} />);
   expect(container.querySelectorAll("button")).toHaveLength(1);

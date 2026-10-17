@@ -122,6 +122,8 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     // Remove it before replay so the actual attention backfill still runs.
     await owner`ALTER TABLE session_event_cursors
       ADD COLUMN last_meaningful_sequence integer NOT NULL DEFAULT 0`;
+    // Current event readers project 0810's usage source key.
+    await owner`ALTER TABLE session_events ADD COLUMN usage_source_key text`;
     // Current session/turn adapters project 0608's nullable context fields.
     // Stage only empty reader columns for historical seeds, not its authority
     // triggers or backfill; remove them before the real ordered 0608 replay.
@@ -308,6 +310,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       DROP COLUMN content_archive,
       DROP COLUMN content_archive_purged_at`;
     await owner`ALTER TABLE session_event_cursors DROP COLUMN last_meaningful_sequence`;
+    await owner`ALTER TABLE session_events DROP COLUMN usage_source_key`;
     // Assert the attribution repair's literal policy invariance before the
     // separately governed 0591 planner optimization. This fixture already
     // stages future receipts to replay a historical migration boundary; retain
@@ -425,8 +428,8 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       scopedComputeRead,
     ]);
     // ...and 0805, which inlines every session_reference_visible() call as
-    // the same EXISTS probe of sessions. Let PostgreSQL deparse the expected
-    // rewrite so formatting matches exactly.
+    // the same EXISTS probe of sessions, kept per-row by 0827's OFFSET 0. Let
+    // PostgreSQL deparse the expected rewrite so formatting matches exactly.
     const inlineSessionProbe = async (relname: string, expression: unknown) => {
       if (typeof expression !== "string" || !expression.includes("session_reference_visible("))
         return expression;
@@ -436,7 +439,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
           `(${relname}.${session} IS NULL OR EXISTS (SELECT 1 FROM sessions session_row` +
           ` WHERE session_row.account_id = ${relname}.${account}` +
           ` AND session_row.workspace_id = ${relname}.${workspace}` +
-          ` AND session_row.id = ${relname}.${session}))`,
+          ` AND session_row.id = ${relname}.${session} OFFSET 0))`,
       );
       await owner.unsafe(
         `CREATE POLICY expected_inline_session_probe ON ${relname} AS RESTRICTIVE USING (${rewritten})`,

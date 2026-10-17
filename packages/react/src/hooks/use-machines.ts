@@ -152,8 +152,6 @@ export type UseMachinesResult = {
  */
 function swapFailureMessage(t: OpenGeniText, result: SwapActiveSandboxResponse): string {
   switch (result.code) {
-    case "chat_busy":
-      return t("hooks.useMachines.itsInTheMiddle");
     case "recovery_in_progress":
       return t("hooks.useMachines.itsComputerIsStillStarting");
     case "recovery_degraded":

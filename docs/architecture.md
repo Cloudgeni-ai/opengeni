@@ -110,6 +110,10 @@ answers; filtered reads cannot skip unseen content. Manual unread survives repla
 until newer consumed activity or explicit mark-read.
 [Bounded reads/reconciliation](session-monitoring-mcp.md).
 
+Session list totals materialize narrow, caller-RLS-authorized child metadata once
+before recursive traversal. Roots retain their list/scope filters; exact-target
+grants do not expand to children. Tree depth does not multiply base session scans.
+
 SSE replays/backfills Postgres and subscribes to fanout. Reads byte-bound prefixes
 before transfer; oversized events travel intact/alone. Short pages never prove
 EOF. NATS restarts affect delivery/reachability, never history/queued obligations.
@@ -244,7 +248,19 @@ Cancel govern lifetime. Instance stop/revocation/replacement marks Connected
 Machine tracking `lost`, never process death; temporary outages preserve it.
 Reconciliation batches a fixed due-time frontier, sharing per-instance offline
 observations. Historical retirement retains records without input/wakes.
-Terminal proof atomically commits settlement/audit. Unobserved nonterminal
+Terminal proof atomically commits settlement/audit. Connected Machine runners
+push `OperationCompleted` independently of output attachment and credit; API
+ingestion claims the original process/operation, captures retained output through
+its verified exit frontier, then uses the same fenced settlement. Pushes cannot
+steal an active reaper claim; a racing push preserves an immediate retry. The runner
+retries unacknowledged terminal records on reconnect and its existing heartbeat
+cadence over the bulk connection. Completion collectors use independent ingestion
+capacity and yield before their claim expires, preserving heartbeat/control liveness.
+An exact-operation delivery receipt stops notification retries after durable server
+ownership; it never grants output custody. A dedicated first-notification timestamp
+bypasses polling backoff once, while failed collection keeps reconciliation backoff.
+Reaping remains the unavailable-runner fallback. The event alone does not grant output custody
+or acknowledge retained bytes. Unobserved nonterminal
 sessions receive fallback input. Terminal reads suppress pending notifications,
 not history; running reads suppress neither. Failed/cancelled sessions retain
 audit only. Replaceable fanout follows commit. Separate conversation history
@@ -674,6 +690,15 @@ Canonical: `packages/runtime/src/sandbox/selfhosted/`,
 and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
+
+A human owner's personal-machine move during a turn is explicit consent for
+that logical turn, independent of the initiating person. The separate turn
+receipt and attempt bindings survive recovery without rewriting accepted
+snapshots or borrowing the owner's other authorities. Exact-attempt route
+projection exposes only the consented machine; ordinary discovery stays
+owner-only. Live owner/membership, enrollment/authority generations, session
+execution epoch, interruption and route checks precede dispatch. See
+[Connected Machines](connected-machines.md).
 
 Modal recovery: singleton human consent (`packages/core/src/application/sandbox-recovery.ts`)
 or proved provider loss (`packages/db/src/index.ts`): the quiescent group restores a
@@ -1308,6 +1333,14 @@ Managed 1Password creation preflights canonical link policy without retaining
 trial rows or holding DB locks over provider I/O; post-create failures retain
 the upstream identity for Link/Refresh recovery, never destructive compensation.
 
+Persistent Responses connections share `packages/network/src/responses-websocket.ts`:
+one conversation lifecycle, continuation fingerprints and transport diagnostics for
+Codex, OpenAI API and Azure. Providers supply endpoint/authentication and framing;
+providers without socket support retain HTTP keep-alive. The durable worker owns
+the step retry budget, with its last retry reserved for HTTP. Turn-only HTTP
+selection survives recovery in turn metadata and never carries into a new turn.
+The transport does not replay partial streams or bypass request custody.
+
 Canonical: [`model-providers.md`](model-providers.md),
 [`mcp-surfaces.md`](mcp-surfaces.md),
 [`session-mcp-servers.md`](session-mcp-servers.md), and
@@ -1387,11 +1420,14 @@ Insights retains private/deleted/unmatched amounts. Details require actor
 visibility and canonical selected-key/explicit-permission ceilings. Mask before
 identity filters; hide session/Personal facets. Unknowns stay unknown; allocations
 conserve totals. Unified GET usage/calls use `@opengeni/contracts/insights-usage`;
-the [checkpoint](insights-raw-usage-api.md) documents gates, residuals, privacy and
-interim performance. Its bounded 60-second successful-response cache reauthorizes
+the [DB API](insights-raw-usage-api.md) documents gates, residuals, privacy and
+hourly rollups and online backfill. Model-fact deltas maintain owner-only UTC-hour
+aggregates; readers use exact raw predicates only at ragged edges and keep the
+credit ledger independent. Its bounded 60-second successful-response cache reauthorizes
 every hit and fences live permissions/visibility; normal statement cancellation
 returns an actionable range-too-large error rather than a hung request.
-Canonical: `packages/db/src/insights-usage-bundle.ts`,
+Canonical unified reader: `packages/db/src/insights-unified.ts`. Legacy bundles:
+`packages/db/src/insights-usage-bundle.ts`,
 `packages/db/src/insights-model-bundle.ts`,
 `packages/core/src/domain/insights-usage.ts`, and
 `apps/api/src/routes/insights-usage.ts`.
@@ -2280,6 +2316,8 @@ at execution of historical 0345/0598. It changes only their constraint-catalog
 reads, not published SQL bytes, ledger names, release hashes, or schema guards;
 older servers execute the original source. Already-applied migrations stay
 skipped. See [migration compatibility](migrations-expand-contract.md#historical-server-compatibility).
+The same hash-pinned adapter stabilizes 0807 policy deparsing for dedicated
+schemas without changing its exact helper matcher or published SQL history.
 
 Postgres owns file access/liveness; fork screenshots require ancestry and copied receipts, preserving RLS.
 Storage endpoints and signed URLs are transport details; keep URLs, object keys,

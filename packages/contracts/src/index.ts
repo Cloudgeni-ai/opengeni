@@ -47,6 +47,7 @@ import {
 export * from "./agent-instruction-changes";
 export * from "./bundled-skills";
 export * from "./skill-use";
+export * from "./learning-refusal";
 import { BundledSkillSelection } from "./bundled-skills";
 import { SkillWriteReceipt, SkillSourceReleaseReceipt, SkillPublicationReceipt } from "./skills";
 import { readSkillMetadata } from "./skill-metadata";
@@ -20946,7 +20947,6 @@ export const SwapActiveSandboxResponse = /* @__PURE__ */ defineSchema(() =>
         "unsupported_backend_context",
         "transient_establishment",
         "concurrent_swap",
-        "chat_busy",
         "personal_machine_permission_required",
         "personal_machine_not_permitted",
         "recovery_in_progress",

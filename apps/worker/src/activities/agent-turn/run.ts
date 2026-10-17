@@ -6,6 +6,7 @@ import {
   settleSubscriptionCoreCodexRequest,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
+  markSessionTurnModelTransportHttpOnly,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
 import { createAttemptVaultAccess } from "./secret-resolver";
@@ -44,6 +45,8 @@ import {
   CODEX_CLIENT_VERSION,
   codexRequestStorage,
   withCodexRequestOverrides,
+  withResponsesConversation,
+  createResponsesTurn,
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
@@ -66,6 +69,7 @@ import {
   makeMachineOpObserver,
   modelRequestLifecycleMetricsFor,
   recordModelRequestPhase,
+  recordResponsesTransportDiagnostic,
   type ModelRequestTransportLabel,
   recordCompanyBrainContributions,
   recordTurnStartupPhase,
@@ -1030,12 +1034,40 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   };
                 })()
               : null;
+          providerTurn.persistentModelTransportHttpOnly =
+            turn.metadata?.persistentModelTransportHttpOnly === true;
+          const responsesTurn = createResponsesTurn(
+            input.sessionId,
+            (event) =>
+              recordResponsesTransportDiagnostic(
+                observability,
+                turnExecutionPolicy.providerId,
+                event,
+              ),
+            {
+              httpOnly: providerTurn.persistentModelTransportHttpOnly,
+              onFallback: async () => {
+                providerTurn.persistentModelTransportHttpOnly = true;
+                const persisted = await markSessionTurnModelTransportHttpOnly(db, {
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  executionGeneration: turn.executionGeneration,
+                  attemptId: input.attemptId,
+                });
+                if (!persisted)
+                  throw new TurnAttemptFencedError("Model transport fallback lost turn ownership");
+              },
+            },
+          );
           if (codexContext && runSettings.codexResponsesWebSocketEnabled) {
             // Open this conversation's Responses WebSocket now, so its
             // handshake overlaps the rest of turn preparation instead of
             // delaying the first model response. No model request is sent.
-            void codexRequestStorage.run(codexContext, () =>
-              warmCodexResponsesWebSocket(resolvedModel?.provider.baseUrl),
+            void withResponsesConversation(responsesTurn, () =>
+              codexRequestStorage.run(codexContext, () =>
+                warmCodexResponsesWebSocket(resolvedModel?.provider.baseUrl),
+              ),
             );
           }
           let xaiCoreAuthorization: XaiCoreRequestAuthorization | null = null;
@@ -1238,11 +1270,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             claudeCore ? withClaudeCoreLane("titleRequests")(fn) : fn();
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
+          // The turn's model requests belong to this session's conversation,
+          // so OpenAI/Azure Responses requests can share one WebSocket
+          // connection and continue the previous response on it.
           const withProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeUsage(() =>
-              providerTurn.xaiRequestContext
-                ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
-                : withCodex(fn),
+            withResponsesConversation(responsesTurn, () =>
+              withClaudeUsage(() =>
+                providerTurn.xaiRequestContext
+                  ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
+                  : withCodex(fn),
+              ),
             );
           let codexSessionTitleRequestSequence = 0;
           let xaiSessionTitleRequestSequence = 0;
@@ -1397,6 +1434,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
           const sandboxRoute = await resolveSandboxRoute({
             input,
+            turn,
             settings,
             db,
             eventing,

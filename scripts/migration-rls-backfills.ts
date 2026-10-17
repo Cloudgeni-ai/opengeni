@@ -33,6 +33,11 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { batchedBackfillTransactionLocalSetting } from "../packages/db/src/migration-runner-settings";
+import {
+  SESSION_HISTORY_CAPABILITY,
+  sessionHistoryBackfillPlan,
+  sessionHistoryRlsExecutableSql,
+} from "../packages/db/src/migration-session-history-backfills";
 
 export const MIGRATIONS_DIR = "packages/db/drizzle";
 
@@ -565,11 +570,15 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
   const findings: BackfillFinding[] = [];
 
   for (const file of files) {
-    const raw = readFileSync(join(migrationsDir, file), "utf8");
+    const source = readFileSync(join(migrationsDir, file), "utf8");
+    const raw = sessionHistoryRlsExecutableSql(file, source);
     const runnerSetting = batchedBackfillTransactionLocalSetting(file);
-    const runnerCapabilityGuc =
-      runnerSetting?.value === "1" &&
-      /^-- deployment-mode: (?:rolling|maintenance)\r?\n-- opengeni:batched-backfill\b/u.test(raw)
+    const runnerCapabilityGuc = sessionHistoryBackfillPlan(file, source)
+      ? SESSION_HISTORY_CAPABILITY.slice("opengeni.".length)
+      : runnerSetting?.value === "1" &&
+          /^-- deployment-mode: (?:rolling|maintenance)\r?\n-- opengeni:batched-backfill\b/u.test(
+            raw,
+          )
         ? runnerSetting.guc.slice("opengeni.".length)
         : undefined;
     // Owner-only posture window and tenant GUC state are per-file: the runner

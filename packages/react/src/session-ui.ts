@@ -129,6 +129,11 @@ export { SessionCommandsPanel } from "./components/session-commands-panel";
 export { SessionCommands } from "./components/session-commands";
 
 export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
+export {
+  LearningRefusalActionsProvider,
+  type LearningRefusalActions,
+} from "./timeline/learning-refusal-row";
+export type { LearningRefusalPlace } from "./timeline/learning-refusal-copy";
 export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
 export { StartupTimings } from "./timeline/startup-timings";
 export { useStartupDetails, setStartupDetails } from "./timeline/startup-preference";

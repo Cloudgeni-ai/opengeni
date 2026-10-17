@@ -2335,6 +2335,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         modalImageRef: image,
       });
       const route = await resolveSandboxRoute({
+        turn: { id: "turn-1", executionGeneration: 1 } as never,
         input: { accountId, workspaceId, sessionId: groupId } as never,
         settings,
         db,

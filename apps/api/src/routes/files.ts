@@ -53,7 +53,7 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
-import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
+import { recordWorkspaceUsage, requireLimit, sanitizeWorkspaceFilename } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { retryWhileMissing } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -733,12 +733,7 @@ async function serveRetainedArtifactContent(
 }
 
 export function sanitizeFilename(filename: string): string {
-  const trimmed = filename.trim().replace(/[/\\]/g, "_");
-  const safe = trimmed
-    .replace(/[^A-Za-z0-9._ -]+/g, "_")
-    .replace(/\s+/g, " ")
-    .trim();
-  return safe || "file";
+  return sanitizeWorkspaceFilename(filename);
 }
 
 /** Keep the cleanup lease internal; clients only consume terminal upload states. */

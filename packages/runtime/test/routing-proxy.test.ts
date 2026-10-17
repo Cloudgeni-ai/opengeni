@@ -132,6 +132,40 @@ function mutablePointer(initial: ActivePointer = { activeSandboxId: null, active
 }
 
 describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () => {
+  test("a move during connection authorization re-resolves before any dispatch", async () => {
+    const pointer = mutablePointer({ activeSandboxId: "personal", activeEpoch: 1 });
+    const home: RoutableBackendSession = { exec: async () => ({ stdout: "home", exitCode: 0 }) };
+    const seen: Array<string | null> = [];
+    const proxy = new RoutingSandboxSession({
+      readPointer: pointer.read,
+      resolveActiveBackend: async (route) => {
+        seen.push(route.activeSandboxId);
+        if (route.activeSandboxId === "personal") {
+          pointer.swap(null);
+          throw new Error("personal machine authority is no longer live");
+        }
+        return { session: home, sandboxId: null, kind: "modal" };
+      },
+    });
+    expect(await proxy.exec({ cmd: "hostname" })).toMatchObject({ stdout: "home" });
+    expect(seen).toEqual(["personal", null]);
+  });
+
+  test("an unchanged route never retries revoked machine authority", async () => {
+    const pointer = mutablePointer({ activeSandboxId: "personal", activeEpoch: 1 });
+    let resolutions = 0;
+    const denied = new Error("personal machine authority is no longer live");
+    const proxy = new RoutingSandboxSession({
+      readPointer: pointer.read,
+      resolveActiveBackend: async () => {
+        resolutions += 1;
+        throw denied;
+      },
+    });
+    await expect(proxy.exec({ cmd: "hostname" })).rejects.toBe(denied);
+    expect(resolutions).toBe(1);
+  });
+
   test("tool-scoped finalization preserves reached backends for other durable results", async () => {
     const acknowledgments: Array<{ backend: string; callIds?: readonly string[] }> = [];
     const backend = (name: string): RoutableBackendSession => ({

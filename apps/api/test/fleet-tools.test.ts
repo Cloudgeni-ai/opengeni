@@ -558,9 +558,20 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
         })
       ).ok,
     ).toBe(false);
+    // The owner's human move needs no agent attempt in the request: the click
+    // consents to the running logical turn, while direct execution still does.
     expect((await swapActiveSandbox(services, withoutAttempt, machine.sandboxId)).swapped).toBe(
       false,
     );
+    expect(
+      (
+        await swapActiveSandbox(
+          services,
+          { ...withoutAttempt, consentToCurrentTurn: true },
+          machine.sandboxId,
+        )
+      ).swapped,
+    ).toBe(true);
 
     expect(
       (
@@ -1005,7 +1016,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       "session",
     );
     expect(failed.swapped).toBe(false);
-    expect(failed.code).toBe("concurrent_swap");
+    expect(failed.code).toBe("stale_pointer");
     expect(failedRelease).toBe(1);
   }, 60_000);
 

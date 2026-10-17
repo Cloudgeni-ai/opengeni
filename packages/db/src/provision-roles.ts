@@ -2026,6 +2026,12 @@ BEGIN
         EXECUTE format('GRANT EXECUTE ON FUNCTION %I.change_connected_machine_audience(uuid, uuid, uuid, bigint, text, text, boolean) TO %I', ${literal(schema)}, ${literal(role)});
       END IF;
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_attempt_connected_machine_authorizations FROM %I', ${literal(schema)}, ${literal(role)});
+      IF to_regprocedure(format('%I.consent_session_turn_personal_machine(uuid,uuid,uuid,uuid)', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.consent_session_turn_personal_machine(uuid,uuid,uuid,uuid) TO %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.get_session_attempt_machine(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,boolean,boolean) TO %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_turn_machine_consents, %I.session_attempt_machine_consents FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.live_session_turn_machine_consent(uuid), %I.bind_session_attempt_machine_consent(uuid,uuid,uuid), %I.assert_session_attempt_machine_consent(uuid,uuid,uuid,uuid,uuid,integer,uuid,boolean,boolean) FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+      END IF;
     END IF;
     IF to_regprocedure(
       format(

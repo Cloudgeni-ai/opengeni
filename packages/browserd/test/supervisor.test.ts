@@ -2010,6 +2010,69 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
+  test("retiring a browser this controller lost stops its exact process and keeps its state", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      // The task moved to another machine after an agent restart left this
+      // browser running detached: the control plane retires the exact
+      // generation and keeps the profile and downloads on disk.
+      const stopped: Array<{ profileDirectory: string; pid: number | null }> = [];
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        stopEndedProcess: async (profileDirectory, recorded) => {
+          stopped.push({ profileDirectory, pid: recorded?.pid ?? null });
+        },
+        createDriver: async (context) => fakeDriver(context),
+      });
+      try {
+        const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+        const exact = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+        };
+        await expect(
+          supervisor.endSession(
+            { ...exact, controllerGeneration: "controller-other" },
+            { removeState: false, discardWorkingRuntime: true },
+          ),
+        ).rejects.toThrow("preserved");
+        expect(stopped).toEqual([]);
+
+        await supervisor.endSession(exact, { removeState: false, discardWorkingRuntime: true });
+        expect(stopped).toEqual([
+          { profileDirectory: join(sessionDirectory, "profile"), pid: 2001 },
+        ]);
+        expect(await exists(join(sessionDirectory, "profile"))).toBe(true);
+        const journal = await SqliteBrowserWorkingRuntimeJournal.open(
+          { sessionDirectory, ...exact },
+          true,
+        );
+        try {
+          expect(journal.latest()).toMatchObject({
+            intent: "retire",
+            state: "completed",
+            process: null,
+          });
+        } finally {
+          journal.close();
+        }
+        // A retried retirement is idempotent; it only rechecks for survivors.
+        await supervisor.endSession(exact, { removeState: false, discardWorkingRuntime: true });
+        expect(stopped.at(-1)).toEqual({
+          profileDirectory: join(sessionDirectory, "profile"),
+          pid: null,
+        });
+        // A resume can never adopt the retired directory as a live browser.
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toThrow();
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
   test("an interrupted launch is set aside intact only when no browser runs its profile", async () => {
     await withInterruptedLaunchFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
       const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);

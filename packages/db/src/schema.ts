@@ -11164,6 +11164,7 @@ export const sessionBackgroundCommands = pgTable(
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     settledAt: timestamp("settled_at", { withTimezone: true }),
     completionObservedAt: timestamp("completion_observed_at", { withTimezone: true }),
+    completionNotifiedAt: timestamp("completion_notified_at", { withTimezone: true }),
     reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).notNull().defaultNow(),
     reconcileClaimId: uuid("reconcile_claim_id"),
     reconcileClaimedAt: timestamp("reconcile_claimed_at", {

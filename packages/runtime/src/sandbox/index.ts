@@ -118,6 +118,10 @@ export {
 } from "./materialization-verification-error";
 export { sendCommandInput, type CommandInputSession } from "./command-input";
 export { OpStreamExecClient, type OpStreamOutputFrame } from "./selfhosted/op-stream";
+export {
+  replayConnectedCommandOutput,
+  connectedCommandExitProof,
+} from "./selfhosted/terminal-replay";
 
 export {
   repairSerializedRunStateExposedPorts,

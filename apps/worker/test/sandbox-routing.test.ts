@@ -14,6 +14,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
+import { wrapChannelABoxWithRouting } from "@opengeni/core";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -1426,6 +1427,125 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     ).rejects.toThrow();
     expect(providerRequests).toBe(2);
   }, 60_000);
+
+  test.each(["member", "service"] as const)(
+    "an owner's click routes the running %s turn's next worker and API tool to the personal machine",
+    async (starter) => {
+      if (!available) return;
+      const ownerUserId = `live-move-${crypto.randomUUID()}`;
+      const owner = `user:${ownerUserId}`;
+      const other = `human:${crypto.randomUUID()}`;
+      const initiatingHuman = starter === "service" ? null : other;
+      const access = await ensureManagedAccessForUser(db, {
+        userId: ownerUserId,
+        email: `${ownerUserId}@example.test`,
+        name: "Machine owner",
+      });
+      const grant = access.workspaceGrants.find(
+        (value) => value.workspaceId === access.defaultWorkspaceId,
+      );
+      if (!grant) throw new Error("missing workspace grant");
+      const { accountId, workspaceId } = grant;
+      const [otherWorkspace] = await admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name) values (${accountId}, 'Other person') returning id`;
+      await admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+      values (${accountId}, ${other}, 'active', ${otherWorkspace!.id})`;
+      await admin`insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${accountId}, ${workspaceId}, ${other})`;
+      const machine = await admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${accountId}, true),
+        set_config('opengeni.workspace_id', ${workspaceId}, true),
+        set_config('opengeni.subject_id', ${owner}, true)`;
+        const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(${accountId}::uuid, ${workspaceId}::uuid, 'user',
+          ${`ed25519:${crypto.randomUUID()}`}, true, false, 'linux', 'x86_64', 'Personal build machine', false)`;
+        return row!;
+      });
+      const connectionInstanceId = await claimTestConnection({
+        accountId,
+        workspaceId,
+        enrollmentId: machine.enrollmentId,
+        credentialGeneration: 1,
+      });
+      const session = await createSession(db, {
+        accountId,
+        workspaceId,
+        initialMessage: "Run the build",
+        resources: [],
+        metadata: {},
+        model: "gpt-test",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "modal",
+        createdBy: initiatingHuman
+          ? { kind: "subject", subjectId: initiatingHuman }
+          : { kind: "service", subjectId: "service:routing-test" },
+        subjectId: other,
+      });
+      const attempt = await claimRoutingAttempt({ accountId, workspaceId, sessionId: session.id });
+      let dispatched = 0;
+      const bus = busWithAgent(
+        workspaceId,
+        machine.enrollmentId,
+        connectionInstanceId,
+        "personal-build-machine",
+        () => {
+          dispatched += 1;
+        },
+      );
+      const routed = wrapTurnBoxWithRouting(
+        { db, settings, bus, opJournal: testOpJournal },
+        {
+          workspaceId,
+          sessionId: session.id,
+          resourceAccountId: accountId,
+          resourceSubjectId: other,
+          personalMachineAttempt: { ...attempt, subjectId: initiatingHuman },
+        },
+        fakeGroupBox("managed-home"),
+      ).session as { exec(args: unknown): Promise<{ stdout: string }> };
+      expect((await routed.exec({ cmd: "hostname" })).stdout.trim()).toBe("managed-home");
+      expect(
+        await setActiveSandbox(db, {
+          consentToCurrentTurn: true,
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+          subjectId: owner,
+          targetSandboxId: machine.sandboxId,
+          expectedEpoch: session.activeEpoch,
+        }),
+      ).toMatchObject({ swapped: true });
+      expect((await routed.exec({ cmd: "hostname" })).stdout.trim()).toBe("personal-build-machine");
+      expect(dispatched).toBe(1);
+      const apiRouted = wrapChannelABoxWithRouting(
+        { db, settings, bus },
+        {
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+          resourceSubjectId: other,
+          machineAuthority: async () => ({
+            subjectId: initiatingHuman,
+            personalMachineAttempt: attempt,
+          }),
+          directRequest: { requestId: crypto.randomUUID(), holderId: crypto.randomUUID() },
+        },
+        fakeGroupBox("managed-home"),
+      ).session as { exec(args: unknown): Promise<{ stdout: string }> };
+      expect((await apiRouted.exec({ cmd: "hostname" })).stdout.trim()).toBe(
+        "personal-build-machine",
+      );
+      expect(dispatched).toBe(2);
+      // Discovery is still owner-only; the running turn received one route, not
+      // the owner's identity or the right to pick any other personal machine.
+      expect(
+        await getSandbox(db, { accountId, workspaceId, subjectId: other }, machine.sandboxId),
+      ).toBeNull();
+    },
+    60_000,
+  );
 
   test("live sessions follow an in-place audience change without rebuilding or losing the machine", async () => {
     if (!available) return;

@@ -56,6 +56,9 @@ export type BrowserTextObservation = {
     sourceKind: string;
     nodes: readonly BrowserTextNode[];
     omittedNodeCount?: number | undefined;
+    omittedRegions?:
+      | readonly { role: string; name?: string | undefined; count: number }[]
+      | undefined;
     removedRefCount?: number | undefined;
     clippedFieldCount?: number | undefined;
   };
@@ -159,6 +162,19 @@ function plural(count: number, noun: string): string {
   return `${count} ${noun}${/(?:s|x|ch|sh)$/.test(noun) ? "es" : "s"}`;
 }
 
+/** ": 950 in main, 40 in navigation "Menu"" for the largest omitted regions. */
+function omittedRegionText(
+  regions: readonly { role: string; name?: string | undefined; count: number }[] | undefined,
+): string {
+  if (!regions || regions.length === 0) return "";
+  return `: ${regions
+    .map(
+      (region) =>
+        `${region.count} in ${region.role}${region.name ? ` ${quoted(region.name)}` : ""}`,
+    )
+    .join(", ")}`;
+}
+
 export function browserObservationText(
   observation: BrowserTextObservation,
   options: { allRefs?: boolean } = {},
@@ -219,7 +235,9 @@ export function browserObservationText(
     for (const node of nodes) lines.push(browserNodeLine(node, allRefs, base));
   }
   const notes = [
-    view.omittedNodeCount ? `${plural(view.omittedNodeCount, "element")} not shown` : null,
+    view.omittedNodeCount
+      ? `${plural(view.omittedNodeCount, "element")} not shown${omittedRegionText(view.omittedRegions)}`
+      : null,
     view.removedRefCount ? `${plural(view.removedRefCount, "earlier element")} removed` : null,
     view.clippedFieldCount ? `${plural(view.clippedFieldCount, "long field")} clipped` : null,
   ].filter((entry): entry is string => entry !== null);

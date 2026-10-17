@@ -9,10 +9,25 @@ box.
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
-account-admin approval. Only the owner may attach a user machine. Using it from an
-exact agent attempt additionally requires an explicit `connected_machine.use` grant
-for that session visibility/context. Once/session/always grants use the common
-personal-resource lifecycle; every operation revalidates the exact attempt, owner
+account-admin approval. Only the owner may attach a user machine. Moving a running
+chat is explicit owner consent for that logical turn, even when another person,
+a schedule, or an agent started it. The route changes immediately; the next tool
+operation uses the new machine. Already dispatched work is not moved or replayed.
+The separate `session_turn_machine_consents` receipt is bound to the current attempt
+and to replacement attempts of the same turn (recovery, failover, retry). It does
+not change the initiating person, rewrite accepted resource snapshots, expose the
+owner's other machines/resources, or authorize another person's future turns.
+Only the human move path supplies `consentToCurrentTurn`; session creation and
+schedule seeding do not implicitly consent for a running turn. The receipt's
+route epoch records which successful move supplied consent and orders successive
+clicks; it is not a standing route lock. Metadata resolution does not audit usage
+or demand an unchanged pointer, while dispatch checks the current selection and
+records usage once. Worker and API-direct browser/computer/file routes share this
+authority, including turns without an initiating human.
+Without a turn-bound move receipt, an exact attempt still needs an explicit
+`connected_machine.use` grant for that session visibility/context.
+Once/session/always grants use the common personal-resource lifecycle;
+every operation revalidates the exact attempt, owner
 membership revision, target-workspace access, authority epoch, resource/grant
 generation, interruption state, and current machine selection immediately before
 the machine transport is used. Revocation advances the machine and common authority
@@ -627,8 +642,9 @@ commands may use N GiB. An already-admitted command keeps its immutable policy.
 Every provider operation revalidates its exact live connection and any
 caller-owned personal-machine authority at the last boundary before dispatch,
 even inside a cached, swapped, or pinned multi-day turn. For a personal machine,
-that same PostgreSQL snapshot verifies the accepted attempt, immutable admission
-snapshot, current visibility-keyed grant, membership/generation fences, and the
+that same PostgreSQL snapshot verifies the accepted attempt, its owner-click
+consent or immutable admission snapshot/current visibility-keyed grant,
+membership/generation fences, and the
 runner connection. One-off `run_on` exec/read/write uses the same boundary after
 creating its attempt snapshot, so a concurrent revoke cannot reach the provider.
 Organization- and user-scoped machines used from another same-organization
@@ -681,6 +697,27 @@ move adopted commands to `stopping`, after which the global reconciler issues
 affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.
+
+The runner pushes an `OperationCompleted` event after exit and pipe drain,
+independently of the output consumer and its credit. API ingestion uses the
+authenticated control-workspace/enrollment/connection subject and operation ID
+to claim the original adopted command, even after its session changes routes.
+The collector durably captures retained output through the verified exit frontier
+before settlement, so a terminal read cannot race ahead of the final output.
+Duplicate events cannot steal an active collector's claim. The runner republishes
+unacknowledged terminal records on connection establishment and at its existing
+heartbeat cadence over the independent bulk connection, healing a full send queue
+or reconnect without waiting for reaper backoff. A delivery-only acknowledgement
+stops these notifications after the server durably owns reconciliation; it never
+releases retained output. Only the first notification bypasses polling backoff.
+Failed collections reuse reconciliation's exponential backoff, and pending
+duplicates coalesce per operation. Older agents and lost connections remain covered by
+reconciliation. Terminal publication
+does not discard retained output; release remains separately retryable after custody.
+Completion collectors have independent ingestion capacity, so even a saturated
+collection queue cannot delay machine heartbeats. A collector yields to reconciliation
+before its existing claim lease expires; this never cancels or time-limits the command.
+
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: Opengeni sends that shell as direct argv, with the requested login or
 non-login semantics, instead of silently substituting the machine service's
