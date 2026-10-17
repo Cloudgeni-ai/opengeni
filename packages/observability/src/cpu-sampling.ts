@@ -191,18 +191,30 @@ async function captureAndReport(options: CpuSamplingSignalOptions): Promise<void
   const path = join(directory, `opengeni-cpu-profile-${process.pid}-${Date.now()}.json`);
   await writeFile(path, JSON.stringify(summary, null, 2));
   options.log("cpu sampling profile completed", {
-    path,
-    windowMs: summary.windowMs,
-    samples: summary.samples,
-    busyMs: summary.busyMs,
-    longestBlockMs: summary.blocks[0]?.durationMs ?? 0,
-    blocksOver100Ms: summary.blocks.length,
-    topSelf: summary.topSelf
-      .slice(0, 8)
-      .map((entry) => `${entry.samples} ${entry.label}`)
-      .join(" | "),
-    longestBlockTopStack: summary.blocks[0]?.topStacks[0]?.label.slice(0, 1_500) ?? "",
+    cpuProfilePath: path,
+    cpuProfileWindowMs: summary.windowMs,
+    cpuProfileSamples: summary.samples,
+    cpuProfileBusyMs: summary.busyMs,
+    cpuProfileLongestBlockMs: summary.blocks[0]?.durationMs ?? 0,
+    cpuProfileBlocksOver100Ms: summary.blocks.length,
+    cpuProfileTopSelf: logSafeFrames(
+      summary.topSelf
+        .slice(0, 8)
+        .map((entry) => `${entry.samples} ${entry.label}`)
+        .join(" | "),
+    ),
+    cpuProfileLongestBlockTopStack: logSafeFrames(
+      summary.blocks[0]?.topStacks[0]?.label.slice(0, 1_500) ?? "",
+    ),
   });
+}
+
+/**
+ * Structured logs publish only allow-listed attributes; frame labels must fit
+ * the code-location grammar there, so any other character becomes `?`.
+ */
+function logSafeFrames(text: string): string {
+  return text.replace(/[^\w$<>()[\]:./@ |#*,-]/g, "?").slice(0, 2_000);
 }
 
 function frameLabel(frame: CpuSampleFrame): string {
