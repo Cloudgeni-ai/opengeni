@@ -11,6 +11,7 @@
 // Stream parsing is delegated to the SDK (SSE passthrough; spec §0(d)).
 
 import { randomUUID } from "node:crypto";
+import { withResponsesContinuationAdmission } from "@opengeni/network/responses-websocket";
 import { hasMeaningfulCodexOutput } from "./meaningful-output";
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
@@ -245,6 +246,7 @@ export function parseCodexUsageHeaders(headers: Headers): CodexUsageHeaderSnapsh
 }
 
 type RequestAudit = {
+  nextTransportAttempt: () => number;
   ctx: CodexRequestContext;
   requestId: string;
   transportAttempt: number;
@@ -504,7 +506,32 @@ async function fetchBeforeHeaders(
       controller.signal.throwIfAborted();
       throw new CodexResponseTimeoutError("whole_request", audit.requestId, false);
     }
-    basePromise = base(input, { ...init, redirect: "error", signal: controller.signal });
+    basePromise = withResponsesContinuationAdmission(
+      async () => {
+        await emitRequestEvent(audit, { phase: "failed", responseObserved: true, status: 400 });
+        controller.signal.throwIfAborted();
+        if (Date.now() - audit.logicalStartedAt >= audit.policy.wholeRequestTimeoutMs) {
+          throw new CodexResponseTimeoutError("whole_request", audit.requestId, false);
+        }
+        audit.transportAttempt = audit.nextTransportAttempt();
+        audit.terminalOutcome = null;
+        audit.settlement = null;
+        audit.admitted = false;
+        audit.attemptStartedAtMonotonic = performance.now();
+        await emitRequestEvent(audit, { phase: "started", responseObserved: false });
+        controller.signal.throwIfAborted();
+        await audit.ctx.beforeProviderDispatch?.({
+          requestId: audit.requestId,
+          transportAttempt: audit.transportAttempt,
+        });
+        audit.admitted = true;
+        if (controller.signal.aborted) {
+          await settleProviderRequest(audit, "refused");
+          controller.signal.throwIfAborted();
+        }
+      },
+      () => base(input, { ...init, redirect: "error", signal: controller.signal }),
+    );
   } catch (error) {
     externalSignal?.removeEventListener("abort", forwardAbort);
     throw error;
@@ -910,6 +937,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         ctx,
         requestId,
         transportAttempt,
+        nextTransportAttempt: () => ++transportAttempt,
         ...(model ? { model } : {}),
         logicalStartedAt,
         attemptStartedAtMonotonic: performance.now(),

@@ -45,6 +45,7 @@ import {
   codexRequestStorage,
   withCodexRequestOverrides,
   withResponsesConversation,
+  createResponsesTurn,
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
@@ -67,6 +68,7 @@ import {
   makeMachineOpObserver,
   modelRequestLifecycleMetricsFor,
   recordModelRequestPhase,
+  recordResponsesTransportDiagnostic,
   type ModelRequestTransportLabel,
   recordCompanyBrainContributions,
   recordTurnStartupPhase,
@@ -1027,12 +1029,31 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   };
                 })()
               : null;
+          providerTurn.persistentModelTransportHttpOnly =
+            turn.metadata?.persistentModelTransportHttpOnly === true;
+          const responsesTurn = createResponsesTurn(
+            input.sessionId,
+            (event) =>
+              recordResponsesTransportDiagnostic(
+                observability,
+                turnExecutionPolicy.providerId,
+                event,
+              ),
+            {
+              httpOnly: providerTurn.persistentModelTransportHttpOnly,
+              onFallback: () => {
+                providerTurn.persistentModelTransportHttpOnly = true;
+              },
+            },
+          );
           if (codexContext && runSettings.codexResponsesWebSocketEnabled) {
             // Open this conversation's Responses WebSocket now, so its
             // handshake overlaps the rest of turn preparation instead of
             // delaying the first model response. No model request is sent.
-            void codexRequestStorage.run(codexContext, () =>
-              warmCodexResponsesWebSocket(resolvedModel?.provider.baseUrl),
+            void withResponsesConversation(responsesTurn, () =>
+              codexRequestStorage.run(codexContext, () =>
+                warmCodexResponsesWebSocket(resolvedModel?.provider.baseUrl),
+              ),
             );
           }
           let xaiCoreAuthorization: XaiCoreRequestAuthorization | null = null;
@@ -1239,7 +1260,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // so OpenAI/Azure Responses requests can share one WebSocket
           // connection and continue the previous response on it.
           const withProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            withResponsesConversation(input.sessionId, () =>
+            withResponsesConversation(responsesTurn, () =>
               withClaudeUsage(() =>
                 providerTurn.xaiRequestContext
                   ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)

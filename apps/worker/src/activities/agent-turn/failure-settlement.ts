@@ -1,6 +1,7 @@
 import { recordSessionUsageLimitEvent } from "@opengeni/core";
+import { shouldFallbackModelSocket } from "./persistent-transport-recovery";
 import {
-  requestSessionTurnRecovery,
+  requestSessionTurnRecovery as persistSessionTurnRecovery,
   recordUsageEvent,
   getActiveSessionHistoryItemsPaged,
   readLease,
@@ -211,6 +212,19 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     acknowledgeLostAttemptOwnership,
     acknowledgeRecoveryQuiescence,
   } = deps;
+  // A refused socket applies to the entire logical turn, including recovery
+  // caused later by a lease, tool, or worker interruption rather than a model.
+  const requestSessionTurnRecovery: typeof persistSessionTurnRecovery = (
+    database,
+    workspaceId,
+    recovery,
+  ) =>
+    persistSessionTurnRecovery(database, workspaceId, {
+      ...recovery,
+      ...(providerTurn.persistentModelTransportHttpOnly
+        ? { persistentModelTransportHttpOnly: true as const }
+        : {}),
+    });
   // Capture before any recovery/checkpoint DB operation can fail again.
   if (isSessionEventPersistenceError(error)) {
     try {
@@ -1351,6 +1365,17 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       retryAfterMs: providerRetryAfterMs(error),
       jitterSample: Math.random(),
     });
+    if (
+      shouldFallbackModelSocket({
+        error,
+        recovery: recoveryResult,
+        httpOnly: providerTurn.persistentModelTransportHttpOnly === true,
+        nextRecoveryCount: nextProviderRecoveryCount,
+        recoveryLimit: providerRecoveryLimit(recoveryCode),
+      })
+    ) {
+      providerTurn.persistentModelTransportHttpOnly = true;
+    }
     const setupRecoveryExhausted =
       earlyCommandStartUnavailable &&
       recoveryResult.status === "exhausted" &&

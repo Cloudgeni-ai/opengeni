@@ -128,11 +128,13 @@ describe("time context in durable model history", () => {
       triggerEventId: turn.triggerEventId,
       attemptId: turn.activeAttemptId!,
       reason: "worker_lost",
+      persistentModelTransportHttpOnly: true,
     });
     expect(recovery.action).toBe("recovering");
     const replacement = await claim(grant.workspaceId, session.id);
     expect(replacement.id).toBe(turn.id);
     expect(replacement.executionGeneration).toBe(turn.executionGeneration + 1);
+    expect(replacement.metadata.persistentModelTransportHttpOnly).toBe(true);
     expect(await getActiveSessionHistoryItems(client.db, grant.workspaceId, session.id)).toEqual(
       history,
     );

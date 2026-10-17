@@ -7,15 +7,21 @@ import {
   parseCodexRequestTransport,
   OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
   withResponsesConversation,
+  createResponsesTurn,
   type CodexWebSocketLike,
   type ResponsesWebSocketEndpoint,
 } from "../src/responses-websocket";
 import { parseCodexUsageHeaders } from "../src/fetch";
+import {
+  markResponsesPrefixReady,
+  type ResponsesTransportDiagnostic,
+} from "@opengeni/network/responses-websocket";
 
 const URL = "https://chatgpt.example/backend-api/codex/responses";
 
 class FakeSocket implements CodexWebSocketLike {
   readyState = 0;
+  handshakeStatus?: number;
   sent: Array<Record<string, unknown>> = [];
   closed = false;
   onopen: CodexWebSocketLike["onopen"] = null;
@@ -50,7 +56,13 @@ class FakeSocket implements CodexWebSocketLike {
 }
 
 function harness(
-  options: { autoOpen?: boolean; now?: () => number; endpoint?: ResponsesWebSocketEndpoint } = {},
+  options: {
+    autoOpen?: boolean;
+    now?: () => number;
+    endpoint?: ResponsesWebSocketEndpoint;
+    observe?: (event: ResponsesTransportDiagnostic) => void;
+    httpOnly?: boolean;
+  } = {},
 ) {
   const sockets: FakeSocket[] = [];
   const httpCalls: string[] = [];
@@ -72,7 +84,26 @@ function harness(
       ...(options.endpoint ? { endpoint: options.endpoint } : {}),
     },
   );
-  return { transport, sockets, httpCalls };
+  let turn = createResponsesTurn("conversation", options.observe, { httpOnly: options.httpOnly });
+  const scoped = options.endpoint?.conversationScoped
+    ? transport
+    : Object.assign(
+        (...args: Parameters<typeof transport>) =>
+          withResponsesConversation(turn, () => transport(...args)),
+        {
+          warm: (...args: Parameters<typeof transport.warm>) =>
+            withResponsesConversation(turn, () => transport.warm(...args)),
+        },
+      );
+  return {
+    transport: scoped,
+    sockets,
+    httpCalls,
+    prefixReady: () => withResponsesConversation(turn, markResponsesPrefixReady),
+    nextTurn: () => {
+      turn = createResponsesTurn("conversation", options.observe);
+    },
+  };
 }
 
 function request(
@@ -120,6 +151,88 @@ const rateLimits = {
     },
   },
 };
+
+test("transient handshake failure stays on sockets for the next durable retry", async () => {
+  const { transport, sockets, httpCalls } = harness({ autoOpen: false });
+  const first = transport(URL, request());
+  const rejection = expect(first).rejects.toThrow("WebSocket");
+  for (let i = 0; i < 50 && !sockets[0]; i++) await Bun.sleep(1);
+  sockets[0]!.drop();
+  await rejection;
+  const retry = transport(URL, request());
+  for (let i = 0; i < 50 && !sockets[1]; i++) await Bun.sleep(1);
+  sockets[1]!.open();
+  const socket = await nextSend(() => sockets[1]);
+  socket.emit({ type: "response.completed", response: { id: "retry" } });
+  await (await retry).text();
+  expect(httpCalls).toEqual([]);
+});
+
+test("a recovered HTTP-only turn skips warming and opens again on the next turn", async () => {
+  const { transport, sockets, nextTurn } = harness({ httpOnly: true });
+  transport.warm(URL, request().headers);
+  expect((await transport(URL, request())).headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+    "http; reason=turn_fallback",
+  );
+  expect(sockets).toHaveLength(0);
+  nextTurn();
+  const pending = transport(URL, request());
+  const socket = await nextSend(() => sockets[0]);
+  socket.emit({ type: "response.completed", response: { id: "new-turn" } });
+  await (await pending).text();
+});
+
+test("diagnostics separate first/later calls, wire bytes, cache usage, and final prefix readiness", async () => {
+  const events: ResponsesTransportDiagnostic[] = [];
+  const { transport, sockets, prefixReady } = harness({ observe: (event) => events.push(event) });
+  const user = { role: "user", content: "x".repeat(1000) };
+  prefixReady();
+  const first = transport(URL, request({ model: "m", input: [user], stream: true }));
+  const socket = await nextSend(() => sockets[0]);
+  socket.emit({
+    type: "response.completed",
+    response: {
+      id: "r1",
+      usage: { input_tokens: 100, input_tokens_details: { cached_tokens: 20 } },
+    },
+  });
+  await (await first).text();
+  prefixReady();
+  const second = transport(
+    URL,
+    request({ model: "m", input: [user, { role: "user", content: "next" }], stream: true }),
+  );
+  for (let i = 0; i < 50 && socket.sent.length < 2; i++) await Bun.sleep(1);
+  socket.emit({
+    type: "response.completed",
+    response: {
+      id: "r2",
+      usage: { input_tokens: 120, input_tokens_details: { cached_tokens: 100 } },
+    },
+  });
+  await (await second).text();
+  const terminals = events.filter((event) => event.phase === "terminal");
+  expect(terminals).toMatchObject([
+    { position: "first", outcome: "completed", promptTokens: 100, cachedTokens: 20 },
+    { position: "later", outcome: "completed", promptTokens: 120, cachedTokens: 100 },
+  ]);
+  expect(events.filter((event) => event.phase === "prefix_ready_to_send")).toHaveLength(2);
+  const sends = events.filter((event) => event.phase === "send");
+  expect(sends).toHaveLength(2);
+  expect(sends[1]!.inputBytes!).toBeLessThan(sends[1]!.fullInputBytes!);
+});
+
+test("diagnostic observer failures cannot fail a model request", async () => {
+  const { transport, sockets } = harness({
+    observe: () => {
+      throw new Error("observer unavailable");
+    },
+  });
+  const pending = transport(URL, request());
+  const socket = await nextSend(() => sockets[0]);
+  socket.emit({ type: "response.completed", response: { id: "r1" } });
+  expect((await pending).status).toBe(200);
+});
 
 test("streams a response over one reused connection as SSE with usage headers", async () => {
   const { transport, sockets, httpCalls } = harness();
@@ -227,13 +340,14 @@ test("a failed warm handshake sends the waiting request over HTTP and backs off"
   transport.warm(URL, request().headers);
   const pending = transport(URL, request());
   await Bun.sleep(1);
+  sockets[0]!.handshakeStatus = 426;
   sockets[0]!.drop(1006);
   const failed = await pending;
   expect(failed.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=handshake_failed");
   expect(await failed.text()).toBe("http");
   transport.warm(URL, request().headers);
   const backedOff = await transport(URL, request());
-  expect(backedOff.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=handshake_backoff");
+  expect(backedOff.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=turn_fallback");
   expect(sockets).toHaveLength(1);
   expect(httpCalls).toHaveLength(2);
 });
@@ -306,19 +420,72 @@ test("a concurrent request of the same conversation uses HTTP while the socket i
   await (await first).text();
 });
 
-test("a failed handshake falls back to HTTP and backs off", async () => {
+test("concurrent cold requests join one handshake, never opening two sockets", async () => {
   const { transport, sockets, httpCalls } = harness({ autoOpen: false });
+  const first = transport(URL, request());
+  const second = transport(URL, request());
+  for (let i = 0; i < 50 && !sockets[0]; i++) await Bun.sleep(1);
+  expect(sockets).toHaveLength(1);
+  sockets[0]!.open();
+  const socket = await nextSend(() => sockets[0]);
+  socket.emit({ type: "response.completed", response: { id: "r1" } });
+  await (await first).text();
+  await (await second).text();
+  expect(sockets).toHaveLength(1);
+  expect(httpCalls).toHaveLength(1);
+});
+
+test("cancellation during a handshake returns promptly and sends no model request", async () => {
+  const { transport, sockets, httpCalls } = harness({ autoOpen: false });
+  const controller = new AbortController();
+  const pending = transport(URL, request(undefined, { signal: controller.signal }));
+  for (let i = 0; i < 50 && !sockets[0]; i++) await Bun.sleep(1);
+  controller.abort(new Error("cancel during handshake"));
+  await expect(pending).rejects.toThrow("cancel during handshake");
+  sockets[0]!.open();
+  await Bun.sleep(1);
+  expect(sockets[0]!.sent).toEqual([]);
+  expect(httpCalls).toEqual([]);
+  sockets[0]!.close();
+});
+
+test("credential rotation retires the old idle connection for the conversation", async () => {
+  const { transport, sockets } = harness();
+  const first = transport(URL, request());
+  const old = await nextSend(() => sockets[0]);
+  old.emit({ type: "response.completed", response: { id: "r1" } });
+  await (await first).text();
+  const headers = new Headers(request().headers);
+  headers.set("authorization", "Bearer rotated");
+  const second = transport(URL, request(undefined, { headers }));
+  const next = await nextSend(() => sockets[1]);
+  expect(old.closed).toBe(true);
+  next.emit({ type: "response.completed", response: { id: "r2" } });
+  await (await second).text();
+});
+
+test("a refused handshake falls back only for this turn; the next turn tries immediately", async () => {
+  const { transport, sockets, httpCalls, nextTurn } = harness({ autoOpen: false });
   const pending = transport(URL, request());
   for (let i = 0; i < 50 && !sockets[0]; i++) await Bun.sleep(1);
+  sockets[0]!.handshakeStatus = 426;
   sockets[0]!.drop(1006);
   const failed = await pending;
   expect(failed.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=handshake_failed");
   expect(await failed.text()).toBe("http");
   const backedOff = await transport(URL, request());
-  expect(backedOff.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=handshake_backoff");
+  expect(backedOff.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=turn_fallback");
   expect(await backedOff.text()).toBe("http");
   expect(sockets).toHaveLength(1);
   expect(httpCalls).toHaveLength(2);
+  nextTurn();
+  const next = transport(URL, request());
+  for (let i = 0; i < 50 && !sockets[1]; i++) await Bun.sleep(1);
+  sockets[1]!.open();
+  const socket = await nextSend(() => sockets[1]);
+  socket.emit({ type: "response.completed", response: {} });
+  await (await next).text();
+  expect(sockets).toHaveLength(2);
 });
 
 test("a refused request keeps the HTTP error shape and the connection", async () => {
@@ -360,7 +527,7 @@ test("a connection lost mid-response fails that stream and is never reused", asy
   expect(sockets).toHaveLength(2);
 });
 
-test("a conversation whose socket keeps dropping mid-response falls back to HTTP", async () => {
+test("independent dropped requests never accumulate a timer-based fallback", async () => {
   let clock = 1_000;
   const { transport, sockets, httpCalls } = harness({ now: () => clock });
   const dropOnce = async (index: number) => {
@@ -381,16 +548,8 @@ test("a conversation whose socket keeps dropping mid-response falls back to HTTP
   await dropOnce(1);
   expect(httpCalls).toEqual([]);
 
-  // A second drop close to the first moves the conversation to HTTP.
+  // A different request's drop must not silently consume this step's budget.
   await dropOnce(2);
-  const viaHttp = await transport(URL, request());
-  expect(viaHttp.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=stream_dropped");
-  transport.warm(URL, request().headers);
-  expect(sockets).toHaveLength(3);
-  expect(httpCalls).toEqual([URL]);
-
-  // After the fallback period the conversation tries the socket again.
-  clock += 31 * 60_000;
   const again = transport(URL, request());
   const fresh = await nextSend(() => sockets[3]);
   fresh.emit({ type: "response.completed", response: {} });
@@ -401,6 +560,7 @@ test("a conversation whose socket keeps dropping mid-response falls back to HTTP
     kind: "http",
     reason: "stream_dropped",
   });
+  expect(httpCalls).toEqual([]);
 });
 
 test("aborting a request closes its socket", async () => {
@@ -512,8 +672,8 @@ describe("continuing the previous response on a connection", () => {
   const result = { type: "function_call_output", call_id: "call_1", output: "12:34" };
 
   async function complete(socket: FakeSocket, pending: Promise<Response>, id: string) {
-    for (const item of [reasoning, preamble, call]) {
-      socket.emit({ type: "response.output_item.done", item });
+    for (const [output_index, item] of [reasoning, preamble, call].entries()) {
+      socket.emit({ type: "response.output_item.done", output_index, item });
     }
     socket.emit({ type: "response.completed", response: { id } });
     const response = await pending;
@@ -572,6 +732,61 @@ describe("continuing the previous response on a connection", () => {
     await (await third).text();
   });
 
+  test("empty terminal output reconstructs completed items in index order", async () => {
+    const { transport, sockets } = harness();
+    const first = transport(URL, request({ ...base, input: [user] }));
+    const socket = await nextSend(() => sockets[0]);
+    for (const index of [2, 0, 1])
+      socket.emit({
+        type: "response.output_item.done",
+        output_index: index,
+        item: [reasoning, preamble, call][index],
+      });
+    socket.emit({ type: "response.completed", response: { id: "r1", output: [] } });
+    await (await first).text();
+    const { pending, sent } = await sendNext(transport, socket, {
+      ...base,
+      input: [user, ...sentBack, result],
+    });
+    expect(sent.input).toEqual([result]);
+    expect(sent.previous_response_id).toBe("r1");
+    socket.emit({ type: "response.completed", response: { id: "r2" } });
+    await (await pending).text();
+  });
+
+  for (const response of [{ status: "incomplete" }, { error: { code: "failed" } }]) {
+    test(`unsuccessful completed-event payload never establishes continuation ${JSON.stringify(response)}`, async () => {
+      const { transport, sockets } = harness();
+      const first = transport(URL, request({ ...base, input: [user] }));
+      const socket = await nextSend(() => sockets[0]);
+      socket.emit({ type: "response.completed", response: { id: "r1", ...response } });
+      await (await first).text();
+      const { pending, sent } = await sendNext(transport, socket, {
+        ...base,
+        input: [user, result],
+      });
+      expect(sent).not.toHaveProperty("previous_response_id");
+      socket.emit({ type: "response.completed", response: { id: "r2" } });
+      await (await pending).text();
+    });
+  }
+
+  test("explicit caller continuation is never replaced by the pooled chain", async () => {
+    const { transport, sockets } = harness();
+    const first = transport(URL, request({ ...base, input: [user] }));
+    const socket = await nextSend(() => sockets[0]);
+    await complete(socket, first, "pooled");
+    const { pending, sent } = await sendNext(transport, socket, {
+      ...base,
+      previous_response_id: "caller",
+      input: [user, ...sentBack, result],
+    });
+    expect(sent.previous_response_id).toBe("caller");
+    expect(sent.input).toHaveLength(5);
+    socket.emit({ type: "response.completed", response: { id: "r2" } });
+    await (await pending).text();
+  });
+
   for (const [label, body] of [
     [
       "changed instructions",
@@ -625,7 +840,7 @@ describe("continuing the previous response on a connection", () => {
     const { transport, sockets } = harness();
     const first = transport(URL, request({ ...base, input: [user] }));
     const socket = await nextSend(() => sockets[0]);
-    socket.emit({ type: "response.output_item.done", item: call });
+    socket.emit({ type: "response.output_item.done", output_index: 0, item: call });
     socket.emit({ type: "response.failed", response: { id: "resp_1" } });
     await (await first).text();
     const { pending, sent } = await sendNext(transport, socket, {
@@ -733,7 +948,11 @@ describe("OpenAI API and Azure OpenAI endpoints", () => {
     expect(socket.headers.authorization).toBe("Bearer key");
     // WebSocket mode always streams; the HTTP-only field is not sent.
     expect(socket.sent[0]).toEqual({ type: "response.create", model: "m", input: [user] });
-    socket.emit({ type: "response.output_item.done", item: { id: "fc_1", ...call } });
+    socket.emit({
+      type: "response.output_item.done",
+      output_index: 0,
+      item: { id: "fc_1", ...call },
+    });
     socket.emit({ type: "response.completed", response: { id: "resp_1" } });
     await (await first).text();
 

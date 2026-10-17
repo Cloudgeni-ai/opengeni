@@ -11,10 +11,13 @@ import {
   CODEX_PROVIDER_BASE_URL,
   codexResponsesTransport,
   codexSubscriptionFetch,
-  OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
   warmCodexResponsesConnection,
   type CodexResponsesTransport,
 } from "@opengeni/codex";
+import {
+  responsesTransport,
+  OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+} from "@opengeni/network/responses-websocket";
 import {
   XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
   xaiSubscriptionFetch,
@@ -199,10 +202,9 @@ function sharedCodexWebSocketTransport(): CodexResponsesTransport {
 let openaiWebSocketTransport: CodexResponsesTransport | undefined;
 function openAIResponsesFetch(settings: Settings): typeof globalThis.fetch {
   if (!settings.openaiResponsesWebSocketEnabled) return globalThis.fetch;
-  openaiWebSocketTransport ??= codexResponsesTransport(
-    (input, init) => globalThis.fetch(input, init),
-    { endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT },
-  );
+  openaiWebSocketTransport ??= responsesTransport((input, init) => globalThis.fetch(input, init), {
+    endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+  });
   return openaiWebSocketTransport as unknown as typeof globalThis.fetch;
 }
 
