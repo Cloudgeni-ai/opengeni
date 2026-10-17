@@ -57,10 +57,8 @@ DO $subscription_admin_policies$
 DECLARE
   data_schema text := current_schema();
   policy record;
-  -- Dedicated-schema installs migrate with opengeni_private on search_path,
-  -- where pg_get_expr prints the helper without its schema prefix.
   call_pattern text :=
-    '(?:opengeni_private\.)?subscription_organization_admin\(((?:(?:"[^"]+"|[a-z_][a-z0-9_]*)\.)?account_id)\)';
+    'opengeni_private\.subscription_organization_admin\(((?:(?:"[^"]+"|[a-z_][a-z0-9_]*)\.)?account_id)\)';
   replacement text :=
     '(((\1)::text = NULLIF(pg_catalog.current_setting(''opengeni.account_id'', true), ''''))'
     || ' AND COALESCE((SELECT opengeni_private.subscription_organization_admin(admin_scope.account_setting::uuid)'

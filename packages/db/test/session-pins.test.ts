@@ -215,6 +215,79 @@ afterAll(async () => {
 }, 180_000);
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
+  test("totals materialization preserves private, workspace and exact-target boundaries", async () => {
+    if (!available) return;
+    const { workspace, subjectId: owner } = await siteViewerWorkspace();
+    const viewer = `user:totals-viewer-${crypto.randomUUID()}`;
+    await grantMember(workspace, viewer);
+    const root = await session({ ...workspace, message: "shared totals root" });
+    const child = await session({
+      ...workspace,
+      message: "shared attention",
+      parentSessionId: root.id,
+    });
+    const privateRoot = await session({
+      ...workspace,
+      message: "private totals root",
+      privateOwnerSubjectId: owner,
+      createdBy: { kind: "subject", subjectId: owner },
+    });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+      update sessions set status='requires_action' where id in (${child.id}, ${privateRoot.id})`,
+    );
+    const foreign = await freshWorkspace();
+    const foreignRoot = await session({ ...foreign, message: "foreign totals root" });
+    const foreignChild = await session({
+      ...foreign,
+      message: "foreign attention",
+      parentSessionId: foreignRoot.id,
+    });
+    await executeSessionActivity(
+      foreign.workspaceId,
+      sql`
+      update sessions set status='requires_action' where id=${foreignChild.id}`,
+    );
+    const options = {
+      subjectId: viewer,
+      parentSessionId: null,
+      includeTotals: true,
+      includePinned: false,
+      limit: 1,
+    };
+    const visible = await listSessionEntriesForSubject(db, workspace.workspaceId, options);
+    expect(visible.sessions.map((row) => row.id)).toEqual([root.id]);
+    expect(visible.totals?.needsYouCount).toBe(1);
+    expect(visible.totals?.groups).toHaveLength(1);
+    expect(visible.totals?.groups[0]).toMatchObject({ total: 2, attention: 1 });
+    const owned = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      ...options,
+      subjectId: owner,
+    });
+    expect(owned.totals?.needsYouCount).toBe(2);
+    expect(owned.totals?.groups[0]).toMatchObject({ total: 3, attention: 2 });
+    const exact = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      ...options,
+      authorizationScope: { kind: "scoped", rootSessionIds: [], sessionIds: [root.id] },
+    });
+    expect(exact.totals?.needsYouCount).toBe(0);
+    expect(exact.totals?.groups[0]).toMatchObject({ total: 1, attention: 0 });
+    const tree = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      ...options,
+      authorizationScope: { kind: "scoped", rootSessionIds: [root.id], sessionIds: [] },
+    });
+    expect(tree.totals).toEqual(visible.totals);
+    for (const rootSessionIds of [[], [privateRoot.id], [foreignRoot.id]]) {
+      const denied = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+        ...options,
+        authorizationScope: { kind: "scoped", rootSessionIds, sessionIds: [] },
+      });
+      expect(denied.sessions).toEqual([]);
+      expect(denied.totals).toEqual({ needsYouCount: 0, groups: [] });
+    }
+  });
+
   test("complete totals and attention discovery survive small pages, pins and target grants", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1104,6 +1177,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
   test("does not double-count cyclic legacy parent graphs", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
+    const subjectId = `user:cycle-totals-${crypto.randomUUID()}`;
+    await grantMember(workspace, subjectId);
     const root = await session({ ...workspace, message: "cycle root" });
     const child = await session({
       ...workspace,
@@ -1153,6 +1228,14 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionSince: null,
       truncated: true,
     });
+    const page = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      includePinned: false,
+      includeTotals: true,
+    });
+    expect(page.sessions).toEqual([]);
+    expect(page.totals).toEqual({ needsYouCount: 0, groups: [] });
   }, 60_000);
 
   test("reaps expired list snapshots outside request transactions", async () => {

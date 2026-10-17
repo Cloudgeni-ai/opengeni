@@ -32623,6 +32623,15 @@ async function sessionListTotalsInScope(
         acknowledged_sequence, manually_unread_through, actively_working
       from ${schema.sessionPins}
       where workspace_id = ${workspaceId} and subject_id = ${options.subjectId}
+    ), visible_children as materialized (
+      -- Keep the recursive join off the base table: a hash-join plan otherwise
+      -- scans the whole workspace and rechecks RLS at every tree depth. This
+      -- narrow projection uses the same caller's RLS in the same statement.
+      select id, parent_session_id, account_id, status, active_turn_id,
+        input_wait_until, input_wait_turn_id, subtree_run_override_revision,
+        direct_control_state, direct_pause_revision
+      from ${schema.sessions}
+      where workspace_id = ${workspaceId} and parent_session_id is not null
     ), roots as materialized (
       select ${schema.sessions.id} as id, ${schema.sessions.channelId} as channel_id,
         ${schema.sessions.accountId} as account_id,
@@ -32664,8 +32673,8 @@ async function sessionListTotalsInScope(
           case when child.direct_control_state = 'paused' then child.direct_pause_revision end
         ),
         parent.pinned_path or coalesce(personal.pinned, false), parent.related
-      from nodes parent join ${schema.sessions} child
-        on child.workspace_id = ${workspaceId} and child.parent_session_id = parent.id
+      from nodes parent join visible_children child
+        on child.parent_session_id = parent.id
       left join personal_state personal on personal.session_id = child.id
       where parent.related
     ), attention_roots as (

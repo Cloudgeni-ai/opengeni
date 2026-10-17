@@ -185,7 +185,9 @@ test("the router probe is a partial-index lookup that never visits ordinary hist
         index % 2 === 0 ? sql.raw(part) : sql`${query.params[Number(part) - 1]}`,
       );
     const result = await tx.execute(sql`explain (format json) ${sql.join(fragments, sql``)}`);
-    const plan = (result[0]!["QUERY PLAN"] as { Plan: PlanNode }[])[0]!.Plan;
+    const plans = result[0]?.["QUERY PLAN"] as { Plan: PlanNode }[] | undefined;
+    const plan = plans?.[0]?.Plan;
+    if (!plan) throw new Error("Skill catalog probe returned no execution plan");
     const walk = (node: PlanNode) => {
       if (node["Index Name"]) indexes.push(node["Index Name"]);
       node.Plans?.forEach(walk);

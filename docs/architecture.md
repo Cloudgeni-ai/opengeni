@@ -104,6 +104,10 @@ answers; filtered reads cannot skip unseen content. Manual unread survives repla
 until newer consumed activity or explicit mark-read.
 [Bounded reads/reconciliation](session-monitoring-mcp.md).
 
+Session list totals materialize narrow, caller-RLS-authorized child metadata once
+before recursive traversal. Roots retain their list/scope filters; exact-target
+grants do not expand to children. Tree depth does not multiply base session scans.
+
 SSE replays/backfills Postgres and subscribes to fanout. Reads byte-bound prefixes
 before transfer; oversized events travel intact/alone. Short pages never prove
 EOF. NATS restarts affect delivery/reachability, never history/queued obligations.
@@ -2285,6 +2289,8 @@ at execution of historical 0345/0598. It changes only their constraint-catalog
 reads, not published SQL bytes, ledger names, release hashes, or schema guards;
 older servers execute the original source. Already-applied migrations stay
 skipped. See [migration compatibility](migrations-expand-contract.md#historical-server-compatibility).
+The same hash-pinned adapter stabilizes 0807 policy deparsing for dedicated
+schemas without changing its exact helper matcher or published SQL history.
 
 Postgres owns file access/liveness; fork screenshots require ancestry and copied receipts, preserving RLS.
 Storage endpoints and signed URLs are transport details; keep URLs, object keys,
