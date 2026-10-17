@@ -196,6 +196,10 @@ pick a VM.
     unclaimed ready clone, a blocked sandbox) books its worst-case save,
     which an earlier agent may have started, and its disk's growth, and a
     build VM it cannot end its disk and a snapshot, until it has ended.
+    Each such disk is booked by the length of its own file, or the length
+    its record keeps if that is longer, never by today's base image; one
+    whose length cannot be read books more than any disk holds, so nothing
+    else is admitted to the disk until it has ended.
   - A new sandbox's first files (its copy of its template's disk or the
     base image, by data ranges, whichever is larger since a stale template
     falls back to the base image) are booked before the copy starts, and a
@@ -238,8 +242,7 @@ pick a VM.
   was never saved: a running one waits no more, and a paused one wakes,
   still waiting until it runs. Otherwise a restarted agent gives it back to the
   core, which waits for room above the high watermark for it again, and
-  wakes it by itself once there is. If that write fails, a restart finds it
-  saved and waiting only for use, as before.
+  wakes it by itself once there is.
 - The room a paused sandbox waits for is its VM's cgroup footprint, file
   cache included, so it may wait somewhat longer than its guest needs.
 - On nested hosts free page reporting does return huge pages: Firecracker

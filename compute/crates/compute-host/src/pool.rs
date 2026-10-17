@@ -1134,6 +1134,9 @@ pub(crate) struct Held {
     /// Host memory it may hold: its guest's, when its files still say,
     /// otherwise the most any guest may have.
     pub bytes: u64,
+    /// The length of the disk its guest may still write to; see
+    /// [`crate::disk_growth::retained_disk_len`].
+    pub disk_bytes: u64,
 }
 
 /// Ends the VMs of builds an earlier agent left under `root` and removes
@@ -1174,10 +1177,15 @@ pub(crate) async fn end_leftover_builds<E: Engine>(
         if let Err(error) = engine.clean_up(&spec).await {
             tracing::error!(%error, %name, ?ordinal, "a template VM left behind may still run; its user stays taken");
             let memory_mib = memory_mib.unwrap_or(MAX_MEMORY_MIB);
+            let disk = paths.disk.clone();
+            let disk_bytes = blocking(move || Ok(crate::disk_growth::retained_disk_len(&disk)))
+                .await
+                .unwrap_or(crate::disk_growth::UNKNOWN_DISK);
             held.push(Held {
                 name,
                 ordinal,
                 bytes: u64::from(memory_mib) << 20,
+                disk_bytes,
             });
             continue;
         }

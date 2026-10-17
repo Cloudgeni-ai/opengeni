@@ -41,7 +41,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 tracing::error!(%id, ordinal = record.ordinal, "ordinal taken twice; leaving the sandbox on disk");
                 self.block(id, format!("ordinal {} is taken twice", record.ordinal));
                 // Its VM may still run.
-                self.unmanaged(id, self.record_size(&record));
+                let size = self.retained_size(&record).await;
+                self.unmanaged(id, size);
                 continue;
             }
             // Nothing is done for a sandbox, not even looking at its VM,
@@ -52,7 +53,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Err(error) => {
                     tracing::error!(%id, %error, "record not known to be durable; blocking the sandbox and leaving it alone");
                     self.block(id, format!("record not known to be durable: {error}"));
-                    self.unmanaged(id, self.record_size(&record));
+                    let size = self.retained_size(&record).await;
+                    self.unmanaged(id, size);
                     continue;
                 }
             };
@@ -63,7 +65,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // and the pool fills again.
             if record.removing || record.ready {
                 // Its VM may still run until the removal ends it.
-                self.unmanaged(id, self.record_size(&record));
+                let size = self.retained_size(&record).await;
+                self.unmanaged(id, size);
                 self.remove_recorded(&record, None, Vec::new(), None);
                 continue;
             }
@@ -110,7 +113,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Err(error) => {
                     tracing::error!(%id, %error, "disk length unknown; blocking the sandbox and leaving it alone");
                     self.block(id, format!("disk length unknown: {error}"));
-                    self.unmanaged(id, self.record_size(&record));
+                    let size = self.retained_size(&record).await;
+                    self.unmanaged(id, size);
                 }
             }
         }
@@ -174,7 +178,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         });
                     let config =
                         SandboxConfig::new(1, mib, crate::protocol::SleepConfig::default());
-                    self.unmanaged(stray.id, self.size(&config, None));
+                    let disk = Paths::new(&self.root, stray.id).disk;
+                    let size = self.retained_size_of(&config, None, disk).await;
+                    self.unmanaged(stray.id, size);
                 }
             }
         }
@@ -249,6 +255,32 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// removed.
     pub(super) fn block(&mut self, id: Id, problem: String) {
         self.blocked.insert(id.0, problem);
+    }
+
+    /// [`Self::retained_size_of`] for the sandbox `record` describes.
+    async fn retained_size(&self, record: &Record) -> Size {
+        let disk = Paths::of(&self.root, record).disk;
+        self.retained_size_of(&record.config, record.allocation.disk_bytes, disk)
+            .await
+    }
+
+    /// [`Self::size`] for a sandbox of `config` whose VM this agent leaves
+    /// running unmanaged, with the disk at `disk` it may still write booked
+    /// by that disk's own length, or the length its record keeps if longer:
+    /// never by today's base image, which may be shorter. A length that
+    /// cannot be read books more than any host holds, so nothing else is
+    /// admitted to the disk meanwhile.
+    async fn retained_size_of(
+        &self,
+        config: &SandboxConfig,
+        recorded: Option<u64>,
+        disk: std::path::PathBuf,
+    ) -> Size {
+        let length =
+            tokio::task::spawn_blocking(move || crate::disk_growth::retained_disk_len(&disk))
+                .await
+                .unwrap_or(crate::disk_growth::UNKNOWN_DISK);
+        self.size(config, Some(length.max(recorded.unwrap_or(0))))
     }
 
     /// Counts the VM of sandbox `id`, of `size`, which may still run,

@@ -28,6 +28,21 @@ pub(crate) fn disk_bound(length: u64, unit: u64) -> u64 {
         .saturating_add(length / 256)
 }
 
+/// A disk length longer than any filesystem holds, for a disk whose length
+/// cannot be read: what it books leaves no room to admit anything else.
+pub(crate) const UNKNOWN_DISK: u64 = u64::MAX / 4;
+
+/// The length of the disk file at `path` that a VM this agent does not
+/// manage may still write to: 0 when there is none, which nothing then
+/// grows, and [`UNKNOWN_DISK`] when it cannot be read.
+pub(crate) fn retained_disk_len(path: &Path) -> u64 {
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(_) => UNKNOWN_DISK,
+    }
+}
+
 /// What the disk file at `path` may still take as its guest writes to it:
 /// its [`disk_bound`] less what it holds alone. `shares` says whether the
 /// filesystem shares extents between files (see

@@ -265,10 +265,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             let name = self.spare_name();
-            // What it may still write until it is gone: its disk copy, as
-            // far as a disk may grow, and a snapshot of its guest memory.
+            // What it may still write until it is gone: its own disk, as
+            // far as it may grow, and a snapshot of its guest memory.
             let disk = DiskSpace::save(
-                self.disk_bound()
+                crate::disk_growth::disk_bound(build.disk_bytes, self.allocation_unit)
                     .saturating_add(build.bytes.saturating_mul(self.save_copies))
                     .saturating_add(SAVE_EXTRA),
             );
