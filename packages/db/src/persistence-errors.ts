@@ -117,6 +117,19 @@ export function isRetryablePersistenceSqlState(sqlState: string | null): boolean
   return sqlState === "40P01" || sqlState === "40001";
 }
 
+// SQLSTATEs a rolling migration produces for a moment in a transaction that
+// overlaps it: a statement already inside a routine planned against the old
+// definition meets the new column type (42883, 42804), or a cached plan meets
+// a changed table (0A000, 42703, 42P01). Outside a migration they are
+// deterministic, so they get only a short, bounded retry and never become
+// retryable failures themselves.
+const SCHEMA_CHANGE_SQLSTATES = new Set(["42883", "42804", "0A000", "42703", "42P01"]);
+const SCHEMA_CHANGE_RETRY_DELAYS_MS = [250, 1_000] as const;
+
+export function isSchemaChangePersistenceSqlState(sqlState: string | null): boolean {
+  return sqlState !== null && SCHEMA_CHANGE_SQLSTATES.has(sqlState);
+}
+
 /**
  * Recognize only explicit postgres.js/Node transport codes, including nested
  * driver causes. These failures can arrive as plain Errors with no SQLSTATE or
@@ -377,6 +390,8 @@ export type IdempotentPersistenceTransactionOptions = {
   maxAttempts?: number;
   correlationId?: string;
   onRetry?: (input: { attempt: number; sqlState: "40P01" | "40001" }) => void | Promise<void>;
+  /** Waits before retrying a schema-change SQLSTATE; tests shorten it. */
+  sleep?: (ms: number) => Promise<void>;
 };
 
 /**
@@ -405,6 +420,20 @@ export async function runIdempotentPersistenceTransaction<T>(
           attempt,
           sqlState: sqlState as "40P01" | "40001",
         });
+        continue;
+      }
+      if (
+        isSchemaChangePersistenceSqlState(sqlState) &&
+        attempt < maxAttempts &&
+        isDatabasePersistenceFailure(error)
+      ) {
+        // A migration may be swapping a type under this transaction; give it
+        // a moment to commit, then run the same idempotent transaction again.
+        const delayMs =
+          SCHEMA_CHANGE_RETRY_DELAYS_MS[attempt - 1] ?? SCHEMA_CHANGE_RETRY_DELAYS_MS.at(-1)!;
+        await (options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(
+          delayMs,
+        );
         continue;
       }
       if (!isDatabasePersistenceFailure(error)) throw error;
