@@ -673,3 +673,75 @@ async fn timeouts_kill_or_pause() {
         .unwrap();
     assert_eq!(record.record.state, e2b::lifecycle::State::Paused);
 }
+
+/// With a certificate for the API's host and `*.<domain>`, the front door
+/// serves HTTPS itself: the API, and sandbox host names, as the SDK
+/// reaches them.
+#[tokio::test]
+async fn the_front_door_serves_https_for_the_api_and_sandbox_host_names() {
+    let fleet = Fleet::start().await;
+    let seen = Arc::new(Seen::default());
+    let (_host, _levels) = host(&fleet, &seen).await;
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["api.e2b.test".into(), "*.e2b.test".into()])
+            .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+    std::fs::write(&cert, certified.cert.pem()).unwrap();
+    std::fs::write(&key, certified.key_pair.serialize_pem()).unwrap();
+    let tls = compute_control::tls::public_server(&cert, &key).unwrap();
+    let front = Front::new(
+        Arc::clone(&fleet.running.service),
+        Settings {
+            domain: "e2b.test".into(),
+            ..Settings::default()
+        },
+    );
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(e2b::listen::serve(
+        listener,
+        e2b::router(Arc::clone(&front)),
+        Some(tls),
+    ));
+    let root = reqwest::Certificate::from_pem(certified.cert.pem().as_bytes()).unwrap();
+    let client = |host: &str| {
+        reqwest::Client::builder()
+            .add_root_certificate(root.clone())
+            .resolve(host, address)
+            .build()
+            .unwrap()
+    };
+    let port = address.port();
+    let created = client("api.e2b.test")
+        .post(format!("https://api.e2b.test:{port}/v2/sandboxes"))
+        .header("x-api-key", KEY)
+        .json(&json!({"templateID": "base", "timeout": 120}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let sandbox: Value = created.json().await.unwrap();
+    let id = sandbox["sandboxID"].as_str().unwrap();
+    let token = sandbox["envdAccessToken"].as_str().unwrap();
+    let envd = format!("{ENVD_PORT}-{id}.e2b.test");
+    let answered = client(&envd)
+        .get(format!("https://{envd}:{port}/health"))
+        .header("x-access-token", token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), 200);
+    assert_eq!(
+        answered.text().await.unwrap(),
+        format!("port {ENVD_PORT} token {token}")
+    );
+    // Plain HTTP to the same port gets nothing.
+    assert!(
+        reqwest::get(format!("http://{address}/v2/sandboxes"))
+            .await
+            .is_err()
+    );
+}

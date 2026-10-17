@@ -61,7 +61,7 @@ pub struct Config {
     pub seed: u64,
     /// Where the E2B front door listens, and how it runs; `None` for no
     /// front door.
-    pub e2b: Option<(SocketAddr, e2b::Settings)>,
+    pub e2b: Option<e2b::listen::Listen>,
 }
 
 /// A running replica; dropping it stops it.
@@ -126,7 +126,11 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         }),
     ];
     let e2b = match config.e2b {
-        Some((address, settings)) => {
+        Some(e2b::listen::Listen {
+            address,
+            tls,
+            settings,
+        }) => {
             let listener = TcpListener::bind(address)
                 .await
                 .with_context(|| format!("listening for E2B callers on {address}"))?;
@@ -134,11 +138,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
             let front = e2b::Front::new(Arc::clone(&service), settings);
             let router = e2b::router(Arc::clone(&front));
             tasks.push(tokio::spawn(e2b::ops::sweep(front)));
-            tasks.push(tokio::spawn(async move {
-                if let Err(error) = axum::serve(listener, router).await {
-                    tracing::error!(%error, "the E2B front door stopped");
-                }
-            }));
+            tasks.push(tokio::spawn(e2b::listen::serve(listener, router, tls)));
             Some(bound)
         }
         None => None,

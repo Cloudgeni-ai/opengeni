@@ -18,9 +18,14 @@
 //! ([`lifecycle`]); [`ops`] carries out creates, pauses, resumes and kills,
 //! and a sweeper in every replica finishes the ones a crash cut short and
 //! applies timeouts.
+//!
+//! The listener ([`listen`]) speaks plain HTTP behind a TLS terminator, or
+//! HTTPS itself with a certificate for the API's name and `*.<domain>`:
+//! the SDK reaches both surfaces over HTTPS.
 
 pub mod api;
 pub mod lifecycle;
+pub mod listen;
 pub mod ops;
 pub mod route;
 pub mod traffic;

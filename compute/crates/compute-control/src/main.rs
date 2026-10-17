@@ -132,6 +132,14 @@ struct Serve {
     /// The domain sandbox host names are under, `<port>-<id>.<domain>`.
     #[arg(long, default_value = "localhost")]
     e2b_domain: String,
+    /// The front door's certificate chain, PEM, naming the API's host and
+    /// `*.<domain>`; with it the front door serves HTTPS itself, without it
+    /// plain HTTP for a TLS terminator in front.
+    #[arg(long, requires = "e2b_tls_key")]
+    e2b_tls_cert: Option<PathBuf>,
+    /// The key of `--e2b-tls-cert`, PEM.
+    #[arg(long, requires = "e2b_tls_cert")]
+    e2b_tls_key: Option<PathBuf>,
     /// An E2B template, as `id=image:VCPUSxMEMORY_MIB`, for example
     /// `base=base:2x1024`; repeat for more. Without any, `base` is the
     /// default image at 2x1024.
@@ -163,6 +171,21 @@ fn parse_template(text: &str) -> Result<(String, e2b::Template), String> {
 }
 
 impl Serve {
+    fn e2b_listen(&self) -> anyhow::Result<Option<e2b::listen::Listen>> {
+        let Some(address) = self.e2b_listen else {
+            return Ok(None);
+        };
+        let tls = match (&self.e2b_tls_cert, &self.e2b_tls_key) {
+            (Some(cert), Some(key)) => Some(compute_control::tls::public_server(cert, key)?),
+            _ => None,
+        };
+        Ok(Some(e2b::listen::Listen {
+            address,
+            tls,
+            settings: self.e2b_settings(),
+        }))
+    }
+
     fn e2b_settings(&self) -> e2b::Settings {
         let mut settings = e2b::Settings {
             domain: self.e2b_domain.clone(),
@@ -266,9 +289,7 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
         operator: args.operator_team.clone(),
         scaling: args.scaling()?,
         seed: seed()?,
-        e2b: args
-            .e2b_listen
-            .map(|address| (address, args.e2b_settings())),
+        e2b: args.e2b_listen()?,
     };
     let running = start(store, config).await?;
     tracing::info!(api = %running.api, hosts = %running.hosts, e2b = ?running.e2b, "serving");
