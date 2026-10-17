@@ -2327,6 +2327,8 @@ describe("release schema contract", () => {
     const appendedMigrationPaths = [
       "0829_sessions_workspace_activity_xid_index.sql",
       "0828_session_activity_xid.sql",
+      "0829_retained_screenshot_evict_oldest.sql",
+      "0828_retained_screenshot_maintenance_fresh_claims_first.sql",
       "0827_session_visibility_probe_per_row.sql",
       "0824_explicit_learning_destination_symmetry.sql",
       "0822_session_pin_owner_short_circuit.sql",
