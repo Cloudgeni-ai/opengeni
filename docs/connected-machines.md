@@ -544,7 +544,11 @@ as for a crashed runner. Other admitted work, such as a request still being
 answered, a git operation or a pending upload, still makes the update wait,
 and Windows keeps waiting for every command. Only lost physical settlement, which can never
 become provable in that process, ends the update with retryable
-`update_state_unavailable`. The agent checks every owned browserd scope through
+`update_state_unavailable`. A browser controller that crashed, was killed or
+stopped uncleanly is not lost settlement on Linux and macOS: it runs as the
+leader of its own process group, so the update waits (busy) only until nothing
+remains in that group. The browsers it launched run in their own sessions and
+are adopted by the next controller. The agent checks every owned browserd scope through
 its private admin-only idle proof. Open sessions block only when a restart
 would lose something: admitted commands, pending creation or shutdown,
 attached browser sessions, browsers without a durable working runtime, and
