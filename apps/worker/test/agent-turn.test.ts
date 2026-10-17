@@ -6265,7 +6265,7 @@ describe("transient provider error classifier", () => {
     expect(providerRecoveryCountAfterModelRequestPhase(4, "completed")).toBe(0);
   });
 
-  test("isolates session-title subscription requests from main-turn lifecycle callbacks", () => {
+  test("isolates session-title subscription requests from main-turn lifecycle callbacks", async () => {
     const getCodexToken = mock(async () => ({ accessToken: "codex-token", accountId: "acct" }));
     const refreshCodexToken = mock(async () => ({
       accessToken: "codex-token-2",
@@ -6295,7 +6295,12 @@ describe("transient provider error classifier", () => {
     expect(titleCodexContext.nextRequestId?.()).toBe("title-request");
     expect(titleCodexContext.turnMetadata).toEqual({ request_kind: "session_title" });
     expect(titleCodexContext.onUsageHeaders).toBe(codexContext.onUsageHeaders);
-    expect(titleCodexContext.beforeProviderDispatch).toBe(beforeProviderDispatch);
+    // The main dispatch checks still run for title requests, scoped as a title dispatch.
+    await titleCodexContext.beforeProviderDispatch?.({
+      requestId: "title-request",
+      transportAttempt: 1,
+    });
+    expect(beforeProviderDispatch).toHaveBeenCalledTimes(1);
     expect(titleCodexContext.onRequestPreparationDiagnostic).toBeUndefined();
     expect(titleCodexContext.onModelRequestDiagnostic).toBeUndefined();
     expect(titleCodexContext.onModelRequestEvent).toBeUndefined();

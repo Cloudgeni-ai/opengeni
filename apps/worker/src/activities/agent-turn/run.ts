@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { withClaudeConnectionCredential } from "@opengeni/config";
 import {
   getSessionAuthorityProjection,
@@ -141,15 +142,29 @@ import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
 
 /**
+ * Set while a session-title request runs the main context's dispatch checks.
+ * The title request is a separate model call, so the main stream's dispatch
+ * observer (latency metrics and per-call timing) ignores it.
+ */
+const sessionTitleDispatch = new AsyncLocalStorage<true>();
+
+/** Whether the current provider dispatch belongs to a session-title request. */
+export function isSessionTitleDispatch(): boolean {
+  return sessionTitleDispatch.getStore() === true;
+}
+
+/**
  * Retain subscription credential/account authority for the title sidecar
  * without sharing main-stream recovery, startup, audit, or opaque-artifact
- * callbacks. Title usage is returned by the runtime and metered separately.
+ * callbacks. Title usage is returned by the runtime and metered separately, and
+ * its dispatches run the main checks without counting as a main-stream dispatch.
  */
 export function sessionTitleCodexRequestContext(
   context: CodexRequestContext,
   nextRequestId: () => string,
   requests?: ReturnType<typeof createCoreCodexRequests>,
 ): CodexRequestContext {
+  const mainChecks = context.beforeProviderDispatch;
   return {
     clientVersion: context.clientVersion,
     ...(context.sessionId !== undefined ? { sessionId: context.sessionId } : {}),
@@ -162,13 +177,17 @@ export function sessionTitleCodexRequestContext(
           beforeProviderDispatch: async (
             request: Parameters<NonNullable<CodexRequestContext["beforeProviderDispatch"]>>[0],
           ) => {
-            await context.beforeProviderDispatch?.();
+            if (mainChecks) await sessionTitleDispatch.run(true, () => mainChecks());
             if (request) await requests.reserve(request);
           },
           onProviderRequestSettled: requests.observe,
         }
-      : context.beforeProviderDispatch
-        ? { beforeProviderDispatch: context.beforeProviderDispatch }
+      : mainChecks
+        ? {
+            beforeProviderDispatch: (
+              request: Parameters<NonNullable<CodexRequestContext["beforeProviderDispatch"]>>[0],
+            ) => sessionTitleDispatch.run(true, () => mainChecks(request)),
+          }
         : {}),
     ...(context.responseTimeoutPolicy
       ? { responseTimeoutPolicy: context.responseTimeoutPolicy }
@@ -470,6 +489,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     });
     // Diagnostic only: a timing observer can never fence or fail a request.
     const observeProviderDispatch = () => {
+      if (isSessionTitleDispatch()) return;
       try {
         eventing.providerDispatchObserver?.();
       } catch {

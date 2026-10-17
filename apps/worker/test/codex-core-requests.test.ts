@@ -9,7 +9,10 @@ import {
   createCoreCodexRequests,
   providerRequestIdPrefix,
 } from "../src/activities/agent-turn/codex-core-requests";
-import { sessionTitleCodexRequestContext } from "../src/activities/agent-turn/run";
+import {
+  isSessionTitleDispatch,
+  sessionTitleCodexRequestContext,
+} from "../src/activities/agent-turn/run";
 
 const request = { requestId: "r1", transportAttempt: 1 };
 function fixture() {
@@ -207,6 +210,33 @@ test("title responses retain separate custody and cannot be settled by the conve
   expect(title.settled).toEqual([]);
   await title.tracker.checkpoint();
   expect(title.settled).toEqual([{ operationId: "title/1", outcome: "response_received" }]);
+});
+
+test("title dispatches run the main checks without counting as a main-stream dispatch", async () => {
+  // The main context's checks end by notifying the main stream's dispatch
+  // observer (per-call timing). A title request must not open that call.
+  const observed: boolean[] = [];
+  const main: CodexRequestContext = {
+    clientVersion: "fixture",
+    getToken: async () => ({ accessToken: "fixture", chatgptAccountId: null, isFedramp: false }),
+    refresh: async () => {
+      throw new Error("not used");
+    },
+    resolveModel: (value) => value,
+    beforeProviderDispatch: async () => {
+      observed.push(isSessionTitleDispatch());
+    },
+  };
+  const title = fixture();
+  for (const context of [
+    sessionTitleCodexRequestContext(main, () => "title"),
+    sessionTitleCodexRequestContext(main, () => "title", title.tracker),
+  ]) {
+    await context.beforeProviderDispatch!({ requestId: "title", transportAttempt: 1 });
+  }
+  await main.beforeProviderDispatch!(request);
+  expect(observed).toEqual([true, true, false]);
+  expect(isSessionTitleDispatch()).toBe(false);
 });
 
 test("model request IDs do not repeat across turns that share a Temporal activity ID", () => {
