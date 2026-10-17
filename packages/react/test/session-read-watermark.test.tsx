@@ -96,7 +96,7 @@ describe("conversation reads and the event feed's window", () => {
 
   test("a goal event during the read of a self-streamed goal re-reads", async () => {
     let reads = 0;
-    let releaseRead: (() => void) | null = null;
+    let releaseRead: () => void = () => undefined;
     const readReleased = new Promise<void>((resolve) => {
       releaseRead = resolve;
     });
@@ -157,7 +157,7 @@ describe("retained conversation views", () => {
       await reopened.unmount();
 
       // Nothing is kept for a later reopen either.
-      let releaseRead: (() => void) | null = null;
+      let releaseRead: () => void = () => undefined;
       denied = false;
       const slowClient = client as { getSession: (...args: never[]) => Promise<unknown> };
       const original = slowClient.getSession;
@@ -172,7 +172,7 @@ describe("retained conversation views", () => {
         undefined,
       );
       expect(again.result.current.session).toBeNull();
-      releaseRead?.();
+      releaseRead();
       await again.unmount();
     } finally {
       release();
@@ -182,7 +182,7 @@ describe("retained conversation views", () => {
   test("a goal read as gone is not shown again on the next reopen", async () => {
     let current: SessionGoal | null = fakeGoal();
     let holdReads = false;
-    let releaseRead: (() => void) | null = null;
+    let releaseRead: () => void = () => undefined;
     const client = fakeClient({
       findGoal: async () => {
         if (holdReads) {
@@ -211,7 +211,7 @@ describe("retained conversation views", () => {
       holdReads = true;
       const third = await mount();
       expect(third.result.current.goal).toBeNull();
-      releaseRead?.();
+      releaseRead();
       await flush(10);
       await third.unmount();
     } finally {
@@ -223,7 +223,7 @@ describe("retained conversation views", () => {
     const original = fakeGoal({ text: "Old objective" });
     let current: SessionGoal = original;
     let holdReads = false;
-    let releaseRead: (() => void) | null = null;
+    let releaseRead: () => void = () => undefined;
     let updates = 0;
     const client = fakeClient({
       findGoal: async () => {
@@ -255,7 +255,7 @@ describe("retained conversation views", () => {
       let paused: Promise<SessionGoal | null> | null = null;
       paused = reopened.result.current.pause("aimed at the old objective");
       await flush(10);
-      releaseRead?.();
+      releaseRead();
       await flush(50);
       expect(await paused).toBeNull();
       expect(updates).toBe(0);
