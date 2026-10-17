@@ -5,7 +5,7 @@ import {
   withLearningRefusalMeta,
 } from "../src/learning-refusal";
 
-const skillId = "21a78814-7662-4252-b40a-b57971b244e7";
+const skillId = "1b496aec-f6a2-410c-be19-68070edb7080";
 
 describe("learning refusal fact", () => {
   test("is added to `_meta` without touching the model-visible result", () => {
@@ -16,17 +16,17 @@ describe("learning refusal fact", () => {
     };
     const withFact = withLearningRefusalMeta(result, {
       destination: "skill",
-      reason: "personal_chat",
+      reason: "learning_off",
       skillId,
     });
     expect(withFact.content).toBe(result.content);
     expect(withFact._meta as Record<string, unknown>).toEqual({
       other: 1,
-      [LEARNING_REFUSAL_META_KEY]: { destination: "skill", reason: "personal_chat", skillId },
+      [LEARNING_REFUSAL_META_KEY]: { destination: "skill", reason: "learning_off", skillId },
     });
     expect(learningRefusalFromToolOutput(withFact)).toEqual({
       destination: "skill",
-      reason: "personal_chat",
+      reason: "learning_off",
       skillId,
     });
   });
@@ -35,12 +35,12 @@ describe("learning refusal fact", () => {
     expect(() =>
       withLearningRefusalMeta({}, {
         destination: "skill",
-        reason: "personal_chat",
+        reason: "learning_off",
         message: "private text",
       } as never),
     ).toThrow();
     expect(() =>
-      withLearningRefusalMeta({}, { destination: "skill", reason: "personal_chat", skillId: "x" }),
+      withLearningRefusalMeta({}, { destination: "skill", reason: "learning_off", skillId: "x" }),
     ).toThrow();
   });
 

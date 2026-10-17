@@ -787,6 +787,7 @@ class OpConsumer {
         stderr,
         timedOut: exit.timedOut,
         durationMs: exit.durationMs,
+        backgroundChildrenStopped: exit.backgroundChildrenStopped,
       },
       heals: this.heals,
       startRetries,

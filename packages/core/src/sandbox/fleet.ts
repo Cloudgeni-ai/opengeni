@@ -16,6 +16,7 @@ import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config"
 import {
   agentCapabilityEnabled,
   type SandboxBackend,
+  CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
   type SecretResolver,
 } from "@opengeni/contracts";
 import {
@@ -927,6 +928,7 @@ export type RunOnResult = {
   content?: string;
   bytesWritten?: number;
   reason?: string;
+  notice?: string;
 };
 
 export type RunOnSelfhostedMachine = {
@@ -1123,6 +1125,9 @@ export async function executeRunOnSelfhostedMachine(
           : !hasTerminalExit
             ? { reason: "machine returned no terminal exit code" }
             : {}),
+        ...(res.backgroundChildrenStopped
+          ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
+          : {}),
       };
     }
     if (op.kind === "read") {

@@ -727,6 +727,16 @@ On Unix a private unreaped group anchor fences the PGID until cleanup has been
 issued, so cancellation cannot signal a recycled group and the requested command
 cannot exit and leave invisible same-group work behind. The runner-death lease
 also closes the crash gap where `Drop` cannot run.
+On Windows the owned Job Object provides the same containment and a native
+active-process-zero cleanup receipt. Ordinary shell backgrounding (`&`, subshells
+and `nohup`) does not detach work from the command's scope. Just before automatic
+shell-exit cleanup, the runner observes live non-anchor members using the owned
+Linux cgroup, the anchored Unix process group, or the Windows Job Object. Positive
+evidence travels with the terminal result and survives command settlement and
+agent handover. Only then does a new shell result or terminal command read append
+a short notice explaining the cleanup and the foreground `exec_command` workflow
+for long jobs. Structured stdout/stderr remain unchanged; ordinary commands,
+explicit cancellation/deadlines and older runners produce no inferred notice.
 An oversized reply is likewise returned as typed `PAYLOAD_TOO_LARGE`; neither
 backpressure nor a reply-size failure changes the machine's heartbeat state.
 

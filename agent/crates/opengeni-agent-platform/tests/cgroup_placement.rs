@@ -129,6 +129,44 @@ mod linux {
         prove_cpu_lease_lifecycle(&service_dir, &platform).await;
     }
 
+    #[tokio::test]
+    async fn shell_exit_reports_session_detached_children_from_owned_cgroup() {
+        let Some(service_dir) = delegated_and_isolated() else {
+            eprintln!("SKIP: cleanup evidence requires a dedicated delegated supervisor subgroup");
+            return;
+        };
+        // Unlimited operation: this exercises lifecycle ownership, not resource policy.
+        let cgroups =
+            establish_oom_isolation(OpCgroupConfig::default(), &[]).expect("owned cgroup");
+        let root = tempfile::tempdir().expect("fixture directory");
+        let platform = NativePlatform::with_root(root.path()).with_oom_isolation(cgroups);
+        let ready = root.path().join("detached.pid");
+        let request = ExecRequest {
+            command: vec!["setsid sh -c 'echo $$ > \"$READY\"; exec sleep 60' >/dev/null 2>&1 & while [ ! -s \"$READY\" ]; do sleep 0.01; done; cat \"$READY\"".into()],
+            shell: true, timeout_ms: 5_000,
+            env: std::collections::HashMap::from([("READY".into(), ready.to_string_lossy().into_owned())]),
+            ..Default::default()
+        };
+        let response = platform.exec(&request).await.expect("contained shell");
+        assert!(!response.timed_out);
+        assert!(response.background_children_stopped);
+        let descendant = String::from_utf8(response.stdout.to_vec()).unwrap();
+        // A killed orphan can remain a zombie until PID 1 reaps it. Presence of
+        // /proc alone is not liveness; the process must be absent or terminal.
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", descendant.trim())) {
+            let state = stat.rsplit_once(')').unwrap().1.split_whitespace().next();
+            assert!(
+                matches!(state, Some("Z" | "X" | "x")),
+                "child survived cleanup: {stat}"
+            );
+        }
+        assert!(!std::fs::read_dir(service_dir).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("op-")));
+    }
+
     async fn prove_descendant_placement_and_abort(
         service_dir: &Path,
         self_unified: &str,

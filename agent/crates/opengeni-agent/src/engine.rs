@@ -879,6 +879,7 @@ impl Engine {
                             detail: format!("resume after agent update failed: {error}"),
                         }),
                         duration_ms: 0,
+                        background_children_stopped: false,
                         stdout: crate::job::ChannelStats {
                             total_bytes: 0,
                             digest: blake3::hash(&[]),

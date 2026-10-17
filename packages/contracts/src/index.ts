@@ -47,7 +47,6 @@ import {
 export * from "./agent-instruction-changes";
 export * from "./bundled-skills";
 export * from "./skill-use";
-export * from "./learning-refusal";
 import { BundledSkillSelection } from "./bundled-skills";
 import { SkillWriteReceipt, SkillSourceReleaseReceipt, SkillPublicationReceipt } from "./skills";
 import { readSkillMetadata } from "./skill-metadata";
@@ -224,7 +223,6 @@ export {
   COMPUTER_SCREENSHOT_MAX_DIMENSION,
   COMPUTER_SCREENSHOT_MAX_PIXELS,
   COMPUTER_SCREENSHOT_RETENTION_MS,
-  COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
   GENERATED_IMAGE_MAX_BYTES,
   GENERATED_VIDEO_MAX_BYTES,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
@@ -10131,6 +10129,7 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
             commandId: z.string().uuid(),
           })
           .strict(),
+        notice: z.string().optional(),
       })
       .passthrough(),
     z
@@ -15358,6 +15357,10 @@ export const SessionCommandFailure = /* @__PURE__ */ defineSchema(() =>
 );
 export type SessionCommandFailure = z.infer<typeof SessionCommandFailure>;
 
+/** Appended only to a new result with positive native command-cleanup evidence. */
+export const CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE =
+  "Stopped background child processes when the shell exited. For long jobs, use exec_command on this machine with the job in the foreground, then command_read or command_wait with the returned command ID.";
+
 /** Stored reconciliation checkpoints, not a live provider probe or native ACK. */
 export const SessionBackgroundCommandReconciliation = /* @__PURE__ */ defineSchema(() =>
   z
@@ -15410,6 +15413,7 @@ export const SessionBackgroundCommand = /* @__PURE__ */ defineSchema(() =>
       exitCode: z.number().int().nullable(),
       settlementReason: z.string().nullable(),
       failure: SessionCommandFailure.optional(),
+      backgroundChildrenStopped: z.literal(true).optional(),
       startedAt: z.string(),
       settledAt: z.string().nullable(),
       completionObservedAt: z.string().nullable().optional(),

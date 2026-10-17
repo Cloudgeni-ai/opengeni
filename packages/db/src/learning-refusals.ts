@@ -1,4 +1,3 @@
-import type { SkillScope } from "@opengeni/contracts";
 import type {
   LearningRefusal,
   LearningRefusalDestination,
@@ -6,25 +5,48 @@ import type {
 } from "@opengeni/contracts/learning-refusal";
 
 /**
- * The authority refusals a person can act on, by the exact message of the
- * routine that raised them (SQLSTATE 42501). Anything else with that state is
- * the generic `not_permitted`, unless it is a transient attempt fence below.
+ * Refusals because Agent learning is Off, by the exact message of the routine
+ * that raised them (SQLSTATE 42501). Anything else with that state is the
+ * generic `not_permitted`, unless it is a transient attempt fence or a
+ * correction the agent can make itself (below). Unknown messages are reported
+ * to the person: a refusal must never be lost silently.
  */
-const REFUSAL_REASONS: ReadonlyMap<string, LearningRefusalReason | "skill_scope"> = new Map([
-  ["Learning is Off; durable Skill changes are refused", "learning_off"],
-  ["Instruction learning is Off", "learning_off"],
-  ["Knowledge learning is Off for this task", "learning_off"],
-  // An agent whose learning saves only for its person (a private chat, a
-  // chat using personal memory) can explicitly save workspace Skills and
-  // instructions, but cannot review Skills or install plugins.
-  [
-    "Agents cannot review Skills or install workspace plugins from personal learning",
-    "personal_chat",
-  ],
-  // A personal Skill from a workspace-learning chat; otherwise a Skill (such as
-  // an organization Skill) no agent may change.
-  ["Skill outside accepted learning scope", "skill_scope"],
+const LEARNING_OFF = new Set([
+  "Learning is Off; durable Skill changes are refused",
+  "Instruction learning is Off",
+  "Knowledge learning is Off for this task",
 ]);
+
+/**
+ * Refusals the agent can correct and retry itself, by exact message. They are
+ * not a refusal to show the person:
+ * - `evidence_not_shared`: cited evidence or a source is personal or not yet
+ *   published, so readers of the destination could not see it.
+ * - `reference_unavailable`: a referenced entry, revision, source or Skill
+ *   revision does not exist or is not visible here.
+ * - `skill_scope_kept`: an edit named a scope other than the Skill's own.
+ */
+export type LearningSaveCorrection =
+  | "evidence_not_shared"
+  | "reference_unavailable"
+  | "skill_scope_kept";
+
+const CORRECTIONS: ReadonlyMap<string, LearningSaveCorrection> = new Map([
+  ["Instruction evidence is unavailable to workspace readers", "evidence_not_shared"],
+  ["Knowledge evidence has not been published", "evidence_not_shared"],
+  ["Knowledge reference would widen source access", "evidence_not_shared"],
+  ["Knowledge source would widen document access", "evidence_not_shared"],
+  ["Knowledge reference unavailable", "reference_unavailable"],
+  ["Knowledge source unavailable", "reference_unavailable"],
+  ["Knowledge revision unavailable", "reference_unavailable"],
+  ["Skill revision unavailable", "reference_unavailable"],
+  ["Skill scope differs from the requested scope", "skill_scope_kept"],
+]);
+
+/** The correction the agent can make itself, or null. */
+export function learningSaveCorrection(message: string): LearningSaveCorrection | null {
+  return CORRECTIONS.get(message) ?? null;
+}
 
 /**
  * Fences that refuse a stale, interrupted, or re-scoped attempt. The change
@@ -66,24 +88,19 @@ export function nestedAuthorityRefusalMessage(error: unknown): string | null {
 
 /**
  * What a definite authority refusal of a durable learning write means for the
- * person, or null when the refusal is a transient fence rather than a policy
- * decision. `skillScope` is the scope of the existing Skill the change
- * targeted, when known.
+ * person, or null when it is a transient fence or a correction the agent can
+ * make itself rather than a policy decision.
  */
 export function classifyLearningRefusal(input: {
   destination: LearningRefusalDestination;
   message: string;
   skillId?: string | undefined;
-  skillScope?: SkillScope | null | undefined;
 }): LearningRefusal | null {
   if (TRANSIENT_FENCES.some((fence) => fence.test(input.message))) return null;
-  const known = REFUSAL_REASONS.get(input.message);
-  const reason: LearningRefusalReason =
-    known === "skill_scope"
-      ? input.skillScope === "user"
-        ? "personal_target"
-        : "not_permitted"
-      : (known ?? "not_permitted");
+  if (CORRECTIONS.has(input.message)) return null;
+  const reason: LearningRefusalReason = LEARNING_OFF.has(input.message)
+    ? "learning_off"
+    : "not_permitted";
   return {
     destination: input.destination,
     reason,

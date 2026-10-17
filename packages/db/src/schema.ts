@@ -11161,6 +11161,7 @@ export const sessionBackgroundCommands = pgTable(
     settlementReason: text("settlement_reason"),
     runnerFailure:
       jsonb("runner_failure").$type<import("@opengeni/contracts").SessionCommandFailure>(),
+    backgroundChildrenStopped: boolean("background_children_stopped").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     settledAt: timestamp("settled_at", { withTimezone: true }),
     completionObservedAt: timestamp("completion_observed_at", { withTimezone: true }),

@@ -1,14 +1,18 @@
 import { describe, expect, test } from "bun:test";
-import { classifyLearningRefusal, nestedAuthorityRefusalMessage } from "../src/learning-refusals";
+import {
+  classifyLearningRefusal,
+  learningSaveCorrection,
+  nestedAuthorityRefusalMessage,
+} from "../src/learning-refusals";
 
 describe("classifyLearningRefusal", () => {
   test("names the reason a person can act on", () => {
     expect(
       classifyLearningRefusal({
         destination: "skill",
-        message: "Agents cannot review Skills or install workspace plugins from personal learning",
+        message: "Learning is Off; durable Skill changes are refused",
       }),
-    ).toEqual({ destination: "skill", reason: "personal_chat" });
+    ).toEqual({ destination: "skill", reason: "learning_off" });
     expect(
       classifyLearningRefusal({
         destination: "instruction",
@@ -26,24 +30,15 @@ describe("classifyLearningRefusal", () => {
     ).toEqual({ destination: "knowledge", reason: "not_permitted" });
   });
 
-  test("a Skill scope mismatch names a personal Skill as such", () => {
+  test("a Skill no chat may change is a plain refusal", () => {
     const skillId = crypto.randomUUID();
-    const mismatch = (skillScope: "user" | "workspace" | "organization" | null) =>
+    expect(
       classifyLearningRefusal({
         destination: "skill",
         message: "Skill outside accepted learning scope",
         skillId,
-        skillScope,
-      });
-    expect(mismatch("user")).toEqual({
-      destination: "skill",
-      reason: "personal_target",
-      skillId,
-    });
-    // A personal-learning chat can change a workspace Skill; an organization
-    // Skill is out of every agent's reach.
-    expect(mismatch("organization")?.reason).toBe("not_permitted");
-    expect(mismatch(null)?.reason).toBe("not_permitted");
+      }),
+    ).toEqual({ destination: "skill", reason: "not_permitted", skillId });
   });
 
   test("transient fences are not a refusal to show", () => {
@@ -54,6 +49,20 @@ describe("classifyLearningRefusal", () => {
     ]) {
       expect(classifyLearningRefusal({ destination: "knowledge", message })).toBe(null);
     }
+  });
+
+  test("corrections the agent can make itself are not a refusal to show", () => {
+    for (const [message, correction] of [
+      ["Instruction evidence is unavailable to workspace readers", "evidence_not_shared"],
+      ["Knowledge reference would widen source access", "evidence_not_shared"],
+      ["Knowledge reference unavailable", "reference_unavailable"],
+      ["Skill scope differs from the requested scope", "skill_scope_kept"],
+    ] as const) {
+      expect(learningSaveCorrection(message)).toBe(correction);
+      expect(classifyLearningRefusal({ destination: "knowledge", message })).toBe(null);
+    }
+    // An unknown refusal is still shown: none is ever lost silently.
+    expect(learningSaveCorrection("Some new policy refusal")).toBe(null);
   });
 
   test("finds the authority refusal inside a wrapped driver error", () => {

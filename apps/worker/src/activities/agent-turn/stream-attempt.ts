@@ -55,7 +55,11 @@ import {
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
 } from "@opengeni/runtime";
-import { serviceTierForLatencyMode, type Settings } from "@opengeni/config";
+import {
+  retainedImageWorkspaceQuotaBytes,
+  serviceTierForLatencyMode,
+  type Settings,
+} from "@opengeni/config";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
 import {
   isContextCompactionInterruption,
@@ -1439,6 +1443,7 @@ export async function runTurnStreamAttempt(
               attemptId: input.attemptId,
               output: typedScreenshot,
               kind: media.retainedSessionImageKindsByCallId.get(completedToolCall.callId),
+              workspaceQuotaBytes: retainedImageWorkspaceQuotaBytes(settings, input.workspaceId),
             });
             media.retainedScreenshotReceiptsByCallId.set(
               completedToolCall.callId,
@@ -1470,6 +1475,10 @@ export async function runTurnStreamAttempt(
                       turnId: activeTurnId,
                       attemptId: input.attemptId,
                       output: image,
+                      workspaceQuotaBytes: retainedImageWorkspaceQuotaBytes(
+                        settings,
+                        input.workspaceId,
+                      ),
                     }).catch(() => null)
                   : null;
                 receipts.push(receipt?.available ? receipt : null);

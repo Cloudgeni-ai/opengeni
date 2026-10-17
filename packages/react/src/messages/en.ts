@@ -3079,17 +3079,13 @@ export const englishMessages = {
   "timeline.knowledgeReceipt.viewInKnowledge": "View in Knowledge",
   "timeline.learningRefusal.agentLearningSettings": "Agent learning settings",
   "timeline.learningRefusal.instructionLearningOff":
-    "Agent learning for workspace instructions is off for this chat. Turn it on in Agent learning settings, or add it yourself in workspace instructions.",
+    "Agent learning for workspace instructions is off where this would be saved. Turn it on in Agent learning settings, then ask again.",
   "timeline.learningRefusal.instructionNotPermitted":
-    "This chat isn't allowed to change workspace instructions. Make the change yourself, or ask a workspace admin.",
-  "timeline.learningRefusal.instructionPersonalChat":
-    "This chat saves what it learns only for you, so it can't change workspace instructions, which everyone in the workspace shares. Make the change yourself, or ask in a shared chat.",
+    "This chat isn't allowed to change workspace instructions.",
   "timeline.learningRefusal.knowledgeLearningOff":
-    "Agent learning for Knowledge is off for this chat. Turn it on in Agent learning settings, or add it yourself in Knowledge.",
+    "Agent learning for Knowledge is off where this would be saved. Turn it on in Agent learning settings, then ask again.",
   "timeline.learningRefusal.knowledgeNotPermitted":
-    "This chat isn't allowed to make this change. Make it yourself in Knowledge, or ask a workspace admin.",
-  "timeline.learningRefusal.knowledgePersonalChat":
-    "This chat saves what it learns only for you, so it can't change Knowledge shared with the workspace. Make the change yourself in Knowledge, or ask in a shared chat.",
+    "This chat isn't allowed to make this change in Knowledge.",
   "timeline.learningRefusal.notSavedToKnowledge": "Not saved to Knowledge",
   "timeline.learningRefusal.notSavedToSkills": "Not saved to Skills",
   "timeline.learningRefusal.notSavedToWorkspaceInstructions": "Not saved to workspace instructions",
@@ -3100,13 +3096,8 @@ export const englishMessages = {
   "timeline.learningRefusal.siteAgent":
     "Agents started from a Site page don't save Skills, instructions, or Knowledge.",
   "timeline.learningRefusal.skillLearningOff":
-    "Agent learning for Skills is off for this chat. Turn it on in Agent learning settings, or make the change yourself in Skills.",
-  "timeline.learningRefusal.skillNotPermitted":
-    "This chat isn't allowed to change this Skill. Make the change yourself in Skills, or ask a workspace admin.",
-  "timeline.learningRefusal.skillPersonalChat":
-    "This chat saves what it learns only for you, so it can't change a Skill shared with the workspace. Make the change yourself in Skills, or ask in a shared chat.",
-  "timeline.learningRefusal.skillPersonalTarget":
-    "This chat saves what it learns for the whole workspace, so it can't change your personal Skill. Make the change yourself in Skills, or ask in a private chat.",
+    "Agent learning for Skills is off where this would be saved. Turn it on in Agent learning settings, then ask again.",
+  "timeline.learningRefusal.skillNotPermitted": "This chat isn't allowed to change this Skill.",
   "timeline.noticePresentation.waitedElapsed": "Waited · {elapsed}",
   "timeline.noticePresentation.waitedForAgentsElapsed_one": "Waited for {count} agent · {elapsed}",
   "timeline.noticePresentation.waitedForAgentsElapsed_other":

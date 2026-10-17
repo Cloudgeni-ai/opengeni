@@ -15,23 +15,14 @@ export const LEARNING_REFUSAL_DESTINATIONS = ["skill", "instruction", "knowledge
 export type LearningRefusalDestination = (typeof LEARNING_REFUSAL_DESTINATIONS)[number];
 
 /**
- * Why it was refused, in terms a person can act on:
- * - `personal_chat`: this chat's Agent learning saves only for its person (a
- *   private chat, a chat using personal memory, or a personal workspace), and
- *   the change targets something shared with the workspace.
- * - `personal_target`: this chat's Agent learning saves for the workspace,
- *   and the change targets a personal Skill.
- * - `learning_off`: Agent learning for this destination is Off for this chat.
+ * Why it was refused, in terms a person can act on. An agent saves to the
+ * destination it explicitly chooses, so only a genuine refusal is reported:
+ * - `learning_off`: Agent learning for this destination is Off, in this
+ *   chat's or the workspace's settings.
  * - `site_agent`: an agent started from a Site page never saves learning.
  * - `not_permitted`: any other definite authority or policy refusal.
  */
-export const LEARNING_REFUSAL_REASONS = [
-  "personal_chat",
-  "personal_target",
-  "learning_off",
-  "site_agent",
-  "not_permitted",
-] as const;
+export const LEARNING_REFUSAL_REASONS = ["learning_off", "site_agent", "not_permitted"] as const;
 export type LearningRefusalReason = (typeof LEARNING_REFUSAL_REASONS)[number];
 
 /** Codes and ids only: never the refused text, a Skill's name, or a server message. */
