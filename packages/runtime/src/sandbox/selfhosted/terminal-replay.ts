@@ -7,6 +7,7 @@ export function connectedCommandExitProof(exit: OpExit, observedAt: Date) {
   return {
     outcome: "exited" as const,
     exitCode: exit.exitCode,
+    ...(exit.backgroundChildrenStopped ? { backgroundChildrenStopped: true } : {}),
     reason: code
       ? `op_failure_${code}`
       : exit.cancelled

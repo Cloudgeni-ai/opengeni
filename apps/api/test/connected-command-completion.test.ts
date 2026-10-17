@@ -18,13 +18,16 @@ import {
   listSessionEvents,
   settleConnectedMachineSessionBackgroundCommand,
   settleCollectedConnectedMachineBackgroundCommand,
+  settleClaimedConnectedMachineBackgroundCommand,
 } from "@opengeni/db";
+import { CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
 import {
   getSessionBackgroundCommand,
   locateConnectedCommandCompletion,
   readSessionBackgroundCommandOutput,
   claimPushedConnectedCommandCompletion,
   deferConnectedMachineBackgroundCommandReconciliation,
+  recordConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
 import { createConnectedCommandOutputCapture } from "@opengeni/db/session-command-output";
 import { handleAgentEventPayload } from "../src/sandbox/metrics-ingestion";
@@ -444,4 +447,73 @@ test("custody checkpoint failure cannot suppress already committed terminal fano
   ).rejects.toThrow("invalid frontier");
   expect(published).toBe(1);
   expect(await getSessionBackgroundCommand(client.db, command)).toMatchObject({ state: "exited" });
+});
+
+test("only observed child cleanup adds a durable final result notice", async () => {
+  for (const stopped of [false, true]) {
+    const command = await fixture();
+    await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      ...command,
+      outcome: "exited",
+      exitCode: 0,
+      reason: "op_exit",
+      backgroundChildrenStopped: stopped,
+    });
+    const [update] =
+      await shared.admin`select payload from session_system_updates where session_id = ${command.sessionId} and kind = 'background_command_result'`;
+    expect(update.payload.notice).toBe(
+      stopped ? CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE : undefined,
+    );
+    for (let read = 0; read < 2; read++) {
+      const result = await readSessionBackgroundCommandOutput(client.db, command);
+      expect(result.notice).toBe(stopped ? CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE : undefined);
+      expect(result.chunks).toEqual([]);
+      if (!stopped) expect(Object.keys(result)).not.toContain("notice");
+    }
+  }
+});
+
+test("pushed cleanup notice comes from verified retained output, not notification text", async () => {
+  for (const stopped of [false, true]) {
+    const command = await fixture();
+    await ingestConnectedCommandCompletion(
+      client.db,
+      ids(command),
+      {
+        opId: command.opId,
+        exit: OpExit.fromPartial({ exitCode: 0, backgroundChildrenStopped: !stopped }),
+      },
+      undefined,
+      reader(OpExit.fromPartial({ exitCode: 0, backgroundChildrenStopped: stopped })),
+    );
+    const result = await readSessionBackgroundCommandOutput(client.db, command);
+    expect(result.notice).toBe(stopped ? CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE : undefined);
+    expect(result.chunks[0]?.chunk).toBe("final output\n");
+  }
+});
+
+test("reconciled cleanup evidence remains positive across settlement", async () => {
+  const command = await fixture();
+  const claim = {
+    ...command,
+    claimId: crypto.randomUUID(),
+    state: "running" as const,
+    reconcileAttempts: 1,
+    proof: null,
+  };
+  await shared.admin`update session_background_commands set reconcile_claim_id = ${claim.claimId}, reconcile_claimed_at = now() where id = ${command.commandId}`;
+  await recordConnectedMachineBackgroundCommandProof(client.db, {
+    claim,
+    proof: {
+      outcome: "exited",
+      exitCode: 0,
+      reason: "op_exit",
+      observedAt: new Date(),
+      backgroundChildrenStopped: true,
+    },
+  });
+  await settleClaimedConnectedMachineBackgroundCommand(client.db, { claim });
+  expect((await readSessionBackgroundCommandOutput(client.db, command)).notice).toBe(
+    CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
+  );
 });

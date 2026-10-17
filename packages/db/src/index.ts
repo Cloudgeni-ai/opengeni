@@ -84,6 +84,7 @@ export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
+  CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
   parseSecretReference,
   type SecretReference,
   ToolReviewContext,
@@ -83049,6 +83050,9 @@ function backgroundCommandTerminalMutation(input: {
         reason,
         ...(command.failure ? { failure: command.failure } : {}),
         outputLocator,
+        ...(command.backgroundChildrenStopped
+          ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
+          : {}),
       };
       const causalAuthority = await backgroundCommandCausalAuthorityTx(tx as unknown as Database, {
         ...input,
@@ -83230,6 +83234,7 @@ export async function settleConnectedMachineSessionBackgroundCommand(
   db: Database,
   input: {
     failure?: SessionBackgroundCommand["failure"];
+    backgroundChildrenStopped?: boolean | undefined;
     accountId: string;
     workspaceId: string;
     sessionId: string;

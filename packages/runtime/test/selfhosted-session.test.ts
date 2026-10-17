@@ -60,6 +60,7 @@ function sessionWith(
             exitCode: response.exitCode,
             timedOut: response.timedOut,
             durationMs: response.durationMs,
+            backgroundChildrenStopped: response.backgroundChildrenStopped,
           },
         };
       },
@@ -520,6 +521,30 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(structured.stdout).toBe("");
     expect(structured.stderr).toBe(stderr);
     expect(structured.exitCode).toBe(2);
+  });
+
+  test("native child cleanup appends a notice without changing structured output", async () => {
+    const mock = new MockAgentResponder({
+      exec: () => ({
+        exitCode: 0,
+        stdout: new TextEncoder().encode("done\n"),
+        stderr: new Uint8Array(),
+        timedOut: false,
+        durationMs: "4",
+        backgroundChildrenStopped: true,
+      }),
+    });
+    const session = sessionWith(mock);
+    const structured = await session.exec({ cmd: "sleep 60 & printf done" });
+    expect(structured.stdout).toBe("done\n");
+    expect(structured.stderr).toBe("");
+    const text = await session.execCommand({ cmd: "sleep 60 & printf done" });
+    expect(text).toContain("done\n");
+    expect(
+      text.endsWith(
+        "Stopped background child processes when the shell exited. For long jobs, use exec_command on this machine with the job in the foreground, then command_read or command_wait with the returned command ID.",
+      ),
+    ).toBe(true);
   });
 
   test("exec maps explicit Windows shell families without POSIX flags", async () => {

@@ -1339,6 +1339,8 @@ export interface ExecResponse {
   timedOut: boolean;
   /** Wall-clock duration the process ran. */
   durationMs: string;
+  /** Positive native evidence that normal shell-exit cleanup stopped live children. */
+  backgroundChildrenStopped: boolean;
 }
 
 export interface FsReadRequest {
@@ -2052,6 +2054,7 @@ export interface OpExit {
    * IO error text, captured byte totals) — the out-of-band plane's food.
    */
   failureDetail: { [key: string]: string };
+  backgroundChildrenStopped: boolean;
 }
 
 export interface OpExit_DigestsEntry {
@@ -5482,7 +5485,14 @@ export const ExecRequest_EnvEntry: MessageFns<ExecRequest_EnvEntry> = {
 };
 
 function createBaseExecResponse(): ExecResponse {
-  return { exitCode: 0, stdout: new Uint8Array(0), stderr: new Uint8Array(0), timedOut: false, durationMs: "0" };
+  return {
+    exitCode: 0,
+    stdout: new Uint8Array(0),
+    stderr: new Uint8Array(0),
+    timedOut: false,
+    durationMs: "0",
+    backgroundChildrenStopped: false,
+  };
 }
 
 export const ExecResponse: MessageFns<ExecResponse> = {
@@ -5501,6 +5511,9 @@ export const ExecResponse: MessageFns<ExecResponse> = {
     }
     if (message.durationMs !== "0") {
       writer.uint32(40).uint64(message.durationMs);
+    }
+    if (message.backgroundChildrenStopped !== false) {
+      writer.uint32(48).bool(message.backgroundChildrenStopped);
     }
     return writer;
   },
@@ -5552,6 +5565,14 @@ export const ExecResponse: MessageFns<ExecResponse> = {
           message.durationMs = reader.uint64().toString();
           continue;
         }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.backgroundChildrenStopped = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5580,6 +5601,11 @@ export const ExecResponse: MessageFns<ExecResponse> = {
         : isSet(object.duration_ms)
         ? globalThis.String(object.duration_ms)
         : "0",
+      backgroundChildrenStopped: isSet(object.backgroundChildrenStopped)
+        ? globalThis.Boolean(object.backgroundChildrenStopped)
+        : isSet(object.background_children_stopped)
+        ? globalThis.Boolean(object.background_children_stopped)
+        : false,
     };
   },
 
@@ -5600,6 +5626,9 @@ export const ExecResponse: MessageFns<ExecResponse> = {
     if (message.durationMs !== "0") {
       obj.durationMs = message.durationMs;
     }
+    if (message.backgroundChildrenStopped !== false) {
+      obj.backgroundChildrenStopped = message.backgroundChildrenStopped;
+    }
     return obj;
   },
 
@@ -5613,6 +5642,7 @@ export const ExecResponse: MessageFns<ExecResponse> = {
     message.stderr = object.stderr ?? new Uint8Array(0);
     message.timedOut = object.timedOut ?? false;
     message.durationMs = object.durationMs ?? "0";
+    message.backgroundChildrenStopped = object.backgroundChildrenStopped ?? false;
     return message;
   },
 };
@@ -12875,6 +12905,7 @@ function createBaseOpExit(): OpExit {
     totals: {},
     failureCode: "",
     failureDetail: {},
+    backgroundChildrenStopped: false,
   };
 }
 
@@ -12904,6 +12935,9 @@ export const OpExit: MessageFns<OpExit> = {
     globalThis.Object.entries(message.failureDetail).forEach(([key, value]: [string, string]) => {
       OpExit_FailureDetailEntry.encode({ key: key as any, value }, writer.uint32(66).fork()).join();
     });
+    if (message.backgroundChildrenStopped !== false) {
+      writer.uint32(72).bool(message.backgroundChildrenStopped);
+    }
     return writer;
   },
 
@@ -12987,6 +13021,14 @@ export const OpExit: MessageFns<OpExit> = {
           }
           continue;
         }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.backgroundChildrenStopped = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -13054,6 +13096,11 @@ export const OpExit: MessageFns<OpExit> = {
           {},
         )
         : {},
+      backgroundChildrenStopped: isSet(object.backgroundChildrenStopped)
+        ? globalThis.Boolean(object.backgroundChildrenStopped)
+        : isSet(object.background_children_stopped)
+        ? globalThis.Boolean(object.background_children_stopped)
+        : false,
     };
   },
 
@@ -13101,6 +13148,9 @@ export const OpExit: MessageFns<OpExit> = {
         });
       }
     }
+    if (message.backgroundChildrenStopped !== false) {
+      obj.backgroundChildrenStopped = message.backgroundChildrenStopped;
+    }
     return obj;
   },
 
@@ -13141,6 +13191,7 @@ export const OpExit: MessageFns<OpExit> = {
       },
       {},
     );
+    message.backgroundChildrenStopped = object.backgroundChildrenStopped ?? false;
     return message;
   },
 };

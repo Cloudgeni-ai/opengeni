@@ -849,6 +849,32 @@ pub(crate) struct OpCgroupHandle {
 
 #[cfg(target_os = "linux")]
 impl OpCgroupHandle {
+    /// cgroup.procs omits zombies and includes session-detached descendants.
+    /// Descendant cgroups are part of the same recursive kill boundary.
+    pub(crate) fn has_live_children(&self, anchor_pid: i32) -> std::io::Result<bool> {
+        let Some(dir) = &self.dir else {
+            return Ok(false);
+        };
+        let mut pending = vec![dir.clone()];
+        while let Some(dir) = pending.pop() {
+            let processes = std::fs::read_to_string(dir.join("cgroup.procs"))?;
+            if processes
+                .lines()
+                .filter_map(|pid| pid.parse::<i32>().ok())
+                .any(|pid| pid != anchor_pid)
+            {
+                return Ok(true);
+            }
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    pending.push(entry.path());
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Gives the leaf to a successor process image without killing or removing
     /// it. A CPU lease is deliberately leaked: the quota must stay enforced
     /// until the successor re-acquires it, and `exec` ends this image's count.

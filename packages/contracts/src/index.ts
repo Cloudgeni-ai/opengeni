@@ -10131,6 +10131,7 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
             commandId: z.string().uuid(),
           })
           .strict(),
+        notice: z.string().optional(),
       })
       .passthrough(),
     z
@@ -15358,6 +15359,10 @@ export const SessionCommandFailure = /* @__PURE__ */ defineSchema(() =>
 );
 export type SessionCommandFailure = z.infer<typeof SessionCommandFailure>;
 
+/** Appended only to a new result with positive native command-cleanup evidence. */
+export const CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE =
+  "Stopped background child processes when the shell exited. For long jobs, use exec_command on this machine with the job in the foreground, then command_read or command_wait with the returned command ID.";
+
 /** Stored reconciliation checkpoints, not a live provider probe or native ACK. */
 export const SessionBackgroundCommandReconciliation = /* @__PURE__ */ defineSchema(() =>
   z
@@ -15410,6 +15415,7 @@ export const SessionBackgroundCommand = /* @__PURE__ */ defineSchema(() =>
       exitCode: z.number().int().nullable(),
       settlementReason: z.string().nullable(),
       failure: SessionCommandFailure.optional(),
+      backgroundChildrenStopped: z.literal(true).optional(),
       startedAt: z.string(),
       settledAt: z.string().nullable(),
       completionObservedAt: z.string().nullable().optional(),

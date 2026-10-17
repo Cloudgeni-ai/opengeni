@@ -440,6 +440,8 @@ message ExecResponse {
   bool timed_out = 4;
   // Wall-clock duration the process ran.
   uint64 duration_ms = 5;
+  // Positive native evidence that normal shell-exit cleanup stopped live children.
+  bool background_children_stopped = 6;
 }
 
 // =============================================================================
@@ -1177,6 +1179,7 @@ message OpExit {
   // Structured detail for failure_code (exact counters: retained bytes, the
   // IO error text, captured byte totals) — the out-of-band plane's food.
   map<string, string> failure_detail = 8;
+  bool background_children_stopped = 9;
 }
 
 // Transactional upload begin. Requires transactional_fs_write, not op_stream.
