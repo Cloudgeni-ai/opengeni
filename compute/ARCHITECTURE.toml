@@ -29,9 +29,11 @@ mode = "required"
 [rules.file_size.stale_entries]       # entries whose file shrank, fell under the limit, or is gone
 mode = "advisory"
 
-# compute-core is the pure lifecycle state machine: inputs in, actions out. It
-# never touches files, sockets, threads, processes, the environment or the
-# clock, so the seeded simulation can drive it exactly and replay any failure.
+# compute-core (the lifecycle state machine) and compute-fleet (leases,
+# ownership, fences and placement) are pure: inputs in, actions out. They
+# never touch files, sockets, threads, processes, the environment or the
+# clock, so the seeded simulations can drive them exactly and replay any
+# failure.
 # Time arrives as an input. Every other crate is allowed; a new crate must be
 # added here on purpose.
 #

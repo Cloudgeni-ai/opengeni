@@ -186,3 +186,35 @@ together came to 348 MiB stored. The working-set pack holds at most
 | Remote | its compressed memory image, working-set pack and disk chunks beyond the common part (about 0.1 GiB together) | about $0.002 for this live footprint; older copies until they are collected and a share of the common part come on top |
 
 A running sandbox costs what its memory and processors use.
+
+## Fleet decisions
+
+Phase 3, measured on 2026-10-17 by `compute-fleet`'s budget test
+(`FLEET_BUDGET_PRINT=1 cargo test --release -p compute-fleet --test budget
+-- --nocapture`), release build on one core of an Apple M4 Pro. The fleet
+has 5,000 hosts of 384 GiB in 3 zones and 2 memory-image classes, ready
+clones of 8 shapes, and 500,000 sandboxes placed one at a time. Each row
+times one decision in the service's memory; a real request adds its store
+round trips and the proxy hop on top.
+
+| Decision | Count | p50 | p99 | Max |
+| --- | --- | --- | --- | --- |
+| Create: place and reserve, fleet filling up | 500,000 | 0.42 µs | 1.0 µs | 58 µs |
+| Create: place, 98 % of hosts full | 20,000 | 0.17 µs | 0.46 µs | 8 µs |
+| Create: no host has room (every pool walked) | 2,000 | 11 µs | 17 µs | 31 µs |
+| Renewal: a host's capacity into the view | 15,000 | 0.50 µs | 0.96 µs | 19 µs |
+| Wake: find the owner | 200,000 | 0.21 µs | 0.50 µs | 105 µs |
+| Recovery: one pass over every host's renewal count | 200 | 90 µs | 163 µs | 343 µs |
+| Host lost: clear its sandboxes (about 100) | 200 | 20 µs | 33 µs | 41 µs |
+| Host back: reconcile what it lists (about 100) | 200 | 9 µs | 15 µs | 16 µs |
+
+The test fails if any p99 reaches 1 ms (20 ms in a debug build). The
+recovery pass runs every 250 ms, so watching 5,000 hosts takes under 0.1 %
+of one core.
+
+The protocol simulation (`tests/protocol.rs`) passed 700 seeds of each of
+its two runs: 16 hosts and 600 sandboxes for 600 s with clocks up to
+0.05 % apart, and 8 hosts and 200 sandboxes for 300 s with clocks up to
+0.5 % apart, both under partitions, lost and late messages, agent stalls
+and restarts, power losses, stuck freezes and kills, and leader failovers.
+

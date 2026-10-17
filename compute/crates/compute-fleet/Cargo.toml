@@ -1,0 +1,16 @@
+[package]
+name = "compute-fleet"
+description = "Pure, deterministic fleet decisions for Opengeni compute: host leases, sandbox ownership, placement and scaling"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+compute-core = { path = "../compute-core" }
+
+[lints]
+workspace = true
