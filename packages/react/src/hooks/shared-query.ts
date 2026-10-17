@@ -1,4 +1,11 @@
-import { useCallback, useLayoutEffect, useReducer, useRef, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useReducer,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
 
@@ -589,6 +596,22 @@ export function retainSharedQueries(scope: object): () => void {
       if (state.retainers === 0) clearSharedQueries(scope);
     }, 0);
   };
+}
+
+/**
+ * Keep reads made through `client` after the components that made them
+ * unmount, for as long as the calling component stays mounted: returning to a
+ * screen (for example a conversation opened a moment ago) then draws its last
+ * rows at once and re-reads in the background. Use it only when every
+ * signed-in person gets their own client object; changing `client` or
+ * unmounting drops everything kept. `OpenGeniProvider retainReadsAcrossMounts`
+ * does the same for the provider's client.
+ */
+export function useRetainedReads(client: object | null | undefined, enabled = true): void {
+  useEffect(() => {
+    if (!client || !enabled) return;
+    return retainSharedQueries(client);
+  }, [client, enabled]);
 }
 
 /**

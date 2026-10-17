@@ -11,7 +11,9 @@ import type {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { normalizeError } from "../lib/error-message";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
+  projectionReadThrough,
   useDebouncedCallback,
   usePageLiveActivity,
   useSessionEventTrigger,
@@ -249,6 +251,8 @@ export function useTurnQueue(
   }, [enabled, load, registerSessionReconciler, sessionId]);
 
   const scheduleRefresh = useDebouncedCallback(() => void load());
+  const freshSnapshot = stateTargetKey === targetKey ? snapshot : null;
+  const freshLoading = stateTargetKey === targetKey ? loading : enabled;
   useSessionEventTrigger(
     client,
     workspaceId,
@@ -258,8 +262,21 @@ export function useTurnQueue(
     {
       enabled,
       ...(options.events !== undefined ? { events: options.events } : {}),
+      readThrough: projectionReadThrough(freshSnapshot, freshLoading),
+      refresh: scheduleRefresh,
     },
     async () => await load(true),
+  );
+  // Until the first read lands, show the queue as it was when this
+  // conversation was last left (only when the host retains reads). Commands
+  // still act only on a fresh snapshot.
+  const retainedSnapshot = useRetainedSessionView(
+    client,
+    workspaceId,
+    sessionId,
+    "queue",
+    freshSnapshot,
+    { enabled, discard: stateTargetKey === targetKey && deniesRetainedView(error) },
   );
 
   const mutate = useCallback(
@@ -424,7 +441,7 @@ export function useTurnQueue(
   );
 
   const identityMatches = stateTargetKey === targetKey;
-  const visibleSnapshot = identityMatches ? snapshot : null;
+  const visibleSnapshot = freshSnapshot ?? retainedSnapshot;
   const visiblePendingByTurn = identityMatches ? pendingByTurn : EMPTY_PENDING_BY_TURN;
   const mutating = useMemo(
     () => Object.keys(visiblePendingByTurn).length > 0,
@@ -443,7 +460,7 @@ export function useTurnQueue(
     activePersonalConnections: visibleSnapshot?.activePersonalConnections ?? [],
     effectiveControl: visibleSnapshot?.effectiveControl ?? null,
     stoppingPreviousAttempt: visibleSnapshot?.stoppingPreviousAttempt ?? false,
-    loading: identityMatches ? loading : enabled,
+    loading: freshLoading && retainedSnapshot === null,
     error: identityMatches ? error : null,
     refresh: load,
     moveTurn,

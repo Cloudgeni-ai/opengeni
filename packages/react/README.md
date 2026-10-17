@@ -237,10 +237,28 @@ they are older than 10 seconds. Failed reads are never kept, and a
 401/403/404 drops what was kept. Retained reads are dropped when `client`
 changes or the provider unmounts.
 
-> **Host action item:** only set `retainReadsAcrossMounts` when every signed-in
-> person gets their own `client` object (create a new client on sign-in,
-> sign-out and account switch), as the stock Opengeni console does. With a
-> shared client, leave it off.
+The same opt-in keeps the last view of each conversation a person leaves: its
+event tail, detail, prompt queue, pending questions, goal and lineage. Reopening
+it within 10 minutes draws that view in the first render, with no loading
+state, while every hook still reads its resource once in the background and the
+fresh tail replaces the kept one when it lands. It is held in memory only (never
+written to the device), and the kept event tails together stay within one open
+conversation's window budget, dropping the least recently left first. Hosts
+without `OpenGeniProvider` (for example a React Native app passing `client` to
+each hook) opt in with `useRetainedReads(client)` in a component that stays
+mounted while that person is signed in.
+
+> **Host action item:** only set `retainReadsAcrossMounts` (or call
+> `useRetainedReads`) when every signed-in person gets their own `client`
+> object (create a new client on sign-in, sign-out and account switch), as the
+> stock Opengeni console does. With a shared client, leave it off.
+
+Read hooks watching a shared event feed (`events` from `useSessionEvents`)
+re-read their projection only for an event after what their own read reflects.
+Current servers report that in the `X-OpenGeni-Session-Sequence` response header
+of the queue, pending questions, goal and lineage reads
+(`observedSessionSequence` in `@opengeni/sdk`); behind a server or proxy that
+does not report it, every matching event in the loaded tail re-reads as before.
 
 ### Exact conversation search navigation
 
