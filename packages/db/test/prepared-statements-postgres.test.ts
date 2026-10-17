@@ -152,3 +152,39 @@ describe("prepared statements under row-level security", () => {
     expect(await probeStatement(unprepared.db)).toEqual({ prepared: 0, generic: 0 });
   });
 });
+
+describe("connection reuse", () => {
+  // Each backend keeps its own catalog cache and prepared plans, so work spread
+  // over every pooled connection pays that warmup once per connection. After a
+  // burst opened the whole pool, sequential work must stay on the connection
+  // that was idle most recently, leaving the rest idle until idle_timeout.
+  test("sequential work after a burst stays on the most recently idle connection", async () => {
+    const pool = createDb(shared.appUrl, { max: 4 });
+    try {
+      const burst = await Promise.all(
+        Array.from({ length: 4 }, () =>
+          rawRows<{ pid: number }>(pool.db, sql`select pg_backend_pid() as pid from pg_sleep(0.2)`),
+        ),
+      );
+      expect(new Set(burst.map(([row]) => row!.pid)).size).toBe(4);
+
+      const sequential = new Set<number>();
+      for (let round = 0; round < 12; round += 1) {
+        const [row] = await rawRows<{ pid: number }>(pool.db, sql`select pg_backend_pid() as pid`);
+        sequential.add(row!.pid);
+      }
+      expect(sequential.size).toBe(1);
+
+      const transactional = new Set<number>();
+      for (let round = 0; round < 4; round += 1) {
+        await withWorkspaceRls(pool.db, tenantA.workspaceId, async (scoped) => {
+          const [row] = await rawRows<{ pid: number }>(scoped, sql`select pg_backend_pid() as pid`);
+          transactional.add(row!.pid);
+        });
+      }
+      expect(transactional).toEqual(sequential);
+    } finally {
+      await pool.close();
+    }
+  });
+});
