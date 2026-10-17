@@ -56,12 +56,13 @@ for activity ([3](0003-activity-idle-and-sleep-levels.md)).
   Collector.
 - **Budget targets:** under 0.1% of one core and 2 MiB of memory per host
   at a thousand sandboxes and one request per second per host, including
-  sampling, encoding and export but not the canary. Measured on a nested
-  host at 1,000 running sandboxes ([measurements](../measurements.md)):
-  processor time within the baselines' spread of about 0.1% of a core, so
-  the target is neither shown met nor missed at that precision; 1.1 MiB
-  more heap while exporting, plus 1.2 MiB of resident code for HTTP and
-  TLS.
+  sampling, encoding and export but not the canary. Measured on two
+  nested hosts at 1,000 running sandboxes
+  ([measurements](../measurements.md)): processor time within the
+  baselines' spread (about 0.1% of a core on one, 0.45% on the other), so
+  the target is neither shown met nor missed at that precision; 1.1 to
+  1.3 MiB more heap while exporting, plus 1.2 to 1.4 MiB of resident code
+  for HTTP and TLS.
 
 ## What building it taught us
 

@@ -198,6 +198,25 @@ set grew 2.3 MiB, a little over it. Journaling only held 0.6 MiB more
 anonymous memory. Events journaled took 85 KB of log per 240 s, about
 30 MB a day at this rate.
 
+The same method on a GCP n2-highmem-32 (32 vCPUs, Intel Xeon at 2.8 GHz,
+nested, `nested` memory profile, europe-west4) with 1,000 sandboxes of
+128 MiB running, on the final build:
+
+| Phase | Processor, % of one core | Resident at end | Anonymous at end |
+| --- | --- | --- | --- |
+| Baseline | 14.46 | 36.1 MiB | 27.5 MiB |
+| Journal only | 15.05 | 37.2 MiB | 28.3 MiB |
+| Exporting | 14.67 | 39.8 MiB | 29.7 MiB |
+| Baseline again | 14.91 | 38.0 MiB | 29.3 MiB |
+
+The baseline itself costs more here, and its two runs differ by 0.45% of
+a core, so this host resolves the observability cost even less well:
+journaling only measured 0.36% of a core above the mean of the baselines
+and exporting 0.01% below it, both within that spread. Exporting held
+1.3 MiB more anonymous memory than the mean of the baselines and 2.7 MiB
+more resident memory; journaling only held about the same as the
+baselines. The journal grew 85 KB per 240 s, as on Azure.
+
 ## Cost per sleeping sandbox
 
 Illustrative estimates of the main resources a sleeping sandbox holds,
