@@ -290,9 +290,9 @@ describe("composerSubmissionErrorMessage", () => {
   test("preserves composer-owned validation and safe reconciliation guidance", () => {
     expect(
       composerSubmissionErrorMessage(
-        new ComposerStateError("A message can include at most 12 timeline annotations."),
+        new ComposerStateError("Wait for the current message to finish sending."),
       ),
-    ).toContain("at most 12");
+    ).toContain("Wait for the current message");
     expect(composerSubmissionErrorMessage(new ComposerReconciliationRequiredError())).toContain(
       "cannot safely retry",
     );
