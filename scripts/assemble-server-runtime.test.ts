@@ -17,6 +17,8 @@ test("only the worker image retains the native Documents parser", () => {
   expect(API_RUNTIME_EXTERNALS).not.toContain("@llamaindex/liteparse");
   expect(WORKER_RUNTIME_EXTERNALS).toContain("@llamaindex/liteparse");
   expect(API_RUNTIME_EXTERNALS).toContain("sharp");
+  expect(API_RUNTIME_EXTERNALS).toContain("ws");
+  expect(WORKER_RUNTIME_EXTERNALS).toContain("ws");
 });
 
 test("both images ship the 1Password SDK as a package, so its WASM core travels with it", () => {
