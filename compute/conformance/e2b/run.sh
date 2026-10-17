@@ -54,6 +54,9 @@ cleanup() {
   if [[ -d $CGROUP ]]; then
     for vm in "$CGROUP"/*/; do [[ -f $vm/cgroup.kill ]] && echo 1 > "$vm/cgroup.kill" || true; done
   fi
+  # The host's user ids and networks stay claimed by a state root that
+  # still has sandboxes, so the next agent on this host could not start.
+  rm -rf "$WORK/state"
   echo "logs and results: $WORK"
   exit "$status"
 }

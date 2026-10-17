@@ -11,9 +11,17 @@
 //!
 //! A pause or kill cuts a sandbox's traffic: every stream through the
 //! front door ends, and kept streams are dropped. A Connect stream (an
+//! Another replica's pause cuts nothing here, so a request re-reads the
+//! lifecycle once its stream to the guest is open: if the sandbox is no
+//! longer running, the request is not forwarded, and a sandbox its connect
+//! woke after a pause is saved again.
+//!
+//! A Connect stream (an
 //! envd command's or PTY's output, say) holds the sandbox awake while it
 //! is open, through a hold with a short time to live that is renewed while
-//! any is open, and released soon after the last one ends. Its keepalive
+//! any is open, and released soon after the last one ends. Each replica
+//! keeps its own hold, so one replica's streams ending does not release a
+//! sandbox another replica's streams still need. Its keepalive
 //! bytes move nothing: neither the E2B timeout, which only connect and
 //! set-timeout calls move, nor the hold, which only open streams keep.
 
@@ -28,7 +36,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use compute_guest::{ENVD_PORT, GATEWAY_PORT};
-use compute_protocol::host::{Id, PriorityName};
+use compute_protocol::host::{Id, LevelName, PriorityName};
 use http_body_util::{BodyExt as _, StreamBody};
 use hyper::body::{Body as _, Frame, Incoming};
 use hyper::client::conn::http1::{self, SendRequest};
@@ -39,7 +47,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use super::lifecycle::{self, OnTraffic, State};
-use super::ops::{self, STREAM_HOLD};
+use super::ops;
 use super::route::{self, HOP_BY_HOP, TRAFFIC_TOKEN, Target};
 use super::{Front, Refused};
 use crate::store::Store;
@@ -261,6 +269,14 @@ async fn carry<S: Store>(
     let Some(row) = front.store().lifecycle(id).await? else {
         return Ok(not_found(id));
     };
+    // Before anything that could resume it: a request without the traffic
+    // token changes nothing.
+    if target.port != ENVD_PORT
+        && let Some(token) = &row.record.traffic_token
+        && let Some(refusal) = refuse_token(request.headers(), token)
+    {
+        return Ok(refusal);
+    }
     match lifecycle::on_traffic(&row.record) {
         OnTraffic::Route => {}
         OnTraffic::Resume => {
@@ -268,12 +284,6 @@ async fn carry<S: Store>(
         }
         OnTraffic::NotFound => return Ok(not_found(id)),
         OnTraffic::Transitioning => return Ok(transitioning(target)),
-    }
-    if target.port != ENVD_PORT
-        && let Some(token) = &row.record.traffic_token
-        && let Some(refusal) = refuse_token(request.headers(), token)
-    {
-        return Ok(refusal);
     }
     let team = row.team;
     let lane = front.traffic.lane(id);
@@ -291,6 +301,9 @@ async fn carry<S: Store>(
     let Sent { response, sender } = match sent {
         Dialed::Sent(sent) => sent,
         Dialed::PortClosed => return Ok(port_closed(target)),
+        // Paused or killed meanwhile: what a request then would get; a
+        // retry finds it paused, or gone.
+        Dialed::NotRunning => return Ok(transitioning(target)),
     };
     let mut response = response;
     if response.status() == StatusCode::SWITCHING_PROTOCOLS {
@@ -387,6 +400,8 @@ struct Sent {
 enum Dialed {
     Sent(Sent),
     PortClosed,
+    /// The sandbox stopped running while its stream was being opened.
+    NotRunning,
 }
 
 /// Sends `request` on a kept stream, or on a new one when there is none
@@ -420,6 +435,14 @@ async fn send<S: Store>(
     let Some(mut sender) = dial(front, team, target).await? else {
         return Ok(Dialed::PortClosed);
     };
+    // The lifecycle was read before the connect, which may have taken long
+    // enough for a pause or kill on another replica to complete, and then
+    // woke the sandbox again. So it is read again now that the stream is
+    // open: nothing is forwarded unless it still runs, and a sandbox paused
+    // meanwhile is put back to sleep.
+    if !still_running(front, team, target.id).await? {
+        return Ok(Dialed::NotRunning);
+    }
     let response = sender.send_request(request).await.map_err(|error| {
         Refused::new(
             502,
@@ -427,6 +450,29 @@ async fn send<S: Store>(
         )
     })?;
     Ok(Dialed::Sent(Sent { response, sender }))
+}
+
+/// Whether `id` is still recorded running. When it is pausing or paused,
+/// asks its host to save it again, undoing a wake this replica's connect
+/// may have made.
+async fn still_running<S: Store>(front: &Front<S>, team: &str, id: Id) -> Result<bool, Refused> {
+    let state = front
+        .store()
+        .lifecycle(id)
+        .await?
+        .map(|row| row.record.state);
+    if state == Some(State::Running) {
+        return Ok(true);
+    }
+    if matches!(state, Some(State::Pausing | State::Paused)) {
+        match front.service.sleep(team, id, LevelName::Saved).await {
+            Ok(()) | Err(crate::service::Failure::NotFound) => {}
+            Err(failure) => {
+                tracing::debug!(%id, %failure, "saving again a sandbox paused meanwhile");
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Opens a stream to the guest port; `None` when nothing listens there.
@@ -568,7 +614,10 @@ async fn hold<S: Store>(front: Arc<Front<S>>, lane: Arc<Lane>, team: String, id:
         if *open.borrow_and_update() == 0 {
             tokio::time::sleep(HOLD_GRACE).await;
             if *open.borrow_and_update() == 0 {
-                if held && let Err(failure) = front.service.release(&team, id, STREAM_HOLD).await {
+                if held
+                    && let Err(failure) =
+                        front.service.release(&team, id, front.stream_hold()).await
+                {
                     tracing::debug!(%id, %failure, "releasing a stream hold");
                 }
                 held = false;
@@ -590,7 +639,7 @@ async fn hold<S: Store>(front: Arc<Front<S>>, lane: Arc<Lane>, team: String, id:
             if running {
                 match front
                     .service
-                    .hold(&team, id, STREAM_HOLD, Some(HOLD_TTL))
+                    .hold(&team, id, front.stream_hold(), Some(HOLD_TTL))
                     .await
                 {
                     Ok(()) => held = true,

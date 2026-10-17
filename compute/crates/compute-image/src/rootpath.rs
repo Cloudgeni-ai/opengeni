@@ -180,12 +180,13 @@ pub fn create(root: &Path, path: &Path, mode: u32) -> io::Result<File> {
     Ok(file)
 }
 
-/// Opens the file at `path`, which must not be a symlink, to read, or to
-/// append to (creating it with `mode` if missing).
+/// Opens the file at `path`, which must be a regular file, to read, or to
+/// append to (creating it with `mode` if missing). A symlink, FIFO, device
+/// or socket there is refused; the open does not block on a FIFO.
 ///
 /// # Errors
 ///
-/// When it is a symlink, and when opening fails.
+/// When it is not a regular file, and when opening fails.
 pub fn open(path: &Path, append: Option<u32>) -> io::Result<File> {
     let (flags, mode) = match append {
         None => (OFlags::RDONLY, 0),
@@ -193,10 +194,17 @@ pub fn open(path: &Path, append: Option<u32>) -> io::Result<File> {
     };
     let fd = rustix::fs::open(
         path,
-        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        flags | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
         mode_of(mode),
     )?;
-    Ok(File::from(fd))
+    let file = File::from(fd);
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    Ok(file)
 }
 
 /// Sets the mode, and the modification time if given, of the directory at

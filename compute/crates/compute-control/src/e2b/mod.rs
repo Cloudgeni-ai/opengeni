@@ -177,6 +177,9 @@ pub struct Front<S> {
     pub settings: Settings,
     keys: Keys,
     traffic: traffic::Traffic,
+    /// The hold this replica's open streams keep on a sandbox: its own
+    /// name, so one replica's streams ending releases only its own hold.
+    stream_hold: String,
     /// Sandboxes the sweeper is working on, or should leave alone until
     /// the time given after a failure.
     sweeping: Mutex<HashMap<Id, Option<Instant>>>,
@@ -199,8 +202,16 @@ impl<S: Store> Front<S> {
             settings,
             keys: Keys::default(),
             traffic: traffic::Traffic::default(),
+            stream_hold: format!("{}{}", ops::STREAM_HOLD, replica()),
             sweeping: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The hold this replica's open streams keep on a sandbox (see
+    /// [`traffic`]).
+    #[must_use]
+    pub fn stream_hold(&self) -> &str {
+        &self.stream_hold
     }
 
     /// Its sandbox traffic.
@@ -236,4 +247,22 @@ pub fn router<S: Store>(front: Arc<Front<S>>) -> Router {
     Router::new()
         .fallback(front_door::<S>)
         .with_state((front, rest))
+}
+
+/// A name for this replica, unique among the fleet's: 8 random bytes in
+/// hex, or the clock's nanoseconds if there is no randomness.
+fn replica() -> String {
+    let mut bytes = [0u8; 8];
+    if getrandom::fill(&mut bytes).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        bytes.copy_from_slice(&nanos.to_le_bytes()[..8]);
+    }
+    bytes
+        .iter()
+        .fold(String::with_capacity(16), |mut text, byte| {
+            let _ = std::fmt::Write::write_fmt(&mut text, format_args!("{byte:02x}"));
+            text
+        })
 }

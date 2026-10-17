@@ -369,15 +369,24 @@ impl MemoryStore {
             .collect()
     }
 
-    fn lifecycles_due_now(&self, now_ms: u64, limit: usize) -> Vec<LifecycleRow> {
+    fn lifecycles_due_now(
+        &self,
+        now_ms: u64,
+        after: Option<(u64, Id)>,
+        limit: usize,
+    ) -> Vec<LifecycleRow> {
+        // Ids compare as the database compares them: as text.
+        let after = after.map(|(due, id)| (due, id.to_string()));
+        let key = |row: &LifecycleRow| (row.record.due_ms(), row.id.to_string());
         let mut due: Vec<LifecycleRow> = self
             .lock()
             .lifecycles
             .values()
             .filter(|row| row.record.due_ms() <= now_ms)
+            .filter(|row| after.as_ref().is_none_or(|after| key(row) > *after))
             .cloned()
             .collect();
-        due.sort_by_key(|row| row.record.due_ms());
+        due.sort_by_cached_key(key);
         due.truncate(limit);
         due
     }
@@ -495,8 +504,9 @@ impl Store for MemoryStore {
     fn lifecycles_due(
         &self,
         now_ms: u64,
+        after: Option<(u64, Id)>,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send {
-        ready(Ok(self.lifecycles_due_now(now_ms, limit)))
+        ready(Ok(self.lifecycles_due_now(now_ms, after, limit)))
     }
 }

@@ -153,7 +153,7 @@ def _read_exact(response: http.client.HTTPResponse, length: int) -> bytes | None
     while len(data) < length:
         chunk = response.read(length - len(data))
         if not chunk:
-            return None if not data else data
+            return data if data else None
         data += chunk
     return data
 
@@ -244,9 +244,13 @@ class Envd:
                 boundary = uuid.uuid4().hex
                 headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
                 data = (
-                    f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
-                    f'filename="file"\r\nContent-Type: application/octet-stream\r\n\r\n'
-                ).encode() + body + f"\r\n--{boundary}--\r\n".encode()
+                    (
+                        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+                        f'filename="file"\r\nContent-Type: application/octet-stream\r\n\r\n'
+                    ).encode()
+                    + body
+                    + f"\r\n--{boundary}--\r\n".encode()
+                )
             connection.request(method, f"/files?{query}", body=data, headers=headers)
             response = connection.getresponse()
             text = response.read()
@@ -450,8 +454,9 @@ class E2bSandbox:
         self._envd = Envd(door, self.sandbox_id, created.get("envdAccessToken"))
         self.files = E2bFiles(self._envd)
 
-    def _start(self, command: str, envs: Mapping[str, str] | None, cwd: str | None,
-               timeout: float | None) -> _Stream:
+    def _start(
+        self, command: str, envs: Mapping[str, str] | None, cwd: str | None, timeout: float | None
+    ) -> _Stream:
         process: dict[str, Any] = {"cmd": "/bin/bash", "args": ["-l", "-c", command]}
         if envs:
             process["envs"] = dict(envs)
@@ -459,8 +464,14 @@ class E2bSandbox:
             process["cwd"] = cwd
         return self._envd.stream("process.Process/Start", {"process": process}, timeout)
 
-    def run(self, command: str, *, timeout: float = 60, envs: Mapping[str, str] | None = None,
-            cwd: str | None = None) -> CommandResult:
+    def run(
+        self,
+        command: str,
+        *,
+        timeout: float = 60,
+        envs: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
         stream = self._start(command, envs, cwd, timeout + DEFAULT_TIMEOUT)
         try:
             _, result = _result(stream.messages())
@@ -534,8 +545,9 @@ class E2bSandbox:
         state = SandboxState.PAUSED if info["state"] == "paused" else SandboxState.RUNNING
         entry = self.host.sandbox(self.sandbox_id) if self.host is not None else None
         if entry is None:
-            return SandboxInfo(self.sandbox_id, state, state.value, "unknown", False, None, 0,
-                               False)
+            return SandboxInfo(
+                self.sandbox_id, state, state.value, "unknown", False, None, 0, False
+            )
         observed = SandboxInfo.from_status(self.sandbox_id, entry)
         return SandboxInfo(
             sandbox_id=self.sandbox_id,
@@ -614,8 +626,15 @@ class E2bServices:
             os.environ.get("COMPUTE_SMOKE_E2B_TEMPLATE", "base"),
         )
 
-    def fixture(self, fixture_type: Any, context: ScenarioContext, *, scenario_id: str,
-                sandbox: SandboxConfig, sandbox_count: int) -> Any:
+    def fixture(
+        self,
+        fixture_type: Any,
+        context: ScenarioContext,
+        *,
+        scenario_id: str,
+        sandbox: SandboxConfig,
+        sandbox_count: int,
+    ) -> Any:
         """Create the scenario's sandboxes through the front door, wait until
         each answers, and register their removal with the scenario's cleanup."""
 

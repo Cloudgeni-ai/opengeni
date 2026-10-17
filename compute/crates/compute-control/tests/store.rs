@@ -400,7 +400,7 @@ async fn lifecycles<S: Store>(store: S) {
 
     // A pause under way is due at once; a paused sandbox never is.
     let due: Vec<Id> = store
-        .lifecycles_due(u64::MAX - 1, 100_000)
+        .lifecycles_due(u64::MAX - 1, None, 100_000)
         .await
         .unwrap()
         .into_iter()
@@ -410,12 +410,41 @@ async fn lifecycles<S: Store>(store: S) {
     assert!(!due.contains(&paused.id));
     assert!(
         store
-            .lifecycles_due(0, 10)
+            .lifecycles_due(0, None, 10)
             .await
             .unwrap()
             .iter()
             .all(|row| row.record.due_ms() == 0)
     );
+
+    // Read a page at a time, the due ones come each once, in order, past
+    // any number due at the same time.
+    let mut same = Vec::new();
+    for _ in 0..5 {
+        let row = lifecycle(&team, State::Killing, 0);
+        assert!(store.insert_lifecycle(&row).await.unwrap());
+        same.push(row.id);
+    }
+    let mut paged = Vec::new();
+    let mut after = None;
+    loop {
+        let page = store.lifecycles_due(u64::MAX - 1, after, 2).await.unwrap();
+        after = page.last().map(|row| (row.record.due_ms(), row.id));
+        paged.extend(page.iter().map(|row| (row.record.due_ms(), row.id)));
+        if page.len() < 2 {
+            break;
+        }
+    }
+    let mut sorted = paged.clone();
+    sorted.sort_by_key(|(due, id)| (*due, id.to_string()));
+    sorted.dedup();
+    assert_eq!(paged, sorted, "in order, each once");
+    for id in same.iter().chain([&running.id]) {
+        assert!(paged.iter().any(|(_, paged)| paged == id));
+    }
+    for id in same {
+        assert!(store.delete_lifecycle(id, 0).await.unwrap());
+    }
 
     assert!(!store.delete_lifecycle(running.id, 0).await.unwrap());
     assert!(store.delete_lifecycle(running.id, 1).await.unwrap());

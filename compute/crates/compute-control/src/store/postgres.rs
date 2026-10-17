@@ -74,7 +74,7 @@ create table if not exists compute_lifecycles (
     version bigint not null
 );
 create index if not exists compute_lifecycles_team on compute_lifecycles (team);
-create index if not exists compute_lifecycles_due on compute_lifecycles (due_ms);
+create index if not exists compute_lifecycles_due on compute_lifecycles (due_ms, id collate \"C\");
 commit;
 ";
 
@@ -838,16 +838,28 @@ impl Store for PostgresStore {
             .collect()
     }
 
-    async fn lifecycles_due(&self, now_ms: u64, limit: usize) -> Result<Vec<LifecycleRow>> {
+    async fn lifecycles_due(
+        &self,
+        now_ms: u64,
+        after: Option<(u64, Id)>,
+        limit: usize,
+    ) -> Result<Vec<LifecycleRow>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        // The largest `bigint` is never (see `due`), so no time reaches it.
+        let now = i64::try_from(now_ms).unwrap_or(i64::MAX).min(i64::MAX - 1);
+        // Due times are never negative, so -1 comes before every row.
+        let (after_due, after_id) = after.map_or((-1, String::new()), |(due, id)| {
+            (i64::try_from(due).unwrap_or(i64::MAX), id.to_string())
+        });
         self.client()
             .await?
             .query(
                 &format!(
                     "select {LIFECYCLE_COLUMNS} from compute_lifecycles where due_ms <= $1 \
-                     order by due_ms limit $2"
+                     and (due_ms, id collate \"C\") > ($2, $3) \
+                     order by due_ms, id collate \"C\" limit $4"
                 ),
-                &[&i64::try_from(now_ms).unwrap_or(i64::MAX), &limit],
+                &[&now, &after_due, &after_id, &limit],
             )
             .await
             .map_err(database)?

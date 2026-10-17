@@ -112,13 +112,22 @@ pub fn finish(root: &Path, guest: &Path, image: &ImageConfig) -> Result<Added> {
     Ok(added)
 }
 
-/// The text of the file the image has at `path`; empty when missing.
+/// The most of an account file read; real ones are a few KiB.
+const ACCOUNTS_AT_MOST: u64 = 16 << 20;
+
+/// The text of the file the image has at `path`; empty when missing. It
+/// must be a regular file of at most [`ACCOUNTS_AT_MOST`].
 fn read(path: &Path) -> Result<String> {
     match rootpath::open(path, None) {
-        Ok(mut file) => {
+        Ok(file) => {
             let mut text = String::new();
-            io::Read::read_to_string(&mut file, &mut text)
+            io::Read::read_to_string(&mut io::Read::take(file, ACCOUNTS_AT_MOST + 1), &mut text)
                 .with_context(|| format!("reading {}", path.display()))?;
+            anyhow::ensure!(
+                text.len() as u64 <= ACCOUNTS_AT_MOST,
+                "{} is larger than {ACCOUNTS_AT_MOST} bytes",
+                path.display()
+            );
             Ok(text)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
@@ -226,6 +235,47 @@ mod tests {
                 .contains(USER_LINE)
         );
         assert!(root.join("user").is_dir());
+    }
+
+    #[test]
+    fn an_account_file_that_is_not_a_regular_file_is_refused() {
+        let guest = guest();
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("root");
+        fs::create_dir_all(root.join("etc/passwd")).unwrap();
+        let error = format!(
+            "{:#}",
+            finish(&root, guest.path(), &ImageConfig::default()).unwrap_err()
+        );
+        assert!(error.contains("not a regular file"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_account_file_that_is_a_fifo_is_refused_without_blocking() {
+        let guest = guest();
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("root");
+        fs::create_dir_all(root.join("etc")).unwrap();
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            root.join("etc/passwd"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o644),
+            0,
+        )
+        .unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        let guest_dir = guest.path().to_owned();
+        let builder = root.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(finish(&builder, &guest_dir, &ImageConfig::default()));
+        });
+        let result = finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("blocked on a FIFO");
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(error.contains("not a regular file"), "{error}");
     }
 
     fn guest() -> tempfile::TempDir {

@@ -1,6 +1,7 @@
 //! Creates naming a sandbox image (ADR 19): the host fetches it from its
 //! store once, however many creates wait for it, keeps it, and copies it
-//! for each new disk; an image nowhere is refused and frees the id.
+//! for each new disk, an agent after a restart included; an image nowhere
+//! is refused and frees the id.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,11 +29,12 @@ async fn creates_fetch_their_image_once_keep_it_and_copy_it() {
     let image = store.put_rootfs(&file).await.unwrap();
     let config = Lab::config(&root, HostPolicy::default());
     let state = config.root.clone();
+    let world = Arc::default();
     let engine = Fake {
-        world: Arc::default(),
+        world: Arc::clone(&world),
         delays: Delays::default(),
     };
-    let (handle, _agent) = HostAgent::start(config, engine, store).await.unwrap();
+    let (handle, agent) = HostAgent::start(config, engine, store).await.unwrap();
     let sandbox = SandboxConfig::new(1, 128, NEVER).with_image(image);
 
     // Three creates at once share one fetch.
@@ -68,4 +70,25 @@ async fn creates_fetch_their_image_once_keep_it_and_copy_it() {
         .await
         .unwrap();
     assert_eq!(std::fs::read(disk(&state, id(5))).unwrap(), b"base");
+
+    // After a restart, the image the host kept is checked and used, with
+    // the store's copy still gone.
+    drop(handle);
+    tokio::time::timeout(std::time::Duration::from_secs(10), agent)
+        .await
+        .expect("the agent stops once its handles are gone")
+        .unwrap();
+    let engine = Fake {
+        world,
+        delays: Delays::default(),
+    };
+    let (handle, _agent) = HostAgent::start(
+        Lab::config(&root, HostPolicy::default()),
+        engine,
+        Directory::new(root.join("store")),
+    )
+    .await
+    .unwrap();
+    handle.create(id(6), sandbox).await.unwrap();
+    assert_eq!(std::fs::read(disk(&state, id(6))).unwrap(), b"an image");
 }

@@ -2,7 +2,7 @@
 //! the lifecycle it records, and sandbox traffic through the guest's
 //! gateway.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use compute_control::e2b::{self, Front, Settings};
+use compute_control::e2b::{self, Front, Settings, Template};
 use compute_control::store::{MemoryStore, Store as _};
 use compute_guest::{ENVD_PORT, GATEWAY_PORT};
 use compute_protocol::host::{Id, LevelName, Reply, Request};
@@ -33,6 +33,9 @@ struct Seen {
     requests: AtomicUsize,
     /// Streaming responses still open.
     streams: AtomicUsize,
+    /// Port 8081 answers its gateway header only once this is notified,
+    /// as a slow connect would.
+    slow: tokio::sync::Notify,
 }
 
 /// Counts a streaming response while it is open.
@@ -100,7 +103,10 @@ async fn gateway(seen: Arc<Seen>, mut stream: GuestStream) {
     }
     let port: u16 = line.strip_prefix("tcp ").unwrap().parse().unwrap();
     *seen.dials.lock().unwrap().entry(port).or_default() += 1;
-    if port != ENVD_PORT && port != 8080 {
+    if port == 8081 {
+        seen.slow.notified().await;
+    }
+    if port != ENVD_PORT && port != 8080 && port != 8081 {
         let _ = stream
             .get_mut()
             .write_all(b"error connection refused\n")
@@ -120,7 +126,9 @@ async fn gateway(seen: Arc<Seen>, mut stream: GuestStream) {
 #[derive(Default)]
 struct Levels {
     at: HashMap<Id, LevelName>,
-    holds: HashMap<Id, usize>,
+    holds: HashMap<Id, BTreeSet<String>>,
+    /// Sandboxes that never go to sleep, though their sleeps are answered.
+    stuck: HashSet<Id>,
     log: Vec<String>,
 }
 
@@ -137,18 +145,21 @@ async fn host(fleet: &Fleet, seen: &Arc<Seen>) -> (FakeHost, Arc<Mutex<Levels>>)
                 state.at.insert(*id, LevelName::Running);
             }
             Request::Sleep { id, level, .. } => {
+                if state.stuck.contains(id) {
+                    return Act::Reply(Reply::Done);
+                }
                 state.at.insert(*id, *level);
                 state.log.push(format!("sleep {level:?}"));
             }
             Request::Hold {
                 id, hold, ttl_ms, ..
             } => {
-                *state.holds.entry(*id).or_default() = 1;
+                state.holds.entry(*id).or_default().insert(hold.clone());
                 state.log.push(format!("hold {hold} {ttl_ms:?}"));
                 return Act::Reply(Reply::Done);
             }
             Request::Release { id, hold, .. } => {
-                state.holds.insert(*id, 0);
+                state.holds.entry(*id).or_default().remove(hold);
                 state.log.push(format!("release {hold}"));
                 return Act::Reply(Reply::Done);
             }
@@ -160,7 +171,7 @@ async fn host(fleet: &Fleet, seen: &Arc<Seen>) -> (FakeHost, Arc<Mutex<Levels>>)
                         json!({
                             "id": id.to_string(), "generation": 1, "revision": 1,
                             "level": level, "durability": "local", "memory_saved": true,
-                            "step": null, "holds": state.holds.get(id).copied().unwrap_or(0),
+                            "step": null, "holds": state.holds.get(id).map_or(0, BTreeSet::len),
                             "resident_bytes": null, "broken": false,
                         })
                     })
@@ -199,10 +210,15 @@ struct Door {
 
 impl Door {
     async fn start(fleet: &Fleet) -> Self {
+        Self::start_with(fleet, Settings::default()).await
+    }
+
+    /// A front door with `settings`, but a quick sweeper and short pauses.
+    async fn start_with(fleet: &Fleet, settings: Settings) -> Self {
         let settings = Settings {
             pause_within: Duration::from_secs(5),
             sweep_every: Duration::from_millis(100),
-            ..Settings::default()
+            ..settings
         };
         let front = Front::new(Arc::clone(&fleet.running.service), settings);
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -586,7 +602,7 @@ async fn an_open_stream_holds_its_sandbox_until_it_ends_and_a_pause_cuts_it() {
         async || {
             log(&levels)
                 .iter()
-                .any(|line| line.starts_with("hold e2b-streams Some(45000)"))
+                .any(|line| line.starts_with("hold e2b-streams-") && line.ends_with(" Some(45000)"))
         },
     )
     .await;
@@ -594,7 +610,11 @@ async fn an_open_stream_holds_its_sandbox_until_it_ends_and_a_pause_cuts_it() {
     until(
         Duration::from_secs(10),
         "the hold is released",
-        async || log(&levels).contains(&"release e2b-streams".to_owned()),
+        async || {
+            log(&levels)
+                .iter()
+                .any(|line| line.starts_with("release e2b-streams-"))
+        },
     )
     .await;
     until(
@@ -633,6 +653,62 @@ async fn an_open_stream_holds_its_sandbox_until_it_ends_and_a_pause_cuts_it() {
     )
     .await;
     assert_eq!(door.front.traffic().idle(id.parse().unwrap(), ENVD_PORT), 0);
+}
+
+/// Two replicas each keep their own hold for their streams: one replica's
+/// stream ending leaves the other's hold in place, and a pause through
+/// either releases both.
+#[tokio::test]
+async fn each_replica_holds_a_sandbox_for_its_own_streams() {
+    let (fleet, _host, levels, _seen, a) = fleet_with_guest().await;
+    let b = Door::start(&fleet).await;
+    let sandbox = a.create(json!({"templateID": "base"})).await;
+    let id = sandbox["sandboxID"].as_str().unwrap().to_owned();
+    let sandbox_id: Id = id.parse().unwrap();
+    let holds = || {
+        levels
+            .lock()
+            .unwrap()
+            .holds
+            .get(&sandbox_id)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let both = BTreeSet::from([
+        a.front.stream_hold().to_owned(),
+        b.front.stream_hold().to_owned(),
+    ]);
+    assert_ne!(a.front.stream_hold(), b.front.stream_hold());
+    let mut streams = Vec::new();
+    for door in [&a, &b] {
+        let mut response = door
+            .traffic(&id, ENVD_PORT, "/stream")
+            .header("content-type", "application/connect+json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.chunk().await.unwrap().unwrap(), "tick\n");
+        streams.push(response);
+    }
+    until(
+        Duration::from_secs(5),
+        "both replicas hold it",
+        async || holds() == both,
+    )
+    .await;
+    // A's stream ends: only A's hold goes.
+    drop(streams.remove(0));
+    until(
+        Duration::from_secs(10),
+        "A's hold is released",
+        async || holds() == BTreeSet::from([b.front.stream_hold().to_owned()]),
+    )
+    .await;
+    // A pause through A ends B's stream and releases B's hold too.
+    let (status, _) = a.post(&format!("/sandboxes/{id}/pause"), json!({})).await;
+    assert_eq!(status, 204);
+    assert!(holds().is_empty());
+    assert_eq!(levels.lock().unwrap().at[&sandbox_id], LevelName::Saved);
 }
 
 #[tokio::test]
@@ -676,6 +752,127 @@ async fn timeouts_kill_or_pause() {
         .unwrap()
         .unwrap();
     assert_eq!(record.record.state, e2b::lifecycle::State::Paused);
+}
+
+/// A sweeper with more pauses it cannot finish than it reads at a time
+/// still applies a later timeout: every round reads past them.
+#[tokio::test]
+async fn pauses_that_cannot_finish_do_not_hold_up_later_timeouts() {
+    let fleet = Fleet::start().await;
+    let seen = Arc::new(Seen::default());
+    let (_host, levels) = host(&fleet, &seen).await;
+    let mut settings = Settings::default();
+    settings.templates.insert(
+        "small".into(),
+        Template {
+            image: "base".into(),
+            vcpus: 1,
+            memory_mib: 256,
+            disk_mib: 1024,
+        },
+    );
+    let door = Door::start_with(&fleet, settings).await;
+    // More pauses under way than the sweeper reads at a time, each due
+    // before any timeout, none of which the host ever finishes.
+    for _ in 0..65 {
+        let sandbox = door.create(json!({"templateID": "small"})).await;
+        let id: Id = sandbox["sandboxID"].as_str().unwrap().parse().unwrap();
+        levels.lock().unwrap().stuck.insert(id);
+        let mut row = fleet.store.lifecycle(id).await.unwrap().unwrap();
+        row.record
+            .set(e2b::lifecycle::State::Pausing, e2b::ops::now_ms());
+        assert!(
+            compute_control::store::replace_lifecycle(&*fleet.store, &mut row)
+                .await
+                .unwrap()
+        );
+    }
+    let killed = door
+        .create(json!({"templateID": "small", "timeout": 1}))
+        .await;
+    let killed = killed["sandboxID"].as_str().unwrap().to_owned();
+    until(
+        Duration::from_secs(10),
+        "the timeout kills it",
+        async || door.get(&format!("/sandboxes/{killed}")).await.0 == 404,
+    )
+    .await;
+}
+
+/// A request whose connect is slow while another replica pauses the
+/// sandbox is not forwarded once the stream opens, and the sandbox its
+/// connect woke is saved again.
+#[tokio::test]
+async fn a_request_whose_connect_outlasts_a_pause_is_not_forwarded() {
+    let (fleet, _host, levels, seen, door) = fleet_with_guest().await;
+    let sandbox = door.create(json!({"templateID": "base"})).await;
+    let id = sandbox["sandboxID"].as_str().unwrap().to_owned();
+    let sandbox_id: Id = id.parse().unwrap();
+    let served = seen.requests.load(Ordering::SeqCst);
+    let request = tokio::spawn({
+        let call = door.traffic(&id, 8081, "/work");
+        async move { call.send().await.unwrap().status().as_u16() }
+    });
+    until(
+        Duration::from_secs(5),
+        "the connect reaches the guest",
+        async || seen.dials.lock().unwrap().get(&8081).copied() == Some(1),
+    )
+    .await;
+    // Another replica's pause completes meanwhile.
+    let mut row = fleet.store.lifecycle(sandbox_id).await.unwrap().unwrap();
+    row.record
+        .set(e2b::lifecycle::State::Paused, e2b::ops::now_ms());
+    assert!(
+        compute_control::store::replace_lifecycle(&*fleet.store, &mut row)
+            .await
+            .unwrap()
+    );
+    levels
+        .lock()
+        .unwrap()
+        .at
+        .insert(sandbox_id, LevelName::Saved);
+    seen.slow.notify_one();
+    assert_eq!(request.await.unwrap(), 409);
+    assert_eq!(seen.requests.load(Ordering::SeqCst), served);
+    assert_eq!(levels.lock().unwrap().at[&sandbox_id], LevelName::Saved);
+    assert!(
+        levels
+            .lock()
+            .unwrap()
+            .log
+            .contains(&"sleep Saved".to_owned())
+    );
+}
+
+/// A sweep that read a sandbox when its timeout had passed, and runs only
+/// after a client moved the timeout, leaves it running.
+#[tokio::test]
+async fn a_sweep_of_a_record_read_before_the_timeout_moved_changes_nothing() {
+    let (fleet, _host, _levels, _seen, door) = fleet_with_guest().await;
+    for body in [
+        json!({"templateID": "base", "timeout": 600}),
+        json!({"templateID": "base", "timeout": 600, "autoPause": true}),
+    ] {
+        let sandbox = door.create(body).await;
+        let id = sandbox["sandboxID"].as_str().unwrap().to_owned();
+        // As the sweeper read it: due, at the version before the move.
+        let mut stale = fleet
+            .store
+            .lifecycle(id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        stale.record.end_ms = 0;
+        let (status, _) = door
+            .post(&format!("/sandboxes/{id}/timeout"), json!({"timeout": 900}))
+            .await;
+        assert_eq!(status, 204);
+        e2b::ops::sweep_row(&door.front, stale).await.unwrap();
+        let (status, detail) = door.get(&format!("/sandboxes/{id}")).await;
+        assert_eq!((status, detail["state"].as_str()), (200, Some("running")));
+    }
 }
 
 /// With a certificate for the API's host and `*.<domain>`, the front door

@@ -24,8 +24,9 @@ use super::{Front, Refused};
 use crate::service::{Failure, new_id};
 use crate::store::{LifecycleRow, Spec, Store, replace_lifecycle};
 
-/// The hold an open stream keeps on its sandbox (see [`super::traffic`]).
-pub const STREAM_HOLD: &str = "e2b-streams";
+/// How the hold an open stream keeps on its sandbox is named: this, then
+/// the replica's name (see [`super::traffic`]).
+pub const STREAM_HOLD: &str = "e2b-streams-";
 
 /// How long the guest may take to pass a create's `init` to envd.
 const INIT_WITHIN: Duration = Duration::from_secs(60);
@@ -266,7 +267,11 @@ pub async fn pause<S: Store>(front: &Front<S>, team: &str, id: Id) -> Result<(),
     finish_pause(front, team, id, front.settings.pause_within).await
 }
 
-/// Finishes a pause recorded as `Pausing`, within `within`.
+/// Finishes a pause recorded as `Pausing`, within `within`. It ends this
+/// replica's streams and releases its hold; every other replica's sweeper
+/// sees `Pausing` and does the same for its own, and until then the host
+/// keeps the sandbox awake, so the save is asked for again until it is
+/// done.
 async fn finish_pause<S: Store>(
     front: &Front<S>,
     team: &str,
@@ -274,7 +279,7 @@ async fn finish_pause<S: Store>(
     within: Duration,
 ) -> Result<(), Refused> {
     front.traffic.cut(id);
-    match front.service.release(team, id, STREAM_HOLD).await {
+    match front.service.release(team, id, front.stream_hold()).await {
         Ok(()) | Err(Failure::NotFound) => {}
         Err(failure) => tracing::debug!(%id, %failure, "releasing a pausing sandbox's stream hold"),
     }
@@ -341,6 +346,11 @@ pub async fn kill<S: Store>(front: &Front<S>, team: &str, id: Id) -> Result<(), 
         Ok(true)
     })
     .await?;
+    finish_kill(front, team, id).await
+}
+
+/// Finishes a kill recorded as `Killing`.
+async fn finish_kill<S: Store>(front: &Front<S>, team: &str, id: Id) -> Result<(), Refused> {
     front.traffic.cut(id);
     match front.service.delete(team, id).await {
         Ok(()) | Err(Failure::NotFound) => {}
@@ -470,44 +480,76 @@ pub async fn set_timeout<S: Store>(
 
 /// Applies timeouts, and finishes pauses and kills a crash cut short, for
 /// as long as it runs. Every replica runs one; a sandbox two replicas work
-/// on at once ends the same way, since every step is idempotent.
+/// on at once ends the same way, since every step is idempotent. Each round
+/// reads every due record, a page at a time, so records it cannot finish
+/// yet (a host away, say) never keep it from later ones.
 pub async fn sweep<S: Store>(front: Arc<Front<S>>) {
     let mut every = tokio::time::interval(front.settings.sweep_every);
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         every.tick().await;
-        let due = match front.store().lifecycles_due(now_ms(), SWEEP_BATCH).await {
+        sweep_round(&front).await;
+    }
+}
+
+/// One round of the sweeper: starts the work due for every due record it
+/// is not already working on or leaving alone after a failure.
+pub async fn sweep_round<S: Store>(front: &Arc<Front<S>>) {
+    let now = now_ms();
+    let mut after = None;
+    loop {
+        let due = match front.store().lifecycles_due(now, after, SWEEP_BATCH).await {
             Ok(due) => due,
             Err(error) => {
                 tracing::warn!(%error, "reading due E2B sandboxes");
-                continue;
+                return;
             }
         };
+        let full = due.len() == SWEEP_BATCH;
+        after = due.last().map(|row| (row.record.due_ms(), row.id));
         for row in due {
             if !front.begin_sweep(row.id) {
                 continue;
             }
-            let front = Arc::clone(&front);
+            let front = Arc::clone(front);
             tokio::spawn(async move {
                 let id = row.id;
-                let result = sweep_one(&front, row).await;
+                let result = sweep_row(&front, row).await;
                 if let Err(refused) = &result {
                     tracing::warn!(%id, error = %refused.message, "sweeping an E2B sandbox");
                 }
                 front.end_sweep(id, result.is_ok());
             });
         }
+        if !full {
+            return;
+        }
     }
 }
 
-/// Does what is due for one record.
-async fn sweep_one<S: Store>(front: &Front<S>, row: LifecycleRow) -> Result<(), Refused> {
+/// Does what is due for one record as it was read. A record changed since
+/// (a timeout moved, a connect) is left alone: every transition the sweep
+/// begins is conditional on the version read, and the next sweep decides
+/// again.
+///
+/// # Errors
+///
+/// When the store, the fleet or the host fail.
+pub async fn sweep_row<S: Store>(front: &Front<S>, row: LifecycleRow) -> Result<(), Refused> {
     let team = row.team.clone();
+    let mut row = row;
     match lifecycle::due(&row.record, now_ms()) {
         Due::Nothing => Ok(()),
-        Due::Kill => kill(front, &team, row.id).await,
+        Due::Kill => {
+            if row.record.state != State::Killing {
+                row.record.set(State::Killing, now_ms());
+                if !replace_lifecycle(front.store(), &mut row).await? {
+                    return Ok(());
+                }
+            }
+            finish_kill(front, &team, row.id).await
+        }
         Due::Pause => {
-            let mut row = row;
             if row.record.state == State::Running {
                 row.record.set(State::Pausing, now_ms());
                 if !replace_lifecycle(front.store(), &mut row).await? {

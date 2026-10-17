@@ -286,10 +286,12 @@ pub trait Store: Send + Sync + 'static {
     fn lifecycles(&self, team: &str) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send;
 
     /// At most `limit` E2B lifecycles due by `now_ms` (see
-    /// [`Record::due_ms`]), soonest first.
+    /// [`Record::due_ms`]), in order of due time then id, from just after
+    /// `after`: the due time and id of the last one a previous read gave.
     fn lifecycles_due(
         &self,
         now_ms: u64,
+        after: Option<(u64, Id)>,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send;
 }

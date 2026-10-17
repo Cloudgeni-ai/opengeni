@@ -47,7 +47,11 @@ an init system of its own.
   lifecycle state first (`pausing`, `killing`), then acts, then writes the
   end state. A sweeper in every replica finishes a pause or kill that a
   crash cut short, and applies timeouts, so the state a client was given
-  is the state it will find. Pausing asks the owner host to sleep the
+  is the state it will find. Each transition the sweeper begins is
+  conditional on the version of the record it read, so a timeout moved
+  meanwhile wins. Each round reads every due record, a page at a time,
+  so records it cannot finish yet never hold up later ones. Pausing asks
+  the owner host to sleep the
   sandbox to Saved and waits for the host to report it there; an idle
   sleep, which the host may undo on any request, is something else and
   never shows through the API.
@@ -64,6 +68,9 @@ an init system of its own.
   does not hold it awake. Tests check both. The front door holds the
   sandbox through a host hold with a 45 s time to live, renewed every
   15 s while any stream is open and released 2 s after the last one ends.
+  Each replica keeps its own hold; a pause ends each replica's streams
+  and its hold as that replica's sweeper sees it, and asks the host again
+  until the save is done.
   Heartbeats move nothing: not the E2B timeout, which only connect and
   set-timeout move, and not the hold, which only open streams keep.
 - **Traffic reaches the guest through the owner host's `connect`.** A
@@ -74,7 +81,11 @@ an init system of its own.
   like any open stream; streams are kept only 2 s, then closed. envd's
   access token passes through; a sandbox created without public traffic
   also needs its traffic token on user ports. A pause or kill ends every
-  stream through the front door.
+  stream through the front door. The traffic token is checked before
+  anything else, auto-resume included. A request re-reads the lifecycle
+  once its stream to the guest is open, so a pause another replica
+  finished meanwhile is not undone: the request is not forwarded, and a
+  sandbox its connect woke is saved again.
 - **TLS: either the front door or a terminator in front.** The SDK uses
   HTTPS for the API and for `<port>-<id>.<domain>`. With `--e2b-tls-cert`
   and `--e2b-tls-key` the front door serves HTTPS itself, with one
@@ -104,7 +115,9 @@ an init system of its own.
   file, adds `compute-guest` and envd, keeps the image's user, directory,
   environment and command, and stores the file in object storage by
   digest. A sandbox's config names its image; a host fetches and caches
-  images by digest and keeps templates per image and shape. An E2B
+  images by digest and keeps templates per image and shape. An image a
+  host kept across a restart is checked against its digest and used
+  without asking the store. An E2B
   template id names one of these images.
 - **What every image gets, for the SDK to work.** The SDK runs commands
   as `/bin/bash -l -c` and starts PTYs with bash, and envd looks users up
@@ -126,7 +139,8 @@ an init system of its own.
   so the command can handle the `SIGTERM` a shutdown sends; five seconds
   later the rest are killed.
 - **The guest keeps the init for good before it answers.** It writes the
-  init to the sandbox's disk (synced, renamed, directory synced), then
+  init to the sandbox's disk (a new file, readable only by root, synced,
+  renamed, directory synced), then
   gives it to envd, then answers `ok`. If envd fails, the kept init
   stands and goes to envd with the retry or the next restore, so disk,
   guest and envd never disagree for long. An init file that is there but

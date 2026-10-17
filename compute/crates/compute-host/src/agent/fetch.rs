@@ -5,6 +5,10 @@
 //! The fetch writes the image's file to local disk, so it is booked with
 //! the core like any other write first: the store is asked for the file's
 //! length, the agent books it, and only then does the fetch start.
+//!
+//! An image an earlier agent left on the host is checked against its id
+//! first: when it matches, the creates go on with it, and the store is
+//! neither asked nor needed.
 
 use std::sync::Arc;
 
@@ -58,8 +62,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 waiting: vec![(id, config, owner, reply)],
             },
         );
-        let (store, events) = (Arc::clone(&self.store), self.events_tx.clone());
+        let (rootfs, store) = (Arc::clone(&self.rootfs), Arc::clone(&self.store));
+        let events = self.events_tx.clone();
         tokio::spawn(async move {
+            // A kept image that matches its id needs nothing fetched.
+            if rootfs.hold(image).await.is_some() {
+                let _ = events.send(Event::ImageFetched {
+                    image,
+                    result: Ok(()),
+                });
+                return;
+            }
             let length = store.image_len(image).await;
             let _ = events.send(Event::ImageSized { image, length });
         });

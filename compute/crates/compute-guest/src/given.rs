@@ -10,7 +10,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::Path;
 
 use crate::envd::InitData;
@@ -53,7 +53,10 @@ pub fn keep(path: &Path, given: &InitData) -> io::Result<()> {
 }
 
 /// Replaces the file at `path` with `bytes` and `mode`, so that after a
-/// crash at any point it holds either the old or the new contents.
+/// crash at any point it holds either the old or the new contents. The
+/// staging file is always a new one this call makes, with `mode` set on
+/// it before anything is written: whatever an earlier attempt left at its
+/// name (a partial file, a link) is removed first, never reused.
 ///
 /// # Errors
 ///
@@ -61,12 +64,20 @@ pub fn keep(path: &Path, given: &InitData) -> io::Result<()> {
 pub fn write_durably(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let mut staged = path.as_os_str().to_owned();
     staged.push(".new");
+    match fs::remove_file(&staged) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    // Exclusive creation fails on anything at the name, a link included,
+    // so the file written is the one made here.
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(mode)
         .open(&staged)?;
+    // The process's umask may have narrowed `mode`; set it exactly.
+    file.set_permissions(fs::Permissions::from_mode(mode))?;
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
@@ -80,7 +91,6 @@ pub fn write_durably(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
 
@@ -118,6 +128,36 @@ mod tests {
         assert_eq!(load(&path), Given::Kept(given("old")));
         keep(&path, &given("new")).unwrap();
         assert_eq!(load(&path), Given::Kept(given("new")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_an_earlier_attempt_left_at_the_staging_name_is_not_reused() {
+        let dir = tempdir();
+        let path = dir.join("init-data.json");
+        let staged = dir.join("init-data.json.new");
+        // A partial file with wider permissions.
+        fs::write(&staged, b"{\"envVa").unwrap();
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o644)).unwrap();
+        keep(&path, &given("one")).unwrap();
+        assert_eq!(load(&path), Given::Kept(given("one")));
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // A link at the name: replaced, and what it named is untouched.
+        let elsewhere = dir.join("elsewhere");
+        fs::write(&elsewhere, b"unchanged").unwrap();
+        fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &staged).unwrap();
+        keep(&path, &given("two")).unwrap();
+        assert_eq!(load(&path), Given::Kept(given("two")));
+        assert_eq!(fs::read(&elsewhere).unwrap(), b"unchanged");
+        assert_eq!(
+            fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_file());
         let _ = fs::remove_dir_all(&dir);
     }
 
