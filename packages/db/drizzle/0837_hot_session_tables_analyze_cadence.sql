@@ -19,12 +19,12 @@
 -- planner's live index probes.
 SET LOCAL lock_timeout = '5s';
 
-ALTER TABLE public.sessions SET (
+ALTER TABLE sessions SET (
   autovacuum_analyze_scale_factor = 0,
   autovacuum_analyze_threshold = 50000
 );
 
-ALTER TABLE public.session_event_cursors SET (
+ALTER TABLE session_event_cursors SET (
   autovacuum_analyze_scale_factor = 0,
   autovacuum_analyze_threshold = 50000
 );
