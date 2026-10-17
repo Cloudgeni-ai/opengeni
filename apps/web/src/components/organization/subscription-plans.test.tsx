@@ -94,6 +94,9 @@ test("upgrade confirms proration, fresh replacement credit and targets the selec
   const client = clientFixture();
   const changed = mock(() => {});
   await mount(plans(client, "pro", true, changed));
+  expect(document.body.textContent).toContain("$100.00 monthly credit");
+  expect(document.body.textContent).toContain("$500.00 monthly credit");
+  expect(document.body.textContent?.match(/5× prepaid credit/g)).toHaveLength(2);
   await click("Upgrade to Max");
   expect(document.body.textContent).toContain("Stripe prorates unused time");
   expect(document.body.textContent).toContain("replaced, not added");
@@ -274,8 +277,8 @@ test("balance splits monthly, promotional and other general credit without doubl
     />,
   );
   expect(document.body.textContent).toContain("$158.45");
-  expect(document.body.textContent).toContain("$123.45");
-  expect(document.body.textContent).toContain("$25.00");
+  expect(document.body.textContent).toContain("$73.45");
+  expect(document.body.textContent).toContain("$75.00");
   expect(document.body.textContent).toContain("$10.00");
   expect(document.body.textContent).toContain("Other general credit");
 });

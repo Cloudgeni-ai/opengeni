@@ -226,8 +226,11 @@ export function SubscriptionPlans({
                   </p>
                   <p>{item.seatLimit === null ? "Unlimited seats" : `${item.seatLimit} seats`}</p>
                   {item.monthlyPriceMicros &&
-                  item.monthlyCreditMicros === item.monthlyPriceMicros * 10 ? (
-                    <p className="text-xs text-fg-muted">10× prepaid credit</p>
+                  item.monthlyCreditMicros > item.monthlyPriceMicros &&
+                  item.monthlyCreditMicros % item.monthlyPriceMicros === 0 ? (
+                    <p className="text-xs text-fg-muted">
+                      {item.monthlyCreditMicros / item.monthlyPriceMicros}× prepaid credit
+                    </p>
                   ) : null}
                   {item.freeCredit ? (
                     <p className="text-xs text-fg-muted">Monthly credit for eligible accounts</p>
