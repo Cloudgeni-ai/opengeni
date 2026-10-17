@@ -8,7 +8,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SessionClientLike } from "./client";
 import { usePageLiveActivity } from "./hooks/internal";
-import { retainSharedQueries } from "./hooks/shared-query";
+import { useRetainedReads } from "./hooks/shared-query";
 import { OpenGeniContext } from "./session-context";
 import { ErrorMessageContext, type ErrorMessageFormatter } from "./lib/error-message";
 import { joinClientConfigRead } from "./lib/client-config-read";
@@ -39,9 +39,10 @@ export type OpenGeniProviderProps = {
   reloadOnApiContractChange?: boolean | undefined;
   /**
    * Keep subscription account lists and usage readings (`useCodexAccounts`,
-   * `useSuperGrokAccounts`) for `client` after the components that read them
-   * unmount, so returning to them renders the last rows at once and re-reads
-   * in the background. Off by default: then readers mounted together share one
+   * `useSuperGrokAccounts`) and the last view of each conversation left (its
+   * event tail and session projections) for `client` after the components that
+   * read them unmount, so returning to them renders the last rows at once and
+   * re-reads in the background. Off by default: then readers mounted together share one
    * request, but nothing is served to a later mount. Opt in only when every
    * signed-in person gets their own `client` object (the stock Opengeni console
    * creates a new client on every identity change). Retained rows are dropped
@@ -105,10 +106,7 @@ export function OpenGeniProvider({
   callbackRef.current = onWorkspaceControlEvent;
   interactionCallbackRef.current = onWorkspaceInteractionEvent;
 
-  useEffect(() => {
-    if (!retainReadsAcrossMounts) return;
-    return retainSharedQueries(client);
-  }, [client, retainReadsAcrossMounts]);
+  useRetainedReads(client, retainReadsAcrossMounts);
 
   const strictContract = reloadOnApiContractChange;
   const verifyApiContract = useCallback(async (): Promise<void> => {
@@ -149,13 +147,15 @@ export function OpenGeniProvider({
   );
   const reconcileSession = useMemo(
     () =>
-      (sessionId: string): Promise<void> => {
+      (sessionId: string, options: { initialOpen?: boolean | undefined } = {}): Promise<void> => {
         const existing = reconcileInFlightRef.current.get(sessionId);
         if (existing) return existing;
         // This read also crosses the exact API-contract handshake before stale
         // state can be presented as live after a deployment.
         const promise = (async () => {
           await withTimeout(verifyApiContract(), 10_000, "API contract reconciliation");
+          // Each projection was read alongside the tail this first open follows.
+          if (options.initialOpen) return;
           const callbacks = [...(reconcilersRef.current.get(sessionId)?.values() ?? [])];
           await withTimeout(
             Promise.all(callbacks.map((reconcile) => reconcile())).then(() => undefined),

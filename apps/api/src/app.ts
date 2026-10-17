@@ -824,6 +824,7 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Page-Max-Bytes",
       "X-OpenGeni-Page-Truncated",
       "X-OpenGeni-Payload-Mode",
+      "X-OpenGeni-Session-Sequence",
       "X-OpenGeni-Truncated-By",
     ],
   };

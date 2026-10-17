@@ -1,3 +1,4 @@
+import { readClientConfig } from "@opengeni/react/session";
 import { useNativeVoiceInput, type NativeVoiceInput } from "@opengeni/react-native";
 import { transcribeExpoRecording, useExpoVoiceRecorder } from "@opengeni/react-native/expo";
 import * as Haptics from "expo-haptics";
@@ -31,8 +32,8 @@ export function useComposerVoice(input: {
   useEffect(() => {
     if (!workspaceId) return;
     let current = true;
-    client
-      .getClientConfig({ workspaceId })
+    // Joins the conversation's own read of this workspace's config.
+    readClientConfig(client, workspaceId)
       .then((config) => {
         if (!current) return;
         setCapability({

@@ -387,7 +387,12 @@ import {
   sessionUsageLimitForRead,
   setSessionUsageLimitForAccess,
 } from "@opengeni/core";
-import { assertSessionExists, boundedLimit } from "../http/common";
+import {
+  assertSessionExists,
+  boundedLimit,
+  requireSessionSequence,
+  SESSION_SEQUENCE_HEADER,
+} from "../http/common";
 import { isAgentActingAsPerson } from "../http/acting-person";
 import {
   humanSecretWriteContext,
@@ -2446,6 +2451,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/lineage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const observedSequence = await requireSessionSequence(
+      db,
+      workspaceId,
+      c.req.param("sessionId"),
+    );
     const lineage = await readSessionLineage(deps, grant, c.req.param("sessionId"));
     const sessionIds = [
       c.req.param("sessionId"),
@@ -2477,6 +2487,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       grant.subjectId,
       lineageSessions,
     );
+    c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     return c.json({
       ...lineage,
       sessionHasSchedules: targets.has(c.req.param("sessionId")),
@@ -2909,8 +2920,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
-    await assertSessionExists(db, workspaceId, sessionId);
+    const observedSequence = await requireSessionSequence(db, workspaceId, sessionId);
     const goal = await getSessionGoalWithContinuation(db, workspaceId, sessionId);
+    c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     if (!goal) {
       // `?absent=null` opts in to a successful `null` for a goal-less session,
       // so a browser polling a fresh chat logs no failed request. Without it
@@ -3663,8 +3675,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
+    const observedSequence = await requireSessionSequence(db, workspaceId, sessionId);
     const snapshot = await getSessionQueueSnapshot(db, workspaceId, sessionId);
     if (!snapshot) throw new HTTPException(404, { message: "session not found" });
+    c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     return c.json(projectQueueSnapshot(snapshot, sessionId, relatedSessionAccessFor(c)));
   });
 
@@ -4249,7 +4263,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
-    await assertSessionExists(db, workspaceId, sessionId);
+    const observedSequence = await requireSessionSequence(db, workspaceId, sessionId);
     const rawStatus = c.req.query("status");
     const status = rawStatus ? HumanInputRequestStatus.safeParse(rawStatus) : null;
     if (status && !status.success) {
@@ -4260,6 +4274,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const requests = await listSessionHumanInputRequests(db, workspaceId, sessionId, {
       ...(status?.success ? { status: status.data } : {}),
     });
+    c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     return c.json({ requests });
   });
 

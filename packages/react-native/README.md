@@ -19,6 +19,23 @@ import { createExpoOpenGeniAdapters } from "@opengeni/react-native/expo";
 </OpenGeniReactNativeProvider>;
 ```
 
+To reopen a recently viewed conversation instantly, keep reads for the signed-in
+person's client with `useRetainedReads(client)` from `@opengeni/react/session`
+in a component that stays mounted while they are signed in. The screen then
+draws the conversation as it was left, with no spinner, and refreshes it in the
+background. Only do this when each signed-in person gets their own client
+object (a new client on sign-in, sign-out and account switch); the kept view is
+in memory only and is dropped when the client changes.
+
+```tsx
+import { useRetainedReads } from "@opengeni/react/session";
+
+function SignedIn({ client, children }) {
+  useRetainedReads(client);
+  return children;
+}
+```
+
 ### Labels and languages
 
 The native components read their text from the same catalog as

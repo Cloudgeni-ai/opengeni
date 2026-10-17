@@ -112,6 +112,7 @@ export type {
   SessionMessagePreviewReference,
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export { observedSessionSequence, SESSION_SEQUENCE_HEADER } from "./session-sequence";
 export type { Chats } from "./chats";
 export type { ServiceContext } from "./embedding-client";
 export {

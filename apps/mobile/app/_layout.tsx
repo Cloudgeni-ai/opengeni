@@ -1,3 +1,4 @@
+import { useRetainedReads } from "@opengeni/react/session";
 import { OpenGeniReactNativeProvider } from "@opengeni/react-native";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
@@ -18,7 +19,11 @@ void restoreAppearance();
 void restoreOutsideCallTarget();
 
 function NativeEnvironment({ children }: { children: React.ReactNode }) {
-  const { adapters } = useAccount();
+  const { adapters, client } = useAccount();
+  // Each signed-in account has its own client, so a conversation opened a
+  // moment ago draws at once from memory and refreshes behind it. Switching or
+  // signing out replaces the client, which drops everything kept.
+  useRetainedReads(client);
   return (
     <OpenGeniReactNativeProvider
       adapters={adapters}

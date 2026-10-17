@@ -9,7 +9,9 @@ import {
   type EmbeddedHumanInputClientOverride,
 } from "../session-context";
 import { isActionableHumanInputRequest } from "../human-input";
+import { useRetainedSessionView } from "./session-view-cache";
 import {
+  projectionReadThrough,
   useDebouncedCallback,
   useMutationRunner,
   usePolledValue,
@@ -91,7 +93,18 @@ export function useHumanInputRequests(
   useSessionEventTrigger(client, workspaceId, sessionId, isHumanInputEvent, scheduleRefresh, {
     enabled,
     ...(options.events !== undefined ? { events: options.events } : {}),
+    readThrough: projectionReadThrough(state.data, state.loading),
   });
+  // Until the first read lands, show the questions pending when this
+  // conversation was last left (only when the host retains reads).
+  const retainedRequests = useRetainedSessionView(
+    client,
+    workspaceId,
+    sessionId,
+    "human-input",
+    state.data,
+    { enabled },
+  );
 
   useEffect(() => {
     const now = Date.now();
@@ -141,13 +154,13 @@ export function useHumanInputRequests(
   const now = Date.now();
   void deadlineVersion;
   return {
-    requests: [...(state.data ?? [])]
+    requests: [...(state.data ?? retainedRequests ?? [])]
       .filter((request) => isActionableHumanInputRequest(request, now))
       .sort(
         (left, right) =>
           left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
       ),
-    loading: state.loading,
+    loading: state.loading && retainedRequests === null,
     error: state.error,
     refresh: state.refresh,
     respond,

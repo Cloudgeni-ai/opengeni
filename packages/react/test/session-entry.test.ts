@@ -141,7 +141,9 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/timeline/learning-refusal-copy.ts"))).toBe(
       true,
     );
-    expect(reactSources.length).toBe(37);
+    // Retained conversation views for a reopen, on the shared-query store.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/session-view-cache.ts"))).toBe(true);
+    expect(reactSources.length).toBe(38);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);
