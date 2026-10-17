@@ -15,6 +15,7 @@ import type { FetchLike } from "./index";
  * {@link parseModelRequestTransport}.
  */
 export const MODEL_TRANSPORT_HEADER = "x-opengeni-model-transport";
+export const MODEL_SOCKET_FAILURE_HEADER = "x-opengeni-model-socket-failure";
 
 /**
  * How one Responses request was carried. A WebSocket request either
@@ -221,17 +222,40 @@ type ResponsesTurn = {
   readyAt?: number;
   observe?: (event: ResponsesTransportDiagnostic) => void;
   httpOnly: boolean;
-  onFallback?: () => void;
+  onFallback?: () => void | Promise<void>;
+  fallbackWrite?: Promise<void>;
 };
 const responsesConversation = new AsyncLocalStorage<ResponsesTurn>();
 export function hasResponsesTurn(): boolean {
   return responsesConversation.getStore() !== undefined;
 }
-const continuationAdmission = new AsyncLocalStorage<() => Promise<void>>();
+const continuationAdmission = new AsyncLocalStorage<(signal: AbortSignal) => Promise<void>>();
+const dispatchObservation = new AsyncLocalStorage<(transport: ModelRequestTransport) => void>();
+
+export function withModelTransportObservation<T>(
+  observe: (transport: ModelRequestTransport) => void,
+  fn: () => T,
+): T {
+  return dispatchObservation.run(observe, fn);
+}
+
+/** Preserve timeout classification while retaining the selected socket route. */
+export function markModelSocketFailure(error: Error): void {
+  if (isModelSocketTransportError(error)) return;
+  const cause = new ModelSocketTransportError(
+    "Persistent model socket did not complete",
+    "response",
+  );
+  cause.cause = error.cause;
+  error.cause = cause;
+}
 
 /** The custody owner settles a definitive continuation refusal and admits the
  * replacement physical request. No second request bypasses that boundary. */
-export function withResponsesContinuationAdmission<T>(admit: () => Promise<void>, fn: () => T): T {
+export function withResponsesContinuationAdmission<T>(
+  admit: (signal: AbortSignal) => Promise<void>,
+  fn: () => T,
+): T {
   return continuationAdmission.run(admit, fn);
 }
 
@@ -239,7 +263,7 @@ export function withResponsesContinuationAdmission<T>(admit: () => Promise<void>
 export function createResponsesTurn(
   conversationId: string,
   observe?: ResponsesTurn["observe"],
-  policy: { httpOnly?: boolean; onFallback?: () => void } = {},
+  policy: { httpOnly?: boolean; onFallback?: () => void | Promise<void> } = {},
 ): ResponsesTurn {
   return {
     conversationId,
@@ -268,6 +292,8 @@ export function isModelSocketTransportError(error: unknown): boolean {
   const seen = new Set<unknown>();
   while (error && typeof error === "object" && !seen.has(error)) {
     if (error instanceof ModelSocketTransportError) return true;
+    const headers = (error as { headers?: Headers }).headers;
+    if (headers instanceof Headers && headers.get(MODEL_SOCKET_FAILURE_HEADER) === "1") return true;
     seen.add(error);
     error = (error as { cause?: unknown }).cause;
   }
@@ -739,11 +765,12 @@ export function responsesTransport(
         release(connection);
         return connection;
       },
-      (error) => {
+      async (error) => {
         if (slots.get(slot) === key) slots.delete(slot);
         if (error instanceof ModelSocketTransportError && error.refused && turn) {
           turn.httpOnly = true;
-          turn.onFallback?.();
+          turn.fallbackWrite ??= Promise.resolve().then(() => turn.onFallback?.());
+          await turn.fallbackWrite;
         }
         throw error;
       },
@@ -809,6 +836,8 @@ export function responsesTransport(
       reason: Extract<ModelRequestTransport, { kind: "http" }>["reason"],
     ): Promise<Response> => {
       const transport = { kind: "http", reason } as const;
+      await turn?.fallbackWrite;
+      dispatchObservation.getStore()?.(transport);
       let response: Response;
       try {
         response = withTransport(await http(input, httpInit), transport);
@@ -956,11 +985,23 @@ export function responsesTransport(
       let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
       let started = false;
       let finished = false;
+      let continuationPending: Promise<void> | null = null;
+      const continuationAbort = new AbortController();
       let cacheUsage: Pick<ResponsesTransportDiagnostic, "promptTokens" | "cachedTokens"> = {};
       const pending: Uint8Array[] = [];
 
       const finish = (error?: unknown, successful = error === undefined) => {
         if (finished) return;
+        if (continuationPending) {
+          // Closing cannot outrun an in-flight custody reservation. The owner
+          // joins admission and settles a newly admitted, unsent request first.
+          if (error !== undefined) continuationAbort.abort(error);
+          void continuationPending.then(
+            () => finish(error, successful),
+            (admissionError) => finish(admissionError, false),
+          );
+          return;
+        }
         finished = true;
         observe({
           phase: "terminal",
@@ -1033,6 +1074,7 @@ export function responsesTransport(
             inputBytes: Buffer.byteLength(encoded),
             fullInputBytes: Buffer.byteLength(text),
           });
+          dispatchObservation.getStore()?.(transport);
           active.socket.send(encoded);
         } catch {
           finish(
@@ -1068,13 +1110,24 @@ export function responsesTransport(
           transport.input = "full";
           const resumeEvents = active.onEvent;
           active.onEvent = null;
-          void (async () => {
-            await admitContinuation?.();
+          const pendingAdmission = (async () => {
+            await admitContinuation?.(continuationAbort.signal);
+            continuationAbort.signal.throwIfAborted();
             if (finished) return;
             signal?.throwIfAborted();
             active.onEvent = resumeEvents;
             sendMessage(payload);
-          })().catch(finish);
+          })();
+          continuationPending = pendingAdmission;
+          void pendingAdmission.then(
+            () => {
+              continuationPending = null;
+            },
+            (error) => {
+              continuationPending = null;
+              finish(error);
+            },
+          );
           return;
         }
         if (!started && type === "error" && typeof event.status === "number") {

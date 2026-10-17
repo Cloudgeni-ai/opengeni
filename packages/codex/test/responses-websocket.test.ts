@@ -62,6 +62,7 @@ function harness(
     endpoint?: ResponsesWebSocketEndpoint;
     observe?: (event: ResponsesTransportDiagnostic) => void;
     httpOnly?: boolean;
+    onFallback?: () => Promise<void>;
   } = {},
 ) {
   const sockets: FakeSocket[] = [];
@@ -84,7 +85,10 @@ function harness(
       ...(options.endpoint ? { endpoint: options.endpoint } : {}),
     },
   );
-  let turn = createResponsesTurn("conversation", options.observe, { httpOnly: options.httpOnly });
+  let turn = createResponsesTurn("conversation", options.observe, {
+    httpOnly: options.httpOnly,
+    onFallback: options.onFallback,
+  });
   const scoped = options.endpoint?.conversationScoped
     ? transport
     : Object.assign(
@@ -232,6 +236,23 @@ test("diagnostic observer failures cannot fail a model request", async () => {
   const socket = await nextSend(() => sockets[0]);
   socket.emit({ type: "response.completed", response: { id: "r1" } });
   expect((await pending).status).toBe(200);
+});
+
+test("socket refusal persists its turn policy before dispatching HTTP", async () => {
+  let release!: () => void;
+  const write = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const { transport, sockets, httpCalls } = harness({ autoOpen: false, onFallback: () => write });
+  const pending = transport(URL, request());
+  for (let i = 0; i < 50 && !sockets[0]; i++) await Bun.sleep(1);
+  sockets[0]!.handshakeStatus = 426;
+  sockets[0]!.drop();
+  await Bun.sleep(1);
+  expect(httpCalls).toHaveLength(0);
+  release();
+  expect((await pending).status).toBe(200);
+  expect(httpCalls).toHaveLength(1);
 });
 
 test("streams a response over one reused connection as SSE with usage headers", async () => {

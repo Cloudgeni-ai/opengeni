@@ -41023,6 +41023,38 @@ export async function nextSessionHistoryPosition(
   });
 }
 
+/** Persist socket refusal before HTTP dispatch, under the current attempt fence.
+ * Every recovery path and worker replacement then inherits the same turn policy. */
+export async function markSessionTurnModelTransportHttpOnly(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+): Promise<boolean> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (tx) => {
+      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      if (!fence.allowed) return false;
+      await tx
+        .update(schema.sessionTurns)
+        .set({
+          metadata: sql`${schema.sessionTurns.metadata} || '{"persistentModelTransportHttpOnly":true}'::jsonb`,
+        })
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        );
+      return true;
+    }),
+  );
+}
+
 /**
  * Replace the input-token count for the most recent authoritative terminal
  * response. Null means that response supplied no usable final-call count, so

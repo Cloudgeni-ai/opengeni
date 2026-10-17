@@ -6,6 +6,7 @@ import {
   settleSubscriptionCoreCodexRequest,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
+  markSessionTurnModelTransportHttpOnly,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
 import { createAttemptVaultAccess } from "./secret-resolver";
@@ -1045,8 +1046,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ),
             {
               httpOnly: providerTurn.persistentModelTransportHttpOnly,
-              onFallback: () => {
+              onFallback: async () => {
                 providerTurn.persistentModelTransportHttpOnly = true;
+                const persisted = await markSessionTurnModelTransportHttpOnly(db, {
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  executionGeneration: turn.executionGeneration,
+                  attemptId: input.attemptId,
+                });
+                if (!persisted)
+                  throw new TurnAttemptFencedError("Model transport fallback lost turn ownership");
               },
             },
           );

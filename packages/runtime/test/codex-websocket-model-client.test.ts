@@ -10,6 +10,7 @@ import {
 } from "@opengeni/codex";
 import OpenAI from "openai";
 import { ReplayableJsonOpenAI } from "../src/replayable-json-body";
+import { isModelSocketTransportError } from "@opengeni/network/responses-websocket";
 
 class FakeSocket implements CodexWebSocketLike {
   readyState = 0;
@@ -33,6 +34,60 @@ class FakeSocket implements CodexWebSocketLike {
     this.onclose?.({ code: 1000 });
   }
 }
+
+test.each(["headers", "idle"])(
+  "Codex %s timeout retains socket evidence through the SDK",
+  async (phase) => {
+    let socket!: FakeSocket;
+    const transport = codexResponsesTransport(
+      async () => {
+        throw new Error("unexpected HTTP");
+      },
+      {
+        createSocket: () => {
+          socket = new FakeSocket();
+          queueMicrotask(() => socket.open());
+          return socket;
+        },
+      },
+    );
+    const context: CodexRequestContext = {
+      clientVersion: "test",
+      sessionId: "conversation",
+      getToken: async () => ({ accessToken: "fake", chatgptAccountId: "fake", isFedramp: false }),
+      refresh: async () => ({ accessToken: "fake", chatgptAccountId: "fake", isFedramp: false }),
+      resolveModel: (model) => model,
+      responseTimeoutPolicy: {
+        headersTimeoutMs: 40,
+        streamIdleTimeoutMs: 15,
+        wholeRequestTimeoutMs: 200,
+      },
+    };
+    const client = new OpenAI({
+      apiKey: "fake",
+      baseURL: "https://chatgpt.example/backend-api",
+      maxRetries: 0,
+      fetch: codexSubscriptionFetch(transport) as typeof globalThis.fetch,
+    });
+    const result = codexRequestStorage.run(context, async () => {
+      try {
+        const stream = await client.responses.create({ model: "m", input: "hello", stream: true });
+        for await (const _event of stream) {
+          /* drain */
+        }
+        return null;
+      } catch (error) {
+        return error;
+      }
+    });
+    for (let i = 0; i < 100 && !socket?.sent.length; i++) await Bun.sleep(1);
+    if (phase === "idle") socket.emit({ type: "response.created", response: { id: "pending" } });
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect(isModelSocketTransportError(error)).toBe(true);
+    expect(socket.sent).toHaveLength(1);
+  },
+);
 
 test("the model client's Codex Responses requests go over the WebSocket", async () => {
   const sockets: FakeSocket[] = [];
@@ -136,10 +191,21 @@ test("a Codex turn's warmed connection carries its first model request", async (
   expect(httpCalls).toEqual([]);
 });
 
-test("continuation refusal settles and re-admits before the full physical request", async () => {
+test.each([
+  "success",
+  "close_during_admission",
+  "close_during_settlement",
+  "abort_during_admission",
+  "timeout_during_admission",
+])("continuation refusal accounts for every physical request: %s", async (scenario) => {
   const sockets: FakeSocket[] = [];
   const custody: string[] = [];
   let requestSequence = 0;
+  let releaseGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const abort = new AbortController();
   const transport = codexResponsesTransport(
     async () => {
       throw new Error("unexpected HTTP");
@@ -156,15 +222,31 @@ test("continuation refusal settles and re-admits before the full physical reques
   const context: CodexRequestContext = {
     clientVersion: "test",
     sessionId: "conversation",
+    ...(scenario === "timeout_during_admission"
+      ? { responseTimeoutPolicy: { headersTimeoutMs: 30, wholeRequestTimeoutMs: 1000 } }
+      : {}),
     getToken: async () => ({ accessToken: "fake", chatgptAccountId: "fake", isFedramp: false }),
     refresh: async () => ({ accessToken: "fake", chatgptAccountId: "fake", isFedramp: false }),
     resolveModel: (model) => model,
     nextRequestId: () => `request-${++requestSequence}`,
     beforeProviderDispatch: async (request) => {
       custody.push(`admit:${request?.requestId}:${request?.transportAttempt}`);
+      if (
+        request?.requestId === "request-2" &&
+        request.transportAttempt === 2 &&
+        scenario.endsWith("during_admission")
+      )
+        await gate;
     },
     onProviderRequestSettled: async (request) => {
       custody.push(`${request.outcome}:${request.requestId}:${request.transportAttempt}`);
+      if (
+        request.requestId === "request-2" &&
+        request.transportAttempt === 1 &&
+        request.outcome === "refused" &&
+        scenario === "close_during_settlement"
+      )
+        await gate;
     },
   };
   const fetch = codexSubscriptionFetch(transport);
@@ -173,6 +255,7 @@ test("continuation refusal settles and re-admits before the full physical reques
     codexRequestStorage.run(context, () =>
       fetch("https://chatgpt.example/backend-api/responses", {
         method: "POST",
+        signal: abort.signal,
         body: JSON.stringify({ model: "m", stream: true, input }),
       }),
     );
@@ -192,6 +275,37 @@ test("continuation refusal settles and re-admits before the full physical reques
     status: 400,
     error: { code: "previous_response_not_found", param: "previous_response_id" },
   });
+  if (scenario !== "success") {
+    let settled = false;
+    const result = second.then(
+      (response) => {
+        settled = true;
+        return response;
+      },
+      (error: unknown) => {
+        settled = true;
+        return error;
+      },
+    );
+    const held =
+      scenario === "close_during_settlement" ? "refused:request-2:1" : "admit:request-2:2";
+    for (let i = 0; i < 100 && !custody.includes(held); i++) await Bun.sleep(1);
+    expect(custody).toContain(held);
+    if (scenario === "timeout_during_admission") await Bun.sleep(40);
+    else if (scenario === "abort_during_admission") abort.abort(new Error("cancelled"));
+    else socket.close();
+    await Bun.sleep(1);
+    expect(settled).toBe(false);
+    releaseGate();
+    const outcome = await result;
+    if (scenario === "timeout_during_admission") expect((outcome as Response).status).toBe(504);
+    else expect(outcome).toBeInstanceOf(Error);
+    expect(socket.sent).toHaveLength(2);
+    expect(custody.at(-1)).toBe(
+      scenario === "close_during_settlement" ? "refused:request-2:1" : "refused:request-2:2",
+    );
+    return;
+  }
   for (let i = 0; i < 100 && socket.sent.length < 3; i++) await Bun.sleep(1);
   expect(custody).toEqual([
     "admit:request-1:1",
