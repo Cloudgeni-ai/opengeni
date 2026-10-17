@@ -1,4 +1,5 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
+import { createScheduledNotificationTools } from "./scheduled-notification-tool";
 import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
@@ -160,6 +161,8 @@ export type PrepareTurnToolPolicyDeps = {
 };
 
 export type PrepareTurnToolRuntimeDeps = {
+  /** Accepted causal occurrence from the already-frozen learning lineage. */
+  scheduledTaskRunId?: string | null;
   /** Connected-vault providers and the shared read budget for this attempt. */
   vaultAccess: AttemptVaultAccess;
   fetchKnowledgeSource?:
@@ -490,23 +493,42 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     session.firstPartyMcpPermissions,
     linkedAuthority,
   );
+  // Owner notification is an exact-attempt runtime capability, not delegated
+  // workspace control. This also serves old selections and zero-permission
+  // schedules without changing their stored authority or minting a bearer.
+  const scheduledNotificationTools = deps.scheduledTaskRunId
+    ? await createScheduledNotificationTools({
+        db,
+        bus,
+        scope: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+          executionGeneration: attempt.executionGeneration,
+        },
+      })
+    : [];
   // Background-command tools need compute: the effective route of this turn,
   // a managed sandbox or an attached Connected Machine, not the durable home.
   const toolFamilies = resolveAgentToolFamilies(session.agent, {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
   });
-  const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
-    scheduledTurnMcpServerIds(turn) !== null
-      ? allowedFirstPartyMcpToolsForSession(
-          runSettings,
-          scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
-        )
-      : resolveSessionFirstPartyMcpTools(
-          runSettings,
-          session,
-          (await requireWorkspace(db, input.workspaceId)).settings,
-        ),
-  );
+  const selectedFirstPartyMcpTools = toolFamilies
+    .firstPartyTools(
+      scheduledTurnMcpServerIds(turn) !== null
+        ? allowedFirstPartyMcpToolsForSession(
+            runSettings,
+            scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
+          )
+        : resolveSessionFirstPartyMcpTools(
+            runSettings,
+            session,
+            (await requireWorkspace(db, input.workspaceId)).settings,
+          ),
+    )
+    .filter((name) => scheduledNotificationTools.length === 0 || name !== "notify_user");
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({
     agentConfig: session.agent,
@@ -821,6 +843,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     observability,
   });
   const attemptToolDefinitions = [
+    ...scheduledNotificationTools,
     ...(operationReadStore
       ? [
           createOperationReadAttemptToolDefinition({
@@ -1212,6 +1235,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     postToolPreparationStartedAt,
     preparationIndependentToolNames: [
       ...titleToolPlan.preparationIndependentToolNames,
+      ...scheduledNotificationTools.map((tool) => tool.modelName),
       "skill_read",
     ],
     codeSearchAvailable: codeSearchTools.length > 0,

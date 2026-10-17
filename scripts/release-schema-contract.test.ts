@@ -2827,6 +2827,7 @@ describe("release schema contract", () => {
       "0793_private_site_sessions.sql",
       "0794_site_ai_insights.sql",
       "0795_site_lifecycle_cancellation.sql",
+      "0814_scheduled_owner_notifications.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

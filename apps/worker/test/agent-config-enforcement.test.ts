@@ -99,6 +99,8 @@ function toolName(tool: Tool | ModelRequest["tools"][number]): string {
 }
 
 type FixtureOptions = {
+  scheduledOwner?: string | null;
+  zeroPermissions?: boolean;
   agent?: ResolvedAgentConfig | null;
   hasSkills?: boolean;
   lazy?: boolean;
@@ -199,6 +201,11 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       return input.catalog;
     }),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
+    spyOn(db, "getScheduledNotificationContext").mockResolvedValue(
+      options.scheduledOwner !== undefined
+        ? { runId: SCOPE.turnId, subjectId: options.scheduledOwner, existing: false }
+        : null,
+    ),
     ...(typeof db.sessionHasToolRouterHistory === "function"
       ? [spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(false)]
       : []),
@@ -306,7 +313,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       : { bundledSkillIds: options.bundledSkillIds ?? [] }),
     skills: [],
     firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
-    firstPartyMcpPermissions: null,
+    firstPartyMcpPermissions: options.zeroPermissions ? [] : null,
     model: options.modelId ?? "scripted-model",
     sandboxBackend: "none",
     mcpServers: [{ id: "customer-product" }],
@@ -377,6 +384,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       workspaceRefs: context.workspaceRefs,
     });
     const toolRuntime = await prepareTurnToolRuntime({
+      scheduledTaskRunId: options.scheduledOwner !== undefined ? SCOPE.turnId : null,
       ...context,
       input,
       catalogSourceSettings: settings,
@@ -554,6 +562,47 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     mcp.close();
   }
 }
+
+test.each(["user:owner", null])(
+  "scheduled notification is visible before search with owner %s and zero permissions",
+  async (scheduledOwner) => {
+    const captured = await captureWorkerRequest({
+      scheduledOwner,
+      zeroPermissions: true,
+      agent: agentConfig("none", "humanInput", false),
+      hasSkills: false,
+      lazy: true,
+    });
+    expect(captured.names).toContain("notify_user");
+    expect(captured.deferredNames).not.toContain("notify_user");
+    expect(captured.names).not.toContain("opengeni__notify_user");
+    expect(captured.preparation.firstPartyPermissions).toEqual([]);
+    const notification = captured.catalog.entries.find(
+      (entry) => entry.modelName === "notify_user",
+    )!;
+    expect(notification).toBeDefined();
+    expect(notification.description).toContain(
+      scheduledOwner ? "scheduled run's owner" : "no human inbox recipient",
+    );
+  },
+);
+
+test("scheduled notification replaces the ordinary MCP tool without duplicating its identity", async () => {
+  const captured = await captureWorkerRequest({
+    scheduledOwner: "user:owner",
+    agent: agentConfig("all"),
+    lazy: true,
+  });
+  expect(
+    captured.catalog.entries.filter(
+      (entry) =>
+        entry.identity.serverId === "opengeni" && entry.identity.toolName === "notify_user",
+    ),
+  ).toHaveLength(1);
+  expect(captured.names).toContain("notify_user");
+  expect(captured.names).not.toContain("opengeni__notify_user");
+  expect(captured.preparation.firstPartyTools).not.toContain("notify_user");
+});
 
 test.each(["accepted", "initial", "spoof", "none"] as const)(
   "worker tool environment signs only trusted %s setup provenance",

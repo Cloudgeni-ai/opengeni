@@ -150,6 +150,13 @@ so a concurrent future reschedule is preserved.
 Temporal coordinates; activities read Postgres obligations, not signals.
 Conversation/goals/queues/usage/provider/tool transcripts never enter workflow history.
 
+Scheduled owner notification is an exact-attempt runtime capability independent
+of frozen delegated tool permissions. `scheduled-notification-tool.ts` in the
+agent-turn worker supplies the tool; `scheduled_notification_context_v1` shares
+accepted-occurrence recipient resolution with inbox projection. Old selections
+and zero-permission runs remain unchanged, while ownerless runs disclose that
+nobody can receive the notification. See [scheduled access](scheduled-task-access.md).
+
 Canonical: `apps/worker/src/workflows/session.ts`,
 [`run-lifecycle.md`](run-lifecycle.md).
 

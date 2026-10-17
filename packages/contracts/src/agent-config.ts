@@ -553,6 +553,9 @@ export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
   refresh_credentials: "runtime",
   knowledge_source_fetch: "runtime",
   knowledge_source_read: "runtime",
+  // Worker-bound own-owner notification; the ordinary MCP variant remains
+  // selection/permission governed and can offer other recipients.
+  notify_user: "runtime",
 } as const satisfies Record<string, AgentFunctionToolClass>;
 export type AgentFunctionToolName = keyof typeof AGENT_FUNCTION_TOOL_CAPABILITIES;
 

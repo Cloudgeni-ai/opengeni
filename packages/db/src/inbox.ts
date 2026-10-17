@@ -369,6 +369,31 @@ export async function getSessionInboxRecipient(
   });
 }
 
+/**
+ * A scheduled occurrence's recipient, never the destination chat's creator.
+ * The database shares this resolver with event projection. Accepted learning
+ * lineage already preserves the occurrence through children and continuations;
+ * its policy modes grant no notification authority.
+ */
+export async function getScheduledNotificationContext(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string; key?: string },
+): Promise<{ runId: string; subjectId: string | null; existing: boolean } | null> {
+  return withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{
+      run_id: string;
+      subject_id: string | null;
+      existing: boolean;
+    }>(
+      scopedDb,
+      sql`select * from opengeni_private.scheduled_notification_context_v1(
+      ${input.workspaceId}::uuid, ${input.sessionId}::uuid, ${input.turnId}::uuid,
+      ${input.key ?? null}::text)`,
+    );
+    return row ? { runId: row.run_id, subjectId: row.subject_id, existing: row.existing } : null;
+  });
+}
+
 /** Titles of sessions in one workspace, read under that workspace's context. */
 export async function getSessionTitles(
   db: Database,

@@ -1648,6 +1648,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             },
           });
           const toolRuntime = await prepareTurnToolRuntime({
+            scheduledTaskRunId:
+              typeof learning.scheduledTaskRunId === "string" ? learning.scheduledTaskRunId : null,
             vaultAccess,
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,

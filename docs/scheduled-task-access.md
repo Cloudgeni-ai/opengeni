@@ -113,6 +113,29 @@ Already-admitted occurrences retain their frozen execution settings. Text in a
 launcher prompt naming a child model is also unchanged; editing that instruction
 is a separate content change, not an effect of changing these defaults.
 
+## Reaching the owner from a run
+
+Scheduled work receives a preparation-independent `notify_user` runtime tool,
+including schedules with old tool lists or an empty first-party permission set.
+This is an exact-attempt, own-owner capability: it grants neither session control,
+other-recipient messaging nor inbox management, and does not modify saved grants.
+The recipient comes from the accepted occurrence's causal human, not the creator
+of an existing destination chat. Accepted lineage preserves it through children
+and autonomous continuations; an unrelated human turn does not inherit it.
+
+The tool's initial description explicitly says when the occurrence has no supported
+human inbox recipient. Such calls retain an event with `delivered: false` and
+`no_human_recipient`, never silently target the chat creator. Managed humans have
+an inbox; phone delivery additionally requires their native-device registration
+and notification settings. The built-in local human has an inbox but no native
+phone pairing. External/service-only subjects without a native inbox are explicit
+non-delivery cases.
+
+The database uses the same occurrence resolver for notification projection and
+runtime receipts. Posting a stable key updates the same inbox item and only a new
+item enqueues a phone alert. Existing ordinary-session tool selection, permissions
+and other-member opt-ins remain unchanged.
+
 ## Who owns a schedule
 
 A schedule's owner is the person who saved it: a managed human (or a verified

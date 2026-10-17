@@ -43,6 +43,15 @@ function resolve(overrides: Partial<ResolveAgentConfigInput> = {}) {
   });
 }
 
+test("scheduled own-owner notification is a runtime mechanic, not human-input authority", () => {
+  const config = resolve({
+    request: { capabilities: { from: "none", humanInput: false } },
+  }).config!;
+  const families = resolveAgentToolFamilies(config);
+  expect(families.allowsFunctionTool("notify_user")).toBe(true);
+  expect(families.allowsFirstPartyTool("notify_user")).toBe(false);
+});
+
 function errorCode(fn: () => unknown): string | null {
   try {
     fn();
