@@ -226,6 +226,8 @@ export type BrowserStateRestoreInput = {
 
 export type BrowserSupervisorSession = BrowserSessionReference & {
   observation: BrowserObservation;
+  /** Returned only by the create that launched the browser. */
+  notice?: string;
 };
 
 export type BrowserStateCaptureInput = BrowserSessionReference & {
@@ -240,6 +242,7 @@ export type BrowserStateCaptureInput = BrowserSessionReference & {
 export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
+  readonly networkNotice?: string | null;
   start(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   listTargets(): Promise<BrowserTarget[]>;
   openTarget(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
@@ -316,6 +319,10 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
 
 export type BrowserSupervisorOptions = {
   ephemeralContextPoolEnabled?: boolean;
+  /** Run managed Linux browsers in their own network namespace where the
+   * machine supports it (default true). A deployment whose browsers already
+   * own their network, such as a managed sandbox VM, turns it off. */
+  networkIsolation?: boolean;
   /** Host a virtual WebAuthn authenticator in every page target (default true
    * where the transport supports it). Passkey placements bring the acted-on
    * tab to the front before each action, because Chromium refuses WebAuthn
@@ -464,6 +471,7 @@ export class BrowserSupervisor {
               options.agentBrowserBinary,
               options.lightpandaBinary,
               options.headlessShell,
+              options.networkIsolation !== false,
             )));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
@@ -523,6 +531,7 @@ export class BrowserSupervisor {
             downloadDirectory: join(poolDirectory, "downloads"),
             screenshotDirectory: join(poolDirectory, "screenshots"),
             headed: false,
+            ...(options.networkIsolation === false ? { networkIsolation: false } : {}),
             ...(context.browserExecutablePath
               ? { browserExecutablePath: context.browserExecutablePath }
               : {}),
@@ -955,9 +964,11 @@ export class BrowserSupervisor {
       this.sessions.set(options.browserSessionId, runtime);
       const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
       runtime.creationObservation = null;
+      const notice = runtime.driver.networkNotice;
       return {
         ...binding(runtime),
         observation,
+        ...(notice ? { notice } : {}),
       };
     } finally {
       if (this.creating.get(options.browserSessionId) === creation) {
@@ -2800,6 +2811,7 @@ async function createBrowserDriver(
   binary?: ResolvedAgentBrowserBinary,
   lightpandaBinary?: ResolvedLightpandaBinary,
   headlessShell?: VerifiedHeadlessShell,
+  networkIsolation = true,
 ): Promise<BrowserSupervisorDriver> {
   if (context.transport.kind === "attached_chrome") {
     const attached = await createAttachedChromeTransport({
@@ -2926,6 +2938,7 @@ async function createBrowserDriver(
     downloadDirectory: context.downloadDirectory,
     screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
+    ...(networkIsolation ? {} : { networkIsolation: false }),
     ...(offscreen ? { offscreen: true } : {}),
     ...(route?.kind === "proxy" && route.proxyUrl ? { proxyUrl: route.proxyUrl } : {}),
     ...(launchArguments.length > 0 ? { launchArguments } : {}),

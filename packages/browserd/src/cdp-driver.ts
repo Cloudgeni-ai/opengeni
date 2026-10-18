@@ -161,6 +161,8 @@ export type BrowserCommandRunner = {
     cdpBrowserPid?: number,
   ) => Promise<OwnedManagedBrowserProcess | null>;
   readonly reattachedOwnedProcess?: OwnedManagedBrowserProcess | null;
+  /** A plain line for the agent about how this browser was launched. */
+  readonly networkNotice?: string | null;
   externalAuth?: (
     command: BrowserExternalAuthCommand,
     options?: { timeoutMs?: number; signal?: AbortSignal },
@@ -388,6 +390,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   readonly fencedInputBatches = true;
   get focusedInputObservations(): boolean {
     return this.engine !== "lightpanda";
+  }
+  get networkNotice(): string | null {
+    return this.runner.networkNotice ?? null;
   }
   private readonly browserSessionId: string;
   private readonly controllerGeneration: string;

@@ -183,6 +183,16 @@ describe("browser model text", () => {
     ).toBe(
       "BrowserSession 11111111-1111-4111-8111-111111111111 (ready): chromium on the user's own Chrome\nNo tabs are open.",
     );
+    // A launch notice follows the session line, once, on the opening call.
+    expect(
+      browserOpenText({
+        session,
+        targets: [],
+        notice: "This browser uses the machine's network directly.",
+      }),
+    ).toBe(
+      "BrowserSession 11111111-1111-4111-8111-111111111111 (ready): chromium headless on a Connected Machine\nThis browser uses the machine's network directly.\nNo tabs are open.",
+    );
     expect(browserTabsText({ browserSessionId: session.id, targets: [target] })).toBe(
       `BrowserSession ${session.id} has 1 tab:\nTab T1 selected: "Checkout" https://shop.example/checkout`,
     );

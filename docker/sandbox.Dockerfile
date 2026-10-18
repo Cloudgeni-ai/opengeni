@@ -557,6 +557,9 @@ ENV OPENGENI_BROWSERD_LIGHTPANDA_BINARY=/usr/local/lib/opengeni/lightpanda
 ENV OPENGENI_BROWSERD_BROWSER_EXECUTABLE=/usr/lib/chromium/chromium
 ENV OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY=/usr/local/lib/opengeni/opengeni-computer-native
 ENV OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux
+# The sandbox VM's network belongs to its browsers already; the per-browser
+# network namespace used on people's own machines is not needed here.
+ENV OPENGENI_BROWSERD_NETWORK_ISOLATION=off
 ENV NODE_PATH=/opt/opengeni/codemode-runtime/node_modules
 
 COPY --from=browserd-build /out/opengeni-browserd /usr/local/bin/opengeni-browserd

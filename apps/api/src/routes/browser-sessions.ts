@@ -5148,7 +5148,11 @@ export function withInitialView<
 >(
   response: T,
   launched: Awaited<ReturnType<BrowserControlClient["createSession"]>> | null,
-): T | (T & { initialView: { targets: BrowserTarget[]; observation: BrowserObservation } }) {
+):
+  | T
+  | (T & {
+      initialView: { targets: BrowserTarget[]; observation: BrowserObservation; notice?: string };
+    }) {
   if (
     !launched?.targets ||
     response.operation.state !== "completed" ||
@@ -5161,7 +5165,11 @@ export function withInitialView<
   }
   return {
     ...response,
-    initialView: { targets: launched.targets, observation: launched.observation },
+    initialView: {
+      targets: launched.targets,
+      observation: launched.observation,
+      ...(launched.notice ? { notice: launched.notice } : {}),
+    },
   };
 }
 

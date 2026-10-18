@@ -2078,6 +2078,15 @@ Managed download tools use the existing explicit workspace-save API; bytes stay 
 Linux managed-browser cleanup and recovery share exact profile/executable and
 process-birth checks in [`linux-process-identity.ts`](../packages/browserd/src/linux-process-identity.ts).
 
+On a person's Linux machine, managed Chromium runs in its own network namespace
+bridged to the host by pasta ([`browser-network-isolation.ts`](../packages/browserd/src/browser-network-isolation.ts)),
+so host interface churn (container veths, bridges, VPNs) cannot fire Chromium's
+network-change handling and abort requests in flight. The browser keeps the
+person's UID and the spawned PID; host loopback servers, the DevTools port and
+DNS stay reachable. Where pasta or user namespaces are unavailable it launches
+on the shared network and `browser_open` says so in one line. Managed sandbox
+VMs turn it off (`OPENGENI_BROWSERD_NETWORK_ISOLATION=off`).
+
 Explicit managed Chromium working-directory recovery uses the internal
 [`working-runtime-journal.ts`](../packages/browserd/src/working-runtime-journal.ts)
 launch/suspension/retirement receipt. Exact directory, controller, token, placement and
