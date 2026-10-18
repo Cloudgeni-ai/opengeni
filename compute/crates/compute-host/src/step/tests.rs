@@ -227,6 +227,7 @@ impl Sandbox {
             fetcher: None,
             pager: crate::PagerConfig::new(self.root.path().join("no-pager")),
             launches: 0,
+            untouched: false,
             unthrottle: None,
             meter: None,
             last_used_ms: 1_700_000_000_000,
@@ -647,6 +648,51 @@ async fn a_save_waiting_for_memory_that_does_not_arrive_can_be_cancelled() {
     assert_eq!(ran.outcome, Outcome::Cancelled);
     let durable = sandbox.records.settle(sandbox.id).await.unwrap();
     assert!(!durable.image);
+}
+
+/// A checkpoint cancelled before it began, or while it waits for its
+/// memory, reports that it wrote nothing, so the core books nothing for
+/// it; a step that began its work, such as a save waiting for its memory,
+/// may have written.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checkpoint_cancelled_before_it_captured_anything_reports_it_wrote_nothing() {
+    let sandbox = Sandbox::new().await;
+    let record = sandbox.record(Change::new()).await;
+    let job = sandbox.job(NoStore, record.clone(), true);
+    job.cancel.cancel();
+    let ran = job.run(Step::Checkpoint).await;
+    assert_eq!(ran.outcome, Outcome::Cancelled);
+    assert!(!ran.report.wrote, "cancelled before it began");
+
+    let silent = |name: &str| {
+        Paging::start(
+            sandbox.root.path().join(name),
+            "1".into(),
+            ((0, 0), 1 << 20),
+            None,
+            Vec::new(),
+        )
+    };
+    for (step, wrote) in [(Step::Checkpoint, false), (Step::Save, true)] {
+        let mut job = sandbox.job(NoStore, record.clone(), true);
+        // A pager that never listens: the memory it serves never completes.
+        job.live.as_mut().unwrap().memory.paging = Some(silent(&format!("{step:?}.sock")));
+        let cancel = job.cancel.clone();
+        let running = tokio::spawn(async move { job.run(step).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !running.is_finished(),
+            "{step:?} did not wait for the memory"
+        );
+        cancel.cancel();
+        let ran = tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("the cancelled step ends")
+            .unwrap();
+        assert_eq!(ran.outcome, Outcome::Cancelled, "{step:?}");
+        assert_eq!(ran.report.wrote, wrote, "{step:?}");
+    }
 }
 
 /// A failed disk check, or one an agent never finished, keeps every later

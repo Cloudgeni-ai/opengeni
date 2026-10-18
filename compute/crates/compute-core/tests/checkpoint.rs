@@ -64,6 +64,17 @@ impl Rig {
             sandbox: SandboxId(id),
             op,
             outcome,
+            wrote: true,
+        })
+    }
+
+    /// Finishes `op`, which the host agent is certain wrote nothing.
+    fn finish_untouched(&mut self, id: u128, op: OpId, outcome: Outcome) -> Vec<Action> {
+        self.send(Input::Finished {
+            sandbox: SandboxId(id),
+            op,
+            outcome,
+            wrote: false,
         })
     }
 
@@ -440,6 +451,55 @@ fn the_image_a_checkpoint_wrote_stays_booked_until_a_reading() {
         .collect();
     starts.sort_unstable();
     assert_eq!(starts, [(1, Step::Checkpoint), (2, Step::Restore)]);
+}
+
+/// A checkpoint cancelled before it wrote anything, such as by a sleep
+/// that use then withdrew, books nothing: it is due again at once, and
+/// booking an image each time would refuse other wakes for space nothing
+/// took.
+#[test]
+fn a_checkpoint_cancelled_before_it_wrote_anything_books_nothing() {
+    let mut rig = Rig::new(HostPolicy {
+        disk: Some(DiskPolicy {
+            reserve: GIB,
+            reserve_inodes: 100,
+        }),
+        ..HostPolicy::default()
+    });
+    rig.send(Input::Disk {
+        available: DiskSpace {
+            bytes: 3 * GIB,
+            inodes: 1_000_000,
+        },
+    });
+    // Sandbox 1 books its next save, 1 GiB; sandbox 2, saved, needs as
+    // much to wake, which fits while sandbox 1 has written nothing.
+    rig.add(1, State::RUNNING, checkpointed(), Size::whole(GIB));
+    let saved = State::new(Level::Saved, Durability::Local, true);
+    let rules = SleepPolicy::new(SleepRules::RECOMMENDED).unwrap();
+    rig.add(2, saved, rules, Size::whole(GIB));
+    let booked = |rig: &Rig| rig.host.disk().unwrap().booked.bytes;
+
+    let (step, op) = only_start(&rig.at(FIRST_CHECKPOINT));
+    assert_eq!(step, Step::Checkpoint);
+    let actions = rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Paused,
+    });
+    assert_eq!(cancelled(&actions), [op], "{actions:?}");
+    // Used before the cancellation took effect: the sleep is withdrawn,
+    // and the checkpoint, still due, starts again once this one ends.
+    rig.send(Input::Touch {
+        sandbox: SandboxId(1),
+        priority: Priority::Interactive,
+    });
+    let (step, _) = only_start(&rig.finish_untouched(1, op, Outcome::Cancelled));
+    assert_eq!(step, Step::Checkpoint);
+    assert_eq!(rig.state(1), State::RUNNING);
+    assert_eq!(booked(&rig), GIB, "only its next save");
+    // With the disk as it was, sandbox 2 still fits.
+    let (step, _) = only_start(&rig.hold(2));
+    assert_eq!(step, Step::Restore);
 }
 
 #[test]

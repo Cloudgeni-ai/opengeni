@@ -131,6 +131,11 @@ pub(crate) struct Report {
     /// process's incarnation, read as it began: what the sandbox went
     /// through while awake.
     pub reading: Option<(u64, MemoryStats)>,
+    /// Whether it may have written to the host's local disk; see
+    /// [`compute_core::Input::Finished`]. `false`, as by default, only
+    /// when it certainly wrote nothing, as a step that never began its
+    /// work.
+    pub wrote: bool,
 }
 
 /// A VM's activity counters, read at one moment: what the host judges
@@ -217,6 +222,11 @@ pub(crate) struct Job<E: Engine, S> {
     pub pager: crate::PagerConfig,
     /// VM processes this job has started; zero when it is issued.
     pub launches: u32,
+    /// Whether the step is certain it wrote nothing to the host's local
+    /// disk: so until its work begins, and again where a step ends before
+    /// writing anything, as a checkpoint cancelled before its capture.
+    /// Set as the step begins, whatever it was issued with.
+    pub untouched: bool,
     /// Called once the step no longer does the work its kind's
     /// concurrency limit protects (a wake, once its VMM has resumed), so
     /// another may start while this one waits for its guest.
@@ -316,11 +326,14 @@ impl<E: Engine, S: Store> Job<E, S> {
                 launches: self.launches,
                 notes,
                 reading,
+                wrote: !self.untouched,
             },
         }
     }
 
     async fn step(&mut self, step: Step) -> (Outcome, After<E::Vm>) {
+        // Until its work begins, a step writes nothing.
+        self.untouched = true;
         if self.cancel.is_cancelled() {
             return (
                 Outcome::Cancelled,
@@ -347,6 +360,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 );
             }
         }
+        self.untouched = false;
         match step {
             Step::Pause
             | Step::Resume

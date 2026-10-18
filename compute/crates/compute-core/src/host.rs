@@ -115,6 +115,11 @@ pub enum Input {
         op: OpId,
         /// How it went.
         outcome: Outcome,
+        /// Whether it may have written to the host's local disk, which
+        /// then stays booked until a disk reading shows it. `false` only
+        /// when the host agent is certain it wrote nothing, as for a step
+        /// cancelled before its work began.
+        wrote: bool,
     },
     /// A started step no longer does the work its kind's concurrency limit
     /// protects, such as a wake whose VM already runs and only waits for
@@ -747,7 +752,8 @@ impl Host {
                 sandbox,
                 op,
                 outcome,
-            } => self.finish(now, sandbox, op, outcome, out),
+                wrote,
+            } => self.finish(now, sandbox, op, outcome, wrote, out),
             Input::Unthrottled { sandbox, op } => self.unthrottle(sandbox, op),
             Input::Borrow { loan, step } => self.borrow(loan, step),
             Input::Return { loan } => self.give_back(loan),
@@ -908,6 +914,7 @@ impl Host {
         id: SandboxId,
         op: OpId,
         outcome: Outcome,
+        wrote: bool,
         out: &mut Vec<Action>,
     ) {
         if let Some(step) = self.orphans.remove(&op) {
@@ -932,13 +939,17 @@ impl Host {
         // A checkpoint leaves its sandbox running, booking its next save as
         // before, so what it wrote, its new memory image, is booked here
         // whatever it came to: one cancelled while it uploads has written
-        // it too.
-        let wrote = match (flight.step, outcome) {
+        // it too. A step that certainly wrote nothing, such as one
+        // cancelled before it began, books nothing: a checkpoint cancelled
+        // so, and due again at once, would otherwise book an image each
+        // time it is tried.
+        let written = match (flight.step, outcome) {
+            _ if !wrote => DiskSpace::default(),
             (Step::Checkpoint, _) | (Step::Save, Outcome::Failed(_)) => slot.save_space(),
             (Step::Fetch, Outcome::Failed(_)) => DiskSpace::save(slot.size.fetch),
             _ => DiskSpace::default(),
         };
-        self.disk_spent = self.disk_spent.add(wrote);
+        self.disk_spent = self.disk_spent.add(written);
         let before = slot.state;
         let backoff = if flight.step.wakes() {
             &self.policy.wake_backoff
