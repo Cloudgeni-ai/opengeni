@@ -34,6 +34,9 @@ import {
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import { createActivityTestHarness } from "../src/activities";
+import * as titlePreparation from "../src/activities/agent-turn/session-title";
+import * as turnContext from "../src/activities/agent-turn/turn-context";
+import { createCoreCodexRequests } from "../src/activities/agent-turn/codex-core-requests";
 
 // A Steer to a busy chat is read at the running turn's next model-step
 // boundary: the current step's tool calls finish, nothing in flight is cut
@@ -646,6 +649,177 @@ test("a Steer while the model is still generating cuts that request short and ke
   expect(historyShape(history)).toEqual(["user:task", "assistant", "user:status", "assistant"]);
   expect((await turns(session.id)).map((turn) => turn.status)).toEqual(["superseded", "completed"]);
 });
+
+/** The fixture has no remote tools; enable only its offline title sidecar. */
+function enableOfflineParallelTitles() {
+  const plan = titlePreparation.sessionTitleToolPlan;
+  const needsTitle = titlePreparation.shouldRequestMissingSessionTitle;
+  return [
+    spyOn(titlePreparation, "shouldRequestMissingSessionTitle").mockImplementation((input) =>
+      needsTitle({ ...input, firstPartyMcpTools: ["set_session_title"] }),
+    ),
+    spyOn(titlePreparation, "sessionTitleToolPlan").mockImplementation((input) => ({
+      ...plan(input),
+      generateTitleInParallel: input.shouldRequestTitle,
+      promoteTitleTool: false,
+    })),
+  ];
+}
+
+for (const titleAlreadyCompleted of [false, true]) {
+  test(`Steer drains title custody without waiting for generation: completed=${titleAlreadyCompleted}`, async () => {
+    const ctx = await fixture();
+    const session = await startSession(ctx);
+    const bus = new MemoryEventBus();
+    let titleCalls = 0;
+    let titleAborted = false;
+    const model = new StreamingModel((call) =>
+      call === 0
+        ? {
+            completed: [assistantMessage("Checking the task.", "title-main")],
+            cutOff: { itemId: "title-cut", text: "Next I will" },
+            onStreaming: async () => {
+              expect(titleCalls).toBe(1);
+              const before = (await events(ctx, session.id)).at(-1)?.sequence ?? 0;
+              await send(ctx, session.id, "What is the status?", "steer");
+              await publishSince(ctx, session.id, bus, before);
+            },
+          }
+        : { completed: [assistantMessage("Status is ready.", "title-next")] },
+    );
+    const runtime = scriptedRuntime(model, async () => {});
+    runtime.generateSessionTitle = async (_settings, _prompt, options) => {
+      titleCalls += 1;
+      if (titleAlreadyCompleted || titleCalls > 1)
+        return { title: "Task status and progress", usage: null };
+      return await new Promise((resolve) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          titleAborted = true;
+          resolve({ title: null, usage: null });
+        };
+        const timer = setTimeout(() => {
+          options!.signal!.removeEventListener("abort", onAbort);
+          resolve({ title: "Unnecessarily delayed title", usage: null });
+        }, 2_000);
+        options!.signal!.addEventListener("abort", onAbort, { once: true });
+      });
+    };
+    const spies = enableOfflineParallelTitles();
+    try {
+      expect((await runTurn(ctx, session.id, runtime, bus)).status).toBe("idle");
+      expect(titleAborted).toBe(!titleAlreadyCompleted);
+      const firstEvents = await events(ctx, session.id);
+      expect(firstEvents.filter((event) => event.type === "turn.superseded")).toHaveLength(1);
+      const titles = firstEvents.filter((event) => event.type === "session.title_set");
+      expect(titles).toHaveLength(titleAlreadyCompleted ? 1 : 0);
+      if (titleAlreadyCompleted) {
+        expect(titles[0]!.sequence).toBeLessThan(
+          firstEvents.find((event) => event.type === "turn.superseded")!.sequence,
+        );
+      }
+      expect((await runTurn(ctx, session.id, runtime, bus)).status).toBe("idle");
+      expect(titleCalls).toBe(titleAlreadyCompleted ? 1 : 2);
+      expect(
+        (await events(ctx, session.id)).filter((event) => event.type === "session.title_set"),
+      ).toHaveLength(1);
+      const firstInput = JSON.stringify(model.requests[0]!.input);
+      expect(JSON.stringify(model.requests[1]!.input).startsWith(firstInput.slice(0, -1))).toBe(
+        true,
+      );
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+}
+
+for (const titleCustody of ["none", "clean", "unknown"] as const) {
+  test(`a withdrawn Steer respects title custody: ${titleCustody}`, async () => {
+    const unknownTitleOutcome = titleCustody === "unknown";
+    const ctx = await fixture();
+    const session = await startSession(ctx);
+    const scripted = new ScriptedModel([
+      { id: "withdrawn-title-step", output: [functionCall("local_fixture", {}, "title-call")] },
+      { id: "withdrawn-title-answer", output: [assistantMessage("All steps done.")] },
+    ]);
+    let phantomReads = 0;
+    let titleCalls = 0;
+    let titleAborted = false;
+    let reservations = 0;
+    const settlements: string[] = [];
+    const titleRequests = createCoreCodexRequests({
+      reserve: async () => {
+        reservations += 1;
+        return { operationId: crypto.randomUUID() };
+      },
+      settle: async ({ outcome }) => {
+        settlements.push(outcome);
+      },
+    });
+    const titleRequest = { requestId: "withdrawn-title", transportAttempt: 1 };
+    const read = spyOn(opengeniDb, "hasPendingSteerForTurn").mockImplementation(async () => {
+      if (scripted.calls !== 1 || phantomReads > 0) return false;
+      phantomReads += 1;
+      return true;
+    });
+    const runtime = scriptedRuntime(scripted, async () => {});
+    runtime.generateSessionTitle = async (_settings, _prompt, options) => {
+      titleCalls += 1;
+      if (titleCalls > 1) {
+        if (titleCustody === "clean") {
+          await titleRequests.reserve(titleRequest);
+          await titleRequests.observe({ ...titleRequest, outcome: "response_received" });
+        }
+        return { title: "Completed task progress", usage: null };
+      }
+      if (unknownTitleOutcome) await titleRequests.reserve(titleRequest);
+      return await new Promise((resolve) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          titleAborted = true;
+          if (unknownTitleOutcome) {
+            void titleRequests
+              .observe({ ...titleRequest, outcome: "unknown" })
+              .then(() => resolve({ title: null, usage: null }));
+          } else resolve({ title: null, usage: null });
+        };
+        const timer = setTimeout(() => {
+          options!.signal!.removeEventListener("abort", onAbort);
+          resolve({ title: "Delayed task progress", usage: null });
+        }, 2_000);
+        options!.signal!.addEventListener("abort", onAbort, { once: true });
+      });
+    };
+    const spies = enableOfflineParallelTitles();
+    const custody =
+      titleCustody !== "none"
+        ? spyOn(turnContext, "subscriptionCoreTurnOf").mockReturnValue({
+            titleRequests,
+          } as NonNullable<ReturnType<typeof turnContext.subscriptionCoreTurnOf>>)
+        : null;
+    try {
+      expect((await runTurn(ctx, session.id, runtime)).status).toBe("idle");
+      expect(phantomReads).toBe(1);
+      expect(titleAborted).toBe(true);
+      expect(titleCalls).toBe(unknownTitleOutcome ? 1 : 2);
+      expect(titleRequests.hasUnknownOutcome()).toBe(unknownTitleOutcome);
+      expect(reservations).toBe(titleCustody === "none" ? 0 : 1);
+      expect(settlements).toEqual(
+        unknownTitleOutcome ? ["unknown"] : titleCustody === "clean" ? ["response_received"] : [],
+      );
+      const timeline = await events(ctx, session.id);
+      expect(timeline.some((event) => event.type === "turn.superseded")).toBe(false);
+      expect(timeline.filter((event) => event.type === "session.title_set")).toHaveLength(
+        unknownTitleOutcome ? 0 : 1,
+      );
+      expect(timeline.filter((event) => event.type === "turn.completed")).toHaveLength(1);
+    } finally {
+      read.mockRestore();
+      custody?.mockRestore();
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+}
 
 test("several quick Steers while the model generates are read in order by one request", async () => {
   const ctx = await fixture();

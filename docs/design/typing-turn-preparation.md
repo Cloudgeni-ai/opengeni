@@ -457,3 +457,63 @@ reliable total-latency win. Production's longer post-claim window may hide more,
 but that remains a canary hypothesis, not a measured saving. Warm catalog hits
 still pay the live scope/serving read, and the hint adds an early read; track
 both hit cost and cold-probe overlap before claiming a general improvement.
+
+## Follow-up: do not wait for a display title before Steer handover
+
+A first-turn Steer can arrive while its independent display-title request is
+still running. Previously the handover finished that request before recording
+`turn.superseded`, so a cosmetic task delayed both handover and the correction's
+first model request. The activity now cancels and joins pending title work at
+that boundary. A title already completed still persists, including its usage
+and request custody, before settlement. Provider work never escapes the activity.
+
+If the Steer is withdrawn under the settlement lock, the same attempt resumes.
+It rechecks admission and restarts a cancelled title only when its request lane
+permits another request; an unknown subscription outcome keeps its replay fence
+and leaves titling to a later turn. A completed title is not regenerated.
+Ordinary final completion still waits for its title. Cancellation preserves any
+resolved result and usage even if it is still passing through async transport
+wrappers; only a rejected generation has no result to persist.
+
+This is a model-facing behavior change requiring review. No previously sent
+prompt or stored history item changes, but the next turn may still be untitled:
+the existing title-tool plan then chooses its untitled disclosure and a new
+parallel title request rather than its titled disclosure. That moves the existing
+tool-list transition to the turn after a title succeeds. The restarted title can
+use the correction's opener, and an interrupted title request may have consumed
+provider work. The change does not claim byte-identical later tool catalogs.
+
+For a permitted first-party carrier selecting `set_session_title` and `goal_set`,
+the existing tool-plan snapshots are:
+
+| State at next-turn preparation | Parallel title | Eager title tool | Remote selected tools |
+| --- | --- | --- | --- |
+| Already titled | No | No | `set_session_title`, `goal_set` |
+| Still untitled, parallel generator available | Yes | No | `goal_set` |
+| Still untitled, no parallel generator | No | Yes | `goal_set` |
+
+No carrier or permission is added. The plan tests pin all three outcomes. The
+change affects which existing row applies after cancellation, not the plan's
+rules or any previously persisted model input.
+
+`steer_handover_title` measures cancellation plus joining/persisting any completed
+result, not the complete Steer latency. A provider that ignores cancellation can
+still delay this drain; it must not be detached merely to improve the metric.
+
+A matched development stack used the real API, Temporal, PostgreSQL and Codex
+HTTP transport with synthetic credentials, a streaming answer, and a fixed
+two-second title response. Ten first-answer Steers per cohort measured:
+
+| Milliseconds, median / p90 | Before | After |
+| --- | ---: | ---: |
+| Steer acceptance → superseded | 1,833 / 1,878 | 139 / 153 |
+| Steer acceptance → next request-start audit | 2,238 / 2,302 | 616 / 795 |
+| Steer acceptance → answer transport abort | 43 / 68 | 60 / 75 |
+| Answer abort → superseded | 1,786 / 1,838 | 75 / 95 |
+
+The answer transport already aborted promptly; the saved time was after that
+abort. The fixture observed cancellation of the pending title and a fresh title
+request on the next turn. These are synthetic-delay measurements, not a claim
+that production saves two seconds. The next request-start audit is not the
+literal socket-send timestamp. Production's retained title events consistently
+preceded handover, but live before/after verification remains necessary.

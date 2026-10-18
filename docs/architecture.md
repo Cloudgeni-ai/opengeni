@@ -1189,6 +1189,13 @@ model request, reads `hasPendingSteerForTurn` (a queued user/API turn with
 `delivery: "steer"`, or a pending agent Steer instruction). When one exists,
 admission throws `ModelStepHandover` before the request leaves the worker.
 
+Steer handover cancels and drains an in-flight parallel display title before
+settlement, preserving already-completed title usage and custody. If the Steer
+is withdrawn, the continuing attempt rechecks admission and restarts a cancelled
+title only if its request custody permits another call; unknown outcomes remain
+fenced. A later untitled turn follows the existing title-tool disclosure rules;
+no earlier prompt prefix is rewritten. See `docs/design/typing-turn-preparation.md`.
+
 The turn does not wait for that boundary on its own schedule. A Steer watch
 per attempt (`steer-watch.ts`) subscribes to the session's live events
 (`session.control.steer_requested`, `session.queue.changed`,

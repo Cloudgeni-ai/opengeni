@@ -89,6 +89,7 @@ import {
   recordModelInputTokens,
   recordModelStepPhase,
   recordTurnStartupPhase,
+  measureTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
   recordSandboxSharedPreparation,
   StreamTimingMetrics,
@@ -505,10 +506,11 @@ export async function runTurnStreamAttempt(
     parallelSessionTitleFinished = true;
     await parallelSessionTitle?.finish();
   };
-  const cancelParallelSessionTitle = async (): Promise<void> => {
-    if (parallelSessionTitleFinished) return;
+  const cancelParallelSessionTitle = async (): Promise<GeneratedSessionTitle | null> => {
+    if (parallelSessionTitleFinished) return (await parallelSessionTitle?.finish()) ?? null;
     parallelSessionTitleFinished = true;
     await parallelSessionTitle?.cancel();
+    return (await parallelSessionTitle?.finish()) ?? null;
   };
   let runInput: Awaited<ReturnType<typeof turnInput>>["input"] | null = null;
   let codemodeContinuationNote: string | undefined;
@@ -2193,7 +2195,13 @@ export async function runTurnStreamAttempt(
       await historySink.reconcileConversationTruth({ requireDurable: true });
       await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
       await finalizeTurnOpStreamOps();
-      await finishParallelSessionTitle();
+      // A display title must not delay the person's correction. Cancel and
+      // join it before settlement; an already-completed result still persists.
+      const completedTitle = await measureTurnStartupPhase(
+        observability,
+        { phase: "steer_handover_title", provider: streamProvider, backend: groupBoxBackend },
+        cancelParallelSessionTitle,
+      );
       await flushHeldSessionUsageReceipts(db, input.sessionId);
       const settled = await eventing.settle!({
         events: [
@@ -2217,7 +2225,19 @@ export async function runTurnStreamAttempt(
         // rebuild the input from the durable history and resume sampling.
         preemptedCutOffText = "";
         steerWatch?.rearm();
+        const restartTitle =
+          generateSessionTitleInParallel &&
+          runtime.generateSessionTitle &&
+          !completedTitle?.title &&
+          (subscriptionCoreTurnOf(providerTurn)?.titleRequests?.canRecover() ?? true);
+        if (restartTitle) {
+          // The same attempt continues, so its cancelled sidecar needs a new
+          // owner. Check admission against the completed stream before the
+          // input rebuild seeds the history sink from its durable projection.
+          await revalidateModelCallAdmission();
+        }
         await prepareRunAttemptInput();
+        if (restartTitle) startParallelSessionTitle();
         return "resume_after_withdrawn_handover";
       }
       if (!settled) return claimedResult({ status: "cancelled" });
@@ -2428,49 +2448,53 @@ export async function runTurnStreamAttempt(
   // Preparation may have spent the last allowance on a completed summary.
   // Neither the title sidecar nor ordinary inference may dispatch afterward.
   await revalidateModelCallAdmission();
-  if (
-    turn.source !== "compaction" &&
-    generateSessionTitleInParallel &&
-    runtime.generateSessionTitle &&
-    !runtimeCancellationSignal.aborted
-  ) {
-    const serviceTier = serviceTierForLatencyMode(
-      turnExecutionPolicy.providerId,
-      turnExecutionPolicy.latencyMode,
-    );
-    titleCreditPolicyRevision = creditPolicyRevision;
-    const titleRoute = sessionTitleRoute({
-      resolvedModel,
-      modelName: turnExecutionPolicy.upstreamModelId,
-      resolveTurnModel: (modelId) => runtime.resolveTurnModel(runSettings, modelId),
-    });
-    titleUsageModelId = titleRoute.usageModelId;
-    parallelSessionTitle = startParallelSessionTitleGeneration({
-      signal: runtimeCancellationSignal,
-      onFinish: persistParallelSessionTitle,
-      generate: async (signal) =>
-        await withSessionTitleProviderRequestContext(() =>
-          runtime.generateSessionTitle!(
-            runSettings,
-            sessionTitlePrompt,
-            sessionTitleGenerationOptions({
-              resolvedModel: titleRoute.resolvedModel,
-              modelName: titleRoute.modelName,
-              serviceTier,
-              signal,
-            }),
+  function startParallelSessionTitle(): void {
+    if (
+      turn.source !== "compaction" &&
+      generateSessionTitleInParallel &&
+      runtime.generateSessionTitle &&
+      !runtimeCancellationSignal.aborted
+    ) {
+      const serviceTier = serviceTierForLatencyMode(
+        turnExecutionPolicy.providerId,
+        turnExecutionPolicy.latencyMode,
+      );
+      titleCreditPolicyRevision = creditPolicyRevision;
+      const titleRoute = sessionTitleRoute({
+        resolvedModel,
+        modelName: turnExecutionPolicy.upstreamModelId,
+        resolveTurnModel: (modelId) => runtime.resolveTurnModel(runSettings, modelId),
+      });
+      titleUsageModelId = titleRoute.usageModelId;
+      parallelSessionTitleFinished = false;
+      parallelSessionTitle = startParallelSessionTitleGeneration({
+        signal: runtimeCancellationSignal,
+        onFinish: persistParallelSessionTitle,
+        generate: async (signal) =>
+          await withSessionTitleProviderRequestContext(() =>
+            runtime.generateSessionTitle!(
+              runSettings,
+              sessionTitlePrompt,
+              sessionTitleGenerationOptions({
+                resolvedModel: titleRoute.resolvedModel,
+                modelName: titleRoute.modelName,
+                serviceTier,
+                signal,
+              }),
+            ),
           ),
-        ),
-      onError: (error) => {
-        observability.warn("parallel session title generation failed", {
-          ...safeErrorDiagnostic(error),
-          errorClass: "ParallelSessionTitleGenerationError",
-          errorCode: "parallel_session_title_generation_failed",
-          origin: "worker",
-        });
-      },
-    });
+        onError: (error) => {
+          observability.warn("parallel session title generation failed", {
+            ...safeErrorDiagnostic(error),
+            errorClass: "ParallelSessionTitleGenerationError",
+            errorCode: "parallel_session_title_generation_failed",
+            origin: "worker",
+          });
+        },
+      });
+    }
   }
+  startParallelSessionTitle();
   try {
     if (yieldsToSteer) {
       steerWatch = await startSteerWatch({

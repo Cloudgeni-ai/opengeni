@@ -443,7 +443,7 @@ describe("startParallelSessionTitleGeneration", () => {
       generate: async (signal) => {
         observedSignal = signal;
         await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
-        return { title: "Too late", usage: null };
+        throw signal.reason;
       },
     });
 
@@ -463,7 +463,16 @@ describe("startParallelSessionTitleGeneration", () => {
       resolveGeneration = resolve;
     });
     const onFinish = mock(async () => {});
-    const task = startParallelSessionTitleGeneration({ generate: () => generation, onFinish });
+    const task = startParallelSessionTitleGeneration({
+      generate: async () => {
+        const completed = await generation;
+        // The response is complete, but transport/context wrappers have not
+        // finished resolving it when cancellation arrives.
+        for (let hop = 0; hop < 5; hop += 1) await Promise.resolve();
+        return completed;
+      },
+      onFinish,
+    });
 
     resolveGeneration(result);
     // No yield: cancellation races the already-queued completion handler.
@@ -473,13 +482,13 @@ describe("startParallelSessionTitleGeneration", () => {
     expect(onFinish).toHaveBeenCalledWith(result);
   });
 
-  test("a timed-out request discards a late title and still joins settlement", async () => {
+  test("a timed-out request joins its aborted transport and settlement", async () => {
     const onFinish = mock(async () => {});
     const task = startParallelSessionTitleGeneration({
       timeoutMs: 1,
       generate: async (signal) => {
         await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
-        return { title: "Too late", usage: null };
+        throw signal.reason;
       },
       onFinish,
     });

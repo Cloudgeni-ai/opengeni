@@ -240,7 +240,9 @@ export function startParallelSessionTitleGeneration(input: {
   const signal = AbortSignal.any(signals);
   const generation = input
     .generate(signal)
-    .then((result) => (signal.aborted ? null : result))
+    // A response can finish before cancellation but still be resolving through
+    // async transport layers. Keep its title and usage; only rejection proves
+    // there is no completed result to persist.
     .catch((error: unknown) => {
       if (!signal.aborted) input.onError?.(error);
       return null;
@@ -258,9 +260,6 @@ export function startParallelSessionTitleGeneration(input: {
   return {
     finish,
     cancel: async () => {
-      // Let an already-resolved generation deliver its queued result before
-      // aborting. A request still pending at this boundary remains cancelled.
-      await Promise.resolve();
       cancellationController.abort();
       await finish();
     },

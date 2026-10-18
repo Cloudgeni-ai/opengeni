@@ -2314,6 +2314,7 @@ export type TurnStartupPhase =
   | "claim_rls_setup"
   | "claim_scoped_callback"
   | "claim_continued_accounts"
+  | "steer_handover_title"
   | "claim_update_authority"
   | "claim_session_read"
   | "claim_capability_settings"
