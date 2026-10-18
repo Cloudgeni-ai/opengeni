@@ -299,6 +299,12 @@ describe("unit process planning", () => {
     ).toBe(true);
     expect(sourceUsesWallClockPerformanceAssertion("const now = Date.now();")).toBe(false);
     expect(sourceUsesWallClockPerformanceAssertion("expect(rows).toBeLessThan(100);")).toBe(false);
+    expect(
+      sourceUsesWallClockPerformanceAssertion(
+        "// opengeni:test-wall-clock-sensitive\nexpect(block.durationMs).toBeGreaterThanOrEqual(200);",
+      ),
+    ).toBe(true);
+    expect(sourceUsesWallClockPerformanceAssertion("// wall clock sensitive")).toBe(false);
   });
 
   test("recognizes only shared-container cluster-role mutations", () => {

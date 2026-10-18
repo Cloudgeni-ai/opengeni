@@ -68,8 +68,12 @@ export function sourceUsesExplicitTestConcurrency(source: string): boolean {
 
 export function sourceUsesWallClockPerformanceAssertion(source: string): boolean {
   return (
-    /\b(?:Bun\.nanoseconds|performance\.now|Date\.now)\s*\(/.test(source) &&
-    /\.toBeLessThan(?:OrEqual)?\s*\(/.test(source)
+    // Timing that the source pattern below cannot see, such as a sampling
+    // profiler whose sampler thread starves when other test processes share
+    // the CPUs, declares itself explicitly.
+    /opengeni:test-wall-clock-sensitive/u.test(source) ||
+    (/\b(?:Bun\.nanoseconds|performance\.now|Date\.now)\s*\(/.test(source) &&
+      /\.toBeLessThan(?:OrEqual)?\s*\(/.test(source))
   );
 }
 
