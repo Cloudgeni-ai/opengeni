@@ -869,6 +869,7 @@ from that commit. Results carry the commits as `backend+agent`.
 | r5 14:46 | f973bd193+057cd2c06 | fec5f6e4d | 3 | 1 | create: the sandbox was created (17.0 s from the provision start to `sandbox.box.created`, the gateway logged the host linked and the agent's session opened), then the first file write failed: the agent refuses a transfer whose session epoch is 0, which the backend sends |
 | r6 14:51 | the same, lazy provisioning off | fec5f6e4d | 3 | 1 | create: the same failure; eager provisioning does not change it |
 | r8 15:38 | 1f341facf+e5441d3e1 | 6423207a7 | 10 | 9 | none before create: create (first turn 25.1 s), commands, files, git, browser, move (26.6 s to another host, files kept) pass; see below |
+| r9 16:38 | 5ca485cef+734a3ba3a | ab08a672b | 8 | 12 | none before create: create (first turn 25.1 s), commands, files, git, browser pass; see below |
 
 Checks after create were skipped through r6 because they need create.
 In r8 (every request now carries a nonzero agent epoch) create and most
@@ -889,3 +890,28 @@ repeated "more agent-link connections than a sandbox may hold" for the
 same sandbox (124 times in 10 minutes). The run-as check
 is not applicable: the backend and the agent support running as another
 user, but Opengeni has no way to request it for a sandbox.
+
+The port check of r8 and r9 was wrong: it opened `connect/8765`, which
+reaches guest vsock port 8765, where nothing listens. A guest TCP port is
+reached through the guest's gateway (`connect/57` with the header line
+`tcp 8765`); the check does that from r10 on. The move check of r9 failed
+because a sandbox is handed off only while it sleeps and the failed
+sleep-remote check had left it awake (in r8 it was asleep by chance); the
+check now puts it to sleep first.
+
+r9 ran compute-control's versioned schema (`compute_schema`) for the first
+time, over r8's database without a reset: both replicas started and all
+three hosts registered again. In r9 the background command was listed
+while it ran, but stopping it through Opengeni did not end it within
+60 s; the terminal, desktop and delete failed as in r8; the UI pass failed
+because the session page shows its Files, Terminal and Desktop tabs only
+after "Open workspace" (fixed in the pass). The host journal explains
+the sleep failures better than r8 did. From 16:39:32 to 16:45:13, right
+after the background command started, the host ran the sandbox's
+scheduled checkpoint about 110 times a second, each cancelled at once
+(76,000 journal lines in six minutes); it stopped when a wake was refused
+with "host full: disk, needed 8.1 GB, free 0" while the host's compute
+disk had 481 GB free, so the host's disk booking had leaked. Later sleeps
+(Saved at 16:47:23, which idle then took to Remote by 16:48:02) were
+resumed by a request only at 16:49:24, again about 120 s after the
+command that should have woken them.
