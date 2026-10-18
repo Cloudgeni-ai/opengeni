@@ -30,6 +30,8 @@ export type FakeFailure = {
   exitCode?: number;
   sleepMs?: number;
   stdoutBytes?: number;
+  /** Override the receipt after an applied create, including invalid ids. */
+  stdout?: string;
   /** Apply the mutation before failing (an error after the request was sent). */
   afterEffect?: boolean;
   once?: boolean;
@@ -47,6 +49,8 @@ export type FakeState = {
   /** Number of upcoming commands that report an invalidated session. */
   invalidate?: number;
   logins?: number;
+  /** Deterministic entropy for the next generated item id (consumed once). */
+  nextItemIdBytes?: number[];
 };
 
 const statePath = process.env.FAKE_PASS_STATE!;
@@ -286,7 +290,10 @@ if (command === "item" && sub === "create") {
     fail("Error parsing JSON from stdin", "expected value at line 1 column 1");
   }
   if (role === "Viewer") fail(context, "Could not perform operation. Reason: PermissionDenied");
-  const id = randomBytes(12).toString("base64url");
+  // A successful fake receipt must use the adapter's supported id alphabet.
+  // Random base64url can start with '-', which correctly stays unconfirmed.
+  const id = Buffer.from(state.nextItemIdBytes ?? randomBytes(12)).toString("hex");
+  delete state.nextItemIdBytes;
   const now = civilNow();
   let content: unknown;
   let note = "";
@@ -357,6 +364,7 @@ if (command === "item" && sub === "create") {
   });
   save(state);
   if (failure?.afterEffect) {
+    if (failure.stdout !== undefined) process.stdout.write(failure.stdout);
     process.stderr.write(failure.stderr ?? "");
     process.exit(failure.exitCode ?? 1);
   }
