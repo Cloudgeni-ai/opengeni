@@ -197,6 +197,15 @@ pub trait Engine: Send + Sync + 'static {
     /// resources. Succeeds when there is none.
     fn clean_up(&self, spec: &VmSpec) -> impl Future<Output = Result<(), EngineError>> + Send;
 
+    /// Releases what VMs that ended while nothing managed them left behind
+    /// with no VM to name it by, such as Firecracker's empty cgroups,
+    /// which would go on claiming the memory protection of VMs that are
+    /// gone. For the one host agent holding the host, once, before it
+    /// starts or adopts any VM. Blocks briefly.
+    fn clean_up_left_behind(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+
     /// Bytes of host memory the VM holds right now; with huge-page guest
     /// memory, the huge pages it holds.
     fn resident_bytes(&self, vm: &Self::Vm) -> Result<u64, EngineError>;

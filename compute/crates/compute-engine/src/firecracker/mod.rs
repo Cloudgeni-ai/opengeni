@@ -176,7 +176,9 @@ pub struct FirecrackerConfig {
     /// The jailer binary from the same Firecracker release.
     pub jailer: PathBuf,
     /// Parent of every VM's own cgroup. It must sit inside the cgroup v2
-    /// hierarchy with the memory and CPU controllers available.
+    /// hierarchy with the memory and CPU controllers available, and hold
+    /// no groups but the VMs': [`Engine::clean_up_left_behind`] removes
+    /// the empty ones.
     pub cgroup_parent: PathBuf,
 }
 
@@ -1067,6 +1069,12 @@ impl Engine for Firecracker {
         self.discard(spec)
             .await
             .map_err(|error| EngineError::io("clean_up", error))
+    }
+
+    fn clean_up_left_behind(&self) -> Result<(), EngineError> {
+        self.cgroups
+            .remove_empty_children()
+            .map_err(|error| EngineError::io("clean_up_left_behind", error))
     }
 
     fn resident_bytes(&self, vm: &FirecrackerVm) -> Result<u64, EngineError> {

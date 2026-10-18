@@ -1175,6 +1175,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Takes back what an earlier agent left, then takes a first reading
     /// and starts the templates.
     async fn begin(&mut self, held: Vec<Held>, strays: Vec<Stray>, shapes: Vec<Shape>) {
+        // Before any VM starts or is adopted, so no group being set up
+        // looks left behind.
+        if let Err(error) = self.engine.clean_up_left_behind() {
+            tracing::warn!(%error, "could not release what VMs that ended unmanaged left behind");
+        }
         self.hold_builds(held);
         self.recover(strays).await;
         // Admission refuses what needs disk until it has a reading, and
