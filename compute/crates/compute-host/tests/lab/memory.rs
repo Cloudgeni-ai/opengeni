@@ -150,6 +150,81 @@ async fn a_guest_stalls_while_the_huge_page_pool_is_empty_and_resumes_after() {
     host.finish("pool");
 }
 
+/// Host memory `sandbox` holds, as the agent last sampled it.
+fn resident(status: &HostStatus, sandbox: Id) -> u64 {
+    status
+        .sandboxes
+        .iter()
+        .find(|found| found.id == sandbox)
+        .and_then(|found| found.resident_bytes)
+        .unwrap_or(0)
+}
+
+/// A running guest hands back memory it frees, on both profiles. The host
+/// can give back only whole backing pages, so a guest on 2 MiB huge pages
+/// that reported its free memory in 4 KiB blocks would give back nothing;
+/// the engine has it report blocks no smaller than its backing pages.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_guest_gives_back_memory_it_frees() {
+    const FILL: u64 = 512 * MIB;
+    let Some(lab) = lab() else {
+        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
+        return;
+    };
+    let host = Host::new(&lab, "reclaim", &[]);
+    let agent = host.start().await;
+    let sandbox = id(0);
+    create_sized(&agent.client, sandbox, 1024).await;
+    let (output, _) = exec(
+        &agent.client,
+        sandbox,
+        &format!(
+            "dd if=/dev/zero of=/dev/shm/fill bs=1M count={} 2>/dev/null; echo dd=$?",
+            FILL / MIB
+        ),
+    )
+    .await;
+    assert_eq!(output.trim(), "dd=0");
+    agent
+        .wait_until("the filled guest's memory to be sampled", |status| {
+            resident(status, sandbox) >= FILL
+        })
+        .await;
+    let full = resident(&agent.status().await, sandbox);
+    let started = Instant::now();
+    let (output, _) = exec(&agent.client, sandbox, "rm /dev/shm/fill; echo rm=$?").await;
+    assert_eq!(output.trim(), "rm=0");
+    // The guest reports a couple of seconds after memory is freed.
+    let deadline = started + Duration::from_secs(60);
+    let freed = loop {
+        let now = resident(&agent.status().await, sandbox);
+        if now + FILL / 2 <= full {
+            break now;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the guest gave back {} MiB of the {} MiB it freed ({} MiB held, {} MiB when full; \
+             huge pages: {})",
+            full.saturating_sub(now) / MIB,
+            FILL / MIB,
+            now / MIB,
+            full / MIB,
+            nested()
+        );
+        sleep(Duration::from_millis(200)).await;
+    };
+    eprintln!(
+        "freed {} MiB in the guest; the host got {} MiB back within {:?} (huge pages: {})",
+        FILL / MIB,
+        (full - freed) / MIB,
+        started.elapsed(),
+        nested()
+    );
+    agent.remove_all().await;
+    agent.kill();
+    host.finish("reclaim");
+}
+
 /// A cgroup the test creates, ended and removed with everything below it
 /// when dropped.
 struct Group(PathBuf);

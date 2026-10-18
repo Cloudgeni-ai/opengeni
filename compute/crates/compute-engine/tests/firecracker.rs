@@ -224,9 +224,7 @@ fn jailed_spec(lab: &Path, name: &str, uid: u32) -> VmSpec {
         cpu_weight: 200,
         memory_limit: None,
         kernel,
-        boot_args:
-            "console=ttyS0 reboot=k panic=1 quiet loglevel=1 page_reporting.page_reporting_order=0"
-                .into(),
+        boot_args: "console=ttyS0 reboot=k panic=1 quiet loglevel=1".into(),
         drives: vec![Drive {
             id: "rootfs".into(),
             path: rootfs,

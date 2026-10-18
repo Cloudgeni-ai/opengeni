@@ -4,6 +4,7 @@
 //! [`serve`] runs a pager as a process of its own, one per VM, so the VM's
 //! memory never depends on the host agent that started it.
 
+mod dir;
 pub mod quiesce;
 pub mod serve;
 pub mod user;

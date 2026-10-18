@@ -11,18 +11,20 @@
 //! (malformed requests are answered by the API thread alone and prove
 //! nothing).
 
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use nix::fcntl::{OFlag, open};
+use nix::fcntl::OFlag;
 use nix::sys::socket::{
     AddressFamily, SockFlag, SockType, UnixAddr, connect as connect_to, socket,
 };
 use nix::sys::stat::{Mode, SFlag, fstat};
 
 use super::Quiesce;
+use super::dir::Dir;
 
 /// The request whose answer is the proof.
 const REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n\r\n";
@@ -30,20 +32,30 @@ const REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nAccept: applicatio
 /// Asks the VMM listening on an API socket.
 #[derive(Debug)]
 pub struct AskVmm {
-    socket: PathBuf,
+    /// The jail the socket is in, opened while the pager was root (see
+    /// [`super::dir`]), and the socket's name there.
+    jail: Dir,
+    name: OsString,
     asking: Option<UnixStream>,
     reply: Vec<u8>,
 }
 
 impl AskVmm {
-    /// Asks the VMM whose API listens at `socket`.
-    #[must_use]
-    pub fn new(socket: PathBuf) -> Self {
-        Self {
-            socket,
+    /// Asks the VMM whose API listens at `socket`, opening the directory
+    /// it is in now: a pager about to drop to the VM's user calls this
+    /// first, since it then cannot walk the path again.
+    ///
+    /// # Errors
+    ///
+    /// If the directory cannot be opened.
+    pub fn new(socket: &Path) -> io::Result<Self> {
+        let (jail, name) = Dir::of(socket)?;
+        Ok(Self {
+            jail,
+            name,
             asking: None,
             reply: Vec::new(),
-        }
+        })
     }
 }
 
@@ -55,7 +67,7 @@ impl Quiesce for AskVmm {
     fn ask(&mut self) -> io::Result<RawFd> {
         self.asking = None;
         self.reply.clear();
-        let mut stream = connect(&self.socket)?;
+        let mut stream = connect(&self.jail, &self.name)?;
         // An empty socket's buffer takes the whole request at once.
         let written = stream.write(REQUEST)?;
         if written != REQUEST.len() {
@@ -107,22 +119,17 @@ impl Quiesce for AskVmm {
     }
 }
 
-/// Connects to the socket at `path` without following a link: the jail
-/// the socket lives in belongs to the VMM, and the pager is not to be sent
-/// anywhere else. The connection is non-blocking from the start, so a
-/// listener whose queue is full refuses at once (`EAGAIN`) instead of
-/// holding the caller.
-fn connect(path: &Path) -> io::Result<UnixStream> {
-    let fd = open(
-        path,
-        OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-        Mode::empty(),
-    )?;
+/// Connects to the socket `name` in `jail` without following a link: the
+/// jail belongs to the VMM, and the pager is not to be sent anywhere else.
+/// The connection is non-blocking from the start, so a listener whose
+/// queue is full refuses at once (`EAGAIN`) instead of holding the caller.
+fn connect(jail: &Dir, name: &OsStr) -> io::Result<UnixStream> {
+    let fd = jail.open(name, OFlag::O_PATH, Mode::empty())?;
     let kind = SFlag::from_bits_truncate(fstat(&fd)?.st_mode) & SFlag::S_IFMT;
     if kind != SFlag::S_IFSOCK {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("{} is not a socket", path.display()),
+            format!("{} is not a socket", jail.display(name)),
         ));
     }
     let stream = socket(
@@ -178,7 +185,7 @@ mod tests {
     fn only_a_successful_answer_is_proof() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("api.sock");
-        let mut ask = AskVmm::new(socket.clone());
+        let mut ask = AskVmm::new(&socket).unwrap();
         assert!(ask.ask().is_err(), "nothing listens yet");
 
         let answering = answer_once(UnixListener::bind(&socket).unwrap(), "200 OK");
@@ -200,8 +207,8 @@ mod tests {
         let _listener = UnixListener::bind(&real).unwrap();
         let link = dir.path().join("api.sock");
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        assert!(AskVmm::new(link).ask().is_err());
-        assert!(AskVmm::new(real).ask().is_ok());
+        assert!(AskVmm::new(&link).unwrap().ask().is_err());
+        assert!(AskVmm::new(&real).unwrap().ask().is_ok());
     }
 
     #[test]
@@ -222,7 +229,7 @@ mod tests {
         let started = Instant::now();
         let mut askers: Vec<AskVmm> = Vec::new();
         let refused = (0..16).find_map(|_| {
-            let mut ask = AskVmm::new(path.clone());
+            let mut ask = AskVmm::new(&path).unwrap();
             match ask.ask() {
                 Ok(_) => {
                     askers.push(ask);

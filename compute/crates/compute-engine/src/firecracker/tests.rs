@@ -278,14 +278,37 @@ async fn a_run_state_change_fails_only_when_nothing_changed() {
 #[test]
 fn boot_pins_the_clock_source_restore_can_correct() {
     assert_eq!(
-        boot_args("console=ttyS0 quiet"),
+        boot_args("console=ttyS0 quiet", None),
         "console=ttyS0 quiet clocksource=kvm-clock"
     );
-    assert_eq!(boot_args(""), "clocksource=kvm-clock");
+    assert_eq!(boot_args("", None), "clocksource=kvm-clock");
     assert_eq!(
-        boot_args("console=ttyS0 clocksource=tsc"),
+        boot_args("console=ttyS0 clocksource=tsc", None),
         "console=ttyS0 clocksource=tsc"
     );
+}
+
+#[test]
+fn a_guest_reports_freed_memory_in_blocks_the_host_can_give_back() {
+    assert_eq!(reporting_order(PageSize::Base), 0);
+    assert_eq!(reporting_order(PageSize::Huge), 9);
+    assert_eq!(
+        boot_args("console=ttyS0", Some(PageSize::Huge)),
+        "console=ttyS0 clocksource=kvm-clock page_reporting.page_reporting_order=9"
+    );
+    assert_eq!(
+        boot_args("quiet", Some(PageSize::Base)),
+        "quiet clocksource=kvm-clock page_reporting.page_reporting_order=0"
+    );
+    // The caller's own order stands, and a guest that reports nothing gets none.
+    assert_eq!(
+        boot_args(
+            "page_reporting.page_reporting_order=3 clocksource=tsc",
+            Some(PageSize::Huge)
+        ),
+        "page_reporting.page_reporting_order=3 clocksource=tsc"
+    );
+    assert_eq!(boot_args("quiet", None), "quiet clocksource=kvm-clock");
 }
 
 #[test]
