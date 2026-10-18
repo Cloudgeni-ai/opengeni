@@ -220,8 +220,11 @@ contract is `compute/docs/agent-link.md`.
 - The relay producer token arrives from the host on `_compute.relay`, and a
   fresh one before it expires. It is kept in memory only; every stream
   registration, the first and each reconnect, presents the latest one.
-- After a restore the guest sends `SIGUSR1`: the agent drops its connection and
-  dials again at once, without the outage back-off.
+- The guest carries each of the agent's connections as a stream that outlives
+  sleep, wake and checkpoints on the same host. When the host has no stream to
+  go on with (after a move, a recovery on another host or a restart of the host
+  agent), the guest sends `SIGUSR1`: the agent drops its connection and dials
+  again at once, without the outage back-off.
 - The agent writes what it has in use to `/run/compute/activity/agent.<pid>`,
   so the fabric sleeps the sandbox only when the agent is idle too: running or
   waiting host operations, plus open streams that carried traffic within the

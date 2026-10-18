@@ -462,9 +462,11 @@ enum TransportLossKind {
 
 /// Asks every link to drop its connection and dial again at once, without
 /// the back-off it uses for an outage. An agent in a fabric sandbox gets this
-/// after a restore: its connections went with the old host process, and the
-/// new one answers at once. A request that arrives while a link is dialing is
-/// kept, so that link redials once more after it connects.
+/// when its host has no stream for its connections, after a move, a recovery
+/// on another host or a restart of the host agent: its connections went with
+/// the host that carried them, and the host answers at once. A request that
+/// arrives while a link is dialing is kept, so that link redials once more
+/// after it connects.
 #[derive(Clone)]
 pub struct ReconnectSignal {
     generation: Arc<tokio::sync::watch::Sender<u64>>,
@@ -788,7 +790,8 @@ pub struct Supervisor<P: Platform> {
     browser_bridge: Option<BrowserBridgeInventory>,
     /// Latched once a clean shutdown (SIGINT/SIGTERM) is requested.
     shutdown: ShutdownSignal,
-    /// Asks every link to reconnect at once (a fabric sandbox's restore).
+    /// Asks every link to reconnect at once (a fabric sandbox whose host lost
+    /// its connections).
     reconnect: ReconnectSignal,
     /// Process-global update admission fence + idempotency key. One binary backs
     /// every workspace link, so concurrent per-link updates cannot be independent.
@@ -5212,7 +5215,7 @@ mod tests {
     /// Fabric mode over a real nats-server playing the sandbox's host: the
     /// link dials with no credential, advertises nothing to renew, follows the
     /// relay credential the host sends, refuses renewal and self-update, and
-    /// reconnects at once when asked (a restore).
+    /// reconnects at once when asked (its host lost its connections).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::too_many_lines)] // one linear wire scenario
     async fn a_fabric_link_serves_through_its_host_without_a_credential() {
@@ -5318,8 +5321,8 @@ mod tests {
             Some("update_unsupported")
         );
 
-        // A restore: the link drops its connection and says hello again at
-        // once, far inside the outage back-off.
+        // The host lost the link's connections: the link drops its own and
+        // says hello again at once, far inside the outage back-off.
         let asked = Instant::now();
         reconnect.request();
         let _ = it::next_hello(&mut hellos).await;
