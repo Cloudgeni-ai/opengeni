@@ -27,6 +27,8 @@ import {
   parseMcpServers,
   McpServerConnectionRefSchema,
   requiredSandboxEnvForBackend,
+  computeAgentApiUrl,
+  computeSettingsIssues,
   resolveStreamTokenSecret,
   retryStartupDependency,
   SANDBOX_REQUIRED_ENV,
@@ -2646,6 +2648,41 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).toThrow(
       "OPENGENI_MODAL_TOKEN_ID and OPENGENI_MODAL_TOKEN_SECRET must both be set or both omitted",
     );
+  });
+
+  test("compute is validated only when selected and needs the agent plane", () => {
+    // Not selected: nothing compute-related is required.
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_BACKEND: "docker" }, () => getSettings()),
+    ).not.toThrow();
+    expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "compute" }, () => getSettings())).toThrow(
+      "OPENGENI_COMPUTE_API_URL is required",
+    );
+    const ready = {
+      OPENGENI_SANDBOX_BACKEND: "compute",
+      OPENGENI_COMPUTE_API_URL: "http://compute.test:8080",
+      OPENGENI_COMPUTE_API_KEY: "k",
+      OPENGENI_PUBLIC_BASE_URL: "https://opengeni.test",
+      OPENGENI_SANDBOX_SELFHOSTED_ENABLED: "true",
+      OPENGENI_ENROLLMENT_SIGNING_SECRET: "enrollment-signing-secret",
+      OPENGENI_SELFHOSTED_NATS_URL: "nats://127.0.0.1:4222",
+    };
+    const settings = withEnv(ready, () => getSettings());
+    expect(computeSettingsIssues(settings)).toEqual([]);
+    expect(settings.computeVcpus).toBe(2);
+    expect(settings.computeMemoryMib).toBe(4096);
+    expect(computeAgentApiUrl(settings)).toBe("https://opengeni.test");
+    expect(() =>
+      withEnv({ ...ready, OPENGENI_SANDBOX_SELFHOSTED_ENABLED: "false" }, () => getSettings()),
+    ).toThrow("OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true is required");
+    expect(() =>
+      withEnv({ ...ready, OPENGENI_COMPUTE_MEMORY_REQUEST_MIB: "8192" }, () => getSettings()),
+    ).toThrow("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB must not exceed");
+    expect(
+      computeSettingsIssues({ ...settings, environment: "production" }).some((issue) =>
+        issue.includes("must use https"),
+      ),
+    ).toBe(true);
   });
 
   test("SANDBOX_REQUIRED_ENV + requiredSandboxEnvForBackend agree", () => {

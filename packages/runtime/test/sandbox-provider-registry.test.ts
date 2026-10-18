@@ -55,6 +55,16 @@ const CREDS: Record<SandboxBackendType, Record<string, unknown>> = {
     openSandboxImage:
       "registry.example.com/opengeni@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   },
+  // compute needs the fabric plus the Connected Machine plane its agents use.
+  compute: {
+    computeApiUrl: "https://compute.example.test",
+    computeApiKey: "k",
+    publicBaseUrl: "https://opengeni.example.test",
+    sandboxSelfhostedEnabled: true,
+    enrollmentSigningSecret: "enrollment-signing-secret",
+    selfhostedNatsUrl: "nats://nats.example.test:4222",
+    agentOpStreamEnabled: true,
+  },
 };
 
 describe("provider registry — descriptor invariants + backendId assertion", () => {
@@ -417,6 +427,7 @@ describe("createSandboxClient — per-backend matrix construction", () => {
       "blaxel",
       "cloudflare",
       "vercel",
+      "compute",
     ] as const) {
       const settings = testSettings({ sandboxBackend: backend });
       expect(() => createSandboxClient(settings)).toThrow(SandboxConfigError);

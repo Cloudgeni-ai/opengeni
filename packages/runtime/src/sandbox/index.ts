@@ -609,6 +609,33 @@ export {
   type ConnectedMachineOs,
 } from "./selfhosted/workspace-path";
 export type { SelfhostedConnectionBinding } from "./routing/backend-resolver";
+// Opengeni compute: managed microVM sandboxes whose provider session is the
+// Connected Machine agent inside the box (docs/compute-backend.md).
+export {
+  ComputeFabricClient,
+  ComputeFabricError,
+  isComputeFabricNotFound,
+  type ComputeCreateRequest,
+  type ComputeSandboxView,
+  type ComputeWokenView,
+} from "./compute/fabric";
+export {
+  getComputeAgentPlane,
+  setComputeAgentPlane,
+  type ComputeAgentConnection,
+  type ComputeAgentPlane,
+} from "./compute/plane";
+export {
+  COMPUTE_WORKSPACE_ROOT,
+  ComputeSandboxClient,
+  ComputeSandboxSession,
+  ComputeWakeGate,
+  ComputeWakingControlRpc,
+  deleteComputeBox,
+  type ComputeCreateIdentity,
+  type ComputeSessionState,
+  type ComputeTurnDeps,
+} from "./compute/session";
 // The op-stream exec transport (op-stream protocol v1.1 — streaming exec to a
 // Connected Machine runner). The worker injects `NatsOpStreamTransport` (over
 // the same bus connection as the control rpc) plus an `OpStreamJournal`

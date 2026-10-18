@@ -485,7 +485,8 @@ export interface SelfhostedSessionState {
  * consume it unchanged.
  */
 export class SelfhostedSession {
-  readonly backendId = "selfhosted" as const;
+  /** "compute" for a compute sandbox's agent session (a subclass). */
+  readonly backendId: "selfhosted" | "compute" = "selfhosted";
   readonly workspaceId: string;
   readonly controlWorkspaceId: string;
   readonly agentId: string;
