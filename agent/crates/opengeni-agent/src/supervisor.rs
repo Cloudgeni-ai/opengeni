@@ -2216,6 +2216,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             operation_resource_policy: link.platform.operation_resource_policy_supported(),
             operation_cpu_quota: link.platform.operation_cpu_quota_supported(),
             transactional_fs_write: link.platform.transactional_fs_write_supported(),
+            transactional_fs_write_machine: link.platform.transactional_fs_write_supported(),
             credential_renew: true,
             mac_permissions,
             browser_control_http: link.platform.browser_control_http_supported(),
@@ -5261,8 +5262,19 @@ mod tests {
     /// terminal receipt, and lost final acknowledgement replay without frames.
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[allow(clippy::too_many_lines)] // one linear wire scenario
     async fn transactional_write_full_wire_round_trip() {
+        transactional_write_wire_round_trip(7).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn machine_transactional_write_full_wire_round_trip() {
+        transactional_write_wire_round_trip(0).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_lines)] // one linear wire scenario
+    async fn transactional_write_wire_round_trip(epoch: u32) {
         use opengeni_agent_platform::NativePlatform;
         use v1::{control_request::Op, control_response::Result as ResultBody};
 
@@ -5297,6 +5309,7 @@ mod tests {
         let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
         let capabilities = supervisor.capabilities(&link).await;
         assert!(capabilities.transactional_fs_write);
+        assert!(capabilities.transactional_fs_write_machine);
         assert!(capabilities.credential_renew);
         let shutdown = supervisor.shutdown_handle();
         let run = tokio::spawn(async move { supervisor.run().await });
@@ -5340,15 +5353,15 @@ mod tests {
             })),
             ..Default::default()
         });
+        assert!(call(start.clone(), epoch).await.error.is_none());
         assert_eq!(
-            call(start.clone(), 0)
+            call(start, epoch + 1)
                 .await
                 .error
                 .expect("epoch fence")
                 .code,
             v1::ErrorCode::Fenced as i32
         );
-        assert!(call(start, 7).await.error.is_none());
         assert!(!dir.path().join("document").exists());
         for (seq, body) in bytes.chunks(512 * 1024).enumerate() {
             let offset = seq * 512 * 1024;
@@ -5361,21 +5374,21 @@ mod tests {
                 last,
             });
             assert_eq!(
-                call(chunk.clone(), 6)
+                call(chunk.clone(), epoch + 1)
                     .await
                     .error
                     .expect("stale fence")
                     .code,
                 v1::ErrorCode::Fenced as i32
             );
-            let response = call(chunk.clone(), 7).await;
+            let response = call(chunk.clone(), epoch).await;
             assert!(
                 matches!(response.result, Some(ResultBody::WriteChunk(_))),
                 "{:?}",
                 response.error
             );
             assert!(
-                call(chunk, 7).await.error.is_none(),
+                call(chunk, epoch).await.error.is_none(),
                 "lost acknowledgement replay"
             );
             if !last {
@@ -5386,7 +5399,7 @@ mod tests {
             Op::OpQuery(v1::OpQuery {
                 op_id: "fsw-wire-test".into(),
             }),
-            7,
+            epoch,
         )
         .await;
         let Some(ResultBody::OpStatus(status)) = query.result else {

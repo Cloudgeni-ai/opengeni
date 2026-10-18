@@ -144,6 +144,13 @@ responder. `packages/runtime/src/sandbox/selfhosted/control-replay.ts` owns nego
 bounded recovery; legacy agents keep one-shot mutation semantics. See the
 [recovery contract](connected-machines.md#control-transport-recovery).
 
+Transactional file transfers keep the exact connection, operation ID and epoch.
+Machine-addressed operations have epoch 0 (not a fabricated session epoch) and
+negotiate `transactional_fs_write_machine` in addition to `transactional_fs_write`.
+Older transactional agents retain nonzero session-scoped support; the runtime
+refuses unsupported large machine-addressed replacements before any file operation.
+See [the upload contract](../agent/TRANSACTIONAL-WRITES.md).
+
 Control revisions increase.
 
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,

@@ -3211,6 +3211,8 @@ export function registerBrowserSessionRoutes(
           enrollment.agentCapabilities.operationResourcePolicy === true,
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+        transactionalFsWriteMachineSupported:
+          enrollment.agentCapabilities.transactionalFsWriteMachine === true,
         browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&

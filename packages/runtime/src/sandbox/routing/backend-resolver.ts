@@ -68,6 +68,7 @@ export interface SelfhostedConnectionBinding {
   operationResourcePolicySupported: boolean;
   operationCpuQuotaSupported: boolean;
   transactionalFsWriteSupported?: boolean;
+  transactionalFsWriteMachineSupported?: boolean;
   browserControlHttpSupported?: boolean;
 }
 
@@ -398,6 +399,8 @@ export function makeActiveBackendResolver(
         operationResourcePolicySupported: connection.operationResourcePolicySupported,
         operationCpuQuotaSupported: connection.operationCpuQuotaSupported,
         transactionalFsWriteSupported: connection.transactionalFsWriteSupported === true,
+        transactionalFsWriteMachineSupported:
+          connection.transactionalFsWriteMachineSupported === true,
         browserControlHttpSupported: connection.browserControlHttpSupported === true,
         // The routing proxy caches this session by sandbox+epoch, but command
         // policy and runner authority are mutable. Re-read one coherent DB
