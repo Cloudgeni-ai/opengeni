@@ -1571,7 +1571,9 @@ describe("BrowserSession route discipline", () => {
       source.indexOf("async function continueExpiredBrowserResume"),
       source.indexOf("async function settleExpiredBrowserResume"),
     );
-    expect(continuation).toContain("if (!expired?.controllerGeneration) return null;");
+    expect(continuation).toContain(
+      "if (!expired?.controllerGeneration) return { unavailable: null };",
+    );
     expect(continuation).toContain(
       'browserSessionStorageMode(record.session) !== "private_profile"',
     );
@@ -1616,6 +1618,11 @@ describe("BrowserSession route discipline", () => {
     expect(settle.indexOf("if (!expired.settleable)")).toBeLessThan(
       settle.indexOf("withBrowserPlacement("),
     );
+    // The refusal says why the copy could not be continued: the controller's
+    // own explanation, or which precondition it failed.
+    expect(continuation).toContain("return { unavailable: error.error.message };");
+    expect(resume).toContain("continued.unavailable,");
+    expect(settle).toContain("could not be recovered. ${unavailable}");
   });
 
   test("preserves exact human, service, and agent-attempt action provenance", () => {

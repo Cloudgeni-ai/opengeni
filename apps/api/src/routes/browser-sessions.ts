@@ -2492,14 +2492,20 @@ export function registerBrowserSessionRoutes(
             browserSessionId,
             request.operationId,
           );
-          if (continued) {
-            const parsed = BrowserSessionMutationResponse.parse(continued);
+          if ("continued" in continued) {
+            const parsed = BrowserSessionMutationResponse.parse(continued.continued);
             observeLifecycleResult(deps.observability, startedAtMs, parsed);
             return context.json(parsed, 200);
           }
           // Otherwise end an expired resume's retained controller generation,
           // then resume normally from the same durable state.
-          await settleExpiredBrowserResume(context, grant, workspaceId, browserSessionId);
+          await settleExpiredBrowserResume(
+            context,
+            grant,
+            workspaceId,
+            browserSessionId,
+            continued.unavailable,
+          );
           before = await getBrowserSessionControlRecord(deps.db, {
             accountId: grant.accountId,
             workspaceId,
@@ -4080,8 +4086,8 @@ export function registerBrowserSessionRoutes(
    * browser, or its preserved profile and launch receipt after the controller
    * restarted). The controller's existing same-generation recovery adopts or
    * relaunches it from that directory, so the record, its history and the
-   * possibly newer working profile all survive. Returns null when the browser
-   * cannot be continued this way, leaving the record unchanged for the
+   * possibly newer working profile all survive. When the browser cannot be
+   * continued this way it returns why, leaving the record unchanged for the
    * settle-and-restore path. */
   async function continueExpiredBrowserResume(
     context: Context,
@@ -4089,13 +4095,13 @@ export function registerBrowserSessionRoutes(
     workspaceId: string,
     browserSessionId: string,
     operationId: string,
-  ): Promise<BrowserSessionMutationResponse | null> {
+  ): Promise<ExpiredBrowserResumeContinuation> {
     const expired = await getExpiredBrowserSessionResume(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       browserSessionId,
     });
-    if (!expired?.controllerGeneration) return null;
+    if (!expired?.controllerGeneration) return { unavailable: null };
     const controllerGeneration = expired.controllerGeneration;
     const record = await getBrowserSessionControlRecord(deps.db, {
       accountId: grant.accountId,
@@ -4109,14 +4115,19 @@ export function registerBrowserSessionRoutes(
       throw new BrowserSessionStateError("BrowserSession controller authority changed");
     }
     // Only a private profile has a working copy the controller can adopt.
-    if (browserSessionStorageMode(record.session) !== "private_profile") return null;
+    if (browserSessionStorageMode(record.session) !== "private_profile") {
+      return { unavailable: "It kept no private profile to continue" };
+    }
     const rootSecret = browserAuthorityRoot(deps);
     const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
     if (
       record.session.placement.kind === "connected_machine" &&
       sourceSession.activeSandboxId !== record.session.placement.sandboxId
     ) {
-      return null;
+      return {
+        unavailable:
+          "The chat that created it is no longer attached to the machine the browser ran on",
+      };
     }
     return await withBrowserPlacement(
       sourceSession,
@@ -4125,7 +4136,7 @@ export function registerBrowserSessionRoutes(
       retained?.placementInstanceId ?? null,
       "browser.resume",
       context.req.raw.signal,
-      async (placement) => {
+      async (placement): Promise<ExpiredBrowserResumeContinuation> => {
         const binding = retained ?? {
           controllerId: "opengeni-browserd",
           controllerGeneration,
@@ -4137,7 +4148,7 @@ export function registerBrowserSessionRoutes(
           transport.engine !== "chromium" ||
           transport.ephemeralPartition
         ) {
-          return null;
+          return { unavailable: "Its browser keeps no working copy that can be continued" };
         }
         const client = await provisionController(
           deps,
@@ -4157,7 +4168,9 @@ export function registerBrowserSessionRoutes(
           );
         } catch (error) {
           // Its working copy was launched on a desktop that is gone.
-          if (error instanceof BrowserSessionStateError) return null;
+          if (error instanceof BrowserSessionStateError) {
+            return { unavailable: "The desktop it was launched on is gone" };
+          }
           throw error;
         }
         const networkRoute = await resolveActiveBrowserNetworkRouteLaunch({
@@ -4238,18 +4251,25 @@ export function registerBrowserSessionRoutes(
             error.error.code === "resource_unavailable"
           ) {
             await release();
-            return null;
+            console.warn("browser working copy could not be continued", {
+              browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              failure: interactionFailure(error),
+            });
+            return { unavailable: error.error.message };
           }
           throw error;
         }
-        return await continueExpiredBrowserSessionResume(deps.db, {
-          accountId: grant.accountId,
-          workspaceId,
-          browserSessionId,
-          operationId,
-          actorSubjectId: grant.subjectId,
-          controller: binding,
-        });
+        return {
+          continued: await continueExpiredBrowserSessionResume(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+            operationId,
+            actorSubjectId: grant.subjectId,
+            controller: binding,
+          }),
+        };
       },
     );
   }
@@ -4262,6 +4282,7 @@ export function registerBrowserSessionRoutes(
     grant: AccessGrant,
     workspaceId: string,
     browserSessionId: string,
+    unavailable: string | null,
   ): Promise<void> {
     const expired = await getExpiredBrowserSessionResume(deps.db, {
       accountId: grant.accountId,
@@ -4273,7 +4294,9 @@ export function registerBrowserSessionRoutes(
       // It ran past its checkpoint, so returning it to that checkpoint would
       // silently discard newer state.
       throw new BrowserSessionStateError(
-        "BrowserSession was lost when its controller restarted, and its working copy could not be recovered",
+        unavailable
+          ? `BrowserSession was lost when its controller restarted, and its working copy could not be recovered. ${unavailable}`
+          : "BrowserSession was lost when its controller restarted, and its working copy could not be recovered",
       );
     }
     const record = await getBrowserSessionControlRecord(deps.db, {
@@ -5162,6 +5185,12 @@ async function endCapturedBrowserController(
     if (!(error instanceof BrowserControlRequestError && error.status === 404)) throw error;
   }
 }
+
+/** A lost browser continued from its retained working copy, or why it could
+ * not be (null when it has no such copy at all). */
+type ExpiredBrowserResumeContinuation =
+  | { continued: Awaited<ReturnType<typeof continueExpiredBrowserSessionResume>> }
+  | { unavailable: string | null };
 
 function isDefiniteBrowserControllerFailure(error: unknown): boolean {
   return (
