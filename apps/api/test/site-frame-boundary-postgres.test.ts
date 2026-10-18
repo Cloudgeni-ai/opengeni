@@ -320,6 +320,15 @@ test("an owner can allow an existing chat in one private console Site and revoke
   expect((await f.call("GET", `/sessions/${sessionId}`, frame)).status).toBe(200);
   expect((await f.call("GET", `/sessions/${unrelated}`, frame)).status).toBe(404);
   expect((await f.call("GET", `/sessions/${sessionId}`, other.frame("other"))).status).toBe(404);
+  // Published-runtime dispatch carries Site/version provenance, never the console marker.
+  expect(
+    (
+      await f.call("GET", `/sessions/${sessionId}`, {
+        "x-opengeni-site-id": site.siteId,
+        "x-opengeni-site-version": site.versionId,
+      })
+    ).status,
+  ).toBe(404);
   expect(
     (
       await f.call("GET", `/sessions/${sessionId}`, {
@@ -335,6 +344,29 @@ test("an owner can allow an existing chat in one private console Site and revoke
   expect(page.siteAccessId).toBe(site.siteId);
   const originList = await f.call("GET", `/sessions?view=page&originSiteId=${site.siteId}`, frame);
   expect((await originList.json()).sessions).toEqual([]);
+  const draftPath = `/sessions/${sessionId}/composer-draft`;
+  const initialDraft = await f.call("GET", draftPath, frame);
+  expect(initialDraft.status).toBe(200);
+  const initial = await initialDraft.json();
+  const draft = {
+    text: "Prepared for the owner to review and edit, not send",
+    resources: [],
+    model: initial.model,
+    reasoningEffort: initial.reasoningEffort,
+    latencyMode: initial.latencyMode,
+    expectedRevision: initial.revision,
+  };
+  const turnsBeforeDraft = await f.turns(sessionId);
+  const saved = await f.call("PUT", draftPath, frame, draft);
+  expect(saved.status, await saved.clone().text()).toBe(200);
+  const savedDraft = await saved.json();
+  expect(savedDraft).toMatchObject({ text: draft.text, revision: initial.revision + 1 });
+  expect(await (await f.call("GET", draftPath, frame)).json()).toMatchObject(savedDraft);
+  expect(
+    (await f.call("PUT", draftPath, frame, { ...draft, text: "Stale overwrite" })).status,
+  ).toBe(409);
+  expect(await f.turns(sessionId)).toEqual(turnsBeforeDraft);
+  expect((await f.call("GET", `/sessions/${sessionId}/events`, frame)).status).toBe(200);
   expect(
     (
       await f.call("POST", `/sessions/${sessionId}/events`, frame, {
@@ -367,6 +399,15 @@ test("an owner can allow an existing chat in one private console Site and revoke
   try {
     expect((await f.call("DELETE", access)).status).toBe(200);
     expect((await f.call("GET", `/sessions/${sessionId}`, frame)).status).toBe(404);
+    expect((await f.call("GET", draftPath, frame)).status).toBe(404);
+    expect(
+      (
+        await f.call("PUT", draftPath, frame, {
+          ...draft,
+          expectedRevision: savedDraft.revision,
+        })
+      ).status,
+    ).toBe(404);
     expect(
       (await f.call("POST", `/sessions/${sessionId}/events`, frame, { text: "No longer allowed" }))
         .status,

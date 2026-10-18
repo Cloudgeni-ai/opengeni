@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { SessionQueueSnapshot } from "@opengeni/sdk";
+import type { SaveComposerDraftRequest, SessionQueueSnapshot } from "@opengeni/sdk";
 import { SessionConversation } from "../src/components/session-conversation";
 import { Markdown } from "../src/components/markdown";
 import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
@@ -11,6 +11,85 @@ import { latestQuestionClient } from "./fixtures/latest-question-client";
 import { archivedTranscriptEvents } from "./fixtures/archived-transcript";
 
 registerDom();
+
+test("an embedded existing chat loads history and live events and prepares an editable revision-fenced draft without sending", async () => {
+  const base = fakeClient({});
+  const saved: SaveComposerDraftRequest[] = [];
+  let sends = 0;
+  let draftReads = 0;
+  const event = (sequence: number, text: string) => ({
+    id: crypto.randomUUID(),
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    sequence,
+    type: "user.message",
+    payload: { text },
+    occurredAt: new Date().toISOString(),
+    turnId: null,
+    clientEventId: null,
+  });
+  const effectiveControl = {
+    state: "running",
+    directState: "running",
+    override: null,
+    primaryBlocker: null,
+    settlement: null,
+  };
+  const client = fakeClient({
+    getSession: async () => ({ id: SESSION_ID, status: "idle", effectiveControl }) as never,
+    getQueue: async () => ({ items: [], pendingInputs: [], effectiveControl }) as never,
+    listHumanInputRequests: async () => [],
+    listEvents: async () => [event(1, "Existing chat history")],
+    streamEvents: async function* (_workspace, _session, options) {
+      yield event(2, "A live update in the same chat");
+      await new Promise<void>((resolve) => {
+        if (options?.signal?.aborted) resolve();
+        else options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+    },
+    getComposerDraft: async (...args) => {
+      draftReads++;
+      return { ...(await base.getComposerDraft(...args)), revision: 7 };
+    },
+    saveComposerDraft: async (...args) => {
+      expect(args.slice(0, 2)).toEqual([WORKSPACE_ID, SESSION_ID]);
+      saved.push(args[2]);
+      return base.saveComposerDraft(...args);
+    },
+    submitComposerDraft: async () => {
+      sends++;
+      throw new Error("Must not send automatically");
+    },
+    sendMessage: async () => {
+      sends++;
+      throw new Error("Must not send automatically");
+    },
+  });
+  const text = "Prepared by the dashboard for review, not sent";
+  const view = await renderComponent(
+    <SessionConversation
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      modelPicker={false}
+      composerOptions={{ initialDraft: { text, resources: [] } }}
+    />,
+  );
+  try {
+    await waitFor(() => saved.length === 1, "Prepared draft was not saved");
+    expect(draftReads).toBeGreaterThan(0);
+    expect(saved[0]).toMatchObject({ text, expectedRevision: 7, resources: [] });
+    const input = view.container.querySelector("textarea");
+    expect(input?.value).toBe(text);
+    expect(input?.readOnly).toBe(false);
+    expect(input?.disabled).toBe(false);
+    expect(view.container.textContent).toContain("Existing chat history");
+    expect(view.container.textContent).toContain("A live update in the same chat");
+    expect(sends).toBe(0);
+  } finally {
+    await view.unmount();
+  }
+});
 
 test("computer offers use the embedding product's app flow", async () => {
   const client = fakeClient({
