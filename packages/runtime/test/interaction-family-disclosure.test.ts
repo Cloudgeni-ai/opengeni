@@ -22,6 +22,7 @@ import {
 import { anthropicMessages } from "../src/anthropic-messages";
 import { baseModelInputFilterForSettings } from "../src/model-input";
 import { interactionToolInputJsonSchema } from "../src/interaction-tool-json-schema";
+import { projectHistoryForProvider } from "../src/provider-history-adapter";
 
 const OPEN = "interaction__browser_open";
 const OBSERVE = "interaction__browser_observe";
@@ -263,6 +264,116 @@ describe("interaction family disclosure", () => {
     expect(ids[1]).toBe("toolu_01Open");
     expect(ids[2]).toBe(ids[3]);
     expect(ids[2]).not.toBe("toolu_01Open");
+  });
+
+  test("an entry call inside a parallel step keeps that step's results contiguous on Claude and Chat", () => {
+    for (const format of ["generic", "native"] as const) {
+      const marker = {
+        version: 1,
+        format,
+        tools: [{ type: "function", name: OBSERVE, description: "", parameters: {} }],
+      };
+      const exec = (callId: string) => ({
+        type: "function_call",
+        callId,
+        name: "exec_command",
+        arguments: "{}",
+        status: "completed",
+      });
+      const history = [
+        { type: "message", role: "user", content: "check the page and the logs" },
+        exec("toolu_01First"),
+        {
+          type: "function_call",
+          callId: "toolu_01Open",
+          name: OPEN,
+          arguments: "{}",
+          status: "completed",
+          providerData: { [MARKER]: marker },
+        },
+        exec("toolu_01Third"),
+        {
+          type: "function_call_result",
+          callId: "toolu_01First",
+          name: "exec_command",
+          status: "completed",
+          output: { type: "text", text: "first" },
+        },
+        {
+          type: "function_call_result",
+          callId: "toolu_01Open",
+          name: OPEN,
+          status: "completed",
+          output: [{ type: "input_text", text: "opened" }],
+        },
+        {
+          type: "function_call_result",
+          callId: "toolu_01Third",
+          name: "exec_command",
+          status: "completed",
+          output: { type: "text", text: "third" },
+        },
+      ];
+      const expanded = restoreGenericDispatchHistoryItems(
+        expandInteractionFamilyDisclosures(history),
+      ) as Array<Record<string, unknown>>;
+      // The disclosure follows the entry call's own result, inside the step's results.
+      expect(expanded).toHaveLength(history.length + 2);
+      expect(expanded[8]).toEqual(history[6]);
+      expect(String(expanded[6]!.callId ?? expanded[6]!.call_id)).toBe(
+        "opengeni:family:toolu_01Open",
+      );
+
+      // Before the fix Claude refused this history before any network call.
+      expect(() => anthropicMessages(expanded as ModelRequest["input"])).toThrow(
+        "Claude tool results are incomplete",
+      );
+      const claude = anthropicMessages(
+        projectHistoryForProvider(expanded, "anthropic-messages") as ModelRequest["input"],
+      );
+      const resultsMessage = claude.find((message) =>
+        message.content.some((block) => (block as { type?: string }).type === "tool_result"),
+      )!;
+      expect(
+        resultsMessage.content.map((block) => (block as { tool_use_id?: string }).tool_use_id),
+      ).toEqual(["toolu_01First", "toolu_01Open", "toolu_01Third"]);
+
+      // Chat Completions sees all three results before the disclosure too.
+      const chat = projectHistoryForProvider(expanded, "chat");
+      expect(chat).toHaveLength(expanded.length);
+      expect(chat.slice(4, 7).map((item) => item.callId)).toEqual([
+        "toolu_01First",
+        "toolu_01Open",
+        "toolu_01Third",
+      ]);
+      if (format === "generic") expect(chat.slice(7)).toEqual(expanded.slice(6, 8));
+      expect(projectHistoryForProvider(chat, "chat")).toBe(chat);
+
+      // The Responses API accepts the interleaved order, so its prefix is untouched.
+      const responses = projectHistoryForProvider(expanded, "responses");
+      expect(responses.map((item) => item.callId ?? item.call_id)).toEqual(
+        expanded.map((item) => item.callId ?? item.call_id),
+      );
+    }
+  });
+
+  test("a step whose results are already contiguous projects as the same array", () => {
+    const history = [
+      { type: "message", role: "user", content: "go" },
+      { type: "function_call", callId: "toolu_01A", name: "exec_command", arguments: "{}" },
+      { type: "function_call", callId: "toolu_01B", name: "exec_command", arguments: "{}" },
+      { type: "function_call_result", callId: "toolu_01A", name: "exec_command", output: "a" },
+      { type: "message", role: "user", content: "a steer between results stays in place" },
+      { type: "function_call_result", callId: "toolu_01B", name: "exec_command", output: "b" },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] },
+    ];
+    for (const api of ["chat", "anthropic-messages"] as const) {
+      const projected = projectHistoryForProvider(history, api);
+      expect(projected.map((item) => item.callId ?? item.content)).toEqual(
+        history.map((item) => item.callId ?? item.content),
+      );
+    }
+    expect(projectHistoryForProvider(history, "anthropic-messages")).toBe(history);
   });
 
   test("a tagged union with two members for one tag shows one entry", () => {

@@ -236,7 +236,68 @@ export function projectHistoryForProvider(
     return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
   });
   const input = projected.every((item, index) => item === items[index]) ? items : projected;
-  return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi);
+  const wire = projectWireHistory(withWireValidFunctionCallArguments(input), providerApi);
+  return providerApi === "responses" ? wire : withContiguousToolResults(wire);
+}
+
+/**
+ * Claude and Chat Completions accept a step's parallel tool results only as
+ * one uninterrupted run answering every call of that step. History can hold
+ * other items between those results, for example a family disclosure shown
+ * after an entry tool's result when that call was not the step's last. Those
+ * providers reject such a request before any model output, so the chat would
+ * fail every turn on its own valid history. Request-locally, move each item
+ * that would break the run (any model-side item, and the results of calls
+ * made inside the run) to just after the run's last result, keeping their
+ * order. Person and system messages keep their place, as they were already
+ * valid there. Only histories these providers rejected change, so no prefix a
+ * provider has already accepted is altered, and canonical history is never
+ * rewritten. The Responses API accepts the interleaved order and is left as is.
+ */
+export function withContiguousToolResults(
+  items: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const resultIndex = new Map<string, number>();
+  for (const [index, item] of items.entries()) {
+    if (item.type !== "function_call_result") continue;
+    const id = callId(item);
+    if (id && !resultIndex.has(id)) resultIndex.set(id, index);
+  }
+  const outstanding = new Set<string>();
+  let answering = false;
+  let deferred: Array<Record<string, unknown>> = [];
+  let output: Array<Record<string, unknown>> | null = null;
+  for (const [index, item] of items.entries()) {
+    const id = item.type === "function_call_result" ? callId(item) : null;
+    if (id && outstanding.delete(id)) {
+      output?.push(item);
+      answering = outstanding.size > 0;
+      if (!answering && output && deferred.length) {
+        output.push(...deferred);
+        deferred = [];
+      }
+      continue;
+    }
+    if (answering && !isPersonOrSystemMessage(item)) {
+      output ??= items.slice(0, index);
+      deferred.push(item);
+      continue;
+    }
+    output?.push(item);
+    if (item.type !== "function_call") continue;
+    const callIdentity = callId(item);
+    const answeredAt = callIdentity ? resultIndex.get(callIdentity) : undefined;
+    if (callIdentity && answeredAt !== undefined && answeredAt > index) {
+      outstanding.add(callIdentity);
+    }
+  }
+  if (!output) return items;
+  output.push(...deferred);
+  return output;
+}
+
+function isPersonOrSystemMessage(item: Record<string, unknown>): boolean {
+  return (item.type ?? "message") === "message" && item.role !== "assistant";
 }
 
 /**
