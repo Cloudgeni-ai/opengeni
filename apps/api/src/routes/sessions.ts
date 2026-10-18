@@ -1045,6 +1045,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             : {}),
           ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
           ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
+          ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
           ...(query.createdBy ? { createdBy: query.createdBy } : {}),
           ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
           ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
@@ -1105,6 +1106,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
         ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
         pinned: page.pinned.map(decorateEntry),
+        ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
         sessions: page.sessions.map(decorateEntry),
       });
     }
@@ -1127,6 +1129,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
         ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
         pinned: page.pinned.map(decorate),
+        ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
         sessions: page.sessions.map(decorate),
       });
     }
@@ -3645,7 +3648,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
         reauthorizeAfterMs:
-          authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
+          c.req.header("x-opengeni-site-frame") === "1"
+            ? 2_000
+            : (authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS),
         reauthorize: async () => {
           await reauthorizeSiteSessionRequest(c.req.raw);
           const freshGrant = await requireFreshAccessGrant(c, deps, workspaceId, "sessions:read");
@@ -5693,7 +5698,7 @@ export function sessionAuthorizationOperationForHttp(
   return null;
 }
 
-function sessionAuthorizationHttpError(error: unknown): HTTPException {
+export function sessionAuthorizationHttpError(error: unknown): HTTPException {
   if (error instanceof SessionAuthorizationDeniedError) {
     return new HTTPException(404, { message: "session not found" });
   }
@@ -5868,6 +5873,7 @@ export function sessionListQuery(
   allowCursor = true,
 ): {
   originSiteId: string | undefined;
+  siteAccessId: string | undefined;
   limit: string | undefined;
   parentSessionId: string | null | undefined;
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
@@ -5892,6 +5898,14 @@ export function sessionListQuery(
 } {
   const parentSessionId = query.parentSessionId;
   const originSiteId = query.originSiteId;
+  const siteAccessId = query.siteAccessId;
+  if (
+    siteAccessId !== undefined &&
+    (!z.string().uuid().safeParse(siteAccessId).success || originSiteId !== undefined)
+  )
+    throw new HTTPException(400, {
+      message: "siteAccessId must name one Site without an origin filter",
+    });
   if (originSiteId !== undefined && !z.string().uuid().safeParse(originSiteId).success)
     throw new HTTPException(400, { message: "originSiteId must be a Site id" });
   // "null" = roots only; a uuid = children of that session; anything else is
@@ -6038,6 +6052,7 @@ export function sessionListQuery(
     contentArchivedOnly ||
     mineOnly ||
     originSiteId !== undefined ||
+    siteAccessId !== undefined ||
     channelId !== undefined ||
     createdByKind !== undefined ||
     updatedFrom !== undefined ||
@@ -6059,6 +6074,7 @@ export function sessionListQuery(
   return {
     limit: query.limit,
     originSiteId,
+    siteAccessId,
     parentSessionId:
       parentSessionId === undefined
         ? undefined

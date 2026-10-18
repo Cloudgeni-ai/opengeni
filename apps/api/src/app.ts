@@ -30,6 +30,7 @@ import {
 import { codemodeSessionRequest } from "./codemode";
 import { siteClampedAgentGuard } from "./site-agent-guard";
 import { siteFrameGuard } from "./site-frame-guard";
+import { registerSiteSessionAccessRoutes } from "./routes/site-session-access";
 import { SiteDataUnsupportedError } from "@opengeni/contracts/site-session-http";
 import {
   SiteSessionPathError,
@@ -2325,6 +2326,7 @@ export function createAppComposition(deps: AppDependencies): {
   // only classifies the session module's own paths.
   registerInboxRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
   registerWorkspaceIntegrationRoutes(app, routeDeps);

@@ -2853,6 +2853,7 @@ describe("release schema contract", () => {
       "0795_site_lifecycle_cancellation.sql",
       "0839_docker_local_command_containment.sql",
       "0840_retained_process_reconciler_version.sql",
+      "0842_site_session_access.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

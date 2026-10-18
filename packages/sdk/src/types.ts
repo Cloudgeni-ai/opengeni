@@ -1947,6 +1947,8 @@ export type SessionListResponse = {
   archiveStatus?: "active" | "archived" | "all";
   /** Server-resolved Site origin filter, when requested. */
   originSiteId?: string;
+  /** Server-resolved Site access filter, when requested. */
+  siteAccessId?: string;
   sessions: Session[];
   nextCursor: string | null;
 };

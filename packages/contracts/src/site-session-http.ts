@@ -79,7 +79,7 @@ function siteDataPath(path: string, rewritten: string, workspaceId: string, site
  * refuses frame requests outside the allowlist or to another Site's sessions.
  *
  * `workspaceId` `site-host` checks a path inside the Site without rewriting
- * it. A session list must name `originSiteId=current`; the host binds it to
+ * it. A session list must name `originSiteId=current` or `siteAccessId=current`; the host binds it to
  * its pinned Site, or to no Site at all when the frame has none.
  */
 export function siteSessionPath(
@@ -94,12 +94,17 @@ export function siteSessionPath(
   const rewritten = hostWorkspacePath(path, workspaceId);
   if (SITE_DATA_PATH.test(pathname)) return siteDataPath(path, rewritten, workspaceId, siteId);
   if (match.operation.id !== "sessions.list") return rewritten;
-  // A Site lists only its own conversations. Never widen a Site list to the workspace.
+  // A Site lists only conversations available to it. Never widen to the workspace.
   const url = new URL(rewritten, "http://site.invalid");
   const origins = url.searchParams.getAll("originSiteId");
-  if (origins.length !== 1 || origins[0] !== "current") throw new SiteSessionPathError();
+  const access = url.searchParams.getAll("siteAccessId");
+  if (origins.length + access.length !== 1 || (origins[0] ?? access[0]) !== "current")
+    throw new SiteSessionPathError();
   if (workspaceId === "site-host") return path;
-  url.searchParams.set("originSiteId", siteId ?? SITE_NO_ORIGIN_ID);
+  url.searchParams.set(
+    access.length ? "siteAccessId" : "originSiteId",
+    siteId ?? SITE_NO_ORIGIN_ID,
+  );
   return url.pathname + url.search;
 }
 

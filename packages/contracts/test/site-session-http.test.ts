@@ -16,6 +16,31 @@ import {
 
 const host = "/v1/workspaces/site-host";
 
+test("Site access listing is pinned to current, never a self-grant or an origin rewrite", () => {
+  expect(siteSessionPath(`${host}/sessions?siteAccessId=current`, "ws", "GET", "site")).toBe(
+    "/v1/workspaces/ws/sessions?siteAccessId=site",
+  );
+  for (const query of [
+    "siteAccessId=other",
+    "siteAccessId=current&originSiteId=current",
+    "siteAccessId=current&siteAccessId=other",
+  ]) {
+    expect(() => siteSessionPath(`${host}/sessions?${query}`, "ws", "GET", "site")).toThrow(
+      SiteSessionPathError,
+    );
+  }
+  for (const method of ["GET", "PUT", "DELETE"]) {
+    expect(() =>
+      siteSessionPath(
+        `${host}/published-artifacts/current/session-access/chat`,
+        "ws",
+        method,
+        "site",
+      ),
+    ).toThrow(SiteSessionPathError);
+  }
+});
+
 test("Site code reaches only the SITE_OPERATIONS allowlist", () => {
   for (const [method, suffix] of [
     ["GET", ""],

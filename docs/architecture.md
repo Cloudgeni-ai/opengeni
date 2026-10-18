@@ -52,6 +52,9 @@ never omitted-tools queue arrays. Connection-backed MCPs use native authenticati
 An optional `ToolRef.allowedTools` narrows a connection's catalog and direct calls;
 merged refs intersect that ceiling and children cannot widen it. Console Site
 agents use it for the overlap of Site-declared tools and the viewer's permissions.
+Private console Sites may also reach an existing chat only through its owner's
+explicit, viewer-bound Site/chat grant. This uses native session routes and
+live revocation, not a changed origin or audience; see [Site conversations](site-conversations.md).
 Their editable-artifact writes also require immutable create/import provenance
 within the same Site-clamped session tree; read-created session links grant no edits.
 After a worker claims a turn, its session RLS actor carries the canonical
