@@ -34,7 +34,7 @@ import { useDesktopThisComputer } from "@/components/desktop/this-computer";
 import { moveChatToMachine } from "@/lib/move-chat-to-machine";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
-import { thisComputerReady } from "@opengeni/react/this-computer";
+import { thisComputerReady, thisComputerNeedsPermissions } from "@opengeni/react/this-computer";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 import type { ChatSendContext } from "./session-github-repositories";
 
@@ -92,8 +92,7 @@ function focusIfIdle(card: HTMLElement | null, target: HTMLElement | null = card
 
 /**
  * The Connected Machine card in a conversation. The agent can post it, but only
- * the person can connect a machine (the command is minted in their browser and
- * never enters the transcript) or move this chat onto one. Once a machine with a
+ * the person can connect a machine or move this chat onto one. Once a machine with a
  * screen is reachable, the card offers the Opengeni Browser extension for it.
  */
 export function SessionMachineCapabilityCard({
@@ -249,6 +248,8 @@ export function SessionMachineCapabilityCard({
                 : "Ask a workspace admin to connect a machine.";
   // Inside the desktop app, the computer it runs on is one click away.
   const desktop = useDesktopThisComputer();
+  const desktopReady =
+    thisComputerReady(desktop?.computer.status ?? null) && !desktop?.computer.status?.reconnecting;
   const offerThisComputer =
     desktop !== null &&
     desktop.computer.status !== null &&
@@ -270,25 +271,58 @@ export function SessionMachineCapabilityCard({
         description={recommendation.rationale}
         skill={false}
         expanded={false}
-        complete={activeMachine !== null}
+        complete={activeMachine !== null || desktopReady}
         completeLabel={
           activeMachine
             ? outcome?.sandboxId === activeMachine.sandboxId
               ? outcome.text
               : `This chat runs on ${machineDisplayName(t, activeMachine)}`
-            : undefined
+            : desktopReady
+              ? `Your agents can use ${desktop?.computer.status?.machineName || "this computer"}.`
+              : undefined
         }
-        actionLabel={offerThisComputer ? "Use this computer" : "Connect a machine"}
+        actionLabel={
+          offerThisComputer
+            ? desktop.computer.acting
+              ? "Connecting…"
+              : "Use this computer"
+            : "Connect a computer"
+        }
+        busy={offerThisComputer && desktop.computer.acting}
         actionUnavailable={offerThisComputer ? null : actionUnavailable}
         opensDialog={false}
-        note={fleet.canManage ? "You can remove a connected machine anytime from Machines." : ""}
-        onOpen={() => (offerThisComputer ? desktop.openSetup() : openSetup())}
+        note={
+          offerThisComputer
+            ? "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app."
+            : fleet.canManage
+              ? "You can remove a connected machine anytime from Machines."
+              : ""
+        }
+        onOpen={() => {
+          if (!offerThisComputer) return openSetup();
+          if (desktop.computer.acting) return;
+          if (thisComputerNeedsPermissions(desktop.computer.status)) return desktop.openSetup();
+          void (
+            desktop.computer.status?.state === "paused"
+              ? desktop.computer.resume().then(() => desktop.computer.status)
+              : desktop.computer.connect({ screenControl: true })
+          ).then((next) => {
+            if (thisComputerNeedsPermissions(next)) desktop.openSetup();
+            void fleet.refresh();
+          });
+        }}
         onClose={closeSetup}
         opener={opener}
         cardRef={cardRef}
         details={
           unavailableOnDeployment || !fleet.canRead ? null : (
             <>
+              {desktop?.computer.actionError !== null &&
+              desktop?.computer.actionError !== undefined ? (
+                <Notice tone="failed" live="assertive" className="mx-4 mb-3 text-xs">
+                  Couldn't connect this computer. {desktop.computer.actionError || "Try again."}
+                </Notice>
+              ) : null}
               {/* Always mounted, so moves and new machines are announced. */}
               <span className="sr-only" role="status" aria-live="polite">
                 {announcement}
@@ -364,6 +398,7 @@ export function SessionMachineCapabilityCard({
             if (!open) closeSetup();
           }}
           workspaceId={workspaceId}
+          sessionId={sessionId}
           origin={origin}
           machines={fleet.machines}
           machinesLoading={fleet.loading}

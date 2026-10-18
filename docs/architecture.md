@@ -2235,6 +2235,15 @@ tool approvals/attachments/human-input forms/history; `ChatComposer` is input-on
 clients. Foreground/background share tokens; light embeds set iframe
 `data-og-theme="light"`.
 
+Computer offers stay client-owned: `SessionConversation.computerConnection`
+renders the existing `ThisComputerCard` using the embedding product's desktop
+host or download/connect flow, with no terminal-command fallback. The console
+uses the same host connection and its platform downloads; the desktop kit's
+`computer-link.ts` completes an account-exact, workspace-authorized, locally
+confirmed handoff through existing PKCE and `ThisComputer.connect`. The agent's
+offer/event contract is unchanged. See [embedding](embedding.md#computer-connection-offers)
+and [desktop app](design/desktop-app.md#deep-links).
+
 `useSessionConversation` owns that same feed, queue and composer independently
 of presentation. `SessionConversationView` consumes the controller without
 opening another stream or maintaining a second draft. Hosts with persistent

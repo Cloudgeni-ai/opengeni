@@ -58,6 +58,7 @@ import {
   type HostThemePreference,
 } from "../lib/host-theme";
 import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { ThisComputerCard, type ThisComputerCardProps } from "./this-computer/this-computer-card";
 
 export type SessionConversationLabels = {
   /** Banner action after a refresh failure; the conversation stays mounted. */
@@ -77,6 +78,8 @@ const DEFAULT_CONVERSATION_LABELS = (t: OpenGeniText): SessionConversationLabels
 export type SessionConversationProps = ClientOverride &
   SessionProxyBaseUrl & {
     sessionId: string;
+    /** Product-owned desktop connection flow for computer offers. No console URLs or shell commands are assumed. */
+    computerConnection?: Omit<ThisComputerCardProps, "rationale">;
     /** Host-owned artifact links, previews and other message presentation. */
     renderMessageText?: MessageTimelineProps["renderMessageText"];
     /**
@@ -298,6 +301,7 @@ function ConversationView({
   renderInteractiveBlock,
   toolRegistry,
   timelineProps,
+  computerConnection,
   renderAllowanceExhausted,
   allowanceExhaustedLabels,
   voiceInput: voiceInputRequested = true,
@@ -507,7 +511,12 @@ function ConversationView({
             events={feed.events}
             items={conversation.timeline}
             turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
-            renderAuthNeeded={timelineProps?.renderAuthNeeded}
+            renderAuthNeeded={(item) =>
+              timelineProps?.renderAuthNeeded?.(item) ??
+              (item.capability?.id === "api:connected-machine" && computerConnection ? (
+                <ThisComputerCard {...computerConnection} rationale={item.capability.rationale} />
+              ) : undefined)
+            }
             emptyState={timelineProps?.emptyState}
             renderMessageSender={timelineProps?.renderMessageSender}
             status={status}

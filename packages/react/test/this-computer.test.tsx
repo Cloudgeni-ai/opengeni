@@ -57,6 +57,21 @@ test("each state maps to one view", () => {
   expect(thisComputerView(status({ state: "paused", busy: true }))).toBe("resuming");
 });
 
+test("embedded products own downloads and the account handoff without a console or command fallback", () => {
+  const html = renderToStaticMarkup(
+    <ThisComputerCard
+      productName="Acme"
+      downloads={[{ label: "Download Acme", url: "https://example.com/app" }]}
+      openAppUrl="acme://connect?destination=opaque"
+    />,
+  );
+  expect(html).toContain("Download Acme");
+  expect(html).toContain("acme://connect?destination=opaque");
+  expect(html).toContain("Open app and connect");
+  expect(html).not.toContain("curl");
+  expect(html).not.toContain("app.opengeni.ai");
+});
+
 test("the offer shows only while there is something to do", () => {
   const render = (value: ThisComputerStatus | null, dismissed = false) =>
     renderToStaticMarkup(

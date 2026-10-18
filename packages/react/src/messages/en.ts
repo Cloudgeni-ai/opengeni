@@ -2951,7 +2951,7 @@ export const englishMessages = {
   "skillDiscovery.viewAllSkills": "View all skills",
   "thisComputer.title": "Use this computer",
   "thisComputer.offer": "Let agents work on {machineName}.",
-  "thisComputer.offerAction": "Set up",
+  "thisComputer.offerAction": "Use this computer",
   "thisComputer.notNow": "Not now",
   "thisComputer.intro": "Agents can work on {machineName} for you, like a helper at the keyboard.",
   "thisComputer.abilities.screen": "See the screen and use apps",
@@ -3033,7 +3033,14 @@ export const englishMessages = {
   "thisComputer.card.getApp":
     "Install the {productName} app on your computer, then turn on “Use this computer”.",
   "thisComputer.card.getAppAction": "Get {productName} for desktop",
-  "thisComputer.card.note": "Only you can use your computer, in your own chats.",
+  "thisComputer.card.note":
+    "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app.",
+  "thisComputer.card.openApp": "Open app and connect",
+  "thisComputer.card.installThenOpen":
+    "Install the app, then return here to open it and connect. The app will confirm your account and ask for any system permissions it needs.",
+  "thisComputer.card.connectFailed": "Couldn't open the connection flow. Try again.",
+  "thisComputer.card.hostSetupUnavailable":
+    "This app hasn't enabled computer setup here. Ask its administrator how to connect your computer.",
   "timeline.activityRail.archived": "Archived.",
   "timeline.activityRail.brief": "Brief",
   "timeline.activityRail.decision": "Decision",
