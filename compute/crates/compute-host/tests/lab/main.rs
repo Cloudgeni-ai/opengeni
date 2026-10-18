@@ -292,6 +292,20 @@ async fn create(client: &Client, sandbox: Id, sleep: SleepConfig) {
 /// Wakes `sandbox`, runs `script` in its shell and returns the output and
 /// how long the wake took.
 async fn exec(client: &Client, sandbox: Id, script: &str) -> (String, Duration) {
+    match try_exec(client, sandbox, script, Duration::from_secs(120)).await {
+        Ok(done) => done,
+        Err(why) => panic!("{sandbox}: {why}"),
+    }
+}
+
+/// Like [`exec`], but a script that has not ended within `limit` is an
+/// error that says what it printed by then.
+async fn try_exec(
+    client: &Client,
+    sandbox: Id,
+    script: &str,
+    limit: Duration,
+) -> Result<(String, Duration), String> {
     let started = Instant::now();
     let (reply, mut stream) = client
         .connect(sandbox, None, PORT, PriorityName::Interactive)
@@ -316,16 +330,60 @@ async fn exec(client: &Client, sandbox: Id, script: &str) -> (String, Duration) 
             }
         }
     };
-    let finished = timeout(Duration::from_secs(120), read).await;
+    let finished = timeout(limit, read).await;
     let output = String::from_utf8_lossy(&output);
     // What it printed tells which of its steps never ended.
-    assert!(
-        finished.is_ok(),
-        "{sandbox}: script timed out after {:?}; its output so far:\n{output}",
-        started.elapsed()
-    );
+    if finished.is_err() {
+        return Err(format!(
+            "script timed out after {:?}; its output so far:\n{output}",
+            started.elapsed()
+        ));
+    }
     let output = output.strip_suffix(&end).unwrap_or(&output).to_owned();
-    (output, Duration::from_micros(waited_us))
+    Ok((output, Duration::from_micros(waited_us)))
+}
+
+/// What the guest of `sandbox` and its namespace on the host say about its
+/// network, for a test whose guest could not reach out: the guest's own
+/// view (its link counters, neighbours, TCP state, and whether its timers
+/// and a new connection work) and the namespace's link counters,
+/// connections and the host's netfilter chains.
+async fn network_report(client: &Client, sandbox: Id) -> String {
+    const GUEST: &str = "timeout 5 cat /proc/uptime
+timeout 5 cat /sys/devices/system/clocksource/clocksource0/current_clocksource
+timeout 5 ip -s link show eth0
+timeout 5 ip neigh
+timeout 5 ip route
+timeout 5 grep -E '^(Ip|Tcp|Udp):' /proc/net/snmp
+timeout 5 cat /proc/net/tcp
+if timeout 5 sleep 1; then echo timers ok; else echo timers-failed; fi
+if timeout 10 bash -c 'exec 3<>/dev/tcp/1.1.1.1/80'; then echo connect ok; else echo connect-failed; fi";
+    let guest = match try_exec(client, sandbox, GUEST, Duration::from_secs(40)).await {
+        Ok((output, _)) => output,
+        Err(why) => why,
+    };
+    let namespace = format!("ogc-{sandbox}");
+    let host = |args: &[&str]| -> String {
+        match Command::new(args[0]).args(&args[1..]).output() {
+            Ok(out) => format!(
+                "$ {}\n{}{}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(error) => format!("$ {}\n{error}\n", args.join(" ")),
+        }
+    };
+    let report = [
+        host(&["ip", "netns", "exec", &namespace, "ip", "-s", "link"]),
+        host(&["ip", "netns", "exec", &namespace, "ip", "neigh"]),
+        host(&["ip", "netns", "exec", &namespace, "conntrack", "-L"]),
+        host(&["ip", "-s", "-br", "link"]),
+        host(&["nft", "list", "chains"]),
+        host(&["sysctl", "net.ipv4.ip_forward"]),
+    ]
+    .concat();
+    format!("the guest says:\n{guest}\nthe host says:\n{report}")
 }
 
 /// The line `exec` appends to a script to see it finish.
@@ -817,7 +875,15 @@ if getent hosts example.com >/dev/null; then echo dns ok; else echo dns-failed; 
     let mut wakes = JoinSet::new();
     for sandbox in ids.iter().copied() {
         let (client, script) = (Arc::clone(&client), script.clone());
-        wakes.spawn(async move { (sandbox, exec(&client, sandbox, &script).await) });
+        wakes.spawn(async move {
+            match try_exec(&client, sandbox, &script, Duration::from_secs(120)).await {
+                Ok(done) => (sandbox, done),
+                Err(why) => panic!(
+                    "{sandbox}: {why}\n{}",
+                    network_report(&client, sandbox).await
+                ),
+            }
+        });
     }
     let mut first_connect_ms = Vec::new();
     let mut second_connect_ms = Vec::new();

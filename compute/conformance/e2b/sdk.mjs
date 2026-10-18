@@ -15,6 +15,26 @@ const run = (name, fn) => check(suite, name, fn);
 const measured = {};
 const text = (data) => new TextDecoder().decode(data);
 
+// What the guest of `box` says about a server that never answered on
+// `port`: what listens, how long naming its own address takes (Python's
+// http.server does that before it listens), and whether names resolve
+// and connections go out at all.
+async function serverReport(box, port) {
+  const script = [
+    "timeout 5 ss -ltn",
+    "cat /etc/resolv.conf",
+    `s=$(date +%s%N); timeout 30 python3 -c 'import socket; print(socket.getfqdn("::"))'; echo getfqdn $? $(( ($(date +%s%N) - s) / 1000000 )) ms`,
+    "s=$(date +%s%N); timeout 10 getent hosts example.com; echo getent $? $(( ($(date +%s%N) - s) / 1000000 )) ms",
+    "if timeout 10 bash -c 'exec 3<>/dev/tcp/1.1.1.1/80'; then echo connect ok; else echo connect-failed; fi",
+  ].join("\n");
+  try {
+    const result = await box.commands.run(script, { timeoutMs: 90_000 });
+    return `port ${port}: the guest says ${JSON.stringify(result.stdout + result.stderr)}`;
+  } catch (error) {
+    return `port ${port}: the guest's report failed: ${String(error).slice(0, 2000)}`;
+  }
+}
+
 const sandbox = await run("create base with envs, metadata and pause with auto-resume", async () =>
   Sandbox.create("base", {
     timeoutMs: 600_000,
@@ -156,7 +176,7 @@ await run("getHost reaches a server in the sandbox, publicly", async () => {
       expect((await response.arrayBuffer()).byteLength === 1 << 20, "wrong length");
       return { tries: i + 1 };
     }
-    if (i > 40) throw new Error(`status ${response.status}`);
+    if (i > 40) throw new Error(`status ${response.status}; ${await serverReport(sandbox, 8000)}`);
     await sleep(250);
   }
 });
@@ -182,7 +202,7 @@ await run("a private sandbox's ports need the traffic token", async () => {
       if (open.ok) break;
       await sleep(250);
     }
-    expect(open.ok, `with the token: ${open.status}`);
+    if (!open.ok) throw new Error(`with the token: ${open.status}; ${await serverReport(closed, 8001)}`);
     const refused = await fetch(url);
     expect(refused.status === 403, `without the token: ${refused.status}`);
   } finally {

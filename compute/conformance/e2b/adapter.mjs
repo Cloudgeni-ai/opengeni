@@ -69,7 +69,16 @@ await run("resolveExposedPort reaches a server in the sandbox", async () => {
   const host = typeof endpoint === "string" ? endpoint : (endpoint.url ?? `https://${endpoint.host}`);
   const url = host.startsWith("http") ? host : `https://${host}`;
   const response = await fetch(new URL("/README.md", url.endsWith("/") ? url : `${url}/`));
-  expect(response.ok, `status ${response.status}`);
+  if (!response.ok) {
+    // What the server printed, what listens, and how long naming its own
+    // address takes: Python's http.server does that before it listens.
+    const report = await session
+      .execCommand({
+        cmd: `cat /tmp/http.log; timeout 5 ss -ltn; s=$(date +%s%N); timeout 30 python3 -c 'import socket; print(socket.getfqdn("::"))'; echo getfqdn $? $(( ($(date +%s%N) - s) / 1000000 )) ms`,
+      })
+      .catch((error) => String(error));
+    throw new Error(`status ${response.status}; the guest says ${JSON.stringify(report).slice(0, 4000)}`);
+  }
   return { url };
 });
 
