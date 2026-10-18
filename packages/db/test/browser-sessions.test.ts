@@ -1488,7 +1488,7 @@ describe("durable BrowserSession lifecycle", () => {
     ).rejects.toBeInstanceOf(BrowserSessionStateError);
 
     expect(await getExpiredBrowserSessionResume(client.db, { ...scope, browserSessionId })).toEqual(
-      { controllerGeneration: expiredGeneration },
+      { controllerGeneration: expiredGeneration, settleable: true },
     );
     await expect(
       settleExpiredBrowserSessionResume(client.db, {
@@ -1832,6 +1832,109 @@ describe("durable BrowserSession lifecycle", () => {
     });
     expect(replay.operation).toMatchObject({ state: "failed", replayed: true });
     expect(replay.session.lifecycle).toBe("lost");
+  });
+
+  test("a browser lost to a restarted controller continues from its working copy", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const browserSessionId = active.session.id;
+    const suspendOperationId = crypto.randomUUID();
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId: suspendOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId,
+      controllerGeneration: active.controllerGeneration,
+    });
+    await failBrowserSessionSuspension(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId,
+      controllerGeneration: active.controllerGeneration,
+      missingControllerSession: true,
+      error: {
+        code: "resource_not_found",
+        message: "browser session is not active",
+        retryable: false,
+      },
+    });
+
+    // The failed suspension's generation owns the working copy, which ran past
+    // any checkpoint, so it is never settled back to suspended.
+    expect(await getExpiredBrowserSessionResume(client.db, { ...scope, browserSessionId })).toEqual(
+      { controllerGeneration: active.controllerGeneration, settleable: false },
+    );
+    await expect(
+      settleExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        expectedControllerGeneration: null,
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionStateError);
+    await expect(
+      prepareBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: scope.subjectId,
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionStateError);
+    expect(
+      await touchExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        controllerGeneration: active.controllerGeneration,
+      }),
+    ).toBe(true);
+    expect(
+      await touchExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        controllerGeneration: crypto.randomUUID(),
+      }),
+    ).toBe(false);
+
+    const controller = {
+      controllerId: "browserd:test",
+      controllerGeneration: active.controllerGeneration,
+      placementInstanceId: "placement:restarted",
+    };
+    await expect(
+      continueExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: scope.subjectId,
+        controller: { ...controller, controllerGeneration: crypto.randomUUID() },
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionOperationConflictError);
+    const operationId = crypto.randomUUID();
+    const continued = await continueExpiredBrowserSessionResume(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId,
+      actorSubjectId: scope.subjectId,
+      controller,
+    });
+    expect(continued.session).toMatchObject({
+      id: browserSessionId,
+      lifecycle: "active",
+      failureCode: null,
+      controller: {
+        controllerGeneration: active.controllerGeneration,
+        placementInstanceId: "placement:restarted",
+      },
+    });
+    expect(continued.operation).toMatchObject({ operationId, kind: "resume", state: "completed" });
+    expect(
+      await getExpiredBrowserSessionResume(client.db, { ...scope, browserSessionId }),
+    ).toBeNull();
   });
 
   test("enforces workspace RLS for reads", async () => {
