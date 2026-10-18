@@ -3762,7 +3762,7 @@ async function sweepComputeOrphansForConfiguredBackend(
   };
   try {
     const stale = await reconcileStaleComputeEnrollments({
-      list: async () => await listStaleComputeSandboxEnrollments(db, staleBound),
+      list: async (after) => await listStaleComputeSandboxEnrollments(db, after, staleBound),
       revoke: async (candidate) =>
         await revokeStaleComputeSandboxEnrollment(db, candidate, itemBound(staleBound)),
       nowMs,

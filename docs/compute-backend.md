@@ -76,11 +76,14 @@ skips sandbox enrollments, and machine routes list machines only.
   ends within one minute or when the activity is cancelled. That budget
   starts before the stale-enrollment reconcile below and covers everything:
   each fabric request until its body is read, and each database check and
-  revoke, which runs in one transaction that ends at its deadline: the
-  statement in progress then (a lock wait included) is cancelled on the
-  server, and work that finishes after the deadline, or after the activity
-  is stopped, rolls back instead of committing late. Each sandbox's database
-  work gets at most five seconds of the pass. One stalled delete or lock
+  revoke. PostgreSQL itself enforces the database deadline: the work sets
+  the statement timeout to the time left before the workspace lock wait and
+  again before its main statement, so a lock wait or slow statement ends on
+  the server by the deadline, whatever the connection pool's state, and no
+  other connection's work is ever touched.
+  Work that finishes after the deadline, or after the activity is stopped,
+  rolls back instead of committing late. Each sandbox's database work gets at
+  most five seconds of the pass. One stalled delete or lock
   therefore never holds up the others or the rest of maintenance. Each pass
   resumes after the last sandbox the previous one reached, and a sandbox whose
   cleanup failed sits out ten minutes, doubling up to an hour, so failures at
@@ -100,8 +103,11 @@ skips sandbox enrollments, and machine routes list machines only.
   therefore never stays active for a sandbox that is gone. This reconcile
   gets its own fifteen seconds of the pass, so the fabric sweep always keeps
   the rest; it revokes eight enrollments at a time, each within five
-  seconds, resumes after the last one the previous pass reached, and sets
-  a failed one aside like a failed sandbox. One enrollment stuck behind a
+  seconds, and sets a failed one aside like a failed sandbox. It reads the
+  inventory a page of 100 at a time in enrollment-id order, each pass after
+  the last enrollment the previous one reached and from the start again
+  after the last page, so enrollments that keep failing never hide the ones
+  behind them. One enrollment stuck behind a
   workspace lock therefore delays neither the others nor the sweep.
 - **Resume**: re-address the same sandbox by id; no wake is needed. If a request
   finds no responder (no host serves the sandbox, for example mid-move),

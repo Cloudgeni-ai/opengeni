@@ -649,6 +649,7 @@ export {
   sweepComputeOrphans,
   type ComputeOrphanSweepProgress,
   type StaleComputeEnrollment,
+  type StaleComputeEnrollmentPage,
   type ComputeOrphanSweepResult,
   type ComputeSandboxIdentity,
 } from "./compute/orphans";

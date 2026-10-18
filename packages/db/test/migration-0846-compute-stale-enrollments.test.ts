@@ -12,6 +12,7 @@ import {
   DatabaseWorkDeadlineError,
   listStaleComputeSandboxEnrollments,
   revokeStaleComputeSandboxEnrollment,
+  STALE_COMPUTE_ENROLLMENT_PAGE_SIZE,
   type DatabaseWorkBound,
 } from "../src";
 import {
@@ -122,15 +123,21 @@ async function revokeStaleComputeSandboxEnrollments(
 ): Promise<{ revoked: { workspaceId: string; enrollmentId: string }[]; failed: number }> {
   const revoked: { workspaceId: string; enrollmentId: string }[] = [];
   let failed = 0;
-  for (const candidate of await listStaleComputeSandboxEnrollments(db, bound)) {
-    if (bound && (bound.signal?.aborted || Date.now() >= bound.deadlineAtMs)) break;
-    try {
-      if (await revokeStaleComputeSandboxEnrollment(db, candidate, bound)) revoked.push(candidate);
-    } catch {
-      failed += 1;
+  let after: string | undefined;
+  for (;;) {
+    const page = await listStaleComputeSandboxEnrollments(db, after, bound);
+    for (const candidate of page.candidates) {
+      if (bound && (bound.signal?.aborted || Date.now() >= bound.deadlineAtMs)) break;
+      try {
+        if (await revokeStaleComputeSandboxEnrollment(db, candidate, bound))
+          revoked.push(candidate);
+      } catch {
+        failed += 1;
+      }
     }
+    if (!page.more) return { revoked, failed };
+    after = page.candidates.at(-1)!.enrollmentId;
   }
-  return { revoked, failed };
 }
 
 afterAll(async () => {
@@ -151,7 +158,8 @@ test("the runtime role lists stale sandbox enrollments of every workspace, and o
   // Neither the runtime role nor the owner reads enrollments across workspaces.
   expect(await app`select id from enrollments`).toHaveLength(0);
   expect(await owner`select id from enrollments`).toHaveLength(0);
-  const rows = await app`select * from opengeni_private.list_stale_compute_sandbox_enrollments()`;
+  const rows =
+    await app`select * from opengeni_private.list_stale_compute_sandbox_enrollments(null)`;
   expect(rows.map((row) => row.enrollment_id).sort()).toEqual([...stale].sort());
   // The capability ends with the inventory.
   expect(await owner`select id from enrollments`).toHaveLength(0);
@@ -248,7 +256,9 @@ test("a bounded call ends its database work at the deadline and never commits la
       null,'whole-machine','active',now() - interval '30 minutes')`;
   const tenancy = await fixture.admin.reserve();
   const row = await fixture.admin.reserve();
-  const client = createDb(appUrl());
+  // A one-connection pool, held by the revoke itself: the deadline needs no
+  // other connection, because the server enforces it.
+  const client = createDb(appUrl(), { max: 1 });
   try {
     // The tenancy lock is released after 210 ms, inside the 300 ms deadline;
     // the revoke's UPDATE then waits on the enrollment's row lock, which is
@@ -307,12 +317,12 @@ test("a bounded call ends its database work at the deadline and never commits la
 test("PUBLIC and hostile default roles cannot execute the inventory, and posture holds", async () => {
   expect(
     (
-      await fixture.admin`select has_function_privilege(${hostileRole},'opengeni_private.list_stale_compute_sandbox_enrollments()','EXECUTE') as allowed`
+      await fixture.admin`select has_function_privilege(${hostileRole},'opengeni_private.list_stale_compute_sandbox_enrollments(uuid)','EXECUTE') as allowed`
     )[0]!.allowed,
   ).toBe(false);
   const [row] = await fixture.admin`select count(*)::int as n from pg_proc p,
     lateral aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
-    where p.oid='opengeni_private.list_stale_compute_sandbox_enrollments()'::regprocedure
+    where p.oid='opengeni_private.list_stale_compute_sandbox_enrollments(uuid)'::regprocedure
       and acl.grantee=0 and acl.privilege_type='EXECUTE'`;
   expect(row!.n).toBe(0);
   const client = createDb(appUrl());
@@ -326,5 +336,42 @@ test("PUBLIC and hostile default roles cannot execute the inventory, and posture
     ).toEqual([]);
   } finally {
     await client.close();
+  }
+});
+
+test("the inventory is read a page at a time after a cursor, so every stale enrollment is reached", async () => {
+  const [source] = await fixture.admin`select account_id, workspace_id from enrollments
+    where id = ${stale[0]!}`;
+  const many: string[] = [];
+  for (let index = 0; index < STALE_COMPUTE_ENROLLMENT_PAGE_SIZE + 5; index += 1) {
+    const id = crypto.randomUUID();
+    many.push(id);
+    await fixture.admin`insert into enrollments(id,account_id,workspace_id,kind,sandbox_group_id,
+      pubkey,exposure,status,created_at)
+      values(${id},${source!.account_id},${source!.workspace_id},'sandbox',${crypto.randomUUID()},
+        null,'whole-machine','active',now() - interval '30 minutes')`;
+  }
+  const client = createDb(appUrl());
+  try {
+    const seen: string[] = [];
+    let after: string | undefined;
+    let pages = 0;
+    for (;;) {
+      const page = await listStaleComputeSandboxEnrollments(client.db, after);
+      pages += 1;
+      const ids = page.candidates.map((candidate) => candidate.enrollmentId);
+      // In id order, strictly after the cursor.
+      expect(ids).toEqual([...ids].sort());
+      if (after !== undefined) expect(ids.every((id) => id > after!)).toBe(true);
+      seen.push(...ids);
+      if (!page.more) break;
+      expect(ids).toHaveLength(STALE_COMPUTE_ENROLLMENT_PAGE_SIZE);
+      after = ids.at(-1);
+    }
+    expect(pages).toBeGreaterThan(1);
+    for (const id of many) expect(seen).toContain(id);
+  } finally {
+    await client.close();
+    await fixture.admin`update enrollments set status = 'revoked' where id in ${fixture.admin(many)}`;
   }
 });

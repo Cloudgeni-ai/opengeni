@@ -228,19 +228,30 @@ export async function sweepComputeOrphans(input: {
 
 export type StaleComputeEnrollment = { workspaceId: string; enrollmentId: string };
 
+/** One page of the stale inventory, in enrollment-id order. */
+export type StaleComputeEnrollmentPage = {
+  candidates: StaleComputeEnrollment[];
+  /** The inventory may go on past this page. */
+  more: boolean;
+};
+
 /**
  * Revoke the compute sandbox enrollments Opengeni's own records show are stale
  * (their sandbox is already gone, so no fabric listing names them; see the
- * database's stale inventory). Like the orphan sweep, enrollments are handled
- * a few at a time and, with `progress` (its own, keyed by enrollment), each
- * pass resumes after the last one reached and a failed revoke sits out a
- * while, so one enrollment whose workspace stays locked never keeps the
- * others waiting pass after pass. Give each `revoke` its own short deadline so
- * a stuck one fails, rather than holding a slot until `signal` stops the
- * whole pass. Once `signal` aborts no new revoke starts.
+ * database's stale inventory). The inventory is read a page at a time in
+ * enrollment-id order. With `progress` (its own, keyed by enrollment) each
+ * pass reads the page after the last enrollment the previous one reached, and
+ * starts again at the beginning after the last page; a failed revoke sits out
+ * a while. However many enrollments keep failing, every other one is reached
+ * within a few passes, and one whose workspace stays locked never keeps the
+ * others waiting. Enrollments are revoked a few at a time; give each `revoke`
+ * its own short deadline so a stuck one fails, rather than holding a slot
+ * until `signal` stops the whole pass. Once `signal` aborts no new revoke
+ * starts.
  */
 export async function reconcileStaleComputeEnrollments(input: {
-  list(): Promise<StaleComputeEnrollment[]>;
+  /** The page after `after` (from the start when undefined). */
+  list(after: string | undefined): Promise<StaleComputeEnrollmentPage>;
   /** True when it revoked the enrollment, false when it no longer qualifies. */
   revoke(candidate: StaleComputeEnrollment): Promise<boolean>;
   nowMs?: number;
@@ -253,26 +264,33 @@ export async function reconcileStaleComputeEnrollments(input: {
   const { signal, progress } = input;
   const result = { examined: 0, revoked: [] as StaleComputeEnrollment[], failed: 0 };
   if (signal?.aborted) return result;
-  const listed = await untilStopped(input.list(), signal);
-  result.examined = listed.length;
-  if (progress) {
-    const ids = new Set(listed.map((candidate) => candidate.enrollmentId));
-    for (const id of progress.failures.keys()) if (!ids.has(id)) progress.failures.delete(id);
+  let after = progress?.cursor;
+  let page = await untilStopped(input.list(after), signal);
+  if (page.candidates.length === 0 && after !== undefined) {
+    // The previous pass reached the end: start again at the beginning.
+    after = undefined;
+    page = await untilStopped(input.list(undefined), signal);
   }
-  const ordered = listed
-    .filter((candidate) => {
-      const failure = progress?.failures.get(candidate.enrollmentId);
-      return !failure || failure.retryAtMs <= nowMs;
-    })
-    .map((candidate) => ({ key: candidate.enrollmentId, candidate }))
-    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  const candidates = resumedAfter(ordered, progress?.cursor);
+  const listed = page.candidates;
+  result.examined = listed.length;
+  const last = listed.at(-1)?.enrollmentId;
+  if (progress) {
+    // Forget the failures of enrollments this page shows are no longer stale.
+    const ids = new Set(listed.map((candidate) => candidate.enrollmentId));
+    const covered = (id: string): boolean =>
+      (after === undefined || id > after) && (!page.more || (last !== undefined && id <= last));
+    for (const id of progress.failures.keys()) {
+      if (covered(id) && !ids.has(id)) progress.failures.delete(id);
+    }
+  }
   let next = 0;
   const work = async (): Promise<void> => {
-    while (next < candidates.length && !input.signal?.aborted) {
-      const { key, candidate } = candidates[next]!;
+    while (next < listed.length && !input.signal?.aborted) {
+      const candidate = listed[next]!;
       next += 1;
-      if (progress) progress.cursor = key;
+      if (progress) progress.cursor = candidate.enrollmentId;
+      const failure = progress?.failures.get(candidate.enrollmentId);
+      if (failure && failure.retryAtMs > nowMs) continue;
       try {
         if (await untilStopped(input.revoke(candidate), signal)) result.revoked.push(candidate);
         progress?.failures.delete(candidate.enrollmentId);
@@ -284,6 +302,11 @@ export async function reconcileStaleComputeEnrollments(input: {
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, candidates.length) }, work));
+  await Promise.all(Array.from({ length: Math.min(concurrency, listed.length) }, work));
+  // The whole page was reached: the next pass reads the page after it, or the
+  // first page again once this was the last.
+  if (progress && next >= listed.length && !signal?.aborted) {
+    progress.cursor = page.more ? last : undefined;
+  }
   return result;
 }

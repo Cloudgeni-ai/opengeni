@@ -62854,13 +62854,15 @@ export async function releaseSandboxAgentLink(
 
 /**
  * A deadline (and optional stop signal) for maintenance work such as the
- * compute orphan sweep. A bounded call runs in one transaction that ends at the
- * absolute deadline: every statement runs under a statement timeout no longer
- * than the time left, the statement in progress at the deadline (or when the
- * signal aborts) is cancelled on the server, and work that finishes after the
- * deadline rolls back instead of committing late. Lock waits (the workspace
- * tenancy lock included) end with it. `db` must be the pool, not a
- * transaction: the cancellation goes over another pooled connection.
+ * compute orphan sweep. A bounded call runs in one transaction whose every
+ * statement the server itself ends by the deadline: before each one the work
+ * sets the statement timeout to the time left (`limit`), so a lock wait (the
+ * workspace tenancy lock included) or a slow statement is cancelled by
+ * PostgreSQL at the deadline, whatever the pool's state, and nothing else is
+ * ever cancelled. Work that finishes after the deadline, or after the signal
+ * aborts, rolls back instead of committing late; a stopped call returns at
+ * once. A call whose deadline has passed, or that waited for a pooled
+ * connection until then, does nothing.
  */
 export type DatabaseWorkBound = { deadlineAtMs: number; signal?: AbortSignal | undefined };
 
@@ -62871,73 +62873,47 @@ export class DatabaseWorkDeadlineError extends Error {
   }
 }
 
+/** Give the next statements of bounded work at most the time left. */
+type LimitToDeadline = (db: Database) => Promise<void>;
+
 async function withinWorkBound<T>(
   db: Database,
   bound: DatabaseWorkBound | undefined,
-  fn: (db: Database) => Promise<T>,
+  fn: (db: Database, limit: LimitToDeadline) => Promise<T>,
 ): Promise<T> {
-  if (!bound) return await fn(db);
-  const signal = bound.signal;
-  signal?.throwIfAborted();
-  const remainingMs = bound.deadlineAtMs - Date.now();
-  if (remainingMs <= 0) throw new DatabaseWorkDeadlineError();
-  // The transaction's server process and start, so the statement it is running
-  // at the deadline can be cancelled. The cancel names this exact transaction
-  // (a pooled connection that has moved on to other work is left alone), the
-  // server ignores one that arrives between statements, and none is sent once
-  // the work has finished.
-  let transaction: { pid: number; startedAt: string } | null = null;
-  let finished = false;
-  let cancelled = false;
-  const cancel = (): void => {
-    if (finished || !transaction || cancelled) return;
-    cancelled = true;
-    void db
-      .execute(
-        sql`select pg_catalog.pg_cancel_backend(activity.pid)
-          from pg_catalog.pg_stat_activity activity
-          where activity.pid = ${transaction.pid}::integer
-            and activity.xact_start = ${transaction.startedAt}::timestamptz`,
-      )
-      .catch(() => undefined);
-  };
-  const timer = setTimeout(cancel, remainingMs);
-  signal?.addEventListener("abort", cancel, { once: true });
-  const work = withDatabaseStatementTimeout(db, remainingMs, async (bounded) => {
-    const [current] = await rawRows<{ pid: number | string; started_at: string }>(
-      bounded,
-      sql`select pg_catalog.pg_backend_pid() as pid, pg_catalog.now()::text as started_at`,
+  if (!bound) return await fn(db, async () => {});
+  const { deadlineAtMs, signal } = bound;
+  const limit: LimitToDeadline = async (handle) => {
+    signal?.throwIfAborted();
+    const remainingMs = Math.floor(deadlineAtMs - Date.now());
+    if (remainingMs <= 0) throw new DatabaseWorkDeadlineError();
+    await handle.execute(
+      sql`select pg_catalog.set_config('statement_timeout', ${`${remainingMs}ms`}, true)`,
     );
-    transaction = { pid: Number(current!.pid), startedAt: current!.started_at };
-    if (signal?.aborted || Date.now() >= bound.deadlineAtMs) cancel();
-    let value: T;
-    try {
-      value = await fn(bounded);
-    } finally {
-      finished = true;
-    }
+  };
+  signal?.throwIfAborted();
+  if (Date.now() >= deadlineAtMs) throw new DatabaseWorkDeadlineError();
+  const work = db.transaction(async (tx) => {
+    const scoped = tx as unknown as Database;
+    await limit(scoped);
+    const value = await fn(scoped, limit);
     // A stopped or late call rolls back rather than commit after its bound.
     signal?.throwIfAborted();
-    if (Date.now() >= bound.deadlineAtMs) throw new DatabaseWorkDeadlineError();
+    if (Date.now() >= deadlineAtMs) throw new DatabaseWorkDeadlineError();
     return value;
   });
+  if (!signal) return await work;
+  work.catch(() => {});
+  let onAbort: (() => void) | undefined;
+  const stopped = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason ?? new Error("The maintenance work was stopped."));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  stopped.catch(() => {});
   try {
-    if (!signal) return await work;
-    work.catch(() => {});
-    let onAbort: (() => void) | undefined;
-    const stopped = new Promise<never>((_, reject) => {
-      onAbort = () => reject(signal.reason ?? new Error("The maintenance work was stopped."));
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
-    stopped.catch(() => {});
-    try {
-      return await Promise.race([work, stopped]);
-    } finally {
-      if (onAbort) signal.removeEventListener("abort", onAbort);
-    }
+    return await Promise.race([work, stopped]);
   } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", cancel);
+    if (onAbort) signal.removeEventListener("abort", onAbort);
   }
 }
 
@@ -62950,8 +62926,10 @@ export async function revokeSandboxEnrollment(
   bound?: DatabaseWorkBound,
 ): Promise<{ revoked: boolean }> {
   const now = input.now ?? new Date();
-  const scoped = withinWorkBound(db, bound, (boundedDb) =>
+  const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
     withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
+      // The tenancy lock is held: the statement below gets only the time left.
+      await limit(scopedDb);
       const rows = await scopedDb
         .update(schema.enrollments)
         .set({
@@ -62995,8 +62973,10 @@ export async function computeSandboxNamed(
   input: { workspaceId: string; sandboxGroupId: string; enrollmentId: string; sandboxId: string },
   bound?: DatabaseWorkBound,
 ): Promise<boolean> {
-  const scoped = withinWorkBound(db, bound, (boundedDb) =>
+  const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
     withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
+      // The tenancy lock is held: the statement below gets only the time left.
+      await limit(scopedDb);
       const rows = await rawRows<{ named: boolean }>(
         scopedDb,
         sql`
@@ -63033,19 +63013,25 @@ export async function computeSandboxNamed(
   }
 }
 
+/** The most entries one page of the stale compute enrollment inventory holds. */
+export const STALE_COMPUTE_ENROLLMENT_PAGE_SIZE = 100;
+
 /**
  * Compute sandbox enrollments nothing can use any more: active, created more
  * than ten minutes ago (the create settle window), and their group's lease
  * neither names them nor is warming a new box. These are enrollments whose
  * sandbox is already gone (a delete whose revoke failed, a create that never
  * made one), which no fabric listing shows the orphan sweep. The
- * cross-workspace inventory (migration 0846) returns ids only, oldest first by
- * id; revoke each with {@link revokeStaleComputeSandboxEnrollment}.
+ * cross-workspace inventory (migration 0846) returns ids only, one page in
+ * enrollment-id order after `after` (from the start without it), with `more`
+ * when the inventory may go on past the page; revoke each with
+ * {@link revokeStaleComputeSandboxEnrollment}.
  */
 export async function listStaleComputeSandboxEnrollments(
   db: Database,
+  after: string | undefined,
   bound?: DatabaseWorkBound,
-): Promise<{ workspaceId: string; enrollmentId: string }[]> {
+): Promise<{ candidates: { workspaceId: string; enrollmentId: string }[]; more: boolean }> {
   const rows = await withinWorkBound(
     db,
     bound,
@@ -63054,12 +63040,18 @@ export async function listStaleComputeSandboxEnrollments(
         boundedDb,
         sql`
           select workspace_id, enrollment_id
-          from opengeni_private.list_stale_compute_sandbox_enrollments()
+          from opengeni_private.list_stale_compute_sandbox_enrollments(${after ?? null}::uuid)
           order by enrollment_id
         `,
       ),
   );
-  return rows.map((row) => ({ workspaceId: row.workspace_id, enrollmentId: row.enrollment_id }));
+  return {
+    candidates: rows.map((row) => ({
+      workspaceId: row.workspace_id,
+      enrollmentId: row.enrollment_id,
+    })),
+    more: rows.length >= STALE_COMPUTE_ENROLLMENT_PAGE_SIZE,
+  };
 }
 
 /**
@@ -63074,8 +63066,10 @@ export async function revokeStaleComputeSandboxEnrollment(
   candidate: { workspaceId: string; enrollmentId: string },
   bound?: DatabaseWorkBound,
 ): Promise<boolean> {
-  const scoped = withinWorkBound(db, bound, (boundedDb) =>
+  const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
     withWorkspaceRls(boundedDb, candidate.workspaceId, async (scopedDb) => {
+      // The tenancy lock is held: the statement below gets only the time left.
+      await limit(scopedDb);
       const rows = await rawRows<{ id: string }>(
         scopedDb,
         sql`

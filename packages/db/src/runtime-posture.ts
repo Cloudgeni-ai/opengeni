@@ -5554,7 +5554,7 @@ export function evaluateRuntimeDatabasePosture(
       violations.push("Modal create inventory has unsafe owner, ACL or runtime privileges");
     }
     const enrollmentInventory = posture.privateRoutines.find(
-      (routine) => routine.name === "list_stale_compute_sandbox_enrollments()",
+      (routine) => routine.name === "list_stale_compute_sandbox_enrollments(uuid)",
     );
     if (
       enrollmentInventory &&

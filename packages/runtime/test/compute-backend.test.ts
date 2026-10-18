@@ -887,7 +887,7 @@ describe("compute sandbox client", () => {
     // deadline. The others revoke at once.
     const reconcile = (nowMs: number, concurrency: number) =>
       reconcileStaleComputeEnrollments({
-        list: async () => listed,
+        list: async () => ({ candidates: listed, more: false }),
         revoke: async (candidate) => {
           attempts.push(candidate.enrollmentId);
           if (candidate.enrollmentId === "enr-a") {
@@ -914,7 +914,7 @@ describe("compute sandbox client", () => {
     setTimeout(() => stop.abort(), 50);
     const started = Date.now();
     const stuck = await reconcileStaleComputeEnrollments({
-      list: async () => listed,
+      list: async () => ({ candidates: listed, more: false }),
       revoke: async (candidate) =>
         candidate.enrollmentId === "enr-a" ? await new Promise<boolean>(() => {}) : true,
       concurrency: 2,
@@ -922,6 +922,51 @@ describe("compute sandbox client", () => {
     });
     expect(stuck.revoked.map((r) => r.enrollmentId)).toEqual(["enr-b", "enr-c"]);
     expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  test("stale enrollments that keep failing never hide the ones after them", async () => {
+    // The inventory, read a page of three at a time in id order: the first
+    // three keep failing, and only the next page holds healthy ones.
+    const inventory = ["enr-1", "enr-2", "enr-3", "enr-4", "enr-5"].map((enrollmentId) => ({
+      workspaceId: "ws",
+      enrollmentId,
+    }));
+    const list = async (after: string | undefined) => {
+      const rest = inventory.filter((c) => after === undefined || c.enrollmentId > after);
+      return { candidates: rest.slice(0, 3), more: rest.length > 3 };
+    };
+    const progress = createComputeOrphanSweepProgress();
+    const attempts: string[] = [];
+    const reconcile = (nowMs: number) =>
+      reconcileStaleComputeEnrollments({
+        list,
+        revoke: async (candidate) => {
+          attempts.push(candidate.enrollmentId);
+          if (["enr-1", "enr-2", "enr-3"].includes(candidate.enrollmentId)) {
+            throw new Error("locked");
+          }
+          inventory.splice(
+            inventory.findIndex((c) => c.enrollmentId === candidate.enrollmentId),
+            1,
+          );
+          return true;
+        },
+        nowMs,
+        progress,
+      });
+    const startedAt = Date.now();
+    const first = await reconcile(startedAt);
+    expect(first).toMatchObject({ examined: 3, failed: 3, revoked: [] });
+    // Even straight away, before any failure may retry, the next pass reads
+    // the page after the failures.
+    const second = await reconcile(startedAt + 1);
+    expect(second.revoked.map((r) => r.enrollmentId)).toEqual(["enr-4", "enr-5"]);
+    // Then it starts again at the beginning, where the failures sit out
+    // their retry delay.
+    attempts.length = 0;
+    const third = await reconcile(startedAt + 2);
+    expect(third).toMatchObject({ examined: 3, failed: 0, revoked: [] });
+    expect(attempts).toEqual([]);
   });
 
   test("deleting a sandbox revokes its enrollment only after the fabric delete", async () => {

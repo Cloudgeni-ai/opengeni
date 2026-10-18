@@ -9,7 +9,10 @@
 -- own records, across workspaces: active sandbox enrollments created more
 -- than 10 minutes ago (the create settle window) whose group's lease neither
 -- names them nor is warming a new box. The worker then revokes each one under
--- its own workspace's RLS, re-checking the same condition.
+-- its own workspace's RLS, re-checking the same condition. It returns one
+-- page of at most 100 in enrollment-id order, after the id the caller gives
+-- (none for the first page), so a caller can reach every entry however many
+-- of the first ones keep failing.
 --
 -- It reuses the owner-only, transaction-bound read capability of the Modal
 -- inventory (0497): one more SELECT policy on enrollments, true only for the
@@ -19,8 +22,8 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
-CREATE INDEX IF NOT EXISTS enrollments_active_sandbox_created_idx
-  ON enrollments (created_at)
+CREATE INDEX IF NOT EXISTS enrollments_active_sandbox_id_idx
+  ON enrollments (id)
   WHERE kind = 'sandbox' AND status = 'active';
 
 DO $policy$
@@ -63,7 +66,7 @@ DO $inventory$
 DECLARE data_schema text := pg_catalog.current_schema(); role_name text;
 BEGIN
   EXECUTE pg_catalog.format($ddl$
-    CREATE FUNCTION opengeni_private.list_stale_compute_sandbox_enrollments()
+    CREATE FUNCTION opengeni_private.list_stale_compute_sandbox_enrollments(after_enrollment uuid)
     RETURNS TABLE (workspace_id uuid, enrollment_id uuid)
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $body$
     DECLARE opened integer;
@@ -84,7 +87,8 @@ BEGIN
               AND (lease.liveness = 'warming'
                 OR lease.resume_state #>> '{sessionState,enrollmentId}' = enrollment.id::text)
           )
-        ORDER BY enrollment.created_at, enrollment.id LIMIT 100;
+          AND (after_enrollment IS NULL OR enrollment.id > after_enrollment)
+        ORDER BY enrollment.id LIMIT 100;
       IF opened = 1 THEN
         DELETE FROM opengeni_private.modal_inventory_read_capabilities capability
         WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
@@ -94,15 +98,15 @@ BEGIN
     END
     $body$;
   $ddl$, data_schema, data_schema);
-  REVOKE ALL ON FUNCTION opengeni_private.list_stale_compute_sandbox_enrollments() FROM PUBLIC;
+  REVOKE ALL ON FUNCTION opengeni_private.list_stale_compute_sandbox_enrollments(uuid) FROM PUBLIC;
   FOR role_name IN
     SELECT DISTINCT role.rolname FROM pg_catalog.pg_proc proc
     CROSS JOIN LATERAL pg_catalog.aclexplode(coalesce(proc.proacl, pg_catalog.acldefault('f', proc.proowner))) acl
     JOIN pg_catalog.pg_roles role ON role.oid = acl.grantee
-    WHERE proc.oid = 'opengeni_private.list_stale_compute_sandbox_enrollments()'::regprocedure
+    WHERE proc.oid = 'opengeni_private.list_stale_compute_sandbox_enrollments(uuid)'::regprocedure
       AND acl.grantee <> proc.proowner
   LOOP
-    EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION opengeni_private.list_stale_compute_sandbox_enrollments() FROM %I', role_name);
+    EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION opengeni_private.list_stale_compute_sandbox_enrollments(uuid) FROM %I', role_name);
   END LOOP;
   -- Mirror the existing approved inventory callers, including custom runtime
   -- roles. No new public cross-workspace capability is introduced.
@@ -113,7 +117,7 @@ BEGIN
     WHERE proc.oid = 'opengeni_private.list_live_modal_sandbox_leases()'::regprocedure
       AND acl.privilege_type = 'EXECUTE' AND acl.grantee <> proc.proowner
   LOOP
-    EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION opengeni_private.list_stale_compute_sandbox_enrollments() TO %I', role_name);
+    EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION opengeni_private.list_stale_compute_sandbox_enrollments(uuid) TO %I', role_name);
   END LOOP;
 END;
 $inventory$;
