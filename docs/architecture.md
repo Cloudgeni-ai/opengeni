@@ -27,8 +27,13 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 External users require live membership/`asUser()`; an organization key holding
 `members:manage` creates a missing shared-workspace membership on the user's first
 request (`provisionExternalMemberOnFirstUse` in `packages/core/src/access`, never
-changing an existing one; SDK per-user workspaces stay single-user). Visibility differs from `agentAccess`;
-Personal Knowledge follows the verified active-turn user. Links never merge users.
+changing an existing one; SDK per-user workspaces stay single-user).
+External workspace routes resolve their organization-local mapping before native
+workspace authorization. All native-workspace HTTP middleware shares the same
+route-namespace/UUID admission boundary; lookup failures propagate to HTTP
+diagnostics rather than being treated as missing workspaces.
+Visibility differs from `agentAccess`; Personal Knowledge follows the verified
+active-turn user. Links never merge users.
 [Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), [run lifecycle](run-lifecycle.md).

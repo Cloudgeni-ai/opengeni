@@ -87,6 +87,7 @@ function fixture(overrides: Partial<ApiKey> = {}, credentialKind = "organization
   );
   track(spyOn(db, "getWorkspaceGrant").mockResolvedValue(null));
   const workspace = track(spyOn(db, "requireWorkspace").mockResolvedValue(workspaceRecord));
+  track(spyOn(db, "getWorkspace").mockImplementation(async (...args) => workspace(...args)));
   const deps = {
     db: {} as never,
     settings: testSettings({
