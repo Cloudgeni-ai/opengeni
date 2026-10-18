@@ -156,6 +156,24 @@ describe("ComputerSession route discipline", () => {
     expect(source).toContain("retryable: false");
   });
 
+  test("reports a request for another machine before the routed machine's desktop state", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const placement = source.slice(
+      source.indexOf("async function withComputerPlacement"),
+      source.indexOf("async function withActiveComputerController"),
+    );
+    const routed = placement.slice(placement.indexOf("handle.routingSession.prime()"));
+    // A locked or display-less routed machine must not answer for the machine
+    // the request named.
+    expect(routed.indexOf("wrongInteractionPlacementMessage(")).toBeGreaterThan(-1);
+    expect(routed.indexOf("wrongInteractionPlacementMessage(")).toBeLessThan(
+      routed.indexOf("assertConnectedMachineComputerAccess("),
+    );
+    expect(routed.indexOf("throwComputerSourcePlacementChanged(")).toBeLessThan(
+      routed.indexOf("assertConnectedMachineComputerAccess("),
+    );
+  });
+
   test("resolves a routed Connected Machine with the turn's machine authority, not the agent grant", async () => {
     const source = await readFile(routeUrl, "utf8");
     const placement = source.slice(
