@@ -1,9 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
+import {
+  ControlRequest,
+  ControlResponse,
+  ErrorCode,
+  OpLostReason,
+  OpState,
+  type OpStatus,
+} from "@opengeni/agent-proto";
 import {
   ComputeFabricClient,
   ComputeFabricError,
   ComputeSandboxClient,
+  COMPUTE_AGENT_EPOCH,
   ComputeSandboxSession,
   MockAgentResponder,
   NatsControlRpc,
@@ -20,6 +28,8 @@ import {
   type ControlRpc,
   type NatsRequestConnection,
 } from "../src/sandbox";
+import { Manifest } from "@openai/agents/sandbox";
+import { fileContentDigest } from "../src/sandbox/selfhosted/file-transfer";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
@@ -170,6 +180,10 @@ class FakeAgentPlane implements ComputeAgentPlane {
   natsTransport = false;
   /** Every subject a request was sent on over that connection. */
   readonly natsSubjects: string[] = [];
+  /** The agent's Hello advertised transactional file writes. */
+  transactional = false;
+  /** Transactional writes by op id, as the agent's upload engine keeps them. */
+  readonly uploads = new Map<string, { epoch: number; path: string; bytes: number[] }>();
   private readonly runners = new Map<string, FakeOpRunner>();
 
   private runner(agentId: string, instance: string): FakeOpRunner {
@@ -239,6 +253,13 @@ class FakeAgentPlane implements ComputeAgentPlane {
         if (this.sessions.get(agentId) !== instance) {
           return offlineControlResponse(req.requestId, true);
         }
+        // The real agent refuses work under epoch 0 (its upload engine
+        // fences every transaction step on it); only a ping is unfenced.
+        if (req.epoch === 0 && req.op?.$case !== "ping") {
+          return fenced(req.requestId, "request carries epoch 0");
+        }
+        const upload = await this.uploadStep(req);
+        if (upload) return upload;
         const answer = await this.responder.request(subject, req, opts);
         if (answer.error?.code === ErrorCode.ERROR_CODE_UNSUPPORTED) {
           return await this.runner(agentId, instance).request(subject, req, opts);
@@ -252,6 +273,84 @@ class FakeAgentPlane implements ComputeAgentPlane {
     return this.transport;
   }
 
+  /** The agent's transactional write engine: a begin, chunks and queries
+   * must all repeat the begin's nonzero epoch. */
+  private async uploadStep(req: ControlRequest): Promise<ControlResponse | null> {
+    const op = req.op;
+    if (op?.$case === "opStart" && op.opStart.op?.$case === "fsWrite") {
+      this.uploads.set(req.requestId, {
+        epoch: req.epoch,
+        path: op.opStart.op.fsWrite.path,
+        bytes: [],
+      });
+      return {
+        requestId: req.requestId,
+        error: undefined,
+        result: {
+          $case: "opStart",
+          opStart: { accepted: true, status: this.uploadStatus(req.requestId) },
+        },
+      };
+    }
+    const opId =
+      op?.$case === "writeChunk"
+        ? op.writeChunk.opId
+        : op?.$case === "opQuery" && this.uploads.has(op.opQuery.opId)
+          ? op.opQuery.opId
+          : null;
+    if (opId === null || !op) return null;
+    const upload = this.uploads.get(opId);
+    if (!upload || upload.epoch !== req.epoch) return fenced(req.requestId, "epoch changed");
+    if (op.$case === "writeChunk") {
+      upload.bytes.push(...op.writeChunk.bytes);
+      if (op.writeChunk.last) {
+        await this.responder.request(
+          "",
+          ControlRequest.fromPartial({
+            requestId: crypto.randomUUID(),
+            epoch: req.epoch,
+            op: {
+              $case: "fsWrite",
+              fsWrite: { path: upload.path, content: Uint8Array.from(upload.bytes) },
+            },
+          }),
+        );
+      }
+      return {
+        requestId: req.requestId,
+        error: undefined,
+        result: { $case: "writeChunk", writeChunk: { seq: op.writeChunk.seq } },
+      };
+    }
+    return {
+      requestId: req.requestId,
+      error: undefined,
+      result: { $case: "opStatus", opStatus: this.uploadStatus(opId) },
+    };
+  }
+
+  private uploadStatus(opId: string): OpStatus {
+    const bytes = Uint8Array.from(this.uploads.get(opId)?.bytes ?? []);
+    return {
+      opId,
+      state: OpState.OP_STATE_COMPLETE,
+      nextSeq: "0",
+      exit: {
+        exitCode: 0,
+        timedOut: false,
+        cancelled: false,
+        durationMs: "0",
+        digests: { content: fileContentDigest(bytes) },
+        totals: { content: String(bytes.byteLength) },
+        failureCode: "",
+        failureDetail: {},
+        backgroundChildrenStopped: false,
+      },
+      lostReason: OpLostReason.OP_LOST_REASON_UNSPECIFIED,
+      writeOffset: String(bytes.byteLength),
+    };
+  }
+
   async resolveConnection(input: {
     workspaceId: string;
     enrollmentId: string;
@@ -263,7 +362,7 @@ class FakeAgentPlane implements ComputeAgentPlane {
       connectionInstanceId: instance,
       workspaceRoot: "/workspace",
       opStream: true,
-      transactionalFsWriteSupported: false,
+      transactionalFsWriteSupported: this.transactional,
       browserControlHttpSupported: false,
       runAsSupported: this.runAs,
     };
@@ -298,6 +397,14 @@ const fabrics: FakeFabric[] = [];
 afterEach(() => {
   for (const fabric of fabrics.splice(0)) fabric.stop();
 });
+
+function fenced(requestId: string, message: string): ControlResponse {
+  return {
+    requestId,
+    error: { code: ErrorCode.ERROR_CODE_FENCED, message, retryable: false, detail: {} },
+    result: undefined,
+  };
+}
 
 function agentIdOf(box: FabricBox): string {
   return (box.body.init as { agent: { agent_id: string } }).agent.agent_id;
@@ -687,10 +794,41 @@ describe("compute sandbox client", () => {
   test("a turn binding shares the sandbox state and wake gate", async () => {
     const { client } = setup();
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
-    const bound = session.bindTurn({ epoch: 3 });
+    const bound = session.bindTurn({ terminalScopeId: "chat-1" });
     expect(bound.state).toBe(session.state);
     expect(bound.gate).toBe(session.gate);
     expect(bound.backendId).toBe("compute");
+  });
+
+  test("setup writes, turn writes and later writes pass the agent's epoch fence", async () => {
+    const { client, plane } = setup();
+    plane.transactional = true;
+    // Larger than one chunk, so the agent's transactional upload engine runs.
+    const big = "x".repeat(300 * 1024);
+    const session = await client.create(
+      {
+        manifest: new Manifest({
+          root: "/workspace",
+          entries: { "setup.txt": { type: "file", content: big } },
+        }),
+      },
+      { opengeniCreateIdentity: identity },
+    );
+    await session.bindTurn({}).writeFile({ path: "/workspace/turn.txt", content: big });
+    const resumed = await client.resume(await client.serializeSessionState(session.state));
+    await resumed.writeFile({ path: "/workspace/later.txt", content: big });
+    const output = await resumed.exec({ command: "true" });
+    expect(output.exitCode).toBe(0);
+
+    for (const name of ["setup.txt", "turn.txt", "later.txt"]) {
+      const read = await resumed.readFile({ path: `/workspace/${name}` });
+      expect(read.byteLength).toBe(big.length);
+    }
+    // The manifest writes in chunks; the two large writes were transactions.
+    expect(plane.uploads.size).toBe(2);
+    const fencedSends = plane.sent.filter((s) => s.req.op?.$case !== "ping");
+    expect(fencedSends.length).toBeGreaterThan(0);
+    expect(fencedSends.every((s) => s.req.epoch === COMPUTE_AGENT_EPOCH)).toBe(true);
   });
 });
 

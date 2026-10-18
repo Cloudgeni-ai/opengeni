@@ -70,6 +70,16 @@ const COMPUTE_PRIVATE_ROOT = "/tmp/opengeni-private";
  * keeps finding no responder. */
 const WAKE_INTERVAL_MS = 5_000;
 
+/**
+ * The epoch every compute request carries. A sandbox's agent never adopts an
+ * epoch (nothing acknowledges its hello with one), so it fences nothing; but
+ * it refuses file-write transactions whose epoch is 0, and a transaction's
+ * chunks must repeat its begin's epoch. A fixed nonzero value meets both for
+ * every caller. Opengeni fences compute sandboxes by their lease and the
+ * gateway's owner epoch instead.
+ */
+export const COMPUTE_AGENT_EPOCH = 1;
+
 /** Who a compute sandbox belongs to. Required to create one: its agent's
  * enrollment is bound to this lease. */
 export interface ComputeCreateIdentity {
@@ -109,7 +119,6 @@ export type ComputeLiveState = ComputeSessionState & {
  * session. */
 export type ComputeTurnDeps = Pick<
   SelfhostedSessionDeps,
-  | "epoch"
   | "terminalScopeId"
   | "adoptBackgroundCommand"
   | "settleBackgroundCommand"
@@ -414,7 +423,7 @@ export class ComputeSandboxSession extends SelfhostedSession {
       resolveOperationAdmission,
       ...(deps.controlTimeoutMs !== undefined ? { timeoutMs: deps.controlTimeoutMs } : {}),
       ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
-      ...(turn.epoch !== undefined ? { epoch: turn.epoch } : {}),
+      epoch: COMPUTE_AGENT_EPOCH,
       ...(turn.terminalScopeId !== undefined ? { terminalScopeId: turn.terminalScopeId } : {}),
       ...(turn.adoptBackgroundCommand
         ? { adoptBackgroundCommand: turn.adoptBackgroundCommand }

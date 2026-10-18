@@ -70,6 +70,10 @@ skips sandbox enrollments, and machine routes list machines only.
   `ComputeWakingControlRpc` asks the fabric to wake it and resends under the
   same request id until the agent answers. Every operation re-resolves the
   agent's connection instance.
+- **Request epoch**: every compute request carries `COMPUTE_AGENT_EPOCH`
+  (1). The agent in a sandbox never adopts an epoch, so this fences nothing,
+  but its file-write transactions require a nonzero epoch repeated on every
+  step. Compute is fenced by its lease and the gateway's owner epoch.
 - **Idle**: when the last holder releases a compute lease, nothing is
   captured or deleted. The fabric sleeps the sandbox by its own rules and
   keeps memory and disk; Opengeni never drains a compute lease for being idle
