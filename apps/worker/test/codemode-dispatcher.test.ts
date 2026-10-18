@@ -657,7 +657,9 @@ describe("CodemodeAttemptDispatcher", () => {
       scope,
       undefined,
       1,
-      { claimLeaseMs: 1_000, claimHeartbeatMs: 100 },
+      // The wait below outlasts one whole lease, so only renewal keeps the claim.
+      // A 3 s lease tolerates a slow database on a loaded CI runner.
+      { claimLeaseMs: 3_000, claimHeartbeatMs: 100 },
     );
     dispatcher.start();
     const request = async () =>
@@ -677,7 +679,7 @@ describe("CodemodeAttemptDispatcher", () => {
     try {
       expect(await request()).toBe("accepted");
       await preparationStarted;
-      await Bun.sleep(1_200);
+      await Bun.sleep(3_500);
       expect(await request()).toBe("already_running");
       releasePreparation();
       expect(await waitForTerminal(scope, operationId)).toMatchObject({
