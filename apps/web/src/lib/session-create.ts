@@ -689,6 +689,7 @@ const MANAGED_BACKEND_LABELS: Partial<Record<SandboxBackend, string>> = {
   cloudflare: "Cloudflare",
   vercel: "Vercel",
   opensandbox: "OpenSandbox",
+  compute: "Opengeni compute",
 };
 
 function backendLabel(backend: SandboxBackend): string {

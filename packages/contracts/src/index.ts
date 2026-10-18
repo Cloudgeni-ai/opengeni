@@ -20570,6 +20570,7 @@ export const MachineKind = /* @__PURE__ */ defineSchema(() =>
     "vercel",
     "selfhosted",
     "opensandbox",
+    "compute",
   ]),
 );
 export type MachineKind = z.infer<typeof MachineKind>;

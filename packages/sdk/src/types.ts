@@ -9731,7 +9731,8 @@ export type MachineKind =
   | "cloudflare"
   | "vercel"
   | "selfhosted"
-  | "opensandbox";
+  | "opensandbox"
+  | "compute";
 
 export type MachineConnectionAuthority = {
   state: "not_applicable" | "unclaimed" | "active" | "expired";
