@@ -48,7 +48,7 @@ OPENGENI_URL=$OPENGENI_URL API_CONTRACT=$contract MODEL=$MODEL_DEPLOYMENT OUT=$o
   bun "$HOME/e2e/suite/run.ts" || status=$?
 # Every replica's log, each line prefixed with its pod.
 for part in compute-control api worker-turns worker-control relay; do
-  kubectl -n opengeni logs -l "app.kubernetes.io/component=$part" --prefix --all-containers \
+  kubectl -n opengeni logs -l "app.kubernetes.io/component=$part" --prefix --all-containers --tail=-1 \
     --max-log-requests=20 --since=2h >"$out/$part.log" 2>&1 || true
 done
 # Failure records since the run began (diagnostics.py).

@@ -836,3 +836,40 @@ the agent's disk budget. Every rate search first waits two minutes after
 putting its N sandboxes to rest, so their writes and uploads are done.
 The client widened its local port range for ours (one TCP connection per
 request through the lab's relay; in production the socket is local).
+
+## Opengeni end to end on GCP (2026-10-18)
+
+The suite in `compute/e2e` (its README has the steps and checks). Method:
+`env.sh up` in project-scoped resources in europe-west4-a: three
+n2-standard-8 hosts with nested virtualization in a zonal group that
+compute-control grows (hosts have no public address; Cloud NAT), an
+n2-standard-32 stack VM (Ubuntu 24.04, kernel 7.0 gcp, 500 GB SSD) running
+k3s 1.36 with the Opengeni chart at the compute commit: API, worker (turns
+and control), web, relay, Postgres (`max_connections=500`), Temporal, NATS
+with auth callout, Garage and `computeControl` (its own schema and role,
+two replicas, API over TLS, host endpoint as a NodePort, link signing key,
+the team link pointing at the API's agent gateway); Caddy in front with
+Let's Encrypt certificates on sslip.io names. Opengeni runs with
+`OPENGENI_SANDBOX_BACKEND=compute`, desktop enabled, and the managed
+deployment's sandbox rollout controls (turn-owned sandbox leases, lazy
+provisioning). The model is an Azure OpenAI deployment made for the runs
+(`gpt-5.6-terra`, GlobalStandard). The suite drives sessions through the
+public API with real model turns, reads the fabric's own API for host and
+sandbox facts, and finishes with a Playwright pass in the web app.
+
+Opengeni's images are built on the stack VM from the development branch of the
+backend, merged with the agent's fabric-mode branch; the sandbox images
+come from the same checkout, so the agent in each sandbox is the one built
+from that commit. Results carry the commits as `backend+agent`.
+
+| run (UTC) | Opengeni | compute | passed | failed | first failure |
+| --- | --- | --- | ---: | ---: | --- |
+| r1 13:43 | 087c9cb83 | 171ffa83a | 3 | 1 | create: MCP tool startup got HTTP 500; Postgres was at its 100 connections (Temporal holds about 47). Fixed: `postgres.args` in the chart, 500 in the e2e |
+| r2 13:46, r3 14:05, r4 14:25 | 087c9cb83, f973bd193 | 171ffa83a, 4dd28c3b3 | 3 | 1 | create: "creating a compute sandbox needs its lease identity". The deployment had sandbox ownership off (the chart's default), so the SDK created the sandbox without the lease; the e2e now sets the managed deployment's rollout controls |
+| r5 14:46 | f973bd193+057cd2c06 | fec5f6e4d | 3 | 1 | create: the sandbox was created (17.0 s from the provision start to `sandbox.box.created`, the gateway logged the host linked and the agent's session opened), then the first file write failed: the agent refuses a transfer whose session epoch is 0, which the backend sends |
+| r6 14:51 | the same, lazy provisioning off | fec5f6e4d | 3 | 1 | create: the same failure; eager provisioning does not change it |
+
+Checks after create (commands through host-loss and the UI pass) were
+skipped in every run so far because they need create. The run-as check
+is not applicable: the backend and the agent support running as another
+user, but Opengeni has no way to request it for a sandbox.
