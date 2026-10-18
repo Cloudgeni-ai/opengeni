@@ -192,6 +192,18 @@ async fn a_sandbox_being_handed_off_takes_no_wake() {
     one.wait_level(sandbox, LevelName::Paused).await;
     let handle = one.handle.clone();
     let handing = tokio::spawn(async move { handle.hand_off(sandbox, OwnerEpoch::FIRST).await });
+    // A wake the agent takes before the hand-off wakes the sandbox and
+    // turns the hand-off down, so probe only once the hand-off has begun
+    // its sleep (nothing else would, with sleep left to requests) or ended.
+    one.wait_until("the hand-off to begin", |status| {
+        handing.is_finished()
+            || status
+                .sandboxes
+                .iter()
+                .find(|held| held.id == sandbox)
+                .is_none_or(|held| held.step.is_some())
+    })
+    .await;
     // Until it is gone, every wake is refused; once gone, none finds it.
     loop {
         match one.wake(sandbox).await {
