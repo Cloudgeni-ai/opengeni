@@ -60,6 +60,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let wake = Toucher {
                     id,
                     commands: self.commands_tx.clone(),
+                    by: super::observe::By::AgentLink,
                 };
                 hub.attach(
                     id.to_string(),

@@ -216,7 +216,9 @@ impl Core {
     }
 
     pub(super) fn message(&mut self, now: u64, id: &str, queued: Queued) {
-        self.wake(now, id);
+        if let Some(reply) = &queued.reply {
+            self.asked(now, id, reply);
+        }
         let Some(sandbox) = self.sandboxes.get_mut(id) else {
             return;
         };

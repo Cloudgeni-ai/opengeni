@@ -423,6 +423,11 @@ impl Core {
             self.close_conn(now, conn, Some("Maximum Payload Violation"));
             return;
         }
+        let sandbox = self
+            .sandboxes
+            .get_mut(&self.conns[&conn].sandbox)
+            .expect("a connection's sandbox is attached");
+        sandbox.answered(&publish.subject);
         let Some((link, s)) = sandbox.session.on() else {
             return;
         };

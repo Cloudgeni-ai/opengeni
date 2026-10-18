@@ -112,8 +112,15 @@ fn sub(core: &mut Core, now: u64, conn: ConnId, name: &str, sid: &str) {
     );
 }
 
-/// The gateway sends a message for the host's `sid`.
+/// The gateway sends a request for the host's `sid`.
 fn msg(core: &mut Core, now: u64, s: u32, sid: u32, payload: Bytes) {
+    send(core, now, (s, sid), Some("_INBOX.r"), payload);
+}
+
+/// The gateway sends a message for the host's `sid` of session `s`: a
+/// request to be answered on `reply`, or with none a message nobody waits
+/// on.
+fn send(core: &mut Core, now: u64, (s, sid): (u32, u32), reply: Option<&str>, payload: Bytes) {
     core.on(
         now,
         Input::Gateway {
@@ -122,10 +129,36 @@ fn msg(core: &mut Core, now: u64, s: u32, sid: u32, payload: Bytes) {
                 s,
                 sid,
                 subject: format!("{}.rpc", scope()),
-                reply: Some("_INBOX.r".into()),
+                reply: reply.map(Into::into),
                 headers: None,
             },
             payload,
+        },
+    );
+}
+
+/// The agent answers on `reply`.
+fn answer(core: &mut Core, now: u64, conn: ConnId, reply: &str) {
+    guest(
+        core,
+        now,
+        conn,
+        ClientOp::Pub(Publish {
+            subject: reply.into(),
+            reply: None,
+            headers: None,
+            payload: Bytes::from_static(b"done"),
+        }),
+    );
+}
+
+/// The host says whether the sandbox runs.
+fn told(core: &mut Core, now: u64, running: Running) {
+    core.on(
+        now,
+        Input::Running {
+            sandbox: SANDBOX.into(),
+            running,
         },
     );
 }
@@ -216,13 +249,8 @@ fn messages_that_waited_too_long_go_and_make_room() {
     msg(&mut core, 0, s, 1, Bytes::from_static(b"old"));
     msg(&mut core, 10, s, 1, Bytes::from_static(b"older"));
     msg(&mut core, 20, s, 1, Bytes::from_static(b"dropped"));
-    assert_eq!(wakes(&core.take()), 1);
-    // The two that came within a wake's interval of the first wake the
-    // sandbox once more when it ends.
-    let every = Settings::default().wake_every_ms;
-    assert_eq!(core.deadline(), Some(every));
-    core.on(every, Input::Tick);
-    assert_eq!(wakes(&core.take()), 1);
+    // The host never said it runs: each request wakes it.
+    assert_eq!(wakes(&core.take()), 3);
     assert_eq!(core.deadline(), Some(hold));
     core.on(hold, Input::Tick);
     msg(&mut core, hold, s, 1, Bytes::from_static(b"new"));
@@ -240,7 +268,7 @@ fn wakes(effects: &[Effect]) -> usize {
 }
 
 #[test]
-fn a_message_too_soon_after_a_wake_wakes_its_sandbox_when_the_interval_ends() {
+fn a_request_wakes_a_sleeping_sandbox_and_one_that_falls_asleep_before_it_answers() {
     // The agent is connected and holds its subscription, as in a VM that
     // was paused: the host delivers to it, and only a wake runs it.
     let every = 250;
@@ -251,31 +279,152 @@ fn a_message_too_soon_after_a_wake_wakes_its_sandbox_when_the_interval_ends() {
     connect(&mut core, 0, 1);
     let s = open(&mut core, 0);
     sub(&mut core, 0, 1, "rpc", "1");
+    told(&mut core, 0, Running::Awake);
     core.take();
-    msg(&mut core, 0, s, 1, Bytes::from_static(b"write"));
-    assert_eq!(wakes(&core.take()), 1);
-    // It is put to sleep at once, and the next request follows within the
-    // interval: not woken now, but not left asleep either.
-    core.on(
-        5,
-        Input::Running {
-            sandbox: SANDBOX.into(),
-            running: Running::Asleep,
-        },
+    send(
+        &mut core,
+        0,
+        (s, 1),
+        Some("_INBOX.1"),
+        Bytes::from_static(b"write"),
     );
-    msg(&mut core, 10, s, 1, Bytes::from_static(b"exec"));
-    msg(&mut core, 20, s, 1, Bytes::from_static(b"again"));
-    assert_eq!(delivered(&core.take(), 1), ["exec", "again"]);
-    assert_eq!(core.deadline(), Some(every));
-    core.on(every - 1, Input::Tick);
+    assert_eq!(wakes(&core.take()), 1);
+    // Answered, then put to sleep at once: an explicit sleep right after a
+    // request stays.
+    answer(&mut core, 2, 1, "_INBOX.1");
+    told(&mut core, 5, Running::Asleep);
     assert_eq!(wakes(&core.take()), 0);
-    core.on(every, Input::Tick);
+    // A request for it asleep wakes it at once, however soon.
+    send(
+        &mut core,
+        10,
+        (s, 1),
+        Some("_INBOX.2"),
+        Bytes::from_static(b"exec"),
+    );
+    let effects = core.take();
+    assert_eq!(wakes(&effects), 1);
+    assert_eq!(delivered(&effects, 1), ["exec"]);
+    // Running again, a request that soon after needs no wake of its own...
+    told(&mut core, 12, Running::Awake);
+    send(
+        &mut core,
+        20,
+        (s, 1),
+        Some("_INBOX.3"),
+        Bytes::from_static(b"again"),
+    );
+    let effects = core.take();
+    assert_eq!(wakes(&effects), 0);
+    assert_eq!(delivered(&effects, 1), ["again"]);
+    // ...until it falls asleep with both unanswered: it is woken for them.
+    told(&mut core, 30, Running::Asleep);
     assert_eq!(wakes(&core.take()), 1, "woken once for both");
+    told(&mut core, 31, Running::Awake);
+    answer(&mut core, 32, 1, "_INBOX.2");
+    told(&mut core, 33, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 1, "it still owes one");
+    told(&mut core, 34, Running::Awake);
+    answer(&mut core, 35, 1, "_INBOX.3");
+    told(&mut core, 36, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 0, "it owes nothing");
+    // Nothing of this needs a timer.
     assert_eq!(core.deadline(), None);
-    // A message after a quiet interval wakes it at once.
-    msg(&mut core, 2 * every, s, 1, Bytes::from_static(b"later"));
+    // Awake, a request after a quiet interval wakes it at once.
+    told(&mut core, 40, Running::Awake);
+    send(
+        &mut core,
+        2 * every,
+        (s, 1),
+        Some("_INBOX.4"),
+        Bytes::from_static(b"later"),
+    );
     assert_eq!(wakes(&core.take()), 1);
     assert_eq!(core.deadline(), None);
+}
+
+#[test]
+fn a_message_nobody_waits_on_reaches_a_sleeping_agent_without_waking_it() {
+    let mut core = core(Settings::default());
+    connect(&mut core, 0, 1);
+    let s = open(&mut core, 0);
+    sub(&mut core, 0, 1, "rpc", "1");
+    told(&mut core, 0, Running::Asleep);
+    core.take();
+    // Acknowledgements of what the agent sent before it slept.
+    for n in 0..10u8 {
+        send(&mut core, u64::from(n), (s, 1), None, Bytes::from(vec![n]));
+    }
+    let effects = core.take();
+    assert_eq!(wakes(&effects), 0);
+    assert_eq!(
+        delivered(&effects, 1).len(),
+        10,
+        "delivered for when it runs"
+    );
+    // Nor when it sleeps again.
+    told(&mut core, 20, Running::Awake);
+    told(&mut core, 21, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 0);
+    assert_eq!(core.deadline(), None);
+}
+
+#[test]
+fn a_request_left_unanswered_is_woken_for_only_while_it_is_young() {
+    let hold = 120_000;
+    let mut core = core(Settings {
+        hold_ms: hold,
+        ..Settings::default()
+    });
+    connect(&mut core, 0, 1);
+    let s = open(&mut core, 0);
+    sub(&mut core, 0, 1, "rpc", "1");
+    told(&mut core, 0, Running::Awake);
+    core.take();
+    send(
+        &mut core,
+        0,
+        (s, 1),
+        Some("_INBOX.1"),
+        Bytes::from_static(b"never answered"),
+    );
+    core.take();
+    told(&mut core, hold - 1, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 1);
+    // Its sender gave up on it by now.
+    told(&mut core, hold - 1, Running::Awake);
+    told(&mut core, hold, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 0);
+    // An answer to nothing it owes changes nothing.
+    answer(&mut core, hold + 1, 1, "_INBOX.1");
+    told(&mut core, hold + 2, Running::Awake);
+    told(&mut core, hold + 3, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 0);
+}
+
+#[test]
+fn the_requests_an_agent_owes_answers_to_are_bounded() {
+    let mut core = core(Settings {
+        max_waiting: 2,
+        ..Settings::default()
+    });
+    connect(&mut core, 0, 1);
+    let s = open(&mut core, 0);
+    sub(&mut core, 0, 1, "rpc", "1");
+    told(&mut core, 0, Running::Asleep);
+    core.take();
+    for n in 1..=3u8 {
+        let reply = format!("_INBOX.{n}");
+        send(&mut core, 1, (s, 1), Some(&reply), Bytes::from(vec![n]));
+    }
+    // One past the bound still wakes it...
+    assert_eq!(wakes(&core.take()), 3);
+    told(&mut core, 2, Running::Awake);
+    answer(&mut core, 3, 1, "_INBOX.1");
+    answer(&mut core, 3, 1, "_INBOX.2");
+    // ...but is not woken for again.
+    told(&mut core, 4, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 0);
 }
 
 fn errors(effects: &[Effect], to: ConnId) -> Vec<String> {

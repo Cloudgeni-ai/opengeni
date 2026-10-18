@@ -1045,7 +1045,7 @@ async fn a_restarted_host_opens_the_kept_session_so_messages_wait_for_the_agent(
             s,
             sid: 1,
             subject: rpc(SCOPE_1),
-            reply: None,
+            reply: Some("_INBOX.gw.kept".into()),
             headers: None,
         },
         b"kept",

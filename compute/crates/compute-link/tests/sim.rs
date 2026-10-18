@@ -17,9 +17,12 @@
 //! - an agent hears `PONG` only once its gateway opened its session;
 //! - a gateway hears `sub`, `unsub`, `pub` and `state` only for sessions it
 //!   opened, within their scope, and each `open` names a new `s`;
-//! - a message for a sandbox wakes it, at most once per wake interval,
-//!   and nothing else does (not a relay credential, a state change or
-//!   what the agent sends).
+//! - a request for a sandbox (a message with a reply subject) wakes it: at
+//!   once if the host last said it sleeps or said nothing, and otherwise
+//!   at most once per wake interval; a sandbox the host says went to sleep
+//!   while its agent certainly owes an answer to a young request is woken
+//!   again; and nothing else wakes one (not a message nobody waits on, a
+//!   relay credential, another state change or what the agent sends).
 //!
 //! And at the end, once everything is back, every message sent is
 //! delivered, both connections of each agent are up, and each sandbox's
@@ -30,7 +33,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use compute_link::core::{ConnId, Core, Effect, Input, LinkId, Settings};
-use compute_link::nats::{ClientOp, Connect, Publish, ServerOp};
+use compute_link::nats::{ClientOp, Connect, Delivery, Publish, ServerOp};
 use compute_link::saved::Saved;
 use compute_protocol::link::{
     AgentLink, Ending, GatewayFrame, HostFrame, Refusal, Relay, Running, may_publish, may_subscribe,
@@ -126,11 +129,15 @@ struct Sandbox {
     shut_out: bool,
     agent: Agent,
     last_wake: Option<u64>,
-    /// When a message the core took came too soon after `last_wake` to
-    /// wake it at once: it owes a wake when the interval is over.
-    owed_wake: Option<u64>,
     /// The state the host last gave for it.
     running: Option<Running>,
+    /// The state the core was last told for it, while it was attached.
+    told: Option<Running>,
+    /// The requests the core took for it, by reply subject, with when.
+    taken: HashMap<String, u64>,
+    /// Those its agent has not sent an answer to: the core certainly owes
+    /// them still.
+    owes: HashSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,6 +179,8 @@ struct Sent {
     instance: String,
     sid: u32,
     subject: String,
+    /// Its reply subject, for a request.
+    reply: Option<String>,
     /// Must be delivered, sent once everything was back.
     must: bool,
 }
@@ -247,8 +256,10 @@ impl Sim {
                         asleep: false,
                     },
                     last_wake: None,
-                    owed_wake: None,
                     running: None,
+                    told: None,
+                    taken: HashMap::new(),
+                    owes: HashSet::new(),
                 })
                 .collect(),
             sessions: HashMap::new(),
@@ -312,19 +323,23 @@ impl Sim {
 
     /// Feeds the core, then queues what it asks.
     fn input(&mut self, input: Input) {
-        // A message the host takes, for a session it still holds, wakes
-        // its sandbox; one for a session it ended is stale.
-        let message_for = match &input {
-            Input::Gateway {
-                link,
-                frame: GatewayFrame::Msg { s, .. },
-                ..
-            } if self.host_sessions.contains(&(*link, *s)) => self
-                .sessions
-                .get(&(*link, *s))
-                .map(|session| session.sandbox.clone()),
-            _ => None,
-        };
+        let request_for = self.request_for(&input);
+        // Whether the core must wake it: always unless the core was told it
+        // runs and woke it within the interval.
+        let must_wake = request_for.as_ref().map(|(n, _)| {
+            let sandbox = &self.sandboxes[*n];
+            sandbox.told != Some(Running::Awake)
+                || sandbox
+                    .last_wake
+                    .is_none_or(|at| self.now >= at + self.settings.wake_every_ms)
+        });
+        let fell_asleep = self.fell_asleep(&input);
+        if let Input::Running { sandbox, running } = &input {
+            let n = self.index(sandbox);
+            if self.sandboxes[n].attached {
+                self.sandboxes[n].told = Some(*running);
+            }
+        }
         match &input {
             Input::Gateway {
                 link,
@@ -339,55 +354,93 @@ impl Sim {
         let tick = matches!(input, Input::Tick);
         self.core.on(self.now, input);
         let effects = self.core.take();
-        // Only a message wakes a sandbox: a relay credential, a state
-        // change or anything the agent sends never does. A tick wakes only
-        // a sandbox owed a wake for a message that came too soon after its
-        // last.
+        let woke = |n: usize| {
+            effects.iter().any(
+                |effect| matches!(effect, Effect::Wake { sandbox } if *sandbox == self.sandboxes[n].id),
+            )
+        };
+        // Only a request, or falling asleep owing an answer, wakes a
+        // sandbox: a message nobody waits on, a relay credential, a tick or
+        // anything the agent sends never does.
         for effect in &effects {
-            if let Effect::Wake { sandbox } = effect
-                && message_for.as_ref() != Some(sandbox)
-            {
+            if let Effect::Wake { sandbox } = effect {
                 let n = self.index(sandbox);
                 assert!(
-                    tick && self.sandboxes[n].owed_wake.is_some(),
-                    "{sandbox} was woken by something other than a message"
+                    !tick
+                        && (request_for.as_ref().is_some_and(|(r, _)| *r == n)
+                            || fell_asleep.is_some_and(|(a, may, _)| a == n && may)),
+                    "{sandbox} was woken by something other than a request it owes an answer to"
                 );
             }
         }
-        if let Some(sandbox) = message_for {
-            let woke = effects
-                .iter()
-                .any(|effect| matches!(effect, Effect::Wake { sandbox: s } if *s == sandbox));
-            if !woke {
-                let n = self.index(&sandbox);
-                let last = self.sandboxes[n].last_wake;
-                assert!(
-                    last.is_some_and(|at| self.now < at + self.settings.wake_every_ms),
-                    "a message for {sandbox} at {} did not wake it (last at {last:?})",
-                    self.now
-                );
-                self.sandboxes[n].owed_wake.get_or_insert(self.now);
-            }
+        let request_woke = request_for.as_ref().map(|(n, _)| woke(*n));
+        let asleep_woke = fell_asleep.map(|(n, _, _)| woke(n));
+        if let (Some((n, reply)), Some(must), Some(woke)) = (request_for, must_wake, request_woke) {
+            assert_eq!(
+                woke, must,
+                "a request for {} at {} (told {:?}, last woken {:?})",
+                self.sandboxes[n].id, self.now, self.sandboxes[n].told, self.sandboxes[n].last_wake
+            );
+            self.sandboxes[n].taken.insert(reply.clone(), self.now);
+            self.sandboxes[n].owes.insert(reply);
+        }
+        if let (Some((n, _, must)), Some(woke)) = (fell_asleep, asleep_woke) {
+            assert!(
+                !must || woke,
+                "{} fell asleep owing an answer and was not woken",
+                self.sandboxes[n].id
+            );
         }
         for effect in effects {
             self.effect(effect);
         }
-        // A wake that is owed is due when the interval since the last one
-        // ends, and the core's next tick comes by then.
-        for sandbox in &self.sandboxes {
-            if sandbox.attached
-                && sandbox.owed_wake.is_some()
-                && let Some(last) = sandbox.last_wake
-            {
-                let due = last + self.settings.wake_every_ms;
-                assert!(
-                    self.core.deadline().is_some_and(|at| at <= due),
-                    "{} owes a wake at {due}, but the core's next tick is {:?}",
-                    sandbox.id,
-                    self.core.deadline()
-                );
-            }
+    }
+
+    /// A request the host takes, for a session it still holds, wakes its
+    /// sandbox; one for a session it ended is stale.
+    fn request_for(&self, input: &Input) -> Option<(usize, String)> {
+        match input {
+            Input::Gateway {
+                link,
+                frame:
+                    GatewayFrame::Msg {
+                        s,
+                        reply: Some(reply),
+                        ..
+                    },
+                ..
+            } if self.host_sessions.contains(&(*link, *s)) => self
+                .sessions
+                .get(&(*link, *s))
+                .map(|session| (self.index(&session.sandbox), reply.clone())),
+            _ => None,
         }
+    }
+
+    /// A sandbox the core is told went to sleep: whether its agent may owe
+    /// answers (any young request taken) and whether it certainly does (one
+    /// it never sent an answer to).
+    fn fell_asleep(&mut self, input: &Input) -> Option<(usize, bool, bool)> {
+        let Input::Running {
+            sandbox,
+            running: Running::Asleep,
+        } = input
+        else {
+            return None;
+        };
+        let n = self.index(sandbox);
+        let (hold, now, max) = (self.settings.hold_ms, self.now, self.settings.max_waiting);
+        let sandbox = &mut self.sandboxes[n];
+        (sandbox.attached && sandbox.told != Some(Running::Asleep)).then(|| {
+            sandbox.taken.retain(|_, at| now < *at + hold);
+            let may = !sandbox.taken.is_empty();
+            let must = sandbox.taken.len() < max
+                && sandbox
+                    .owes
+                    .iter()
+                    .any(|reply| sandbox.taken.contains_key(reply));
+            (n, may, must)
+        })
     }
 
     fn index(&self, sandbox: &str) -> usize {
@@ -458,13 +511,7 @@ impl Sim {
             }
             Effect::Wake { sandbox } => {
                 let n = self.index(&sandbox);
-                let last = self.sandboxes[n].last_wake;
-                assert!(
-                    last.is_none_or(|at| self.now >= at + self.settings.wake_every_ms),
-                    "{sandbox} woken twice within the interval"
-                );
                 self.sandboxes[n].last_wake = Some(self.now);
-                self.sandboxes[n].owed_wake = None;
                 self.sandboxes[n].agent.asleep = false;
             }
             Effect::Save { sandbox, saved } => {
@@ -766,66 +813,92 @@ impl Sim {
             }
             ServerOp::Ping => self.agent_sends(conn, ClientOp::Pong),
             ServerOp::Ok => {}
-            ServerOp::Err(text) => {
-                // A subscription the server refused is gone.
-                if let Some(subject) = text
-                    .strip_prefix("Permissions Violation for Subscription to \"")
-                    .and_then(|rest| rest.strip_suffix('"'))
-                {
-                    let agent = &mut self.sandboxes[n].agent;
-                    let gone: Vec<String> = agent
-                        .subs
-                        .iter()
-                        .filter(|(_, sub)| sub.subject == subject)
-                        .map(|(sid, _)| sid.clone())
-                        .collect();
-                    for sid in gone {
-                        agent.subs.remove(&sid);
-                        agent.retired.insert(sid);
-                    }
-                    agent.wanted.retain(|_, wanted| wanted != subject);
-                }
-            }
-            ServerOp::Msg(delivery) => {
-                let id = u64::from_be_bytes(delivery.payload.as_ref().try_into().unwrap());
-                let sent = self
-                    .sent
-                    .get(&id)
-                    .unwrap_or_else(|| panic!("an unknown message {id}"));
-                let sandbox = &self.sandboxes[n];
-                assert!(self.delivered.insert(id), "message {id} delivered twice");
-                assert_eq!(sent.sandbox, sandbox.id, "message {id} to another sandbox");
-                assert_eq!(
-                    sent.instance, sandbox.agent.instance,
-                    "message {id} to another instance"
-                );
-                assert_eq!(delivery.subject, sent.subject);
-                let agent = &mut self.sandboxes[n].agent;
-                let Some(sub) = agent.subs.get_mut(&delivery.sid) else {
-                    assert!(
-                        agent.retired.contains(&delivery.sid),
-                        "message {id} for an unknown sid {}",
-                        delivery.sid
-                    );
-                    return;
-                };
-                assert_eq!(sub.subject, sent.subject, "message {id} to another sid");
-                sub.received += 1;
-                assert!(
-                    sub.max.is_none_or(|max| sub.received <= max),
-                    "message {id} past its subscription's maximum"
-                );
-                if sub.max == Some(sub.received) {
-                    agent.subs.remove(&delivery.sid);
-                    agent.retired.insert(delivery.sid.clone());
-                }
-                let key = (sent.sandbox.clone(), sent.instance.clone(), sent.sid);
-                let last = self.last_delivered.insert(key, id);
-                assert!(
-                    last.is_none_or(|last| last < id),
-                    "message {id} after {last:?} for one subscription"
-                );
-            }
+            ServerOp::Err(text) => self.agent_refused(n, &text),
+            ServerOp::Msg(delivery) => self.agent_receives(n, conn, &delivery),
+        }
+    }
+
+    /// A subscription the server refused is gone.
+    fn agent_refused(&mut self, n: usize, text: &str) {
+        let Some(subject) = text
+            .strip_prefix("Permissions Violation for Subscription to \"")
+            .and_then(|rest| rest.strip_suffix('"'))
+        else {
+            return;
+        };
+        let agent = &mut self.sandboxes[n].agent;
+        let gone: Vec<String> = agent
+            .subs
+            .iter()
+            .filter(|(_, sub)| sub.subject == subject)
+            .map(|(sid, _)| sid.clone())
+            .collect();
+        for sid in gone {
+            agent.subs.remove(&sid);
+            agent.retired.insert(sid);
+        }
+        agent.wanted.retain(|_, wanted| wanted != subject);
+    }
+
+    fn agent_receives(&mut self, n: usize, conn: ConnId, delivery: &Delivery) {
+        let id = u64::from_be_bytes(delivery.payload.as_ref().try_into().unwrap());
+        let sent = self
+            .sent
+            .get(&id)
+            .unwrap_or_else(|| panic!("an unknown message {id}"));
+        let sandbox = &self.sandboxes[n];
+        assert!(self.delivered.insert(id), "message {id} delivered twice");
+        assert_eq!(sent.sandbox, sandbox.id, "message {id} to another sandbox");
+        assert_eq!(
+            sent.instance, sandbox.agent.instance,
+            "message {id} to another instance"
+        );
+        assert_eq!(delivery.subject, sent.subject);
+        assert_eq!(
+            delivery.reply, sent.reply,
+            "message {id} with another reply"
+        );
+        let reply = sent.reply.clone();
+        let agent = &mut self.sandboxes[n].agent;
+        let Some(sub) = agent.subs.get_mut(&delivery.sid) else {
+            assert!(
+                agent.retired.contains(&delivery.sid),
+                "message {id} for an unknown sid {}",
+                delivery.sid
+            );
+            return;
+        };
+        assert_eq!(sub.subject, sent.subject, "message {id} to another sid");
+        sub.received += 1;
+        assert!(
+            sub.max.is_none_or(|max| sub.received <= max),
+            "message {id} past its subscription's maximum"
+        );
+        if sub.max == Some(sub.received) {
+            agent.subs.remove(&delivery.sid);
+            agent.retired.insert(delivery.sid.clone());
+        }
+        let key = (sent.sandbox.clone(), sent.instance.clone(), sent.sid);
+        let last = self.last_delivered.insert(key, id);
+        assert!(
+            last.is_none_or(|last| last < id),
+            "message {id} after {last:?} for one subscription"
+        );
+        // Most requests are answered; an agent may leave one, as a stale or
+        // unknown one.
+        if let Some(reply) = reply
+            && self.rng.chance(70)
+        {
+            self.sandboxes[n].owes.remove(&reply);
+            self.agent_sends(
+                conn,
+                ClientOp::Pub(Publish {
+                    subject: reply,
+                    reply: None,
+                    headers: None,
+                    payload: Bytes::from_static(b"answer"),
+                }),
+            );
         }
     }
 
@@ -1098,6 +1171,9 @@ impl Sim {
         let session = &self.sessions[&(link, s)];
         let id = self.next_msg;
         self.next_msg += 1;
+        // Half are requests, answered on an inbox of their own; the rest
+        // are acknowledgements and notices nobody waits on.
+        let reply = self.rng.chance(50).then(|| format!("_INBOX.q{id}"));
         self.sent.insert(
             id,
             Sent {
@@ -1105,6 +1181,7 @@ impl Sim {
                 instance: session.instance.clone(),
                 sid,
                 subject: subject.clone(),
+                reply: reply.clone(),
                 must,
             },
         );
@@ -1114,7 +1191,7 @@ impl Sim {
                 s,
                 sid,
                 subject,
-                reply: None,
+                reply,
                 headers: None,
             },
             Bytes::copy_from_slice(&id.to_be_bytes()),
@@ -1209,7 +1286,9 @@ impl Sim {
         self.host_instance.clear();
         for sandbox in &mut self.sandboxes {
             sandbox.last_wake = None;
-            sandbox.owed_wake = None;
+            sandbox.told = None;
+            sandbox.taken.clear();
+            sandbox.owes.clear();
         }
         self.core = Core::new(self.settings.clone());
         for n in 0..SANDBOXES {
@@ -1337,9 +1416,12 @@ impl Sim {
                 if self.sandboxes[n].attached {
                     self.sandboxes[n].attached = false;
                     self.sandboxes[n].last_wake = None;
-                    self.sandboxes[n].owed_wake = None;
                     let id = self.sandboxes[n].id.clone();
                     self.input(Input::Detach { sandbox: id });
+                    // The core forgets it, with what its agent owed.
+                    self.sandboxes[n].told = None;
+                    self.sandboxes[n].taken.clear();
+                    self.sandboxes[n].owes.clear();
                     self.agent_hangs_up(n);
                 } else {
                     self.sandboxes[n].ticket += 1;

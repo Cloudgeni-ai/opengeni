@@ -255,6 +255,7 @@ impl Handle {
             id,
             generation,
             priority,
+            by: super::observe::By::Fleet,
             reply: Some(reply),
         })
         .await?

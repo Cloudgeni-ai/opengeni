@@ -165,6 +165,7 @@ async fn a_traced_wake_and_the_step_it_caused_share_the_trace() {
             .find(|event| is(event, "compute.step", "compute.step", step))
             .unwrap();
         assert_eq!(text(event, "compute.cause"), Some("request"), "{step}");
+        assert_eq!(text(event, "compute.wake.by"), None, "{step}");
         assert_eq!(event.trace, Some(trace), "{step}");
     }
     let pause = seen
@@ -186,6 +187,7 @@ async fn a_traced_wake_and_the_step_it_caused_share_the_trace() {
         })
         .expect("a step woke it");
     assert_eq!(text(wake, "compute.cause"), Some("request"));
+    assert_eq!(text(wake, "compute.wake.by"), Some("fleet"));
     assert_eq!(wake.trace, None);
     assert_eq!(seen.last().unwrap().trace, None);
     assert_eq!(observer.metrics().requests(RequestKind::Wake, None), 2);

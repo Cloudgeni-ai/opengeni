@@ -136,6 +136,12 @@ enabling it changes no session's backend.
    desktop images (with `opengeni-agent`, ADR 21) are built this way from
    the same Opengeni commit as the deployment. Hosts fetch an image from
    the store on its first create.
+9. **Checkpoints.** A running sandbox whose create names no sleep config
+   (Opengeni's never does) is checkpointed to the store after every ten
+   minutes it runs: losing its host costs it what it did since its newest
+   copy (ADR 18). `--checkpoint-every-s` (through
+   `computeControl.extraArgs`) sets that target for the fleet; 0 takes
+   none.
 
 A minimal values file:
 
@@ -235,7 +241,10 @@ filesystem UUID; builds the base image from `COMPUTE_BASE_IMAGE_REF`; and
 installs three units:
 
 - `compute-host-setup.service` applies the kernel settings at every boot:
-  the huge-page pool (`COMPUTE_HUGE_PAGES`), no transparent huge pages,
+  the huge-page pool (`COMPUTE_HUGE_PAGES`; when the kernel finds too few
+  free 2 MiB runs, as on a fresh host whose memory is page cache from the
+  base-image unpack, it drops the cache, compacts memory and asks again,
+  and fails only if still short), no transparent huge pages,
   the software watchdog (3 s, `nowayout`) where the machine has no
   hardware one, and no suspend;
 - `compute-guard.service`, started once and never restarted: it stops
@@ -537,6 +546,11 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   events for its `compute.sandbox.id`. Steps carry time per phase, bytes,
   cause and the host-side pressure the sandbox saw since its previous
   event. A caller that sends `traceparent` finds them under its own trace.
+- **Find what woke a sandbox**: a wake step a caller asked for carries
+  `compute.wake.by`: `fleet` (a wake, touch, hold or connection through
+  the fleet), `agent_link` (a request for its agent, a message with a
+  reply subject; acknowledgements and other messages nobody waits on never
+  wake one) or `guest_port` (data for the guest on a port that wakes it).
 
 ## Upgrades
 

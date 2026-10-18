@@ -18,16 +18,43 @@ use crate::store::Store;
 use super::{HostAgent, Running};
 
 /// Why a step runs, with the caller's trace when a request with one caused
-/// it.
+/// it, and for a wake a caller asked for, what asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Why {
     pub cause: Cause,
     pub trace: Option<TraceContext>,
+    pub by: Option<By>,
 }
 
 impl Why {
     pub const fn plain(cause: Cause) -> Self {
-        Self { cause, trace: None }
+        Self {
+            cause,
+            trace: None,
+            by: None,
+        }
+    }
+}
+
+/// What asked for a sandbox to wake, on its wake step's event as
+/// `compute.wake.by`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum By {
+    /// A caller, through the fleet: a wake, touch, hold or connection.
+    Fleet,
+    /// A request for the sandbox's agent on its agent link.
+    AgentLink,
+    /// Data for the guest on a port that wakes it.
+    GuestPort,
+}
+
+impl By {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Fleet => "fleet",
+            Self::AgentLink => "agent_link",
+            Self::GuestPort => "guest_port",
+        }
     }
 }
 
@@ -66,6 +93,7 @@ pub(super) fn cause(
         Why {
             cause: Cause::Request,
             trace: asked.and_then(|asked| asked.trace),
+            by: None,
         }
     } else {
         Why::plain(Cause::Idle)
@@ -177,6 +205,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         .with("compute.op.id", running.op.0)
         .with("compute.step", step_name(running.step))
         .with("compute.cause", running.why.cause.name())
+        .with_some("compute.wake.by", running.why.by.map(By::name))
         .with("compute.outcome", outcome_name(outcome))
         .with("compute.duration_us", took)
         .with("compute.launches", report.launches)

@@ -20,7 +20,8 @@
 #   pager networking engine save_wake lab guest smoke conformance
 #                                       real VMs, as root
 #
-# Settings: SRC (this checkout's compute/), LAB (/lab), PROFILE (`nested` or
+# Settings: SRC (this checkout's compute/), LAB (/lab; on XFS or btrfs, since
+# a host takes checkpoints only where files share extents), PROFILE (`nested` or
 # `bare-metal`; the agent's own choice when unset), STORE (a directory or
 # gs:// URL for save_wake, LAB/gate-store), SANDBOXES (12, for `lab`),
 # SHARED_EXTENTS (a directory on XFS or btrfs, LAB/at), GUEST (where
@@ -51,7 +52,8 @@ step() { echo "== $(date -u +%H:%M:%S) $*"; }
 root() { CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sudo -E" "$@"; }
 profile() { if [ -n "${PROFILE:-}" ]; then echo "COMPUTE_TEST_PROFILE=$PROFILE"; fi; }
 # check NAME FILTER CMD...: runs CMD, shows the lines of its output FILTER
-# matches, and records NAME as failed if CMD exits non-zero.
+# matches, and records NAME as failed if CMD exits non-zero; returns CMD's
+# status.
 check() {
   local name=$1 filter=$2 log status
   shift 2
@@ -65,6 +67,12 @@ check() {
     tail -60 "$log"
   fi
   rm -f "$log"
+  return "$status"
+}
+# not_run NAME WHY: records NAME as failed without running it.
+not_run() {
+  FAILED+=("$1")
+  echo "!! $1 not run: $2"
 }
 TESTS='^test result|FAILED|panicked|^error|skipped:'
 
@@ -139,14 +147,19 @@ if wants lab; then
     $(profile) COMPUTE_TEST_SANDBOXES="$SANDBOXES" \
     cargo test --locked --release -p compute-host --test lab -- --test-threads 1
 fi
+guest_built=true
 if wants guest || wants conformance; then
   if ! command -v musl-gcc >/dev/null; then
     sudo apt-get install -y -qq musl-tools >/dev/null 2>&1
   fi
   step "guest build ($GUEST)"
-  check guest-build '^\[guest-build|^error' env OUT="$GUEST" bash guest/build.sh
+  # Without a guest the guest and conformance tests fail for that reason
+  # alone; the build's failure is the one the gate reports.
+  check guest-build '^\[guest-build|^error' env OUT="$GUEST" bash guest/build.sh || guest_built=false
 fi
-if wants guest; then
+if wants guest && ! "$guest_built"; then
+  not_run guest "the guest build failed"
+elif wants guest; then
   step guest
   # shellcheck disable=SC2046
   check guest "$TESTS" root env COMPUTE_TEST_LAB="$LAB" COMPUTE_TEST_REQUIRE=lab,guest \
@@ -167,7 +180,9 @@ if wants smoke; then
   fi
   rm -f "$smoke_log"
 fi
-if wants conformance; then
+if wants conformance && ! "$guest_built"; then
+  not_run conformance "the guest build failed"
+elif wants conformance; then
   step conformance
   check conformance-build '^error' cargo build --locked --release -p compute-host -p compute-control
   check conformance '^== |^SUITE|^END |checks passed|^not ok|^FAIL |^  failed: ' sudo -E env PATH="$PATH" LAB="$LAB" \
