@@ -13,6 +13,7 @@ import {
   EnrollmentConsent,
   EnrollmentDeviceFlow,
   MachineCard,
+  MachineDetail,
   MachineDockBar,
   MachineStatusPill,
   MachinesDashboard,
@@ -38,7 +39,6 @@ import {
   swappedMachinesResponse,
 } from "./machines-fixtures";
 import "./styles.css";
-import { MachineDetail } from "../src/components/machines/machine-detail";
 
 /** A single named machine card centered on the page (state-matrix cell). */
 function CardCell({ machine }: { machine: MachineView }) {
