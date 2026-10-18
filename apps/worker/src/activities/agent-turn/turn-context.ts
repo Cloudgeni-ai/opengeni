@@ -39,7 +39,7 @@ export type ClaimedResult = (
   >,
 ) => RunAgentTurnResult;
 
-export type TurnSettleFn = (input: {
+export type TurnSettleInput = {
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>;
   turnStatus:
     | "queued"
@@ -56,7 +56,19 @@ export type TurnSettleFn = (input: {
   consumeRequestedCompactionFailure?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
   notStartedToolCallIds?: readonly string[];
-}) => Promise<boolean>;
+};
+
+/**
+ * Durable turn settlement. `false` means this attempt lost ownership. With
+ * `requireQueuedPrompt`, `"queued_prompt_withdrawn"` means the precondition
+ * failed under the session lock and nothing was written.
+ */
+export type TurnSettleFn = {
+  (
+    input: TurnSettleInput & { requireQueuedPrompt: true },
+  ): Promise<boolean | "queued_prompt_withdrawn">;
+  (input: TurnSettleInput): Promise<boolean>;
+};
 
 export type TurnControlState = {
   cancellationRequestedAt: number | null;

@@ -93,7 +93,7 @@ export const defaultChatComposerMessages = (t: OpenGeniText): ChatComposerMessag
   stopTitle: t("composerMessages.stopTheResponse"),
   sendMessageAriaLabel: t("composerMessages.sendMessage"),
   sendAndResumeAriaLabel: t("composerMessages.addMessageToQueue"),
-  sendTitle: t("composerMessages.queueMessageEnterSteerWith"),
+  sendTitle: t("composerMessages.sendEnterTheAgentReads"),
   sendAndResumeTitle: t("composerMessages.addToQueueEnterSteer"),
   annotationNotesRequired: t("composerMessages.addANoteToEach"),
   workspacePaused: t("composerMessages.workspacePaused"),

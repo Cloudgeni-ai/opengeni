@@ -22,6 +22,7 @@ import {
   attachOpenSuffixToPendingToolCalls,
   clearDurablePendingSessionToolCalls,
   isSessionCompactionRequested,
+  hasQueuedPromptBehindTurn,
   nextSessionHistoryPosition,
   persistModelContextSnapshot,
   updateSessionTitleWithEvent,
@@ -105,6 +106,7 @@ import {
 import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { ToolResultSpill } from "./tool-result-spill";
+import { QueuedPromptYieldError, findQueuedPromptYieldError } from "./queued-prompt-yield";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
@@ -678,13 +680,17 @@ export async function runTurnStreamAttempt(
   let workerPreparationTotalRecorded = false;
   let toolsExecuted = false;
   let finalReplyNudged = false;
-  const revalidateModelCallAdmission = async () => {
-    // The three checks are independent, so they run together; this sits on the
+  // A person's queued prompt is delivered at the next model-step boundary of
+  // every ordinary turn. Standalone compaction is maintenance with no model
+  // step to yield from.
+  const yieldsToQueuedPrompts = turn.source !== "compaction";
+  const revalidateModelCallAdmission = async (options: { yieldToQueuedPrompt?: boolean } = {}) => {
+    // The checks are independent, so they run together; this sits on the
     // critical path of every model call. All of them settle before any outcome
     // is reported, and failures surface in the original order (durable
-    // history, subscription source, then usage), so a refusal is the same one
-    // the sequential checks would have produced.
-    const [history, source, usage] = await Promise.allSettled([
+    // history, subscription source, usage, then a queued prompt), so a refusal
+    // is the same one the sequential checks would have produced.
+    const [history, source, usage, queuedPrompt] = await Promise.allSettled([
       historySink.reconcileConversationTruth({ requireDurable: true }),
       revalidatePlacedSubscriptionCore(db, providerTurn),
       ensureRunAllowedBetweenModelCalls({
@@ -700,11 +706,23 @@ export async function runTurnStreamAttempt(
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
         sessionId: input.sessionId,
       }),
+      options.yieldToQueuedPrompt && yieldsToQueuedPrompts
+        ? hasQueuedPromptBehindTurn(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+          })
+        : Promise.resolve(false),
     ]);
     if (history.status === "rejected") throw history.reason;
     if (source.status === "rejected") throw source.reason;
     if (usage.status === "rejected") throw usage.reason;
     creditPolicyRevision = usage.value;
+    if (queuedPrompt.status === "rejected") throw queuedPrompt.reason;
+    // The previous step's tool results are durable (reconciled above) and
+    // this request has not left the worker: a clean boundary to hand over.
+    if (queuedPrompt.value) throw new QueuedPromptYieldError();
   };
   const runStreamAttempt = async (options: {
     requireTerminalModelResponse: boolean;
@@ -722,7 +740,7 @@ export async function runTurnStreamAttempt(
     if (options.requireTerminalModelResponse) await revalidateModelCallAdmission();
     const modelCallAdmission = createModelCallAdmission({
       signal: runtimeCancellationSignal,
-      admit: revalidateModelCallAdmission,
+      admit: () => revalidateModelCallAdmission({ yieldToQueuedPrompt: true }),
       observe: (phase, durationSeconds) =>
         recordModelStepPhase(observability, {
           provider: resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai",
@@ -1745,8 +1763,10 @@ export async function runTurnStreamAttempt(
         eventing.firstModelRequestPreparationStartedAt !== null &&
         // Compaction needed before the first request is an expected step the
         // in-activity recovery below settles and then reopens; it is not a
-        // preparation failure.
-        !(findCompactionNeededError(error) && eventing.turnStartedPublished)
+        // preparation failure. Handing over to a queued prompt before the
+        // first request is not one either: the turn ends superseded.
+        !(findCompactionNeededError(error) && eventing.turnStartedPublished) &&
+        !(findQueuedPromptYieldError(error) && eventing.turnStartedPublished)
       ) {
         eventing.firstModelRequestPreparationRecorded = true;
         const durationMs = Math.max(
@@ -2374,6 +2394,37 @@ export async function runTurnStreamAttempt(
         }
         return result;
       } catch (attemptError) {
+        if (findQueuedPromptYieldError(attemptError) && eventing.turnStartedPublished) {
+          // Model-call admission found a person's prompt queued behind this
+          // turn before the next request left the worker. Hand over at this
+          // step boundary: the turn ends `superseded` like a deferred Steer,
+          // and the prompt runs next on the same, unchanged history.
+          await flushRuntimeBatcher();
+          await historySink.reconcileConversationTruth({ requireDurable: true });
+          await finishParallelSessionTitle();
+          const settled = await eventing.settle!({
+            events: [
+              { type: "turn.superseded", payload: { reason: "queued_prompt" } },
+              { type: "session.status.changed", payload: { status: "queued" } },
+            ],
+            turnStatus: "superseded",
+            sessionStatus: "queued",
+            activeTurnId: null,
+            requireQueuedPrompt: true,
+          });
+          if (settled === "queued_prompt_withdrawn") {
+            // The prompt was withdrawn or claimed in between. Keep working:
+            // rebuild the input from the durable history and resume sampling.
+            await prepareRunAttemptInput();
+            continue;
+          }
+          if (!settled) return claimedResult({ status: "cancelled" });
+          // Metrics group user-directed supersession with cancellation; the
+          // durable turn outcome remains the precise `superseded` truth.
+          control.turnMetricOutcome = "cancelled";
+          control.activityStatus = "idle";
+          return claimedResult({ status: "idle" });
+        }
         const requestSizeError = findAnthropicRequestSizeError(attemptError);
         const overflow = classifyContextWindowOverflowError(attemptError);
         const compactionNeeded = findCompactionNeededError(attemptError);

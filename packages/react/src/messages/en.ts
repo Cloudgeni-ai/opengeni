@@ -576,7 +576,6 @@ export const englishMessages = {
   "composerMessages.previewUnavailable": "Preview unavailable",
   "composerMessages.queuedAhead_one": "{count} waiting prompt; your message joins the queue.",
   "composerMessages.queuedAhead_other": "{count} waiting prompts; your message joins the queue.",
-  "composerMessages.queueMessageEnterSteerWith": "Queue message (Enter); steer with Cmd/Ctrl+Enter",
   "composerMessages.reasonsThisWorkstreamIsPaused": "Reasons this workstream is paused",
   "composerMessages.removeName": "Remove {name}",
   "composerMessages.removeRestoredResourceIndex": "Remove restored resource {index}",
@@ -593,6 +592,8 @@ export const englishMessages = {
   "composerMessages.sending": "Sending…",
   "composerMessages.sendingFailedYourDraftIs":
     "Sending failed — your draft is still here. Try again.",
+  "composerMessages.sendEnterTheAgentReads":
+    "Send (Enter): a busy agent reads it after its current step. Steer now with Cmd/Ctrl+Enter",
   "composerMessages.sendMessage": "Send message",
   "composerMessages.showPauseDetails": "Show pause details",
   "composerMessages.slashCommands": "Slash commands",

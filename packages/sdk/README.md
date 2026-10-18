@@ -1410,11 +1410,15 @@ for await (const event of client.streamEvents(workspaceId, sessionId, {
 ## Messages, the turn queue, and steering
 
 Messages sent while a turn is running **queue by default** — visible,
-editable, reorderable, and deletable until the worker claims them. Steering is
-the explicit alternative: deliver now by interrupting the running turn.
+editable, reorderable, and deletable until the worker claims them. A queued
+message waits only for the running turn's current model step: before its next
+model request the running turn hands over (`turn.superseded` with reason
+`queued_prompt`) and the message runs next with the full history, without
+cutting off a tool call in progress. Steering is the explicit alternative:
+deliver now by interrupting the running turn immediately.
 
 ```ts
-// Queue (default): stacks behind the running turn.
+// Queue (default): read at the running turn's next model step.
 await client.sendMessage(workspaceId, sessionId, {
   text: "Also check the nginx config",
   clientEventId: crypto.randomUUID(),

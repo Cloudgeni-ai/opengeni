@@ -1619,6 +1619,16 @@ export function buildTimeline(
         if (event.type === "turn.cancelled" && turnId && !prescan.startedTurnIds.has(turnId)) {
           break;
         }
+        // The turn handed over to a person's queued prompt at a model-step
+        // boundary. Nothing was cut off: the agent reads the message next and
+        // carries on, so the turn closes quietly instead of as interrupted.
+        if (event.type === "turn.superseded" && payload.reason === "queued_prompt") {
+          takeAgentResponse(turnId);
+          takePendingWaitOutcome(turnId);
+          finalizeOpen(turnId, "complete", event.occurredAt);
+          items.push(turnEndItem(event, "complete", null));
+          break;
+        }
         takeAgentResponse(turnId);
         takePendingWaitOutcome(turnId);
         const hadActivity = hasTurnActivity(items, turnId);

@@ -27,8 +27,8 @@ A reload, a second client, or an audit all see the same history.
 
 ## Sending input
 
-- **Send** appends a prompt. If a turn is running, the message queues behind it. Queued messages stay editable and reorderable until they start.
-- **Steer** moves your message to the front and interrupts the running turn.
+- **Send** appends a prompt. If a turn is running, the message waits only until that turn's current model step finishes: before its next model request, the running turn hands over and your message runs next with the full history, so the agent reads it within one step instead of after the whole turn. Until then a queued message stays editable and reorderable, and it waits in the queue while the session is paused.
+- **Steer** moves your message to the front and interrupts the running turn immediately, including a tool call in progress.
 - **Pause** and **Resume** hold and release the session.
 - **Cancel** stops the session and its children for good.
 

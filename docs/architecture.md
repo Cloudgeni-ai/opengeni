@@ -1112,7 +1112,17 @@ Steer-equivalent replacement only when the active, unpaused branch is waiting in
 `requires_action`; checked-out queue edits, paused sessions, and other active
 lifecycle states keep ordinary Send ordering. Human prompts are the reorderable
 queue surface; machine-origin inputs remain typed records and join a turn only
-through the claim transaction. A `requires_action` resume preserves that rule
+through the claim transaction. A queued human/API prompt still never waits for
+the whole running turn: model-call admission, which runs before every model
+request after the previous step's tool results are durable, also reads
+`hasQueuedPromptBehindTurn`. When a prompt is queued no request is sent; the
+stream loop settles the turn `superseded`
+(`turn.superseded{reason:"queued_prompt"}`) under the settlement precondition
+`requireQueuedPrompt`, re-checked under the session lock, and the prompt is
+claimed next on the unchanged history. If it was withdrawn in between, nothing
+is written and the turn rebuilds its input from durable history and keeps
+sampling. Unlike Steer this never interrupts a tool call in progress, and the
+timeline closes the handed-over turn quietly. A `requires_action` resume preserves that rule
 without violating provider protocol: it first writes the interrupted
 call/result pair, then re-enters the exact attempt claim to attach only machine
 input whose durable pending-event sequence was inside the resume attempt's

@@ -124,6 +124,23 @@ describe("projection lifecycle audit regressions", () => {
     expect(work(replacement)[1]!.work!.endedAt).toBeUndefined();
   });
 
+  test("a handover to a queued prompt closes the old turn quietly, not as interrupted", () => {
+    const handover = event(5, "turn.superseded", { reason: "queued_prompt" });
+    const events = [
+      event(1, "turn.started"),
+      event(2, "agent.message.completed", { messageId: "before", text: "Checking" }),
+      event(3, "agent.toolCall.created", { id: "read", name: "exec_command", arguments: {} }),
+      event(4, "agent.toolCall.output", { id: "read", output: "ok" }),
+      handover,
+    ];
+    const groups = fold(events);
+    expect(work(groups)[0]!.work!.endedAt).toBe(handover.occurredAt);
+    expect(work(groups)[0]!.outcome).toBe("complete");
+    expect(work(groups)[0]!.items[0]).toMatchObject({ kind: "tool-call", status: "complete" });
+    const timeline = buildTimeline(englishText, events);
+    expect(timeline.some((item) => item.kind === "notice")).toBe(false);
+  });
+
   test("human Retry reopens the failed logical turn without prematurely folding its progress", () => {
     const failed = [
       event(1, "agent.message.completed", { messageId: "before", text: "Checking records" }),

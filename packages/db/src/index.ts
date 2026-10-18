@@ -40851,6 +40851,47 @@ export async function recordSkippedContextCompaction(
 }
 
 /**
+ * Whether a person's prompt (human or API Send) is queued behind the running
+ * turn of this session. The worker reads this before each model request of a
+ * turn: a queued prompt is delivered at that model-step boundary by settling
+ * the running turn `superseded` (reason `queued_prompt`), so the prompt runs
+ * next with the full history instead of waiting for the whole turn.
+ *
+ * This unlocked read only decides whether that settlement is worth trying.
+ * The settlement's `requireQueuedPrompt` precondition re-checks the same
+ * predicate under the session lock, so a prompt withdrawn in between leaves
+ * the turn running.
+ */
+export async function hasQueuedPromptBehindTurn(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+): Promise<boolean> {
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [queued] = await scopedDb
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(queuedPromptBehindTurnWhere(input.workspaceId, input.sessionId, input.turnId))
+        .limit(1);
+      return queued !== undefined;
+    },
+  );
+}
+
+/** The single predicate for a person's prompt queued behind a running turn. */
+function queuedPromptBehindTurnWhere(workspaceId: string, sessionId: string, turnId: string) {
+  return and(
+    eq(schema.sessionTurns.workspaceId, workspaceId),
+    eq(schema.sessionTurns.sessionId, sessionId),
+    eq(schema.sessionTurns.status, "queued"),
+    inArray(schema.sessionTurns.source, ["user", "api"]),
+    ne(schema.sessionTurns.id, turnId),
+  );
+}
+
+/**
  * Read the durable handoff condition immediately after one exact compaction
  * landmark settles. Steer admission deliberately leaves the active attempt
  * unfenced while its latest compaction event is `started`; the worker calls
@@ -77801,6 +77842,13 @@ export type ApplySessionTurnSettlementInput = {
   allowanceGoalPause?: { rationale: string; reason?: "allowance" | "session_usage_limit" };
   events: AppendEventInput[];
   /**
+   * Apply this settlement only while a person's prompt is still queued behind
+   * the turn (see `hasQueuedPromptBehindTurn`), checked under the session
+   * lock. Otherwise nothing is written and the result is
+   * `queued_prompt_withdrawn`, so the caller keeps running the turn.
+   */
+  requireQueuedPrompt?: boolean;
+  /**
    * A mid-turn requires_action freeze. Human-input rows and interaction
    * interventions are public protocol; ordinary approvals remain in
    * pendingApprovals. Pause attaches the bounded open suffix on
@@ -77854,6 +77902,11 @@ export type ApplySessionTurnSettlementResult =
       events: [];
       turnStatus: SessionTurnStatus | null;
       activeTurnId: string | null;
+    }
+  | {
+      /** `requireQueuedPrompt` found no queued prompt; nothing was written. */
+      action: "queued_prompt_withdrawn";
+      events: [];
     };
 
 export type ApplySessionTurnSettlementHooks = {
@@ -78289,6 +78342,19 @@ export async function applySessionTurnSettlement(
           turnStatus,
           activeTurnId: session.activeTurnId,
         };
+      }
+
+      if (input.requireQueuedPrompt) {
+        // The session row lock serializes this with queue edits, deletes and
+        // claims, so the prompt this settlement yields to is still queued.
+        const [queuedPrompt] = await tx
+          .select({ id: schema.sessionTurns.id })
+          .from(schema.sessionTurns)
+          .where(queuedPromptBehindTurnWhere(workspaceId, input.sessionId, input.turnId))
+          .limit(1);
+        if (!queuedPrompt) {
+          return { action: "queued_prompt_withdrawn" as const, events: [] as [] };
+        }
       }
 
       const humanInputRequests = (input.runState?.humanInputRequests ?? []).map((request) => ({
