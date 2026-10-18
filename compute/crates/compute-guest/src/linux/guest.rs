@@ -58,6 +58,9 @@ struct Agent {
     wanted: Option<(AgentInit, CommandEnv)>,
     /// The running agent's pid and what it started with.
     running: Option<(i32, AgentInit)>,
+    /// The epoch its connections to its link port open in; see
+    /// [`Guest::agent_link_gone`].
+    link_epoch: crate::agent::LinkEpoch,
 }
 
 #[derive(Debug)]
@@ -227,10 +230,28 @@ impl Guest {
         }
     }
 
-    /// After a restore its connections are gone: the agent dials again at
-    /// once rather than when its client notices.
-    fn agent_reconnect(&self) {
-        let pid = self.agent().running.as_ref().map(|(pid, _)| *pid);
+    /// The agent's link epoch, which a connection to its link port opens
+    /// in.
+    pub fn agent_link_epoch(&self) -> u64 {
+        self.agent().link_epoch.current()
+    }
+
+    /// The stream of an agent connection opened in `opened_in` ended
+    /// because its host had none to go on with: the sandbox moved, was
+    /// recovered elsewhere or outlived its host agent, and the stream went
+    /// with the host it knew. The host answers, so the agent dials again
+    /// at once rather than after the back-off it takes for an outage, once
+    /// for the connections it had then (see [`crate::agent::LinkEpoch`]).
+    /// A restore alone tells it nothing: a host that kept its streams
+    /// carries its connections on, with what was sent to them while it
+    /// slept.
+    pub fn agent_link_gone(&self, opened_in: u64) {
+        let mut agent = self.agent();
+        if !agent.link_epoch.gone(opened_in) {
+            return;
+        }
+        let pid = agent.running.as_ref().map(|(pid, _)| *pid);
+        drop(agent);
         if let Some(pid) = pid
             && let Err(error) = self.children.signal(pid, libc::SIGUSR1)
         {
@@ -334,7 +355,6 @@ impl Guest {
         }
         state.orders.applied(notice.order);
         drop(state);
-        self.agent_reconnect();
         let _ = stream.write_all(notice::answer(seeded));
     }
 

@@ -6,9 +6,9 @@
 //!
 //! - [`NOTICE_PORT`] takes restore notices (see [`notice`]): the time, the
 //!   sandbox id and a random seed. The guest answers only once envd has
-//!   taken its `/init` for the restore, and then tells Opengeni's agent to
-//!   reconnect. It also answers the host's `activity` question with the
-//!   count the agent registers (see [`agent`]).
+//!   taken its `/init` for the restore. It also answers the host's
+//!   `activity` question with the count the agent registers (see
+//!   [`agent`]).
 //! - [`READY_PORT`] accepts connections once envd is up and its first
 //!   `/init` succeeded, or at boot in an image without envd. Template
 //!   builders wait on it.
@@ -22,9 +22,10 @@
 //! the image's command as one supervised process under the image's user
 //! once the sandbox has its own identity and init, and likewise Opengeni's
 //! agent when the init names one and the image has it, with its link to
-//! the host on [`AGENT_LINK_PORT`]. It reaps orphans and shuts down
-//! cleanly. The parsers and state machines live in the portable modules
-//! here; the system calls live under `linux`.
+//! the host on [`AGENT_LINK_PORT`], each of the agent's connections a
+//! stream that outlives snapshots (see [`resume`]). It reaps orphans and
+//! shuts down cleanly. The parsers and state machines live in the portable
+//! modules here; the system calls live under `linux`.
 
 pub mod agent;
 pub mod cmdline;
@@ -35,6 +36,7 @@ pub mod given;
 pub mod identity;
 pub mod notice;
 pub mod relay;
+pub mod resume;
 pub mod users;
 
 #[cfg(target_os = "linux")]

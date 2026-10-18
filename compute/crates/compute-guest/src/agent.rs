@@ -113,9 +113,50 @@ pub fn activity_answer(running: u32) -> String {
     format!("commands {running}\n")
 }
 
+/// When the agent is told to reconnect at once: once for the connections it
+/// held when the host first answered that it had no stream for one of
+/// them. Each connection the agent opens is in the epoch current then; the
+/// first of an epoch's streams to find the host without it ends the epoch,
+/// and the rest, whose host lost them too, tell it nothing more. Another
+/// signal could reach the agent while it dials, and it would dial once
+/// more, dropping what it was sent on the connection it had just made.
+#[derive(Debug, Default)]
+pub struct LinkEpoch(u64);
+
+impl LinkEpoch {
+    /// The epoch a connection opened now is in.
+    #[must_use]
+    pub fn current(&self) -> u64 {
+        self.0
+    }
+
+    /// The host had no stream for a connection opened in `opened_in`:
+    /// whether to tell the agent.
+    pub fn gone(&mut self, opened_in: u64) -> bool {
+        if opened_in != self.0 {
+            return false;
+        }
+        self.0 += 1;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_is_told_once_for_the_connections_it_held() {
+        let mut epoch = LinkEpoch::default();
+        let (control, bulk) = (epoch.current(), epoch.current());
+        assert!(epoch.gone(control));
+        // Its other connection went with the same host.
+        assert!(!epoch.gone(bulk));
+        // Those it opened since are told again when their host goes.
+        let again = epoch.current();
+        assert!(!epoch.gone(control));
+        assert!(epoch.gone(again));
+    }
 
     fn agent(desktop: bool) -> AgentInit {
         AgentInit {

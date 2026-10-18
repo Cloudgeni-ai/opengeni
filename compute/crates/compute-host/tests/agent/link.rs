@@ -1,15 +1,19 @@
 //! Sandboxes that run Opengeni's agent, reached through the host's agent
 //! link (ADR 21): the guest's connection to its link port reaches a gateway
-//! over the host's one WebSocket, a sleeping sandbox wakes for a message,
-//! the gateway hears when it sleeps and wakes, a new ticket opens the
-//! session again, and the session outlives the host agent's restart and
-//! ends when the sandbox goes.
+//! over the host's one WebSocket, as a stream that outlives the vsock
+//! connections under it; a sleeping sandbox wakes for a message, the
+//! gateway hears when it sleeps and wakes, a new ticket opens the session
+//! again, and the session outlives the host agent's restart and ends when
+//! the sandbox goes.
 
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use compute_core::HostPolicy;
+use compute_guest::resume::StreamId;
 use compute_host::protocol::{Id, LevelName, Reply, Request, SandboxConfig};
 use compute_link::{HostToken, Hub, HubConfig, Timing, Tokens};
 use compute_protocol::fleet::{Ruling, Verdict};
@@ -320,22 +324,71 @@ async fn accept(
     }
 }
 
-// The guest's agent, speaking NATS on its link socket.
+// The guest's agent, speaking NATS through the guest's forwarder to its
+// link socket.
+
+/// The connections the guest's forwarder holds to the host under an
+/// agent's stream, and whether its VM runs to open more.
+#[derive(Default)]
+struct Vm {
+    connections: Mutex<Vec<std::os::unix::net::UnixStream>>,
+    down: AtomicBool,
+}
+
+impl Vm {
+    /// The VM stops, as it does when it is saved: the connections under
+    /// the stream end with it, and no more open until it runs.
+    fn stop(&self) {
+        self.down.store(true, Ordering::SeqCst);
+        for connection in self.connections.lock().unwrap().drain(..) {
+            let _ = connection.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    fn run(&self) {
+        self.down.store(false, Ordering::SeqCst);
+    }
+
+    fn dial(&self, socket: &Path) -> io::Result<std::os::unix::net::UnixStream> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(io::ErrorKind::ConnectionRefused.into());
+        }
+        let connection = std::os::unix::net::UnixStream::connect(socket)?;
+        self.connections
+            .lock()
+            .unwrap()
+            .push(connection.try_clone()?);
+        Ok(connection)
+    }
+}
 
 struct Agent {
     lines: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
+    vm: Arc<Vm>,
 }
 
 impl Agent {
-    /// Connects as instance `inst-1`, once the host has said `INFO`, and
-    /// pings; [`Self::connected`] waits for the answer.
+    /// Connects as instance `inst-1` through the guest's forwarder, which
+    /// carries the connection as a new stream, once the host has said
+    /// `INFO`, and pings; [`Self::connected`] waits for the answer.
     async fn connect(socket: &Path) -> Self {
-        let stream = UnixStream::connect(socket).await.unwrap();
+        static STREAMS: AtomicU64 = AtomicU64::new(1);
+        let id = StreamId(u128::from(STREAMS.fetch_add(1, Ordering::Relaxed)));
+        let (local, forwarded) = std::os::unix::net::UnixStream::pair().unwrap();
+        let vm = Arc::new(Vm::default());
+        let socket = socket.to_path_buf();
+        let dialer = Arc::clone(&vm);
+        std::thread::spawn(move || {
+            compute_guest::resume::relay::relay(forwarded, id, || dialer.dial(&socket), |_| {})
+        });
+        local.set_nonblocking(true).unwrap();
+        let stream = UnixStream::from_std(local).unwrap();
         let (reader, writer) = stream.into_split();
         let mut agent = Self {
             lines: BufReader::new(reader),
             writer,
+            vm,
         };
         let info = agent.line().await;
         assert!(info.starts_with("INFO "), "{info}");
@@ -409,11 +462,12 @@ async fn a_sandbox_agent_reaches_its_gateway_and_a_message_wakes_its_sleeping_sa
     };
     assert_eq!(sent, subject);
 
-    // Saved, its VM is gone, and so is the guest's connection with it.
+    // Saved, its VM is gone, and so are the connections under the agent's
+    // stream with it; the agent's own connection, inside the VM, stays.
     lab.sleep_to(sandbox, LevelName::Saved).await;
     lab.wait_level(sandbox, LevelName::Saved).await;
     gateway.told(Running::Asleep).await;
-    drop(agent);
+    agent.vm.stop();
     gateway.send(&GatewayFrame::Msg {
         s,
         sid,
@@ -423,17 +477,20 @@ async fn a_sandbox_agent_reaches_its_gateway_and_a_message_wakes_its_sleeping_sa
     });
     lab.wait_level(sandbox, LevelName::Running).await;
 
-    // The woken agent connects again with the same instance and takes up
-    // the same session; the message waits for its subscription.
-    let socket_path = socket.clone();
-    let mut agent = Agent::connect(&socket_path).await;
-    agent.connected().await;
-    agent.send(&format!("SUB {subject} 1\r\n")).await;
+    // The woken guest takes the stream up again, and the message the host
+    // kept on it reaches the agent on the connection it subscribed on.
+    agent.vm.run();
     let message = agent.line().await;
     assert!(
         message.starts_with(&format!("MSG {subject} 1 0")),
         "{message}"
     );
+    assert_eq!(agent.line().await, "\r\n", "its empty payload");
+    // The agent's connection never ended: it still answers, over the one
+    // vsock connection the woken guest opened.
+    agent.send("PING\r\n").await;
+    assert_eq!(agent.line().await, "PONG\r\n");
+    assert_eq!(agent.vm.connections.lock().unwrap().len(), 1);
     // Told once of each change: going to sleep, through every level on
     // the way down, is one change.
     assert_eq!(
@@ -508,7 +565,6 @@ async fn a_restarted_host_opens_its_sandboxes_sessions_again_before_their_agents
 
     let dir = lab.sandbox_dir(sandbox);
     let (root, world) = lab.stop().await;
-    drop(agent);
     // Stopped, the hub has written the session it was asked to keep as
     // the subscription was taken.
     links.shutdown().await;
@@ -529,6 +585,13 @@ async fn a_restarted_host_opens_its_sandboxes_sessions_again_before_their_agents
     };
     assert_eq!(kept, subject);
     assert_eq!(sid, 1);
+    // The restarted host knows no stream of the guest's: the agent's
+    // connection ends, as one to a NATS server that went away does, and
+    // the agent connects again.
+    assert!(
+        agent.ended().await,
+        "a stream outlived the host agent that carried it"
+    );
     lab.assert_clean();
 }
 

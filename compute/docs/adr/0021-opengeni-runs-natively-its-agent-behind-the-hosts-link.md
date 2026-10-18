@@ -65,7 +65,10 @@ and 16.1).
   When the init has an `agent` section, `compute-guest` starts
   `opengeni-agent` in fabric mode as root, supervises it, and forwards
   every connection to `127.0.0.1:3958` in the guest to the host over vsock
-  (port 58). The agent dials that address with no credential. Fabric mode
+  (port 58), each as a stream that outlives the vsock connections under
+  it: Firecracker resets every vsock connection when it snapshots a VM, a
+  checkpoint of a running one included, and a restored VM has none. The
+  agent dials that address with no credential. Fabric mode
   also turns off what does not belong in a sandbox: enrollment, credential
   renewal, self-update (the image pins the agent) and service
   installation.
@@ -73,11 +76,11 @@ and 16.1).
   host agent answers each guest's NATS connection itself, knowing from the
   vsock socket which sandbox it is. For each sandbox it keeps one session
   on its link to Opengeni: the guest's subscriptions, opened upstream once,
-  stay open while the sandbox sleeps and across the guest's reconnect
-  after a restore, when it subscribes again. The guest's publishes go up
-  the same session. A message that arrives for a sandbox that is not
-  running wakes it, as any traffic does, and is delivered once the agent
-  has subscribed again; a wake that fails drops what waited, and the
+  stay open while the sandbox sleeps, and so do the agent's connections.
+  The guest's publishes go up the same session. A message that arrives for
+  a sandbox that is not running wakes it, as any traffic does, and reaches
+  the agent on its connection once it runs; after a reconnect, once the
+  agent has subscribed again. A wake that fails drops what waited, and the
   sender's own retry, under its replay identity, takes over. A message to a
   sandbox counts as activity, so it stays awake while used; what the agent
   publishes (its heartbeats, every five seconds) does not, so an idle
@@ -112,12 +115,18 @@ and 16.1).
   memory only. It can register
   streams for that one agent and nothing else; no sandbox holds a
   credential that reaches Opengeni's control plane.
-- **After a restore the agent reconnects at once.** The restore notice
-  already tells the guest that its connections are gone and what time it
-  is. `compute-guest` passes this on to the agent, which dials its local
-  address again without the back-off it uses for an outage: a vsock
-  connection and a NATS handshake with its own host, about a millisecond.
-  A Paused sandbox keeps its connection.
+- **The agent's connections outlive restores; where they cannot, it
+  reconnects at once.** On the host agent that carried them, the guest
+  takes each stream up again after a restore or a checkpoint, and each
+  side sends what the other lacks, the message that woke the sandbox
+  among it. A host with no stream to go on with, after a move, a recovery
+  on another host or a restart of the host agent, says so; `compute-guest`
+  then tells the agent, which dials its local address again without the
+  back-off it uses for an outage: a vsock connection and a NATS handshake
+  with its own host, about a millisecond. A Paused sandbox keeps its
+  connection as it is. (Amended when the streams became resumable: the
+  guest first told the agent to reconnect after every restore, which would
+  now drop what was sent to a connection the host carries on.)
 - **Idle includes the agent.** The host already asks a guest how many
   quiet commands it runs before it sleeps it for being idle (ADR 3). The
   guest now adds counts that guest programs register as files under
@@ -177,7 +186,7 @@ and 16.1).
 - A guest runs the agent (measured in `docs/measurements.md`) and no
   envd, unless its image also serves E2B clients.
 - A sandbox's first command after a sleep waits only for the wake and the
-  agent's local reconnect; measured per sleep level.
+  guest taking its streams up again; measured per sleep level.
 - Opengeni's gateway carries every sandbox's control traffic. It is part of
   Opengeni's API, so it scales with it; each host's link lands on one
   replica, and a host whose link drops dials again and reopens its

@@ -30,6 +30,7 @@ pub mod observe;
 mod paging;
 mod pool;
 pub mod restore_notice;
+mod resume;
 pub mod rootfs;
 mod server;
 mod state;

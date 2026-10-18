@@ -21,6 +21,7 @@ clap = { version = "4", features = ["derive"] }
 compute-core = { path = "../compute-core" }
 compute-engine = { path = "../compute-engine" }
 compute-fleet = { path = "../compute-fleet" }
+compute-guest = { path = "../compute-guest" }
 compute-image = { path = "../compute-image" }
 compute-link = { path = "../compute-link" }
 compute-pager = { path = "../compute-pager" }
