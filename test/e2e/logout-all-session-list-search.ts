@@ -1,31 +1,75 @@
-/** Only the finite rail reads that may straddle an accepted logout-all.
- * Search/cursor reads and any extra query remain visible in the error ledger. */
+import { SESSION_GROUP_VISIBLE_STEP } from "../../apps/web/src/lib/session-group-window";
+
+type ReadShape = Readonly<{
+  /** Every key the read must carry, with its admissible values. */
+  required: Readonly<Record<string, readonly string[]>>;
+  /** Keys the read may carry, with their admissible values. */
+  optional?: Readonly<Record<string, readonly string[]>>;
+}>;
+
+const SUMMARY = { projection: ["summary"] } as const;
+// Project-grouped windows read one display step; ungrouped roots read 50.
+const ROOT_LIMITS = [String(SESSION_GROUP_VISIBLE_STEP), "50"] as const;
+const ACTIVE_ROOTS = {
+  view: ["page"],
+  parentSessionId: ["null"],
+  sortBy: ["updatedAt"],
+  archiveStatus: ["active"],
+} as const;
+
+/**
+ * The first-page rail reads that may be in flight when logout-all is accepted.
+ * Each shape is exact: no other key, no repeated key, and only the listed
+ * values. Cursor and search reads are user-driven and never match.
+ */
+const LOGOUT_ALL_SESSION_LIST_READS: readonly ReadShape[] = [
+  // Pre-page rail reads, kept for a rolling upgrade.
+  { required: { view: ["page"], limit: ["50"], parentSessionId: ["null"] }, optional: SUMMARY },
+  {
+    required: { view: ["page"], limit: ["50"], parentSessionId: ["null"], archivedOnly: ["true"] },
+    optional: SUMMARY,
+  },
+  { required: { view: ["page"], limit: ["50"], ...ACTIVE_ROOTS }, optional: SUMMARY },
+  {
+    required: { view: ["page"], limit: ["50"], ...ACTIVE_ROOTS, channelId: ["null"] },
+    optional: SUMMARY,
+  },
+  // The global pin shortcut section.
+  { required: { view: ["page"], limit: ["1"], pinsOnly: ["true"] }, optional: SUMMARY },
+  // The current rail root page: totals for the hierarchy, pins read separately.
+  {
+    required: { ...ACTIVE_ROOTS, ...SUMMARY, limit: ROOT_LIMITS },
+    optional: { includeTotals: ["true"], includePinned: ["false"] },
+  },
+  // The current Default project window.
+  {
+    required: {
+      ...ACTIVE_ROOTS,
+      ...SUMMARY,
+      limit: ROOT_LIMITS,
+      channelId: ["null"],
+      includePinned: ["false"],
+    },
+  },
+];
+
+/** Only the finite rail reads that may straddle an accepted logout-all. */
 export function exactLogoutAllSessionListSearch(search: string): boolean {
   if (search === "") return true; // Pre-page API during a rolling upgrade.
   const params = new URLSearchParams(search);
-  const allKeys = [...params.keys()];
-  if (new Set(allKeys).size !== allKeys.length) return false;
-  const exactly = (name: string, value: string): boolean =>
-    params.getAll(name).length === 1 && params.get(name) === value;
-  // The rail reads compact summary records (#3184); the projection is the
-  // only extra key any of these reads may carry, and only with that value.
-  if (params.has("projection") && !exactly("projection", "summary")) return false;
-  const keys = allKeys.filter((key) => key !== "projection");
-  if (!exactly("view", "page")) return false;
-  const activeRoots =
-    keys.length === 3 && exactly("limit", "50") && exactly("parentSessionId", "null");
-  const archivedRoots =
-    keys.length === 4 &&
-    exactly("limit", "50") &&
-    exactly("parentSessionId", "null") &&
-    exactly("archivedOnly", "true");
-  const pins = keys.length === 3 && exactly("limit", "1") && exactly("pinsOnly", "true");
-  const currentActiveRoots =
-    // The Default project adds only its explicit null channel to the same read.
-    (keys.length === 5 || (keys.length === 6 && exactly("channelId", "null"))) &&
-    exactly("limit", "50") &&
-    exactly("parentSessionId", "null") &&
-    exactly("sortBy", "updatedAt") &&
-    exactly("archiveStatus", "active");
-  return activeRoots || archivedRoots || pins || currentActiveRoots;
+  const keys = [...params.keys()];
+  if (new Set(keys).size !== keys.length) return false;
+  return LOGOUT_ALL_SESSION_LIST_READS.some((shape) => matchesShape(params, keys, shape));
+}
+
+function matchesShape(params: URLSearchParams, keys: readonly string[], shape: ReadShape): boolean {
+  const optional = shape.optional ?? {};
+  for (const [key, values] of Object.entries(shape.required)) {
+    if (!values.includes(params.get(key) ?? "\u0000")) return false;
+  }
+  return keys.every((key) => {
+    if (key in shape.required) return true;
+    const values = optional[key];
+    return values !== undefined && values.includes(params.get(key)!);
+  });
 }
