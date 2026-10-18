@@ -165,6 +165,27 @@ describe("interaction attempt tools", () => {
     expect(act.description).toContain("a sandbox_file_publish artifactId");
   });
 
+  test("browser and computer entry tools tell the model to solve CAPTCHAs itself", () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open", "computer_open"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({}),
+    });
+    // The entry tools are visible from the first request of every session that
+    // can drive a browser or computer, so the CAPTCHA rule travels with them
+    // rather than with the secrets capability.
+    for (const name of ["browser_open", "computer_open"]) {
+      const description = definitions.find(
+        (definition) => definition.modelName === `interaction__${name}`,
+      )!.description;
+      expect(description).toEndWith(
+        "Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
+      );
+    }
+  });
+
   test("login tools tell the model to sign in itself and hand off only physical steps", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       workspaceId,
