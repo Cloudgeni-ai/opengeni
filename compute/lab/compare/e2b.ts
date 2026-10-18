@@ -21,7 +21,10 @@ export interface E2bOptions {
 interface SdkSandbox {
   sandboxId: string;
   commands: {
-    run(command: string, opts: { onStdout: (data: string) => void; timeoutMs?: number }): Promise<{ stdout: string; exitCode: number }>;
+    run(
+      command: string,
+      opts: { onStdout: (data: string) => void; timeoutMs?: number },
+    ): Promise<{ stdout: string; exitCode: number }>;
   };
   pause(): Promise<boolean>;
   kill(): Promise<boolean>;
@@ -103,7 +106,13 @@ export class E2b implements System<E2bSandbox> {
       timeoutMs: this.timeoutMs,
     });
     const doneMs = performance.now() - started;
-    return { firstByteMs: firstByteMs ?? doneMs, doneMs, output: result.stdout, status: result.exitCode, phases: {} };
+    return {
+      firstByteMs: firstByteMs ?? doneMs,
+      doneMs,
+      output: result.stdout,
+      status: result.exitCode,
+      phases: {},
+    };
   }
 
   async rest(sandbox: E2bSandbox, level: string): Promise<void> {
@@ -132,7 +141,12 @@ export class E2b implements System<E2bSandbox> {
   }
 
   async describe(): Promise<Record<string, unknown>> {
-    return { system: this.name, sdk: "e2b 2.56.0", template: this.template, domain: this.options.domain ?? "default" };
+    return {
+      system: this.name,
+      sdk: "e2b 2.56.0",
+      template: this.template,
+      domain: this.options.domain ?? "default",
+    };
   }
 
   async close(): Promise<void> {}

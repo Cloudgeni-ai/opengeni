@@ -45,7 +45,11 @@ export const MIN_EXPECTED_SAMPLES = 40;
  * `MIN_EXPECTED_SAMPLES` arrivals (and, with arrivals conditioned on their
  * count, gets them).
  */
-export function stepWindow(rate: number, measuredMs: number, warmupMs: number): { stepMs: number; measuredMs: number } {
+export function stepWindow(
+  rate: number,
+  measuredMs: number,
+  warmupMs: number,
+): { stepMs: number; measuredMs: number } {
   const measured = Math.max(measuredMs, Math.ceil((MIN_EXPECTED_SAMPLES / rate) * 1000));
   return { stepMs: warmupMs + measured, measuredMs: measured };
 }
@@ -73,16 +77,40 @@ export function judgeStep(
   const errors = failed.length;
   const succeeded = measured.filter((outcome) => outcome.ok);
   const completedRate = succeeded.length / (measuredMs / 1000);
-  const latency = succeeded.length > 0 ? summarize(succeeded.map((outcome) => outcome.latencyMs)) : undefined;
-  const sampleErrors = [...new Set(failed.map((outcome) => outcome.error ?? "unknown"))].slice(0, 3);
-  const base = { rate, measured: measured.length, errors: errors + restFailures, starved, completedRate, latency, sampleErrors };
-  if (restFailures > 0) return { ...base, holds: false, ends: true, reason: `${restFailures} sandboxes failed to rest again` };
+  const latency =
+    succeeded.length > 0 ? summarize(succeeded.map((outcome) => outcome.latencyMs)) : undefined;
+  const sampleErrors = [...new Set(failed.map((outcome) => outcome.error ?? "unknown"))].slice(
+    0,
+    3,
+  );
+  const base = {
+    rate,
+    measured: measured.length,
+    errors: errors + restFailures,
+    starved,
+    completedRate,
+    latency,
+    sampleErrors,
+  };
+  if (restFailures > 0)
+    return {
+      ...base,
+      holds: false,
+      ends: true,
+      reason: `${restFailures} sandboxes failed to rest again`,
+    };
   // Starvation with no error is the client's limit; with errors, the errors decide.
-  if (starved > 0 && errors === 0) return { ...base, holds: false, reason: "client-limited: no resting sandbox was free" };
-  if (measured.length < criteria.minSamples) return { ...base, holds: false, reason: `only ${measured.length} samples` };
+  if (starved > 0 && errors === 0)
+    return { ...base, holds: false, reason: "client-limited: no resting sandbox was free" };
+  if (measured.length < criteria.minSamples)
+    return { ...base, holds: false, reason: `only ${measured.length} samples` };
   if (errors > 0) return { ...base, holds: false, reason: `${errors} errors` };
   if (!latency || latency.p99 >= criteria.p99LimitMs) {
-    return { ...base, holds: false, reason: `p99 ${Math.round(latency?.p99 ?? Number.POSITIVE_INFINITY)} ms` };
+    return {
+      ...base,
+      holds: false,
+      reason: `p99 ${Math.round(latency?.p99 ?? Number.POSITIVE_INFINITY)} ms`,
+    };
   }
   return { ...base, holds: true };
 }

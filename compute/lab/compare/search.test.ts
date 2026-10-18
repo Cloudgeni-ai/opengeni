@@ -11,8 +11,19 @@ import {
   stepWindow,
 } from "./search.ts";
 
-function outcomes(count: number, windowMs: number, latencyMs: number, extra: Partial<Outcome> = {}): Outcome[] {
-  return Array.from({ length: count }, (_, i) => ({ at: (i * windowMs) / count, ok: true, latencyMs, lagMs: 0, ...extra }));
+function outcomes(
+  count: number,
+  windowMs: number,
+  latencyMs: number,
+  extra: Partial<Outcome> = {},
+): Outcome[] {
+  return Array.from({ length: count }, (_, i) => ({
+    at: (i * windowMs) / count,
+    ok: true,
+    latencyMs,
+    lagMs: 0,
+    ...extra,
+  }));
 }
 
 test("a step holds with no errors, p99 under a second and the offered rate completed", () => {
@@ -24,7 +35,10 @@ test("a step holds with no errors, p99 under a second and the offered rate compl
 
 test("the warm-up does not count", () => {
   // Slow while warming up, fast after.
-  const all = [...outcomes(100, 10_000, 5000), ...outcomes(500, 50_000, 100).map((o) => ({ ...o, at: o.at + 10_000 }))];
+  const all = [
+    ...outcomes(100, 10_000, 5000),
+    ...outcomes(500, 50_000, 100).map((o) => ({ ...o, at: o.at + 10_000 })),
+  ];
   expect(judgeStep(10, all, 10_000, 50_000).holds).toBe(true);
 });
 
@@ -73,7 +87,7 @@ test("after sandboxes are lost the search stops instead of refining on fewer", a
     async (rate) => {
       tried.push(rate);
       // 1/s loses a sandbox; any later step would hold on the 99 left.
-      return rate === 1 ? { ...step(rate, false, 1), ends: true } : step(rate, true);
+      return rate === 1 ? { ...stepped(rate, false, 1), ends: true } : stepped(rate, true);
     },
     3,
   );
@@ -90,7 +104,7 @@ test("starvation alongside errors is the system's failure, not the client's limi
   expect(isClientLimited(step)).toBe(false);
 });
 
-function step(rate: number, holds: boolean, errors = 0, starved = 0): StepResult {
+function stepped(rate: number, holds: boolean, errors = 0, starved = 0): StepResult {
   return { rate, measured: 100, errors, starved, completedRate: rate, holds };
 }
 
@@ -99,7 +113,7 @@ test("the search climbs the ladder, then bisects between the last good and first
   const tried: number[] = [];
   const result = await searchSustainedRate([5, 10, 20, 50, 100], async (rate) => {
     tried.push(rate);
-    return step(rate, rate <= capacity, rate > 45 ? 1 : 0);
+    return stepped(rate, rate <= capacity, rate > 45 ? 1 : 0);
   });
   // 50 fails; then 35 holds, 43 fails, 39 fails.
   expect(tried).toEqual([5, 10, 20, 50, 35, 43, 39]);
@@ -109,26 +123,28 @@ test("the search climbs the ladder, then bisects between the last good and first
 });
 
 test("a system that holds everything reports the top of the ladder", async () => {
-  const result = await searchSustainedRate([1, 2, 5], async (rate) => step(rate, true));
+  const result = await searchSustainedRate([1, 2, 5], async (rate) => stepped(rate, true));
   expect(result.sustained).toBe(5);
   expect(result.errorOnset).toBeUndefined();
   expect(result.steps.length).toBe(3);
 });
 
 test("a first step that fails reports zero and bisects below it", async () => {
-  const result = await searchSustainedRate([4, 8], async (rate) => step(rate, rate < 1.5), 3);
+  const result = await searchSustainedRate([4, 8], async (rate) => stepped(rate, rate < 1.5), 3);
   expect(result.steps.map((s) => s.rate)).toEqual([4, 2, 1, 1.5]);
   expect(result.sustained).toBe(1);
 });
 
 test("a client-limited step stops the search without a verdict", async () => {
-  const result = await searchSustainedRate([5, 10, 20], async (rate) => step(rate, rate < 10, 0, rate === 10 ? 3 : 0));
+  const result = await searchSustainedRate([5, 10, 20], async (rate) =>
+    stepped(rate, rate < 10, 0, rate === 10 ? 3 : 0),
+  );
   expect(result).toMatchObject({ sustained: 5, clientLimited: true });
   expect(result.steps.length).toBe(2);
 });
 
 test("the ladder must ascend", async () => {
-  await expect(searchSustainedRate([5, 5], async (rate) => step(rate, true))).rejects.toThrow();
+  await expect(searchSustainedRate([5, 5], async (rate) => stepped(rate, true))).rejects.toThrow();
 });
 
 test("rates round sensibly", () => {

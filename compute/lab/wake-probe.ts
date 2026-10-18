@@ -15,16 +15,31 @@ try {
     rmSync(vm.apiSock, { force: true });
     rmSync(vm.vsock, { force: true });
     vm.proc = spawn([`${LAB}/bin/cloud-hypervisor`, "--api-socket", vm.apiSock], {
-      stdin: "ignore", stdout: Bun.file(`${vm.dir}/probe-vmm.log`), stderr: Bun.file(`${vm.dir}/probe-vmm.log`),
+      stdin: "ignore",
+      stdout: Bun.file(`${vm.dir}/probe-vmm.log`),
+      stderr: Bun.file(`${vm.dir}/probe-vmm.log`),
     });
     writeFileSync(`${vm.cgroup}/cgroup.procs`, String(vm.pid));
     const deadline = now() + 10000;
-    while (!existsSync(vm.apiSock)) { if (now() > deadline) throw new Error("VMM startup timed out"); await sleep(1); }
-    await vm.api("PUT", "/api/v1/vm.restore", { source_url: `file://${vm.dir}/snapshot`, memory_restore_mode: "CopyOnWrite" });
+    while (!existsSync(vm.apiSock)) {
+      if (now() > deadline) throw new Error("VMM startup timed out");
+      await sleep(1);
+    }
+    await vm.api("PUT", "/api/v1/vm.restore", {
+      source_url: `file://${vm.dir}/snapshot`,
+      memory_restore_mode: "CopyOnWrite",
+    });
     await vm.api("PUT", "/api/v1/vm.resume");
   } else throw new Error("unknown engine");
   for (let round = 0; round < count; round++) {
     const result = await measuredExec(vm.vsock, PROBE);
-    record(process.env.WAKE_RESULT ?? "wake-protocol", { engine, round, ...result, transportTailMs: result.ms - result.doneMs });
+    record(process.env.WAKE_RESULT ?? "wake-protocol", {
+      engine,
+      round,
+      ...result,
+      transportTailMs: result.ms - result.doneMs,
+    });
   }
-} finally { await vm.kill(); }
+} finally {
+  await vm.kill();
+}

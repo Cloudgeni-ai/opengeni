@@ -55,30 +55,46 @@ export class Gke implements System<GkeSandbox> {
     const ns = options.namespace;
     this.claims = new Informer(this.kube, `${CLAIMS}/namespaces/${ns}/sandboxclaims`);
     this.sandboxes = new Informer(this.kube, `${SANDBOXES}/namespaces/${ns}/sandboxes`);
-    this.triggers = new Informer(this.kube, `${SNAPSHOTS}/namespaces/${ns}/podsnapshotmanualtriggers`);
+    this.triggers = new Informer(
+      this.kube,
+      `${SNAPSHOTS}/namespaces/${ns}/podsnapshotmanualtriggers`,
+    );
     this.timeoutMs = options.timeoutMs ?? 180_000;
     this.port = options.port ?? 8888;
   }
 
   async start(withSnapshots: boolean) {
-    await Promise.all([this.claims.start(), this.sandboxes.start(), withSnapshots ? this.triggers.start() : Promise.resolve()]);
+    await Promise.all([
+      this.claims.start(),
+      this.sandboxes.start(),
+      withSnapshots ? this.triggers.start() : Promise.resolve(),
+    ]);
   }
 
   async create(kind: CreateKind, script: string, started: number) {
-    if (kind === "template") throw new Error("Agent Sandbox has no template level between cold and warm pool");
+    if (kind === "template")
+      throw new Error("Agent Sandbox has no template level between cold and warm pool");
     const claim = `cmp-${randomBytes(5).toString("hex")}`;
-    await this.kube.request("POST", `${CLAIMS}/namespaces/${this.options.namespace}/sandboxclaims`, {
-      apiVersion: "extensions.agents.x-k8s.io/v1beta1",
-      kind: "SandboxClaim",
-      metadata: { name: claim, labels: { [RUN_LABEL]: this.options.runLabel } },
-      spec: { warmPoolRef: { name: kind === "pool" ? this.options.warmPool : this.options.coldPool } },
-    });
+    await this.kube.request(
+      "POST",
+      `${CLAIMS}/namespaces/${this.options.namespace}/sandboxclaims`,
+      {
+        apiVersion: "extensions.agents.x-k8s.io/v1beta1",
+        kind: "SandboxClaim",
+        metadata: { name: claim, labels: { [RUN_LABEL]: this.options.runLabel } },
+        spec: {
+          warmPoolRef: { name: kind === "pool" ? this.options.warmPool : this.options.coldPool },
+        },
+      },
+    );
     const postedMs = performance.now() - started;
     try {
       return await this.claimed(claim, script, started, postedMs);
     } catch (error) {
       // The caller never learns the claim, so it cannot remove it.
-      await this.kube.request("DELETE", `${CLAIMS}/namespaces/${this.options.namespace}/sandboxclaims/${claim}`).catch(() => undefined);
+      await this.kube
+        .request("DELETE", `${CLAIMS}/namespaces/${this.options.namespace}/sandboxclaims/${claim}`)
+        .catch(() => undefined);
       throw error;
     }
   }
@@ -86,7 +102,12 @@ export class Gke implements System<GkeSandbox> {
   private async claimed(claim: string, script: string, started: number, postedMs: number) {
     const ready = await this.claims.wait(
       claim,
-      (object) => Boolean(object && (object.status?.sandbox as { name?: string } | undefined)?.name && condition(object, "Ready")?.status === "True"),
+      (object) =>
+        Boolean(
+          object &&
+          (object.status?.sandbox as { name?: string } | undefined)?.name &&
+          condition(object, "Ready")?.status === "True",
+        ),
       this.timeoutMs,
       `claim ${claim} ready`,
     );
@@ -106,13 +127,15 @@ export class Gke implements System<GkeSandbox> {
       phases.resume_patched_ms = performance.now() - started;
       const ready = await this.sandboxes.wait(
         sandbox.id,
-        (object) => condition(object, "Ready")?.status === "True" && ((object?.status?.podIPs as string[] | undefined)?.length ?? 0) > 0,
+        (object) =>
+          condition(object, "Ready")?.status === "True" &&
+          ((object?.status?.podIPs as string[] | undefined)?.length ?? 0) > 0,
         this.timeoutMs,
         `sandbox ${sandbox.id} resumed`,
       );
       phases.resumed_ready_ms = performance.now() - started;
       sandbox.suspended = false;
-      podIp = (ready?.status?.podIPs as string[])[0];
+      podIp = (ready?.status?.podIPs as string[] | undefined)?.[0];
     } else {
       podIp = (this.sandboxes.get(sandbox.id)?.status?.podIPs as string[] | undefined)?.[0];
     }
@@ -122,7 +145,12 @@ export class Gke implements System<GkeSandbox> {
   }
 
   /** Runs `script` through the router; the runtime answers once it exits. */
-  private async execute(sandbox: GkeSandbox, script: string, started: number, podIp?: string): Promise<RunResult> {
+  private async execute(
+    sandbox: GkeSandbox,
+    script: string,
+    started: number,
+    podIp?: string,
+  ): Promise<RunResult> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-Sandbox-ID": sandbox.id,
@@ -143,7 +171,13 @@ export class Gke implements System<GkeSandbox> {
     const body = JSON.parse(text) as { stdout: string; stderr: string; exit_code: number };
     // The runtime replies once the command exits, so its first byte of
     // output arrives with everything else.
-    return { firstByteMs: doneMs, doneMs, output: body.stdout, status: body.exit_code, phases: { response_headers_ms: headersMs } };
+    return {
+      firstByteMs: doneMs,
+      doneMs,
+      output: body.stdout,
+      status: body.exit_code,
+      phases: { response_headers_ms: headersMs },
+    };
   }
 
   async rest(sandbox: GkeSandbox, level: string): Promise<void> {
@@ -165,7 +199,10 @@ export class Gke implements System<GkeSandbox> {
       trigger,
       (found) => {
         const triggered = condition(found, "Triggered");
-        if (triggered?.status === "False" && (triggered.reason === "Failed" || triggered.reason === "Error")) {
+        if (
+          triggered?.status === "False" &&
+          (triggered.reason === "Failed" || triggered.reason === "Error")
+        ) {
           throw new Error(`snapshot of ${pod} failed: ${triggered.message}`);
         }
         return triggered?.status === "True" && triggered.reason === "Complete";
@@ -174,7 +211,12 @@ export class Gke implements System<GkeSandbox> {
       `snapshot of ${pod}`,
     );
     await this.kube.mergePatch(this.sandboxPath(sandbox), { spec: { operatingMode: "Suspended" } });
-    await this.sandboxes.wait(sandbox.id, (found) => condition(found, "Suspended")?.status === "True", this.timeoutMs, `sandbox ${sandbox.id} suspended`);
+    await this.sandboxes.wait(
+      sandbox.id,
+      (found) => condition(found, "Suspended")?.status === "True",
+      this.timeoutMs,
+      `sandbox ${sandbox.id} suspended`,
+    );
     sandbox.suspended = true;
     // The trigger has done its work; the snapshot itself stays.
     void this.kube.request("DELETE", `${triggers}/${trigger}`).catch(() => undefined);
@@ -185,7 +227,10 @@ export class Gke implements System<GkeSandbox> {
   }
 
   async remove(sandbox: GkeSandbox): Promise<void> {
-    await this.kube.request("DELETE", `${CLAIMS}/namespaces/${this.options.namespace}/sandboxclaims/${sandbox.claim}`);
+    await this.kube.request(
+      "DELETE",
+      `${CLAIMS}/namespaces/${this.options.namespace}/sandboxclaims/${sandbox.claim}`,
+    );
   }
 
   async list(): Promise<string[]> {
@@ -194,11 +239,18 @@ export class Gke implements System<GkeSandbox> {
 
   async describe(): Promise<Record<string, unknown>> {
     const version = await this.kube.request<Record<string, unknown>>("GET", "/version");
-    const pools = await this.kube.request<{ items: KubeObject[] }>("GET", `${CLAIMS}/namespaces/${this.options.namespace}/sandboxwarmpools`);
+    const pools = await this.kube.request<{ items: KubeObject[] }>(
+      "GET",
+      `${CLAIMS}/namespaces/${this.options.namespace}/sandboxwarmpools`,
+    );
     return {
       system: this.name,
       kubernetes: version.gitVersion,
-      warmPools: pools.items.map((pool) => ({ name: pool.metadata.name, replicas: pool.spec?.replicas, ready: pool.status?.readyReplicas })),
+      warmPools: pools.items.map((pool) => ({
+        name: pool.metadata.name,
+        replicas: pool.spec?.replicas,
+        ready: pool.status?.readyReplicas,
+      })),
     };
   }
 

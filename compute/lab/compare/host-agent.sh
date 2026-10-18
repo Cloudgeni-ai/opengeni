@@ -18,8 +18,8 @@ set -euo pipefail
 mode="${1:?usage: host-agent.sh cold|template|pool [serve flags...]}"
 shift
 here="$(cd "$(dirname "$0")" && pwd)"
-bin="${BIN:-/home/lab/compute/target/release/compute-host}"
-bun="${BUN:-$(command -v bun || echo /home/lab/.bun/bin/bun)}"
+bin="${BIN:-$HOME/compute/target/release/compute-host}"
+bun="${BUN:-$(command -v bun || echo "$HOME/.bun/bin/bun")}"
 store="${STORE:?set STORE}"
 listen="${LISTEN:?set LISTEN}"
 client="${CLIENT:?set CLIENT}"

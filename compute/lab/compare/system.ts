@@ -29,7 +29,11 @@ export interface System<S extends Sandbox = Sandbox> {
   /** Resting states an existing sandbox can be put in, shallowest first. */
   readonly restLevels: readonly string[];
   /** Creates a sandbox and runs `script` in it as its first command. */
-  create(kind: CreateKind, script: string, started: number): Promise<{ sandbox: S; run: RunResult }>;
+  create(
+    kind: CreateKind,
+    script: string,
+    started: number,
+  ): Promise<{ sandbox: S; run: RunResult }>;
   /** Runs `script`, bringing the sandbox back from rest first. */
   run(sandbox: S, script: string, started: number): Promise<RunResult>;
   /** Puts the sandbox at `level` and returns once it is there. */

@@ -13,15 +13,25 @@ test("addresses", () => {
 });
 
 test("framing matches the host agent's bench", () => {
-  expect(framed("echo 'hi'")).toBe(`bash -c 'echo '\\''hi'\\''' </dev/null\nprintf '\\036compute-bench-done %d\\036' "$?"\nexit\n`);
+  expect(framed("echo 'hi'")).toBe(
+    `bash -c 'echo '\\''hi'\\''' </dev/null\nprintf '\\036compute-bench-done %d\\036' "$?"\nexit\n`,
+  );
 });
 
 test("the scan holds back a tail that may start the record", () => {
   expect(scan(Buffer.from("hello\n"))).toEqual({ done: false, output: 6 });
   expect(scan(Buffer.from("hello\n\x1ecompute-b"))).toEqual({ done: false, output: 6 });
   expect(scan(Buffer.from("hello\n\x1ecompute-bench-done 1"))).toEqual({ done: false, output: 6 });
-  expect(scan(Buffer.from("hello\n\x1ecompute-bench-done 3\x1e"))).toEqual({ done: true, output: 6, status: 3 });
-  expect(scan(Buffer.from("\x1ecompute-bench-done 0\x1e"))).toEqual({ done: true, output: 0, status: 0 });
+  expect(scan(Buffer.from("hello\n\x1ecompute-bench-done 3\x1e"))).toEqual({
+    done: true,
+    output: 6,
+    status: 3,
+  });
+  expect(scan(Buffer.from("\x1ecompute-bench-done 0\x1e"))).toEqual({
+    done: true,
+    output: 0,
+    status: 0,
+  });
 });
 
 let server: Server | undefined;
@@ -65,11 +75,15 @@ test("a run times the first byte and the completion record, even when the reply 
           setTimeout(() => socket.end("-done 0\x1e"), 40);
         });
         // The reply line and nothing else yet.
-        socket.write(`${JSON.stringify({ result: "connected", waited_us: 1500, connect_us: 300, generation: 1 })}\n`);
+        socket.write(
+          `${JSON.stringify({ result: "connected", waited_us: 1500, connect_us: 300, generation: 1 })}\n`,
+        );
         return;
       }
       case "status":
-        socket.end(`${JSON.stringify({ result: "status", sandboxes: [...levels].map(([id, level]) => ({ id, level, step: null, holds: 0, broken: false })) })}\n`);
+        socket.end(
+          `${JSON.stringify({ result: "status", sandboxes: [...levels].map(([id, level]) => ({ id, level, step: null, holds: 0, broken: false })) })}\n`,
+        );
         return;
       case "sleep":
         levels.set(String(request.id), String(request.level));
@@ -96,8 +110,12 @@ test("a run times the first byte and the completion record, even when the reply 
 
 test("an agent error on connect is reported with its code", async () => {
   const path = fakeAgent((_request, socket) => {
-    socket.end(`${JSON.stringify({ result: "error", message: "the host is full", code: "host_full" })}\n`);
+    socket.end(
+      `${JSON.stringify({ result: "error", message: "the host is full", code: "host_full" })}\n`,
+    );
   });
   const ours = new Ours({ address: path });
-  await expect(ours.run({ id: "0".repeat(32) }, "echo", performance.now())).rejects.toThrow("host_full: the host is full");
+  await expect(ours.run({ id: "0".repeat(32) }, "echo", performance.now())).rejects.toThrow(
+    "host_full: the host is full",
+  );
 });

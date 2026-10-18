@@ -44,4 +44,6 @@ const server = createServer((client) => {
   client.on("close", () => agent.end());
   agent.on("close", () => client.end());
 });
-server.listen(port, host, () => console.log(`relaying ${values.listen} to ${values.socket} for ${[...allowed].join(", ")}`));
+server.listen(port, host, () =>
+  console.log(`relaying ${values.listen} to ${values.socket} for ${[...allowed].join(", ")}`),
+);

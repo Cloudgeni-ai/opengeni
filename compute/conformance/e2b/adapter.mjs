@@ -40,7 +40,10 @@ const id = session.state.sandboxId;
 
 await run("execCommand in the workspace, with the client's environment", async () => {
   const out = await session.execCommand({ cmd: "cat README.md && echo $OG_ADAPTER && pwd" });
-  expect(out.includes("# conformance") && out.includes("yes") && out.includes("/home/user/workspace"), out.slice(0, 300));
+  expect(
+    out.includes("# conformance") && out.includes("yes") && out.includes("/home/user/workspace"),
+    out.slice(0, 300),
+  );
 });
 
 await run("execCommand with a tty, then writeStdin", async () => {
@@ -64,9 +67,12 @@ await run("the editor creates a file, and readFile reads it", async () => {
 });
 
 await run("resolveExposedPort reaches a server in the sandbox", async () => {
-  await session.execCommand({ cmd: "(python3 -m http.server 8000 >/tmp/http.log 2>&1 &) ; sleep 1" });
+  await session.execCommand({
+    cmd: "(python3 -m http.server 8000 >/tmp/http.log 2>&1 &) ; sleep 1",
+  });
   const endpoint = await session.resolveExposedPort(8000);
-  const host = typeof endpoint === "string" ? endpoint : (endpoint.url ?? `https://${endpoint.host}`);
+  const host =
+    typeof endpoint === "string" ? endpoint : (endpoint.url ?? `https://${endpoint.host}`);
   const url = host.startsWith("http") ? host : `https://${host}`;
   const response = await fetch(new URL("/README.md", url.endsWith("/") ? url : `${url}/`));
   if (!response.ok) {
@@ -77,14 +83,18 @@ await run("resolveExposedPort reaches a server in the sandbox", async () => {
         cmd: `cat /tmp/http.log; timeout 5 ss -ltn; s=$(date +%s%N); timeout 30 python3 -c 'import socket; print(socket.getfqdn("::"))'; echo getfqdn $? $(( ($(date +%s%N) - s) / 1000000 )) ms`,
       })
       .catch((error) => String(error));
-    throw new Error(`status ${response.status}; the guest says ${JSON.stringify(report).slice(0, 4000)}`);
+    throw new Error(
+      `status ${response.status}; the guest says ${JSON.stringify(report).slice(0, 4000)}`,
+    );
   }
   return { url };
 });
 
 const archive = await run("persistWorkspace makes a tar", async () => session.persistWorkspace());
 
-const serialized = await run("serializeSessionState", async () => client.serializeSessionState(session.state));
+const serialized = await run("serializeSessionState", async () =>
+  client.serializeSessionState(session.state),
+);
 
 await run("the turn ends, and the sandbox pauses as on its timeout", async () => {
   await session.shutdown({ reason: "cleanup", preserveOwnedSessions: true });
@@ -99,13 +109,19 @@ if (serialized) {
   if (resumed) {
     await run("the resumed sandbox is the same one, with its files", async () => {
       expect(resumed.state.sandboxId === id, `${resumed.state.sandboxId} is not ${id}`);
-      expect(text(await resumed.readFile({ path: "notes/a.txt" })).startsWith("alpha"), "content differs");
+      expect(
+        text(await resumed.readFile({ path: "notes/a.txt" })).startsWith("alpha"),
+        "content differs",
+      );
     });
     if (archive) {
       await run("hydrateWorkspace restores the persisted tar", async () => {
         await resumed.execCommand({ cmd: "rm -rf notes" });
         await resumed.hydrateWorkspace(archive);
-        expect(text(await resumed.readFile({ path: "notes/a.txt" })).startsWith("alpha"), "content differs");
+        expect(
+          text(await resumed.readFile({ path: "notes/a.txt" })).startsWith("alpha"),
+          "content differs",
+        );
       });
     }
     await run("delete removes it", async () => {

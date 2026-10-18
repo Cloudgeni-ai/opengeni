@@ -6,7 +6,14 @@
 import { readFileSync } from "node:fs";
 
 export interface KubeObject {
-  metadata: { name: string; namespace?: string; resourceVersion?: string; uid?: string; annotations?: Record<string, string>; labels?: Record<string, string> };
+  metadata: {
+    name: string;
+    namespace?: string;
+    resourceVersion?: string;
+    uid?: string;
+    annotations?: Record<string, string>;
+    labels?: Record<string, string>;
+  };
   spec?: Record<string, unknown>;
   status?: Record<string, unknown> & { conditions?: Condition[] };
 }
@@ -41,19 +48,32 @@ export class Kube {
   fetch(path: string, init: RequestInit = {}): Promise<Response> {
     return fetch(`${this.server}${path}`, {
       ...init,
-      headers: { Authorization: `Bearer ${this.token}`, Accept: "application/json", ...(init.headers ?? {}) },
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        Accept: "application/json",
+        ...(init.headers ?? {}),
+      },
       tls: { ca: this.ca },
     } as RequestInit);
   }
 
-  async request<T = KubeObject>(method: string, path: string, body?: unknown, contentType = "application/json"): Promise<T> {
+  async request<T = KubeObject>(
+    method: string,
+    path: string,
+    body?: unknown,
+    contentType = "application/json",
+  ): Promise<T> {
     const response = await this.fetch(path, {
       method,
       body: body === undefined ? undefined : JSON.stringify(body),
       headers: body === undefined ? {} : { "Content-Type": contentType },
     });
     const text = await response.text();
-    if (!response.ok) throw new KubeError(`${method} ${path}: ${response.status} ${text.slice(0, 300)}`, response.status);
+    if (!response.ok)
+      throw new KubeError(
+        `${method} ${path}: ${response.status} ${text.slice(0, 300)}`,
+        response.status,
+      );
     return JSON.parse(text) as T;
   }
 
@@ -111,7 +131,12 @@ export class Informer {
   }
 
   /** Resolves with the object once `check` holds for it (or its absence). */
-  wait(name: string, check: (object: KubeObject | undefined) => boolean, timeoutMs: number, what: string): Promise<KubeObject | undefined> {
+  wait(
+    name: string,
+    check: (object: KubeObject | undefined) => boolean,
+    timeoutMs: number,
+    what: string,
+  ): Promise<KubeObject | undefined> {
     return new Promise((resolve, reject) => {
       try {
         if (check(this.objects.get(name))) {
@@ -165,7 +190,10 @@ export class Informer {
   }
 
   private async list(): Promise<string> {
-    const list = await this.kube.request<{ metadata: { resourceVersion: string }; items: KubeObject[] }>("GET", this.path);
+    const list = await this.kube.request<{
+      metadata: { resourceVersion: string };
+      items: KubeObject[];
+    }>("GET", this.path);
     const seen = new Set<string>();
     for (const item of list.items) {
       seen.add(item.metadata.name);
@@ -201,8 +229,12 @@ export class Informer {
   /** One watch request; returns the last resource version seen. */
   private async watch(from: string): Promise<string> {
     this.abort = new AbortController();
-    const response = await this.kube.fetch(`${this.path}?watch=1&allowWatchBookmarks=true&resourceVersion=${from}&timeoutSeconds=300`, { signal: this.abort.signal });
-    if (!response.ok || !response.body) throw new KubeError(`watch ${this.path}: ${response.status}`, response.status);
+    const response = await this.kube.fetch(
+      `${this.path}?watch=1&allowWatchBookmarks=true&resourceVersion=${from}&timeoutSeconds=300`,
+      { signal: this.abort.signal },
+    );
+    if (!response.ok || !response.body)
+      throw new KubeError(`watch ${this.path}: ${response.status}`, response.status);
     let version = from;
     let pending = "";
     const decoder = new TextDecoder();
@@ -215,10 +247,17 @@ export class Informer {
         newline = pending.indexOf("\n");
         if (!line.trim()) continue;
         const event = JSON.parse(line) as { type: string; object: KubeObject & { code?: number } };
-        if (event.type === "ERROR") throw new KubeError(`watch error: ${JSON.stringify(event.object)}`, event.object.code ?? 500);
+        if (event.type === "ERROR")
+          throw new KubeError(
+            `watch error: ${JSON.stringify(event.object)}`,
+            event.object.code ?? 500,
+          );
         version = event.object.metadata?.resourceVersion ?? version;
         if (event.type === "BOOKMARK") continue;
-        this.update(event.object.metadata.name, event.type === "DELETED" ? undefined : event.object);
+        this.update(
+          event.object.metadata.name,
+          event.type === "DELETED" ? undefined : event.object,
+        );
       }
     }
     return version;

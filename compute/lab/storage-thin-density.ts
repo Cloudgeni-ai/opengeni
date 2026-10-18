@@ -12,11 +12,20 @@ try {
     const id = 10000 + i;
     const start = now();
     sh(`dmsetup message storage-pool 0 'create_snap ${id} 1'`);
-    created.push(id); times.push(now() - start);
+    created.push(id);
+    times.push(now() - start);
   }
   const after = sh("dmsetup status storage-pool").trim();
   const sorted = [...times].sort((a, b) => a - b);
-  const result = { count, before, after, totalMs: times.reduce((a, b) => a + b, 0), p50Ms: sorted[Math.floor(count / 2)], p99Ms: sorted[Math.floor(count * 0.99)], method: "dmsetup subprocess per snapshot; includes process launch overhead" };
+  const result = {
+    count,
+    before,
+    after,
+    totalMs: times.reduce((a, b) => a + b, 0),
+    p50Ms: sorted[Math.floor(count / 2)],
+    p99Ms: sorted[Math.floor(count * 0.99)],
+    method: "dmsetup subprocess per snapshot; includes process launch overhead",
+  };
   writeFileSync("/lab/storage/analysis/density-thin.json", JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));
 } finally {

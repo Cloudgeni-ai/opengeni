@@ -155,9 +155,7 @@ describe("computeControl", () => {
     const policy = find(manifests, "NetworkPolicy", "cc-opengeni-postgres");
     expect(
       policy.spec.ingress[0].from.some((from: any) =>
-        Object.entries(from.podSelector.matchLabels).every(
-          ([key, value]) => labels[key] === value,
-        ),
+        Object.entries(from.podSelector.matchLabels).every(([key, value]) => labels[key] === value),
       ),
     ).toBe(true);
   });
@@ -191,9 +189,9 @@ describe("computeControl", () => {
       },
     });
     const revision = async (passwordRevision: unknown) =>
-      databaseJob(await render(withRevision(passwordRevision))).spec.template.spec.containers[0].env.find(
-        (e: any) => e.name === "PASSWORD_REVISION",
-      ).value;
+      databaseJob(
+        await render(withRevision(passwordRevision)),
+      ).spec.template.spec.containers[0].env.find((e: any) => e.name === "PASSWORD_REVISION").value;
     expect(await revision(0)).toBe("0");
     expect(await revision(20261018)).toBe("20261018");
     expect(await revision("7")).toBe("7");

@@ -27,7 +27,8 @@ const AGENT_PORT = 52;
  * exp-reclaim.ts: the kernel default keeps roughly twice as much RAM resident.
  */
 export const DEFAULT_BOOT_ARGS =
-  process.env.GUEST_ARGS ?? "console=ttyS0 reboot=k panic=1 quiet loglevel=1 page_reporting.page_reporting_order=0";
+  process.env.GUEST_ARGS ??
+  "console=ttyS0 reboot=k panic=1 quiet loglevel=1 page_reporting.page_reporting_order=0";
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export const now = () => performance.now();
@@ -101,11 +102,14 @@ export class Vm {
     rmSync(this.apiSock, { force: true });
     rmSync(this.vsock, { force: true });
     if (!existsSync(this.cgroup)) mkdirSync(this.cgroup);
-    this.proc = spawn([FIRECRACKER, "--api-sock", this.apiSock, "--id", this.id.replace(/[^a-zA-Z0-9-]/g, "-")], {
-      stdout: Bun.file(`${this.dir}/console.log`),
-      stderr: Bun.file(`${this.dir}/vmm.log`),
-      stdin: "ignore",
-    });
+    this.proc = spawn(
+      [FIRECRACKER, "--api-sock", this.apiSock, "--id", this.id.replace(/[^a-zA-Z0-9-]/g, "-")],
+      {
+        stdout: Bun.file(`${this.dir}/console.log`),
+        stderr: Bun.file(`${this.dir}/vmm.log`),
+        stdin: "ignore",
+      },
+    );
     writeFileSync(`${this.cgroup}/cgroup.procs`, String(this.proc.pid));
     const deadline = now() + 5000;
     while (!existsSync(this.apiSock)) {
@@ -155,7 +159,8 @@ export class Vm {
         await this.exec("true", 2000);
         return;
       } catch (err) {
-        if (now() > deadline) throw new Error(`${this.id}: agent not ready: ${err}`);
+        if (now() > deadline)
+          throw new Error(`${this.id}: agent not ready: ${err}`, { cause: err });
         await sleep(20);
       }
     }
@@ -335,7 +340,12 @@ export function hostMemAvailableMiB(): number {
 /** Host CPU busy fraction over an interval, from /proc/stat. */
 export async function hostCpuBusy(intervalMs: number): Promise<number> {
   const read = () => {
-    const f = readFileSync("/proc/stat", "utf8").split("\n")[0]!.trim().split(/\s+/).slice(1).map(Number);
+    const f = readFileSync("/proc/stat", "utf8")
+      .split("\n")[0]!
+      .trim()
+      .split(/\s+/)
+      .slice(1)
+      .map(Number);
     const idle = f[3]! + f[4]!;
     const total = f.reduce((a, b) => a + b, 0);
     return { idle, total };

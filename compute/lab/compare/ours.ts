@@ -41,7 +41,8 @@ interface Reply {
 
 function check(reply: Reply, expected: string): Reply {
   if (reply.result === expected) return reply;
-  if (reply.result === "error") throw new HostError(String(reply.message), String(reply.code ?? "internal"));
+  if (reply.result === "error")
+    throw new HostError(String(reply.message), String(reply.code ?? "internal"));
   throw new Error(`expected ${expected}, got ${JSON.stringify(reply)}`);
 }
 
@@ -49,7 +50,11 @@ function check(reply: Reply, expected: string): Reply {
  * Sends one request and reads the reply line. Returns the socket with any
  * bytes that followed the reply, for a `connect` stream.
  */
-export function open(address: Address, request: object, timeoutMs = 120_000): Promise<{ reply: Reply; socket: Socket; rest: Buffer }> {
+export function open(
+  address: Address,
+  request: object,
+  timeoutMs = 120_000,
+): Promise<{ reply: Reply; socket: Socket; rest: Buffer }> {
   return new Promise((resolve, reject) => {
     const socket = connect(address);
     if ("host" in address) socket.setNoDelay(true);
@@ -70,7 +75,11 @@ export function open(address: Address, request: object, timeoutMs = 120_000): Pr
       socket.off("close", onClose);
       socket.pause();
       try {
-        resolve({ reply: JSON.parse(buffered.subarray(0, newline).toString()), socket, rest: buffered.subarray(newline + 1) });
+        resolve({
+          reply: JSON.parse(buffered.subarray(0, newline).toString()),
+          socket,
+          rest: buffered.subarray(newline + 1),
+        });
       } catch (error) {
         fail(error as Error);
       }
@@ -126,12 +135,21 @@ export function scan(buffer: Buffer): Scan {
 }
 
 /** Runs a framed script over a connected stream, timed from `started`. */
-export function runOnStream(socket: Socket, rest: Buffer, script: string, started: number, timeoutMs: number): Promise<RunResult & { output: string }> {
+export function runOnStream(
+  socket: Socket,
+  rest: Buffer,
+  script: string,
+  started: number,
+  timeoutMs: number,
+): Promise<RunResult & { output: string }> {
   return new Promise((resolve, reject) => {
     let buffer = Buffer.alloc(0);
     let firstByteMs: number | undefined;
     let settled = false;
-    const timer = setTimeout(() => finish(new Error(`the script did not finish within ${timeoutMs} ms`)), timeoutMs);
+    const timer = setTimeout(
+      () => finish(new Error(`the script did not finish within ${timeoutMs} ms`)),
+      timeoutMs,
+    );
     const finish = (error?: Error, result?: RunResult) => {
       if (settled) return;
       settled = true;
@@ -174,7 +192,9 @@ export function runOnStream(socket: Socket, rest: Buffer, script: string, starte
     };
     socket.on("data", onData);
     socket.once("error", (error) => finish(error));
-    socket.once("close", () => finish(new Error("the guest closed the stream before the script ended")));
+    socket.once("close", () =>
+      finish(new Error("the guest closed the stream before the script ended")),
+    );
     socket.write(framed(script));
     if (rest.length > 0) onData(rest);
     socket.resume();
@@ -200,7 +220,13 @@ interface HostStatus {
  * sleep cost one request per interval rather than one each.
  */
 export class StatusPoller {
-  private readonly waiters = new Set<{ check: (status: HostStatus) => boolean; resolve: () => void; reject: (error: Error) => void; deadline: number; what: string }>();
+  private readonly waiters = new Set<{
+    satisfied: (status: HostStatus) => boolean;
+    resolve: () => void;
+    reject: (error: Error) => void;
+    deadline: number;
+    what: string;
+  }>();
   private running = false;
 
   constructor(
@@ -208,9 +234,15 @@ export class StatusPoller {
     private readonly intervalMs = 25,
   ) {}
 
-  wait(what: string, check: (status: HostStatus) => boolean, timeoutMs: number): Promise<void> {
+  wait(what: string, satisfied: (status: HostStatus) => boolean, timeoutMs: number): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.waiters.add({ check, resolve, reject, deadline: performance.now() + timeoutMs, what });
+      this.waiters.add({
+        satisfied,
+        resolve,
+        reject,
+        deadline: performance.now() + timeoutMs,
+        what,
+      });
       if (!this.running) void this.loop();
     });
   }
@@ -232,7 +264,7 @@ export class StatusPoller {
         for (const waiter of [...this.waiters]) {
           let done = false;
           try {
-            done = waiter.check(status);
+            done = waiter.satisfied(status);
           } catch (error) {
             this.waiters.delete(waiter);
             waiter.reject(error as Error);
@@ -310,7 +342,11 @@ export class Ours implements System<OursSandbox> {
 
   async run(sandbox: OursSandbox, script: string, started: number): Promise<RunResult> {
     const sentMs = performance.now() - started;
-    const { reply, socket, rest } = await open(this.address, { op: "connect", id: sandbox.id, port: this.port, priority: "interactive" }, this.timeoutMs);
+    const { reply, socket, rest } = await open(
+      this.address,
+      { op: "connect", id: sandbox.id, port: this.port, priority: "interactive" },
+      this.timeoutMs,
+    );
     try {
       check(reply, "connected");
     } catch (error) {
@@ -332,7 +368,11 @@ export class Ours implements System<OursSandbox> {
   async rest(sandbox: OursSandbox, level: string): Promise<void> {
     // The last command's stream holds the sandbox awake until the guest
     // closes it; a sleep asked for before that would be cancelled.
-    await this.poller.wait(`${sandbox.id} released`, (status) => this.find(status, sandbox.id).holds === 0, this.timeoutMs);
+    await this.poller.wait(
+      `${sandbox.id} released`,
+      (status) => this.find(status, sandbox.id).holds === 0,
+      this.timeoutMs,
+    );
     if (level === "running") return;
     check(await call(this.address, { op: "sleep", id: sandbox.id, level }), "done");
     await this.poller.wait(
@@ -340,7 +380,10 @@ export class Ours implements System<OursSandbox> {
       (status) => {
         const found = this.find(status, sandbox.id);
         if (found.broken) throw new Error(`${sandbox.id} is broken`);
-        if (found.failed_step) throw new Error(`${sandbox.id}: ${found.failed_step.step} failed: ${found.failed_step.error}`);
+        if (found.failed_step)
+          throw new Error(
+            `${sandbox.id}: ${found.failed_step.step} failed: ${found.failed_step.error}`,
+          );
         return found.level === level && !found.step;
       },
       this.timeoutMs,
@@ -358,12 +401,18 @@ export class Ours implements System<OursSandbox> {
   }
 
   async list(): Promise<string[]> {
-    const status = check(await call(this.address, { op: "status" }), "status") as unknown as HostStatus;
+    const status = check(
+      await call(this.address, { op: "status" }),
+      "status",
+    ) as unknown as HostStatus;
     return status.sandboxes.map((sandbox) => sandbox.id);
   }
 
   async describe(): Promise<Record<string, unknown>> {
-    const status = check(await call(this.address, { op: "status" }), "status") as unknown as HostStatus;
+    const status = check(
+      await call(this.address, { op: "status" }),
+      "status",
+    ) as unknown as HostStatus;
     const { sandboxes, steps: _steps, ...rest } = status;
     return { system: this.name, config: this.config, sandboxes: sandboxes.length, ...rest };
   }

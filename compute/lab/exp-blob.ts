@@ -8,7 +8,18 @@
 //   BLOB_KIND=gcs   BLOB_BASE=https://storage.googleapis.com/<bucket>  BLOB_TOKEN=<oauth bearer>
 //   BLOB_KIND=azure BLOB_BASE=https://<account>.blob.core.windows.net/<container>  BLOB_SAS=<sas query>
 import { closeSync, openSync, readSync, statSync, writeSync } from "node:fs";
-import { GUEST_DROP_CACHES, LAB, PROBE, Vm, WORKLOAD, ensureCgroupRoot, now, record, sh, sleep } from "./fc";
+import {
+  GUEST_DROP_CACHES,
+  LAB,
+  PROBE,
+  Vm,
+  WORKLOAD,
+  ensureCgroupRoot,
+  now,
+  record,
+  sh,
+  sleep,
+} from "./fc";
 
 const kind = process.env.BLOB_KIND;
 const base = process.env.BLOB_BASE;

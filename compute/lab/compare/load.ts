@@ -25,7 +25,11 @@ export function seededRandom(seed: number): () => number {
  * carries the offered load rather than whatever chance gives: 40 expected
  * arrivals would otherwise vary by about 6.
  */
-export function poissonArrivals(ratePerSecond: number, durationMs: number, random: () => number): number[] {
+export function poissonArrivals(
+  ratePerSecond: number,
+  durationMs: number,
+  random: () => number,
+): number[] {
   if (!(ratePerSecond > 0)) throw new Error(`rate must be positive: ${ratePerSecond}`);
   const count = Math.round((ratePerSecond * durationMs) / 1000);
   return Array.from({ length: count }, () => random() * durationMs).sort((a, b) => a - b);
@@ -91,7 +95,12 @@ export async function runOpenLoop(
     const started = (async () => operation(scheduledAt))();
     pending.push(
       started.then(
-        (firstByteAt): Outcome => ({ at: offset, ok: true, latencyMs: firstByteAt - scheduledAt, lagMs }),
+        (firstByteAt): Outcome => ({
+          at: offset,
+          ok: true,
+          latencyMs: firstByteAt - scheduledAt,
+          lagMs,
+        }),
         (error: unknown): Outcome => ({
           at: offset,
           ok: false,
