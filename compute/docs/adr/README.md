@@ -25,7 +25,8 @@ old one; old records stay as history.
 | 17 | [Sweeping the chunks no copy names](0017-sweeping-unnamed-chunks.md) | Accepted |
 | 18 | [The fleet: one service, leases in Postgres, fences on every write](0018-the-fleet-service-leases-and-fences.md) | Accepted, in progress |
 | 19 | [An E2B-compatible front door and our own guest init](0019-e2b-compatible-front-door-and-guest-init.md) | Accepted, in progress |
-| 20 | [Opengeni runs on the fabric through its e2b backend](0020-opengeni-runs-on-the-fabric-through-its-e2b-backend.md) | Accepted, in progress |
+| 20 | [Opengeni runs on the fabric through its e2b backend](0020-opengeni-runs-on-the-fabric-through-its-e2b-backend.md) | Superseded by 21 for Opengeni |
+| 21 | [Opengeni runs natively: its machine agent in every sandbox, behind the host's link](0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md) | Accepted |
 
 ## Format
 
