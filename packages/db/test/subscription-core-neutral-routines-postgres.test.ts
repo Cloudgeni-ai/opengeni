@@ -78,6 +78,7 @@ beforeAll(async () => {
     // Rewrites routines 0707, 0713 and 0714 create.
     "0715_subscription_core_api_key_connections.sql",
     "0716_subscription_authority_compat.sql",
+    "0843_indexed_inbox_lineage.sql",
     "0717_subscription_authority_fences.sql",
     "0726_subscription_personal_acceptance_reads.sql",
     // 0728 adds a format-aware overload next to 0707's personal connect writer.

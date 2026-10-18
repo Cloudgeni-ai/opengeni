@@ -346,3 +346,38 @@ The new `claim_provider_settings` phase makes that slice separately measurable
 after deployment. Production validation must also account for the earlier
 deferred-preparation change; a lean local fixture and a production subscription
 turn with real integrations are not matched controls.
+
+## Follow-up: indexed inbox provenance lookups
+
+Delivered updates still require the same live authority checks. Several of those
+checks compare a turn's indexed UUID after converting the column to text. On a
+large retained history this prevents a parameterized UUID index lookup, even
+though the lineage names one exact turn. The same pattern occurs in the inbox
+context and MCP binding fences and the subscription compatibility readers.
+
+Convert the lineage value instead, inside a guarded CASE. Require exactly 36
+bytes of canonical lowercase hexadecimal UUID text before casting; PostgreSQL's
+ordinary UUID parser also accepts spellings the old text comparison rejected.
+Keep `lower()` only at the compatibility sites that already normalized their
+input. Malformed, missing and non-string lineage values remain nonmatches, not
+cast errors. Workspace, session, source, credential and generation predicates
+are unchanged. The migration patches exactly one occurrence of each of eight
+known comparisons and fails on source drift. It adds no routine, grant, index,
+lock, cached authority or runtime-posture exception, so old binaries can continue
+using the same database functions during a rolling deployment.
+
+Four bounded read-only production query comparisons over about 79,000 retained
+workspace turns measured 52–63 ms for the original representative provenance
+join versus 0.23–1.06 ms for the indexed form. The original plan touched roughly
+25,730 shared buffers; the indexed form touched eight. These are lookup
+measurements, not full trigger or turn measurements: other predicates can select
+different plans or short-circuit the lookup. In particular, an empty-binding
+local claim did not reproduce a stable whole-claim improvement in alternating
+controls. Do not multiply the isolated lookup saving by the number of sites or
+present it as the missing production second.
+
+Real-PostgreSQL tests exercise every installed guard against canonical,
+uppercase, malformed, missing and non-string JSON values; pin the existing
+normalization differences; check wrong-workspace/session nonmatches; and verify
+parameterized index scans with retained history. Existing receiver-context,
+sender-binding and subscription-authority suites remain the behavioral gates.
