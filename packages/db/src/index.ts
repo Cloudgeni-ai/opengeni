@@ -15,6 +15,7 @@ export {
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./model-call-timing";
+export * from "./model-provider-execution-inputs";
 import {
   modelCallTimingColumns,
   modelCallTimingOrNull,
@@ -16016,10 +16017,13 @@ export async function loadWorkspaceProviderApiKey(
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   turnModelId?: string | null,
+  connectionMetadata?: readonly ConnectionMetadataWithVerification[],
 ): Promise<string | null> {
   if (providerKind === "claude_subscription" && !settings.claudeSubscriptionEnabled) return null;
   const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
-  const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
+  const metadata = (
+    connectionMetadata ?? (await listConnectionsMetadata(db, workspaceId, null))
+  ).find(
     (connection) =>
       connection.subjectId === null &&
       connection.providerDomain.toLowerCase() === spec.providerDomain &&
@@ -16062,6 +16066,7 @@ export async function loadWorkspaceVercelAiGatewayApiKey(
   settings: Settings,
   workspaceId: string,
   turnModelId?: string | null,
+  connectionMetadata?: readonly ConnectionMetadataWithVerification[],
 ): Promise<string | null> {
   return await loadWorkspaceProviderApiKey(
     db,
@@ -16069,6 +16074,7 @@ export async function loadWorkspaceVercelAiGatewayApiKey(
     workspaceId,
     "vercel_gateway",
     turnModelId?.startsWith("workspace-gateway/") ? turnModelId : null,
+    connectionMetadata,
   );
 }
 
@@ -16078,6 +16084,7 @@ export async function loadWorkspaceOpenRouterApiKey(
   settings: Settings,
   workspaceId: string,
   turnModelId?: string | null,
+  connectionMetadata?: readonly ConnectionMetadataWithVerification[],
 ): Promise<string | null> {
   return await loadWorkspaceProviderApiKey(
     db,
@@ -16085,6 +16092,7 @@ export async function loadWorkspaceOpenRouterApiKey(
     workspaceId,
     "openrouter",
     turnModelId?.startsWith("workspace-openrouter/") ? turnModelId : null,
+    connectionMetadata,
   );
 }
 
@@ -16094,6 +16102,7 @@ export async function loadWorkspaceOpperApiKey(
   settings: Settings,
   workspaceId: string,
   turnModelId?: string | null,
+  connectionMetadata?: readonly ConnectionMetadataWithVerification[],
 ): Promise<string | null> {
   return await loadWorkspaceProviderApiKey(
     db,
@@ -16101,6 +16110,7 @@ export async function loadWorkspaceOpperApiKey(
     workspaceId,
     "opper",
     turnModelId?.startsWith("workspace-opper/") ? turnModelId : null,
+    connectionMetadata,
   );
 }
 
@@ -87096,11 +87106,12 @@ export async function loadDirectModelProviderConnection(
   settings: Settings,
   workspaceId: string,
   modelId: string,
+  connectionMetadata?: readonly ConnectionMetadataWithVerification[],
 ) {
   if (!isDirectModelId(modelId)) return null;
-  const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
-    (candidate) => directModelConnectionSpec(candidate)?.modelId === modelId,
-  );
+  const metadata = (
+    connectionMetadata ?? (await listConnectionsMetadata(db, workspaceId, null))
+  ).find((candidate) => directModelConnectionSpec(candidate)?.modelId === modelId);
   if (!metadata) throw new Error("OpenAI or Azure OpenAI connection is no longer available");
   const connection = await loadConnectionCredentialForBroker(db, settings, {
     workspaceId,
