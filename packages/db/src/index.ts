@@ -62994,7 +62994,10 @@ export async function computeSandboxNamed(
             and (
               lease.liveness = 'warming'
               or lease.instance_id = ${input.sandboxId}
-              or lease.resume_state #>> '{sessionState,enrollmentId}' = ${input.enrollmentId}
+              or lease.resume_state #>> '{sessionState,providerState,sandboxId}' =
+                ${input.sandboxId}
+              or lease.resume_state #>> '{sessionState,providerState,enrollmentId}' =
+                ${input.enrollmentId}
             )
         ) as named
       `,
@@ -63019,7 +63022,9 @@ export const STALE_COMPUTE_ENROLLMENT_PAGE_SIZE = 100;
 /**
  * Compute sandbox enrollments nothing can use any more: active, created more
  * than ten minutes ago (the create settle window), and their group's lease
- * neither names them nor is warming a new box. These are enrollments whose
+ * neither names them (in its envelope, sessionState.providerState.enrollmentId)
+ * nor is warming a new box, nor holds a live compute box whose envelope does
+ * not say which enrollment it runs. These are enrollments whose
  * sandbox is already gone (a delete whose revoke failed, a create that never
  * made one), which no fabric listing shows the orphan sweep. The
  * cross-workspace inventory (migration 0846) returns ids only, one page in
@@ -63090,7 +63095,13 @@ export async function revokeStaleComputeSandboxEnrollment(
               and lease.sandbox_group_id = e.sandbox_group_id
               and (
                 lease.liveness = 'warming'
-                or lease.resume_state #>> '{sessionState,enrollmentId}' = e.id::text
+                or (
+                  lease.backend = 'compute'
+                  and lease.liveness in ('warm', 'draining')
+                  and lease.instance_id is not null
+                  and lease.resume_state #>> '{sessionState,providerState,enrollmentId}' is null
+                )
+                or lease.resume_state #>> '{sessionState,providerState,enrollmentId}' = e.id::text
               )
           )
         returning e.id

@@ -68,8 +68,10 @@ skips sandbox enrollments, and machine routes list machines only.
   (`sweepComputeOrphans`, filtered by its gateway URL) and, for each one
   older than ten minutes that Opengeni's records no longer name, revokes its
   enrollment and then deletes it. A sandbox is named while its enrollment is
-  active and its group's lease holds it (by sandbox or enrollment id) or is
-  warming, since a creator may be about to commit it (`computeSandboxNamed`).
+  active and its group's lease holds it (its instance id, or the sandbox or
+  enrollment id in the lease envelope's `sessionState.providerState`, where
+  the worker writes the provider state) or is warming, since a creator may be
+  about to commit it (`computeSandboxNamed`).
   The fabric's own inventory is the record, so nothing is lost when Opengeni's
   rows go: a failed revoke deletes nothing, and a failed delete leaves a listed
   sandbox for the next pass. The sweep handles eight orphans at a time and
@@ -97,7 +99,10 @@ skips sandbox enrollments, and machine routes list machines only.
   whose revoke failed, a create that never made a sandbox) is in no fabric
   listing, so the same maintenance also revokes, from Opengeni's own records,
   every active sandbox enrollment older than ten minutes whose group's lease
-  neither names it nor is warming (migration 0846: a cross-workspace inventory
+  neither names it (`sessionState.providerState.enrollmentId`) nor is warming
+  nor holds a live compute sandbox whose envelope does not say which
+  enrollment it runs, so a live sandbox is never revoked whatever a capture
+  left in its envelope (migration 0846: a cross-workspace inventory
   of ids under the owner-only read capability, then one revoke per enrollment
   under its workspace's RLS that re-checks the condition). An enrollment
   therefore never stays active for a sandbox that is gone. This reconcile
@@ -143,7 +148,12 @@ skips sandbox enrollments, and machine routes list machines only.
   loss leaves it for its new owner. The marker is cleared when the lease
   re-arms or goes cold.
 - **Capture**: a portable tar only, to move a workspace to another backend
-  (rotation and archive capture still drain with a capture).
+  (rotation and archive capture still drain with a capture). There are no
+  warm checkpoints: the fabric persists the sandbox itself, so the turn-end
+  and interval checkpoints other tar backends take are skipped
+  (`warmCheckpoints: "forced_only"` in the capture policy; only a forced
+  rotation checkpoint runs), and a turn neither reads the workspace nor keeps
+  the sandbox awake to do so.
 - **Metering**: warm seconds count only while the sandbox is awake. The
   gateway records each `state` change (`recordComputeSandboxPower`): asleep
   stamps `compute_asleep_since`, which caps accrual; awake moves the meter

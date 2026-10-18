@@ -8,7 +8,7 @@ import { getComputeAgentPlane } from "../compute/plane";
 import { ComputeSandboxClient } from "../compute/session";
 import { SandboxConfigError } from "../errors";
 import { resolveRelayConfig } from "./selfhosted";
-import { REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
+import { ROTATION_ONLY_PORTABLE_TAR_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
 
 /** A request window that outlasts a wake from disk (the host holds a message
  * for up to 120 s) plus the agent's reply. */
@@ -19,8 +19,8 @@ export const computeProvider: ProviderRegistration = {
   exactResumeMode: "custom",
   instanceIdFields: ["sandboxId"],
   // The fabric persists the sandbox itself. A portable tar is only the read-only
-  // capture that moves a workspace to another backend.
-  workspaceCapturePolicy: () => REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE,
+  // capture that rotates, archives or moves a workspace; no warm checkpoints.
+  workspaceCapturePolicy: () => ROTATION_ONLY_PORTABLE_TAR_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.compute,
   validateCredentials(settings) {
     const issues = computeSettingsIssues(settings);

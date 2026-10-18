@@ -82,12 +82,25 @@ beforeAll(async () => {
     group: string,
     liveness: string,
     enrollmentId: string | null,
+    box: { instanceId?: string; backend?: string; archiveOnly?: boolean } = {},
   ): Promise<void> => {
-    const resumeState = enrollmentId ? { sessionState: { enrollmentId } } : null;
+    // The lease envelope as the worker writes it: the provider state, with the
+    // enrollment, under sessionState.providerState. An archive-only envelope
+    // (a capture folded onto a lease whose provider state never serialized)
+    // carries no provider state at all.
+    const resumeState = box.archiveOnly
+      ? { sessionState: { workspaceArchiveAt: new Date().toISOString() } }
+      : enrollmentId
+        ? {
+            backendId: "compute",
+            sessionState: { providerState: { sandboxId: "sbx-named", enrollmentId } },
+          }
+        : null;
     await fixture.admin`insert into sandbox_leases(account_id,workspace_id,sandbox_group_id,
-      liveness,backend,lease_epoch,expires_at,resume_state)
-      values(${tenant.accountId},${tenant.workspaceId},${group},${liveness},'compute',1,
-        now()+interval '1 hour',${resumeState ? fixture.admin.json(resumeState) : null})`;
+      liveness,backend,lease_epoch,expires_at,instance_id,resume_state)
+      values(${tenant.accountId},${tenant.workspaceId},${group},${liveness},
+        ${box.backend ?? "compute"},1,now()+interval '1 hour',${box.instanceId ?? null},
+        ${resumeState ? fixture.admin.json(resumeState) : null})`;
   };
   const tenants: { accountId: string; workspaceId: string }[] = [];
   for (const label of ["first", "second"]) {
@@ -112,6 +125,23 @@ beforeAll(async () => {
   const warming = await enroll(second, { ageMinutes: 30 });
   await lease(second, warming.group, "warming", null);
   kept.push(warming.id);
+  // Kept: a warm lease holds a live compute box, even though a capture left its
+  // envelope with archive fields only.
+  const live = await enroll(first, { ageMinutes: 30 });
+  await lease(first, live.group, "warm", null, { instanceId: "sbx-live", archiveOnly: true });
+  kept.push(live.id);
+  // Stale: a warm lease whose envelope names a newer enrollment of the group.
+  const replaced = await enroll(second, { ageMinutes: 30 });
+  await lease(second, replaced.group, "warm", crypto.randomUUID(), { instanceId: "sbx-new" });
+  stale.push(replaced.id);
+  // Stale: its group moved to another backend's live box.
+  const otherBackend = await enroll(second, { ageMinutes: 30 });
+  await lease(second, otherBackend.group, "warm", null, {
+    instanceId: "sb-modal",
+    backend: "modal",
+    archiveOnly: true,
+  });
+  stale.push(otherBackend.id);
   // Kept: younger than the create settle window.
   kept.push((await enroll(first, { ageMinutes: 1 })).id);
 }, 180_000);

@@ -395,12 +395,15 @@ describe("the compute orphan sweep's record check", () => {
     expect(await named(live, "compute-box")).toBe(true);
     // A box the lease does not hold, under an active enrollment of the group.
     expect(await named(stray, "lost-box")).toBe(false);
-    // The lease names its box by enrollment too.
+    // The lease names its box by enrollment or sandbox id in its envelope too,
+    // where the worker writes the provider state.
     await admin`update sandbox_leases
-      set resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb), '{sessionState}',
-        jsonb_build_object('enrollmentId', ${stray}::text))
+      set resume_state = jsonb_build_object('backendId', 'compute', 'sessionState',
+        jsonb_build_object('providerState', jsonb_build_object(
+          'enrollmentId', ${stray}::text, 'sandboxId', 'parked-box')))
       where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
     expect(await named(stray, "lost-box")).toBe(true);
+    expect(await named(live, "parked-box")).toBe(true);
     // While a creator warms the group, its new box is not yet on the lease.
     await admin`update sandbox_leases set liveness = 'warming', resume_state = null
       where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;

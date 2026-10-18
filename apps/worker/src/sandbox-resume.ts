@@ -967,6 +967,13 @@ async function persistWarmWorkspaceSnapshot(
       reportSkipped(lease.backend, "capture_policy");
       return false;
     }
+    if (!force && capturePolicy.warmCheckpoints === "forced_only") {
+      // The provider persists the live sandbox itself: reading it for a
+      // periodic recovery point would only cost a capture (and on compute,
+      // keep the sandbox awake).
+      reportSkipped(lease.backend, "capture_policy");
+      return false;
+    }
     const nativeModalPersistence =
       workspacePersistence === "snapshot_filesystem" ||
       workspacePersistence === "snapshot_directory";

@@ -29,6 +29,7 @@ import {
   sweepComputeOrphans,
   createComputeOrphanSweepProgress,
   reconcileStaleComputeEnrollments,
+  serializeEstablishedSandboxEnvelope,
 } from "../src/sandbox";
 import { COMPUTE_ORPHAN_SWEEP_LIMIT } from "../src/sandbox/compute/orphans";
 import { applyDiff } from "@openai/agents";
@@ -1235,6 +1236,30 @@ describe("compute sandbox client", () => {
     await expect(
       client.deserializeSessionState({ ...serialized, stateVersion: 2 }),
     ).rejects.toBeInstanceOf(SandboxConfigError);
+  });
+
+  test("the lease envelope names the sandbox and enrollment where the sweeps look", async () => {
+    // The stale-enrollment inventory, its revoke and the orphan sweep's record
+    // check read sessionState.providerState.{enrollmentId,sandboxId} of the
+    // lease envelope; this is the shape the worker persists.
+    const { client } = setup();
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    const envelope = await serializeEstablishedSandboxEnvelope({
+      client,
+      session,
+      sessionState: session.state,
+      instanceId: session.state.sandboxId,
+      backendId: client.backendId,
+    });
+    expect(envelope).toMatchObject({
+      backendId: "compute",
+      sessionState: {
+        providerState: {
+          sandboxId: session.state.sandboxId,
+          enrollmentId: session.state.enrollmentId,
+        },
+      },
+    });
   });
 
   test("a turn binding shares the sandbox state and wake gate", async () => {

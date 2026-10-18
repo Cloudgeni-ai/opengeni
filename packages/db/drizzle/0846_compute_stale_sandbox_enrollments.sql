@@ -8,7 +8,10 @@
 -- no longer in any fabric listing. This inventory finds those from Opengeni's
 -- own records, across workspaces: active sandbox enrollments created more
 -- than 10 minutes ago (the create settle window) whose group's lease neither
--- names them nor is warming a new box. The worker then revokes each one under
+-- names them in its envelope (sessionState.providerState.enrollmentId), nor
+-- is warming a new box, nor holds a live compute box (warm or draining with an
+-- instance) whose envelope does not say which enrollment it runs. The last
+-- rule keeps a live box safe whatever a capture left in its envelope. The worker then revokes each one under
 -- its own workspace's RLS, re-checking the same condition. It returns one
 -- page of at most 100 in enrollment-id order, after the id the caller gives
 -- (none for the first page), so a caller can reach every entry however many
@@ -85,7 +88,11 @@ BEGIN
             WHERE lease.workspace_id = enrollment.workspace_id
               AND lease.sandbox_group_id = enrollment.sandbox_group_id
               AND (lease.liveness = 'warming'
-                OR lease.resume_state #>> '{sessionState,enrollmentId}' = enrollment.id::text)
+                OR (lease.backend = 'compute' AND lease.liveness IN ('warm', 'draining')
+                  AND lease.instance_id IS NOT NULL
+                  AND lease.resume_state #>> '{sessionState,providerState,enrollmentId}' IS NULL)
+                OR lease.resume_state #>> '{sessionState,providerState,enrollmentId}'
+                  = enrollment.id::text)
           )
           AND (after_enrollment IS NULL OR enrollment.id > after_enrollment)
         ORDER BY enrollment.id LIMIT 100;
