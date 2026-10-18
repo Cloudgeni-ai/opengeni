@@ -1480,6 +1480,89 @@ describe("interaction attempt tools", () => {
       expect(result.structuredContent).not.toHaveProperty(omitted);
   });
 
+  test("returns a post-action screenshot in the same call when includeScreenshot is set", async () => {
+    const target = browserTarget();
+    const observation = browserObservation(target);
+    const image = new Uint8Array([1, 2, 3]);
+    const order: string[] = [];
+    let captureFails = false;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, value) => {
+          order.push("act");
+          return browserReceipt(value.operationId, observation);
+        },
+        captureBrowserTarget: async (_workspaceId, _browserSessionId, targetId) => {
+          order.push(`capture:${targetId}`);
+          if (captureFails) throw new Error("synthetic capture failure");
+          return {
+            frameId: "captured-browser-frame",
+            browserSessionId,
+            controllerGeneration: target.controllerGeneration,
+            targetId: target.id,
+            targetGeneration: target.targetGeneration,
+            documentGeneration: target.documentGeneration!,
+            sequence: 1,
+            mediaType: "image/jpeg",
+            width: 1,
+            height: 1,
+            deviceScaleFactor: 1,
+            scrollX: 0,
+            scrollY: 0,
+            capturedAt: now,
+            data: image,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+    });
+    const context = {
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    };
+    const action = { type: "scroll", deltaX: 0, deltaY: 480 };
+
+    const plain = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, action },
+      context,
+    );
+    expect(plain.content).toHaveLength(1);
+    expect(order).toEqual(["act"]);
+
+    order.length = 0;
+    const visual = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, action, includeScreenshot: true },
+      { ...context, operationId: randomUUID() },
+    );
+    // The capture follows the settled action, never runs alongside it.
+    expect(order).toEqual(["act", `capture:${target.id}`]);
+    expect(visual.isError).toBeFalsy();
+    expect(visual.content).toHaveLength(2);
+    expect(visual.content[0]).toMatchObject({ type: "text" });
+    expect(visual.content[1]).toEqual({
+      type: "image",
+      data: Buffer.from(image).toString("base64"),
+      mimeType: "image/jpeg",
+    });
+    expect(visual.structuredContent).toMatchObject({ targetId: target.id, state: "completed" });
+
+    // A failed capture keeps the completed action's receipt and says why.
+    captureFails = true;
+    const failed = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, action, includeScreenshot: true },
+      { ...context, operationId: randomUUID() },
+    );
+    expect(failed.isError).toBeFalsy();
+    expect(failed.structuredContent).toMatchObject({ targetId: target.id, state: "completed" });
+    expect(failed.content).toHaveLength(2);
+    expect((failed.content[1] as { text: string }).text).toBe(
+      "The action ran, but its screenshot could not be captured: synthetic capture failure",
+    );
+  });
+
   test("skips the pre-action AX read with all explicit fences and omits post-action AX on request", async () => {
     const target = browserTarget();
     let request: BrowserActionRequest | null = null;
