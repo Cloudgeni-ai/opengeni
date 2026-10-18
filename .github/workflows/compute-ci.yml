@@ -214,8 +214,9 @@ jobs:
           key: compute-lab-${{ hashFiles('compute/lab/host-setup.sh', 'compute/deploy/host/pins.env') }}
       - name: Huge pages for the nested profile
         run: |
-          # A quarter of the runner's memory, in 2 MiB pages.
-          pages=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 4 / 2048 ))
+          # Half the runner's memory, in 2 MiB pages: the lab step runs its
+          # tests at once, and a quarter (4 GB) left later ones a full host.
+          pages=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 2 / 2048 ))
           echo "$pages" | sudo tee /proc/sys/vm/nr_hugepages
           grep -i hugepages_total /proc/meminfo
       - name: The KVM gate
@@ -224,17 +225,33 @@ jobs:
           LAB: /lab
           PROFILE: nested
           SANDBOXES: "4"
-        run: bash ci/gate.sh
+        run: |
+          # The runner starts jobs with an out-of-memory score adjustment of
+          # 500; the lab checks that ordinary processes keep the default 0.
+          sudo choom -n 0 -p $$
+          bash ci/gate.sh
       - name: Where the lab's room went
         if: failure()
         run: |
           df -h / /lab
           sudo du -xsh /lab/* 2>/dev/null | sort -h | tail -15
+      - name: Collect the conformance logs and results
+        if: failure()
+        run: |
+          # Only its text: the directory also holds sockets and the test
+          # authority's key, which the upload cannot or should not take.
+          out=$RUNNER_TEMP/conformance
+          mkdir -p "$out"
+          [ -d /lab/t/e2b-conformance ] || exit 0
+          cd /lab/t/e2b-conformance
+          sudo find . -type f \( -name '*.log' -o -name '*.json' -o -name '*.md' -o -name '*.txt' -o -name '*.xml' \) \
+            -size -20M -exec cp --parents {} "$out" \;
+          sudo chown -R "$(id -u):$(id -g)" "$out"
       - name: Keep the conformance logs and results
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: compute-conformance-${{ github.run_id }}
-          path: /lab/t/e2b-conformance
+          path: ${{ runner.temp }}/conformance
           if-no-files-found: ignore
           retention-days: 14
