@@ -758,7 +758,8 @@ const ComputerObserveInput = z
 const ComputerObserveOutput = ComputerObservation.extend({
   capturedFrame: z
     .object({ width: z.number().int().positive(), height: z.number().int().positive() })
-    .strict(),
+    .strict()
+    .optional(),
 }).strict();
 const ComputerClipboardInput = z.object({ computerSessionId: z.string().uuid() }).strict();
 const ComputerActInput = z
@@ -1672,27 +1673,36 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "observe"],
     title: "Observe app or window",
     description:
-      "Read one ComputerSession app/window/screen target, causal generation, semantic accessibility tree, focus, frame identity, and a bounded current screenshot without taking control. capturedFrame gives the screenshot's exact pixel dimensions; use those pixels for pointer coordinates, not the target's native bounds or an image-preview size.",
+      "Read one ComputerSession app/window/screen target, causal generation, semantic accessibility tree, focus, frame identity, and a bounded current screenshot without taking control. capturedFrame gives the screenshot's exact pixel dimensions; use those pixels for pointer coordinates, not the target's native bounds or an image-preview size. An app target may return only its accessibility tree; observe one of its windows or the screen for pixels.",
     input: ComputerObserveInput,
     output: ComputerObserveOutput,
     readOnly: true,
     idempotent: true,
-    modelText: computerObservationText,
+    modelText: (output) =>
+      output.capturedFrame
+        ? computerObservationText(output)
+        : `${computerObservationText(output)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`,
     execute: async (value) => {
       // The tree and the pixels are independent reads of the same target;
-      // a generation mismatch below re-reads the tree once.
-      let [observation, frame] = await Promise.all([
-        input.transport.observeComputerTarget(
-          input.workspaceId,
-          value.computerSessionId,
-          value.targetId,
-        ),
-        input.transport.captureComputerTarget(
-          input.workspaceId,
-          value.computerSessionId,
-          value.targetId,
-        ),
-      ]);
+      // a generation mismatch below re-reads the tree once. An app target
+      // spans several windows, so most adapters cannot photograph it; its
+      // tree is then the whole observation instead of a failed read.
+      const capture = input.transport
+        .captureComputerTarget(input.workspaceId, value.computerSessionId, value.targetId)
+        .then(
+          (frame) => ({ frame, error: null as unknown }),
+          (error: unknown) => ({ frame: null, error }),
+        );
+      let observation = await input.transport.observeComputerTarget(
+        input.workspaceId,
+        value.computerSessionId,
+        value.targetId,
+      );
+      const { frame, error } = await capture;
+      if (frame === null) {
+        if (observation.target.kind === "app") return observation;
+        throw error;
+      }
       if (observation.target.targetGeneration !== frame.targetGeneration) {
         observation = await input.transport.observeComputerTarget(
           input.workspaceId,
