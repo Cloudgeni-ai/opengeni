@@ -114,13 +114,21 @@ pub(super) fn configure_credentials_before_exec(
     uid: u32,
     gid: u32,
     groups: Vec<u32>,
+    cwd: Option<std::ffi::CString>,
 ) {
-    // SAFETY: the closure owns its group list (allocated before fork, only read
-    // after it) and calls nothing but the raw credential syscalls above.
+    // SAFETY: the closure owns its group list and working directory (allocated
+    // before fork, only read after it) and calls nothing but the raw credential
+    // syscalls above and chdir(2), all async-signal-safe.
     unsafe {
-        command
-            .as_std_mut()
-            .pre_exec(move || switch_thread_credentials(uid, gid, &groups));
+        command.as_std_mut().pre_exec(move || {
+            switch_thread_credentials(uid, gid, &groups)?;
+            if let Some(cwd) = &cwd {
+                if libc::chdir(cwd.as_ptr()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
     }
 }
 

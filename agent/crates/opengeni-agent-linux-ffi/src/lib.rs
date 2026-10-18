@@ -55,18 +55,41 @@ pub fn configure_process_cgroup_before_exec(
 }
 
 /// Configures `command` to run as `uid`/`gid` with exactly `groups` as its
-/// supplementary groups. The switch is registered as a pre-exec hook, so it runs
-/// after every hook registered before it (cgroup migration and OOM bias still
-/// run with the agent's privileges) and before user code. A failed switch fails
+/// supplementary groups, then to enter `cwd` as that user. The switch is
+/// registered as a pre-exec hook, so it runs after every hook registered before
+/// it (cgroup migration and OOM bias still run with the agent's privileges) and
+/// before user code. A failed switch or a directory the user cannot enter fails
 /// the spawn; the child never runs with the agent's credentials.
+///
+/// Give the working directory here, never through `Command::current_dir`: the
+/// standard library enters that directory before pre-exec hooks run, which
+/// would traverse it with the agent's credentials.
+///
+/// # Errors
+///
+/// A working directory that cannot be passed to the kernel (it contains a
+/// NUL byte); nothing is registered then.
 #[cfg(target_os = "linux")]
 pub fn configure_credentials_before_exec(
     command: &mut tokio::process::Command,
     uid: u32,
     gid: u32,
     groups: Vec<u32>,
-) {
-    ffi::configure_credentials_before_exec(command, uid, gid, groups);
+    cwd: Option<&std::path::Path>,
+) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let cwd = cwd
+        .map(|cwd| std::ffi::CString::new(cwd.as_os_str().as_bytes()))
+        .transpose()
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "working directory contains a NUL byte",
+            )
+        })?;
+    ffi::configure_credentials_before_exec(command, uid, gid, groups, cwd);
+    Ok(())
 }
 
 /// Irreversibly switches the CALLING THREAD ONLY to `uid`/`gid` with exactly
@@ -166,7 +189,8 @@ mod tests {
         }
         let mut command = tokio::process::Command::new("/bin/sh");
         command.args(["-c", "echo $(id -u) $(id -g) $(id -G)"]);
-        configure_credentials_before_exec(&mut command, 65534, 65534, vec![65534, 12345]);
+        configure_credentials_before_exec(&mut command, 65534, 65534, vec![65534, 12345], None)
+            .expect("configure credentials");
         let output = command
             .as_std_mut()
             .output()
@@ -178,6 +202,42 @@ mod tests {
         let mut groups = fields[2..].to_vec();
         groups.sort_unstable();
         assert_eq!(groups, vec!["12345", "65534"]);
+    }
+
+    #[test]
+    fn credential_hook_enters_the_working_directory_as_the_requested_identity() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if !is_root() {
+            eprintln!("skipped: needs root");
+            return;
+        }
+        // A root-only parent with an open child: root may enter the child,
+        // the requested user may not.
+        let parent = std::env::temp_dir().join(format!("og-ffi-cwd-{}", std::process::id()));
+        let child = parent.join("open");
+        std::fs::create_dir_all(&child).expect("create fixture");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+            .expect("restrict parent");
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755))
+            .expect("open child");
+        let run = |cwd: &std::path::Path, uid: u32| {
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.args(["-c", "pwd"]);
+            configure_credentials_before_exec(&mut command, uid, uid, vec![uid], Some(cwd))
+                .expect("configure credentials");
+            command.as_std_mut().output()
+        };
+        let denied = run(&child, 65534);
+        let allowed = run(&child, 0);
+        std::fs::remove_dir_all(&parent).expect("remove fixture");
+        let error = denied.expect_err("the user cannot traverse the root-only parent");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        let allowed = allowed.expect("root enters the child");
+        assert_eq!(
+            String::from_utf8_lossy(&allowed.stdout).trim(),
+            child.to_string_lossy()
+        );
     }
 
     #[test]

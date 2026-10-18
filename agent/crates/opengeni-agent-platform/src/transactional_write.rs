@@ -29,13 +29,39 @@ pub fn begin(
 ) -> PlatformResult<Box<dyn TransactionalWrite>> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        unix::begin(path, request)
+        unix::begin(path, request, false)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (path, request);
         Err(PlatformError::Unsupported(
             "transactional fs write requires Linux or macOS".into(),
+        ))
+    }
+}
+
+/// Begin a transaction whose staged content has no name until it is
+/// published (Linux `O_TMPFILE`), for a caller that runs as a user who may
+/// write the destination's directory. Such a user could swap a named staging
+/// file between verification and publication; an unnamed one cannot be
+/// reached, and publication links the verified descriptor itself.
+///
+/// # Errors
+/// Everywhere but Linux, and on a filesystem without `O_TMPFILE`, it fails
+/// closed as unsupported.
+pub(crate) fn begin_unnamed(
+    path: &Path,
+    request: &v1::FsWriteBegin,
+) -> PlatformResult<Box<dyn TransactionalWrite>> {
+    #[cfg(target_os = "linux")]
+    {
+        unix::begin(path, request, true)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (path, request);
+        Err(PlatformError::Unsupported(
+            "unnamed transactional staging requires Linux".into(),
         ))
     }
 }
@@ -270,8 +296,13 @@ mod unix {
     }
 
     fn regular(file: &File) -> PlatformResult<Metadata> {
+        regular_with_links(file, 1)
+    }
+
+    // Unnamed staged content has no link until it is published.
+    fn regular_with_links(file: &File, links: u64) -> PlatformResult<Metadata> {
         let meta = file.metadata().map_err(io)?;
-        if !meta.is_file() || meta.nlink() != 1 || meta.mode() & 0o7000 != 0 {
+        if !meta.is_file() || meta.nlink() != links || meta.mode() & 0o7000 != 0 {
             return Err(unsupported("transactional destination must be a single-link regular file without special mode bits"));
         }
         no_xattrs(file)?;
@@ -323,12 +354,21 @@ mod unix {
         Ok((bytes, hash.finalize().to_hex().to_string()))
     }
 
+    /// Where the staged content lives until publication.
+    enum Stage {
+        /// `content` in a private directory next to the destination.
+        Named { name: String, dir: File },
+        /// An unnamed (`O_TMPFILE`) inode only this transaction's descriptor
+        /// reaches; publication links that descriptor.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        Unnamed,
+    }
+
     struct Staged {
         path: std::path::PathBuf,
         parent: File,
         name: OsString,
-        stage_name: String,
-        stage_dir: File,
+        stage: Stage,
         content: File,
         base: Option<(File, Metadata)>,
         request: v1::FsWriteBegin,
@@ -340,8 +380,11 @@ mod unix {
         fn drop(&mut self) {
             // Only our exact private names, relative to pinned handles. Never
             // sweep other transactions or interpret an orphan as a resumable op.
-            let _ = fs::unlinkat(&self.stage_dir, "content", AtFlags::empty());
-            let _ = fs::unlinkat(&self.parent, self.stage_name.as_str(), AtFlags::REMOVEDIR);
+            // Unnamed content vanishes with its descriptor.
+            if let Stage::Named { name, dir } = &self.stage {
+                let _ = fs::unlinkat(dir, "content", AtFlags::empty());
+                let _ = fs::unlinkat(&self.parent, name.as_str(), AtFlags::REMOVEDIR);
+            }
         }
     }
 
@@ -366,6 +409,7 @@ mod unix {
     pub(super) fn begin(
         path: &Path,
         request: &v1::FsWriteBegin,
+        unnamed: bool,
     ) -> PlatformResult<Box<dyn TransactionalWrite>> {
         let valid_digest = |value: &str| {
             value.len() == 64
@@ -417,37 +461,24 @@ mod unix {
                 ))
             }
         };
-        let (stage_name, stage_dir) = private_stage_dir(&parent)?;
         let mode = if request.mode == 0 {
             0o666
         } else {
             request.mode
         };
-        let content = match fs::openat(
-            &stage_dir,
-            "content",
-            OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            ordinary_mode(mode)?,
-        ) {
-            Ok(fd) => File::from(fd),
-            Err(error) => {
-                let _ = fs::unlinkat(&parent, stage_name.as_str(), AtFlags::REMOVEDIR);
-                return Err(io(error));
-            }
-        };
+        let (stage, content) = stage_content(&parent, unnamed, ordinary_mode(mode)?)?;
         let staged = Staged {
             path,
             parent,
             name,
-            stage_name,
-            stage_dir,
+            stage,
             content,
             base,
             request: request.clone(),
             bytes: 0,
             published: false,
         };
-        let new_meta = regular(&staged.content)?;
+        let new_meta = staged.staged_meta()?;
         if let Some(base) = &staged.base {
             let meta = &base.1;
             if meta.uid() != new_meta.uid() || meta.gid() != new_meta.gid() {
@@ -458,6 +489,154 @@ mod unix {
             fs::fchmod(&staged.content, ordinary_mode(meta.mode() & 0o777)?).map_err(io)?;
         }
         Ok(Box::new(staged))
+    }
+
+    fn stage_content(parent: &File, unnamed: bool, mode: Mode) -> PlatformResult<(Stage, File)> {
+        if unnamed {
+            return Ok((Stage::Unnamed, unnamed_content(parent, mode)?));
+        }
+        let (stage_name, stage_dir) = private_stage_dir(parent)?;
+        match fs::openat(
+            &stage_dir,
+            "content",
+            OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode,
+        ) {
+            Ok(fd) => Ok((
+                Stage::Named {
+                    name: stage_name,
+                    dir: stage_dir,
+                },
+                File::from(fd),
+            )),
+            Err(error) => {
+                let _ = fs::unlinkat(parent, stage_name.as_str(), AtFlags::REMOVEDIR);
+                Err(io(error))
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn unnamed_content(parent: &File, mode: Mode) -> PlatformResult<File> {
+        // Without O_EXCL the inode may later be linked into the directory.
+        match fs::openat(
+            parent,
+            ".",
+            OFlags::TMPFILE | OFlags::RDWR | OFlags::CLOEXEC,
+            mode,
+        ) {
+            Ok(fd) => Ok(File::from(fd)),
+            Err(rustix::io::Errno::OPNOTSUPP | rustix::io::Errno::ISDIR) => Err(unsupported(
+                "this filesystem cannot stage a transactional write unnamed (O_TMPFILE)",
+            )),
+            Err(error) => Err(io(error)),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn unnamed_content(_parent: &File, _mode: Mode) -> PlatformResult<File> {
+        Err(unsupported("unnamed transactional staging requires Linux"))
+    }
+
+    impl Staged {
+        fn staged_meta(&self) -> PlatformResult<Metadata> {
+            match self.stage {
+                Stage::Named { .. } => regular(&self.content),
+                Stage::Unnamed => regular_with_links(&self.content, 0),
+            }
+        }
+
+        /// Make the staged content the destination. A named stage is renamed
+        /// into place. Unnamed content is linked through its own descriptor, so
+        /// exactly the verified inode is published: directly under the
+        /// destination name for a creation (no-replace), else under a fresh
+        /// name that is then atomically exchanged with the destination and
+        /// checked, the previous file put back if anything else arrived.
+        fn publish(&self, flags: RenameFlags) -> PlatformResult<()> {
+            let conflict = |error: rustix::io::Errno| {
+                if error == rustix::io::Errno::EXIST {
+                    failure("WRITE_CONFLICT", "destination appeared before commit")
+                } else {
+                    io(error)
+                }
+            };
+            match &self.stage {
+                Stage::Named { dir, .. } => {
+                    fs::renameat_with(dir, "content", &self.parent, &self.name, flags)
+                        .map_err(conflict)
+                }
+                Stage::Unnamed => self.publish_unnamed(),
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        fn publish_unnamed(&self) -> PlatformResult<()> {
+            use std::os::fd::AsRawFd as _;
+
+            // The calling thread's own descriptor table entry: always
+            // reachable by that thread, whatever identity it runs as.
+            let descriptor = format!("/proc/thread-self/fd/{}", self.content.as_raw_fd());
+            let link = |name: &std::ffi::OsStr| {
+                fs::linkat(
+                    fs::CWD,
+                    descriptor.as_str(),
+                    &self.parent,
+                    name,
+                    AtFlags::SYMLINK_FOLLOW,
+                )
+            };
+            if self.request.expected_absent {
+                return link(&self.name).map_err(|error| {
+                    if error == rustix::io::Errno::EXIST {
+                        failure("WRITE_CONFLICT", "destination appeared before commit")
+                    } else {
+                        io(error)
+                    }
+                });
+            }
+            let fresh = OsString::from(format!(".opengeni-publish-{}", uuid::Uuid::new_v4()));
+            link(&fresh).map_err(io)?;
+            if let Err(error) = fs::renameat_with(
+                &self.parent,
+                &fresh,
+                &self.parent,
+                &self.name,
+                RenameFlags::EXCHANGE,
+            ) {
+                let _ = fs::unlinkat(&self.parent, &fresh, AtFlags::empty());
+                return Err(io(error));
+            }
+            let ours = self.content.metadata().map_err(io)?;
+            let published = fs::statat(&self.parent, &self.name, AtFlags::SYMLINK_NOFOLLOW);
+            let exact = published.is_ok_and(|named| {
+                named.st_ino == ours.ino() && i128::from(named.st_dev) == i128::from(ours.dev())
+            });
+            if !exact {
+                // Something replaced our link before the exchange: put the
+                // previous destination back and publish nothing.
+                let _ = fs::renameat_with(
+                    &self.parent,
+                    &fresh,
+                    &self.parent,
+                    &self.name,
+                    RenameFlags::EXCHANGE,
+                );
+                let _ = fs::unlinkat(&self.parent, &fresh, AtFlags::empty());
+                return Err(failure(
+                    "WRITE_CONFLICT",
+                    "staged content was replaced before publication",
+                ));
+            }
+            // The fresh name now holds the previous destination.
+            let _ = fs::unlinkat(&self.parent, &fresh, AtFlags::empty());
+            Ok(())
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        #[allow(clippy::unused_self)]
+        fn publish_unnamed(&self) -> PlatformResult<()> {
+            Err(unsupported("unnamed transactional staging requires Linux"))
+        }
     }
 
     impl TransactionalWrite for Staged {
@@ -488,7 +667,7 @@ mod unix {
                     "staged content differs from intended size/digest",
                 ));
             }
-            regular(&self.content)?;
+            self.staged_meta()?;
             self.content.sync_all().map_err(io)?;
             let (current_parent, _) = parent(&self.path, false)?;
             let initial_parent = self.parent.metadata().map_err(io)?;
@@ -537,14 +716,7 @@ mod unix {
             } else {
                 RenameFlags::empty()
             };
-            fs::renameat_with(&self.stage_dir, "content", &self.parent, &self.name, flags)
-                .map_err(|error| {
-                    if error == rustix::io::Errno::EXIST {
-                        failure("WRITE_CONFLICT", "destination appeared before commit")
-                    } else {
-                        io(error)
-                    }
-                })?;
+            self.publish(flags)?;
             // Rename is the commit point. Do not turn a subsequent cleanup or
             // directory-sync failure into a retryable pre-commit error. This is
             // atomic visibility, not a durable receipt across power/process loss.

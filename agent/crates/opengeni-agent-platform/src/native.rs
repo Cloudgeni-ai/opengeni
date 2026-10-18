@@ -18,7 +18,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use crate::cgroup::{OpCgroupConfig, OpCgroups};
 use crate::desktop::{resolve_desktop, DesktopBackend};
 use crate::error::{PlatformError, PlatformResult};
-use crate::run_as::RunAsIdentity;
+use crate::run_as::{RunAsChild, RunAsIdentity};
 use crate::{BrowserControlBackend, HostIdentity, Platform, StreamRegistry};
 
 /// The host-native platform: exec/fs/git against the machine the agent runs on,
@@ -184,12 +184,28 @@ impl NativePlatform {
         identity: Option<&RunAsIdentity>,
     ) -> PlatformResult<PathBuf> {
         let path = self.resolve_path(cwd, identity)?;
-        let metadata = std::fs::metadata(&path).map_err(|error| {
-            PlatformError::from_io(
-                &format!("{operation} working directory {}", path.display()),
-                &error,
-            )
-        })?;
+        // Checked as the requested user, so a directory only the agent can
+        // reach is reported the same way the user's own chdir would fail.
+        let metadata = match identity {
+            Some(identity) => {
+                let checked = path.clone();
+                let operation = operation.to_string();
+                crate::run_as::on_identity_thread(identity, move || {
+                    std::fs::metadata(&checked).map_err(|error| {
+                        PlatformError::from_io(
+                            &format!("{operation} working directory {}", checked.display()),
+                            &error,
+                        )
+                    })
+                })?
+            }
+            None => std::fs::metadata(&path).map_err(|error| {
+                PlatformError::from_io(
+                    &format!("{operation} working directory {}", path.display()),
+                    &error,
+                )
+            })?,
+        };
         if !metadata.is_dir() {
             let mut detail = BTreeMap::new();
             detail.insert("path".to_string(), path.to_string_lossy().into_owned());
@@ -326,7 +342,7 @@ impl ExecProcessGroup {
         mut command: tokio::process::Command,
         cgroups: Option<&OpCgroups>,
         requested_policy: OpCgroupConfig,
-        run_as: Option<&RunAsIdentity>,
+        run_as: Option<&RunAsChild>,
     ) -> std::io::Result<Self> {
         #[cfg(not(target_os = "linux"))]
         if run_as.is_some() {
@@ -405,8 +421,13 @@ impl ExecProcessGroup {
         }
         // Registered last: the hooks above still need the agent's privileges.
         #[cfg(target_os = "linux")]
-        if let Some(identity) = run_as {
-            crate::run_as::configure_child(identity, &mut command);
+        if let Some(run_as) = run_as {
+            if let Err(error) = crate::run_as::configure_child(run_as, &mut command) {
+                mark_unsettled_work();
+                let _ = terminate_unix_process_group(pgid);
+                let _ = anchor.start_kill();
+                return Err(error);
+            }
         }
         let child = match command.spawn() {
             Ok(child) => child,
@@ -988,7 +1009,7 @@ fn spawn_contained_with_policy(
     mut command: tokio::process::Command,
     cgroups: Option<&OpCgroups>,
     requested_policy: OpCgroupConfig,
-    run_as: Option<&RunAsIdentity>,
+    run_as: Option<&RunAsChild>,
 ) -> std::io::Result<ContainedExec> {
     command
         .kill_on_drop(true)
@@ -1064,10 +1085,14 @@ impl Platform for NativePlatform {
         })?;
         let identity = crate::run_as::resolve(&req.run_as)?;
         let mut resolved = req.clone();
-        resolved.cwd = self
-            .resolve_process_cwd(&req.cwd, "pty", identity.as_ref())?
-            .to_string_lossy()
-            .into_owned();
+        // A run-as terminal without a cwd starts where that user's login would
+        // (the PTY layer picks the user's home); every other cwd resolves here.
+        if !(req.cwd.is_empty() && identity.is_some()) {
+            resolved.cwd = self
+                .resolve_process_cwd(&req.cwd, "pty", identity.as_ref())?
+                .to_string_lossy()
+                .into_owned();
+        }
         registry.open_pty(&resolved, &self.default_shell()).await
     }
 
@@ -1105,9 +1130,16 @@ impl Platform for NativePlatform {
             command
         };
 
-        cmd.current_dir(self.resolve_process_cwd(&req.cwd, "exec", identity.as_ref())?);
-        if let Some(identity) = &identity {
-            cmd.envs(identity.login_env());
+        let cwd = self.resolve_process_cwd(&req.cwd, "exec", identity.as_ref())?;
+        let run_as = identity.map(|identity| RunAsChild {
+            identity,
+            cwd: cwd.clone(),
+        });
+        if let Some(run_as) = &run_as {
+            // Entered as the user by the credential hook, never here as root.
+            cmd.envs(run_as.identity.login_env());
+        } else {
+            cmd.current_dir(cwd);
         }
         for (k, v) in &req.env {
             cmd.env(k, v);
@@ -1129,7 +1161,7 @@ impl Platform for NativePlatform {
             cmd,
             self.cgroups.as_deref(),
             requested_policy,
-            identity.as_ref(),
+            run_as.as_ref(),
         )
         .map_err(|e| {
             PlatformError::from_io(
@@ -1231,14 +1263,10 @@ impl Platform for NativePlatform {
         let Some(identity) = identity else {
             return crate::transactional_write::begin(&path, req);
         };
-        // Staging creates the private stage and content file in the target's
-        // directory as the user (their permissions, their ownership); chunks then
-        // write through the open descriptor and the commit renames the user's
-        // file into place.
-        let req = req.clone();
-        crate::run_as::on_identity_thread(&identity, move || {
-            crate::transactional_write::begin(&path, &req)
-        })
+        // The whole transaction runs as the user (their permissions, their
+        // ownership): staging, publication and the cleanup of an unpublished
+        // write, with the content unnamed until the verified inode is linked.
+        crate::run_as::begin_transactional_write(&identity, path, req.clone())
     }
 
     async fn fs_write(&self, req: &v1::FsWriteRequest) -> PlatformResult<v1::FsWriteResponse> {
@@ -1304,10 +1332,17 @@ impl Platform for NativePlatform {
     ) -> PlatformResult<ContainedExec> {
         let identity = crate::run_as::resolve(&req.run_as)?;
         let mut cmd = tokio::process::Command::new("git");
-        cmd.args(git_args(req.op(), &req.args))
-            .current_dir(self.resolve_process_cwd(&req.cwd, "git", identity.as_ref())?);
-        if let Some(identity) = &identity {
-            cmd.envs(identity.login_env());
+        cmd.args(git_args(req.op(), &req.args));
+        let cwd = self.resolve_process_cwd(&req.cwd, "git", identity.as_ref())?;
+        let run_as = identity.map(|identity| RunAsChild {
+            identity,
+            cwd: cwd.clone(),
+        });
+        if let Some(run_as) = &run_as {
+            // Entered as the user by the credential hook, never here as root.
+            cmd.envs(run_as.identity.login_env());
+        } else {
+            cmd.current_dir(cwd);
         }
         let requested_policy = requested_policy(policy)?;
         if requested_policy.has_limits()
@@ -1325,7 +1360,7 @@ impl Platform for NativePlatform {
             cmd,
             self.cgroups.as_deref(),
             requested_policy,
-            identity.as_ref(),
+            run_as.as_ref(),
         )
         .map_err(|e| PlatformError::from_io("spawn git", &e))
     }

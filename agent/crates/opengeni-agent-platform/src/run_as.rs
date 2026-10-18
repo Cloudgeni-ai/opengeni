@@ -134,16 +134,30 @@ pub(crate) fn lookup(_run_as: &str) -> PlatformResult<RunAsIdentity> {
     ))
 }
 
-/// Registers the identity's credential switch on a contained child. Call it
+/// A contained child's run-as: the identity, and the working directory it
+/// enters as that user (never through `Command::current_dir`, which the
+/// standard library enters with the agent's credentials before any hook).
+#[derive(Debug, Clone)]
+pub(crate) struct RunAsChild {
+    pub(crate) identity: RunAsIdentity,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) cwd: PathBuf,
+}
+
+/// Registers the child's credential switch and working directory. Call it
 /// after every pre-exec hook that needs the agent's privileges.
 #[cfg(target_os = "linux")]
-pub(crate) fn configure_child(identity: &RunAsIdentity, command: &mut tokio::process::Command) {
+pub(crate) fn configure_child(
+    child: &RunAsChild,
+    command: &mut tokio::process::Command,
+) -> std::io::Result<()> {
     opengeni_agent_linux_ffi::configure_credentials_before_exec(
         command,
-        identity.uid,
-        identity.gid,
-        identity.groups.clone(),
-    );
+        child.identity.uid,
+        child.identity.gid,
+        child.identity.groups.clone(),
+        Some(&child.cwd),
+    )
 }
 
 /// Runs `work` on a disposable thread switched to `identity`, waiting for it.
@@ -198,6 +212,126 @@ where
     receiver
         .await
         .map_err(|_| PlatformError::os("run_as worker ended without a result"))?
+}
+
+/// What the caller of a run-as transaction asks its identity thread to do.
+enum WriteRequest {
+    Append(Vec<u8>, std::sync::mpsc::Sender<PlatformResult<()>>),
+    Commit(std::sync::mpsc::Sender<CommitEvent>),
+}
+
+/// What the identity thread answers during a commit: a question for the
+/// caller's authority check, then the result.
+enum CommitEvent {
+    Authorize(std::sync::mpsc::Sender<bool>),
+    Done(PlatformResult<()>),
+}
+
+/// A transactional write that lives on its own thread switched to the user:
+/// staging, verification, publication and the cleanup of an unpublished
+/// write all run with the user's identity. The content is staged unnamed
+/// (`O_TMPFILE`), so the user cannot swap it between verification and
+/// publication. The caller's authority check still runs on the caller's
+/// thread, immediately before publication.
+struct IdentityWrite {
+    requests: Option<std::sync::mpsc::Sender<WriteRequest>>,
+}
+
+impl crate::transactional_write::TransactionalWrite for IdentityWrite {
+    fn append(&mut self, bytes: &[u8]) -> PlatformResult<()> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.send(WriteRequest::Append(bytes.to_vec(), reply))?;
+        answer
+            .recv()
+            .map_err(|_| PlatformError::os("run_as write thread ended"))?
+    }
+
+    fn commit(&mut self, authorized: &dyn Fn() -> bool) -> PlatformResult<()> {
+        let (events, event) = std::sync::mpsc::channel();
+        self.send(WriteRequest::Commit(events))?;
+        loop {
+            match event
+                .recv()
+                .map_err(|_| PlatformError::os("run_as write thread ended"))?
+            {
+                CommitEvent::Authorize(answer) => {
+                    let _ = answer.send(authorized());
+                }
+                CommitEvent::Done(result) => return result,
+            }
+        }
+    }
+}
+
+impl IdentityWrite {
+    fn send(&self, request: WriteRequest) -> PlatformResult<()> {
+        self.requests
+            .as_ref()
+            .and_then(|requests| requests.send(request).ok())
+            .ok_or_else(|| PlatformError::os("run_as write thread ended"))
+    }
+}
+
+/// Begins a transactional write as `identity` on a thread that keeps that
+/// identity until the transaction ends (dropping it ends the thread, which
+/// discards an unpublished write as the user).
+///
+/// # Errors
+///
+/// The credential switch, the thread, or the transaction's own begin failure.
+pub(crate) fn begin_transactional_write(
+    identity: &RunAsIdentity,
+    path: PathBuf,
+    request: opengeni_agent_proto::v1::FsWriteBegin,
+) -> PlatformResult<Box<dyn crate::transactional_write::TransactionalWrite>> {
+    let (requests, incoming) = std::sync::mpsc::channel::<WriteRequest>();
+    let (began, begin_result) = std::sync::mpsc::channel::<PlatformResult<()>>();
+    let failed_switch = began.clone();
+    spawn_identity_thread(
+        identity,
+        move || {
+            let mut write = match crate::transactional_write::begin_unnamed(&path, &request) {
+                Ok(write) => {
+                    let _ = began.send(Ok(()));
+                    write
+                }
+                Err(error) => {
+                    let _ = began.send(Err(error));
+                    return Ok(());
+                }
+            };
+            // Ends when the caller drops its handle; `write` then drops here.
+            while let Ok(next) = incoming.recv() {
+                match next {
+                    WriteRequest::Append(bytes, reply) => {
+                        let _ = reply.send(write.append(&bytes));
+                    }
+                    WriteRequest::Commit(events) => {
+                        let ask = events.clone();
+                        let result = write.commit(&|| {
+                            let (answer, answered) = std::sync::mpsc::channel();
+                            ask.send(CommitEvent::Authorize(answer)).is_ok()
+                                && answered.recv().unwrap_or(false)
+                        });
+                        let _ = events.send(CommitEvent::Done(result));
+                    }
+                }
+            }
+            Ok(())
+        },
+        move |result: PlatformResult<()>| {
+            // Only a failed credential switch reaches here with an error.
+            if let Err(error) = result {
+                let _ = failed_switch.send(Err(error));
+            }
+        },
+    )?;
+    begin_result
+        .recv()
+        .map_err(|_| PlatformError::os("run_as write thread ended without a result"))??;
+    Ok(Box::new(IdentityWrite {
+        requests: Some(requests),
+    }))
 }
 
 /// Starts the thread: switch credentials, run `work`, hand its result to
