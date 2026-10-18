@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -270,6 +270,62 @@ describe("durable working-runtime launch receipts", () => {
       expect(() =>
         assertWorkingRuntimeReceipt(journal.latest(), authority, launchDigest, receipt.profile),
       ).toThrow();
+    });
+  });
+
+  test("an interrupted recovery reinstates the exact receipt it started from, finishing a reinstatement a crash cut short", async () => {
+    await withJournal(async ({ journal, receipt }) => {
+      // Only an unsettled recovery of an exact recorded receipt is resumable.
+      expect(journal.interruptedRecovery(receipt)).toBeNull();
+      journal.begin({ ...receipt, process: null }, receipt.operationId);
+      const claim = journal.latest()!;
+      const recovery = journal.interruptedRecovery(claim);
+      expect(recovery as unknown).toEqual({
+        kind: "interrupted",
+        base: receipt,
+        interrupted: claim,
+      });
+      // A crash after the reinstatement's first write is finished next time.
+      const writes = spyOn(
+        SqliteBrowserWorkingRuntimeJournal.prototype as unknown as { write(r: unknown): void },
+        "write",
+      );
+      const original = writes.getMockImplementation();
+      let count = 0;
+      writes.mockImplementation(function (this: unknown, value: unknown) {
+        if (++count === 2) throw new Error("synthetic crash");
+        return (original ?? (() => {})).call(this, value);
+      });
+      expect(() => journal.reinstate(recovery!)).toThrow("synthetic crash");
+      writes.mockRestore();
+      const partial = journal.latest()!;
+      expect(partial.state).toBe("prepared");
+      const reinstating = journal.interruptedRecovery(partial);
+      expect(reinstating).toEqual({ kind: "reinstating", receipt: partial });
+      const reinstated = journal.reinstate(reinstating!);
+      expect(journal.latest()).toEqual(reinstated);
+      expect(reinstated).toMatchObject({
+        intent: "launch",
+        state: "completed",
+        process: receipt.process,
+        directoryLaunchAllowed: receipt.directoryLaunchAllowed,
+      });
+      expect(journal.interruptedRecovery(reinstated)).toBeNull();
+      // The reinstated receipt starts the next recovery under a fresh id.
+      journal.begin({ ...reinstated, process: null }, reinstated.operationId);
+      const next = journal.latest()!;
+      expect(journal.interruptedRecovery(next) as unknown).toEqual({
+        kind: "interrupted",
+        base: reinstated,
+        interrupted: next,
+      });
+    });
+  });
+
+  test("an interrupted first launch has no receipt to reinstate", async () => {
+    await withJournal(async ({ journal, receipt }) => {
+      journal.begin({ ...receipt, process: null });
+      expect(journal.interruptedRecovery(journal.latest())).toBeNull();
     });
   });
 

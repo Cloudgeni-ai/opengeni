@@ -863,7 +863,9 @@ async function chromeStderrDrainWrapper(
  * an 800x600 screen with no work area; sites treat both as bot signals. The
  * User-Agent switch reaches every scope, workers and the HTTP header included,
  * and keeps Chrome's own brand list. It also empties the high-entropy Client
- * Hints; the driver presents this machine's real values in their place. */
+ * Hints; the driver presents this machine's real values in their place. As on
+ * Linux, a browser whose version cannot be read still launches with its own
+ * User-Agent rather than one naming a guessed version. */
 export async function macosOffscreenChromeArguments(
   executable: string,
   probes: {
@@ -872,16 +874,18 @@ export async function macosOffscreenChromeArguments(
   } = {},
 ): Promise<string[]> {
   const [major, display] = await Promise.all([
-    (probes.chromeMajorVersion ?? chromeMajorVersion)(executable),
+    (probes.chromeMajorVersion ?? chromeMajorVersion)(executable).catch(() => null),
     (probes.mainDisplay ?? macosMainDisplay)(),
   ]);
   // --screen-info sizes are device pixels; Chrome divides them by
   // devicePixelRatio. The display is measured in points, so a Retina screen
   // passed as-is would present half its real size (smaller than the window).
   const pixels = (points: number) => Math.round(points * display.scale);
+  const screen = `--screen-info={${pixels(display.width)}x${pixels(display.height)} devicePixelRatio=${display.scale} workAreaLeft=${pixels(display.insets.left)} workAreaRight=${pixels(display.insets.right)} workAreaTop=${pixels(display.insets.top)} workAreaBottom=${pixels(display.insets.bottom)}}`;
+  if (major === null) return [screen];
   return [
     `--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
-    `--screen-info={${pixels(display.width)}x${pixels(display.height)} devicePixelRatio=${display.scale} workAreaLeft=${pixels(display.insets.left)} workAreaRight=${pixels(display.insets.right)} workAreaTop=${pixels(display.insets.top)} workAreaBottom=${pixels(display.insets.bottom)}}`,
+    screen,
   ];
 }
 
@@ -2009,12 +2013,26 @@ async function processExecutablePath(pid: number): Promise<string> {
 
 /** The executable a running process was started from, as recorded for later
  * exact comparison. On Linux this is the kernel's own link text, which stays
- * stable (with a " (deleted)" suffix) after an upgrade removes the old runtime. */
+ * stable (with a " (deleted)" suffix) after an upgrade removes the old runtime.
+ * On macOS it is the path ps reports, kept as reported: an agent upgrade
+ * removes the old runtime while its daemon still runs, so the path can no
+ * longer be resolved. */
 async function processExecutableIdentity(pid: number): Promise<string> {
-  if (process.platform !== "linux") return await processExecutablePath(pid);
-  const link = await readlink(`/proc/${pid}/exe`);
-  if (!link.startsWith("/")) throw daemonLineageUnavailable();
-  return link;
+  if (process.platform === "linux") {
+    const link = await readlink(`/proc/${pid}/exe`);
+    if (!link.startsWith("/")) throw daemonLineageUnavailable();
+    return link;
+  }
+  if (process.platform === "darwin") {
+    const path = await darwinProcessCommand(pid);
+    if (!path.startsWith("/")) throw daemonLineageUnavailable();
+    return path;
+  }
+  return await processExecutablePath(pid);
+}
+
+async function darwinProcessCommand(pid: number): Promise<string> {
+  return (await boundedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "comm="])).trim();
 }
 
 async function executableMatches(pid: number, recorded: string): Promise<boolean> {
@@ -2026,6 +2044,7 @@ async function executableMatches(pid: number, recorded: string): Promise<boolean
       throw error;
     }
   }
+  if (process.platform === "darwin" && (await darwinProcessCommand(pid)) === recorded) return true;
   try {
     return await sameExecutable(pid, recorded);
   } catch (error) {
