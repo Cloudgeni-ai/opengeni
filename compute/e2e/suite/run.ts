@@ -29,6 +29,9 @@ const OUT = env("OUT");
 const STARTED = new Date().toISOString();
 // No check takes longer (a host loss waits for the lost host's lease).
 const CHECK_TIMEOUT_MS = 30 * 60_000;
+// How long an aborted check's own cleanup may take after it (a few bounded
+// requests).
+const CLEANUP_LIMIT_MS = 10 * 60_000;
 const COMPUTE_SERVICE = env("COMPUTE_SERVICE");
 const COMPUTE_ADDRESS = env("COMPUTE_ADDRESS", "127.0.0.1");
 const COMPUTE_PORT = Number(env("COMPUTE_PORT", "8080"));
@@ -1125,6 +1128,26 @@ check("delete", "deleting the session deletes its sandbox on the fabric", ["crea
   }
 });
 
+/** Ends the Connected Machine's agent and waits until it has exited:
+ * SIGTERM, then SIGKILL after 15 s; an agent still running is a cleanup
+ * failure. */
+async function stopAgent(agent: ReturnType<typeof spawn>): Promise<void> {
+  const exited = (ms: number) =>
+    agent.exitCode !== null || agent.signalCode !== null
+      ? Promise.resolve(true)
+      : new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => resolve(false), ms);
+          agent.once("exit", () => {
+            clearTimeout(timer);
+            resolve(true);
+          });
+        });
+  agent.kill("SIGTERM");
+  if (await exited(15_000)) return;
+  agent.kill("SIGKILL");
+  if (!(await exited(10_000))) cleanupErrors.push(`connected-machine: its agent (pid ${agent.pid}) did not exit after SIGKILL`);
+}
+
 /** The machine states in which a Connected Machine is reachable. */
 const ONLINE_MACHINE = new Set(["online", "display_unavailable"]);
 
@@ -1141,6 +1164,9 @@ check(
     const agentEnv = { ...process.env, OPENGENI_CONFIG_DIR: config, OPENGENI_API_URL: OPENGENI_URL };
     let agent: ReturnType<typeof spawn> | undefined;
     let enrollment: string | undefined;
+    // What this check made, by id: its cleanup never goes through the
+    // borrowed shared state.
+    let own: string | undefined;
     try {
       const minted = await step("mint an enroll token", () => og<any>("POST", `${ws()}/enrollments/token`, {}));
       const before = new Set(
@@ -1186,6 +1212,7 @@ check(
           targetSandboxId: machine.sandboxId,
         }),
       );
+      own = created.id;
       state.session = { id: created.id };
       seen = 0;
       const turn = await step("its first turn", () => nextTurn());
@@ -1211,24 +1238,29 @@ check(
       const idle = Date.now() - idleStart;
       if (idle > 10_000) throw new Error(`the command after the idle wait took ${(idle / 1000).toFixed(1)} s`);
       await deleteSession(5 * 60_000).catch((error) => cleanupErrors.push(`connected-machine: deleting its session: ${error}`));
+      own = undefined;
       return (
         `online ${online} after connecting; exec and a turn ran on ${name}; ${[...states].join("/")} at every 5 s look ` +
         `through 90 s idle with the same agent process (pid ${agent!.pid}), then exec in ${(idle / 1000).toFixed(1)} s`
       );
     } finally {
-      if (state.session && state.session.id !== saved.session?.id) {
-        await og("DELETE", ses(), undefined, { cleanup: true }).catch((error) =>
-          cleanupErrors.push(`connected-machine: deleting its session: ${error}`),
-        );
-      }
+      // The compute session goes back first, whatever happens below.
       state.session = saved.session;
       seen = saved.seen;
-      agent?.kill("SIGTERM");
-      if (enrollment) {
-        await og("POST", `${ws()}/enrollments/${enrollment}/revoke`, {}, { cleanup: true }).catch((error) =>
-          cleanupErrors.push(`connected-machine: revoking enrollment ${enrollment}: ${error}`),
-        );
-      }
+      const ownSession = own;
+      await Promise.all([
+        ownSession
+          ? og("DELETE", `${ws()}/sessions/${ownSession}`, undefined, { cleanup: true }).catch((error) =>
+              cleanupErrors.push(`connected-machine: deleting its session ${ownSession}: ${error}`),
+            )
+          : undefined,
+        agent ? stopAgent(agent) : undefined,
+        enrollment
+          ? og("POST", `${ws()}/enrollments/${enrollment}/revoke`, {}, { cleanup: true }).catch((error) =>
+              cleanupErrors.push(`connected-machine: revoking enrollment ${enrollment}: ${error}`),
+            )
+          : undefined,
+      ]);
     }
   },
 );
@@ -1287,9 +1319,18 @@ for (const one of checks.filter((c) => selected.has(c.id))) {
     clearTimeout(timer);
   }
   if (checkAbort.signal.aborted) {
-    // An aborted check's requests and waits end at once; let it unwind
-    // (its own cleanup included) before the next check starts.
-    await Promise.race([running.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 60_000))]);
+    // An aborted check's requests and waits end at once; its cleanup
+    // (requests of at most 120 s each) runs on. The next check starts, and
+    // the run ends, only once that cleanup is done; one that never ends is a
+    // cleanup failure, not a pass.
+    const unwound = await Promise.race([
+      running.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), CLEANUP_LIMIT_MS)),
+    ]);
+    if (!unwound) cleanupErrors.push(`${one.id}: its cleanup did not finish within ${CLEANUP_LIMIT_MS / 60_000} min of the timeout`);
   }
   const result: Result = { id: one.id, title: one.title, status, detail, seconds: (Date.now() - start) / 1000 };
   if (status === "pass" && proofs.length > 0) result.proofs = proofs;

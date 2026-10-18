@@ -77,6 +77,10 @@ await step("terminal", async () => {
 
 await step("desktop", async () => {
   await tab("Desktop");
+  // The dock's own width leaves the desktop a thumbnail; maximized, it is
+  // drawn at a size a person would use (the dock's "Maximize dock").
+  const maximize = page.getByRole("button", { name: "Maximize dock", exact: true });
+  if (await maximize.first().isVisible().catch(() => false)) await maximize.first().click();
   // The desktop view's pixels as drawn (a capture of the element, so a WebGL
   // canvas counts too), decoded on a blank page: an empty canvas fails.
   const decoder = await browser.newPage();

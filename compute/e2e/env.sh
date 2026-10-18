@@ -275,29 +275,67 @@ deploy() {
 # a deployment that matches that record, and leaves one it found already
 # there.
 MODEL_RECORD=$STATE/model.created
-model_created_at() {
-  az cognitiveservices account deployment show -n "$1" -g "$2" --deployment-name "$3" \
-    --query systemData.createdAt -o tsv 2>/dev/null
+# Azure's creation time of a deployment, which tells it from a later one of
+# the same name: prints it and succeeds; returns 1 when Azure says there is
+# no such deployment, 2 when it could not say (any other error, or no time).
+model_lookup() {
+  local err out
+  err=$(mktemp)
+  if out=$(az cognitiveservices account deployment show -n "$1" -g "$2" --deployment-name "$3" \
+    --query systemData.createdAt -o tsv 2>"$err"); then
+    rm -f "$err"
+    [ -n "$out" ] || return 2
+    printf '%s\n' "$out"
+    return 0
+  fi
+  if grep -qiE 'NotFound|could not be found|does not exist' "$err"; then
+    rm -f "$err"
+    return 1
+  fi
+  cat "$err" >&2
+  rm -f "$err"
+  return 2
 }
+# The record of a deployment this environment created (nonempty time only).
+model_record() { printf 'account=%s\ngroup=%s\nname=%s\ncreated=%s' "$@"; }
 model_recorded() {
-  [ -f "$MODEL_RECORD" ] &&
-    [ "$(cat "$MODEL_RECORD")" = "$(printf 'account=%s\ngroup=%s\nname=%s\ncreated=%s' "$1" "$2" "$3" "$(model_created_at "$1" "$2" "$3")")" ]
+  [ -n "$4" ] && [ -f "$MODEL_RECORD" ] && [ "$(cat "$MODEL_RECORD")" = "$(model_record "$@")" ]
 }
 model_up() {
   local account=${AZURE_OPENAI_ACCOUNT:?AZURE_OPENAI_ACCOUNT} group=${AZURE_OPENAI_GROUP:?AZURE_OPENAI_GROUP}
-  local name=${MODEL_DEPLOYMENT:-${MODEL_NAME:?MODEL_NAME}}
-  if ! exists az cognitiveservices account deployment show -n "$account" -g "$group" --deployment-name "$name"; then
-    log "Azure OpenAI deployment $name (${MODEL_NAME:?MODEL_NAME} ${MODEL_VERSION:?MODEL_VERSION}) on $account"
-    az cognitiveservices account deployment create -n "$account" -g "$group" --deployment-name "$name" \
-      --model-name "$MODEL_NAME" --model-version "$MODEL_VERSION" --model-format OpenAI \
-      --sku-name "${MODEL_SKU:-GlobalStandard}" --sku-capacity "${MODEL_CAPACITY:-500}" >/dev/null
-    (umask 077 && printf 'account=%s\ngroup=%s\nname=%s\ncreated=%s' "$account" "$group" "$name" \
-      "$(model_created_at "$account" "$group" "$name")" >"$MODEL_RECORD")
-  elif model_recorded "$account" "$group" "$name"; then
-    log "reusing deployment $name, which this environment created"
-  else
-    log "using deployment $name, which was already there: model-down will leave it"
-  fi
+  local name=${MODEL_DEPLOYMENT:-${MODEL_NAME:?MODEL_NAME}} created rc=0
+  created=$(model_lookup "$account" "$group" "$name") || rc=$?
+  case $rc in
+    1)
+      log "Azure OpenAI deployment $name (${MODEL_NAME:?MODEL_NAME} ${MODEL_VERSION:?MODEL_VERSION}) on $account"
+      az cognitiveservices account deployment create -n "$account" -g "$group" --deployment-name "$name" \
+        --model-name "$MODEL_NAME" --model-version "$MODEL_VERSION" --model-format OpenAI \
+        --sku-name "${MODEL_SKU:-GlobalStandard}" --sku-capacity "${MODEL_CAPACITY:-500}" >/dev/null
+      created=
+      for _ in 1 2 3 4 5 6; do
+        created=$(model_lookup "$account" "$group" "$name") && break
+        created=
+        sleep 10
+      done
+      if [ -z "$created" ]; then
+        log "created deployment $name but Azure gave no creation time to record it by; model-down cannot" \
+          "prove it is this environment's, so delete it by hand when done"
+        return 1
+      fi
+      (umask 077 && model_record "$account" "$group" "$name" "$created" >"$MODEL_RECORD")
+      ;;
+    0)
+      if model_recorded "$account" "$group" "$name" "$created"; then
+        log "reusing deployment $name, which this environment created"
+      else
+        log "using deployment $name, which was already there: model-down will leave it"
+      fi
+      ;;
+    *)
+      log "could not ask Azure about deployment $name on $account"
+      return 1
+      ;;
+  esac
   local endpoint key
   endpoint=$(az cognitiveservices account show -n "$account" -g "$group" --query properties.endpoint -o tsv)
   key=$(az cognitiveservices account keys list -n "$account" -g "$group" --query key1 -o tsv)
@@ -305,18 +343,50 @@ model_up() {
     "$name" "${endpoint%/}" "$key" >"$STATE/model.env")
   log "model $name ready; run deploy to hand it to Opengeni"
 }
+# Deletes the deployment only if Azure shows the one this environment
+# recorded creating; the record goes only once that one is known gone.
 model_down() {
-  local account=${AZURE_OPENAI_ACCOUNT:?AZURE_OPENAI_ACCOUNT} group=${AZURE_OPENAI_GROUP:?AZURE_OPENAI_GROUP}
-  local name=${MODEL_DEPLOYMENT:-${MODEL_NAME:?MODEL_NAME}}
-  if ! exists az cognitiveservices account deployment show -n "$account" -g "$group" --deployment-name "$name"; then
-    log "no deployment $name on $account"
-  elif model_recorded "$account" "$group" "$name"; then
-    log "deleting Azure OpenAI deployment $name, which this environment created"
-    az cognitiveservices account deployment delete -n "$account" -g "$group" --deployment-name "$name"
-  else
-    log "leaving deployment $name: this environment did not create it (no matching record in $MODEL_RECORD)"
+  local account=${AZURE_OPENAI_ACCOUNT:-} group=${AZURE_OPENAI_GROUP:-} name=${MODEL_DEPLOYMENT:-${MODEL_NAME:-}}
+  if [ -f "$MODEL_RECORD" ]; then
+    account=$(sed -n 's/^account=//p' "$MODEL_RECORD")
+    group=$(sed -n 's/^group=//p' "$MODEL_RECORD")
+    name=$(sed -n 's/^name=//p' "$MODEL_RECORD")
   fi
-  rm -f "$STATE/model.env" "$MODEL_RECORD"
+  if [ -z "$account" ] || [ -z "$group" ] || [ -z "$name" ]; then
+    log "no record of a deployment this environment created, and no AZURE_OPENAI_ACCOUNT, AZURE_OPENAI_GROUP and MODEL_NAME"
+    rm -f "$STATE/model.env"
+    return 0
+  fi
+  local created rc=0
+  created=$(model_lookup "$account" "$group" "$name") || rc=$?
+  case $rc in
+    1)
+      log "no deployment $name on $account"
+      rm -f "$STATE/model.env" "$MODEL_RECORD"
+      ;;
+    0)
+      if model_recorded "$account" "$group" "$name" "$created"; then
+        log "deleting Azure OpenAI deployment $name, which this environment created"
+        az cognitiveservices account deployment delete -n "$account" -g "$group" --deployment-name "$name"
+        rc=0
+        model_lookup "$account" "$group" "$name" >/dev/null || rc=$?
+        if [ "$rc" -ne 1 ]; then
+          log "deployment $name may still be there; keeping the record in $MODEL_RECORD"
+          return 1
+        fi
+        rm -f "$STATE/model.env" "$MODEL_RECORD"
+      else
+        # Not the one recorded: the recorded one is gone (this one has
+        # another creation time) or there never was one.
+        log "leaving deployment $name: this environment did not create it (no matching record in $MODEL_RECORD)"
+        rm -f "$STATE/model.env" "$MODEL_RECORD"
+      fi
+      ;;
+    *)
+      log "could not ask Azure about deployment $name; keeping the record in $MODEL_RECORD"
+      return 1
+      ;;
+  esac
 }
 
 # --- suite ----------------------------------------------------------------
@@ -332,7 +402,11 @@ suite() {
   local status=0 verified=0 dir=$STATE/runs/$run collector
   # A sandbox's guest console goes with the sandbox, which the run deletes
   # at its end, so it is copied while the run goes on.
+  # Only this invocation's results count: none from an earlier run of the
+  # same name, here or on the stack VM.
   mkdir -p "$dir"
+  rm -f "$dir/results.json" "$dir/results.md"
+  on "rm -rf e2e/runs/$run"
   consoles_loop "$dir" "$(date -u +%s)" &
   collector=$!
   on "RUN=$run ONLY='${ONLY:-}' KEEP='${KEEP:-}' PROJECT=$PROJECT ZONE=$ZONE bash e2e/suite.sh" |
@@ -340,10 +414,11 @@ suite() {
   kill "$collector" 2>/dev/null || true
   wait "$collector" 2>/dev/null || true
   mkdir -p "$STATE/runs"
-  copy_from "e2e/runs/$run" "$STATE/runs/" || log "could not copy the run's results"
+  local copied=0
+  copy_from "e2e/runs/$run" "$STATE/runs/" || copied=$?
   RUN=$run host_logs || log "could not collect the hosts' journals"
-  if [ ! -f "$dir/results.json" ]; then
-    log "suite run $run left no results (the suite exited $status)"
+  if [ "$copied" -ne 0 ] || [ ! -f "$dir/results.json" ]; then
+    log "suite run $run: its results did not come back (copy exited $copied, the suite exited $status)"
     return $((status == 0 ? 1 : status))
   fi
   bun "$HERE/suite/verify.ts" "$dir" || verified=$?
@@ -369,14 +444,23 @@ on_host() {
     -o "ProxyCommand=ssh ${SSH_OPTS[*]} -W %h:%p $USER_NAME@$(stack_ip)" "$user@$ip" "$@"
 }
 
-# Copies, every minute until killed, the guest console of every sandbox
-# that wrote to it since <epoch> into <dir>/consoles-<host>.log ("== <id>"
-# before each), keeping the last copy that had any.
+# Until killed: every 20 s, appends to <dir>/pager-<host>.log one line per
+# sandbox on the host saying whether its pager left learned.json and how
+# often pager.log says "Permission denied" (verify.ts reads them); every
+# minute, copies the guest console of every sandbox that wrote to it since
+# <epoch> into <dir>/consoles-<host>.log ("== <id>" before each), keeping the
+# last copy that had any.
 consoles_loop() {
-  local dir=$1 since=$2 user name ip
+  local dir=$1 since=$2 user name ip round
   user=$(os_login_user) || return 0
-  for (( ; ; )); do
+  for ((round = 0; ; round++)); do
     while read -r name ip; do
+      on_host "$user" "$ip" "for d in \$(sudo find /var/lib/compute/state/vm/firecracker -mindepth 1 -maxdepth 1 -type d); do \
+        p=no; sudo test -e \$d/pager && p=yes; l=no; sudo test -f \$d/pager/learned.json && l=yes; \
+        n=\$(sudo cat \$d/pager.log \$d/pager/pager.log 2>/dev/null | grep -c 'Permission denied'); \
+        echo \"@\$(date +%s) \$(basename \$d) pager=\$p learned=\$l denied=\$n\"; done" \
+        >>"$dir/pager-$name.log" 2>/dev/null || true
+      [ $((round % 3)) -eq 0 ] || continue
       on_host "$user" "$ip" "for f in \$(sudo find /var/lib/compute/state/vm/firecracker -mindepth 2 -maxdepth 2 \
         -name console.log -newermt @$since 2>/dev/null); do echo \"== \$(basename \$(dirname \$f))\"; sudo cat \$f; done" \
         >"$dir/.consoles-$name.log" 2>/dev/null || true
@@ -386,7 +470,7 @@ consoles_loop() {
         rm -f "$dir/.consoles-$name.log"
       fi
     done < <(g compute instances list --filter "name~^$PREFIX-host" --format 'value(name,networkInterfaces[0].networkIP)')
-    sleep 60
+    sleep 20
   done
 }
 
@@ -475,12 +559,28 @@ status() {
   g iam roles list --project "$PROJECT" --filter "name~${PREFIX//-/_}" --format 'value(name,deleted)'
   # A certificate authority's pool stays until its authorities are gone
   # (they wait out their deletion period).
-  g privateca pools list --location "$REGION" --format 'value(name)' | sed -n "s/^\($PREFIX-.*\)/ca pool \1/p"
-  if [ -n "${AZURE_OPENAI_ACCOUNT:-}" ] && command -v az >/dev/null; then
-    local name=${MODEL_DEPLOYMENT:-${MODEL_NAME:-}}
-    az cognitiveservices account deployment list -n "$AZURE_OPENAI_ACCOUNT" -g "${AZURE_OPENAI_GROUP:-}" \
-      --query "[?name=='$name'].{deployment:name,created:systemData.createdAt}" -o tsv 2>/dev/null |
-      sed "s/^/azure openai deployment (record: $([ -f "$MODEL_RECORD" ] && echo created here || echo none)) /"
+  g privateca pools list --location "$REGION" --format 'value(name.basename())' | sed -n "s/^\($PREFIX-.*\)/ca pool \1/p"
+  # The model deployment this environment recorded creating, or else the
+  # one the settings name.
+  local account=${AZURE_OPENAI_ACCOUNT:-} group=${AZURE_OPENAI_GROUP:-} name=${MODEL_DEPLOYMENT:-${MODEL_NAME:-}} record=none
+  if [ -f "$MODEL_RECORD" ]; then
+    record="created here"
+    account=$(sed -n 's/^account=//p' "$MODEL_RECORD")
+    group=$(sed -n 's/^group=//p' "$MODEL_RECORD")
+    name=$(sed -n 's/^name=//p' "$MODEL_RECORD")
+  fi
+  if [ -n "$account" ] && [ -n "$name" ]; then
+    if ! command -v az >/dev/null; then
+      log "azure openai deployment $name on $account (record: $record): az is not installed to look"
+    else
+      local created rc=0
+      created=$(model_lookup "$account" "$group" "$name") || rc=$?
+      case $rc in
+        0) printf 'azure openai deployment %s on %s, created %s (record: %s)\n' "$name" "$account" "$created" "$record" ;;
+        1) [ "$record" = none ] || printf 'azure openai deployment %s on %s: gone, record left\n' "$name" "$account" ;;
+        *) printf 'azure openai deployment %s on %s (record: %s): Azure could not say whether it exists\n' "$name" "$account" "$record" ;;
+      esac
+    fi
   fi
 }
 

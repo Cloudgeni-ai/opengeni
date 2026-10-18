@@ -25,7 +25,8 @@ if (!dir) {
 }
 const saved = JSON.parse(readFileSync(`${dir}/results.json`, "utf8")) as Meta & { results: Result[] };
 
-type Step = { at: number; sandbox: string; step: string; cause: string; by: string; before: string; after: string; host: string };
+/** A completed step: when it began and ended (ms), on which host. */
+type Step = { start: number; at: number; sandbox: string; step: string; cause: string; by: string; before: string; after: string; host: string };
 const steps: Step[] = [];
 const journals = readdirSync(dir).filter((name) => /^host-.*\.log$/.test(name));
 for (const name of journals) {
@@ -39,8 +40,10 @@ for (const name of journals) {
       continue;
     }
     if (event.event !== "compute.step" || event["compute.outcome"] !== "done") continue;
+    const ended = Number(BigInt(String(event.time_unix_nano)) / 1_000_000n);
     steps.push({
-      at: Number(BigInt(String(event.time_unix_nano)) / 1_000_000n),
+      start: ended - Number(event["compute.duration_us"] ?? 0) / 1_000,
+      at: ended,
       sandbox: String(event["compute.sandbox.id"]),
       step: String(event["compute.step"]),
       cause: String(event["compute.cause"] ?? ""),
@@ -81,10 +84,27 @@ function leveled(proof: LevelProof): { ok: boolean; how: string } {
         `)${wakes}`,
     };
   }
-  const woke = mine.find((s) => s.at > to && s.before === proof.level);
+  // Nothing may have begun to change the sandbox between reaching the level
+  // and the suite's request, even a step that ended after the request (a
+  // wake someone else started, still under way when the suite asked).
+  const early = mine.filter((s) => s !== last && s.start > last.at && s.start < to);
+  if (early.length > 0) {
+    return {
+      ok: false,
+      how:
+        `host journal: ${proof.level} at ${clock(last.at)}, but before the suite's request at ${clock(to)} ` +
+        early.map((s) => `${s.step} (${s.cause}${s.by ? `, by ${s.by}` : ""}) began at ${clock(s.start)}`).join(", ") +
+        wakes,
+    };
+  }
+  // The wake that ended the sleep began with the suite's request, or later.
+  const woke = mine.find((s) => s.at > last.at && s.before === proof.level);
+  if (!woke) return { ok: false, how: `host journal: ${proof.level} at ${clock(last.at)} on ${last.host}, and no step woke it from there${wakes}` };
   return {
     ok: true,
-    how: `host journal: ${proof.level} at ${clock(last.at)} on ${last.host}` + (woke ? `, woken from it by ${wake(woke)}` : "") + wakes,
+    how:
+      `host journal: ${proof.level} at ${clock(last.at)} on ${last.host}, woken from it by ${wake(woke)}, ` +
+      `begun ${((woke.start - to) / 1000).toFixed(2)} s after the suite's request${wakes}`,
   };
 }
 
@@ -97,11 +117,66 @@ function checkpointed(proof: CheckpointProof): { ok: boolean; how: string } {
   return { ok: true, how: `host journal: ${done.length} checkpoint(s) while streaming, at ${done.map((s) => `${clock(s.at)} on ${s.host}`).join(", ")}` };
 }
 
+// The checks whose pass rests on the journals: a pass with no proof to
+// verify is not one.
+const NEEDS_PROOF = /^(sleep-.*|checkpoint)$/;
 for (const result of saved.results) {
+  if (result.status === "pass" && !result.proofs?.length && NEEDS_PROOF.test(result.id)) {
+    result.status = "fail";
+    result.detail = `${result.detail}; no proof recorded for the hosts' journals to verify`;
+    continue;
+  }
   if (!result.proofs?.length || result.status !== "pass") continue;
   const checked = result.proofs.map(check);
   result.detail = `${result.detail}; ${checked.map((one) => one.how).join("; ")}`;
   if (checked.some((one) => !one.ok)) result.status = "fail";
+}
+
+// The saved sleep's wake is a paged restore: the sandbox's pager must have
+// written learned.json and not keep failing ("Permission denied" in
+// pager.log) on its host. env.sh copies a line per sandbox and host every
+// 20 s while the run goes on (pager-<host>.log: "@<epoch> <id> pager=
+// learned= denied=").
+type PagerLook = { at: number; host: string; pager: boolean; learned: boolean; denied: number };
+const pagerLooks = new Map<string, PagerLook[]>();
+const pagerFiles = readdirSync(dir).filter((file) => /^pager-.*\.log$/.test(file));
+for (const name of pagerFiles) {
+  for (const line of readFileSync(`${dir}/${name}`, "utf8").split("\n")) {
+    const found = line.match(/^@(\d+) ([0-9a-f]+) pager=(yes|no) learned=(yes|no) denied=(\d+)/);
+    if (!found) continue;
+    const looks = pagerLooks.get(found[2]) ?? [];
+    looks.push({
+      at: Number(found[1]) * 1000,
+      host: name.replace(/^pager-|\.log$/g, ""),
+      pager: found[3] === "yes",
+      learned: found[4] === "yes",
+      denied: Number(found[5]),
+    });
+    pagerLooks.set(found[2], looks);
+  }
+}
+function paged(proof: Proof): { ok: boolean; how: string } {
+  if (pagerFiles.length === 0) return { ok: false, how: "no pager snapshots from the hosts to check the paged wake with" };
+  const looks = (pagerLooks.get(proof.sandbox) ?? []).filter((look) => look.at >= Date.parse(proof.from));
+  const after = looks.filter((look) => look.at >= Date.parse(proof.to));
+  const denied = Math.max(0, ...looks.map((look) => look.denied));
+  const learned = after.find((look) => look.learned);
+  if (denied > 1) return { ok: false, how: `pager: pager.log says "Permission denied" ${denied} times` };
+  if (!learned) {
+    return {
+      ok: false,
+      how: `pager: no learned.json in the sandbox's pager directory in ${after.length} look(s) after the wake (${after.filter((look) => look.pager).length} with a pager directory)`,
+    };
+  }
+  return { ok: true, how: `pager: learned.json on ${learned.host} at ${clock(learned.at)}, "Permission denied" ${denied} times` };
+}
+for (const result of saved.results) {
+  if (result.id !== "sleep-saved" || result.status !== "pass") continue;
+  const proof = result.proofs?.find((one) => one.kind === "level");
+  if (!proof) continue;
+  const checked = paged(proof);
+  result.detail = `${result.detail}; ${checked.how}`;
+  if (!checked.ok) result.status = "fail";
 }
 
 // The agent's reconnects, per sandbox, from the guest consoles env.sh copied.
