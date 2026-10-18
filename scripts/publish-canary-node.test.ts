@@ -4,6 +4,36 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot } from "./publishable-workspaces";
 
+test("native Node recovers a transient Rekor response-body reset before npm publication", () => {
+  const directory = mkdtempSync(join(repoRoot, ".release-canary-node-test-"));
+  try {
+    const outfile = join(directory, "rekor.mjs");
+    const build = spawnSync(
+      process.execPath,
+      [
+        "build",
+        "scripts/fixtures/canary-rekor-node.ts",
+        "--target=node",
+        "--packages=external",
+        "--outfile",
+        outfile,
+      ],
+      { cwd: repoRoot, encoding: "utf8", timeout: 30_000 },
+    );
+    expect(build.status, build.stderr).toBe(0);
+    const run = spawnSync("node", [outfile], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: { PATH: process.env.PATH },
+      timeout: 30_000,
+    });
+    expect(run.status, `${run.error ?? ""}\n${run.stderr}`).toBe(0);
+    expect(run.stdout).toContain("native Node recovered a real Rekor response-body reset");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("native Node verifies the actual pinned Sigstore TUF root without weakening signatures", () => {
   const result = spawnSync("node", ["scripts/fixtures/canary-tuf-node.mjs"], {
     cwd: repoRoot,

@@ -156,6 +156,20 @@ retained in `canary-source-provenance-<source_sha>` and linked by byte count and
 SHA-256 from the V2 custody records before write intent. They are signing evidence,
 not registry acceptance. Sanitized write diagnostics never change `WRITE_UNKNOWN`.
 
+Ancestor source signing permits at most three complete attestation attempts for
+allowlisted transient Rekor transport/HTTP failures, with 1s then 2s backoff and
+the existing 30s per-request timeout. This includes a reset while reading a
+successful HTTP response body, outside Sigstore's own HTTP retry boundary.
+An uncertain Rekor append may already exist; a fresh signature for the identical
+statement may add another log entry. Only the returned, retained bundle passes
+through official verification before npm PUT. Identity, certificate, evidence and
+permanent HTTP failures are not retried. npm writes still have zero retries;
+exhausted signing stops before that package's write intent, without undoing
+earlier acknowledgements or making an incomplete cohort reconcilable. After a
+controller repair, the lifecycle owner may dispatch the normally merged current
+controller with the same admitted `source_sha` and a fresh run/version; do not
+rerun the old controller or replay any partially published version.
+
 It publishes `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0`
 publishes `1.0.2-canary.N`, skipping a retired patch), without consuming changesets
 or moving an existing `latest` tag. Registry first-publication behavior is unchanged.

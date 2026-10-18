@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { attest } from "sigstore";
 import { verifyCanaryController } from "./canary-source-admission";
 
@@ -66,18 +67,61 @@ export type SuppliedCanaryProvenance = {
   evidence?: { file: string; bytes: number; sha256: string };
 };
 
+function transientTransparencyFailure(error: unknown): boolean {
+  if (
+    !error ||
+    typeof error !== "object" ||
+    !("code" in error) ||
+    error.code !== "TLOG_CREATE_ENTRY_ERROR" ||
+    !("cause" in error)
+  )
+    return false;
+  const cause = error.cause;
+  if (!cause || typeof cause !== "object") return false;
+  // Only known transport failures and temporary HTTP responses. In particular,
+  // certificate/identity errors, 409 conflicts and malformed evidence fail closed.
+  if ("statusCode" in cause)
+    return [408, 429, 500, 502, 503, 504].includes(cause.statusCode as number);
+  if (!("code" in cause)) return false;
+  return (
+    ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN"].includes(cause.code as string) ||
+    (cause.code === "FETCH_ERROR" && "type" in cause && cause.type === "request-timeout")
+  );
+}
+
+async function attestWithTransportRecovery(
+  payload: Buffer,
+  sign: typeof attest,
+  wait: (milliseconds: number) => Promise<unknown>,
+): Promise<Awaited<ReturnType<typeof attest>>> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await sign(payload, "application/vnd.in-toto+json", {
+        retry: { retries: 0 },
+        timeout: 30_000,
+      });
+    } catch (error) {
+      if (attempt >= 2 || !transientTransparencyFailure(error)) throw error;
+      // Retry the entire attestation, including response-body consumption (which
+      // Sigstore's HTTP retry does not cover). A lost Rekor response may already
+      // have appended evidence: we do not infer absence or replay an npm write.
+      // Fresh signing can append another signature for this identical statement;
+      // only a returned bundle, verified by libnpmpublish, can authorize the PUT.
+      await wait(1_000 * 2 ** attempt);
+    }
+  }
+}
+
 export async function signCanarySource(
   manifest: Record<string, unknown>,
   packed: Buffer,
   directory: string,
   env = process.env,
   sign: typeof attest = attest,
+  wait: (milliseconds: number) => Promise<unknown> = sleep,
 ): Promise<SuppliedCanaryProvenance> {
   const payload = Buffer.from(JSON.stringify(canarySourceStatement(manifest, packed, env)));
-  const bundle = await sign(payload, "application/vnd.in-toto+json", {
-    retry: { retries: 0 },
-    timeout: 30_000,
-  });
+  const bundle = await attestWithTransportRecovery(payload, sign, wait);
   const index = bundle.verificationMaterial?.tlogEntries?.[0]?.logIndex;
   if (!/^\d+$/.test(index ?? "") || bundle.dsseEnvelope?.payload !== payload.toString("base64")) {
     throw new Error("Canary source provenance was not retained in transparency log");
