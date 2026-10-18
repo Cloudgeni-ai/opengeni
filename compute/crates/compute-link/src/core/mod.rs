@@ -13,17 +13,21 @@
 //!   would.
 //! - A session belongs to the sandbox and the agent's connection instance,
 //!   not to one connection: it stays open while the sandbox sleeps, and a
-//!   connection with the same instance takes up its subscriptions.
+//!   connection with the same instance takes up its subscriptions. An agent
+//!   holds several connections at once (Opengeni's agent opens a control
+//!   and a bulk one), each with subscriptions of its own; a connection of
+//!   another instance starts a new session and ends them all.
 //! - A message for a subscription no connection holds waits, and wakes the
 //!   sandbox, until a connection subscribes to it again or it has waited
 //!   [`Settings::hold_ms`]. Every message that arrives counts as activity.
 //! - Subscriptions a reconnected agent did not take up within
-//!   [`Settings::grace_ms`] end.
+//!   [`Settings::grace_ms`] end, and so do those of a connection that
+//!   ended while others of its agent stay.
 
 mod conns;
 mod frames;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use bytes::Bytes;
 use compute_protocol::link::{AgentLink, GatewayFrame, Headers, HostFrame, Relay, Running};
@@ -164,8 +168,8 @@ struct Sandbox {
     /// Messages for subscriptions no connection holds, oldest first.
     queued: VecDeque<Queued>,
     relay: Option<Relay>,
-    /// The connection that holds the session.
-    conn: Option<ConnId>,
+    /// The connections of its instance that said `CONNECT`.
+    conns: BTreeSet<ConnId>,
     /// The gateway refused it for good, until a new ticket.
     refused: bool,
     retry_at: Option<u64>,
@@ -195,8 +199,8 @@ impl Session {
 struct Sub {
     subject: String,
     queue: Option<String>,
-    /// The sid of the connection that holds it.
-    guest: Option<String>,
+    /// The connection that holds it, and its sid there.
+    guest: Option<(ConnId, String)>,
     /// Messages delivered since that connection subscribed.
     delivered: u64,
     /// Unsubscribe once that many were delivered.
@@ -300,10 +304,10 @@ impl Core {
                 link,
                 saved,
             } => self.attach(now, &sandbox, link, saved),
-            Input::Detach { sandbox } => self.detach(&sandbox),
+            Input::Detach { sandbox } => self.detach(now, &sandbox),
             Input::Accepted { conn, sandbox } => self.accepted(conn, sandbox),
             Input::Guest { conn, op } => self.guest(now, conn, op),
-            Input::GuestClosed { conn } => self.drop_conn(conn),
+            Input::GuestClosed { conn } => self.drop_conn(now, conn),
             Input::LinkUp {
                 gateway,
                 link,
@@ -314,7 +318,7 @@ impl Core {
                 frame,
                 payload,
             } => self.gateway(now, link, frame, payload),
-            Input::LinkDown { link } => self.link_down(link),
+            Input::LinkDown { link } => self.link_down(now, link),
             Input::Running { sandbox, running } => self.running(&sandbox, running),
             Input::Tick => self.tick(now),
         }
@@ -328,7 +332,7 @@ impl Core {
             // A new placement: its session opens again under the new
             // ticket, and its agent connects again to be let in by it.
             self.end_session(id);
-            self.close_sandbox_conn(id, None);
+            self.close_sandbox_conns(now, id, None);
             let sandbox = self.sandboxes.get_mut(id).expect("checked above");
             let old = std::mem::replace(&mut sandbox.gateway, link.gateway.clone());
             sandbox.ticket = link.ticket;
@@ -377,7 +381,7 @@ impl Core {
                 next_sid,
                 queued: VecDeque::new(),
                 relay: None,
-                conn: None,
+                conns: BTreeSet::new(),
                 refused: false,
                 retry_at: None,
                 retry_delay: self.settings.retry_min_ms,
@@ -388,12 +392,12 @@ impl Core {
         self.try_open(now, id);
     }
 
-    fn detach(&mut self, id: &str) {
+    fn detach(&mut self, now: u64, id: &str) {
         if !self.sandboxes.contains_key(id) {
             return;
         }
         self.end_session(id);
-        self.close_sandbox_conn(id, None);
+        self.close_sandbox_conns(now, id, None);
         let sandbox = self.sandboxes.remove(id).expect("checked above");
         // Connections still waiting for their first operation.
         let waiting: Vec<ConnId> = self
@@ -403,7 +407,7 @@ impl Core {
             .map(|(conn, _)| *conn)
             .collect();
         for conn in waiting {
-            self.close_conn(conn, None);
+            self.close_conn(now, conn, None);
         }
         self.effects.push(Effect::Save {
             sandbox: id.to_owned(),
@@ -567,7 +571,7 @@ impl Core {
         }
     }
 
-    fn link_down(&mut self, link_id: LinkId) {
+    fn link_down(&mut self, now: u64, link_id: LinkId) {
         let Some(gateway) = self.link_ids.remove(&link_id) else {
             return;
         };
@@ -594,7 +598,7 @@ impl Core {
             .map(|(conn, _)| *conn)
             .collect();
         for conn in conns {
-            self.close_conn(conn, None);
+            self.close_conn(now, conn, None);
         }
     }
 
@@ -642,13 +646,12 @@ impl Core {
         }
     }
 
-    /// Ends the subscriptions the connection holding the session did not
-    /// take up.
+    /// Ends the subscriptions no connection of the session took up.
     fn end_unclaimed(&mut self, id: &str) {
         let Some(sandbox) = self.sandboxes.get(id) else {
             return;
         };
-        if sandbox.conn.is_none() || !matches!(sandbox.session, Session::Open { .. }) {
+        if sandbox.conns.is_empty() || !matches!(sandbox.session, Session::Open { .. }) {
             return;
         }
         let unclaimed: Vec<u32> = sandbox
@@ -676,7 +679,7 @@ impl Core {
             return;
         };
         sandbox.queued.retain(|queued| queued.sid != sid);
-        if let (Some(guest), Some(conn)) = (sub.guest, sandbox.conn)
+        if let Some((conn, guest)) = sub.guest
             && let Some(conn) = self.conns.get_mut(&conn)
         {
             conn.sids.remove(&guest);

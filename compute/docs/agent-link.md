@@ -122,6 +122,12 @@ server would, for the subset the agent's client uses:
   `proto: 1` and the gateway's `max_payload`.
 - It reads `CONNECT`; `name` must be `opengeni-agent/connection/<instance>`.
   The instance is the agent process's connection instance id.
+- An agent may hold several connections at once under its instance, each
+  with subscriptions of its own, as a server allows: Opengeni's agent opens
+  a control connection, which subscribes, and a bulk one, which only
+  publishes. They share the sandbox's one session. A connection under
+  another instance is another agent process: the host ends the old
+  instance's session and all its connections.
 - `PING` gets `PONG`. `SUB`, `UNSUB`, `PUB` and `HPUB` map onto the
   sandbox's session (section 5); messages come back as `MSG` or `HMSG`. With
   `verbose`, each accepted operation gets `+OK`.
@@ -223,7 +229,9 @@ Until `opened`, the host keeps what the guest sends for the session.
   sandbox does not come back by then they are dropped, and Opengeni's
   request times out. A guest that reconnects with the same instance takes up
   the same session and subscriptions; with another instance, the host closes
-  the old session and opens a new one.
+  the old session and opens a new one. When one of an agent's connections
+  ends while others stay, its subscriptions wait the same grace period for a
+  connection to take them up, then end.
 - **Records.** The host keeps each sandbox's instance and subscriptions in
   its record, and opens those sessions again when it starts or its link comes
   back, before any guest runs.

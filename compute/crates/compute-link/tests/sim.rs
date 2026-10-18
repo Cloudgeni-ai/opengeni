@@ -5,16 +5,22 @@
 //! a step delivers one item or does one action, so every interleaving the
 //! seed picks is one the real hub can see.
 //!
+//! Each agent holds two connections, as Opengeni's agent does: a control
+//! one that subscribes and publishes, and a bulk one that only publishes.
+//! Losing one mostly ends the other too, as that agent does, and sometimes
+//! does not.
+//!
 //! Checked throughout:
 //! - a message reaches only the instance and subscription it was sent for,
-//!   at most once, and in order for its subscription;
+//!   at most once, and in order for its subscription, and never the bulk
+//!   connection;
 //! - an agent hears `PONG` only once its gateway opened its session;
 //! - a gateway hears `sub`, `unsub`, `pub` and `state` only for sessions it
 //!   opened, within their scope, and each `open` names a new `s`;
 //! - a message for a sandbox wakes it, at most once per wake interval.
 //!
 //! And at the end, once everything is back, every message sent is
-//! delivered.
+//! delivered, and both connections of each agent are up.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -88,8 +94,12 @@ struct AgentSub {
 struct Agent {
     instance: String,
     restarts: u32,
+    /// The control connection.
     conn: Option<ConnId>,
     phase: Phase,
+    /// The bulk connection, which only publishes.
+    bulk: Option<ConnId>,
+    bulk_phase: Phase,
     /// What the agent wants subscribed, by its own sid; subscribed again
     /// on each connection, as the client does.
     wanted: BTreeMap<String, String>,
@@ -217,6 +227,8 @@ impl Sim {
                         restarts: 0,
                         conn: None,
                         phase: Phase::Down,
+                        bulk: None,
+                        bulk_phase: Phase::Down,
                         wanted: BTreeMap::new(),
                         subs: BTreeMap::new(),
                         retired: HashSet::new(),
@@ -445,7 +457,7 @@ impl Sim {
             return;
         };
         let sandbox = &self.sandboxes[n];
-        if sandbox.agent.conn != Some(conn) {
+        if sandbox.agent.conn != Some(conn) && sandbox.agent.bulk != Some(conn) {
             return;
         }
         let live = self.gateways[sandbox.gateway].live;
@@ -670,25 +682,17 @@ impl Sim {
     }
 
     fn agent_reads(&mut self, n: usize, conn: ConnId, op: ServerOp) {
+        if self.sandboxes[n].agent.bulk == Some(conn) {
+            self.bulk_reads(n, conn, op);
+            return;
+        }
         if self.sandboxes[n].agent.conn != Some(conn) {
             return;
         }
         match op {
             ServerOp::Info(_) => {
                 assert_eq!(self.sandboxes[n].agent.phase, Phase::AwaitInfo);
-                let name = format!(
-                    "opengeni-agent/connection/{}",
-                    self.sandboxes[n].agent.instance
-                );
-                self.agent_sends(
-                    conn,
-                    ClientOp::Connect(Connect {
-                        verbose: false,
-                        name: Some(name),
-                        headers: true,
-                    }),
-                );
-                self.agent_sends(conn, ClientOp::Ping);
+                self.handshake(n, conn);
                 self.sandboxes[n].agent.phase = Phase::Handshake;
                 // Some clients send before the handshake is done.
                 if self.rng.chance(30) {
@@ -766,6 +770,44 @@ impl Sim {
         }
     }
 
+    /// Says `CONNECT` and `PING`, under the agent's instance.
+    fn handshake(&mut self, n: usize, conn: ConnId) {
+        let name = format!(
+            "opengeni-agent/connection/{}",
+            self.sandboxes[n].agent.instance
+        );
+        self.agent_sends(
+            conn,
+            ClientOp::Connect(Connect {
+                verbose: false,
+                name: Some(name),
+                headers: true,
+            }),
+        );
+        self.agent_sends(conn, ClientOp::Ping);
+    }
+
+    fn bulk_reads(&mut self, n: usize, conn: ConnId, op: ServerOp) {
+        match op {
+            ServerOp::Info(_) => {
+                assert_eq!(self.sandboxes[n].agent.bulk_phase, Phase::AwaitInfo);
+                self.handshake(n, conn);
+                self.sandboxes[n].agent.bulk_phase = Phase::Handshake;
+            }
+            ServerOp::Pong => {
+                if self.sandboxes[n].agent.bulk_phase == Phase::Handshake {
+                    self.sandboxes[n].agent.bulk_phase = Phase::Connected;
+                }
+            }
+            ServerOp::Ping => self.agent_sends(conn, ClientOp::Pong),
+            ServerOp::Ok | ServerOp::Err(_) => {}
+            ServerOp::Msg(delivery) => panic!(
+                "{} got a message on its bulk connection, for sid {}",
+                self.sandboxes[n].id, delivery.sid
+            ),
+        }
+    }
+
     fn resubscribe(&mut self, n: usize, conn: ConnId) {
         let wanted: Vec<(String, String)> = self.sandboxes[n]
             .agent
@@ -796,45 +838,79 @@ impl Sim {
         }
     }
 
-    /// The agent's connection ended, by the host or the agent.
+    /// One of the agent's connections ended, by the host or the agent.
+    /// Opengeni's agent then ends the other too, as most times here.
     fn agent_lost(&mut self, n: usize, conn: ConnId) {
+        let agent = &self.sandboxes[n].agent;
+        let other = if agent.conn == Some(conn) {
+            agent.bulk
+        } else if agent.bulk == Some(conn) {
+            agent.conn
+        } else {
+            return;
+        };
+        self.lose(n, conn);
+        if let Some(other) = other
+            && self.rng.chance(70)
+        {
+            self.lose(n, other);
+        }
+    }
+
+    fn lose(&mut self, n: usize, conn: ConnId) {
         let agent = &mut self.sandboxes[n].agent;
-        if agent.conn != Some(conn) {
+        if agent.conn == Some(conn) {
+            agent.conn = None;
+            agent.phase = Phase::Down;
+            agent.subs.clear();
+            agent.retired.clear();
+        } else if agent.bulk == Some(conn) {
+            agent.bulk = None;
+            agent.bulk_phase = Phase::Down;
+        } else {
             return;
         }
-        agent.conn = None;
-        agent.phase = Phase::Down;
-        agent.subs.clear();
-        agent.retired.clear();
         self.to_guest.remove(&conn);
         if let Some(queue) = self.from_guest.get_mut(&conn) {
             queue.push_back(FromGuest::Closed);
         }
     }
 
+    /// The agent opens its control connection, or, once it has one, its
+    /// bulk one.
     fn agent_connects(&mut self, n: usize) {
-        if self.sandboxes[n].agent.conn.is_some() {
+        let agent = &self.sandboxes[n].agent;
+        if agent.conn.is_some() && agent.bulk.is_some() {
             return;
         }
+        let control = agent.conn.is_none();
         let conn = self.next_conn;
         self.next_conn += 1;
         self.conn_of.insert(conn, n);
         self.to_guest.insert(conn, VecDeque::new());
         self.from_guest.insert(conn, VecDeque::new());
         let agent = &mut self.sandboxes[n].agent;
-        agent.conn = Some(conn);
-        agent.phase = Phase::AwaitInfo;
-        agent.subs.clear();
-        agent.retired.clear();
+        if control {
+            agent.conn = Some(conn);
+            agent.phase = Phase::AwaitInfo;
+            agent.subs.clear();
+            agent.retired.clear();
+        } else {
+            agent.bulk = Some(conn);
+            agent.bulk_phase = Phase::AwaitInfo;
+        }
         let id = self.sandboxes[n].id.clone();
         self.core_conns.insert(conn);
         self.input(Input::Accepted { conn, sandbox: id });
     }
 
-    /// The agent's side ends its connection, as a sandbox that sleeps.
+    /// The agent's side ends its connections, as a sandbox that sleeps.
     fn agent_hangs_up(&mut self, n: usize) {
         if let Some(conn) = self.sandboxes[n].agent.conn {
-            self.agent_lost(n, conn);
+            self.lose(n, conn);
+        }
+        if let Some(conn) = self.sandboxes[n].agent.bulk {
+            self.lose(n, conn);
         }
     }
 
@@ -848,6 +924,10 @@ impl Sim {
     }
 
     fn agent_acts(&mut self, n: usize) {
+        let bulk = self.sandboxes[n]
+            .agent
+            .bulk
+            .filter(|_| self.sandboxes[n].agent.bulk_phase == Phase::Connected);
         let Some(conn) = self.sandboxes[n].agent.conn else {
             return;
         };
@@ -914,6 +994,8 @@ impl Sim {
                     1..=4 => format!("_INBOX.r{}", self.rng.below(100)),
                     _ => format!("{scope}.events"),
                 };
+                // Events go out on the bulk connection, when it is up.
+                let conn = bulk.filter(|_| self.rng.chance(70)).unwrap_or(conn);
                 self.agent_sends(
                     conn,
                     ClientOp::Pub(Publish {
@@ -1060,9 +1142,7 @@ impl Sim {
             self.gateways[g].wanted = false;
         }
         for n in 0..SANDBOXES {
-            if let Some(conn) = self.sandboxes[n].agent.conn {
-                self.agent_lost(n, conn);
-            }
+            self.agent_hangs_up(n);
         }
         self.to_guest.clear();
         self.from_guest.clear();
@@ -1258,7 +1338,8 @@ impl Sim {
                 }
             }
             for n in 0..SANDBOXES {
-                if self.sandboxes[n].attached && self.sandboxes[n].agent.conn.is_none() {
+                let agent = &self.sandboxes[n].agent;
+                if self.sandboxes[n].attached && (agent.conn.is_none() || agent.bulk.is_none()) {
                     self.agent_connects(n);
                     moved = true;
                 }
@@ -1335,6 +1416,12 @@ impl Sim {
                 self.sandboxes[n].agent.phase,
                 Phase::Connected,
                 "{} is not connected once everything is back",
+                self.sandboxes[n].id
+            );
+            assert_eq!(
+                self.sandboxes[n].agent.bulk_phase,
+                Phase::Connected,
+                "{}'s bulk connection is not connected once everything is back",
                 self.sandboxes[n].id
             );
             let scope = scope(&self.sandboxes[n].id, &self.sandboxes[n].agent.instance);
