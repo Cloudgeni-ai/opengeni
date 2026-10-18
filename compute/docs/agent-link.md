@@ -79,6 +79,11 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
   once that sandbox was deleted, so a caller that crashed between a create
   and recording its answer can find the sandbox and delete it, without
   creating one.
+- `GET /v1/sandboxes?key=value&...` lists the team's sandboxes whose
+  `metadata` holds every pair given (all of them with none), each with its
+  `created_ms`. A caller that tags its sandboxes, as Opengeni
+  does with its gateway's address, finds every one it made, so it can
+  delete those its own records no longer name.
 - The API serves TLS when the fleet service is given a certificate
   (`--api-tls-cert`, `--api-tls-key`); a deployment that Opengeni reaches
   over a network it does not own must.
