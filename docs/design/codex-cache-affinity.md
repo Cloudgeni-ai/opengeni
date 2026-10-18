@@ -1,7 +1,8 @@
 # Codex: reuse a familiar prefix on the first request
 
-Status: proposed; requires review before merge. Measured October 18, 2026,
-between 10:39 and 10:51 UTC. These are synthetic request pairs, not Opengeni
+Status: proposed; requires review before merge. Serial measurements October 18,
+2026 between 10:39 and 10:51 UTC; concurrent follow-up measurements below.
+These are synthetic request sequences, not Opengeni
 session trees; no child sessions or tool executions are included.
 
 ## Problem and provider evidence
@@ -94,6 +95,14 @@ control the experiment. Arms are `session`, `body`, `header`, and `shared`.
 It prints only synthetic-run metadata, usage and timing, never credentials or
 prompt bodies. It validates the output and closes its own sockets.
 
+`PROBE_CONCURRENCY` (default 1) launches that many fresh sessions together per
+arm/iteration; values above 1 disable pacing and add about 3.2K tokens of
+session-unique user content. `PROBE_FOLLOWUPS` (default 1) controls the number
+of appended requests per session. Concurrent mode records batch launch/finish,
+per-request timestamps and structured errors. Failed sessions are counted,
+not silently retried or replaced. It closes each completed batch's sockets
+before starting another batch; product transport policy is unchanged.
+
 The before/after comparison uses ten new sessions per arm, a roughly 27.7K-token
 prefix including a function schema, and a private user suffix. A separate
 bootstrap makes the prefix familiar; alternating arm order reduces temporal
@@ -143,6 +152,10 @@ the mixed latency result from the larger WebSocket comparison.
 
 ### First-request usage and cost totals
 
+Concurrent results are presented separately below because their unique session
+tails add approximately 3.2K input tokens; do not directly compare their costs
+with the short serial suffixes above.
+
 The exact-model comparison mapping is `reviewedModelListPricing["gpt-6.1-sol"]`
 in `packages/config/src/index.ts`, reviewed October 3, 2026 against
 [OpenAI pricing](https://developers.openai.com/api/docs/pricing). Below 272K
@@ -158,6 +171,98 @@ for 100% of each arm's equivalent cost.
 | HTTP before, 5 requests | 138,589 | 0 | 25 | 0% | 0.277178 (99.91%) | 0 (0%) | 0.000250 (0.09%) | 0.277428 |
 | HTTP after, 5 requests | 138,580 | 137,600 | 25 | 99.29% | 0.001960 (12.27%) | 0.013760 (86.16%) | 0.000250 (1.57%) | 0.015970 |
 
+### Concurrent validation: 15-session bursts
+
+The concurrent comparison launches 15 independent sessions within milliseconds,
+each sending a first request and two immediately appended follow-ups. Every
+session has a unique approximately 3.2K-token tail after the common prefix, so
+follow-up cache measurements exercise session-specific content, not just the
+shared instructions. There is no request pacing or application throttle.
+
+Each cohort runs two rounds, reversing the before/after arm order. A second
+run uses a fresh synthetic prefix and cohort key and reverses the initial arm
+order. Bootstrap requests establish the familiar prefix and are excluded.
+All completed batch sockets are closed before the next batch; no product
+connection policy changes. Reproduce with:
+
+```sh
+CODEX_AUTH_FILE=/path/to/auth.json PROBE_CONCURRENCY=15 PROBE_FOLLOWUPS=2 \
+  PROBE_REPEATS=2 bun scripts/bench-codex-cache-affinity.ts
+# Repeat with PROBE_ARMS=header,session for the opposite initial order.
+```
+
+Retained primary samples: [first cohort](codex-cache-affinity-burst.ndjson) and
+[fresh-cohort replication](codex-cache-affinity-burst-replication.ndjson).
+
+Primary runs were made October 18, 2026 between 11:03 and 11:05 UTC. Four
+15-session bursts per arm (two per independent cohort), totaling 60 new sessions
+and 120 follow-ups per arm. First-request launch spans were 6–27 ms. All 360
+measured requests returned the expected output; all 12 bootstrap requests also
+completed. No model-request errors or 429s were observed.
+
+| Metric | Session header (before) | Shared header (after) |
+| --- | ---: | ---: |
+| First requests reusing the 27,520-token common prefix | 5/60 | 60/60 |
+| Mean uncached first-request input | 28,560.1 | 3,314.6 tokens |
+| Mean first-request input cost, API equivalent | $0.057350 | $0.009381 |
+| First-text latency, median / p95 | 2.096 / 2.767 s | 2.071 / 2.766 s |
+| Follow-ups with any cache hit | 120/120 | 120/120 |
+| Follow-ups also reusing session-specific content (at least 30K cached) | 116/120 | 120/120 |
+| Follow-up cached-input fraction, token weighted | 99.15% | 99.47% |
+| Mean uncached follow-up input | 262.6 | 162.7 tokens |
+| Follow-up first-text latency, median / p95 | 1.711 / 3.159 s | 1.575 / 2.127 s |
+| Conversations falling back to HTTP after handshake refusal | 2/60 | 0/60 |
+
+The unique first-request tail is intentionally cold, explaining why the after
+arm still has about 3.3K uncached tokens rather than the serial test's 190.
+The first-request input saving is 83.6%, about $0.048 per new session. The two
+baseline HTTP fallbacks completed all three requests successfully. The existing
+transport only takes this refusal fallback for HTTP 300–499 except 429; exact
+refusal statuses were not retained. Every other first request used a fresh
+WebSocket/full input, and its follow-ups reused its own socket/incremental
+continuation. No socket or conversation was shared across sessions.
+
+Per-burst medians, shown to avoid hiding placement/time variation:
+
+| Cohort / round | First-text before → after | Follow-up first-text before → after |
+| --- | ---: | ---: |
+| A / 1 | 2.097 → 2.208 s | 1.684 → 1.527 s |
+| A / 2 | 2.236 → 2.076 s | 1.749 → 1.572 s |
+| B / 1 | 2.041 → 2.076 s | 1.670 → 1.590 s |
+| B / 2 | 2.085 → 1.994 s | 1.765 → 1.609 s |
+
+The burst evidence does not show cache, latency or rate-limit harm from one
+affinity key per person at the tested 15-session load. Keep the simple cohort
+design: adding deterministic shards would fragment warm-up without evidence
+of a benefit here. This is not a guarantee at arbitrary traffic levels. The
+roughly equal first-request latency still does not establish an overall speedup.
+
+Primary-run usage/cost totals use the same exact-model standard comparison
+rates above. All cost is `gpt-6.1-sol` (100% model share); no subscription charge
+is inferred. Bootstrap requests are excluded, and input includes cached tokens.
+
+| Requests | Input | Cached | Output | Cache rate | Fresh input USD (% cost) | Cache-read USD (% cost) | Output USD (% cost) | Total USD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Before: 60 first requests | 1,851,207 | 137,600 | 300 | 7.43% | 3.427214 (99.51%) | 0.013760 (0.40%) | 0.003000 (0.09%) | 3.443974 |
+| After: 60 first requests | 1,850,073 | 1,651,200 | 300 | 89.25% | 0.397746 (70.29%) | 0.165120 (29.18%) | 0.003000 (0.53%) | 0.565866 |
+| Before: 120 follow-ups | 3,705,114 | 3,673,600 | 600 | 99.15% | 0.063028 (14.44%) | 0.367360 (84.18%) | 0.006000 (1.37%) | 0.436388 |
+| After: 120 follow-ups | 3,702,846 | 3,683,328 | 600 | 99.47% | 0.039036 (9.44%) | 0.368333 (89.11%) | 0.006000 (1.45%) | 0.413369 |
+
+Exploratory runs are also retained: [first](codex-cache-affinity-burst-retained-sockets.ndjson)
+and [replication](codex-cache-affinity-burst-replication-retained-sockets.ndjson).
+They unintentionally retained idle sockets across batches (up to 62 rather
+than the intended 15 active tasks), so they are not pooled into the primary
+comparison. They nevertheless found first-prefix hits 9/60 before versus
+60/60 after, 120/120 follow-up hits in each arm, and no failed model calls.
+Four conversations used the normal HTTP fallback after WebSocket handshake
+refusal, two per arm. The primary rerun also saw refusals, so idle-socket
+accumulation alone is not an established cause.
+One exploratory shared-affinity burst had a 3.334 s first-text median versus
+2.101 s before; the next round was 2.008 s versus 2.044 s. This transient slower
+burst is retained rather than discarded, but did not reproduce as a systematic
+penalty across the two primary cohorts. Neither exploratory nor primary runs
+establish why individual provider handshakes were refused.
+
 Regression coverage includes deterministic cohorts and isolation, no-human
 fallback, unchanged body and prompt text, HTTP authentication retry, matching
 WebSocket pre-open affinity, and two conversations sharing affinity without
@@ -171,6 +276,9 @@ TypeScript projects passed. Changed source files passed formatting and lint;
 the standalone benchmark typecheck and public-repository hygiene guard passed.
 Three existing human-identity-resolution tests also passed. The full monorepo suite and deployed
 browser benchmark were not run for this header-only draft.
+The concurrent harness extension passed its standalone TypeScript check,
+format/lint and the public-repository hygiene guard; all 154 focused transport
+and affinity tests passed again. The production implementation was unchanged.
 
 ## Risks and decision
 

@@ -27,6 +27,12 @@ const model = process.env.PROBE_MODEL ?? "gpt-6.1-sol";
 const run = process.env.PROBE_RUN ?? randomUUID();
 const repeats = Number(process.env.PROBE_REPEATS ?? 10);
 if (!Number.isInteger(repeats) || repeats < 1) throw new Error("PROBE_REPEATS must be positive.");
+const concurrency = Number(process.env.PROBE_CONCURRENCY ?? 1);
+const followups = Number(process.env.PROBE_FOLLOWUPS ?? 1);
+if (!Number.isInteger(concurrency) || concurrency < 1)
+  throw new Error("PROBE_CONCURRENCY must be positive.");
+if (!Number.isInteger(followups) || followups < 1)
+  throw new Error("PROBE_FOLLOWUPS must be positive.");
 const transportMode = process.env.PROBE_TRANSPORT ?? "websocket";
 if (!["http", "websocket"].includes(transportMode))
   throw new Error("PROBE_TRANSPORT must be http or websocket.");
@@ -62,6 +68,8 @@ console.log(
     run,
     model,
     repeats,
+    concurrency,
+    followups,
     arms,
     transportMode,
     prefixHash: createHash("sha256").update(JSON.stringify({ instructions, tools })).digest("hex"),
@@ -82,17 +90,28 @@ const transport = codexResponsesTransport(fetch, {
 const send = codexSubscriptionFetch(transport);
 let nextStart = 0;
 type Json = Record<string, any>;
+class ProbeFailure extends Error {
+  constructor(
+    readonly status: number | null,
+    readonly code: string,
+  ) {
+    super(code);
+  }
+}
 async function request(
   arm: string,
   iteration: number,
   step: string,
   session: string,
   input: Json[],
+  slot: number,
 ) {
-  // Pace the experiment, not the product: avoid the documented cache-overflow range.
-  const delay = nextStart - Date.now();
-  if (delay > 0) await Bun.sleep(delay);
-  nextStart = Date.now() + 4200;
+  // Serial experiments avoid overflow; burst experiments deliberately do not pace.
+  if (concurrency === 1) {
+    const delay = nextStart - Date.now();
+    if (delay > 0) await Bun.sleep(delay);
+    nextStart = Date.now() + 4200;
+  }
   const bodyKey = arm === "body" || arm === "shared" ? shared : session;
   const body = {
     model,
@@ -107,6 +126,7 @@ async function request(
     prompt_cache_key: bodyKey,
   };
   const start = performance.now();
+  const startedAt = new Date().toISOString();
   const response = await send(`${CODEX_RESPONSES_BASE}/responses`, {
     method: "POST",
     signal: AbortSignal.timeout(90000),
@@ -114,8 +134,10 @@ async function request(
     body: JSON.stringify(body),
   });
   const headersMs = performance.now() - start;
-  if (!response.ok)
-    throw new Error(`Provider HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new ProbeFailure(response.status, "http_error");
+  }
   const decoder = new TextDecoder();
   let buffer = "",
     completed: Json | undefined,
@@ -132,7 +154,10 @@ async function request(
       if (event.type === "response.output_text.delta" && firstOutputMs === undefined)
         firstOutputMs = performance.now() - start;
       if (["response.failed", "response.incomplete", "error"].includes(event.type))
-        throw new Error(`Provider event ${event.type}`);
+        throw new ProbeFailure(
+          event.status ?? null,
+          event.error?.code ?? event.response?.error?.code ?? event.type,
+        );
       if (event.type === "response.completed") completed = event.response;
     }
   }
@@ -149,7 +174,9 @@ async function request(
       type: "sample",
       arm,
       iteration,
+      slot,
       step,
+      startedAt,
       warmup: iteration < 0,
       headersMs,
       firstOutputMs,
@@ -163,40 +190,105 @@ async function request(
   );
   return completed.output as Json[];
 }
+async function runSession(arm: string, iteration: number, slot: number) {
+  const sessionId = randomUUID();
+  const token = {
+    accessToken: auth.tokens.access_token,
+    chatgptAccountId: auth.tokens.account_id,
+    isFedramp: false,
+  };
+  let step = "first";
+  const started = performance.now();
+  try {
+    await codexRequestStorage.run(
+      {
+        sessionId,
+        clientVersion: CODEX_CLIENT_VERSION,
+        ...(arm === "header" || arm === "shared" ? { cacheAffinityKey: shared } : {}),
+        getToken: async () => token,
+        refresh: async () => {
+          throw new Error("Credentials expired; refresh with Codex before retrying.");
+        },
+        resolveModel: (slug) => slug,
+      },
+      () =>
+        withResponsesConversation(createResponsesTurn(sessionId), async () => {
+          // Distinct tails make follow-up reuse measurable beyond the common prefix.
+          const tail =
+            concurrency > 1
+              ? "\n" +
+                Array.from(
+                  { length: 80 },
+                  (_, i) =>
+                    `Private record ${i} for ${sessionId}: preserve this session's inventory notes and original ordering.`,
+                ).join("\n")
+              : "";
+          let input: Json[] = [
+            { role: "user", content: `Session task ${sessionId}: reply OK.${tail}` },
+          ];
+          let output = await request(arm, iteration, step, sessionId, input, slot);
+          for (let index = 0; index < followups; index++) {
+            step = followups === 1 ? "followup" : `followup-${index + 1}`;
+            input = [...input, ...output, { role: "user", content: "Reply OK again." }];
+            output = await request(arm, iteration, step, sessionId, input, slot);
+          }
+        }),
+    );
+    return true;
+  } catch (error) {
+    console.log(
+      JSON.stringify({
+        type: "failure",
+        arm,
+        iteration,
+        slot,
+        step,
+        warmup: iteration < 0,
+        totalMs: performance.now() - started,
+        status: error instanceof ProbeFailure ? error.status : null,
+        code:
+          error instanceof ProbeFailure
+            ? error.code
+            : error instanceof Error
+              ? error.name
+              : "unknown",
+      }),
+    );
+    return false;
+  }
+}
 try {
   // The warm-up establishes a familiar prefix but is not part of measured samples.
   for (let iteration = -1; iteration < repeats; iteration++) {
     const offset = Math.max(0, iteration) % arms.length;
     const order = [...arms.slice(offset), ...arms.slice(0, offset)];
     for (const arm of order) {
-      const sessionId = randomUUID();
-      const token = {
-        accessToken: auth.tokens.access_token,
-        chatgptAccountId: auth.tokens.account_id,
-        isFedramp: false,
-      };
-      await codexRequestStorage.run(
-        {
-          sessionId,
-          clientVersion: CODEX_CLIENT_VERSION,
-          ...(arm === "header" || arm === "shared" ? { cacheAffinityKey: shared } : {}),
-          getToken: async () => token,
-          refresh: async () => {
-            throw new Error("Credentials expired; refresh with Codex before retrying.");
-          },
-          resolveModel: (slug) => slug,
-        },
-        () =>
-          withResponsesConversation(createResponsesTurn(sessionId), async () => {
-            const input = [{ role: "user", content: `Session task ${sessionId}: reply OK.` }];
-            const output = await request(arm, iteration, "first", sessionId, input);
-            await request(arm, iteration, "followup", sessionId, [
-              ...input,
-              ...output,
-              { role: "user", content: "Reply OK again." },
-            ]);
-          }),
+      const start = performance.now();
+      const startedAt = new Date().toISOString();
+      const results = await Promise.all(
+        Array.from({ length: iteration < 0 ? 1 : concurrency }, (_, slot) =>
+          runSession(arm, iteration, slot),
+        ),
       );
+      console.log(
+        JSON.stringify({
+          type: "batch",
+          arm,
+          iteration,
+          startedAt,
+          sessions: results.length,
+          completedSessions: results.filter(Boolean).length,
+          totalMs: performance.now() - start,
+        }),
+      );
+      // Each batch represents completed independent tasks. Do not accumulate
+      // idle sockets from earlier batches and accidentally test a different load.
+      for (const socket of sockets.splice(0)) socket.close(1000, "benchmark batch complete");
+      if (results.some((ok) => !ok)) {
+        process.exitCode = 1;
+        if (iteration < 0)
+          throw new Error("Bootstrap failed; no familiar-prefix comparison is possible.");
+      }
     }
   }
 } finally {
