@@ -155,6 +155,7 @@ import {
   sandboxCommandStillRunning,
   SelfhostedControlError,
   subjectFor,
+  SUPERVISED_STOP_KILL_AFTER_SECONDS,
   modalAppHasRunningSandboxes,
   sweepModalOrphanSandboxes,
   terminateManagedSandboxSession,
@@ -413,6 +414,11 @@ export type DrainableProviderProbeFn = (
 export const RETAINED_PROCESS_RECONCILIATION_LIMIT = 20;
 export const RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
 export const RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
+/** After a supervised stop, the probe waits this long for the exit, so the
+ * stop usually settles in the same reaper pass: the supervisor's KILL
+ * escalation plus a margin. */
+export const RETAINED_PROCESS_STOP_SETTLE_WAIT_MS =
+  SUPERVISED_STOP_KILL_AFTER_SECONDS * 1_000 + 2_000;
 /** Bounds on reading a command's output backlog: per claim, and across one
  * reconciliation sweep so the reaper activity stays well inside its timeout.
  * Each read returns up to one provider page per stream. */
@@ -2538,6 +2544,7 @@ async function reconcileTerminalRetainedProcesses(
           claim.claimId,
           observation.reason,
           observation.outputBacklog === true,
+          claim.ownerState === "background_stopping",
         );
         continue;
       }
@@ -2692,8 +2699,15 @@ async function deferRetainedProcessClaim(
   claimId: string,
   outcome: RetainedProcessDeferralOutcome,
   outputBacklog = false,
+  stopping = false,
 ): Promise<void> {
-  const deferral = retainedProcessReconciliationDeferral(settings, process, outcome, outputBacklog);
+  const deferral = retainedProcessReconciliationDeferral(
+    settings,
+    process,
+    outcome,
+    outputBacklog,
+    stopping,
+  );
   try {
     // A healthy long-lived command can already be on a five-minute backoff
     // when rotation becomes due. Wake it at the lead boundary, then at the
@@ -2731,6 +2745,8 @@ export function retainedProcessReconciliationDeferral(
   process: Pick<SandboxRetainedProcess, "reconcileAttempts">,
   outcome: RetainedProcessDeferralOutcome,
   outputBacklog = false,
+  /** A stop was requested: the command is expected to exit within seconds. */
+  stopping = false,
 ): {
   durableOutcome: string;
   metricOutcome: RetainedProcessReconciliationOutcome;
@@ -2756,10 +2772,11 @@ export function retainedProcessReconciliationDeferral(
     };
   }
   const baseRetryMs = Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000);
-  // A backlog still being drained is progress, not an unhealthy provider:
+  // A backlog still being drained is progress, not an unhealthy provider, and
+  // a stopped command that has not exited yet will within seconds:
   // come back at the reaper cadence, without backoff.
   const exponent =
-    outcome === "provider_running" && outputBacklog
+    outcome === "provider_running" && (outputBacklog || stopping)
       ? 0
       : Math.min(4, Math.max(0, process.reconcileAttempts - 1));
   const retryAfterMs = Math.min(5 * 60_000, baseRetryMs * 2 ** exponent);
@@ -2860,7 +2877,7 @@ function retainedBacklogRemains(session: RetainedProcessProbeSession, result: un
   );
 }
 
-async function withRetainedProcessProbeTimeout<T>(promise: Promise<T>): Promise<T> {
+async function withRetainedProcessProbeTimeout<T>(promise: Promise<T>, extraMs = 0): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -2868,7 +2885,7 @@ async function withRetainedProcessProbeTimeout<T>(promise: Promise<T>): Promise<
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
           () => reject(RETAINED_PROCESS_PROBE_TIMEOUT),
-          RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+          RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS + extraMs,
         );
         timer.unref?.();
       }),
@@ -3097,6 +3114,14 @@ export async function probeRetainedProcessAtProvider(
             lease.rotationReason === "provider_deadline" ? "provider_deadline" : "explicit_stop",
           )) ?? false)
         : false;
+    // A stopped command takes up to the supervisor's KILL escalation to exit.
+    // Wait for it here, within the sweep's budget, so the stop settles now
+    // instead of after a backoff; the read returns as soon as it exits.
+    const readWaitMs =
+      supervisedCancelled &&
+      Date.now() + RETAINED_PROCESS_STOP_SETTLE_WAIT_MS < (drainBudget?.until ?? Infinity)
+        ? RETAINED_PROCESS_STOP_SETTLE_WAIT_MS
+        : 1_000;
     result = await withRetainedProcessProbeTimeout(
       session.writeStdin({
         sessionId: process.providerSessionId,
@@ -3108,9 +3133,10 @@ export async function probeRetainedProcessAtProvider(
           (process.providerBackend !== "modal" || legacyPty)
             ? "\u0003"
             : "",
-        yieldTimeMs: 1_000,
+        yieldTimeMs: readWaitMs,
         maxOutputTokens: 2_000,
       }),
+      readWaitMs - 1_000,
     );
   } catch (error) {
     if (error === RETAINED_PROCESS_PROBE_TIMEOUT) {

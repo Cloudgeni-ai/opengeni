@@ -43,6 +43,7 @@ import {
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
   isProviderSandboxGoneDuringRoutedOperation,
+  isInSandboxSupervisedProcess,
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -481,6 +482,10 @@ export function wrapChannelABoxWithRouting(
             admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
             operation: op,
             providerBinding: boundAdmission.providerBinding ?? null,
+            inSandboxSupervisor: isInSandboxSupervisedProcess(
+              backend.session,
+              retainedProcess.providerSessionId,
+            ),
             ...(backgroundCommand ? { backgroundCommand } : {}),
             owner: {
               kind: "direct",
