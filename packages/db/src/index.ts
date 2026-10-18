@@ -1,5 +1,7 @@
 export { getSessionMachineAccess } from "./session-machine-access";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
+export * from "./site-session-access";
+import { siteSessionAccessFilter } from "./site-session-access";
 import {
   decodeActivityXid,
   encodeActivityXid,
@@ -31614,6 +31616,8 @@ export type SessionListKeysetCursor = {
 export type SessionListCursor = SessionListSnapshotCursor | SessionListKeysetCursor;
 
 export type SessionListFilterOptions = {
+  /** Sessions this viewer may use from this private console Site. */
+  siteAccessId?: string;
   /** Sessions created through this published Site, independent of project. */
   originSiteId?: string;
   /** Exact workspace project; null selects unfiled sessions. */
@@ -32787,6 +32791,7 @@ function sessionFilters(
     | "archiveStatus"
     | "channelId"
     | "originSiteId"
+    | "siteAccessId"
     | "createdBy"
     | "updatedFrom"
     | "updatedBefore"
@@ -32813,7 +32818,9 @@ function sessionFilters(
     filters.push(sql`${schema.sessions.contentArchiveState} = 'archived'`);
   }
   if (options.mineOnly) filters.push(sessionMineSql(options.subjectId));
-  if (options.originSiteId) {
+  if (options.siteAccessId) {
+    filters.push(siteSessionAccessFilter(options.siteAccessId, options.subjectId));
+  } else if (options.originSiteId) {
     filters.push(
       eq(schema.sessions.siteId, options.originSiteId),
       sql`${schema.sessions.siteAccessRootId} is not null`,
@@ -33064,6 +33071,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
   if (
     !hasChannel &&
     !options.originSiteId &&
+    !options.siteAccessId &&
     !options.createdBy &&
     !options.updatedFrom &&
     !options.updatedBefore &&
@@ -33077,6 +33085,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     return "all";
   }
   return JSON.stringify([
+    ...(options.siteAccessId ? [["siteAccess", options.siteAccessId]] : []),
     ...(options.originSiteId ? [["originSite", options.originSiteId]] : []),
     hasChannel ? ["channel", options.channelId] : null,
     options.createdBy ? ["creator", options.createdBy.kind, options.createdBy.subjectId] : null,

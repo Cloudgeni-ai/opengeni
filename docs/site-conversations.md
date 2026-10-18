@@ -32,6 +32,38 @@
   shared histories are not silently converted or exposed as new private Site
   history. Existing Site HTML and source are not rewritten.
 
+## Allowing an existing chat in a private console Site
+
+In the console's Site **Conversations** tab, the owner can choose **Allow an
+existing chat**. This grants that private Site access to one exact chat owned
+by the same person. It does not share the chat with other viewers, move it,
+change its tools, rewrite its creation origin, or grant access to descendants.
+Making the Site shared or archiving it disables this extra access. Existing
+Site-created conversations retain their original audience rules.
+
+Owner-authorized agents can use the normal SDK's `setSiteSessionAccess` and
+`listSiteSessionAccess` outside a Site. Site frames and Site-origin agents cannot
+manage these grants. Published guest/runtime Sites do not consume them.
+
+Inside the console Site, use `listSessionPage(workspaceId, { siteAccessId:
+"current" })` to list available chats, then mount the normal
+`SessionConversation` with the chosen session ID. `originSiteId` still means
+creation provenance and does not include explicitly allowed older chats.
+Both list filters remain viewer-authorized and bound into pagination cursors.
+
+The Site retains the same operation and text-only body restrictions; approvals,
+credentials, attachments and hidden model context still belong in the console.
+Site-submitted turns record their real Site origin and retain existing Site
+execution restrictions. Ordinary console requests retain their normal behavior.
+**Remove access** revokes subsequent reads and writes immediately; an open event
+stream rechecks every two seconds and closes on revocation. Already accepted
+work is not cancelled and already delivered text cannot be recalled.
+
+Management routes are `GET /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access`
+and `PUT`/`DELETE` on its `/:sessionId` suffix. They are deliberately absent from
+the frame operation allowlist. Migration `0842_site_session_access.sql` adds
+the tenant/owner-isolated grant table without backfilling or modifying sessions.
+
 ## Inline AI and app-defined interaction
 
 `createOpenGeniSiteClient().ai` is a convenience over native session creation and
