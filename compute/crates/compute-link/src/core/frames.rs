@@ -110,6 +110,13 @@ impl Core {
                 payload: Bytes::new(),
             });
         }
+        if let Some(state) = sandbox.running {
+            self.effects.push(Effect::Frame {
+                link: link_id,
+                frame: HostFrame::State { s, state },
+                payload: Bytes::new(),
+            });
+        }
         let conns: Vec<ConnId> = sandbox.conns.iter().copied().collect();
         self.set_relay(id, relay);
         for conn in conns {

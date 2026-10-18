@@ -203,7 +203,7 @@ own URL, allowing 60 seconds of clock skew.
 | `sub` | `s`, `sid`, `subject`, `queue`? | Subscribe; `sid` is the host's, stable for the session. |
 | `unsub` | `s`, `sid` | Unsubscribe. |
 | `pub` | `s`, `subject`, `reply`?, `headers`? | Publish the payload. `headers` is a list of `[name, value]`. |
-| `state` | `s`, `state` | `awake` or `asleep`, for display only. |
+| `state` | `s`, `state` | `awake` (its VM runs) or `asleep` (any sleep level). Sent when it changes, once per change however many levels a sleep passes through, and again when a session opens. For showing the sandbox's state and counting its awake time; it decides nothing about delivery. |
 | `close` | `s` | End the session: the sandbox left this host or its agent process changed. |
 
 ### Frames, gateway to host
