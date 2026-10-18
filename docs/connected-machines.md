@@ -558,9 +558,15 @@ Every failure is fail-closed: a command that cannot be continued ends as a
 typed failure, and if the successor never starts, the command's anchor ends it
 as for a crashed runner. Other admitted work, such as a request still being
 answered, a git operation or a pending upload, still makes the update wait,
-and Windows keeps waiting for every command. Only lost physical settlement, which can never
-become provable in that process, ends the update with retryable
-`update_state_unavailable`. A browser controller that crashed, was killed or
+and Windows keeps waiting for every command. Command spawn failures, cancellation
+and panicking waiters retain their actual cleanup owner until exit is proved;
+they do not permanently disable self-update. A transient cleanup error is scoped
+to its exact producer and clears only when that producer obtains completion
+evidence. While that evidence is unavailable, the update reports retryable
+`update_cleanup_unconfirmed`; the response and agent log identify the producer
+and explain recovery. If the cleanup owner itself was lost, finish active commands
+and restart the agent service before retrying. An unreadable admission boundary
+still reports `update_state_unavailable`. A browser controller that crashed, was killed or
 stopped uncleanly is not lost settlement on Linux and macOS: it runs as the
 leader of its own process group, so the update waits (busy) only until nothing
 remains in that group. The browsers it launched run in their own sessions and
@@ -1016,8 +1022,19 @@ command. Success requires empty internal buffers and a flush of that stream;
 losing the stream fails its attached receipt before reconnect. A replacement
 socket cannot prove that the previous reply was sent.
 Controller admission is fenced atomically during its idle proof; failed or
-deferred updates release only their own fence. Missing settlement makes updates
-unavailable for the running process while ordinary work remains usable. Older
+deferred updates release only their own fence. Missing physical settlement makes
+updates unavailable while ordinary work remains usable. Failures are retained per
+producer, never cleared globally or merely by dropping a reservation. Native exec
+and PTY cleanup keep owned handles and retry failed exit observations; a positive
+exit clears only that cleanup's failure. Cleanup cannot inherit a running job's
+handover exemption. Successor startup and rollback restore each adopted command's
+reservation as well as its native handles. After handing over running jobs, the updater rechecks cleanup
+before recording its restart manifest, including failures during the download.
+A panicking worker releases its own reservation only after
+unwinding; independently owned native resources still retain theirs. Lost reply
+delivery is logged, not mistaken for still-running native work. Retained RPC
+replies hold their reservation through delivery or expiry; expiry still rejects
+the original request and does not permit replay or release a live producer. Older
 controller builds without the update-admission transaction cannot authorize
 replacement from an unfenced idle snapshot. A lost fence-release reply retains
 its exact operation owner; ordinary scoped recovery retries only that release
@@ -1025,10 +1042,8 @@ after host update admission has reopened. Failed helper/factory cleanup and
 forced or nonzero helper termination remain unsettled even after the original
 owner leaves active inventory. Helper EOF joins persistent capture producers;
 missing ScreenCaptureKit stop completion cannot become a successful shutdown.
-The current Windows command-group dependency cannot prove full-job
-exit; commands keep their ordinary results, but accepting a command fences
-subsequent self-update for that process. A positive same-job exit proof is
-required before normal Windows update eligibility can be restored. Unexpected
+Windows cleanup retains the same Job Object until its active process count is
+zero; signaling it alone is not completion. Unexpected
 controller exit and forced controller termination likewise preserve uncertainty
 after the old controller is removed from the active inventory. They cannot be
 made update-eligible by reconnecting or replacing the controller.
@@ -1046,6 +1061,31 @@ credentials load into the existing process, preserving host operations.
 The signed `/v1/enrollments/renew` machine protocol is outside the browser API
 contract-revision fence, like device polling and token exchange. Its install-key,
 enrollment-generation and revocation checks still apply in production.
+
+A NATS authentication refusal suspends dialing for that exact saved connection;
+it is not treated as an ordinary network outage. The existing renewal loop checks
+it even when its bearer is not near expiration. A successful renewal clears the
+suspension and the live file reconciler resumes that link. An explicit
+`enrollment_reconnect_required` renewal response persists a terminal state across
+agent restarts: no more NATS or renewal requests until an authorized reconnect
+replaces the connection. `opengeni-agent connections` shows pending renewal versus
+reconnect-required state and the deployment-specific recovery command. Removing
+an obsolete saved connection is also supported. Other workspace links and retained
+host operations remain independent.
+
+Clock skew, transport failure, disabled renewal and older APIs' generic 401/404
+responses are not terminal proof. They allow another transport attempt on the
+existing jittered renewal cadence, so an older API or a temporary callout outage
+cannot strand a still-valid connection. Deploy the typed renewal response before the
+agent update to stop retries for permanently rejected grants completely. An older
+agent does not gain this behavior from a server deployment alone.
+
+Machines shows expired credentials only when the server can verify the bearer
+signature and match its current enrollment generation, and never over a live
+runner. Fresh Hello/heartbeat clears the diagnostic. Invalid signatures and
+removed enrollments cannot safely identify a dashboard row; inspect the local
+connection inventory instead. Saved links to other deployments/workspaces are
+never disclosed through a healthy workspace's machine status.
 
 Deploy the API renewal endpoint before upgrading agents. An older API returns
 404 and the agent retries with jitter while retaining its existing credentials.

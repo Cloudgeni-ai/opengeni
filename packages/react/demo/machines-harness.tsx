@@ -38,6 +38,7 @@ import {
   swappedMachinesResponse,
 } from "./machines-fixtures";
 import "./styles.css";
+import { MachineDetail } from "../src/components/machines/machine-detail";
 
 /** A single named machine card centered on the page (state-matrix cell). */
 function CardCell({ machine }: { machine: MachineView }) {
@@ -148,6 +149,24 @@ function SwapTransition() {
 type ViewDef = { id: string; node: ReactNode; padded?: boolean };
 
 const VIEWS: Record<string, ViewDef> = {
+  "authentication-expired": {
+    id: "authentication-expired",
+    node: (
+      <MachineDetail
+        machine={{
+          ...offlineMachine,
+          connectionAuthority: {
+            ...offlineMachine.connectionAuthority,
+            state: "expired",
+            authenticationError: "credentials_expired",
+          },
+        }}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+      />
+    ),
+  },
   // --- IA / flow (pass 1) ---
   "flow-device": {
     id: "flow-device",

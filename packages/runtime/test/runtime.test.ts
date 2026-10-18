@@ -13410,6 +13410,12 @@ describe("runtime Skill activation", () => {
       attemptToolCatalog: catalog,
     });
     expect(indexedSkillNames(agent)).toContain("opengeni-documents");
+    const rehydratedAgent = buildOpenGeniAgent(settings, [], {
+      attemptToolCatalog: JSON.parse(JSON.stringify(catalog)),
+    });
+    expect(typeof agent.instructions).toBe("string");
+    expect(agent.instructions).toBe(rehydratedAgent.instructions);
+    expect(indexedSkillNames(agent)).toEqual(indexedSkillNames(rehydratedAgent));
 
     const incompleteCatalog = {
       ...catalog,

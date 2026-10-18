@@ -101,6 +101,8 @@ import type {
   EventingState,
   SandboxRuntimeState,
   TurnControlState,
+  TurnSettleFn,
+  TurnSettleInput,
 } from "./turn-context";
 
 export type ClaimTurnDeps = {
@@ -690,7 +692,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     }
     return appended;
   };
-  eventing.settle = async (inputSettlement) => {
+  const settle = async (
+    inputSettlement: TurnSettleInput & { requirePendingSteer?: boolean },
+  ): Promise<boolean | "pending_steer_withdrawn"> => {
     const compactionRequestFailure = inputSettlement.consumeRequestedCompactionFailure
       ? {
           reason: "summarization_failed" as const,
@@ -733,7 +737,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       ...(inputSettlement.notStartedToolCallIds?.length
         ? { notStartedToolCallIds: inputSettlement.notStartedToolCallIds }
         : {}),
+      ...(inputSettlement.requirePendingSteer ? { requirePendingSteer: true } : {}),
     });
+    if (result.action === "pending_steer_withdrawn") return "pending_steer_withdrawn";
     if (result.action === "stale") {
       // The terminal write can lose to a control transaction before the
       // workflow delivers Temporal cancellation. That control may settle
@@ -768,6 +774,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     });
     return true;
   };
+  eventing.settle = settle as TurnSettleFn;
   activityContext?.heartbeat({
     ...heartbeatDetails,
     phase: "turn_started",

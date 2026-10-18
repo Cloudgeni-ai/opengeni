@@ -5833,6 +5833,12 @@ export type WorkspaceSettings = {
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   /** Whether agents may invoke the built-in structured human-input tool. */
   agentHumanInputEnabled?: boolean | undefined;
+  /**
+   * What an ordinary Send does in the console composer while the agent is
+   * working: `queue` (absent) runs it after the current turn, `steer` has the
+   * agent read it at its next model step.
+   */
+  busySend?: "queue" | "steer" | undefined;
   /** Whether agents get the Jev-backed code_search tool; absent or null follows the deployment. */
   codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
@@ -5932,6 +5938,7 @@ export type UpdateWorkspaceSettingsRequest = {
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   agentHumanInputEnabled?: boolean | undefined;
+  busySend?: "queue" | "steer" | undefined;
   codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
@@ -6995,6 +7002,11 @@ export type SteerSessionQueueItemRequest = {
   clientEventId: string;
   expectedTurnVersion: number;
   controlEtag?: string;
+  /**
+   * Interrupt the running turn now instead of at its next model step. Also
+   * turns an already-waiting Steer into an immediate one.
+   */
+  interrupt?: boolean;
 };
 
 export type DeleteSessionQueueItemRequest = {
@@ -9739,6 +9751,7 @@ export type MachineConnectionAuthority = {
   leaseExpiresAt: string | null;
   duplicateRunnerDeniedCount: number;
   duplicateRunnerDeniedAt: string | null;
+  authenticationError?: "credentials_expired" | null | undefined;
 };
 
 export type MachineRuntimeCapabilities = {

@@ -8,6 +8,7 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { PencilIcon, Trash2Icon, UserIcon } from "lucide-react";
 import { lazy, Suspense, useRef, useState } from "react";
 import { toast } from "sonner";
+import { resolveWorkspaceBusySend } from "@opengeni/contracts";
 
 import { AgentActivityRow } from "@/components/settings/agent-activity";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
@@ -440,6 +441,10 @@ function WorkspaceGeneralSettings({
         />
       </Section>
 
+      <Section title="Chats">
+        <BusySendPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
+      </Section>
+
       <Section
         title="New session defaults"
         description="Applied when someone starts a new session in this workspace."
@@ -579,6 +584,75 @@ function RenameWorkspaceDialog({
         </Field>
       </FieldStack>
     </FormDialog>
+  );
+}
+
+/**
+ * What Send does while the agent is working, for everyone in this workspace's
+ * console. Steer suits people who should not need to know the difference:
+ * the agent reads the message as soon as it can, usually within seconds,
+ * instead of after the whole turn. The other choice stays beside Send while
+ * the agent works (and on
+ * Cmd/Ctrl+Enter), so it is one tap away on phones too.
+ */
+function BusySendPreferenceRow({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
+  const context = useAppContext();
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const value = resolveWorkspaceBusySend(workspace?.settings);
+  const [saving, setSaving] = useState(false);
+
+  async function choose(next: "queue" | "steer") {
+    if (next === value) return;
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    setSaving(true);
+    try {
+      const updated = await context.updateWorkspaceSettings(workspaceId, { busySend: next });
+      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        toast.success(
+          next === "steer" ? "Send steers a working agent" : "Send queues behind a working agent",
+        );
+      }
+    } catch {
+      if (context.ownsWorkspaceInvocation(workspaceId, acceptedTransition))
+        toast.error("Couldn't update what Send does");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const reason = canManage ? undefined : "Only workspace admins can change this.";
+  return (
+    <SettingRow
+      label="Send while the agent works"
+      description={
+        value === "steer"
+          ? "Steer: the agent reads your message as soon as it can, usually within seconds. A reply it is writing stops, and it answers with your message in mind. Running tools aren't cut off. Queue is next to Send while it works."
+          : "Queue: your message runs after the agent finishes its current work. Steer is next to Send while it works."
+      }
+      controlWidth="auto"
+      control={
+        <SegmentedControl
+          size="sm"
+          value={value}
+          onValueChange={(next) => void choose(next as "queue" | "steer")}
+          options={[
+            { value: "queue", label: "Queue" },
+            { value: "steer", label: "Steer" },
+          ].map((option) => ({
+            ...option,
+            disabled: saving || !canManage,
+            ...(reason ? { disabledReason: reason } : {}),
+          }))}
+        />
+      }
+    />
   );
 }
 

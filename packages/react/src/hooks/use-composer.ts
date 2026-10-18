@@ -47,6 +47,13 @@ export type InitialComposerDraft = {
   policy?: ComposerPolicy | undefined;
 };
 
+/**
+ * What an ordinary Send does while the agent is working: `queue` runs it after
+ * the current turn, `steer` has the agent read it as soon as it can, usually
+ * within seconds.
+ */
+export type ComposerBusySend = "queue" | "steer";
+
 export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
     /** Called synchronously after local submission. Observer errors never change delivery. */
@@ -72,6 +79,16 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     effectiveControl?: EffectiveSessionControl | null | undefined;
     /** Immediate user-visible destination for an ordinary Send before admission replies. */
     sendDestination?: (() => "chat" | "queue") | undefined;
+    /**
+     * What an ordinary Send does while the agent is working (while
+     * `sendDestination` reports `queue`). `queue` (default) runs the message
+     * after the current turn. `steer` delivers it as a Steer instead: the
+     * agent reads it as soon as it can, usually within seconds (a reply still
+     * being written stops; running tools are not cut off). `sendToQueue`,
+     * `sendAlternate` and `steer` stay explicit
+     * either way.
+     */
+    busySend?: ComposerBusySend | undefined;
     /** Disable remote composer-draft reads and writes for embedded hosts. */
     draftPersistence?: "durable" | "disabled" | undefined;
     /** Required explicit authority when durable draft persistence is disabled. */
@@ -507,8 +524,24 @@ export type ComposerState = {
   requestAnnotationReview?: ((id?: string) => void) | undefined;
   /** Read the current draft synchronously before a destructive replacement. */
   hasDraftContent: () => boolean;
-  /** Append the draft behind prompts already visible in the queue. */
+  /**
+   * The ordinary Send. While the agent is working it follows `busySend`:
+   * queue behind the current turn (default) or Steer.
+   */
   send: (text?: string) => Promise<boolean>;
+  /** Append the draft behind prompts already visible in the queue, whatever `busySend` says. */
+  sendToQueue?: ((text?: string) => Promise<boolean>) | undefined;
+  /** What an ordinary Send does while the agent is working. */
+  busySend?: ComposerBusySend | undefined;
+  /**
+   * The other way to send right now, or `null` when Send is not taking its
+   * busy path (nothing running or waiting, or the workstream is paused):
+   * `steer` when Send queues, `queue` when Send steers. Hosts offer it next to
+   * Send exactly when it is not `null`.
+   */
+  alternateSend?: ComposerBusySend | null | undefined;
+  /** Send the draft the other way: Steer when Send queues, queue when Send steers. */
+  sendAlternate?: ((text?: string) => Promise<boolean>) | undefined;
   /** Locally acknowledged ordinary sends awaiting durable timeline reconciliation. */
   optimisticMessages?: ComposerOptimisticMessage[] | undefined;
   retryOptimisticMessage?: ((clientEventId: string) => void) | undefined;
@@ -826,6 +859,9 @@ export function useComposer(
   sendExtrasRef.current = options.sendExtras;
   const sendDestinationRef = useRef(options.sendDestination);
   sendDestinationRef.current = options.sendDestination;
+  const busySend: ComposerBusySend = options.busySend ?? "queue";
+  const busySendRef = useRef(busySend);
+  busySendRef.current = busySend;
   const sendBlockedRef = useRef(options.sendBlocked);
   sendBlockedRef.current = options.sendBlocked;
   const effectiveControlRef = useRef<EffectiveSessionControl | null>(
@@ -2157,7 +2193,7 @@ export function useComposer(
     ],
   );
 
-  const send = useCallback(
+  const sendToQueue = useCallback(
     async (explicit?: string): Promise<boolean> => {
       if (pendingOperationRef.current?.delivery === "send") {
         return await dispatch("send", explicit);
@@ -2253,6 +2289,39 @@ export function useComposer(
     ],
   );
   const steer = useCallback(async (text?: string) => await dispatch("steer", text), [dispatch]);
+  // Send takes its busy path while a turn runs or prompts wait, except in a
+  // paused workstream, where it keeps ordinary queueing so a Send never
+  // resumes it implicitly.
+  const takesBusyPath = useCallback(
+    (): boolean =>
+      effectiveControlRef.current?.state !== "paused" && sendDestinationRef.current?.() === "queue",
+    [],
+  );
+  const send = useCallback(
+    async (explicit?: string): Promise<boolean> => {
+      // A retained uncertain Send keeps its own delivery; only fresh input
+      // follows the busy-send preference.
+      if (
+        busySendRef.current === "steer" &&
+        pendingOperationRef.current?.delivery !== "send" &&
+        takesBusyPath()
+      ) {
+        return await steer(explicit);
+      }
+      return await sendToQueue(explicit);
+    },
+    [sendToQueue, steer, takesBusyPath],
+  );
+  const sendAlternate = useCallback(
+    async (explicit?: string): Promise<boolean> =>
+      busySendRef.current === "steer" ? await sendToQueue(explicit) : await steer(explicit),
+    [sendToQueue, steer],
+  );
+  const alternateSend: ComposerBusySend | null = takesBusyPath()
+    ? busySend === "steer"
+      ? "queue"
+      : "steer"
+    : null;
 
   const retryOptimisticMessage = useCallback(
     (clientEventId: string): void => {
@@ -2838,6 +2907,10 @@ export function useComposer(
     requestAnnotationReview,
     hasDraftContent,
     send,
+    sendToQueue,
+    busySend,
+    alternateSend: identityMatches ? alternateSend : null,
+    sendAlternate,
     optimisticMessages: visibleOptimisticMessages,
     retryOptimisticMessage,
     restoreOptimisticMessage:

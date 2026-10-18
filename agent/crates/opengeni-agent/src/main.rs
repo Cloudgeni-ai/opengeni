@@ -356,6 +356,19 @@ fn list_connections(api_url: &str) -> anyhow_lite::Result {
             connection.credentials.workspace_id,
             connection.credentials.agent_id
         );
+        match connection.authentication_state {
+            Some(config::AuthenticationState::RenewalRequired) => println!(
+                "    Authentication rejected; transport retries paused while credentials are renewed."
+            ),
+            Some(config::AuthenticationState::ReconnectRequired) => println!(
+                "    Reconnect required; automatic retries stopped. Run `{}` or disconnect this saved connection.",
+                supervisor::rejected_bearer_reconnect_command(
+                    if connection.legacy_origin { None } else { Some(&connection.api_url) },
+                    &connection.credentials.workspace_id,
+                )
+            ),
+            None => {}
+        }
     }
     Ok(())
 }
@@ -958,6 +971,7 @@ fn supervisor_links(
             let link_platform = Arc::new(platform.clone().with_stream_registry(Arc::new(hub)));
             let link =
                 SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials)
+                    .with_authentication_state(connection.authentication_state)
                     .with_connection_instance_id(connection_instance_id);
             if connection.legacy_origin {
                 link

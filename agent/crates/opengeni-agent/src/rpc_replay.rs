@@ -88,8 +88,8 @@ pub struct Receipt {
     expires_at: u64,
     digest: blake3::Hash,
     reply: watch::Sender<Option<Arc<Vec<u8>>>>,
-    // A lost publication is not settled work. Keep its original guard until
-    // some socket has a publication receipt; never clear a physical-work fault.
+    // Keep the original guard through publication or receipt expiry. Physical
+    // producers own their own clones; losing a reply is not live native work.
     reservation: Mutex<Option<WorkReservation>>,
 }
 
@@ -123,18 +123,34 @@ impl Receipt {
     }
 }
 
-impl Drop for Receipt {
-    fn drop(&mut self) {
-        if let Some(reservation) = self.reservation.lock().expect("reply reservation").take() {
-            // Expiry or shutdown without publication proof remains uncertain.
-            reservation.mark_unsettled();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_reply_does_not_poison_updates_or_release_a_live_producer() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        let drain = Arc::new(UpdateDrain::default());
+        let physical = drain.reserve_work(None).unwrap();
+        let mut registry = Registry::default();
+        let expiry = now_ms() + 120_000;
+        let subject = format!("{expiry}.{}", uuid::Uuid::new_v4());
+        let Admission::New(receipt) = registry.admit(&subject, b"mutation") else {
+            panic!("admit")
+        };
+        receipt.complete(b"reply".to_vec(), Some(physical.clone()));
+        drop(receipt);
+        registry.clock_floor = expiry;
+        registry.collect();
+        assert!(matches!(
+            registry.admit(&subject, b"mutation"),
+            Admission::Rejected
+        ));
+        assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
+        assert!(!drain.seal_update("update"));
+        drop(physical);
+        assert!(drain.seal_update("update"));
+    }
 
     #[test]
     fn concurrent_delivery_joins_but_changed_bytes_or_expiry_cannot_execute() {

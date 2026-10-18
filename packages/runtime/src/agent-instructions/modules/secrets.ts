@@ -30,7 +30,6 @@ export const secretsModule: AgentPromptModule = {
           search && "Find saved items and their ready references with `secret_search`.",
         ),
         `Sign in yourself, in this order: ${ladder.join("; ")}.`,
-        "Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
         sentences(
           "Never ask for passwords, keys or codes in chat or in a plain text question.",
           context.capabilities.humanInput &&

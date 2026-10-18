@@ -7,7 +7,7 @@
    `?theme=dark` puts the host in dark mode (`class="dark"` on <html> and a dark
    page background), `&host=navy` uses a tinted dark palette, and
    `&scenario=` selects the conversation state (approval, question, running,
-   long, empty, error). `&explicit=1` pins the legacy `data-og-theme` wrapper;
+   steer-waiting, steered, long, empty, error). `&explicit=1` pins the legacy `data-og-theme` wrapper;
    `&hostile=1` adds global host element CSS. */
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
@@ -59,8 +59,10 @@ function chat(id: string, title: string, minutes: number, status = "idle"): Sess
   } as unknown as Session;
 }
 
+const STEER_TURN = "5a1c0000-0000-4000-8000-0000000000b1";
+const steering = scenario === "steer-waiting" || scenario === "steered";
 const selectedStatus =
-  scenario === "running"
+  scenario === "running" || steering
     ? "running"
     : scenario === "approval" || scenario === "question"
       ? "requires_action"
@@ -231,6 +233,49 @@ if (scenario === "approval") {
 } else if (scenario === "running") {
   investigation();
   push("agent.message.delta", { delta: "Both payments hit the same invoice. Checking the " }, 0);
+} else if (steering) {
+  // The person steers while the agent works. The Steer is only their message:
+  // it waits for the next model step, then takes over as the next turn.
+  investigation();
+  push(
+    "agent.toolCall.created",
+    {
+      id: "call-invoice",
+      name: "acme__get_invoice",
+      arguments: { invoiceId: "INV-2026-09" },
+    },
+    1,
+  );
+  push(
+    "user.message",
+    {
+      text: "Also check whether October was double charged too.",
+      delivery: "steer",
+      routing: "accepted_for_steering",
+    },
+    0.5,
+    STEER_TURN,
+  );
+  const steerEventId = `evt-${sequence}`;
+  if (scenario === "steered") {
+    push(
+      "agent.toolCall.output",
+      { id: "call-invoice", output: text({ id: "INV-2026-09", status: "paid", total: "$490.00" }) },
+      0.4,
+    );
+    push("turn.superseded", { reason: "steer", atModelStep: true }, 0.4);
+    push("turn.started", { triggerEventId: steerEventId }, 0.4, STEER_TURN);
+    push(
+      "agent.toolCall.created",
+      {
+        id: "call-october",
+        name: "acme__list_payments",
+        arguments: { customerId: "cus_9Lk2", since: "2026-10-01" },
+      },
+      0.2,
+      STEER_TURN,
+    );
+  }
 } else if (scenario === "long") {
   investigation();
   push(
@@ -292,6 +337,7 @@ const client = fakeClient({
       effectiveControl: control,
       activePersonalConnections: [],
       stoppingPreviousAttempt: false,
+      // The queue snapshot never lists a prompt accepted for steering.
       items: [],
       pendingInputs: [],
       pendingInputAttachment: null,

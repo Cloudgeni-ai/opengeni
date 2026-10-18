@@ -15,6 +15,7 @@ import type {
 } from "@opengeni/db";
 import { readSubscriptionCoreTurnIdentity } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { handOverWaitToSteer } from "./waiting-steer";
 import {
   recordTurnStartupPhase,
   measureTurnStartupPhase,
@@ -421,6 +422,20 @@ export async function parkCoreSubscriptionTurn(
     return { exit: claimedResult({ status: control.activityStatus }) };
   }
   if (armed.action === "waiting") {
+    // A Steer that was waiting for this turn's next model step replaces the
+    // capacity wait now (its waiter goes with the superseded turn).
+    if (
+      await handOverWaitToSteer(db, bus, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+      })
+    ) {
+      control.turnMetricOutcome = "cancelled";
+      control.activityStatus = "idle";
+      return { exit: claimedResult({ status: "idle" }) };
+    }
     const evaluated = await reconcileCoreCapacityWait(
       { db, bus, signalCodexCapacityWorkflow, settings: deps.settings },
       waits,

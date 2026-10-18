@@ -479,6 +479,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       ...SESSION_USAGE_LIMIT_RUNTIME_ROUTINES.map(
         (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
       ),
+      // Nor the chat-visible machine access explanation (0841).
+      "target-schema runtime capability get_session_machine_access(uuid, uuid, uuid) is missing or ambiguous",
       // Nor personal machine consent (0823) or the private-actor visibility
       // helper the inlined session visibility probe calls (0805).
       "target-schema runtime capability consent_session_turn_personal_machine(uuid, uuid, uuid, uuid) is missing or ambiguous",

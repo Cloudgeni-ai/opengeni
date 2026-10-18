@@ -245,6 +245,7 @@ fn adopt_ops<P: Platform>(
     engine: &Arc<Engine>,
     platform: &P,
     lanes: &std::sync::Mutex<FrameLanes>,
+    update_drain: &Arc<UpdateDrain>,
     ops: Vec<crate::engine::HandedOverOp>,
 ) {
     for op in ops {
@@ -265,21 +266,32 @@ fn adopt_ops<P: Platform>(
             crate::ops::completion_publisher(Some(completion_sink), op.tag.request_id.clone());
         let sink = bulk_frame_sink(lane, op.tag.subject.clone(), engine.clone());
         let emit = crate::ops::frame_publisher(sink, op.tag.request_id.clone());
-        let child = match op.job.exec.as_ref() {
-            None => Ok(None),
-            Some(exec) => platform
-                .adopt_exec(exec)
-                .map(Some)
-                .map_err(|error| format!("could not adopt the command's process: {error}")),
-        };
-        info!(op = %op.tag.request_id, running = op.job.exec.is_some(), "continuing a handed-over command");
-        engine.adopt_job(
-            op,
-            child,
-            emit,
-            |exit| crate::ops::wire_exit(exit).encode_to_vec(),
-            on_exit,
-        );
+        let reservation = update_drain.reserve_adopted_work();
+        if let Some(reservation) = &reservation {
+            reservation.describe(format!("adopted exec request {}", op.tag.request_id));
+        }
+        opengeni_agent_platform::with_work_reservation_sync(reservation, || {
+            let child = match op.job.exec.as_ref() {
+                None => Ok(None),
+                Some(exec) => platform.adopt_exec(exec).map(Some).map_err(|error| {
+                    // A failed native-handle claim is not physical exit proof.
+                    // Do not erase that uncertainty when the typed job fails.
+                    if let Some(reservation) = opengeni_agent_platform::current_work_reservation() {
+                        reservation
+                            .mark_unsettled(format!("native process adoption failed: {error}"));
+                    }
+                    format!("could not adopt the command's process: {error}")
+                }),
+            };
+            info!(op = %op.tag.request_id, running = op.job.exec.is_some(), "continuing a handed-over command");
+            engine.adopt_job(
+                op,
+                child,
+                emit,
+                |exit| crate::ops::wire_exit(exit).encode_to_vec(),
+                on_exit,
+            );
+        });
     }
 }
 
@@ -327,7 +339,10 @@ fn message_is_authentication_denial(message: &str) -> bool {
 /// Persisted connection metadata predates strict URL validation, so unexpected
 /// shell metacharacters are replaced by a visible placeholder instead of being
 /// reflected into copy/pasteable operator guidance.
-fn rejected_bearer_reconnect_command(api_url: Option<&str>, workspace_id: &str) -> String {
+pub(crate) fn rejected_bearer_reconnect_command(
+    api_url: Option<&str>,
+    workspace_id: &str,
+) -> String {
     fn safe_argument(value: &str) -> bool {
         !value.is_empty()
             && value.bytes().all(|byte| {
@@ -607,6 +622,8 @@ pub struct SupervisorLink<P: Platform> {
     pub credentials: StoredCredentials,
     /// Authoritative deployment origin persisted by a non-legacy enrollment.
     pub api_url: Option<String>,
+    /// Persisted authentication recovery state for these exact credentials.
+    pub authentication_state: Option<crate::config::AuthenticationState>,
     /// Random for this daemon process and stable across control/bulk reconnects.
     /// Auth-callout leases this exact value and operational subjects include it.
     pub connection_instance_id: String,
@@ -621,6 +638,7 @@ impl<P: Platform> Clone for SupervisorLink<P> {
             platform: self.platform.clone(),
             credentials: self.credentials.clone(),
             api_url: self.api_url.clone(),
+            authentication_state: self.authentication_state,
             connection_instance_id: self.connection_instance_id.clone(),
             fabric: self.fabric.clone(),
         }
@@ -640,6 +658,7 @@ impl<P: Platform> SupervisorLink<P> {
             platform,
             credentials,
             api_url: None,
+            authentication_state: None,
             connection_instance_id: uuid::Uuid::new_v4().to_string(),
             fabric: None,
         }
@@ -659,6 +678,16 @@ impl<P: Platform> SupervisorLink<P> {
         self
     }
 
+    /// Suspend transport dialing while the connection store owns recovery.
+    #[must_use]
+    pub fn with_authentication_state(
+        mut self,
+        state: Option<crate::config::AuthenticationState>,
+    ) -> Self {
+        self.authentication_state = state;
+        self
+    }
+
     /// Use the process-wide runner identity. Credential-directory reconciliation
     /// must preserve it rather than looking like a competing daemon.
     #[must_use]
@@ -675,6 +704,7 @@ struct WorkspaceLink<P: Platform> {
     platform: Arc<P>,
     creds: StoredCredentials,
     api_url: Option<String>,
+    authentication_state: Option<crate::config::AuthenticationState>,
     connection_instance_id: String,
     fabric: Option<FabricLink>,
     epoch: Arc<EpochCell>,
@@ -700,6 +730,7 @@ impl<P: Platform> WorkspaceLink<P> {
             platform: definition.platform,
             creds: definition.credentials,
             api_url: definition.api_url,
+            authentication_state: definition.authentication_state,
             connection_instance_id: definition.connection_instance_id,
             fabric: definition.fabric,
             epoch: Arc::new(EpochCell::default()),
@@ -965,7 +996,13 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// running: their frames flow once their links connect.
     #[cfg(unix)]
     pub fn adopt_handed_over(&self, platform: &P, ops: Vec<crate::engine::HandedOverOp>) {
-        adopt_ops(&self.engine, platform, &self.frame_lanes, ops);
+        adopt_ops(
+            &self.engine,
+            platform,
+            &self.frame_lanes,
+            &self.update_drain,
+            ops,
+        );
     }
 
     /// A handle that, when [`request`](ShutdownSignal::request)ed, drives a clean
@@ -1145,6 +1182,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         }
                         let unchanged = same_scope && next.get(id).is_some_and(|candidate| {
                             candidate.credentials == link.creds
+                                && candidate.authentication_state == link.authentication_state
                         });
                         if !unchanged {
                             link.shutdown.request();
@@ -1207,6 +1245,12 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// Runs one workspace link's dial → serve → reconnect loop until a clean
     /// shutdown is requested.
     async fn run_link(&self, link: &WorkspaceLink<P>) {
+        if link.authentication_state.is_some() {
+            // Keep the frame/reply scope alive. Returning would make the outer
+            // reconciler respawn this same rejected link in a tight loop.
+            self.link_stop_notified(link).await;
+            return;
+        }
         let mut backoff = Backoff::standard();
         let mut reconnect = self.reconnect.subscribe();
         info!(
@@ -1236,6 +1280,28 @@ impl<P: Platform + 'static> Supervisor<P> {
                 .await
             {
                 ConnectionOutcome::CleanShutdown => return,
+                ConnectionOutcome::AuthenticationRejected => {
+                    // The file watcher adopts recovery state and later renewed
+                    // credentials without discarding retained work. If the disk
+                    // is temporarily unwritable, retry only that local write,
+                    // never the rejected network credential.
+                    loop {
+                        match crate::credential_renewal::record_authentication_rejection(
+                            &link.connection_id,
+                            &link.creds.nats_bearer,
+                        ) {
+                            Ok(()) => break,
+                            Err(error) => warn!(connection_id = %link.connection_id, %error,
+                                "could not persist authentication recovery; transport retries remain paused"),
+                        }
+                        tokio::select! {
+                            () = self.link_stop_notified(link) => return,
+                            () = tokio::time::sleep(backoff.next_delay()) => {}
+                        }
+                    }
+                    self.link_stop_notified(link).await;
+                    return;
+                }
                 ConnectionOutcome::CredentialRotation => {
                     info!(
                         connection_id = %link.connection_id,
@@ -1302,9 +1368,9 @@ impl<P: Platform + 'static> Supervisor<P> {
                 error!(
                     connection_id = %link.connection_id,
                     error = %e,
-                    "control plane rejected the enrollment bearer; automatic renewal and reconnect will retry. If renewal cannot authorize the existing grant, reconnect explicitly with `{reconnect_command}`"
+                    "control plane rejected this connection's credentials; transport retries paused pending renewal. Inspect `opengeni-agent connections`; if reconnect is required, use `{reconnect_command}`"
                 );
-                return ConnectionOutcome::Disconnected(e.to_string());
+                return ConnectionOutcome::AuthenticationRejected;
             }
             Err(e) => return ConnectionOutcome::Disconnected(e.to_string()),
         };
@@ -1523,6 +1589,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 ConnectionOutcome::CleanShutdown => "shutdown",
                 ConnectionOutcome::CredentialRotation => "credential_rotation",
                 ConnectionOutcome::Reconnect => "reconnect",
+                ConnectionOutcome::AuthenticationRejected => "authentication_rejected",
                 ConnectionOutcome::Disconnected(_) => "disconnect",
             };
             info!(
@@ -1660,6 +1727,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 .await;
                 return;
             };
+            reservation.describe(format!("{label} request {request_id}"));
             Some(reservation)
         } else {
             None
@@ -1889,7 +1957,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 publish_response(
                     client,
                     reply,
-                    update_error_response(request_id, "update_state_unavailable", true),
+                    update_unavailable_response(request_id, &self.update_drain),
                     "agent_update_apply",
                     max_payload,
                 )
@@ -1989,7 +2057,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         return;
                     }
                     UpdateReservation::Busy => Some("update_busy_work"),
-                    UpdateReservation::Unavailable => Some("update_state_unavailable"),
+                    UpdateReservation::Unavailable => Some(update_drain.unavailable_code()),
                 };
                 if busy_code.is_none() {
                     if let Some(backend) = browser_control.as_ref() {
@@ -2023,8 +2091,9 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // retains its exact owner for ordinary scoped recovery.
                 update_drain.release_update(&update.operation_id);
                 if update_drain.snapshot().is_none() {
-                    // Lost physical settlement never becomes provable again in
-                    // this process; waiting would only hide the failure.
+                    // Retain the exact cleanup fault; its owner may recover it.
+                    // Report it now rather than hiding it behind indefinite idle.
+                    warn!(reason = ?update_drain.unavailable_reason(), "self-update could not confirm producer cleanup");
                     update_drain.finish_update(&update.operation_id);
                     publish_agent_update_progress(
                         &client,
@@ -2033,7 +2102,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         &update,
                         v1::AgentUpdateStage::Failed,
                         "",
-                        "update_state_unavailable",
+                        update_drain.unavailable_code(),
                         true,
                         false,
                     )
@@ -2099,6 +2168,8 @@ impl<P: Platform + 'static> Supervisor<P> {
                         adoption_platform.as_ref(),
                         &frame_lanes,
                         &from_version,
+                        &update_drain,
+                        &update.operation_id,
                     )
                     .await
                     {
@@ -2341,6 +2412,11 @@ impl<P: Platform + 'static> Supervisor<P> {
     ) -> Result<ConnectedNats, ConnectionOutcome> {
         match self.dial(link, reconnect).await {
             Ok(Ok(connection)) => Ok(connection),
+            // A rejected credential pauses retries until renewal, as on the
+            // control connection, rather than redialing in a storm.
+            Ok(Err(SupervisorError::Authentication(_))) => {
+                Err(ConnectionOutcome::AuthenticationRejected)
+            }
             Ok(Err(e)) => Err(ConnectionOutcome::Disconnected(format!(
                 "bulk dial failed: {e}"
             ))),
@@ -2764,6 +2840,17 @@ fn credential_renew_response(
     }
 }
 
+fn update_unavailable_response(request_id: String, drain: &UpdateDrain) -> v1::ControlResponse {
+    let mut response = update_error_response(request_id, drain.unavailable_code(), true);
+    if let Some(reason) = drain.unavailable_reason() {
+        warn!(%reason, "self-update admission unavailable");
+        let error = response.error.as_mut().expect("update error response");
+        error.message.clone_from(&reason);
+        error.detail.insert("cleanup_reason".into(), reason);
+    }
+    response
+}
+
 fn update_error_response(
     request_id: String,
     failure_code: &str,
@@ -2934,12 +3021,11 @@ async fn publish_response(
     if let Some(receipt) = crate::rpc_replay::current() {
         receipt.complete(payload, reservation);
         receipt.deliver(client, reply).await;
-    } else if let Some(reservation) = reservation {
+    } else if let Some(_reservation) = reservation {
         // Attach the reply's receipt to its actual publication command. A
         // reconnect must fail that receipt rather than redeem it on a socket
         // that never wrote the old reply. This is not a consumer storage ACK.
         if let Err(flush_error) = client.publish_with_flush(reply, payload.into()).await {
-            reservation.mark_unsettled();
             warn!(error = %flush_error, op = label, "control rpc reply transport did not settle");
         }
     } else {
@@ -2956,6 +3042,8 @@ async fn publish_response(
 
 /// The outcome of one connection generation.
 enum ConnectionOutcome {
+    /// Stop transport attempts until the connection store resolves authority.
+    AuthenticationRejected,
     /// The connection dropped (transient); the supervisor backs off + reconnects.
     Disconnected(String),
     /// The short-lived NATS user credential expired as designed. Reconnect with
@@ -3063,13 +3151,15 @@ async fn hand_over_for_update<P: Platform>(
     platform: &P,
     lanes: &std::sync::Mutex<FrameLanes>,
     from_version: &str,
+    update_drain: &Arc<UpdateDrain>,
+    operation_id: &str,
 ) -> Result<(), &'static str> {
     let deadline = Instant::now() + HANDOVER_ATTEMPTS;
     let ops = loop {
         match engine.handover_all().await {
             Ok(ops) => break ops,
             Err(partial) => {
-                adopt_ops(engine, platform, lanes, partial);
+                adopt_ops(engine, platform, lanes, update_drain, partial);
                 if Instant::now() >= deadline {
                     warn!(
                         "running commands could not be handed to the updated agent; not restarting"
@@ -3080,6 +3170,24 @@ async fn hand_over_for_update<P: Platform>(
             }
         }
     };
+    // A carried job may have ended or failed while the binary downloaded.
+    // Its cleanup is not transferable. After every job surrendered its native
+    // handles, prove the remaining producers settled before committing to exec.
+    while !update_drain.seal_update_with_handover(operation_id) {
+        let code = if update_drain.snapshot().is_none() {
+            Some(update_drain.unavailable_code())
+        } else if Instant::now() >= deadline {
+            Some("update_handover_failed")
+        } else {
+            None
+        };
+        if let Some(code) = code {
+            warn!(reason = ?update_drain.unavailable_reason(), "producer cleanup prevented final update handover");
+            adopt_ops(engine, platform, lanes, update_drain, ops);
+            return Err(code);
+        }
+        tokio::time::sleep(HANDOVER_RETRY).await;
+    }
     let manifest = crate::handover::HandoverManifest {
         nonce: uuid::Uuid::new_v4().to_string(),
         from_version: from_version.to_string(),
@@ -3088,7 +3196,7 @@ async fn hand_over_for_update<P: Platform>(
     };
     if let Err(error) = crate::handover::write_manifest(&handover.manifest, &manifest) {
         warn!(%error, "could not record the update handover; commands keep running here");
-        adopt_ops(engine, platform, lanes, manifest.ops);
+        adopt_ops(engine, platform, lanes, update_drain, manifest.ops);
         return Err("update_handover_failed");
     }
     info!(
@@ -3122,7 +3230,7 @@ fn update_busy_code(
         (0, 0)
     };
     match pending {
-        None => Some("update_state_unavailable"),
+        None => Some(update_drain.unavailable_code()),
         Some(pending) if pending.uploads > 0 => Some("update_busy_uploads"),
         Some(pending)
             if pending.routed > if handover { pending.handover } else { 0 }
@@ -3141,6 +3249,23 @@ fn update_busy_code(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn update_cleanup_failure_names_the_producer_and_recovery() {
+        let drain = std::sync::Arc::new(UpdateDrain::default());
+        let work = drain.reserve_work(None).unwrap();
+        work.describe("exec request synthetic-request".into());
+        let failure = work.mark_unsettled("process group 42: wait failed");
+        let response = update_unavailable_response("update-request".into(), &drain);
+        let error = response.error.unwrap();
+        assert_eq!(error.detail["failure_code"], "update_cleanup_unconfirmed");
+        assert!(error.message.contains("synthetic-request"));
+        assert!(error.message.contains("process group 42"));
+        assert!(error.message.contains("restart the agent service"));
+        assert_eq!(error.detail["cleanup_reason"], error.message);
+        failure.resolve();
+        assert!(drain.unavailable_reason().is_none());
+    }
+
     #[tokio::test]
     async fn either_rpc_subscription_ending_ends_the_generation() {
         let mut messages = rpc_messages(futures::stream::empty(), futures::stream::pending());
@@ -5121,6 +5246,130 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    #[allow(clippy::too_many_lines)] // one real multi-link transport lifecycle
+    async fn rejected_link_stops_dialing_and_recovers_without_interrupting_healthy_links() {
+        use opengeni_agent_platform::NativePlatform;
+        let Some(nats_bin) = it::find_nats_server() else {
+            panic!("authentication regression requires nats-server");
+        };
+        let (_lock, _dir) = crate::config::tests::with_temp_config();
+        let port = it::free_local_port();
+        let monitor_port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn_authenticated(&nats_bin, port, monitor_port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let client = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match async_nats::ConnectOptions::new()
+                    .token("accepted-test-token".into())
+                    .connect(&url)
+                    .await
+                {
+                    Ok(client) => break client,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .expect("authenticated test broker should start");
+        let platform = Arc::new(NativePlatform::new());
+        let mut rejected_credentials = it::test_credentials(&url);
+        rejected_credentials.nats_bearer = "rejected-test-token".into();
+        let stored = crate::config::StoredConnection::new(
+            "https://api.example",
+            rejected_credentials.clone(),
+        );
+        crate::config::save_connection(&stored).unwrap();
+        let rejected = SupervisorLink::new(
+            stored.connection_id.clone(),
+            platform.clone(),
+            rejected_credentials,
+        )
+        .with_api_url(stored.api_url.clone())
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let mut healthy_credentials = it::test_credentials(&url);
+        healthy_credentials.nats_bearer = "accepted-test-token".into();
+        healthy_credentials.workspace_id = "healthy-workspace".into();
+        let healthy = SupervisorLink::new("healthy", platform, healthy_credentials)
+            .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let healthy_link = WorkspaceLink::from_definition(healthy.clone());
+        let mut healthy_events = client
+            .subscribe(healthy_link.events_subject())
+            .await
+            .unwrap();
+        let rejected_link = WorkspaceLink::from_definition(rejected.clone());
+        let mut rejected_events = client
+            .subscribe(rejected_link.events_subject())
+            .await
+            .unwrap();
+        let supervisor = Supervisor::new_links(&[rejected.clone(), healthy.clone()], "test");
+        let shutdown = supervisor.shutdown_handle();
+        let (updates, receiver) =
+            tokio::sync::watch::channel(vec![rejected.clone(), healthy.clone()]);
+        let run = tokio::spawn(async move { supervisor.run_with_updates(receiver).await });
+        assert!(
+            it::wait_for_event(
+                &mut healthy_events,
+                Duration::from_secs(10),
+                |event| matches!(event.event, Some(Event::Heartbeat(_)))
+            )
+            .await
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if crate::config::load_connection(&stored.connection_id)
+                    .unwrap()
+                    .unwrap()
+                    .authentication_state
+                    == Some(crate::config::AuthenticationState::RenewalRequired)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("rejected credential must be suspended");
+        let monitor = format!("http://127.0.0.1:{monitor_port}/varz");
+        let before: serde_json::Value = reqwest::get(&monitor).await.unwrap().json().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let after: serde_json::Value = reqwest::get(&monitor).await.unwrap().json().await.unwrap();
+        assert_eq!(
+            before["total_connections"], after["total_connections"],
+            "no rejected transport redials or healthy-link restarts"
+        );
+        let mut recovered = rejected;
+        recovered.credentials.nats_bearer = "accepted-test-token".into();
+        recovered.authentication_state =
+            Some(crate::config::AuthenticationState::ReconnectRequired);
+        updates
+            .send(vec![recovered.clone(), healthy.clone()])
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), rejected_events.next())
+                .await
+                .is_err(),
+            "a persisted terminal state must not dial, even with a transport that would accept it"
+        );
+        recovered.authentication_state = None;
+        updates.send(vec![recovered, healthy]).unwrap();
+        assert!(
+            it::wait_for_event(
+                &mut rejected_events,
+                Duration::from_secs(10),
+                |event| matches!(event.event, Some(Event::Heartbeat(_)))
+            )
+            .await
+        );
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
     /// Real-transport proof of the live reconciliation contract: two independent
     /// workspace links are online concurrently, removing one announces only that
     /// link offline, and the other still answers control RPC immediately.
@@ -6417,6 +6666,63 @@ mod tests {
         (Arc::new(supervisor), platform)
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_handover_rechecks_cleanup_after_the_initial_seal() {
+        let directory = tempfile::tempdir().unwrap();
+        let (supervisor, platform) = handover_test_supervisor(
+            directory.path(),
+            "nats://127.0.0.1:1",
+            TEST_CONNECTION_INSTANCE_ID,
+        );
+        let work = supervisor.update_drain.reserve_work(None).unwrap();
+        work.mark_handover();
+        assert_eq!(
+            supervisor.update_drain.reserve_update("update"),
+            UpdateReservation::Started
+        );
+        assert!(supervisor.update_drain.seal_update_with_handover("update"));
+        work.require_settlement();
+        let failure = work.mark_unsettled("synthetic cleanup during download");
+        let handover = supervisor.handover.as_ref().unwrap();
+        assert_eq!(
+            hand_over_for_update(
+                &supervisor.engine,
+                handover,
+                platform.as_ref(),
+                &supervisor.frame_lanes,
+                "test-0.0.0",
+                &supervisor.update_drain,
+                "update",
+            )
+            .await,
+            Err("update_cleanup_unconfirmed")
+        );
+        assert!(!directory.path().join("handover.json").exists());
+        assert!(!handover.is_pending());
+        failure.resolve();
+        let retry = hand_over_for_update(
+            &supervisor.engine,
+            handover,
+            platform.as_ref(),
+            &supervisor.frame_lanes,
+            "test-0.0.0",
+            &supervisor.update_drain,
+            "update",
+        );
+        tokio::pin!(retry);
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut retry)
+            .await
+            .is_err());
+        assert!(!handover.is_pending());
+        drop(work);
+        tokio::time::timeout(Duration::from_secs(5), retry)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(handover.is_pending());
+    }
+
     /// The agent side of [`a_running_command_continues_across_an_in_place_exec`]:
     /// the predecessor serves, hands its running command over, and `exec`s
     /// this same test binary as its successor, which continues it. A no-op in
@@ -6453,6 +6759,15 @@ mod tests {
             if let Some(manifest) = inherited {
                 assert_eq!(manifest.ops.len(), 1, "one running command handed over");
                 supervisor.adopt_handed_over(&platform, manifest.ops);
+                let owned = supervisor.update_drain.snapshot().unwrap();
+                assert_eq!(
+                    owned.routed, 1,
+                    "the adopted command owns a drain reservation"
+                );
+                assert_eq!(
+                    owned.handover, 1,
+                    "the adopted running command remains transferable"
+                );
                 std::fs::write(
                     directory.join("successor-online"),
                     std::process::id().to_string(),
@@ -6465,12 +6780,18 @@ mod tests {
                 while !directory.join("hand-over-now").exists() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
+                assert_eq!(
+                    supervisor.update_drain.reserve_update("fixture-update"),
+                    UpdateReservation::Started
+                );
                 hand_over_for_update(
                     &supervisor.engine,
                     supervisor.handover.as_ref().unwrap(),
                     platform.as_ref(),
                     &supervisor.frame_lanes,
                     "test-0.0.0",
+                    &supervisor.update_drain,
+                    "fixture-update",
                 )
                 .await
                 .expect("running command handed over");
@@ -6784,7 +7105,8 @@ mod tests {
         fn search_nats_server() -> Option<PathBuf> {
             if let Some(path) = std::env::var_os("PATH") {
                 for dir in std::env::split_paths(&path) {
-                    let candidate = dir.join("nats-server");
+                    let candidate =
+                        dir.join(format!("nats-server{}", std::env::consts::EXE_SUFFIX));
                     if candidate.is_file() {
                         return Some(candidate);
                     }
@@ -6885,6 +7207,26 @@ mod tests {
         pub struct NatsServerGuard(Child);
 
         impl NatsServerGuard {
+            pub fn spawn_authenticated(bin: &Path, port: u16, monitor_port: u16) -> Self {
+                Self(
+                    Command::new(bin)
+                        .args([
+                            "-a",
+                            "127.0.0.1",
+                            "-p",
+                            &port.to_string(),
+                            "-m",
+                            &monitor_port.to_string(),
+                            "--auth",
+                            "accepted-test-token",
+                        ])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .expect("spawn authenticated nats-server"),
+                )
+            }
             pub fn spawn(bin: &Path, port: u16) -> Self {
                 let child = Command::new(bin)
                     .args(["-a", "127.0.0.1", "-p", &port.to_string()])

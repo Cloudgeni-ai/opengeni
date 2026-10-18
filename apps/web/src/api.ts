@@ -34,6 +34,12 @@ let apiUpdateNoticeContainer: HTMLElement | null = null;
 const boundedHttp1SseTransport = "http1-bounded";
 const boundedHttp1SseBatchContentType = "application/vnd.opengeni.sse-batch";
 const HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS = 4_000;
+// A bounded HTTP/1 batch that carried events usually has more right behind it
+// (a streaming answer, a Steer taking effect). Reconnect after this short
+// pause instead of the idle grace, so a live answer is not shown seconds
+// late; the pause still lets requests already queued for the freed
+// connection go first. Empty batches keep the idle grace.
+const HTTP1_BROWSER_SSE_ACTIVE_RECONNECT_GRACE_MS = 250;
 const HTTP1_BROWSER_SSE_BATCH_MAX_BYTES = 512 * 1024;
 // New APIs answer bounded HTTP/1 event requests from an immediate durable
 // snapshot. Keep a browser-owned backstop as well: it bounds a stalled network
@@ -629,6 +635,7 @@ export function managedActorTrackedResponse(
   const reader = response.body!.getReader();
   let settled = false;
   let readerReleased = false;
+  let deliveredBytes = 0;
   let actorAbortReason: unknown | null = null;
   let cleanSeamGrace: Promise<void> | null = null;
   let lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -729,9 +736,15 @@ export function managedActorTrackedResponse(
             // The native body has reached EOF and its HTTP/1 connection is now
             // free. Keep the wrapper logically live for a short grace period
             // so already-queued finite reads win the browser's newly available
-            // slots before the SDK reconnects this durable stream.
+            // slots before the SDK reconnects this durable stream. A batch
+            // that carried events reconnects sooner: more are likely queued.
             if (cleanCloseDelayMs > 0) {
-              await abortableDelay(cleanCloseDelayMs, signal);
+              await abortableDelay(
+                deliveredBytes > 0
+                  ? Math.min(cleanCloseDelayMs, HTTP1_BROWSER_SSE_ACTIVE_RECONNECT_GRACE_MS)
+                  : cleanCloseDelayMs,
+                signal,
+              );
             }
             if (actorAbortReason !== null) {
               controller.error(actorAbortReason);
@@ -741,6 +754,7 @@ export function managedActorTrackedResponse(
             if (settle()) controller.close();
             return;
           }
+          deliveredBytes += next.value.byteLength;
           controller.enqueue(next.value);
         } catch (error) {
           releaseReader();

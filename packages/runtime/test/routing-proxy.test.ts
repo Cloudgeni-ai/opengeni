@@ -1661,7 +1661,9 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
   });
 
   test("process-local provider locators cannot become session background commands", async () => {
-    for (const kind of ["local", "docker", "opensandbox"] as const) {
+    // `unix_local` is the local backend's SDK client id, which is what the
+    // worker routes by.
+    for (const kind of ["local", "unix_local", "docker", "opensandbox"] as const) {
       let backgroundAdoptions = 0;
       const backend: RoutableBackendSession = {
         async execCommand() {
@@ -1688,7 +1690,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
   });
 
   test("supervised Docker and local handles become session background commands", async () => {
-    for (const kind of ["local", "docker"] as const) {
+    for (const kind of ["local", "unix_local", "docker"] as const) {
       let backgroundAdoptions = 0;
       const backend = {
         [Symbol.for("opengeni.durable-shell-process")]: true,

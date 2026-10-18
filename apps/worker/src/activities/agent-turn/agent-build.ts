@@ -790,7 +790,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...videoGenerationOption,
         lazyToolTransport,
         ...(eventing.toolPreparationReady
-          ? { toolPreparationReady: eventing.toolPreparationReady }
+          ? {
+              toolPreparationReady: eventing.toolPreparationReady,
+              ...(eventing.preparedTools?.startDeferredPreparation
+                ? { startToolPreparation: eventing.preparedTools.startDeferredPreparation }
+                : {}),
+            }
           : {}),
         preparationIndependentToolNames,
         supportsImageInput,

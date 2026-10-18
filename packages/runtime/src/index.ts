@@ -434,6 +434,15 @@ import {
 } from "./sandbox/codemode-client";
 import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
 export { InputWaitYield, modelResponseHasVisibleText } from "./input-wait-yield";
+import { withModelStepHandover } from "./model-step-handover";
+export { ModelStepHandover } from "./model-step-handover";
+export {
+  ModelPreemption,
+  isModelPreempted,
+  isPreemptedModelResponse,
+  preemptedResponseCutOffText,
+  preemptedResponseDone,
+} from "./model-preemption";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -2221,6 +2230,8 @@ export type BuildAgentOptions = {
    * may separately exempt an exact attempt-local tool below.
    */
   toolPreparationReady?: Promise<void>;
+  /** Start the owned deferred preparation if tool demand precedes provider dispatch. */
+  startToolPreparation?: () => void;
   /**
    * Exact attempt-local function names that remain visible and executable while
    * deferred catalog preparation is pending. This is a per-tool exception; it
@@ -3468,6 +3479,7 @@ function maybeInstallLazyToolTransport(
     },
     options.agentConfig != null,
     options.toolRouterInHistory === true,
+    options.startToolPreparation,
   );
 }
 
@@ -4517,6 +4529,8 @@ export type PreparedAgentTools = {
    * promise; an ordinary first model response does not.
    */
   ready?: Promise<PreparedAgentTools>;
+  /** Start the same deferred preparation on first provider dispatch or earlier tool demand. */
+  startDeferredPreparation?: () => void;
 };
 
 /**
@@ -4694,6 +4708,11 @@ export type PrepareToolsOptions = {
   materializeConnectorFile?: (request: ConnectorFileMaterializationRequest) => Promise<unknown>;
   /** Overlap every non-eager MCP connection/catalog with the first model request. */
   deferNonEagerUntilToolDemand?: boolean;
+  /** When deferred preparation is enabled, keep its CPU/database work off the
+   * pre-request path. The host calls startDeferredPreparation at provider
+   * dispatch; real tool demand can start it earlier. Existing hosts start
+   * immediately unless they explicitly own this lifecycle. */
+  deferredPreparationStart?: "immediate" | "provider-dispatch";
   /** @internal Shared live cells used by deferred preparation handles. */
   deferredCodexConnectorNamespaces?: Set<string>;
   /** @internal Shared live cells used by deferred preparation handles. */
@@ -4892,7 +4911,8 @@ class DeferredPreparedMcpServer implements MCPServer {
   };
 
   async connect(): Promise<void> {
-    // Physical connection is already running inside resolveTarget.
+    // The preparation owner starts the physical connection; merely exposing
+    // this provisional server must not start it before provider dispatch.
   }
 
   async close(): Promise<void> {
@@ -5466,6 +5486,10 @@ export async function prepareAgentTools(
     await connectedEagerBestEffort?.close().catch(() => undefined);
     await connectedEagerRequired?.close().catch(() => undefined);
   };
+  const closeUnstartedPreparation = async (): Promise<void> => {
+    await Promise.all(deferredEntries.map((entry) => entry.server.close().catch(() => undefined)));
+    await closePublishedServers();
+  };
   const completePreparation = async (): Promise<PreparedAgentTools> => {
     const execution = exposesDeferredPreparation ? "background" : "blocking";
     let attemptToolEnvironment: AttemptToolEnvironment | null = null;
@@ -5576,10 +5600,25 @@ export async function prepareAgentTools(
     return await completePreparation();
   }
 
-  // Non-eager connection/listing starts immediately but is not a first-request
-  // dependency. Search and direct deferred invocation join this exact promise.
-  const ready = completePreparation();
+  // One preparation and completion fence, regardless of whether provider
+  // dispatch or an earlier real tool demand starts it. Merely observing ready
+  // must not start synchronous catalog work on the first-request path.
+  let preparation: Promise<PreparedAgentTools> | null = null;
+  let preparationClosed = false;
+  let resolveReady!: (value: PreparedAgentTools) => void;
+  let rejectReady!: (reason: unknown) => void;
+  const ready = new Promise<PreparedAgentTools>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const startDeferredPreparation = (): void => {
+    if (preparation || preparationClosed) return;
+    preparation = Promise.resolve().then(completePreparation);
+    void preparation.then(resolveReady, rejectReady);
+  };
+  if (options.deferredPreparationStart !== "provider-dispatch") startDeferredPreparation();
   localToolServer?.bindAttemptToolEnvironmentProvider(async () => {
+    startDeferredPreparation();
     const prepared = await ready;
     if (!prepared.attemptToolEnvironment) {
       throw new Error("local model tool server has no exact attempt authority");
@@ -5609,9 +5648,13 @@ export async function prepareAgentTools(
     // Join the bounded deferred preparation and let its complete owner close
     // every server when available; if preparation itself failed, it already
     // released deferred resources and this scope still owns eager/local ones.
-    const fullyPrepared = await ready.catch(() => null);
+    preparationClosed = true;
+    if (!preparation) rejectReady(error);
+    const fullyPrepared = preparation ? await ready.catch(() => null) : null;
     if (fullyPrepared) {
       await fullyPrepared.close().catch(() => undefined);
+    } else if (!preparation) {
+      await closeUnstartedPreparation();
     } else {
       await closePublishedServers();
     }
@@ -5624,6 +5667,7 @@ export async function prepareAgentTools(
         entry.server.registryId,
         () => preparationSettled,
         async () => {
+          startDeferredPreparation();
           const prepared = await ready;
           return prepared.mcpServers.includes(entry.server) ? entry.server : null;
         },
@@ -5643,6 +5687,12 @@ export async function prepareAgentTools(
     inputWaitYield,
     resolvedMcpConnectionIds,
     close: async () => {
+      preparationClosed = true;
+      if (!preparation) {
+        rejectReady(new Error("Deferred tool preparation closed before it started"));
+        await closeUnstartedPreparation();
+        return;
+      }
       let prepared: PreparedAgentTools;
       try {
         prepared = await ready;
@@ -5658,6 +5708,7 @@ export async function prepareAgentTools(
     },
     codexConnectorNamespaces,
     ready,
+    startDeferredPreparation,
   };
 }
 
@@ -9052,6 +9103,8 @@ export type RunAgentStreamOptions = {
   beforeModelRequest?: ModelCallLifecycle["beforeModelRequest"];
   /** Register terminal response settlement before the next producer model request. */
   onModelResponse?: ModelCallLifecycle["onModelResponse"];
+  /** Lets a Steer cut the in-flight model request short (see streamWithPreemption). */
+  modelPreemption?: ModelCallLifecycle["modelPreemption"];
   /** Abort the provider/tool loop when the owning activity is cancelled. */
   signal?: AbortSignal;
   /** Nonblocking phase measurements for request preparation before provider I/O. */
@@ -9306,6 +9359,7 @@ export async function runAgentStream(
           ? { beforeModelRequest: overrides.beforeModelRequest }
           : {}),
         ...(overrides.onModelResponse ? { onModelResponse: overrides.onModelResponse } : {}),
+        ...(overrides.modelPreemption ? { modelPreemption: overrides.modelPreemption } : {}),
       },
       () =>
         withPreparedCompactionRequest(agent, () =>
@@ -9545,7 +9599,7 @@ async function runAgentStreamInternal(
       toolExecution: { preApprovalInputGuardrails: true },
       ...lazyToolRunBindings(agent),
       callModelInputFilter: ownedFilter,
-      ...(inputWaitYield ? { errorHandlers: inputWaitYield.errorHandlers } : {}),
+      errorHandlers: withModelStepHandover(inputWaitYield?.errorHandlers),
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
     ownedRunOptions.sandbox = {
@@ -9711,7 +9765,7 @@ async function runAgentStreamInternal(
     // raise the proactive compaction signal. This runs for turn-start replay AND
     // every mid-turn follow-up.
     callModelInputFilter,
-    ...(inputWaitYield ? { errorHandlers: inputWaitYield.errorHandlers } : {}),
+    errorHandlers: withModelStepHandover(inputWaitYield?.errorHandlers),
     ...(overrides.signal ? { signal: overrides.signal } : {}),
   };
   if (client) {
