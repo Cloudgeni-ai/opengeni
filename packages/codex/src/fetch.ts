@@ -840,11 +840,11 @@ function setCodexIdentityHeaders(
   headers.set("originator", CODEX_ORIGINATOR);
   headers.set("User-Agent", `${CODEX_ORIGINATOR}/${ctx.clientVersion}`);
   headers.set("version", ctx.clientVersion);
-  if (ctx.sessionId) {
-    // Backend sticky cache-routing key (see CodexRequestContext.sessionId):
-    // without it, byte-identical resends miss the prompt cache ~half the
-    // time; with it they pin to a warm shard and hit at the ceiling.
-    headers.set("session_id", ctx.sessionId);
+  const affinityKey = ctx.cacheAffinityKey ?? ctx.sessionId;
+  if (affinityKey) {
+    // Cache affinity is not conversation identity. Keep the body's session
+    // key and the transport's conversation-scoped continuation unchanged.
+    headers.set("session_id", affinityKey);
   }
   if (auth.isFedramp) {
     headers.set("X-OpenAI-Fedramp", "true");

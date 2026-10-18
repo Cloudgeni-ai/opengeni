@@ -90,7 +90,7 @@ import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 
-import { codexWorkspaceMetricKey } from "./codex";
+import { codexCacheAffinityKey, codexWorkspaceMetricKey } from "./codex";
 import {
   filterUnmaterializedSandboxFileDownloads,
   sandboxFileMaterializationOutcome,
@@ -113,7 +113,7 @@ import {
 } from "./codex-core-capacity";
 import { createCoreCodexRequests, providerRequestIdPrefix } from "./codex-core-requests";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
-import { prepareGovernanceAndModel } from "./governance-model";
+import { preferenceSnapshotHumanSubjectId, prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
 import { createSandboxTurnRuntime } from "./sandbox-runtime";
 import {
@@ -575,29 +575,39 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         executionGeneration: attempt.executionGeneration,
       };
-      const learning = await measureTurnStartupPhase(
-        observability,
-        {
-          phase: "learning_policy_freeze",
-          provider: turnExecutionPolicy.providerId,
-          backend: turn.sandboxBackend,
-        },
-        () =>
-          freezeAgentLearningPolicy(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            actor: learningActor,
-          }),
-      );
-      const attachmentAuthority = await measureTurnStartupPhase(
-        observability,
-        {
-          phase: "attachment_authority_projection",
-          provider: turnExecutionPolicy.providerId,
-          backend: turn.sandboxBackend,
-        },
-        () => getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
-      );
+      // Both use the accepted attempt, but neither depends on the other.
+      // Finish both before installing the file-access context below.
+      const [learningResult, attachmentResult] = await Promise.allSettled([
+        measureTurnStartupPhase(
+          observability,
+          {
+            phase: "learning_policy_freeze",
+            provider: turnExecutionPolicy.providerId,
+            backend: turn.sandboxBackend,
+          },
+          () =>
+            freezeAgentLearningPolicy(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              actor: learningActor,
+            }),
+        ),
+        measureTurnStartupPhase(
+          observability,
+          {
+            phase: "attachment_authority_projection",
+            provider: turnExecutionPolicy.providerId,
+            backend: turn.sandboxBackend,
+          },
+          () => getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
+        ),
+      ]);
+      // Observe both operations before failure handling; the policy write
+      // must not outlive this stage if the independent authority read fails.
+      if (learningResult.status === "rejected") throw learningResult.reason;
+      if (attachmentResult.status === "rejected") throw attachmentResult.reason;
+      const learning = learningResult.value;
+      const attachmentAuthority = attachmentResult.value;
       if (!attachmentAuthority) throw new Error("Session attachment authority unavailable");
       return await withSessionRlsActorContext(
         {
@@ -840,13 +850,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   };
                   return {
                     clientVersion: CODEX_CLIENT_VERSION,
-                    // Backend sticky cache-routing key — the SAME id as the body's
-                    // prompt_cache_key (set from input.sessionId for codex turns),
-                    // so routing and cache key agree. Without this header on the
-                    // wire, byte-identical resends hit the prompt cache ~50%
-                    // (per-request shard lottery = prod's measured 48.6% on sol);
-                    // with it, resends pin to the warm shard (Codex CLI parity).
                     sessionId: input.sessionId,
+                    cacheAffinityKey: codexCacheAffinityKey(
+                      input.workspaceId,
+                      preferenceSnapshotHumanSubjectId(turn),
+                      input.sessionId,
+                    ),
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),

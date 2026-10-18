@@ -159,8 +159,10 @@ describe("interaction attempt tools", () => {
     const act = definitions.find(
       (definition) => definition.modelName === "interaction__browser_act",
     )!;
-    expect(act.description).toContain("An upload action takes workspace File IDs");
-    expect(act.description).toContain("artifact.artifactId returned by sandbox_file_publish");
+    expect(act.description).toContain(
+      "An upload action takes paths of files in this session's workspace",
+    );
+    expect(act.description).toContain("a sandbox_file_publish artifactId");
   });
 
   test("login tools tell the model to sign in itself and hand off only physical steps", () => {
@@ -1478,6 +1480,197 @@ describe("interaction attempt tools", () => {
     });
     for (const omitted of ["operationId", "browserSessionId", "dispatchedAt", "error"])
       expect(result.structuredContent).not.toHaveProperty(omitted);
+  });
+
+  test("returns a post-action screenshot in the same call when includeScreenshot is set", async () => {
+    const target = browserTarget();
+    const observation = browserObservation(target);
+    const image = new Uint8Array([1, 2, 3]);
+    const order: string[] = [];
+    let captureFails = false;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, value) => {
+          order.push("act");
+          return browserReceipt(value.operationId, observation);
+        },
+        captureBrowserTarget: async (_workspaceId, _browserSessionId, targetId) => {
+          order.push(`capture:${targetId}`);
+          if (captureFails) throw new Error("synthetic capture failure");
+          return {
+            frameId: "captured-browser-frame",
+            browserSessionId,
+            controllerGeneration: target.controllerGeneration,
+            targetId: target.id,
+            targetGeneration: target.targetGeneration,
+            documentGeneration: target.documentGeneration!,
+            sequence: 1,
+            mediaType: "image/jpeg",
+            width: 1,
+            height: 1,
+            deviceScaleFactor: 1,
+            scrollX: 0,
+            scrollY: 0,
+            capturedAt: now,
+            data: image,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+    });
+    const context = {
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    };
+    const action = { type: "scroll", deltaX: 0, deltaY: 480 };
+
+    const plain = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, action },
+      context,
+    );
+    expect(plain.content).toHaveLength(1);
+    expect(order).toEqual(["act"]);
+
+    order.length = 0;
+    const visual = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, action, includeScreenshot: true },
+      { ...context, operationId: randomUUID() },
+    );
+    // The capture follows the settled action, never runs alongside it.
+    expect(order).toEqual(["act", `capture:${target.id}`]);
+    expect(visual.isError).toBeFalsy();
+    expect(visual.content).toHaveLength(2);
+    expect(visual.content[0]).toMatchObject({ type: "text" });
+    expect(visual.content[1]).toEqual({
+      type: "image",
+      data: Buffer.from(image).toString("base64"),
+      mimeType: "image/jpeg",
+    });
+    expect(visual.structuredContent).toMatchObject({ targetId: target.id, state: "completed" });
+
+    // A failed capture keeps the completed action's receipt and says why.
+    captureFails = true;
+    const failed = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, action, includeScreenshot: true },
+      { ...context, operationId: randomUUID() },
+    );
+    expect(failed.isError).toBeFalsy();
+    expect(failed.structuredContent).toMatchObject({ targetId: target.id, state: "completed" });
+    expect(failed.content).toHaveLength(2);
+    expect((failed.content[1] as { text: string }).text).toBe(
+      "The action ran, but its screenshot could not be captured: synthetic capture failure",
+    );
+  });
+
+  test("an upload by workspace path publishes each file once per operation and dispatches File IDs", async () => {
+    const target = browserTarget();
+    const observation = browserObservation(target);
+    const published: string[] = [];
+    const dispatched: BrowserActionRequest[] = [];
+    let failDispatch = true;
+    const fileIds = new Map<string, string>();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          actInBrowser: async (_workspaceId, _browserSessionId, value) => {
+            dispatched.push(value);
+            if (failDispatch) {
+              failDispatch = false;
+              throw new Error("synthetic dispatch failure");
+            }
+            return browserReceipt(value.operationId, observation);
+          },
+        }),
+        publishSandboxFileArtifact: async (_workspaceId, publishingSessionId, request) => {
+          expect(publishingSessionId).toBe(sessionId);
+          published.push(request.path);
+          const artifactId = randomUUID();
+          fileIds.set(request.path, artifactId);
+          return {
+            type: "sandbox_file" as const,
+            sandboxPath: request.path,
+            filename: request.path.split("/").at(-1)!,
+            artifact: {
+              available: true as const,
+              artifactId,
+              kind: "file" as const,
+              contentType: "text/csv",
+              originalBytes: 3,
+              sha256: "0".repeat(64),
+              retainedAt: now,
+            },
+          };
+        },
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+    });
+    const context = {
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    };
+    const input = {
+      browserSessionId,
+      targetId: target.id,
+      action: {
+        type: "batch",
+        actions: [
+          { type: "upload", locator: "e1a2b3c4d", paths: ["out/a.csv", "out/b.csv"] },
+          { type: "click", locator: "e5f6a7b8c" },
+        ],
+      },
+    };
+
+    await expect(definitions[0]!.execute(input, context)).rejects.toThrow(
+      "synthetic dispatch failure",
+    );
+    // The retry of the same operation dispatches the same File IDs without publishing again.
+    const retried = await definitions[0]!.execute(input, context);
+    expect(retried.isError).toBeFalsy();
+    expect(published).toEqual(["out/a.csv", "out/b.csv"]);
+    expect(dispatched).toHaveLength(2);
+    for (const request of dispatched) {
+      expect(request.action).toEqual({
+        type: "batch",
+        actions: [
+          {
+            type: "upload",
+            locator: { kind: "ref", ref: "e1a2b3c4d" },
+            workspaceFileIds: [fileIds.get("out/a.csv"), fileIds.get("out/b.csv")],
+          },
+          { type: "click", locator: { kind: "ref", ref: "e5f6a7b8c" } },
+        ],
+      });
+    }
+
+    // File IDs still pass through untouched, and the model sees both forms in one line.
+    const direct = await definitions[0]!.execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: {
+          type: "upload",
+          locator: "e1a2b3c4d",
+          workspaceFileIds: [fileIds.get("out/a.csv")],
+        },
+      },
+      { ...context, operationId: randomUUID() },
+    );
+    expect(direct.isError).toBeFalsy();
+    expect(dispatched.at(-1)!.action).toEqual({
+      type: "upload",
+      locator: { kind: "ref", ref: "e1a2b3c4d" },
+      workspaceFileIds: [fileIds.get("out/a.csv")],
+    });
+    expect(published).toHaveLength(2);
+    expect(JSON.stringify(definitions[0]!.inputSchema)).toContain(
+      "upload: locator, workspaceFileIds?, paths?",
+    );
   });
 
   test("skips the pre-action AX read with all explicit fences and omits post-action AX on request", async () => {

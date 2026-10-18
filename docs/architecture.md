@@ -27,8 +27,13 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 External users require live membership/`asUser()`; an organization key holding
 `members:manage` creates a missing shared-workspace membership on the user's first
 request (`provisionExternalMemberOnFirstUse` in `packages/core/src/access`, never
-changing an existing one; SDK per-user workspaces stay single-user). Visibility differs from `agentAccess`;
-Personal Knowledge follows the verified active-turn user. Links never merge users.
+changing an existing one; SDK per-user workspaces stay single-user).
+External workspace routes resolve their organization-local mapping before native
+workspace authorization. All native-workspace HTTP middleware shares the same
+route-namespace/UUID admission boundary; lookup failures propagate to HTTP
+diagnostics rather than being treated as missing workspaces.
+Visibility differs from `agentAccess`; Personal Knowledge follows the verified
+active-turn user. Links never merge users.
 [Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), [run lifecycle](run-lifecycle.md).
@@ -605,8 +610,15 @@ Accepted execution-policy digests tolerate only provably additive latency-mode
 and input-modality declarations, retaining the frozen mode and request tier;
 provider identity and all other executable fields remain exact.
 `packages/core/src/codex-model-availability.ts` requires exact live support on every
-permitted serving account for browser/default/agent choices. It rechecks authority,
-refreshes tokens, and caches support by workspace/credential/revision.
+permitted serving account for browser/default/agent choices. It rechecks authority
+and reuses the shared core's stored catalog only while its credential generation
+and original expiry remain current; stale observations use the existing scoped
+token/probe path. Successful durable composer saves can prepare those facts via
+`packages/core/src/application/draft-model-preparation.ts`. Typing never admits a
+turn, starts a workflow, acquires a turn lease, calls a model, or wakes compute.
+Its credential read is fresh-only: renewal and connection-health changes are
+left to normal access, so preparing a draft cannot revoke its own readiness.
+See [typing preparation](design/typing-turn-preparation.md).
 
 Claude projects system inputs at native phase boundaries, adding a labeled
 machine-continuation anchor when needed, without changing canonical roles/content.
@@ -1416,6 +1428,11 @@ Deployment policy, activation order and customer flow: [scoped promotional
 credits](scoped-promotional-credits.md).
 
 Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
+
+Codex Responses cache affinity is a stable workspace/person cohort, independent
+of the actual session's body key, socket and continuation chain. Unknown human
+identity retains per-session routing. No prompt text or history participates in
+the affinity calculation. See [cache-affinity design](design/codex-cache-affinity.md).
 
 Provider-normalized calls freeze nullable provider/equivalent-credit comparisons.
 `priced_cost_micros` is requested price, not debit; external calls record zero.

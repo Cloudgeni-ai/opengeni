@@ -456,6 +456,22 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     ) as { options?: { timeout?: number } };
     expect(e2b.options?.timeout).toBe(120);
 
+    // The key, domain and addresses reach the adapter explicitly, for every
+    // create and resume against E2B's cloud or an E2B-compatible API.
+    const e2bCompatible = createSandboxClient(
+      testSettings({
+        sandboxBackend: "e2b",
+        e2bApiKey: "k",
+        e2bDomain: "sandboxes.example.com",
+        e2bApiUrl: "https://api.sandboxes.example.com",
+      }),
+    ) as { options?: { connection?: Record<string, unknown> } };
+    expect(e2bCompatible.options?.connection).toEqual({
+      apiKey: "k",
+      domain: "sandboxes.example.com",
+      apiUrl: "https://api.sandboxes.example.com",
+    });
+
     const cloudflare = createSandboxClient(
       testSettings({
         sandboxBackend: "cloudflare",

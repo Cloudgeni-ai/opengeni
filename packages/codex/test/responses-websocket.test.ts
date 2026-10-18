@@ -201,6 +201,63 @@ function request(
   } satisfies RequestInit;
 }
 
+test("shared cache affinity never shares sockets or continuation between conversations", async () => {
+  const { rawTransport, sockets, httpCalls } = harness();
+  const turns = [createResponsesTurn("session-a"), createResponsesTurn("session-b")];
+  const inputs = turns.map((_, i) => [{ role: "user", content: `Private conversation ${i}` }]);
+  const outputs = turns.map((_, i) => [
+    { type: "message", role: "assistant", content: `Answer ${i}` },
+  ]);
+  try {
+    const first = turns.map((turn, i) =>
+      withResponsesConversation(turn, () =>
+        rawTransport(
+          URL,
+          request({
+            model: "m",
+            stream: true,
+            input: inputs[i],
+            prompt_cache_key: `session-${i}`,
+          }),
+        ),
+      ),
+    );
+    for (const i of [0, 1]) {
+      const socket = await nextSend(() => sockets[i]);
+      expect(socket.headers.session_id).toBe("conversation");
+      socket.emit({
+        type: "response.completed",
+        response: { id: `response-${i}`, output: outputs[i] },
+      });
+      await (await first[i]!).text();
+    }
+    expect(sockets).toHaveLength(2);
+    for (const i of [0, 1]) {
+      const followup = { role: "user", content: `Continue ${i}` };
+      const pending = withResponsesConversation(turns[i], () =>
+        rawTransport(
+          URL,
+          request({
+            model: "m",
+            stream: true,
+            input: [...inputs[i]!, ...outputs[i]!, followup],
+            prompt_cache_key: `session-${i}`,
+          }),
+        ),
+      );
+      await Bun.sleep(1);
+      expect(sockets[i]!.sent[1]?.previous_response_id).toBe(`response-${i}`);
+      expect(sockets[i]!.sent[1]?.input).toEqual([followup]);
+      sockets[i]!.emit({ type: "response.completed", response: { id: `later-${i}`, output: [] } });
+      await (await pending).text();
+    }
+    expect(sockets).toHaveLength(2);
+    expect(httpCalls).toHaveLength(0);
+  } finally {
+    for (const socket of sockets) socket.close();
+  }
+});
+
 async function nextSend(socket: () => FakeSocket | undefined) {
   for (let i = 0; i < 50; i++) {
     const current = socket();

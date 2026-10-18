@@ -31,6 +31,14 @@ const MAX_ARGUMENT_BYTES = 4 * 1024 * 1024;
 const DAEMON_STOP_TIMEOUT_MS = 3_000;
 const PROCESS_QUERY_TIMEOUT_MS = 2_000;
 const MAX_PROCESS_QUERY_BYTES = 8 * 1024;
+/** A whole-host process listing (every process with its command line) is far
+ * larger than a single-process query and may take longer on a busy host. */
+const PROCESS_INVENTORY_LIMITS = { maxBytes: 32 * 1024 * 1024, timeoutMs: 10_000 } as const;
+/** One process's command line plus its environment. */
+const PROCESS_ENVIRONMENT_LIMITS = { maxBytes: 1024 * 1024, timeoutMs: 2_000 } as const;
+/** An agent-browser daemon without a browser child that is younger than this
+ * may still be starting its browser, so startup reconciliation leaves it. */
+const ORPHANED_DAEMON_MIN_AGE_MS = 120_000;
 const CHROME_STDERR_DIAGNOSTIC_BYTES = 64 * 1024;
 
 /** Chromium features every managed browser turns off. Chromium honors only
@@ -230,6 +238,12 @@ export class AgentBrowserJsonRunner {
       // directory. No missing-memory/PID-file inference or pre-launch kill.
       if (state !== "exited" || options.allowOwnedProcessLaunch !== true)
         throw new AgentBrowserCommandError("process_failed", "owned browser outcome is unknown");
+      // The browser is proven gone and no process runs its profile, but the
+      // agent-browser daemon that launched it does not exit with its browser:
+      // after its controller died it keeps running with nothing to serve.
+      // Stop every daemon identified, from its own environment, as started
+      // for this exact profile or socket directory before checking records.
+      await stopOrphanedAgentBrowserDaemons(options.profileDirectory, options.socketDirectory);
       await assertNoLiveDaemonRecords(options.socketDirectory, options.namespace);
     }
     for (const directory of [
@@ -1505,7 +1519,14 @@ async function waitForProcessStop(pid: number, timeoutMs: number): Promise<boole
   return !(await processRunning(pid));
 }
 
-async function boundedProcessOutput(command: string, args: readonly string[]): Promise<string> {
+async function boundedProcessOutput(
+  command: string,
+  args: readonly string[],
+  limits: { maxBytes: number; timeoutMs: number } = {
+    maxBytes: MAX_PROCESS_QUERY_BYTES,
+    timeoutMs: PROCESS_QUERY_TIMEOUT_MS,
+  },
+): Promise<string> {
   const child = spawn(command, args, {
     stdio: ["ignore", "pipe", "ignore"],
     windowsHide: true,
@@ -1515,13 +1536,13 @@ async function boundedProcessOutput(command: string, args: readonly string[]): P
   let overflow = false;
   child.stdout.on("data", (chunk: Buffer) => {
     bytes += chunk.byteLength;
-    if (bytes <= MAX_PROCESS_QUERY_BYTES) chunks.push(chunk);
+    if (bytes <= limits.maxBytes) chunks.push(chunk);
     else {
       overflow = true;
       child.kill("SIGKILL");
     }
   });
-  const timer = setTimeout(() => child.kill("SIGKILL"), PROCESS_QUERY_TIMEOUT_MS);
+  const timer = setTimeout(() => child.kill("SIGKILL"), limits.timeoutMs);
   timer.unref?.();
   const code = await new Promise<number | null>((resolveExit, reject) => {
     child.once("error", reject);
@@ -1877,20 +1898,9 @@ export async function inspectOwnedManagedBrowserProcess(
   }
   validateOwnedCdpEndpoint(receipt.cdpEndpoint);
   if (!(await processRunning(receipt.pid))) {
-    if (process.platform !== "linux") {
-      // macOS has no existing exhaustive profile-process inventory. Never
-      // infer absence of a successor from a missing pid alone.
-      throw new AgentBrowserCommandError(
-        "process_failed",
-        "exact directory launch absence is unproven",
-      );
-    }
-    if (await findLinuxManagedBrowserProcess(receipt.profileDirectory, null, true)) {
-      throw new AgentBrowserCommandError(
-        "process_failed",
-        "another process owns the exact profile",
-      );
-    }
+    // Never infer absence of a successor from a missing pid alone: a complete
+    // process inventory must show that nothing else runs the exact profile.
+    await assertManagedBrowserProfileUnused(receipt.profileDirectory);
     return "exited";
   }
   if ((await processBirth(receipt.pid)) !== receipt.birth) {
@@ -2192,18 +2202,28 @@ export async function stopEndedManagedBrowserProcess(
       await stopLaunchingAgentBrowserDaemon(daemon);
     }
   }
-  if (process.platform !== "linux") return;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const survivor = await findLinuxManagedBrowserProcess(profileDirectory, null);
-    if (!survivor) return;
-    const daemon = await launchingAgentBrowserDaemon(survivor.pid);
-    await stopIdentifiedProcess(survivor.pid);
-    await stopLaunchingAgentBrowserDaemon(daemon);
+  if (process.platform === "linux") {
+    let stopped = false;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const survivor = await findLinuxManagedBrowserProcess(profileDirectory, null);
+      if (!survivor) {
+        stopped = true;
+        break;
+      }
+      const daemon = await launchingAgentBrowserDaemon(survivor.pid);
+      await stopIdentifiedProcess(survivor.pid);
+      await stopLaunchingAgentBrowserDaemon(daemon);
+    }
+    if (!stopped)
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "a browser kept running the ended session's private profile",
+      );
   }
-  throw new AgentBrowserCommandError(
-    "process_failed",
-    "a browser kept running the ended session's private profile",
-  );
+  // A browser that had already exited leaves its launching daemon behind
+  // with no parent to find it through; find it by the profile it serves.
+  // The end itself never depends on this: the browser is already stopped.
+  await stopOrphanedAgentBrowserDaemons(profileDirectory).catch(() => undefined);
 }
 
 /** The pinned agent-browser executable as installed (agent-browser) or as
@@ -2258,14 +2278,287 @@ async function processExecutableName(pid: number): Promise<string> {
 
 /** Read-only proof that no process is running a browser on this exact private
  * profile, with the same standard as an exact-directory relaunch: a complete
- * process inventory on Linux; elsewhere absence is unproven and refused. */
+ * process inventory on Linux and macOS; elsewhere absence is unproven and
+ * refused. */
 export async function assertManagedBrowserProfileUnused(profileDirectory: string): Promise<void> {
-  if (process.platform !== "linux") {
-    throw new AgentBrowserCommandError("process_failed", "exact profile absence is unproven");
+  if (process.platform === "linux") {
+    if (await findLinuxManagedBrowserProcess(profileDirectory, null, true)) {
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "another process owns the exact profile",
+      );
+    }
+    return;
   }
-  if (await findLinuxManagedBrowserProcess(profileDirectory, null, true)) {
-    throw new AgentBrowserCommandError("process_failed", "another process owns the exact profile");
+  if (process.platform === "darwin") {
+    await assertNoDarwinProcessNamesProfile(profileDirectory);
+    return;
   }
+  throw new AgentBrowserCommandError("process_failed", "exact profile absence is unproven");
+}
+
+/** The macOS counterpart of the Linux procfs inventory: one listing of every
+ * process with its full command line. Any mention of the exact profile switch
+ * refuses, as on Linux. A process whose arguments the system withholds is
+ * shown as "(name)"; that happens only for another user's process, which
+ * cannot open a profile that is private to this user, so it is accepted only
+ * while the profile is owned by this user and closed to everyone else. */
+async function assertNoDarwinProcessNamesProfile(profileDirectory: string): Promise<void> {
+  const profile = resolve(profileDirectory);
+  const listing = await boundedProcessOutput(
+    "/bin/ps",
+    ["-axww", "-o", "pid=,uid=,command="],
+    PROCESS_INVENTORY_LIMITS,
+  );
+  if (!listing.trim()) {
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "exact profile process inventory is incomplete",
+    );
+  }
+  const profileArgument = `--user-data-dir=${profile}`;
+  const uid = process.getuid?.();
+  let withheld = false;
+  for (const line of listing.split("\n")) {
+    const match = /^\s*([0-9]+)\s+([0-9]+)\s(.*)$/u.exec(line);
+    if (!match) continue;
+    const command = match[3]!.trim();
+    if (command.includes(profileArgument)) {
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "exact directory launch absence is unproven",
+      );
+    }
+    if (/^\(.*\)$/u.test(command) && Number(match[2]) !== uid) withheld = true;
+  }
+  if (!withheld) return;
+  const metadata = await lstat(profile);
+  if (metadata.uid !== uid || (metadata.mode & 0o077) !== 0) {
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "exact profile process inventory is incomplete",
+    );
+  }
+}
+
+type AgentBrowserDaemonProcess = {
+  pid: number;
+  birth: string;
+  profileDirectory: string | null;
+  socketDirectory: string | null;
+  ageMs: number | null;
+  hasLiveChildren: boolean;
+};
+
+/** Every agent-browser daemon this user runs, identified from the live
+ * process itself: an agent-browser executable started with the daemon
+ * environment agent-browser gives it, including the exact profile and socket
+ * directory it serves. A PID record can outlive its daemon or name a reused
+ * PID; a process's own environment cannot. */
+async function agentBrowserDaemonProcesses(): Promise<AgentBrowserDaemonProcess[]> {
+  if (process.platform === "linux") return await linuxAgentBrowserDaemonProcesses();
+  if (process.platform === "darwin") return await darwinAgentBrowserDaemonProcesses();
+  return [];
+}
+
+async function linuxAgentBrowserDaemonProcesses(): Promise<AgentBrowserDaemonProcess[]> {
+  const liveChildren = new Set<number>();
+  const candidates: { pid: number; startTicks: number }[] = [];
+  for (const entry of await readdir("/proc", { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^[1-9][0-9]*$/u.test(entry.name)) continue;
+    const pid = Number(entry.name);
+    let fields: string[];
+    try {
+      const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+      fields = stat
+        .slice(stat.lastIndexOf(")") + 2)
+        .trim()
+        .split(/\s+/u);
+    } catch {
+      continue;
+    }
+    if (fields[0] !== "Z") liveChildren.add(Number(fields[1]));
+    let executable: string;
+    try {
+      // Another user's executable link is unreadable; such a process is
+      // never one of this user's daemons.
+      executable = await readlink(`/proc/${pid}/exe`);
+    } catch {
+      continue;
+    }
+    if (!AGENT_BROWSER_EXECUTABLE_NAME.test(basename(executable.replace(/ \(deleted\)$/u, ""))))
+      continue;
+    candidates.push({ pid, startTicks: Number(fields[19]) });
+  }
+  if (candidates.length === 0) return [];
+  const uptimeSeconds = Number((await readFile("/proc/uptime", "utf8")).split(/\s+/u)[0]);
+  const daemons: AgentBrowserDaemonProcess[] = [];
+  for (const candidate of candidates) {
+    let environment: Map<string, string>;
+    let birth: string;
+    try {
+      environment = new Map(
+        (await readFile(`/proc/${candidate.pid}/environ`, "utf8")).split("\0").map((entry) => {
+          const separator = entry.indexOf("=");
+          return [entry.slice(0, separator), entry.slice(separator + 1)] as [string, string];
+        }),
+      );
+      birth = await processBirth(candidate.pid);
+    } catch {
+      continue;
+    }
+    if (environment.get("AGENT_BROWSER_DAEMON") !== "1") continue;
+    // Linux reports process start in clock ticks of USER_HZ, which is 100 on
+    // every supported architecture.
+    const ageMs =
+      Number.isFinite(uptimeSeconds) && Number.isFinite(candidate.startTicks)
+        ? Math.round((uptimeSeconds - candidate.startTicks / 100) * 1000)
+        : null;
+    daemons.push({
+      pid: candidate.pid,
+      birth,
+      profileDirectory: environment.get("AGENT_BROWSER_PROFILE") ?? null,
+      socketDirectory: environment.get("AGENT_BROWSER_SOCKET_DIR") ?? null,
+      ageMs,
+      hasLiveChildren: liveChildren.has(candidate.pid),
+    });
+  }
+  return daemons;
+}
+
+async function darwinAgentBrowserDaemonProcesses(): Promise<AgentBrowserDaemonProcess[]> {
+  const listing = await boundedProcessOutput(
+    "/bin/ps",
+    ["-axww", "-o", "pid=,ppid=,uid=,stat=,etime=,comm="],
+    PROCESS_INVENTORY_LIMITS,
+  );
+  if (!listing.trim()) {
+    throw new AgentBrowserCommandError("process_failed", "process inventory is unavailable");
+  }
+  const uid = process.getuid?.();
+  const liveChildren = new Set<number>();
+  const candidates: { pid: number; ageMs: number | null }[] = [];
+  for (const line of listing.split("\n")) {
+    const match = /^\s*([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+(\S+)\s+(\S+)\s(.*)$/u.exec(line);
+    if (!match) continue;
+    if (!match[4]!.startsWith("Z")) liveChildren.add(Number(match[2]));
+    if (Number(match[3]) !== uid) continue;
+    if (!AGENT_BROWSER_EXECUTABLE_NAME.test(basename(match[6]!.trim()))) continue;
+    candidates.push({ pid: Number(match[1]), ageMs: darwinElapsedMs(match[5]!) });
+  }
+  const daemons: AgentBrowserDaemonProcess[] = [];
+  for (const candidate of candidates) {
+    // `ps -E` appends the process environment to its command line. A daemon
+    // is started without arguments, so every later word is NAME=value.
+    const described = (
+      await boundedProcessOutput(
+        "/bin/ps",
+        ["-E", "-ww", "-o", "command=", "-p", String(candidate.pid)],
+        PROCESS_ENVIRONMENT_LIMITS,
+      )
+    ).trim();
+    if (!/(?:^| )AGENT_BROWSER_DAEMON=1(?: |$)/u.test(described)) continue;
+    let birth: string;
+    try {
+      birth = await processBirth(candidate.pid);
+    } catch {
+      continue;
+    }
+    daemons.push({
+      pid: candidate.pid,
+      birth,
+      profileDirectory: darwinEnvironmentValue(described, "AGENT_BROWSER_PROFILE"),
+      socketDirectory: darwinEnvironmentValue(described, "AGENT_BROWSER_SOCKET_DIR"),
+      ageMs: candidate.ageMs,
+      hasLiveChildren: liveChildren.has(candidate.pid),
+    });
+  }
+  return daemons;
+}
+
+function darwinEnvironmentValue(described: string, name: string): string | null {
+  const match = new RegExp(`(?:^| )${name}=(.*?)(?= [A-Za-z_][A-Za-z0-9_]*=|$)`, "u").exec(
+    described,
+  );
+  return match?.[1] || null;
+}
+
+/** `ps` elapsed time, formatted [[dd-]hh:]mm:ss. */
+function darwinElapsedMs(value: string): number | null {
+  const match = /^(?:(?:([0-9]+)-)?([0-9]+):)?([0-9]+):([0-9]+)$/u.exec(value);
+  if (!match) return null;
+  const [days, hours, minutes, seconds] = match.slice(1).map((part) => Number(part ?? 0));
+  return (((days! * 24 + hours!) * 60 + minutes!) * 60 + seconds!) * 1000;
+}
+
+/** Stop an identified daemon only while its PID birth still identifies it, so
+ * a reused PID is never signalled. */
+async function stopAgentBrowserDaemon(daemon: AgentBrowserDaemonProcess): Promise<void> {
+  if (!(await processRunning(daemon.pid))) return;
+  try {
+    if ((await processBirth(daemon.pid)) !== daemon.birth) return;
+  } catch {
+    return;
+  }
+  await stopIdentifiedProcess(daemon.pid);
+}
+
+/** Stop every agent-browser daemon started for this exact private profile (or
+ * socket directory). Called only once no process runs the profile, so each
+ * one's browser is gone and it has nothing left to serve. A daemon that still
+ * has a running child is refused rather than stopped. */
+async function stopOrphanedAgentBrowserDaemons(
+  profileDirectory: string,
+  socketDirectory?: string,
+): Promise<void> {
+  const profile = resolve(profileDirectory);
+  const socket = socketDirectory === undefined ? null : resolve(socketDirectory);
+  for (const daemon of await agentBrowserDaemonProcesses()) {
+    if (
+      daemon.profileDirectory !== profile &&
+      (socket === null || daemon.socketDirectory !== socket)
+    )
+      continue;
+    if (daemon.hasLiveChildren)
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "an agent-browser daemon for this profile still runs a child process",
+      );
+    await stopAgentBrowserDaemon(daemon);
+  }
+}
+
+/** Startup reconciliation for agent-browser daemons whose browser is gone.
+ * A daemon does not exit with its browser, so one whose controller died or
+ * lost track of it (a crash, or an agent update that replaced the runtime)
+ * would otherwise run forever. Only daemons started for a profile under this
+ * controller's own sessions directory, with no child process and old enough
+ * to have finished starting a browser, are stopped. A daemon whose browser
+ * still runs is left for recovery or an explicit end. Returns how many were
+ * stopped. */
+export async function reapOrphanedAgentBrowserDaemons(
+  rootDirectory: string,
+  options: { minAgeMs?: number } = {},
+): Promise<number> {
+  const minAgeMs = options.minAgeMs ?? ORPHANED_DAEMON_MIN_AGE_MS;
+  const sessions = `${join(resolve(rootDirectory), "sessions")}/`;
+  let stopped = 0;
+  for (const daemon of await agentBrowserDaemonProcesses()) {
+    if (
+      !daemon.profileDirectory?.startsWith(sessions) ||
+      daemon.hasLiveChildren ||
+      daemon.ageMs === null ||
+      daemon.ageMs < minAgeMs
+    )
+      continue;
+    try {
+      await stopAgentBrowserDaemon(daemon);
+      stopped += 1;
+    } catch {
+      // One daemon that cannot be stopped must not keep the others running.
+    }
+  }
+  return stopped;
 }
 
 async function stopIdentifiedProcess(pid: number): Promise<void> {

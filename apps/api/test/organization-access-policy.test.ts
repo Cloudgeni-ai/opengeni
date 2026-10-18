@@ -120,6 +120,9 @@ function fixture(initial?: OrganizationAccessPolicy) {
     }),
   );
   track(
+    spyOn(db, "getWorkspace").mockImplementation(async (_db, id) => workspaces.get(id) ?? null),
+  );
+  track(
     spyOn(db, "listSharedWorkspacesForAccount").mockImplementation(async () =>
       [...workspaces.values()].filter((w) => w.kind === "shared"),
     ),

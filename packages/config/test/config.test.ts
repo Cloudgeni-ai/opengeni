@@ -2518,6 +2518,34 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).not.toThrow();
   });
 
+  test("e2b connection: the domain is a host name, the addresses are URLs", () => {
+    const base = { OPENGENI_SANDBOX_BACKEND: "e2b", OPENGENI_E2B_API_KEY: "ek" };
+    const settings = withEnv(
+      {
+        ...base,
+        OPENGENI_E2B_DOMAIN: "sandboxes.example.com:8443",
+        OPENGENI_E2B_API_URL: "https://api.example.com",
+        OPENGENI_E2B_SANDBOX_URL: "https://envd.example.com",
+      },
+      () => getSettings(),
+    );
+    expect(settings.e2bDomain).toBe("sandboxes.example.com:8443");
+    expect(settings.e2bApiUrl).toBe("https://api.example.com");
+    expect(settings.e2bSandboxUrl).toBe("https://envd.example.com");
+    for (const domain of [
+      "https://sandboxes.example.com",
+      "sandboxes.example.com/x",
+      ".example.com",
+    ]) {
+      expect(() => withEnv({ ...base, OPENGENI_E2B_DOMAIN: domain }, () => getSettings())).toThrow(
+        "e2bDomain",
+      );
+    }
+    expect(() =>
+      withEnv({ ...base, OPENGENI_E2B_API_URL: "api.example.com" }, () => getSettings()),
+    ).toThrow("e2bApiUrl");
+  });
+
   test("runloop/e2b/blaxel/cloudflare each gate their own single credential", () => {
     const cases: Array<[string, string, string]> = [
       ["runloop", "OPENGENI_RUNLOOP_API_KEY", "rk"],

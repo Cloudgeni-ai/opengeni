@@ -406,7 +406,7 @@ impl CodemodeClient {
     }
 
     async fn call(&self, args: CodemodeCallArgs) -> Result<Value, CodemodeError> {
-        let arguments = parse_arguments(&args.arguments)?;
+        let arguments = read_arguments(&args.arguments).await?;
         let catalog = self.catalog().await?;
         let entry = catalog.resolve(&args.tool)?;
         let operation_id = Uuid::new_v4().to_string();
@@ -541,6 +541,36 @@ fn environment_value(name: &str) -> Option<String> {
 fn nonempty(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+async fn read_arguments(source: &str) -> Result<Map<String, Value>, CodemodeError> {
+    let raw = if source == "-" {
+        use tokio::io::AsyncReadExt as _;
+        let mut input = String::new();
+        tokio::io::stdin()
+            .read_to_string(&mut input)
+            .await
+            .map_err(|_| {
+                CodemodeError::InvalidArguments(
+                    "tool arguments could not be read as UTF-8 from stdin".to_string(),
+                )
+            })?;
+        input
+    } else if let Some(path) = source.strip_prefix('@') {
+        if path.is_empty() {
+            return Err(CodemodeError::InvalidArguments(
+                "tool arguments file path is required after @".to_string(),
+            ));
+        }
+        tokio::fs::read_to_string(path).await.map_err(|_| {
+            CodemodeError::InvalidArguments(
+                "tool arguments file could not be read as UTF-8".to_string(),
+            )
+        })?
+    } else {
+        return parse_arguments(source);
+    };
+    parse_arguments(&raw)
 }
 
 fn parse_arguments(raw: &str) -> Result<Map<String, Value>, CodemodeError> {
@@ -1127,6 +1157,47 @@ mod tests {
             Err(CodemodeError::InvalidArguments(_))
         ));
         assert_eq!(parse_arguments(r#"{"x":1}"#).expect("object")["x"], 1);
+    }
+
+    #[tokio::test]
+    async fn reads_argument_files_with_the_existing_json_parser() {
+        let directory = tempfile::tempdir().expect("input directory");
+        let path = directory.path().join("arguments with spaces.json");
+        let source = format!("@{}", path.display());
+        let content = "UTF-8 ø🙂\n".repeat(100_000);
+        std::fs::write(&path, json!({ "content": content }).to_string()).expect("input file");
+        assert_eq!(
+            read_arguments(&source).await.expect("arguments")["content"],
+            content
+        );
+        for invalid in [
+            "[]",
+            "null",
+            "@another-file",
+            "synthetic-sensitive-content",
+            "",
+        ] {
+            std::fs::write(&path, invalid).expect("invalid input file");
+            let error = read_arguments(&source)
+                .await
+                .expect_err("invalid arguments");
+            assert!(matches!(error, CodemodeError::InvalidArguments(_)));
+            assert!(!error.to_string().contains("synthetic-sensitive-content"));
+        }
+        std::fs::write(&path, [0xff]).expect("invalid UTF-8");
+        assert_eq!(
+            read_arguments(&source).await.unwrap_err().to_string(),
+            "tool arguments file could not be read as UTF-8"
+        );
+        std::fs::remove_file(&path).expect("remove synthetic file");
+        assert_eq!(
+            read_arguments(&source).await.unwrap_err().to_string(),
+            "tool arguments file could not be read as UTF-8"
+        );
+        assert_eq!(
+            read_arguments("@").await.unwrap_err().to_string(),
+            "tool arguments file path is required after @"
+        );
     }
 
     #[test]

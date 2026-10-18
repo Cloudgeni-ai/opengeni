@@ -32,6 +32,22 @@ never `git clone`s a repo onto the machine.
 | `opengeni-agent-update`   | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback.                                    |
 | `opengeni-relay`          | The stateless stream-relay edge image.                                                                                       |
 
+## Large Codemode arguments
+
+The native client accepts one JSON object inline, from stdin (`-`), or from a
+UTF-8 file (`@path`). Stdin and files avoid the operating system's argv-size
+limit without changing the authorized tool, approval, or operation journal.
+File paths are relative to the command's working directory unless absolute.
+
+```sh
+opengeni-agent codemode call server.tool - < arguments.json
+opengeni-agent codemode call server.tool '@arguments with spaces.json'
+```
+
+Arguments default to `{}`; stdin is never read implicitly. Invalid or unreadable
+input fails before any network call, without printing the contents. Server and
+tool payload limits still apply. This requires a native agent release/update.
+
 ## Offline document IDs
 
 `opengeni-agent codemode document-id <kind> <namespace>` prints one JSON object
@@ -152,7 +168,12 @@ drop-ins and ancestor constraints remain authoritative. The
 generated unit uses systemd's `DelegateSubgroup=supervisor`, so the first and every
 replacement control process starts in the same supervisor leaf while the delegated
 root remains empty and restart-safe. Startup verifies this topology and stamps that
-leaf with systemd-oomd's avoid marker. A custom/older unit that cannot provide the
+leaf with systemd-oomd's avoid marker. In-place updates preserve infrastructure
+children in the supervisor leaf and adopt handed-over commands in their existing
+operation leaves; the supervisor need not be its leaf's only process. Commands
+already running without an operation leaf remain on process-group containment
+until they finish; new commands use the restored operation-cgroup manager.
+A custom/older unit that cannot provide the
 subgroup is reported as incapable and stays on unrestricted ambient execution;
 an explicit resource policy then fails closed. Optional per-enrollment memory and
 exact integer-millicore CPU limits arrive on each newly admitted exec/Git request;

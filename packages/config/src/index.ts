@@ -1276,8 +1276,22 @@ const SettingsSchema = z.object({
   runloopBlueprintId: z.string().optional(),
   runloopTunnel: EnvBoolean.default(true),
   runloopKeepAliveSeconds: z.coerce.number().int().positive().optional(),
-  // --- e2b (SDK reads E2B_API_KEY from env; mirrored for validation + forwarding) ---
+  // --- e2b: E2B's cloud or any E2B-compatible API ---
+  // The key, domain and addresses are handed to the SDK explicitly on every
+  // create and resume; unset ones keep the SDK's defaults (E2B's cloud).
   e2bApiKey: z.string().optional(),
+  // Sandboxes are reached as `<port>-<sandbox id>.<domain>`; the API is
+  // `https://api.<domain>` unless e2bApiUrl is set.
+  e2bDomain: z
+    .string()
+    .regex(/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::\d{1,5})?$/, {
+      message: "must be a host name such as sandboxes.example.com, without a scheme or path",
+    })
+    .optional(),
+  e2bApiUrl: z.string().url().optional(),
+  // One address for all envd traffic, routed by the E2b-Sandbox-Id and
+  // E2b-Sandbox-Port headers, instead of a name per sandbox.
+  e2bSandboxUrl: z.string().url().optional(),
   e2bTemplate: z.string().optional(),
   e2bTimeoutSeconds: z.coerce.number().int().positive().optional(),
   e2bTimeoutAction: z.enum(["pause", "kill"]).optional(),
@@ -5048,6 +5062,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     runloopTunnel: optional("OPENGENI_RUNLOOP_TUNNEL"),
     runloopKeepAliveSeconds: optional("OPENGENI_RUNLOOP_KEEP_ALIVE_SECONDS"),
     e2bApiKey: optional("OPENGENI_E2B_API_KEY"),
+    e2bDomain: optional("OPENGENI_E2B_DOMAIN"),
+    e2bApiUrl: optional("OPENGENI_E2B_API_URL"),
+    e2bSandboxUrl: optional("OPENGENI_E2B_SANDBOX_URL"),
     e2bTemplate: optional("OPENGENI_E2B_TEMPLATE"),
     e2bTimeoutSeconds: optional("OPENGENI_E2B_TIMEOUT_SECONDS"),
     e2bTimeoutAction: optional("OPENGENI_E2B_TIMEOUT_ACTION"),
