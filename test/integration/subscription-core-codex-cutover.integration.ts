@@ -53,6 +53,8 @@ const PERSONAL_CONNECT_FORMAT = "0728_subscription_core_personal_connect_format.
 const COMPAT = "0716_subscription_authority_compat.sql";
 // 0717 requires 0716's routines; it follows 0716.
 const FENCES = "0717_subscription_authority_fences.sql";
+// 0843 patches routines 0716 creates; withheld with it and replayed after it.
+const INDEXED_LINEAGE = "0843_indexed_inbox_lineage.sql";
 // The personal version reader is built from the owner reader withheld 0715
 // rewrites: held back with 0715 and replayed after it.
 const PERSONAL_CONNECTION_VERSIONS = "0730_subscription_core_personal_connection_versions.sql";
@@ -106,9 +108,9 @@ describe.skipIf(!realDb)(
       const owner = postgres(owned.ownerUrl, { max: 1 });
       try {
         await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES}), (${PERSONAL_CONNECTION_VERSIONS}), (${FAILOVER_READINESS}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${SHARED_PERSONAL_CHOICE}), (${RETIREMENT}), (${PERSONAL_SHARING})`;
+        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES}), (${PERSONAL_CONNECTION_VERSIONS}), (${FAILOVER_READINESS}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${SHARED_PERSONAL_CHOICE}), (${RETIREMENT}), (${PERSONAL_SHARING}), (${INDEXED_LINEAGE})`;
         await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-        await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${COMPAT}, ${FENCES}, ${PERSONAL_CONNECTION_VERSIONS}, ${FAILOVER_READINESS}, ${PERSONAL_SHARING})`;
+        await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${COMPAT}, ${FENCES}, ${PERSONAL_CONNECTION_VERSIONS}, ${FAILOVER_READINESS}, ${PERSONAL_SHARING}, ${INDEXED_LINEAGE})`;
       } finally {
         await owner.end();
       }
