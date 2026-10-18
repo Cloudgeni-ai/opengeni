@@ -244,7 +244,8 @@ jobs:
           mkdir -p "$out"
           [ -d /lab/t/e2b-conformance ] || exit 0
           cd /lab/t/e2b-conformance
-          sudo find . -type f \( -name '*.log' -o -name '*.json' -o -name '*.md' -o -name '*.txt' -o -name '*.xml' \) \
+          sudo find . -path ./clients/node_modules -prune -o -type f \
+            \( -name '*.log' -o -name '*.json' -o -name '*.jsonl' -o -name '*.md' -o -name '*.txt' -o -name '*.xml' \) \
             -size -20M -exec cp --parents {} "$out" \;
           sudo chown -R "$(id -u):$(id -g)" "$out"
       - name: Keep the conformance logs and results

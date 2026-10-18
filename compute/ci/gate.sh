@@ -170,7 +170,7 @@ fi
 if wants conformance; then
   step conformance
   check conformance-build '^error' cargo build --locked --release -p compute-host -p compute-control
-  check conformance '^== |^SUITE|^END |checks passed|^not ok' sudo -E env PATH="$PATH" LAB="$LAB" \
+  check conformance '^== |^SUITE|^END |checks passed|^not ok|^FAIL |^  failed: ' sudo -E env PATH="$PATH" LAB="$LAB" \
     CONTROL_BIN="$CARGO_TARGET_DIR/release/compute-control" \
     HOST_BIN="$CARGO_TARGET_DIR/release/compute-host" GUEST="$GUEST" ${PROFILE:+PROFILE=$PROFILE} \
     bash conformance/e2b/run.sh
