@@ -74,3 +74,62 @@ test("logout-all default-channel fence admits only the exact current finite read
     expect(exactLogoutAllSessionListSearch(`?${params}`)).toBe(false);
   }
 });
+
+test("logout-all fence admits the current project-grouped rail root page and Default window", () => {
+  // The exact root page main CI saw fenced (project grouping is the default view).
+  const rootPage =
+    "?view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includeTotals=true&includePinned=false";
+  const defaultWindow =
+    "?view=page&limit=4&parentSessionId=null&projection=summary&channelId=null&sortBy=updatedAt&archiveStatus=active&includePinned=false";
+  for (const search of [
+    rootPage,
+    rootPage.replace("limit=4", "limit=50"),
+    rootPage.replace("&includeTotals=true", ""),
+    rootPage.replace("&includePinned=false", ""),
+    defaultWindow,
+    defaultWindow.replace("limit=4", "limit=50"),
+  ])
+    expect(exactLogoutAllSessionListSearch(search)).toBe(true);
+
+  for (const base of [rootPage, defaultWindow]) {
+    for (const [key, value] of [
+      ["limit", "25"],
+      ["limit", "5"],
+      ["projection", "full"],
+      ["parentSessionId", "00000000-0000-4000-8000-000000000001"],
+      ["sortBy", "name"],
+      ["archiveStatus", "all"],
+      ["includePinned", "true"],
+    ] as const) {
+      const params = new URLSearchParams(base);
+      params.set(key, value);
+      expect(exactLogoutAllSessionListSearch(`?${params}`)).toBe(false);
+    }
+    for (const [key, value] of [
+      ["cursor", "opaque"],
+      ["search", "tenant"],
+      ["needsYouOnly", "true"],
+      ["mineOnly", "true"],
+      ["includePinned", "false"],
+      ["unexpected", "1"],
+    ] as const) {
+      const params = new URLSearchParams(base);
+      params.append(key, value);
+      expect(exactLogoutAllSessionListSearch(`?${params}`)).toBe(false);
+    }
+  }
+  // The current shapes always carry the summary projection.
+  expect(exactLogoutAllSessionListSearch(rootPage.replace("&projection=summary", ""))).toBe(false);
+  expect(
+    exactLogoutAllSessionListSearch(rootPage.replace("includeTotals=true", "includeTotals=false")),
+  ).toBe(false);
+  // A named project window is not part of this flow.
+  expect(
+    exactLogoutAllSessionListSearch(
+      defaultWindow.replace("channelId=null", "channelId=00000000-0000-4000-8000-000000000001"),
+    ),
+  ).toBe(false);
+  expect(exactLogoutAllSessionListSearch(defaultWindow.replace("&includePinned=false", ""))).toBe(
+    false,
+  );
+});
