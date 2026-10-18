@@ -15,7 +15,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import {
   currentSessionRlsActorIdentityKey,
   currentSiteViewerRlsContext,
-  getSession,
   getSessionAuthorizationFacts,
   withSessionRlsActorContext,
   type Database,
@@ -23,12 +22,9 @@ import {
   type SessionRlsActorContext,
 } from "@opengeni/db";
 import type { AppDependencies } from "./dependencies";
-import {
-  currentSiteSessionOrigin,
-  siteOriginsMatch,
-  siteSessionOriginFromMetadata,
-} from "./site-session-origin";
+import { currentSiteSessionOrigin } from "./site-session-origin";
 import { siteAgentMayReachSession } from "./site-agent-clamp";
+import { isConsoleSiteSessionRequest, siteMayAccessSession } from "./site-session-access";
 
 export type SessionAuthorizationDependencies = Pick<AppDependencies, "db" | "sessionAuthorization">;
 
@@ -327,12 +323,16 @@ export async function requireSessionAuthorization(
 
   // A request from a Site page (an HTTP frame request, or a tool the page
   // called) may act on a session only when that same Site, or for a frame
-  // without a published Site the same mounted frame, started it. Anything
+  // without a published Site the same mounted frame, started it, or the owner
+  // explicitly allowed it in this console Site. Anything
   // else is indistinguishable from a missing session.
   const siteOrigin = currentSiteSessionOrigin();
-  if (siteOrigin && authority && !input.operation.endsWith(".read")) {
-    const session = await getSession(deps.db, grant.workspaceId, input.sessionId);
-    if (!siteOriginsMatch(siteOrigin, siteSessionOriginFromMetadata(session?.metadata)))
+  if (
+    siteOrigin &&
+    authority &&
+    (!input.operation.endsWith(".read") || isConsoleSiteSessionRequest())
+  ) {
+    if (!(await siteMayAccessSession(deps.db, grant, input.sessionId, siteOrigin)))
       throw new SessionAuthorizationDeniedError("not_found");
   }
 

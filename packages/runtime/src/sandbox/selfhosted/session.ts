@@ -2342,7 +2342,8 @@ export class SelfhostedSession {
       `ws=${encodeURIComponent(channel.workspaceId)}` +
       `&agent=${encodeURIComponent(channel.agentId)}` +
       `&port=${channel.port}` +
-      `&channel=${encodeURIComponent(channel.channelId)}`;
+      `&channel=${encodeURIComponent(channel.channelId)}` +
+      (channel.relayRoute ? `&route=${encodeURIComponent(channel.relayRoute)}` : "");
     return {
       host: this.relay.host,
       port: this.relay.port ?? (tls ? 443 : 80),

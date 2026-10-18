@@ -788,6 +788,11 @@ function ArtifactDetailPage({
               workspaceId={workspaceId}
               siteId={artifactId}
               title={artifact.title}
+              canManageAccess={
+                !archived &&
+                artifact.visibility === "private" &&
+                artifact.ownerSubjectId === context.accessContext.subjectId
+              }
             />
           </LineTabsContent>
           {manageData ? (

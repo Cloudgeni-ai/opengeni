@@ -900,6 +900,16 @@
   line-height: 1.5;
   color: var(--og-color-fg-muted);
 }
+
+.og-tc-card-downloads {
+  flex-wrap: wrap;
+}
+
+.og-tc-card-downloads > a:not(:first-child) {
+  background: var(--og-color-surface-1);
+  border-color: var(--og-color-border);
+  color: var(--og-color-fg);
+}
 .og-tc-card .og-tc-error {
   width: auto;
   margin: 0 19px 12px;

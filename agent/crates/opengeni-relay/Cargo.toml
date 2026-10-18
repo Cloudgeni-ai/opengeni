@@ -59,6 +59,9 @@ base64 = { workspace = true }
 
 # CLI / env config.
 clap = { workspace = true }
+uuid = { workspace = true }
+tokio-tungstenite = { workspace = true }
+serde_urlencoded = "0.7"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros", "time", "io-util"] }

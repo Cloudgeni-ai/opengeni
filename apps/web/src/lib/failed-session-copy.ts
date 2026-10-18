@@ -1,6 +1,7 @@
 import { t } from "@/lib/console-text";
 import { providerRecoverySubject } from "@opengeni/react";
 import type { SessionFailureSummary } from "./events";
+import { freeCreditGapReason, type FreeCreditGap } from "./free-credit-gap";
 
 /**
  * Known provider failure classes. Presentation only: the stored event keeps the
@@ -196,6 +197,8 @@ export function failedSessionCopy(
   creditExhausted = false,
   modelChanged = false,
   canChooseModel = false,
+  /** Free credit remains, but not for this model: name the gap instead of an empty workspace. */
+  freeCreditGap: FreeCreditGap | null = null,
 ): {
   reason: string;
   unavailableModel: boolean;
@@ -330,7 +333,9 @@ export function failedSessionCopy(
     };
   }
   const reason = creditExhausted
-    ? "This workspace is out of Opengeni credits."
+    ? freeCreditGap
+      ? freeCreditGapReason(freeCreditGap)
+      : "This workspace is out of Opengeni credits."
     : failure.safetyRefusal
       ? "The model provider declined this request."
       : unavailableModel

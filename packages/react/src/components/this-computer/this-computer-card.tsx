@@ -1,6 +1,7 @@
 import type { MachineView } from "@opengeni/sdk";
+import { thisComputerNeedsPermissions } from "@opengeni/sdk/this-computer";
 import { ArrowUpRightIcon, CheckIcon, LaptopIcon } from "lucide-react";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useOpenGeniText } from "../../messages/runtime";
 import { defaultThisComputerLabels, type ThisComputerLabels } from "./labels";
 import { thisComputerView } from "./this-computer-status";
@@ -31,10 +32,16 @@ export interface ThisComputerCardProps {
   /** The app's name, e.g. for "Get … for desktop". */
   productName: string;
   labels?: ThisComputerLabels;
-  /** Opens `ThisComputerSetup` (inside the desktop app). */
+  /** Opens `ThisComputerSetup` to finish required system permissions. */
   onSetup?(): void;
   /** Where to get the desktop app, outside it. */
   downloadUrl?: string | null;
+  /** Host-owned OS-appropriate app downloads. Never inferred from a capability event. */
+  downloads?: readonly { label: string; url: string }[];
+  /** Host-owned handoff preserving the signed-in account and current destination. */
+  openAppUrl?: string | null;
+  /** Optional product-owned flow, for apps not using the desktop kit. */
+  onConnect?: (() => Promise<void>) | undefined;
   /**
    * The person set it up or resumed it from this card and it became ready,
    * e.g. to tell the agent to go on. Not called for a computer that was
@@ -59,6 +66,9 @@ export function ThisComputerCard({
   labels: given,
   onSetup,
   downloadUrl,
+  downloads,
+  openAppUrl,
+  onConnect,
   onReady,
   icon,
 }: ThisComputerCardProps) {
@@ -81,6 +91,7 @@ export function ThisComputerCard({
 
   // Tell the consumer once when what the person started here finishes.
   const started = useRef(false);
+  const starting = useRef(false);
   const wasReady = useRef(readyName !== null);
   useEffect(() => {
     if (readyName !== null && !wasReady.current && started.current) {
@@ -92,6 +103,20 @@ export function ThisComputerCard({
   const setup = () => {
     started.current = true;
     onSetup?.();
+  };
+  const connect = () => {
+    if (!computer || computer.acting || starting.current) return;
+    starting.current = true;
+    started.current = true;
+    void computer
+      .connect({ screenControl: true })
+      .then((next) => {
+        if (!next) started.current = false;
+        if (thisComputerNeedsPermissions(next)) onSetup?.();
+      })
+      .finally(() => {
+        starting.current = false;
+      });
   };
 
   let copy: string;
@@ -152,7 +177,7 @@ export function ThisComputerCard({
         reasonIsCopy = Boolean(rationale) && !error;
         copy = reasonIsCopy ? rationale! : labels.offer(machineName);
         action = (
-          <button type="button" onClick={setup}>
+          <button type="button" disabled={computer.acting} onClick={connect}>
             {error ? labels.tryAgain : labels.offerAction}
           </button>
         );
@@ -161,13 +186,35 @@ export function ThisComputerCard({
     const first = own[0]!;
     copy = card.offline(first.name, productName);
   } else {
-    copy = card.getApp(productName);
-    action = downloadUrl ? (
-      <a href={downloadUrl} target="_blank" rel="noreferrer">
-        {card.getAppAction(productName)}
-        <ArrowUpRightIcon aria-hidden />
-      </a>
-    ) : null;
+    reasonIsCopy = Boolean(onConnect && rationale);
+    copy = onConnect
+      ? rationale || card.subtitle
+      : downloads?.length || openAppUrl
+        ? catalogText("thisComputer.card.installThenOpen")
+        : card.getApp(productName);
+    action =
+      downloadUrl && !onConnect ? (
+        <a href={downloadUrl} target="_blank" rel="noreferrer">
+          {card.getAppAction(productName)}
+          <ArrowUpRightIcon aria-hidden />
+        </a>
+      ) : null;
+  }
+  if (!computer && readyName === null && onConnect) {
+    action = (
+      <HostConnectAction
+        onConnect={async () => {
+          started.current = true;
+          try {
+            await onConnect();
+          } catch (caught) {
+            started.current = false;
+            throw caught;
+          }
+        }}
+        label={labels.offerAction}
+      />
+    );
   }
 
   const complete = readyName !== null;
@@ -191,6 +238,18 @@ export function ThisComputerCard({
           <p data-complete={complete ? "" : undefined}>{copy}</p>
           {action}
         </div>
+        {!computer && !complete && (downloads?.length || openAppUrl) ? (
+          <div className="og-tc-card-foot og-tc-card-downloads">
+            {downloads?.map((download) => (
+              <a key={download.url} href={download.url}>
+                {download.label}
+              </a>
+            ))}
+            {openAppUrl ? (
+              <a href={openAppUrl}>{catalogText("thisComputer.card.openApp")}</a>
+            ) : null}
+          </div>
+        ) : null}
         {error ? (
           <p className="og-tc-error" role="alert">
             {error}
@@ -199,5 +258,42 @@ export function ThisComputerCard({
         {!complete ? <p className="og-tc-card-note">{card.note}</p> : null}
       </div>
     </section>
+  );
+}
+
+function HostConnectAction({
+  onConnect,
+  label,
+}: {
+  onConnect: () => Promise<void>;
+  label: string;
+}) {
+  const t = useOpenGeniText();
+  const busyRef = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => {
+          if (busyRef.current) return;
+          busyRef.current = true;
+          setBusy(true);
+          setFailed(false);
+          void Promise.resolve()
+            .then(onConnect)
+            .catch(() => setFailed(true))
+            .finally(() => {
+              busyRef.current = false;
+              setBusy(false);
+            });
+        }}
+      >
+        {label}
+      </button>
+      {failed ? <p role="alert">{t("thisComputer.card.connectFailed")}</p> : null}
+    </>
   );
 }

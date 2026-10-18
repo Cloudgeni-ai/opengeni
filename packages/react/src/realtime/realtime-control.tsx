@@ -404,7 +404,6 @@ export function RealtimeVoiceControl(props: {
     props.modelAvailable,
     props.canStart,
     props.admissionBlocker ?? null,
-    selectedModel.label,
     selectedModel.unavailableCode ?? null,
   );
   const modeOwned = props.snapshot.mode?.state === "active";
@@ -435,8 +434,8 @@ export function RealtimeVoiceControl(props: {
         : !props.canStart && status.phase === "unavailable"
           ? `${status.label}: ${status.detail}`
           : startFailed
-            ? t("realtime.realtimeControl.tryVoiceAgainWithLabel", { label: selectedModel.label })
-            : t("realtime.realtimeControl.startVoiceWithLabel", { label: selectedModel.label });
+            ? t("realtime.realtimeControl.tryVoiceAgain")
+            : t("realtime.realtimeControl.startVoice");
   const runMainAction = audioBlocked
     ? props.onRetryAudibleOutput
     : retryConnection
@@ -984,7 +983,6 @@ function statusContent(
   modelAvailable: boolean,
   canStart: boolean,
   admissionBlocker: string | null,
-  modelLabel: string,
   unavailableCode: string | null = null,
 ): { phase: RealtimeVisualPhase; label: string; detail: string } {
   if (snapshot.audibleOutput === "blocked" && !snapshot.outputMuted) {
@@ -1067,7 +1065,7 @@ function statusContent(
       return {
         phase: "idle",
         label: t("realtime.realtimeControl.startVoice"),
-        detail: t("realtime.realtimeControl.talkLiveWithModellabel", { modelLabel }),
+        detail: t("realtime.realtimeControl.talkLiveWithTheAgent"),
       };
   }
 }

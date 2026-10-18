@@ -30,6 +30,7 @@ import {
 import { apiBaseUrl } from "@/api";
 import { DesktopThisComputerPanel } from "@/components/desktop/this-computer";
 import { ConnectMachineDialog } from "@/components/machines/connect-machine-dialog";
+import { WorkspaceCommandsSection } from "@/components/machines/workspace-commands";
 import { MachineAudienceDialog } from "@/components/machines/machine-audience-dialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
@@ -324,6 +325,15 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           </>
         )}
       </div>
+
+      {!detailId && hasWorkspacePermission(accessContext, workspaceId, "sessions:read") ? (
+        <WorkspaceCommandsSection
+          key={workspaceId}
+          workspaceId={workspaceId}
+          now={now}
+          canControl={hasWorkspacePermission(accessContext, workspaceId, "sessions:control")}
+        />
+      ) : null}
 
       {machines.mutationError && !removeTarget ? (
         <Notice tone="failed" title="Machine action failed">

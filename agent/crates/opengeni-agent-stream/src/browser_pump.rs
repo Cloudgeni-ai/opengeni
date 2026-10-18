@@ -474,6 +474,7 @@ mod tests {
                 agent_id: "agent".to_string(),
                 kind: v1::StreamKind::Browser as i32,
                 port: 20_001,
+                relay_route: None,
             },
             credential: crate::RelayCredential::fixed(
                 "wss://relay.invalid/stream",

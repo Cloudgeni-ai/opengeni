@@ -2311,6 +2311,7 @@ export type TurnStartupPhase =
   | "claim_atomic"
   | "claim_session_read"
   | "claim_capability_settings"
+  | "claim_provider_settings"
   | "learning_policy_freeze"
   | "attachment_authority_projection"
   | "claim_and_policy"

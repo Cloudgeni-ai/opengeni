@@ -2547,6 +2547,39 @@ describe("OpenGeniClient", () => {
     ).resolves.toMatchObject({ originSiteId: SESSION_ID });
   });
 
+  test("Site access lists fail closed on older servers and owner management uses native routes", async () => {
+    const old = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
+    );
+    await expect(
+      old.client.listSessionPage(WORKSPACE_ID, { siteAccessId: SESSION_ID }),
+    ).rejects.toThrow("Site access-filtered");
+    const modern = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        filtersApplied: true,
+        siteAccessId: SESSION_ID,
+      }),
+    );
+    await expect(
+      modern.client.listSessionPage(WORKSPACE_ID, { siteAccessId: "current" }),
+    ).resolves.toMatchObject({ siteAccessId: SESSION_ID });
+    expect(modern.requests[0]!.url).toContain("siteAccessId=current");
+    await modern.client.setSiteSessionAccess(WORKSPACE_ID, SESSION_ID, SESSION_ID, true);
+    await modern.client.setSiteSessionAccess(WORKSPACE_ID, SESSION_ID, SESSION_ID, false);
+    await modern.client.listSiteSessionAccess(WORKSPACE_ID, SESSION_ID);
+    expect(modern.requests.slice(1).map((request) => request.method)).toEqual([
+      "PUT",
+      "DELETE",
+      "GET",
+    ]);
+    expect(modern.requests[1]!.url).toContain(
+      `/published-artifacts/${SESSION_ID}/session-access/${SESSION_ID}`,
+    );
+  });
+
   test("listSessionPage types only an expired snapshot cursor as recoverable", async () => {
     const expired = makeClient(() => new Response("snapshot expired", { status: 410 })).client;
     const unavailable = makeClient(

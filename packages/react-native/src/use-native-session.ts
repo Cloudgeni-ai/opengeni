@@ -117,8 +117,14 @@ export function useOpenGeniNativeSession(input: {
    * What an ordinary Send does while the agent is working: `queue` (default)
    * runs it after the current turn; `steer` has the agent read it within
    * seconds (a reply still being written stops; running tools are not cut off).
+   *
+   * Under `steer` the screen has one Send and nothing to learn: no Queue
+   * choice beside it and no Queue or Steer words. Set `offerQueue` to also
+   * offer Queue beside Send.
    */
   busySend?: ComposerBusySend;
+  /** Under `busySend: "steer"`, also offer Queue beside Send while the agent works. */
+  offerQueue?: boolean;
 }): OpenGeniNativeSessionController {
   const environment = useOpenGeniReactNativeEnvironment();
   const events = useSessionEvents(input.sessionId, {
@@ -155,6 +161,7 @@ export function useOpenGeniNativeSession(input: {
     sendDestination: () =>
       (session.session?.activeTurnId ?? null) !== null || queue.queue.length > 0 ? "queue" : "chat",
     busySend: input.busySend,
+    offerQueue: input.offerQueue,
     sendExtras: () => ({ resources: attachments.readyResources }),
     sendBlocked: () => attachments.hasUnresolved,
     ...nativeComposerAttachmentCallbacks(attachments),

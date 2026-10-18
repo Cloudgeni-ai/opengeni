@@ -516,6 +516,37 @@ describe("SessionChrome", () => {
     expect(mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')).toBeNull();
   });
 
+  test("one Send: waiting messages without Queue or Steer words or Steer actions", async () => {
+    // The prompts are the person's own words; only the chrome must avoid the queue and Steer.
+    const words = (root: HTMLElement) =>
+      [
+        root.textContent ?? "",
+        ...[...root.querySelectorAll("*")].flatMap((node) =>
+          ["aria-label", "title", "data-og-tip"].map((name) => node.getAttribute(name) ?? ""),
+        ),
+      ]
+        .join(" ")
+        .replaceAll("first queued prompt", "")
+        .replaceAll("second queued prompt", "");
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ effectiveControl: { ...pausedEffectiveControl(), settlement: null } })}
+        composer={composer({ busySend: "steer", singleSend: true })}
+      />,
+    );
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    )!;
+    expect(chip.textContent).toContain("2 waiting");
+    expect(mounted.container.querySelector('[data-analytics-action="steer"]')).toBeNull();
+    expect(words(mounted.container)).not.toMatch(/queue|steer/i);
+    await act(async () => chip.click());
+    await flush(50);
+    expect(mounted.container.textContent).toContain("second queued prompt");
+    expect(mounted.container.querySelector('[data-analytics-action="steer"]')).toBeNull();
+    expect(words(mounted.container)).not.toMatch(/queue|steer/i);
+  });
+
   test("lands an optimistic Send in the queue instead of chat chrome", async () => {
     mounted = await renderComponent(
       <SessionChrome

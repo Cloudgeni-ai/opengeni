@@ -120,6 +120,18 @@ import "@opengeni/react/compiled.css";
 // or one conversation: <SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} />
 ```
 
+To give people one Send and nothing to learn, pass `busySend: "steer"`:
+
+```tsx
+<SessionConversation sessionId={sessionId} composerOptions={{ busySend: "steer" }} />
+// OpenGeniChat: conversationProps={{ composerOptions: { busySend: "steer" } }}
+```
+
+A message sent while the agent works is then read as soon as it can, usually
+within seconds. There is no Queue choice beside Send and no Queue or Steer
+words; a message sent while the workstream is paused waits and shows as a
+waiting message. Add `offerQueue: true` to offer Queue beside Send again.
+
 Bearer-token apps pass `headers` (a function runs per request) or a custom
 `fetch`; a `client` passed with `baseUrl` replaces the one the component
 creates:
@@ -159,6 +171,13 @@ voice model answers and hands work to the agent in the same chat, and the
 transcript lands in the timeline. It stays hidden when no model is available,
 when the proxy sets `realtimeVoice: false`, or when you pass
 `realtimeVoice={false}`. The voice code loads lazily on first display.
+The voice button never names the voice model (the model menu does, when
+shown), and neither does the React Native call screen. To name the action
+after your assistant, set its text through `messages`: on the web,
+`"realtime.realtimeControl.startVoice": "Talk to Ava"`, with
+`"realtime.realtimeControl.tryVoiceAgain"` and
+`"realtime.realtimeControl.talkLiveWithTheAgent"` for the retry label and the
+idle hint; on React Native, `"native.timeline.messages.startACall"`.
 
 The working indicator before the first reply says "Thinking…". Pass
 `genieLoading` (`phrases`, `messages`, `orb`, or a whole `render`) to use your
@@ -668,11 +687,13 @@ const norwegian: OpenGeniMessages = {
 
 - Keys are stable, typed identifiers. `englishMessages` is the complete default
   catalog: export it to your translation tooling as is.
-- Templates use single-brace parameters (`"Start voice with {model}"`); a
+- Templates use single-brace parameters (`"Move queued prompt {index} up"`); a
   translation must keep the same parameters.
 - Counted text uses plural suffixes (`_zero`, `_one`, `_two`, `_few`, `_many`,
   `_other`) chosen with `Intl.PluralRules` for `locale`, so each language
-  supplies the forms it needs. `_other` is always required.
+  supplies the forms it needs. `_other` is always required. Where the runtime
+  has no `Intl.PluralRules` (Hermes on React Native), 1 uses `_one` and every
+  other count `_other`; no polyfill is needed.
 - `locale` also sets the language of the dates, times and numbers the
   components format.
 - Missing keys fall back to an outer provider, then English, never to a raw key.
@@ -1015,7 +1036,10 @@ state remains application-owned; durable draft and session state remain in
   while paused) and `sendToQueue()` always queues; the default `"queue"` keeps
   Send queueing. `alternateSend` names the other choice while Send takes that
   busy path (`null` otherwise) and `sendAlternate()` performs it; hosts show it
-  beside Send exactly when it is not `null`. Resume is always an
+  beside Send exactly when it is not `null`. Under `busySend: "steer"` there is
+  no other choice unless `offerQueue: true` is set (`singleSend` is then
+  false): `alternateSend` stays `null`, Cmd/Ctrl+Enter sends, and the stock
+  surfaces use `SingleSendWording` for queue-free copy. Resume is always an
   explicit control action and never an implicit side effect of Send. Drafts
   autosave with optimistic concurrency, survive failed sends, and reuse one
   `clientEventId` across retries so the server dedupes. Draft reads retry transient

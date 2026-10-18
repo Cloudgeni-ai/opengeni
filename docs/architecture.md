@@ -52,6 +52,9 @@ never omitted-tools queue arrays. Connection-backed MCPs use native authenticati
 An optional `ToolRef.allowedTools` narrows a connection's catalog and direct calls;
 merged refs intersect that ceiling and children cannot widen it. Console Site
 agents use it for the overlap of Site-declared tools and the viewer's permissions.
+Private console Sites may also reach an existing chat only through its owner's
+explicit, viewer-bound Site/chat grant. This uses native session routes and
+live revocation, not a changed origin or audience; see [Site conversations](site-conversations.md).
 Their editable-artifact writes also require immutable create/import provenance
 within the same Site-clamped session tree; read-created session links grant no edits.
 After a worker claims a turn, its session RLS actor carries the canonical
@@ -86,6 +89,12 @@ initial clone, not just subsequent sandbox commands.
 ---
 
 ## 3. Core invariants
+
+The console Machines page also projects live background commands across authorized
+chats through the session-list endpoint (`view=running_commands`). It shares the
+ordinary subject/host list scope, reads immutable command launch targets, and uses
+the existing session command cancellation path; it does not create a separate
+process registry or agent tool surface.
 
 Hosted tool-call `status` survives replay; other annotations are stripped
 (`packages/codex/src/hosted-call-status.ts`).
@@ -1716,7 +1725,12 @@ transport tests on every supported host.
 
 One agent independently connects multiple deployments/workspaces within shared
 host containment. The relay carries terminal/desktop bytes, never durable session
-or lease state. Install `latest` may serve baked binaries; pinned versions resolve
+or lease state. Producer registration selects a relay owner and returns a signed,
+channel-bound route in the stream descriptor. Any ingress-selected replica can
+authenticate and proxy one private WebSocket hop to that owner; the existing
+registry remains the only pairing/replay/epoch state. No shared channel store or
+ingress affinity is needed. The chart wires pod-IP advertisement and same-release
+peer access. Install `latest` may serve baked binaries; pinned versions resolve
 binaries/signatures from the immutable release archive.
 
 Canonical: [`../agent/README.md`](../agent/README.md) and
@@ -2069,6 +2083,20 @@ Managed download tools use the existing explicit workspace-save API; bytes stay 
 Linux managed-browser cleanup and recovery share exact profile/executable and
 process-birth checks in [`linux-process-identity.ts`](../packages/browserd/src/linux-process-identity.ts).
 
+On a person's Linux machine, managed Chromium runs in its own network namespace
+bridged to the host by pasta ([`browser-network-isolation.ts`](../packages/browserd/src/browser-network-isolation.ts)),
+so host interface churn (container veths, bridges, VPNs) cannot fire Chromium's
+network-change handling and abort requests in flight. The browser keeps the
+person's UID and the spawned PID; host loopback servers, the DevTools port and
+DNS stay reachable. Loopback keeps both address families, so a server listening
+only on `127.0.0.1` or only on `::1` stays reachable through `localhost`, as on
+the shared network. A launch probe uses the namespace only when the pasta found
+forwards each host loopback listener on its own family and never on the other
+one; Chrome then starts once the namespace's IPv6 addresses have settled.
+Where pasta fails that probe, or pasta or user namespaces are unavailable, it
+launches on the shared network and `browser_open` says so in one line. Managed
+sandbox VMs turn it off (`OPENGENI_BROWSERD_NETWORK_ISOLATION=off`).
+
 Explicit managed Chromium working-directory recovery uses the internal
 [`working-runtime-journal.ts`](../packages/browserd/src/working-runtime-journal.ts)
 launch/suspension/retirement receipt. Exact directory, controller, token, placement and
@@ -2234,6 +2262,15 @@ Mechanics: [shared connection presentation](connection-presentation.md).
 tool approvals/attachments/human-input forms/history; `ChatComposer` is input-only. Sites supply Site-bound
 clients. Foreground/background share tokens; light embeds set iframe
 `data-og-theme="light"`.
+
+Computer offers stay client-owned: `SessionConversation.computerConnection`
+renders the existing `ThisComputerCard` using the embedding product's desktop
+host or download/connect flow, with no terminal-command fallback. The console
+uses the same host connection and its platform downloads; the desktop kit's
+`computer-link.ts` completes an account-exact, workspace-authorized, locally
+confirmed handoff through existing PKCE and `ThisComputer.connect`. The agent's
+offer/event contract is unchanged. See [embedding](embedding.md#computer-connection-offers)
+and [desktop app](design/desktop-app.md#deep-links).
 
 `useSessionConversation` owns that same feed, queue and composer independently
 of presentation. `SessionConversationView` consumes the controller without

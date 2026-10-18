@@ -88,7 +88,7 @@ import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
 import { TimelineAnnotationsChip, type TimelineAnnotationLike } from "./timeline-annotations";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
-import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type SessionChromeSignalId =
   | "incoming"
@@ -440,7 +440,19 @@ function toneClass(tone: SessionChromeSignalTone, selected: boolean): string {
   }
 }
 
-export function SessionChrome({
+/**
+ * Under a single-Send composer (`composer.singleSend`) the chrome speaks of
+ * waiting messages rather than a queue, and offers no Steer on them.
+ */
+export function SessionChrome(props: SessionChromeProps) {
+  return (
+    <SingleSendWording enabled={props.composer?.singleSend === true}>
+      <SessionChromeView {...props} />
+    </SingleSendWording>
+  );
+}
+
+function SessionChromeView({
   sessionStatus,
   queue,
   queueFocusTarget,
@@ -492,6 +504,8 @@ export function SessionChrome({
       : null);
   const stopping = stoppingKind !== null;
   const canMutateQueue = !readOnly && composer !== undefined;
+  // One Send: nothing to choose, so waiting messages offer no Steer.
+  const canSteerQueued = canMutateQueue && composer?.singleSend !== true;
 
   const elapsed = useLiveElapsed(record?.createdAt, Boolean(record));
   const goalState = record
@@ -898,7 +912,7 @@ export function SessionChrome({
             : undefined
         }
         onSteer={
-          canMutateQueue
+          canSteerQueued
             ? (turnId) => {
                 void queue.steerTurn(turnId);
               }
@@ -1076,7 +1090,9 @@ export function SessionChrome({
                             : signal.id === "queue"
                               ? queue.error || queue.mutationError
                                 ? signal.label
-                                : `${queuedTurns.length + optimisticQueued.length} queued`
+                                : t("sessionChrome.queuedCount", {
+                                    count: queuedTurns.length + optimisticQueued.length,
+                                  })
                               : signal.label}
                         </span>
                         {signal.id === "queue" && queuePeek?.text && !selected ? (
@@ -1135,7 +1151,7 @@ export function SessionChrome({
                             <Trash2Icon className="size-3" />
                           </IconAction>
                         </div>
-                      ) : signal.id === "queue" && canMutateQueue && queuePeek && !selected ? (
+                      ) : signal.id === "queue" && canSteerQueued && queuePeek && !selected ? (
                         <div className="flex shrink-0 items-center pr-1 pl-0.5">
                           <IconAction
                             label={t("sessionChrome.steerLatestQueuedMessage")}

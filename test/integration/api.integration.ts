@@ -6699,7 +6699,9 @@ describe("API component integration", () => {
     expect(agentSteer).toMatchObject({
       outcome: "updated",
       resource: { type: "session_system_update" },
-      facts: { interruptionCount: 1, stoppingPreviousAttempt: true },
+      // An Agent Steer never interrupts the child's live attempt: it is read
+      // at that attempt's next model step.
+      facts: { interruptionCount: 0, stoppingPreviousAttempt: false },
     });
     expect(JSON.stringify(agentSteer)).not.toContain(
       "Inspect the new control-plane evidence first",

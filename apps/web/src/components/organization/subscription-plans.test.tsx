@@ -115,6 +115,7 @@ test("upgrade confirms proration, fresh replacement credit and targets the selec
 test("checkout retries retain one UUID even after closing and reopening confirmation", async () => {
   const client = clientFixture();
   await mount(plans(client, "free"));
+  expect(document.body.textContent).not.toContain("Popular");
   await click("Get Pro");
   await submit();
   expect(document.body.textContent).toContain("Checkout transport unavailable");
@@ -281,6 +282,50 @@ test("balance splits monthly, promotional and other general credit without doubl
   expect(document.body.textContent).toContain("$75.00");
   expect(document.body.textContent).toContain("$10.00");
   expect(document.body.textContent).toContain("Other general credit");
+});
+
+test("an organization without a monthly grant shows no empty plan credit meter or row", async () => {
+  const client = clientFixture();
+  const ungranted = { ...previewPlan("free"), creditGrantedMicros: 0, creditRemainingMicros: 0 };
+  await mount(
+    <SubscriptionPlans
+      client={client as unknown as OpenGeniBrowserClient}
+      accountId="org-a"
+      returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
+      catalog={{ accountId: "org-a", revision: 1, plans: previewPlans, plan: ungranted }}
+      plan={ungranted}
+      canManage
+      supportEmail="support@example.test"
+      onChanged={() => {}}
+    />,
+  );
+  await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 7_000_000,
+          generalBalanceMicros: 7_000_000,
+          currency: "usd",
+          updatedAt: "2026-10-18T18:00:00Z",
+          plan: ungranted,
+          promotionalCredits: [],
+        },
+      }}
+    />,
+  );
+  expect(document.body.textContent).toContain("Your plan");
+  expect(document.body.textContent).toContain("5 seats");
+  expect(document.body.textContent).not.toContain("of $0.00 left");
+  expect(document.body.textContent).not.toContain("Used first. Resets monthly.");
+  expect(document.body.textContent).not.toContain("Other general credit");
+  expect(document.body.textContent).toContain("$7.00");
 });
 
 test("seat refusal recognizes current and legacy bodies and offers exactly one upgrade action", async () => {

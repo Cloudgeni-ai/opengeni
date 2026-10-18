@@ -257,6 +257,8 @@ describe("Claude capacity by provider route", () => {
       reasoningLevel: "medium",
     });
     spy(db, "getSessionGoal").mockResolvedValue(null);
+    // No Steer is waiting for this turn's next model step.
+    spy(db, "resolveWaitingSteer").mockResolvedValue(null);
     spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
     const resetAt = new Date(Date.now() + 3_600_000);
     const wait = {

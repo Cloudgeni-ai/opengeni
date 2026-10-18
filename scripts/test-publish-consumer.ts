@@ -1230,7 +1230,7 @@ try {
         "    />",
         "  </>,",
         ");",
-        'if ((markup.match(/aria-label="Start voice with Codex Live"/g) ?? []).length !== 2) throw new Error("SSR output lost public realtime composer controls");',
+        'if ((markup.match(/aria-label="Start voice"/g) ?? []).length !== 2) throw new Error("SSR output lost public realtime composer controls");',
         'if (!markup.includes("Choose voice model and options")) throw new Error("SSR output lost realtime model picker ARIA copy");',
         "console.log(`REALTIME_SUBPATH_SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);",
         "",

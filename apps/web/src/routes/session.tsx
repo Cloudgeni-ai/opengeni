@@ -30,6 +30,7 @@ import { useMessageSenderRenderer } from "@/components/session/message-senders";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { useSessionStartupTimeline } from "@/lib/session-startup-timeline";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { coveredModelChoice, freeCreditGap } from "@/lib/free-credit-gap";
 import { timelineShowsFailure } from "@/lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import { useStreamHealthTelemetry } from "@/lib/stream-health";
@@ -2562,13 +2563,15 @@ function SessionChatPane(props: {
     context.client,
     workspace?.id ?? null,
     props.session.rigId,
-    fixedResourceCatalogEnabled,
+    fixedResourceCatalogEnabled &&
+      hasWorkspacePermission(context.accessContext, props.session.workspaceId, "rigs:use"),
   );
   const personalAttachment = usePersonalResourceAttachment({
     client: context.client,
     authMode: context.clientConfig.auth.mode,
     authSession: context.authSession,
     accessSubjectId: context.accessContext.subjectId,
+    accessContext: context.accessContext,
     managedSelfContext: context.managedSelfContext,
     workspace,
     session: props.session,
@@ -2622,6 +2625,8 @@ function SessionChatPane(props: {
     sendDestination: () =>
       props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
     busySend: resolveWorkspaceBusySend(workspace?.settings),
+    // The console always offers the other choice beside Send.
+    offerQueue: true,
     // Ordinary Send is acknowledged locally. Clear only resources captured in
     // that immutable optimistic operation; later additions belong to the next
     // draft, while retry keeps the original resource refs in the failed bubble.
@@ -2734,6 +2739,13 @@ function SessionChatPane(props: {
   const modelPickerDisabled =
     composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
   const canChooseRecoveryModel = !modelPickerDisabled;
+  // Free credit can still cover other models after this model's credit ran out.
+  const creditGap = props.creditExhausted
+    ? freeCreditGap(modelCatalog.rows, props.session.model, {
+        selectedModel: composerPolicy?.model,
+        preferredModel: modelCatalog.defaultSelection?.model,
+      })
+    : null;
   // Shown while the banner chunk loads or if it fails. On the free model the
   // generic daily-limit line then gives way to the free-model copy; that brief
   // text change keeps the free-model copy out of the direct session bundle.
@@ -2745,6 +2757,7 @@ function SessionChatPane(props: {
           props.creditExhausted && !props.failure.structuralSandboxFailure,
           Boolean(composerPolicy && composerPolicy.model !== props.session.model),
           canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
+          creditGap,
         ).reason
       }
     </div>
@@ -2753,6 +2766,16 @@ function SessionChatPane(props: {
   const reasoningEffort = composerPolicy?.reasoningEffort ?? props.session.reasoningEffort;
   const latencyMode = composerPolicy?.latencyMode ?? props.session.latencyMode;
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, model);
+  // The banner's one-click switch: the same model, effort and speed coercion as the picker.
+  const chooseCoveredModel = (id: string) => {
+    const row = findPickerRow(modelCatalog.rows, id);
+    const choice =
+      row && !modelPickerDisabled ? coveredModelChoice(row, reasoningEffort, latencyMode) : null;
+    if (!choice) return;
+    setComposerModel(choice.model);
+    setComposerReasoningEffort(choice.effort);
+    if (choice.latencyMode !== null) setComposerLatencyMode(choice.latencyMode);
+  };
   const matchesFrozenSessionPolicy = Boolean(
     composerPolicy &&
     composerPolicy.model === props.session.model &&
@@ -3238,6 +3261,8 @@ function SessionChatPane(props: {
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
             creditExhausted={props.creditExhausted}
+            freeCreditGap={creditGap}
+            onChooseModel={chooseCoveredModel}
             workspaceId={props.session.workspaceId}
             canBuyCredits={
               context.clientConfig.billingMode === "stripe" &&
@@ -3843,8 +3868,13 @@ function SessionChatPane(props: {
                     : props.creditExhausted &&
                         (props.session.status === "failed" || props.session.status === "idle")
                       ? // "Send a message to revive" is a dead end without credits —
-                        // the reply turn dies the same budget death.
-                        "Out of Opengeni credits — add credits to continue."
+                        // the reply turn dies the same budget death. With free
+                        // credit left for other models, a covered model revives it.
+                        creditGap
+                        ? creditGap.selectionUsable
+                          ? "Send a follow-up…"
+                          : "Your free credits don't cover this model — choose another model or add credits."
+                        : "Out of Opengeni credits — add credits to continue."
                       : "Send a follow-up…"
                 }
                 controls={

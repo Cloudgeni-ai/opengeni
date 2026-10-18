@@ -784,6 +784,62 @@ test("billing offers at most one authorized action and never Retry", async () =>
   }
 });
 
+test("free credit for other models offers a covered model before buying credits", async () => {
+  const chosen: string[] = [];
+  const gap = {
+    modelLabel: "Claude Opus 5.5",
+    covered: [
+      { id: "azure-sol/gpt-6.1-sol", label: "GPT-6.1 Sol" },
+      { id: "gpt-6-luna", label: "GPT-6 Luna" },
+    ],
+    selectionUsable: false,
+  };
+  const banner = (props: {
+    modelChanged?: boolean;
+    selectionUsable?: boolean;
+    canBuyCredits?: boolean;
+  }) => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason: "insufficient Opengeni credits" }}
+      creditExhausted
+      freeCreditGap={{ ...gap, selectionUsable: props.selectionUsable ?? false }}
+      onChooseModel={(model) => chosen.push(model)}
+      workspaceId="workspace-a"
+      canBuyCredits={props.canBuyCredits ?? true}
+      canChooseModel
+      modelChanged={props.modelChanged}
+      actions={actions}
+    />
+  );
+  const container = await render(banner({}));
+  const headline = container.querySelector('[data-testid="failed-session-banner"] span')!;
+  expect(headline.textContent).toBe(
+    "Your free credits don't cover Claude Opus 5.5. Switch to a model they cover, such as GPT-6.1 Sol or GPT-6 Luna, or add credits.",
+  );
+  expect(container.textContent).not.toMatch(/out of Opengeni credits/i);
+  const switchButton = container.querySelector("button")!;
+  expect(switchButton.textContent).toBe("Use GPT-6.1 Sol");
+  expect(container.querySelector("a")!.textContent).toBe("Buy credits");
+  await act(async () => switchButton.click());
+  expect(chosen).toEqual(["azure-sol/gpt-6.1-sol"]);
+
+  await act(async () => root!.render(banner({ canBuyCredits: false })));
+  expect(container.querySelector("button")!.textContent).toBe("Use GPT-6.1 Sol");
+  expect(container.querySelector("a")).toBeNull();
+
+  // Another uncovered model selected: the switch stays on offer.
+  await act(async () => root!.render(banner({ modelChanged: true })));
+  expect(container.querySelector("button")!.textContent).toBe("Use GPT-6.1 Sol");
+  expect(container.textContent).toContain("Switch to a model they cover");
+
+  // A usable model selected: the copy says how to continue and no switch is offered.
+  await act(async () => root!.render(banner({ modelChanged: true, selectionUsable: true })));
+  expect(container.textContent).toContain(
+    "Your free credits don't cover Claude Opus 5.5. Send a message to continue with the selected model.",
+  );
+  expect(container.querySelector("button")).toBeNull();
+});
+
 test("unknown provider evidence never invents expiry, reset or connection classification", async () => {
   const container = await render(
     <FailedSessionBanner

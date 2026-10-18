@@ -15,6 +15,11 @@ import type { ManagedSelfContext } from "./managed-self-context";
 
 export type PersonalAttachmentMode = PersonalResourceAttachmentIntent["mode"];
 
+export type PersonalResourceReadPermissions = Readonly<{
+  rigs: boolean;
+  connectedMachines: boolean;
+}>;
+
 export type PersonalResourceOwnerScope = Readonly<{
   identityKey: string;
   subjectId: string;
@@ -122,15 +127,20 @@ async function listAuthorityPages(
 export async function loadPersonalResourceCatalog(
   client: OpenGeniBrowserClient,
   scope: PersonalResourceOwnerScope,
+  permissions: PersonalResourceReadPermissions,
 ): Promise<PersonalResourceCatalog> {
   const [rigs, rigPage, connectedMachinePage] = await Promise.all([
     // User-scoped resources follow their owner into every workspace in the
     // organization. Resolve them through the session's current workspace so a
     // shared-workspace chat never depends on a second Personal-workspace route
     // remaining selectable in the browser.
-    client.listRigs(scope.targetWorkspaceId),
-    listAuthorityPages(client, scope.targetWorkspaceId, "rig"),
-    listAuthorityPages(client, scope.targetWorkspaceId, "connected_machine"),
+    permissions.rigs ? client.listRigs(scope.targetWorkspaceId) : [],
+    permissions.rigs
+      ? listAuthorityPages(client, scope.targetWorkspaceId, "rig")
+      : { authorities: [], truncated: false },
+    permissions.connectedMachines
+      ? listAuthorityPages(client, scope.targetWorkspaceId, "connected_machine")
+      : { authorities: [], truncated: false },
   ]);
   const personalRigs = rigs.filter(
     (resource) => resource.scope === "user" && resource.status === "active",

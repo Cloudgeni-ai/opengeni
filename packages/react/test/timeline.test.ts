@@ -2381,6 +2381,28 @@ describe("buildTimeline", () => {
     expect(presentTurnFailureText(englishText, undefined)).toBeNull();
   });
 
+  test("a capacity-recovery failure reads in the host's language in the timeline", () => {
+    reset();
+    const stored =
+      "Automatic capacity recovery stopped after 10 resumptions returned immediately to unavailable capacity. Use Retry or send Continue after checking subscription capacity.";
+    const norwegian = createOpenGeniText({
+      locale: "nb",
+      messages: { "lib.format.capacityRecoveryExhausted": "Abonnementet er tomt for kapasitet." },
+    });
+    const items = buildTimeline(norwegian, [
+      event("turn.failed", {
+        error: stored,
+        code: "codex_capacity_recovery_exhausted",
+        recovery: "user_message",
+        recoveryExhausted: true,
+        retryable: false,
+      }),
+    ]);
+    const rendered = JSON.stringify(items);
+    expect(rendered).toContain("Abonnementet er tomt for kapasitet.");
+    expect(rendered).not.toContain("Automatic capacity recovery stopped");
+  });
+
   test("a compaction turn failure is shown once, on its own landmark", () => {
     reset();
     const recorded = "compaction summarization failed: 400 Missing required parameter.";

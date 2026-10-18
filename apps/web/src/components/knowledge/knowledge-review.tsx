@@ -41,7 +41,11 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { ToolbarSummary } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
 import { apiErrorFacts } from "@/lib/api-error";
-import { canManageWorkspaceSettings, hasAccountPermission } from "@/lib/permissions";
+import {
+  canManageWorkspaceSettings,
+  hasAccountPermission,
+  hasWorkspacePermission,
+} from "@/lib/permissions";
 
 import { errorText } from "./knowledge-data";
 import { Markdown } from "./knowledge-markdown";
@@ -146,6 +150,9 @@ export interface ReviewQueue {
 export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueue {
   const context = useAppContext();
   const workspace = context.workspaces.find((each) => each.id === workspaceId) ?? null;
+  const canReviewKnowledge =
+    hasWorkspacePermission(context.accessContext, workspaceId, "documents:search") &&
+    hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage");
   const canManage = canManageWorkspaceSettings(
     context.accessContext,
     workspace,
@@ -155,11 +162,13 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
     ? hasAccountPermission(context.accessContext, workspace.accountId, "account:admin")
     : false;
   const [state, setState] = useState<{
+    identity: string;
     items: ReviewItem[];
     partial: boolean;
     error: string | null;
   } | null>(null);
   const [retry, setRetry] = useState(0);
+  const identity = `${context.accessContext.subjectId}:${workspaceId}:${canReviewKnowledge}:${canManage}:${canManageOrganization}`;
 
   useEffect(() => {
     let current = true;
@@ -169,12 +178,15 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
       let partial = false;
       const items: ReviewItem[] = [];
       const [batches, instructions, skills] = await Promise.allSettled([
-        client.listKnowledgeReviewBatches(workspaceId, { limit: 20 }),
+        canReviewKnowledge
+          ? client.listKnowledgeReviewBatches(workspaceId, { limit: 20 })
+          : Promise.resolve({ batches: [], nextCursor: null }),
         canManage
           ? client.listAgentInstructionReviews(workspaceId)
           : Promise.resolve({ entries: [], nextCursor: null }),
         client.listWorkspaceSkills(workspaceId, { limit: 100 }),
       ]);
+      if (!current) return;
       if (batches.status === "fulfilled") {
         partial ||= Boolean(batches.value.nextCursor);
         const pages = await Promise.allSettled(
@@ -238,16 +250,28 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
           });
         }
       } else failures.push(errorText(skills.reason));
-      if (current) setState({ items, partial, error: failures.length ? failures[0]! : null });
+      if (current)
+        setState({ identity, items, partial, error: failures.length ? failures[0]! : null });
     })();
     return () => {
       current = false;
     };
-  }, [context, workspaceId, canManage, canManageOrganization, refresh, retry]);
+  }, [
+    context,
+    workspaceId,
+    canReviewKnowledge,
+    canManage,
+    canManageOrganization,
+    identity,
+    refresh,
+    retry,
+  ]);
+
+  const currentState = state?.identity === identity ? state : null;
 
   const groups = useMemo(() => {
     const result: ReviewGroup[] = [];
-    for (const item of state?.items ?? []) {
+    for (const item of currentState?.items ?? []) {
       const key =
         item.kind === "knowledge"
           ? `batch:${item.batch.id}`
@@ -265,16 +289,16 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
         });
     }
     return result;
-  }, [state]);
+  }, [currentState]);
   const items = useMemo(() => groups.flatMap((group) => group.items), [groups]);
 
   return {
     items,
     groups,
     count: items.length,
-    partial: state?.partial ?? false,
-    loading: state === null,
-    error: state?.error ?? null,
+    partial: currentState?.partial ?? false,
+    loading: currentState === null,
+    error: currentState?.error ?? null,
     reload: useCallback(() => setRetry((value) => value + 1), []),
   };
 }

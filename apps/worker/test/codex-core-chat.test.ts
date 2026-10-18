@@ -352,6 +352,8 @@ describe("Codex cutover gate dispositions", () => {
     });
     spy(db, "getSessionGoal").mockResolvedValue(null as never);
     spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    // No Steer is waiting for this turn's next model step unless a test says so.
+    const waitingSteer = spy(db, "resolveWaitingSteer").mockResolvedValue(null);
     const waiter = {
       waiterId: "waiter-1",
       accountId: "account-1",
@@ -384,7 +386,7 @@ describe("Codex cutover gate dispositions", () => {
     });
     const evaluate = spy(db, "evaluateSubscriptionCoreCodexPlacement");
     const reconcile = spy(db, "reconcileSubscriptionCoreCodexCapacityWait");
-    return { waiter, armed, evaluate, reconcile };
+    return { waiter, armed, evaluate, reconcile, waitingSteer };
   }
 
   test("a core wait parks the turn on the durable core waiter and hands the workflow its reference", async () => {
@@ -504,6 +506,24 @@ describe("Codex cutover gate dispositions", () => {
       expect(credits).not.toHaveBeenCalled();
     },
   );
+
+  test("a Steer waiting for the next model step replaces a new core wait", async () => {
+    gate("enabled");
+    const { armed, evaluate, reconcile, waitingSteer } = coreWaitMocks(
+      new Date(Date.now() + 60_000),
+    );
+    waitingSteer.mockResolvedValue({ wakeRevision: 2, workflowId: "session-1", eventIds: [] });
+    const deps = capacityDeps();
+    const outcome = (await selectCodexTurnCapacity(deps)) as { exit?: { status?: string } };
+    // A Steer waiting for the next model step replaces the capacity wait at once:
+    // the turn ends idle, so the Steer is claimed next, and the wait is never re-evaluated.
+    expect(outcome.exit?.status).toBe("idle");
+    expect(armed).toHaveBeenCalledTimes(1);
+    expect(waitingSteer).toHaveBeenCalledTimes(1);
+    expect(waitingSteer.mock.calls[0]![1]).toMatchObject({ sessionId: "session-1" });
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
+  });
 
   test("a core wait whose re-evaluation can already run resumes the same turn", async () => {
     gate("enabled");
