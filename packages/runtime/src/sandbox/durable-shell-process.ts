@@ -430,9 +430,14 @@ function writeScript(input: {
           // The lock passes to the copying process itself, so it is free
           // exactly when that process is gone.
           '    og_take "$d/wlock" 250 || { rm -f "$og_ib"; printf \'@@OG1 busy 0 0\\n\'; exit 0; }',
-          '    mv "$og_ib" "$d/wbuf"',
-          '    cat "$d/wbuf" 1<>"$d/in" </dev/null 2>/dev/null &',
+          // Input can carry secrets (write_stdin values, streamed secret
+          // files). The writer reads it from an open descriptor and the file
+          // is unlinked at once, so no input stays on disk after this call.
+          '    exec 4< "$og_ib"',
+          '    rm -f "$og_ib"',
+          '    cat <&4 1<>"$d/in" 4<&- 2>/dev/null &',
           "    og_wp=$!",
+          "    exec 4<&-",
           '    ln -s "$og_wp $(og_ident "$og_wp")" "$d/wlock.n" && mv -f "$d/wlock.n" "$d/wlock"',
           "    og_i=0",
           // An exited, not yet reaped writer has no identity: it is done.

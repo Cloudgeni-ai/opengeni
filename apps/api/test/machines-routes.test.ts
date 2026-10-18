@@ -32,6 +32,8 @@ import {
   listSandboxes,
   prepareBrowserSessionCreate,
   revokeEnrollment,
+  recordEnrollmentExpiredCredentials,
+  touchEnrollmentLastSeen,
   setActiveSandbox,
   transitionSessionVisibility,
   type Database,
@@ -838,6 +840,31 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(after?.connectionLeaseExpiresAt).not.toBeNull();
     expect(after?.lastSeenAt).not.toBeNull();
   }, 90_000);
+
+  test("machine status projects verified credential expiration and clears it after recovery", async () => {
+    if (!available) throw new Error("authentication status requires PostgreSQL");
+    const { accountId, workspaceId, enrollment, bus } = await seed({ online: false });
+    await admin`UPDATE enrollments SET last_seen_at = NULL, connection_lease_expires_at = NULL WHERE id = ${enrollment.id}`;
+    await recordEnrollmentExpiredCredentials(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+    });
+    const app = appFor(bus);
+    const authorization = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const read = async () =>
+      (
+        await (
+          await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+            headers: { authorization },
+          })
+        ).json()
+      ).machines[0];
+    expect((await read()).connectionAuthority.authenticationError).toBe("credentials_expired");
+    await touchEnrollmentLastSeen(db, { accountId, workspaceId, enrollmentId: enrollment.id });
+    expect((await read()).connectionAuthority.authenticationError).toBeUndefined();
+  }, 60_000);
 
   test("state matrix: displayed-but-unconsented is ONLINE (view/control decoupled); offline when last_seen is missing", async () => {
     if (!available) return;

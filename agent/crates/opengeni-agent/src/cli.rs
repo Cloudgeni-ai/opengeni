@@ -114,6 +114,13 @@ pub struct RunArgs {
     /// The virtual-desktop framebuffer geometry `WIDTHxHEIGHT`.
     #[arg(long, default_value = "1280x800")]
     pub virtual_geometry: String,
+
+    /// Run inside an Opengeni compute sandbox, as its guest init starts the
+    /// agent: the link file names the enrollment and the loopback address of
+    /// the sandbox's host. No enrollment, renewal, update or service
+    /// installation happens in this mode.
+    #[arg(long, value_name = "LINK_FILE")]
+    pub fabric: Option<std::path::PathBuf>,
 }
 
 /// Arguments for the `enroll` subcommand.

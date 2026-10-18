@@ -53,6 +53,7 @@ import {
 import type { SandboxProviderCommand } from "@opengeni/contracts";
 import { hasTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
 import { durableProcessLostResult, hasDurableShellProcesses } from "../durable-shell-process";
+import { sandboxBackendForSdkBackendId } from "../select";
 import {
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
@@ -2865,7 +2866,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       record.backend.kind === "opensandbox"
     )
       return false;
-    if (record.backend.kind !== "local" && record.backend.kind !== "docker") return true;
+    // The routing kind is the SDK client id, which is `unix_local` for the
+    // local backend; compare the Opengeni backend it names.
+    const backend = sandboxBackendForSdkBackendId(record.backend.kind) ?? record.backend.kind;
+    if (backend !== "local" && backend !== "docker") return true;
     const session = record.backend.session;
     return hasDurableShellProcesses(session) && session.isDurableProcessHandle(providerSessionId);
   }

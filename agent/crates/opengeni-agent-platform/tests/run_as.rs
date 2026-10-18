@@ -10,8 +10,13 @@
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::Path;
 
+use std::sync::{Arc, Mutex};
+
 use opengeni_agent_platform::run_as::{self, RunAsIdentity};
-use opengeni_agent_platform::{spawn_pty, NativePlatform, Platform, PlatformError};
+use opengeni_agent_platform::{
+    spawn_pty, DesktopBackend, NativePlatform, Platform, PlatformError, PlatformResult, PtyProcess,
+    StreamRegistry,
+};
 use opengeni_agent_proto::v1;
 
 /// The unprivileged account every mainstream distribution ships.
@@ -124,7 +129,8 @@ async fn exec_runs_with_the_users_ids_groups_and_login_environment() {
 #[tokio::test]
 async fn the_child_cannot_regain_root() {
     let Some(_) = identity() else { return };
-    let platform = NativePlatform::with_root(shared_dir().path());
+    let dir = shared_dir();
+    let platform = NativePlatform::with_root(dir.path());
     let reply = exec_as(
         &platform,
         "grep -E '^(Uid|Gid|CapEff)' /proc/self/status",
@@ -132,6 +138,7 @@ async fn the_child_cannot_regain_root() {
     )
     .await;
     let status = String::from_utf8_lossy(&reply.stdout);
+    assert_eq!(status.lines().count(), 3, "{status}");
     for line in status.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         match fields[0] {
@@ -177,7 +184,8 @@ async fn the_agent_keeps_its_own_identity() {
 #[tokio::test]
 async fn unknown_users_fail_with_their_typed_error() {
     let Some(_) = identity() else { return };
-    let platform = NativePlatform::with_root(shared_dir().path());
+    let dir = shared_dir();
+    let platform = NativePlatform::with_root(dir.path());
     let error = platform
         .exec(&v1::ExecRequest {
             command: vec!["true".to_string()],
@@ -365,7 +373,7 @@ fn pty_children_run_as_the_user_and_own_their_terminal() {
             command: vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "echo \"$(id -u) $USER $(stat -c %u \"$(tty)\")\"".into(),
+                "echo \"$(id -u) $USER $(stat -c %u \"$(tty)\") $(pwd)\"".into(),
             ],
             run_as: USER.into(),
             ..Default::default()
@@ -387,8 +395,238 @@ fn pty_children_run_as_the_user_and_own_their_terminal() {
         }
     }
     let text = String::from_utf8_lossy(&output);
+    // With no cwd the terminal starts in the user's home, or `/` without one.
+    let start = if user.home.is_dir() {
+        user.home.display().to_string()
+    } else {
+        "/".to_string()
+    };
     assert_eq!(
         text.trim(),
-        format!("{} {} {}", user.uid, user.name, user.uid)
+        format!("{} {} {} {start}", user.uid, user.name, user.uid)
     );
+}
+
+/// The first line a PTY prints (the master reports EIO once the child exits).
+fn first_pty_line(process: &mut PtyProcess) -> String {
+    use std::io::Read as _;
+
+    let mut reader = process.take_reader().expect("reader");
+    let mut output = Vec::new();
+    let mut chunk = [0_u8; 256];
+    while let Ok(read) = reader.read(&mut chunk) {
+        if read == 0 {
+            break;
+        }
+        output.extend_from_slice(&chunk[..read]);
+        if output.contains(&b'\n') {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&output).trim().to_string()
+}
+
+/// A relay registrar that keeps the PTY it is given, so the test can read it.
+#[derive(Default)]
+struct KeepPty(Mutex<Option<PtyProcess>>);
+
+#[async_trait::async_trait]
+impl StreamRegistry for KeepPty {
+    async fn register_pty(&self, process: PtyProcess) -> PlatformResult<v1::PtyOpenResponse> {
+        *self.0.lock().unwrap() = Some(process);
+        Ok(v1::PtyOpenResponse::default())
+    }
+
+    async fn register_desktop(
+        &self,
+        _desktop: Arc<dyn DesktopBackend>,
+        _display: &v1::Display,
+        _req: &v1::DesktopEnsureRequest,
+    ) -> PlatformResult<v1::StreamChannel> {
+        Err(PlatformError::Unsupported("no desktop".into()))
+    }
+
+    async fn register_browser_frames(
+        &self,
+        _browserd_port: u16,
+        _req: &v1::BrowserFramesOpenRequest,
+    ) -> PlatformResult<v1::StreamChannel> {
+        Err(PlatformError::Unsupported("no browser".into()))
+    }
+
+    async fn pty_write(&self, _pty_id: &str, _data: &[u8]) -> PlatformResult<()> {
+        Ok(())
+    }
+
+    async fn pty_resize(&self, _pty_id: &str, _cols: u16, _rows: u16) -> PlatformResult<()> {
+        Ok(())
+    }
+
+    async fn pty_close(&self, _pty_id: &str) -> PlatformResult<i32> {
+        Ok(0)
+    }
+}
+
+#[tokio::test]
+async fn a_run_as_terminal_opened_through_the_platform_starts_in_the_users_home() {
+    let Some(user) = identity() else { return };
+    let dir = shared_dir();
+    let registry = Arc::new(KeepPty::default());
+    let platform = NativePlatform::with_root(dir.path()).with_stream_registry(registry.clone());
+    platform
+        .pty_open(&v1::PtyOpenRequest {
+            command: vec!["/bin/sh".into(), "-c".into(), "pwd".into()],
+            run_as: USER.into(),
+            ..Default::default()
+        })
+        .await
+        .expect("pty_open");
+    let mut process = registry.0.lock().unwrap().take().expect("registered pty");
+    let start = if user.home.is_dir() {
+        user.home.display().to_string()
+    } else {
+        "/".to_string()
+    };
+    assert_eq!(first_pty_line(&mut process), start);
+
+    // An explicit cwd still resolves against the workspace.
+    std::fs::create_dir(dir.path().join("here")).unwrap();
+    platform
+        .pty_open(&v1::PtyOpenRequest {
+            command: vec!["/bin/sh".into(), "-c".into(), "pwd".into()],
+            cwd: "here".into(),
+            run_as: USER.into(),
+            ..Default::default()
+        })
+        .await
+        .expect("pty_open with cwd");
+    let mut process = registry.0.lock().unwrap().take().expect("registered pty");
+    assert_eq!(
+        first_pty_line(&mut process),
+        dir.path().join("here").display().to_string()
+    );
+}
+
+#[tokio::test]
+async fn exec_and_git_enter_their_working_directory_as_the_user() {
+    let Some(_) = identity() else { return };
+    let dir = shared_dir();
+    let platform = NativePlatform::with_root(dir.path());
+    // Root-only parent, open child, readable file: only the agent can get there.
+    let private = private_dir(dir.path());
+    let open = private.join("open");
+    std::fs::create_dir(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(open.join("readable"), b"behind a root-only parent").unwrap();
+    let cwd = open.to_string_lossy().into_owned();
+
+    let denied = platform
+        .exec(&v1::ExecRequest {
+            command: vec!["cat readable".to_string()],
+            shell: true,
+            cwd: cwd.clone(),
+            run_as: USER.into(),
+            ..Default::default()
+        })
+        .await;
+    match denied {
+        Err(error) => assert_eq!(error.code(), v1::ErrorCode::Os, "{error}"),
+        Ok(reply) => panic!("exec as the user entered the directory: {reply:?}"),
+    }
+    let denied = platform
+        .git(&v1::GitRequest {
+            op: v1::GitOp::Raw as i32,
+            args: vec!["status".into()],
+            cwd: cwd.clone(),
+            run_as: USER.into(),
+        })
+        .await;
+    assert!(denied.is_err(), "git as the user entered the directory");
+
+    // The agent itself still can.
+    let reply = platform
+        .exec(&v1::ExecRequest {
+            command: vec!["cat readable".to_string()],
+            shell: true,
+            cwd,
+            ..Default::default()
+        })
+        .await
+        .expect("exec as the agent");
+    assert_eq!(&reply.stdout[..], b"behind a root-only parent");
+}
+
+fn begin_request(path: &Path, content: &[u8], base: Option<&[u8]>) -> v1::FsWriteBegin {
+    v1::FsWriteBegin {
+        path: path.to_string_lossy().into_owned(),
+        content_digest: blake3::hash(content).to_hex().to_string(),
+        content_size: Some(content.len() as u64),
+        expected_absent: base.is_none(),
+        expected_base_digest: base
+            .map(|base| blake3::hash(base).to_hex().to_string())
+            .unwrap_or_default(),
+        run_as: USER.into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn transactional_publication_and_cleanup_keep_the_users_identity() {
+    let Some(_) = identity() else { return };
+    let dir = shared_dir();
+    let platform = NativePlatform::with_root(dir.path());
+    let content = b"published as the user";
+    let target = dir.path().join("late");
+    let mut write = platform
+        .fs_write_begin(&begin_request(&target, content, None))
+        .expect("begin");
+    write.append(content).expect("append");
+    // The user loses write access to the directory before the commit: the
+    // publication is the user's, so it is refused.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let refused = write.commit(&|| true);
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(
+        refused.is_err(),
+        "commit published without the user's access"
+    );
+    assert!(!target.exists());
+    drop(write);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn run_as_staging_has_no_name_and_publishes_the_verified_inode() {
+    let Some(user) = identity() else { return };
+    let dir = shared_dir();
+    let platform = NativePlatform::with_root(dir.path());
+    let target = dir.path().join("doc.txt");
+    std::fs::write(&target, b"before").unwrap();
+    std::os::unix::fs::chown(&target, Some(user.uid), Some(user.gid)).unwrap();
+    let content = b"after";
+    let mut write = platform
+        .fs_write_begin(&begin_request(&target, content, Some(b"before")))
+        .expect("begin replacement");
+    write.append(content).expect("append");
+    // Nothing the user could swap: the staged content has no name at all.
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("doc.txt")]);
+    write.commit(&|| true).expect("commit");
+    assert_eq!(std::fs::read(&target).unwrap(), content);
+    assert_eq!(owner(&target), (user.uid, user.gid));
+    assert_eq!(std::fs::metadata(&target).unwrap().nlink(), 1);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+    // A fenced commit publishes nothing and leaves only the original.
+    let mut fenced = platform
+        .fs_write_begin(&begin_request(&target, b"never", Some(content)))
+        .expect("begin");
+    fenced.append(b"never").expect("append");
+    assert!(fenced.commit(&|| false).is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), content);
+    drop(fenced);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }

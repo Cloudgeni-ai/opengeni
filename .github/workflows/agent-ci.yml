@@ -11,6 +11,7 @@ on:
     paths:
       - "agent/**"
       - ".github/workflows/agent-ci.yml"
+      - ".github/actions/setup-agent-test-nats/**"
       - "packages/browserd/src/cua/**"
       - "packages/browserd/scripts/stage-cua-runtime.ts"
       - "packages/browserd/scripts/build-cua-worker.ts"
@@ -186,8 +187,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Install Bun for the compiled macOS desktop adapter
-        if: runner.os == 'macOS'
+      - name: Install Bun for the macOS desktop adapter and the Linux NATS install
+        if: runner.os != 'Windows'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
@@ -199,6 +200,18 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: agent
+
+      # The agent's wire tests run against a real nats-server. They skip where
+      # none is installed, so the Linux leg installs the repository-pinned,
+      # checksum-verified server and makes a missing one a failure.
+      - name: Install the pinned nats-server for the agent's wire tests
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          set -euo pipefail
+          bin="$(bun scripts/install-development-tools.ts --install --tools=nats --json | jq -r .binDirectory)"
+          test -x "$bin/nats-server"
+          echo "$bin" >> "$GITHUB_PATH"
 
       - name: Verify both macOS CUA packages and the isolated compiled loader
         if: runner.os == 'macOS'
@@ -212,7 +225,12 @@ jobs:
           bun packages/browserd/scripts/stage-cua-runtime.ts arm64
           bun test --timeout 120000 packages/browserd/test/cua-runtime-packaging.e2e.test.ts
 
+      - name: Install the native transport test broker
+        uses: ./.github/actions/setup-agent-test-nats
+
       - name: cargo test --workspace
+        env:
+          OPENGENI_AGENT_REQUIRE_NATS: ${{ runner.os == 'Linux' && '1' || '' }}
         run: cargo test --workspace --all-features
 
       - name: Verify publication receipts across blocked writes and reconnects

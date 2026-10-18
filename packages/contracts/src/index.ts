@@ -2930,6 +2930,23 @@ export function organizationModelCompactionThreshold(
   return parsed.success ? parsed.data : null;
 }
 
+/**
+ * What an ordinary Send does while the agent is working. `queue` runs the
+ * message after the current turn; `steer` has the agent read it at its next
+ * model step, after the current step's tool calls finish.
+ */
+export const WorkspaceBusySend = /* @__PURE__ */ defineSchema(() => z.enum(["queue", "steer"]));
+export type WorkspaceBusySend = z.infer<typeof WorkspaceBusySend>;
+
+/** The workspace's busy-Send preference; absent or invalid is `queue`. */
+export function resolveWorkspaceBusySend(settings: unknown): WorkspaceBusySend {
+  const value =
+    settings !== null && typeof settings === "object"
+      ? (settings as { busySend?: unknown }).busySend
+      : undefined;
+  return value === "steer" ? "steer" : "queue";
+}
+
 export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -2980,6 +2997,10 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // billed in Opengeni credits (current and future); absent allows them.
       // Read leniently so a malformed value never fails the whole bag.
       allowCreditModels: z.boolean().optional().catch(undefined),
+      // What an ordinary Send does in the console composer while the agent is
+      // working: "queue" (absent) runs it after the current turn, "steer" has
+      // the agent read it at its next model step. Read leniently.
+      busySend: WorkspaceBusySend.optional().catch(undefined),
     })
     .passthrough(),
 );
@@ -3176,6 +3197,7 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
       // False blocks every model billed in Opengeni credits in this workspace.
       allowCreditModels: z.boolean().optional(),
+      busySend: WorkspaceBusySend.optional(),
     })
     .passthrough(),
 );
@@ -9317,6 +9339,12 @@ export const SteerSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
     clientEventId: SessionOperationKey,
     expectedTurnVersion: z.number().int().positive(),
     controlEtag: z.string().min(1).optional(),
+    /**
+     * Interrupt the running turn now, cutting off its current step, instead
+     * of handing over at its next model step (the default). Also turns an
+     * already-waiting Steer into an immediate one.
+     */
+    interrupt: z.boolean().optional(),
   }),
 );
 export type SteerSessionQueueItemRequest = z.infer<typeof SteerSessionQueueItemRequest>;
@@ -20587,6 +20615,7 @@ export const MachineConnectionAuthority = /* @__PURE__ */ defineSchema(() =>
     leaseExpiresAt: z.string().nullable(),
     duplicateRunnerDeniedCount: z.number().int().nonnegative(),
     duplicateRunnerDeniedAt: z.string().nullable(),
+    authenticationError: z.literal("credentials_expired").nullable().optional(),
   }),
 );
 export type MachineConnectionAuthority = z.infer<typeof MachineConnectionAuthority>;

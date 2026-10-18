@@ -19,6 +19,7 @@ import {
 import { claudeNativeModelProfile, type ResolvedModelProvider } from "@opengeni/config";
 import { withClaudeModelRequest } from "./claude-subscription-usage";
 import { createModelImageSizer } from "./model-image-sizing";
+import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
 import { projectHistoryForProvider } from "./provider-history-adapter";
 import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 import { splitStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
@@ -1178,22 +1179,56 @@ export class AnthropicMessagesModel implements Model {
     const accountScope = anthropicSearchAccountScope(this.provider);
     let merged: Json | undefined;
     let requestId: string | undefined;
-    for (let continuation = 0; ; continuation += 1) {
-      const current = merged
-        ? pausedTurnRequest(request, merged, names, searchQueries, accountScope)
-        : request;
-      // A continuation's blocks extend the same logical response: stream
-      // their text under the ids the merged response will give them.
-      const streamed = yield* this.streamMessage(current, {
-        started: merged !== undefined,
-        ...(merged ? { baseId: merged.id as string } : {}),
-        offset: merged?.content.length ?? 0,
-        ...(merged ? trailingTextRunStart(merged.content) : {}),
+    const partial: AnthropicPartialMessage = {};
+    try {
+      for (let continuation = 0; ; continuation += 1) {
+        const current = merged
+          ? pausedTurnRequest(request, merged, names, searchQueries, accountScope)
+          : request;
+        // A continuation's blocks extend the same logical response: stream
+        // their text under the ids the merged response will give them.
+        const streamed = yield* this.streamMessage(
+          current,
+          {
+            started: merged !== undefined,
+            ...(merged ? { baseId: merged.id as string } : {}),
+            offset: merged?.content.length ?? 0,
+            ...(merged ? trailingTextRunStart(merged.content) : {}),
+          },
+          partial,
+        );
+        requestId = streamed.requestId;
+        merged = mergePausedMessage(merged, streamed.message);
+        if (streamed.message.stop_reason !== "pause_turn") break;
+        assertPauseContinuationAllowed(continuation);
+      }
+    } catch (error) {
+      if (!isModelPreempted(request.signal)) throw error;
+      // A Steer cut the stream short. Keep the text blocks Claude already
+      // closed (content_block_stop); drop everything else (see
+      // preemptedResponseDone). Claude reports input usage at message_start.
+      const preempted = preemptedAnthropicMessage(merged, partial);
+      if (!preempted) {
+        yield preemptedResponseDone({ requestId: partial.requestId ?? requestId });
+        return;
+      }
+      // The response shape supplies only the id and usage; the kept text
+      // keeps the message ids its deltas were streamed under.
+      const result = anthropicResponse(
+        preempted.message,
+        partial.requestId ?? requestId,
+        names,
+        searchQueries,
+        preempted.message.requestUsages,
+        accountScope,
+      );
+      yield preemptedResponseDone({
+        id: result.responseId,
+        requestId: result.requestId,
+        output: preempted.output,
+        usage: result.usage,
       });
-      requestId = streamed.requestId;
-      merged = mergePausedMessage(merged, streamed.message);
-      if (streamed.message.stop_reason !== "pause_turn") break;
-      assertPauseContinuationAllowed(continuation);
+      return;
     }
     const result = anthropicResponse(
       merged!,
@@ -1212,12 +1247,17 @@ export class AnthropicMessagesModel implements Model {
   private async *streamMessage(
     request: ModelRequest,
     continuation: { started: boolean; baseId?: string; offset: number; textRunStart?: number },
+    partial: AnthropicPartialMessage = {},
   ): AsyncGenerator<ResponseStreamEvent, { message: Json; requestId: string | undefined }> {
+    partial.message = undefined;
+    partial.blocks = undefined;
     const response = await this.send(request, true);
     if (!response.body) throw new AnthropicProtocolError("Claude returned an empty stream");
+    partial.requestId = response.headers.get("request-id") ?? undefined;
     // `item` is the merged response index of the message this block's text
     // belongs to: adjacent text blocks share the first block's message.
     const blocks = new Map<number, { block: Json; json: string; stopped: boolean; item: number }>();
+    partial.blocks = blocks;
     let message: Json | undefined;
     let finalDelta = false;
     for await (const event of anthropicSse(
@@ -1287,6 +1327,7 @@ export class AnthropicMessagesModel implements Model {
         case "message_start":
           if (message) throw new AnthropicProtocolError("Duplicate Claude message_start");
           message = object(event.message);
+          partial.message = message;
           if (!continuation.started) yield { type: "response_started" };
           break;
         case "content_block_start":
@@ -1392,6 +1433,87 @@ export class AnthropicMessagesModel implements Model {
     }
     throw new AnthropicStreamInterruptedError("Claude stream ended without message_stop");
   }
+}
+
+/** What a stream had received when a Steer cut it short. */
+type AnthropicPartialMessage = {
+  message?: Json | undefined;
+  blocks?: Map<number, { block: Json; stopped: boolean; item: number }> | undefined;
+  requestId?: string | undefined;
+};
+
+/**
+ * The logical response a preempted stream leaves: the closed text blocks of
+ * earlier paused requests and of the current one, as assistant messages under
+ * the same ids their streamed text used (adjacent text blocks are one message,
+ * as in {@link anthropicResponse}), with the usage Claude reported for each
+ * request so far. `undefined` when no request had started.
+ */
+function preemptedAnthropicMessage(
+  merged: Json | undefined,
+  partial: AnthropicPartialMessage,
+): { message: Json & { requestUsages: Json[] }; output: unknown[] } | undefined {
+  const current = partial.message;
+  if (!merged && !current) return undefined;
+  const id = (merged?.id ?? current?.id) as string;
+  // Merged-response index of each message -> its text parts, in order.
+  const texts = new Map<number, string[]>();
+  const add = (item: number, block: Json) => {
+    if (typeof block?.text !== "string" || block.text.length === 0) return;
+    texts.set(item, [...(texts.get(item) ?? []), block.text]);
+  };
+  const earlier = (merged?.content as Json[] | undefined) ?? [];
+  let runStart: number | undefined;
+  earlier.forEach((block, index) => {
+    if (block?.type !== "text") {
+      runStart = undefined;
+      return;
+    }
+    runStart ??= index;
+    add(runStart, block);
+  });
+  if (current) {
+    // Adjacent text blocks are one message; it is finished only when every
+    // block of its run has closed, so a message never keeps part of its text.
+    const states = [...(partial.blocks?.entries() ?? [])].sort(([x], [y]) => x - y);
+    const open = new Set(
+      states
+        .filter(([, state]) => !state.stopped && state.block?.type === "text")
+        .map(([, state]) => state.item),
+    );
+    for (const [, state] of states) {
+      if (state.stopped && state.block?.type === "text" && !open.has(state.item))
+        add(state.item, state.block);
+    }
+    for (const item of open) texts.delete(item);
+  }
+  const output = [...texts.entries()]
+    .sort(([x], [y]) => x - y)
+    .map(([item, parts]) => ({
+      type: "message",
+      role: "assistant",
+      id: `${id}:${item}`,
+      status: "completed",
+      content: parts.map((part) => ({ type: "output_text", text: part })),
+    }));
+  const currentUsage = current ? ((current.usage as Json | undefined) ?? {}) : undefined;
+  return {
+    message: {
+      ...(merged ?? current),
+      id,
+      stop_reason: "end_turn",
+      content: [],
+      usage:
+        merged && currentUsage
+          ? addUsage(merged.usage ?? {}, currentUsage)
+          : (merged?.usage ?? currentUsage ?? {}),
+      requestUsages: [
+        ...((merged?.requestUsages as Json[] | undefined) ?? []),
+        ...(currentUsage ? [currentUsage] : []),
+      ],
+    },
+    output,
+  };
 }
 
 function assertPauseContinuationAllowed(continuation: number): void {

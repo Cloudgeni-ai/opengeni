@@ -19,6 +19,7 @@ export type {
 } from "./components/model-policy-picker";
 export {
   Actions,
+  AlternateSendButton,
   AttachButton,
   Attachments,
   CommandPalette,
@@ -47,6 +48,7 @@ export type {
   ChatComposerContextValue,
   ChatComposerMessages,
   ComposerActionsProps,
+  ComposerAlternateSendButtonProps,
   ComposerAttachButtonProps,
   ComposerCommandPaletteProps,
   ComposerControlLinks,

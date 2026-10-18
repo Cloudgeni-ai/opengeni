@@ -23,7 +23,7 @@ members = [
 # we lean on clippy::pedantic at the workspace level and silence only the few
 # lints that fight generated code or add no value here.
 [workspace.package]
-version = "0.1.99"
+version = "0.1.100"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
@@ -162,3 +162,9 @@ doc_markdown = "allow"
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# The agent hashes its own executable at startup. Unoptimized, SHA-256 over a
+# Linux debug test binary (hundreds of MB with its debug info) takes longer
+# than the tests that start agents wait for one to come online.
+[profile.dev.package.sha2]
+opt-level = 3

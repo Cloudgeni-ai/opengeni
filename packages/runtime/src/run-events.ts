@@ -27,6 +27,7 @@ import { normalizeProtocolJsonValue } from "./protocol-json";
 import { mcpResultFromCustomData } from "./mcp-result-custom-data";
 import { isInternalGenericDispatchRegistrationItem } from "./lazy-tool-transport";
 import { toolCallIdFromSdkItem } from "./tool-call-identity";
+import { isPreemptedModelResponse } from "./model-preemption";
 
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
@@ -162,7 +163,9 @@ export class AssistantMessagePhaseTracker {
       return [];
     }
     if (data?.type !== "response_done" || !Array.isArray(data.response?.output)) return [];
-    return this.responseDone(data.response.output);
+    // A Steer cut this response short: the turn goes on, so what it kept is a
+    // progress note, never the final answer.
+    return this.responseDone(data.response.output, isPreemptedModelResponse(data));
   }
 
   /** Phase for a streamed text delta, when the provider already declared it. */
@@ -219,8 +222,8 @@ export class AssistantMessagePhaseTracker {
     return due;
   }
 
-  private responseDone(output: unknown[]): NormalizedRuntimeEvent[] {
-    const asksForToolWork = output.some(isClientToolWork);
+  private responseDone(output: unknown[], preempted: boolean): NormalizedRuntimeEvent[] {
+    const asksForToolWork = preempted || output.some(isClientToolWork);
     const messages = output.filter(isAssistantMessageItem);
     const finalMessage = asksForToolWork ? undefined : messages.at(-1);
     this.anonymousPhases = [];

@@ -26,7 +26,13 @@ export type UseSessionConversationOptions = ClientOverride & {
   composerOptions?:
     | Pick<
         UseComposerOptions,
-        "sendExtras" | "sendBlocked" | "onSubmitted" | "onSent" | "onDeliveryError" | "initialDraft"
+        | "sendExtras"
+        | "sendBlocked"
+        | "onSubmitted"
+        | "onSent"
+        | "onDeliveryError"
+        | "initialDraft"
+        | "busySend"
       >
     | undefined;
 };
@@ -83,8 +89,16 @@ export function useSessionConversation(
   const composer = useComposer(sessionId, {
     ...eventOptions,
     initialDraft: host?.initialDraft,
+    busySend: host?.busySend,
     effectiveControl: queue.effectiveControl ?? detail.session?.effectiveControl,
-    sendDestination: () => (queue.queue.length > 0 || status === "running" ? "queue" : "chat"),
+    // As in the console and the native screen: a turn that is still current
+    // (running, recovering or waiting for capacity) means a Send waits.
+    sendDestination: () =>
+      queue.queue.length > 0 ||
+      status === "running" ||
+      (detail.session?.activeTurnId ?? null) !== null
+        ? "queue"
+        : "chat",
     sendExtras: () => {
       const extras = resolveExtras();
       return {

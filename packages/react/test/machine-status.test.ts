@@ -59,6 +59,22 @@ function update(overrides: Partial<Update>): Update {
 }
 
 describe("describeAgentRuntime", () => {
+  test("lost cleanup explains the cause and recovery without hiding the retry", () => {
+    for (const errorCode of ["update_cleanup_unconfirmed", "update_state_unavailable"]) {
+      const status = describeAgentRuntime(
+        englishText,
+        runtime({
+          update: update({ errorCode }),
+        }),
+        NOW,
+      );
+      expect(status.note).toContain("agent log");
+      expect(status.note).toContain("active commands");
+      expect(status.note).toContain("restart the agent service");
+      expect(status.action?.kind).toBe("retry");
+      expect(status.note).not.toContain("update_cleanup_unconfirmed");
+    }
+  });
   test("waiting for idle promises the update truthfully, with no action", () => {
     const status = describeAgentRuntime(
       englishText,
@@ -137,7 +153,26 @@ describe("runnerConflict and describeAgentConnection", () => {
       describeAgentConnection(englishText, { ...authority, state: "expired", supersededCount: 0 }),
     ).toEqual({
       label: "Agent connection lapsed",
-      detail: null,
+      detail: expect.stringContaining("opengeni-agent connections"),
     });
+  });
+
+  test("expired credentials have actionable status, but stale diagnostics never override a live connection", () => {
+    expect(
+      describeAgentConnection(englishText, {
+        ...authority,
+        state: "expired",
+        authenticationError: "credentials_expired",
+      }),
+    ).toEqual({
+      label: "Agent credentials expired",
+      detail: expect.stringContaining("reconnection is required"),
+    });
+    expect(
+      describeAgentConnection(englishText, {
+        ...authority,
+        authenticationError: "credentials_expired",
+      }).label,
+    ).toBe("Agent connected");
   });
 });

@@ -58,8 +58,25 @@ export function QueueDock({
     () => queue.queue.filter((turn) => isAuthoritativeQueuedTurn(turn, queue.mutationFor)),
     [queue.mutationFor, queue.queue],
   );
+  // A failed queue action stays visible until tapped, whether or not prompts
+  // are queued (a Steer is never a queue row).
+  const mutationError = queue.mutationError ? (
+    <Pressable accessibilityRole="alert" onPress={queue.clearMutationError}>
+      <Text style={{ ...fontStyle(theme), fontSize: theme.size.xs, color: c["status-failed"] }}>
+        {queue.mutationError.message}
+      </Text>
+    </Pressable>
+  ) : null;
   if (turns.length === 0) {
-    return leading ? <View style={{ flexDirection: "row" }}>{leading}</View> : null;
+    if (!mutationError) {
+      return leading ? <View style={{ flexDirection: "row" }}>{leading}</View> : null;
+    }
+    return (
+      <View style={{ gap: 6 }}>
+        {leading ? <View style={{ flexDirection: "row" }}>{leading}</View> : null}
+        {mutationError}
+      </View>
+    );
   }
   const first = turns[0]!;
   // The compact signal chip text (goal, agents and the queue share one row).
@@ -278,13 +295,7 @@ export function QueueDock({
           })}
         </View>
       ) : null}
-      {queue.mutationError ? (
-        <Pressable accessibilityRole="alert" onPress={queue.clearMutationError}>
-          <Text style={{ ...fontStyle(theme), fontSize: theme.size.xs, color: c["status-failed"] }}>
-            {queue.mutationError.message}
-          </Text>
-        </Pressable>
-      ) : null}
+      {mutationError}
     </View>
   );
 }

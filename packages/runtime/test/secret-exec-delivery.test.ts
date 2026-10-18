@@ -8,9 +8,11 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
-import { shell } from "@openai/agents/sandbox";
+import { Manifest, shell } from "@openai/agents/sandbox";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createStaticSecretResolver } from "@opengeni/vaults/testing";
 import { testSettings } from "@opengeni/testing";
 import { createSandboxClientForBackend } from "../src/index";
@@ -71,15 +73,23 @@ async function harness(
   const client = createSandboxClientForBackend(backend, settings) as {
     create(manifest?: unknown): Promise<LocalSession>;
   };
-  const local = await client.create({});
+  // The SDK's default local PATH lists only FHS directories. Keep the host's,
+  // so commands run under the in-sandbox process supervisor on every machine,
+  // as they do in production.
+  const local = await client.create(
+    backend === "local"
+      ? new Manifest({ environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" } })
+      : {},
+  );
   sessions.push(local);
-  // Spy on everything the provider receives.
+  // Spy on everything the provider receives. Every command enters through
+  // execCommand, which runs it under the process supervisor or, where that
+  // cannot host it, the SDK's own exec.
   const provider: { commands: string[]; stdin: string[] } = { commands: [], stdin: [] };
-  // The local session's execCommand delegates to exec: spy on exec only.
-  const rawExec = local.exec!.bind(local);
-  local.exec = async (args) => {
+  const rawExecCommand = local.execCommand.bind(local);
+  local.execCommand = async (args) => {
     provider.commands.push(args.cmd);
-    return await rawExec(args);
+    return await rawExecCommand(args);
   };
   const writeStdin = local.writeStdin.bind(local);
   local.writeStdin = async (args) => {
@@ -148,6 +158,36 @@ function expectNoCanary(texts: readonly string[]): void {
   }
 }
 
+/** Files the local process supervisor still keeps for this workspace's
+ * commands, whose names or contents carry input sent to them. */
+function supervisorInputResidue(workspaceRootPath: string): { runs: number; residue: string[] } {
+  const namespace = createHash("sha256").update(workspaceRootPath).digest("hex").slice(0, 16);
+  const root = join(
+    process.env.TMPDIR || tmpdir() || "/tmp",
+    `opengeni-exec-${process.getuid?.() ?? 0}`,
+    namespace,
+  );
+  if (!existsSync(root)) return { runs: 0, residue: [] };
+  const runs = readdirSync(root);
+  const residue: string[] = [];
+  for (const run of runs) {
+    for (const name of readdirSync(join(root, run))) {
+      const path = join(root, run, name);
+      if (name === "wbuf" || name.startsWith("inbuf")) {
+        residue.push(path);
+        continue;
+      }
+      try {
+        if (statSync(path).isFile() && readFileSync(path, "utf8").includes(VALUES.Plain))
+          residue.push(path);
+      } catch {
+        // A status file the supervisor renamed in the meantime.
+      }
+    }
+  }
+  return { runs: runs.length, residue };
+}
+
 describe("secret exec delivery on the local backend", () => {
   test("DL-1: the value reaches the command; the provider text holds only names", async () => {
     const h = await harness();
@@ -185,9 +225,9 @@ describe("secret exec delivery on the local backend", () => {
 
   test("DL-7 / SEC-4: env file is 0600 in a 0700 directory and gone after success and failure", async () => {
     const h = await harness();
-    const exec = h.local.exec!;
+    const execCommand = h.local.execCommand;
     const observed: Array<{ file: string; mode: string; dirMode: string }> = [];
-    h.local.exec = async (args) => {
+    h.local.execCommand = async (args) => {
       const match = /\. '([^']+\/env-[0-9a-f-]+)'/.exec(args.cmd);
       if (match) {
         observed.push({
@@ -196,7 +236,7 @@ describe("secret exec delivery on the local backend", () => {
           dirMode: (statSync(h.scopeDir).mode & 0o777).toString(8),
         });
       }
-      return await exec(args);
+      return await execCommand(args);
     };
     await h.run("true {{secret:Plain}}");
     await h.run("printf %s {{secret:Plain}} >/dev/null; false");
@@ -206,6 +246,11 @@ describe("secret exec delivery on the local backend", () => {
       expect(entry.dirMode).toBe("700");
       expect(existsSync(entry.file)).toBe(false);
     }
+    // The env file travelled to the box as process input. The supervisor
+    // hosted these commands, and none of that input is left on disk.
+    const supervisor = supervisorInputResidue(h.local.state.workspaceRootPath);
+    expect(supervisor.runs).toBeGreaterThan(0);
+    expect(supervisor.residue).toEqual([]);
     await h.routing.clearSecretFilesForAttempt();
     expect(existsSync(h.scopeDir)).toBe(false);
   }, 60_000);
@@ -521,8 +566,9 @@ describe.skipIf(!dockerSandboxImage)("secret exec delivery on the docker backend
   test("DL-7 / SEC-4: env file is 0600 in a 0700 directory and gone after success and failure", async () => {
     const h = await harness({ backend: "docker" });
     const exec = h.local.exec!;
+    const execCommand = h.local.execCommand;
     const observed: string[] = [];
-    h.local.exec = async (args) => {
+    h.local.execCommand = async (args) => {
       const match = /\. '([^']+\/env-[0-9a-f-]+)'/.exec(args.cmd);
       if (match) {
         const probe = (await exec({
@@ -531,13 +577,13 @@ describe.skipIf(!dockerSandboxImage)("secret exec delivery on the docker backend
         })) as { stdout?: string; output?: string } | string;
         observed.push(typeof probe === "string" ? probe : (probe.stdout ?? probe.output ?? ""));
       }
-      return await exec(args);
+      return await execCommand(args);
     };
     await h.run("true {{secret:Plain}}");
     await h.run("printf %s {{secret:Plain}} >/dev/null; false");
     expect(observed).toHaveLength(2);
     for (const entry of observed) expect(entry).toMatch(/600\s+700/);
-    h.local.exec = exec;
+    h.local.execCommand = execCommand;
     const left = await h.run(`ls -A '${h.scopeDir}' | wc -l`);
     expect(left).toMatch(/Output:\n0\n/);
     await h.routing.clearSecretFilesForAttempt();

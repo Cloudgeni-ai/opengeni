@@ -3553,6 +3553,16 @@ describe("lazy sandbox provisioner single-flight", () => {
     );
   });
 
+  test("resuming journaled work starts deferred preparation before joining it", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
+    ).text();
+    const resume = source.slice(source.indexOf("const codemodeOperations = await"));
+    expect(resume).toMatch(
+      /async \(\) => \{\s*eventing\.preparedTools\?\.startDeferredPreparation\?\.\(\);\s*await eventing\.toolPreparationReady;/,
+    );
+  });
+
   test("lazy tool readiness installs its rejection handler before publishing the promise", async () => {
     const toolsSource = await Bun.file(
       new URL("../src/activities/agent-turn/tool-environment.ts", import.meta.url),

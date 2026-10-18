@@ -202,7 +202,9 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
         enrollment.credentialGeneration,
       );
       // Stay outside the 120-second window even when HTTP requests cross a second boundary.
-      expect((await request(expired, now - 300)).status).toBe(401);
+      const skew = await request(expired, now - 300);
+      expect(skew.status).toBe(401);
+      expect((await skew.json()).code).toBe("enrollment_clock_skew");
       expect((await request(expired, now + 300)).status).toBe(401);
       expect((await request(expired, now, generateKeyPairSync("ed25519").privateKey)).status).toBe(
         401,
@@ -224,7 +226,9 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
         ).status,
       ).toBe(401);
       await revokeEnrollment(db, { accountId, workspaceId, enrollmentId: enrollment.id });
-      expect((await request()).status).toBe(401);
+      const revoked = await request();
+      expect(revoked.status).toBe(401);
+      expect((await revoked.json()).code).toBe("enrollment_reconnect_required");
       expect((await getEnrollment(db, workspaceId, enrollment.id))!.status).toBe("revoked");
     },
     180_000,

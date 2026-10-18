@@ -487,6 +487,7 @@ const BrowserOpenInput = z
     baseRevisionId: z.string().uuid().optional(),
     networkRouteId: z.string().uuid().optional(),
     linkedComputerSessionId: z.string().uuid().optional(),
+    includeScreenshot: z.boolean().optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -1067,7 +1068,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -1081,13 +1082,38 @@ export function createInteractionAttemptToolDefinitions(
         value,
         context,
       );
-      currentTab.use(
-        opened.session.id,
+      const openedTargetId =
         opened.observation?.target.id ??
-          opened.targets.find((target) => target.selected)?.id ??
-          null,
-      );
-      return opened;
+        opened.targets.find((target) => target.selected)?.id ??
+        null;
+      currentTab.use(opened.session.id, openedTargetId);
+      if (!value.includeScreenshot) return opened;
+      // The browser is already open. A failed capture must not turn its result
+      // into an error the model could answer by opening another browser.
+      if (!openedTargetId)
+        return new InteractionExecutionResult(opened, [
+          {
+            type: "text" as const,
+            text: "The browser opened, but it has no tab to capture a screenshot of.",
+          },
+        ]);
+      try {
+        const frame = await input.transport.captureBrowserTarget(
+          input.workspaceId,
+          opened.session.id,
+          openedTargetId,
+        );
+        return new InteractionExecutionResult(opened, [
+          browserToolImageContent(frame.data, frame.mediaType),
+        ]);
+      } catch (error) {
+        return new InteractionExecutionResult(opened, [
+          {
+            type: "text" as const,
+            text: `The browser opened, but its screenshot could not be captured: ${screenshotFailureReason(error)}`,
+          },
+        ]);
+      }
     },
   });
 
@@ -1740,7 +1766,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "open"],
     title: "Open or reuse computer",
     description:
-      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. Returns exact apps/windows/screens. Call it first for any computer task; computer_observe and computer_act then work on the session it returns.",
+      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. Returns exact apps/windows/screens. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
     input: ComputerOpenInput,
     output: ComputerOpenOutput,
     readOnly: false,

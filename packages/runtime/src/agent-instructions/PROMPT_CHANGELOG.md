@@ -1,5 +1,17 @@
 # Modular prompt changelog
 
+The CAPTCHA rule moved from the secrets doctrine into the descriptions of the
+two interaction entry tools, `browser_open` and `computer_open`. The secrets
+block renders only with the `secrets` capability and runtime reference
+resolution, and never in the legacy composition, so an agent that could drive a
+browser without that block had no CAPTCHA guidance, refused challenges and
+handed them to the user. The entry tools are visible from the first request of
+every session with browser or computer tools, in both compositions, so the same
+sentence now reaches every such agent and no agent without those tools. The
+secrets block is one line shorter. `browser_auth` and `interaction_request_human`
+keep their existing CAPTCHA clauses, where the agent decides to sign in or hand
+over.
+
 The secrets doctrine now states one rule for every tool: a secret reference
 resolves wherever it is written, including Opengeni's own tools, and an escaped
 reference is passed on unresolved for later work such as schedule prompts,
@@ -240,9 +252,9 @@ with credentials and stall on logins, so the block explicitly grants autonomy:
 use references everywhere they execute, follow the login ladder (saved
 session, saved login plus TOTP, enroll the agent's own 2FA, email or SMS codes
 through connected tools, create the account with a generated password when
-account creation is allowed), always solve CAPTCHAs, never ask for secret
-values in chat, use the ready ask card from a missing-secret error, and hand
-the browser over only for push approvals or hardware keys. It is at most six
+account creation is allowed), never ask for secret values in chat, use the
+ready ask card from a missing-secret error, and hand the browser over only for
+push approvals or hardware keys. It is at most six
 lines under its heading; playbooks live in the `opengeni-secrets` Skill. Clause
 gating: the `secret_search` sentence and the Skill pointer need
 `secret_search` (the Skill pointer also needs Skills); the 2FA-enrollment and
@@ -257,7 +269,6 @@ so "never request credentials in chat" comes with the supported alternative.
 + To pass one on unresolved (a schedule prompt, a message to another agent, a goal, a note or comment), write `\{{secret:Item}}`; it arrives as `{{secret:Item}}` and resolves when that work uses it.
 + Find saved items and their ready references with `secret_search`.
 + Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.
-+ Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.
 + Never ask for passwords, keys or codes in chat or in a plain text question.
 + Ask only for what only the user has, with a `kind: "secret"` question in `request_human_input`; a tool error about a missing secret already contains that call, so make it, adjusting only `saveTo` or `prompt`, and continue with the returned reference.
 + Hand the browser to the user with `interaction_request_human` only for push approvals or hardware keys.
@@ -354,8 +365,7 @@ When a named tool is proven absent, only the clauses naming it change:
 - Secrets: the `secret_search` sentence and the Skill pointer need
   `secret_search`; the 2FA-enrollment and account-creation rungs of the login
   ladder need `secret_save`; the push-approval and hardware-key handoff line
-  needs `interaction_request_human`. The reference, CAPTCHA and never-ask
-  rules stay.
+  needs `interaction_request_human`. The reference and never-ask rules stay.
 
 Tool discovery, media, accepted user/workspace/Skill instructions, active-goal
 continuation input, and the Codemode/code-search/Git-binding attempt

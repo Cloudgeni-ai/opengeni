@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { ATTEMPT_TOOL_CATALOG_VERSION, AttemptToolCatalog } from "@opengeni/contracts";
+import { prepareToolGatewayDefinitions } from "@opengeni/tool-gateway";
 import type { AttemptToolDefinition } from "../src";
 import {
   AttemptToolApprovalRequiredError,
@@ -8,7 +10,9 @@ import {
   AttemptToolOutputValidationError,
   AttemptToolPathCollisionError,
   createAttemptToolEnvironment,
+  digestAttemptToolCatalog,
   parseVerifiedAttemptToolCatalog,
+  verifyAttemptToolCatalog,
 } from "../src";
 
 const scope = {
@@ -39,6 +43,82 @@ function definition(
 }
 
 describe("AttemptToolEnvironment", () => {
+  test("does not partially freeze or memoize a catalog with mutable non-JSON annotations", () => {
+    const { catalog } = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [
+        {
+          ...definition("docs", "search"),
+          annotations: { observedAt: new Date("2026-08-09T12:00:00.000Z") },
+        },
+      ],
+    });
+    expect(Object.isFrozen(catalog)).toBe(false);
+    expect(Object.isFrozen(catalog.entries[0]!.inputSchema)).toBe(false);
+    expect(parseVerifiedAttemptToolCatalog(catalog)).not.toBe(catalog);
+  });
+
+  test("immutable snapshots preserve the prior catalog bytes and digest", () => {
+    const definitions = [definition("docs", "search"), definition("docs", "fetch")];
+    const createdAt = new Date("2026-08-09T12:00:00.000Z");
+    const unsigned = {
+      version: ATTEMPT_TOOL_CATALOG_VERSION,
+      ...scope,
+      generation: 1,
+      createdAt: createdAt.toISOString(),
+      entries: [
+        ...prepareToolGatewayDefinitions(
+          definitions.map((entry) => ({
+            ...entry,
+            execute: async () => ({ content: [] }),
+          })),
+        ).entries,
+      ],
+    };
+    const previous = AttemptToolCatalog.parse({
+      ...unsigned,
+      digest: digestAttemptToolCatalog(unsigned),
+    });
+    const current = createAttemptToolEnvironment({ scope, generation: 1, createdAt, definitions });
+    expect(JSON.stringify(current.catalog)).toBe(JSON.stringify(previous));
+  });
+
+  test("reuses only the exact immutable catalog snapshot and detaches caller schemas", () => {
+    const schema = { type: "object", properties: { query: { type: "string" } } };
+    const environment = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [{ ...definition("docs", "search"), inputSchema: schema }],
+    });
+    const { catalog } = environment;
+    expect(parseVerifiedAttemptToolCatalog(catalog)).toBe(catalog);
+    const receipt = verifyAttemptToolCatalog(catalog);
+    receipt.byteLength = 0;
+    receipt.catalog = { ...catalog, digest: "f".repeat(64) };
+    expect(verifyAttemptToolCatalog(catalog).catalog).toBe(catalog);
+    expect(verifyAttemptToolCatalog(catalog).byteLength).toBe(
+      new TextEncoder().encode(JSON.stringify(catalog)).byteLength,
+    );
+    expect(Object.isFrozen(catalog)).toBe(true);
+    expect(Object.isFrozen(catalog.entries)).toBe(true);
+    expect(Object.isFrozen(catalog.entries[0]!.inputSchema.properties)).toBe(true);
+    expect(() => {
+      catalog.entries[0]!.description = "changed";
+    }).toThrow();
+    schema.properties.query.type = "number";
+    expect(catalog.entries[0]!.inputSchema).toEqual({
+      type: "object",
+      properties: { query: { type: "string" } },
+    });
+    const copy = structuredClone(catalog);
+    expect(parseVerifiedAttemptToolCatalog(copy)).toEqual(catalog);
+    expect(parseVerifiedAttemptToolCatalog(copy)).not.toBe(copy);
+    copy.entries[0]!.description = "tampered";
+    Object.freeze(copy);
+    expect(() => parseVerifiedAttemptToolCatalog(copy)).toThrow(AttemptToolCatalogIntegrityError);
+  });
+
   test("binds a deterministic digest to exact attempt scope and tool catalog", () => {
     const createdAt = new Date("2026-08-09T12:00:00.000Z");
     const first = createAttemptToolEnvironment({

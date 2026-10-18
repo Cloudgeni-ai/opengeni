@@ -574,9 +574,12 @@ export const englishMessages = {
     "Pause this workstream; queued prompts and approvals are preserved",
   "composerMessages.previewName": "Preview {name}",
   "composerMessages.previewUnavailable": "Preview unavailable",
+  "composerMessages.queue": "Queue",
   "composerMessages.queuedAhead_one": "{count} waiting prompt; your message joins the queue.",
   "composerMessages.queuedAhead_other": "{count} waiting prompts; your message joins the queue.",
   "composerMessages.queueMessageEnterSteerWith": "Queue message (Enter); steer with Cmd/Ctrl+Enter",
+  "composerMessages.queueRunsAfterCurrentWork":
+    "Queue: runs after the agent finishes its current work",
   "composerMessages.reasonsThisWorkstreamIsPaused": "Reasons this workstream is paused",
   "composerMessages.removeName": "Remove {name}",
   "composerMessages.removeRestoredResourceIndex": "Remove restored resource {index}",
@@ -596,6 +599,11 @@ export const englishMessages = {
   "composerMessages.sendMessage": "Send message",
   "composerMessages.showPauseDetails": "Show pause details",
   "composerMessages.slashCommands": "Slash commands",
+  "composerMessages.steer": "Steer",
+  "composerMessages.steerMessageEnterQueueWith":
+    "Send (Enter): the agent reads it as soon as it can. Queue with Cmd/Ctrl+Enter",
+  "composerMessages.steerReadsItSoon":
+    "Steer: the agent reads it as soon as it can, usually within seconds. Running tools aren't cut off.",
   "composerMessages.stillPausedByDisplayname": "Still paused by {displayName}",
   "composerMessages.stop": "Stop",
   "composerMessages.stopTheResponse": "Stop the response",
@@ -1483,6 +1491,11 @@ export const englishMessages = {
   "machines.machineOperationPolicy.unlimited": "Unlimited",
   "machines.machineStatus.agentConnected": "Agent connected",
   "machines.machineStatus.agentConnectionLapsed": "Agent connection lapsed",
+  "machines.machineStatus.credentialsExpired": "Agent credentials expired",
+  "machines.machineStatus.credentialsRecovery":
+    "The agent will try to renew its credentials. If it stays offline, run opengeni-agent connections on the machine to check whether reconnection is required.",
+  "machines.machineStatus.offlineRecovery":
+    "On the machine, run opengeni-agent connections to check for rejected credentials. Reconnect that saved connection if requested; other workspace connections are independent.",
   "machines.machineStatus.agentNotConnectedYet": "Agent not connected yet",
   "machines.machineStatus.agentVersionUnknown": "Agent version unknown",
   "machines.machineStatus.agentVInstalled": "Agent v{installed}",
@@ -1500,7 +1513,9 @@ export const englishMessages = {
   "machines.machineStatus.sendAgain": "Send again",
   "machines.machineStatus.sendingTheUpdateToTarget": "Sending the update to {target}…",
   "machines.machineStatus.theAgentCouldnTCheck":
-    "the agent couldn't check whether the machine was idle",
+    "the agent couldn't confirm whether previous work has finished. Check the agent log and try again. If this persists, finish active commands, restart the agent service, then retry the update",
+  "machines.machineStatus.previousWorkCleanupUnconfirmed":
+    "the agent couldn't confirm cleanup of earlier work. The agent log identifies the affected command or helper. Try again after cleanup; if it cannot recover, finish active commands and restart the agent service before retrying",
   "machines.machineStatus.theAgentHasnTConfirmed":
     "The agent hasn't confirmed the update to {target}",
   "machines.machineStatus.theAgentRefusedTheRequest": "the agent refused the request",
@@ -1835,6 +1850,7 @@ export const englishMessages = {
   "native.presentation.other": "Other",
   "native.presentation.pause": "Pause",
   "native.presentation.preparing": "Preparing…",
+  "native.presentation.queue": "Queue",
   "native.presentation.queued": "Queued",
   "native.presentation.queuedPrompts": "Queued prompts",
   "native.presentation.reasoning": "Reasoning",
@@ -2338,7 +2354,7 @@ export const englishMessages = {
     "Show full content for queued prompt {number}",
   "queueSurfaceImplementation.steer": "Steer",
   "queueSurfaceImplementation.steerInterruptTheCurrentTurn":
-    "Steer — interrupt the current turn and send this message now",
+    "Steer: the agent reads this message as soon as it can, usually within seconds. Running tools aren't cut off.",
   "queueSurfaceImplementation.steerQueuedPromptIndex": "Steer queued prompt {index}",
   "queueSurfaceImplementation.thatPromptChangedBeforeIt":
     "That prompt changed before it could be moved to the composer.",
@@ -2703,7 +2719,8 @@ export const englishMessages = {
   "sessionChrome.steer": "Steer",
   "sessionChrome.steerLatestQueuedMessage": "Steer latest queued message",
   "sessionChrome.steerQueuedPromptIndex": "Steer queued prompt {index}",
-  "sessionChrome.steerTip": "Interrupt the current turn and send this message now",
+  "sessionChrome.steerTip":
+    "The agent reads this message as soon as it can, usually within seconds. Running tools aren't cut off.",
   "sessionChrome.theApplicationSUsagePolicy":
     "The application's usage policy blocks another run. Resume when it allows.",
   "sessionChrome.theSelectedModelIsBlocked":
