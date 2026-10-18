@@ -430,6 +430,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "site_runtime_conversations",
       "site_runtime_rate_windows",
       "site_runtime_usage",
+      // 0842 adds private Site/chat grants to both posture inventories.
+      "site_session_access",
       "site_sql_databases",
       "site_sql_migrations",
       "site_sql_queries",
