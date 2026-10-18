@@ -4,8 +4,8 @@
 // deployment's gateway, workspace, sandbox group and enrollment in its metadata.
 // A sandbox whose enrollment is no longer the live box of its group (a create
 // whose answer was lost, a cleanup that failed, a worker that crashed between
-// create and commit, a workspace deleted with everything in it) is deleted here
-// and its enrollment revoked. Nothing on this path messages a sandbox's agent,
+// create and commit, a workspace deleted with everything in it) has its
+// enrollment revoked and is deleted here. Nothing on this path messages its agent,
 // so the sweep never wakes or keeps awake a sleeping sandbox.
 
 import type { ComputeFabricClient, ComputeSandboxView } from "./fabric";
@@ -60,13 +60,24 @@ function identityOf(view: ComputeSandboxView): ComputeSandboxIdentity | null {
   return { sandboxId: view.id, workspaceId, sandboxGroupId, enrollmentId };
 }
 
+/** Orphans handled at once, so one stalled delete never holds up the rest. */
+export const COMPUTE_ORPHAN_SWEEP_CONCURRENCY = 8;
+
 /**
- * Delete every sandbox of this deployment that nothing durable names, then
- * revoke its enrollment. `named` decides from Opengeni's own records (the
- * enrollment is active and its group's lease holds this box, or a creator is
- * still working on the group). A sandbox younger than the settle window is left
- * alone, because its create may not have committed yet. Failures are counted
- * and left for the next sweep.
+ * Delete every sandbox of this deployment that nothing durable names. Its
+ * enrollment is revoked first and the sandbox deleted after, so the fabric's
+ * listing keeps the cleanup owned until both are done: a failed revoke leaves
+ * everything for the next sweep, and a failed delete leaves a listed sandbox
+ * whose revoked enrollment no longer names it. Enrollments whose sandbox is
+ * already gone are not seen here; the worker's stale-enrollment reconcile
+ * revokes those.
+ *
+ * `named` decides from Opengeni's own records (the enrollment is active and its
+ * group's lease holds this box, or a creator is still working on the group). A
+ * sandbox younger than the settle window is left alone, because its create may
+ * not have committed yet. Orphans are handled a few at a time; once `signal`
+ * aborts (the caller's budget or cancellation) no new one starts and the
+ * requests in flight end. Failures are counted and left for the next sweep.
  */
 export async function sweepComputeOrphans(input: {
   fabric: Pick<ComputeFabricClient, "list" | "delete">;
@@ -76,28 +87,46 @@ export async function sweepComputeOrphans(input: {
   revokeEnrollment(input: { workspaceId: string; enrollmentId: string }): Promise<void>;
   nowMs?: number;
   maxDeletions?: number;
+  concurrency?: number;
+  /** Stops the sweep: no new orphan starts after it aborts. Pass the same
+   * signal to the fabric client so the requests in flight end too. */
+  signal?: AbortSignal;
 }): Promise<ComputeOrphanSweepResult> {
   const nowMs = input.nowMs ?? Date.now();
   const maxDeletions = input.maxDeletions ?? COMPUTE_ORPHAN_SWEEP_LIMIT;
-  const views = await input.fabric.list({ [COMPUTE_METADATA.gateway]: input.gateway });
+  const concurrency = Math.max(1, input.concurrency ?? COMPUTE_ORPHAN_SWEEP_CONCURRENCY);
   const result: ComputeOrphanSweepResult = { examined: 0, deleted: [], failed: 0 };
+  if (input.signal?.aborted) return result;
+  const views = await input.fabric.list({ [COMPUTE_METADATA.gateway]: input.gateway });
+  const candidates: ComputeSandboxIdentity[] = [];
   for (const view of views) {
-    if (result.deleted.length >= maxDeletions) break;
     const identity = identityOf(view);
     if (!identity) continue;
     result.examined += 1;
     if (nowMs - view.created_ms < UNSEEN_CREATE_SETTLE_MS) continue;
-    try {
-      if (await input.named(identity)) continue;
-      await input.fabric.delete(identity.sandboxId);
-      await input.revokeEnrollment({
-        workspaceId: identity.workspaceId,
-        enrollmentId: identity.enrollmentId,
-      });
-      result.deleted.push(identity);
-    } catch {
-      result.failed += 1;
-    }
+    candidates.push(identity);
   }
+  let next = 0;
+  let started = 0;
+  const work = async (): Promise<void> => {
+    while (next < candidates.length && started < maxDeletions && !input.signal?.aborted) {
+      const identity = candidates[next]!;
+      next += 1;
+      try {
+        if (await input.named(identity)) continue;
+        if (input.signal?.aborted) return;
+        started += 1;
+        await input.revokeEnrollment({
+          workspaceId: identity.workspaceId,
+          enrollmentId: identity.enrollmentId,
+        });
+        await input.fabric.delete(identity.sandboxId);
+        result.deleted.push(identity);
+      } catch {
+        result.failed += 1;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, candidates.length) }, work));
   return result;
 }

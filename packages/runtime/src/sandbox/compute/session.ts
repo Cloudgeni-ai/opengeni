@@ -729,7 +729,8 @@ export async function deleteComputeBox(
  * enrollment is written before the create is sent. It is revoked only once
  * the fabric proves no sandbox exists or can still appear for that request.
  * Returns whether the enrollment was revoked; false (or a thrown error) leaves
- * the sandbox, if one appears, to the orphan sweep (./orphans.ts).
+ * the sandbox, if one appears, to the orphan sweep (./orphans.ts), and an
+ * enrollment that never gets a sandbox to the worker's stale-enrollment revoke.
  */
 export async function discardComputeCreate(
   fabric: Pick<ComputeFabricClient, "lookupRequest" | "delete">,

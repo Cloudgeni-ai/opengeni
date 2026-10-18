@@ -136,6 +136,9 @@ export type ComputeFabricClientOptions = {
   /** Bounded attempts for retryable failures (same body, same request_id). */
   maxAttempts?: number;
   sleep?: (ms: number) => Promise<void>;
+  /** Ends every request of this client: an aborted signal fails the request
+   * in flight at once and stops further attempts. */
+  signal?: AbortSignal;
 };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
@@ -196,6 +199,7 @@ export class ComputeFabricClient {
   private readonly requestTimeoutMs: number;
   private readonly maxAttempts: number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly signal: AbortSignal | undefined;
 
   constructor(options: ComputeFabricClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/u, "");
@@ -204,6 +208,7 @@ export class ComputeFabricClient {
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.signal = options.signal;
   }
 
   /** Create (or, for a repeated request_id and body, return and wake) one
@@ -278,7 +283,8 @@ export class ComputeFabricClient {
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     let lastError: ComputeFabricError | undefined;
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      if (attempt > 0) await this.sleep(Math.min(8_000, 250 * 2 ** attempt));
+      if (attempt > 0) await this.backoff(Math.min(8_000, 250 * 2 ** attempt));
+      if (this.signal?.aborted) break;
       try {
         return await this.attempt<T>(method, path, body);
       } catch (error) {
@@ -286,13 +292,40 @@ export class ComputeFabricClient {
         lastError = error;
       }
     }
-    throw lastError!;
+    throw (
+      lastError ??
+      new ComputeFabricError({
+        kind: "transport",
+        status: null,
+        message: `compute fabric ${method} ${path.split("?")[0]} was abandoned`,
+      })
+    );
+  }
+
+  /** Wait before a retry, ending early once the client's signal aborts. */
+  private async backoff(ms: number): Promise<void> {
+    const signal = this.signal;
+    if (!signal) return await this.sleep(ms);
+    if (signal.aborted) return;
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<void>((resolve) => {
+      onAbort = () => resolve();
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      await Promise.race([this.sleep(ms), aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
   }
 
   private async attempt<T>(method: string, path: string, body?: unknown): Promise<T> {
     const route = path.split("?")[0];
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const abandon = (): void => controller.abort();
+    this.signal?.addEventListener("abort", abandon, { once: true });
+    if (this.signal?.aborted) controller.abort();
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}${path}`, {
@@ -316,6 +349,7 @@ export class ComputeFabricClient {
       });
     } finally {
       clearTimeout(timer);
+      this.signal?.removeEventListener("abort", abandon);
     }
     if (!response.ok) {
       const { code, message } = await errorBody(response);

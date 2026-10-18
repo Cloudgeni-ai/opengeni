@@ -65,15 +65,28 @@ skips sandbox enrollments, and machine routes list machines only.
   delete, a worker that crashed between create and commit, a workspace deleted
   with everything in it) is the orphan sweep's: every five minutes the worker's
   reaper maintenance lists this deployment's sandboxes on the fabric
-  (`sweepComputeOrphans`, filtered by its gateway URL) and deletes each one
-  older than ten minutes that Opengeni's records no longer name, then revokes
-  its enrollment. A sandbox is named while its enrollment is active and its
-  group's lease holds it (by sandbox or enrollment id) or is warming, since a
-  creator may be about to commit it (`computeSandboxNamed`). The fabric's own
-  inventory is the record, so nothing is lost when Opengeni's rows go, and the
-  sweep never messages an agent, so it wakes nothing. One fabric team serves
-  one Opengeni deployment's gateway; the gateway tag keeps a misconfigured
-  second deployment's sandboxes out of the sweep.
+  (`sweepComputeOrphans`, filtered by its gateway URL) and, for each one
+  older than ten minutes that Opengeni's records no longer name, revokes its
+  enrollment and then deletes it. A sandbox is named while its enrollment is
+  active and its group's lease holds it (by sandbox or enrollment id) or is
+  warming, since a creator may be about to commit it (`computeSandboxNamed`).
+  The fabric's own inventory is the record, so nothing is lost when Opengeni's
+  rows go: a failed revoke deletes nothing, and a failed delete leaves a listed
+  sandbox for the next pass. The sweep handles eight orphans at a time and
+  ends within one minute (its fabric listing included) or when the activity
+  is cancelled, so one stalled delete never holds up the others or the rest
+  of maintenance; whatever it does not reach is the next pass's. It never
+  messages an agent, so it wakes nothing. One fabric team serves one Opengeni
+  deployment's gateway; the gateway tag keeps a misconfigured second
+  deployment's sandboxes out of the sweep.
+- **Stale enrollments**: an enrollment whose sandbox is already gone (a delete
+  whose revoke failed, a create that never made a sandbox) is in no fabric
+  listing, so the same maintenance also revokes, from Opengeni's own records,
+  every active sandbox enrollment older than ten minutes whose group's lease
+  neither names it nor is warming (migration 0846: a cross-workspace inventory
+  of ids under the owner-only read capability, then one revoke per enrollment
+  under its workspace's RLS that re-checks the condition). An enrollment
+  therefore never stays active for a sandbox that is gone.
 - **Resume**: re-address the same sandbox by id; no wake is needed. If a request
   finds no responder (no host serves the sandbox, for example mid-move),
   `ComputeWakingControlRpc` asks the fabric to wake it and resends under the
@@ -179,4 +192,4 @@ otherwise. See "Run as another local user" in `docs/connected-machines.md`.
 Canonical code: `packages/runtime/src/sandbox/compute/`,
 `packages/runtime/src/sandbox/providers/compute.ts`,
 `packages/core/src/sandbox/compute-plane.ts`,
-`apps/api/src/sandbox/compute-gateway*.ts`, migrations 0842 to 0845.
+`apps/api/src/sandbox/compute-gateway*.ts`, migrations 0842 to 0846.

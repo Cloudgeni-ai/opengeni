@@ -62854,12 +62854,13 @@ export async function releaseSandboxAgentLink(
 
 // REVOKE a compute sandbox's enrollment when the sandbox is deleted, which
 // ends its link session at the gateway. Idempotent; never touches a machine.
+// A deleted workspace took the enrollment with it, which is success too.
 export async function revokeSandboxEnrollment(
   db: Database,
   input: { workspaceId: string; enrollmentId: string; now?: Date },
 ): Promise<{ revoked: boolean }> {
   const now = input.now ?? new Date();
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+  const scoped = withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const rows = await scopedDb
       .update(schema.enrollments)
       .set({
@@ -62880,6 +62881,14 @@ export async function revokeSandboxEnrollment(
       .returning({ id: schema.enrollments.id });
     return { revoked: rows.length > 0 };
   });
+  try {
+    return await scoped;
+  } catch (error) {
+    if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
+      return { revoked: false };
+    }
+    throw error;
+  }
 }
 
 /**
@@ -62927,6 +62936,81 @@ export async function computeSandboxNamed(
     }
     throw error;
   }
+}
+
+/**
+ * Revoke compute sandbox enrollments nothing can use any more: active, created
+ * more than ten minutes ago (the create settle window), and their group's
+ * lease neither names them nor is warming a new box. These are enrollments
+ * whose sandbox is already gone (a delete whose revoke failed, a create that
+ * never made one), which no fabric listing shows the orphan sweep. The
+ * cross-workspace inventory (migration 0846) returns ids only; each revoke runs
+ * under its workspace's RLS and re-checks the same condition, so an enrollment
+ * a lease names in the meantime stays active. A failed revoke is counted and
+ * found again by the next call.
+ */
+export async function revokeStaleComputeSandboxEnrollments(db: Database): Promise<{
+  revoked: { workspaceId: string; enrollmentId: string }[];
+  failed: number;
+}> {
+  const candidates = await rawRows<{ workspace_id: string; enrollment_id: string }>(
+    db,
+    sql`
+      select workspace_id, enrollment_id
+      from opengeni_private.list_stale_compute_sandbox_enrollments()
+    `,
+  );
+  const revoked: { workspaceId: string; enrollmentId: string }[] = [];
+  let failed = 0;
+  for (const candidate of candidates) {
+    const scoped = withWorkspaceRls(db, candidate.workspace_id, async (scopedDb) => {
+      const rows = await rawRows<{ id: string }>(
+        scopedDb,
+        sql`
+          update enrollments e
+          set status = 'revoked',
+              revoked_at = now(),
+              connection_instance_id = null,
+              connection_lease_expires_at = null,
+              updated_at = now()
+          where e.workspace_id = ${candidate.workspace_id}
+            and e.id = ${candidate.enrollment_id}
+            and e.kind = 'sandbox'
+            and e.status = 'active'
+            and e.created_at < now() - interval '10 minutes'
+            and not exists (
+              select 1 from sandbox_leases lease
+              where lease.workspace_id = e.workspace_id
+                and lease.sandbox_group_id = e.sandbox_group_id
+                and (
+                  lease.liveness = 'warming'
+                  or lease.resume_state #>> '{sessionState,enrollmentId}' = e.id::text
+                )
+            )
+          returning e.id
+        `,
+      );
+      return rows.length > 0;
+    });
+    try {
+      if (await scoped) {
+        revoked.push({
+          workspaceId: candidate.workspace_id,
+          enrollmentId: candidate.enrollment_id,
+        });
+      }
+    } catch (error) {
+      // A workspace deleted since the inventory took its enrollments with it.
+      if (
+        error instanceof Error &&
+        error.message === `Workspace not found: ${candidate.workspace_id}`
+      ) {
+        continue;
+      }
+      failed += 1;
+    }
+  }
+  return { revoked, failed };
 }
 
 // THE LOUD-CONSENT APPROVE (the user's POST /approve). In ONE transaction:

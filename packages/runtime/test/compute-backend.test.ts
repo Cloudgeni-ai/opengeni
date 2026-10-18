@@ -58,6 +58,9 @@ class FakeFabric {
   loseCreateAnswers = false;
   /** Fail request lookups and deletes (the fabric is unreachable for cleanup). */
   failCleanup = false;
+  /** Sandboxes whose delete never answers until the client gives up. */
+  readonly stallDeletes = new Set<string>();
+  private readonly stalls = new Set<() => void>();
   private readonly server: ReturnType<typeof Bun.serve>;
   /** Called when the fabric wakes a sandbox. */
   onWake: (box: FabricBox) => void = () => {};
@@ -142,6 +145,13 @@ class FakeFabric {
         }
         if (request.method === "GET") return Response.json(this.view(box));
         if (request.method === "DELETE") {
+          if (this.stallDeletes.has(box.id)) {
+            await new Promise<void>((resolve) => {
+              this.stalls.add(resolve);
+              request.signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+            return Response.json({ code: "unavailable", message: "stalled" }, { status: 503 });
+          }
           if (this.failCleanup) {
             return Response.json({ code: "unavailable", message: "down" }, { status: 503 });
           }
@@ -171,7 +181,28 @@ class FakeFabric {
     };
   }
 
+  /** Put an orphan of this deployment on the fabric, created long ago. */
+  addOrphan(id: string, enrollmentId: string = crypto.randomUUID()): FabricBox {
+    const box: FabricBox = {
+      id,
+      createdMs: 1,
+      body: {
+        metadata: {
+          opengeni_gateway: GATEWAY,
+          opengeni_workspace_id: WORKSPACE,
+          opengeni_sandbox_group_id: GROUP,
+          opengeni_enrollment_id: enrollmentId,
+        },
+        init: { agent: { workspace_id: WORKSPACE, agent_id: enrollmentId } },
+      },
+    };
+    this.boxes.set(id, box);
+    return box;
+  }
+
   stop(): void {
+    for (const release of this.stalls) release();
+    this.stalls.clear();
     this.server.stop(true);
   }
 }
@@ -637,9 +668,9 @@ describe("compute sandbox client", () => {
     expect(plane.sent).toHaveLength(sentBefore);
   });
 
-  test("an orphan whose delete fails is counted and kept for the next sweep", async () => {
+  test("an orphan whose delete fails is revoked, counted and kept for the next sweep", async () => {
     const { fabric, plane, client } = setup();
-    await client.create(undefined, { opengeniCreateIdentity: identity });
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
     fabric.failCleanup = true;
     const sweep = () =>
       sweepComputeOrphans({
@@ -654,6 +685,9 @@ describe("compute sandbox client", () => {
         nowMs: Date.now() + 11 * 60_000,
       });
     expect(await sweep()).toMatchObject({ examined: 1, deleted: [], failed: 1 });
+    // Revoked first: the sandbox is still listed, so the next sweep owns it.
+    expect(plane.revoked).toEqual([session.state.enrollmentId]);
+    expect(fabric.boxes.size).toBe(1);
     // A pass deletes at most its limit; the next pass continues.
     fabric.failCleanup = false;
     const capped = await sweepComputeOrphans({
@@ -666,11 +700,75 @@ describe("compute sandbox client", () => {
     });
     expect(capped.deleted).toEqual([]);
     expect(fabric.boxes.size).toBe(1);
-    fabric.failCleanup = true;
-    expect(plane.revoked).toEqual([]);
     fabric.failCleanup = false;
     expect((await sweep()).deleted).toHaveLength(1);
     expect(fabric.boxes.size).toBe(0);
+  });
+
+  test("an orphan whose revoke fails is not deleted, so the next sweep still owns it", async () => {
+    const { fabric } = setup();
+    const enrollmentId = crypto.randomUUID();
+    fabric.addOrphan("sbx-orphan", enrollmentId);
+    const revoked: string[] = [];
+    let revokeFails = true;
+    const sweep = () =>
+      sweepComputeOrphans({
+        fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+        gateway: GATEWAY,
+        named: async () => false,
+        revokeEnrollment: async (input) => {
+          if (revokeFails) throw new Error("database unavailable");
+          revoked.push(input.enrollmentId);
+        },
+      });
+    expect(await sweep()).toMatchObject({ examined: 1, deleted: [], failed: 1 });
+    expect(fabric.boxes.has("sbx-orphan")).toBe(true);
+    expect(fabric.requests.some((r) => r.method === "DELETE")).toBe(false);
+    revokeFails = false;
+    expect((await sweep()).deleted).toHaveLength(1);
+    expect(revoked).toEqual([enrollmentId]);
+    expect(fabric.boxes.size).toBe(0);
+  });
+
+  test("one stalled delete never holds up the other orphans, and the sweep ends with its signal", async () => {
+    const { fabric } = setup();
+    for (const id of ["sbx-a", "sbx-stuck", "sbx-b", "sbx-c"]) fabric.addOrphan(id);
+    fabric.stallDeletes.add("sbx-stuck");
+    const budget = new AbortController();
+    const fabricClient = new ComputeFabricClient({
+      baseUrl: fabric.url,
+      apiKey: "fabric-key",
+      requestTimeoutMs: 60_000,
+      signal: budget.signal,
+    });
+    const started = Date.now();
+    const sweeping = sweepComputeOrphans({
+      fabric: fabricClient,
+      gateway: GATEWAY,
+      named: async () => false,
+      revokeEnrollment: async () => {},
+      concurrency: 2,
+      signal: budget.signal,
+    });
+    // The healthy siblings are deleted while the stuck delete hangs.
+    for (let i = 0; i < 100 && fabric.boxes.size > 1; i += 1) await Bun.sleep(10);
+    expect([...fabric.boxes.keys()]).toEqual(["sbx-stuck"]);
+    budget.abort();
+    const result = await sweeping;
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result.deleted.map((d) => d.sandboxId).sort()).toEqual(["sbx-a", "sbx-b", "sbx-c"]);
+    expect(result.failed).toBe(1);
+    // An aborted signal starts nothing new.
+    fabric.stallDeletes.clear();
+    const after = await sweepComputeOrphans({
+      fabric: fabricClient,
+      gateway: GATEWAY,
+      named: async () => false,
+      revokeEnrollment: async () => {},
+      signal: budget.signal,
+    });
+    expect(after).toEqual({ examined: 0, deleted: [], failed: 0 });
+    expect(fabric.boxes.has("sbx-stuck")).toBe(true);
   });
 
   test("deleting a sandbox revokes its enrollment only after the fabric delete", async () => {

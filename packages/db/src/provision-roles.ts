@@ -2496,6 +2496,9 @@ BEGIN
       IF to_regprocedure('opengeni_private.list_pending_modal_provider_creates()') IS NOT NULL THEN
         REVOKE ALL ON FUNCTION opengeni_private.list_pending_modal_provider_creates() FROM PUBLIC;
       END IF;
+      IF to_regprocedure('opengeni_private.list_stale_compute_sandbox_enrollments()') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION opengeni_private.list_stale_compute_sandbox_enrollments() FROM PUBLIC;
+      END IF;
     END IF;
     IF to_regclass('opengeni_private.modal_native_origin_read_capabilities') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.modal_native_origin_read_capabilities FROM %I', ${literal(role)});
