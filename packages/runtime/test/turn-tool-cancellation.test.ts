@@ -456,6 +456,41 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(adoptions).toBe(0);
   });
 
+  test("a yielded turn-owned process holds the turn until it exits; an adopted one does not", async () => {
+    const controller = createTurnToolCancellationController();
+    expect(controller.holdsTurnOwnedProcesses()).toBe(false);
+    // The first command is adoptable (120); the second is process-local (119).
+    let launches = 0;
+    const exec = functionTool("exec_command", async () =>
+      launches++ === 0 ? running(120, "ready\n") : running(119, "ready\n"),
+    );
+    const write = functionTool("write_stdin", async () => exited(0, "finished\n"));
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 119 || sessionId === 120,
+      canAdoptRetainedProcessAsBackgroundCommand: (sessionId: number) => sessionId === 120,
+      adoptRetainedProcessAsBackgroundCommand: async () => {},
+    };
+    const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    // A session-adopted background command survives the turn ending.
+    await wrappedExec!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "adopted-task", yield_time_ms: 0 }),
+    );
+    expect(controller.holdsTurnOwnedProcesses()).toBe(false);
+
+    // A process-local handle is stopped when the turn ends, so it holds the turn.
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "local-task", yield_time_ms: 0 }));
+    expect(controller.holdsTurnOwnedProcesses()).toBe(true);
+    await wrappedWrite!.invoke(
+      runContext,
+      JSON.stringify({ session_id: 119, chars: "", yield_time_ms: 0 }),
+    );
+    expect(controller.holdsTurnOwnedProcesses()).toBe(false);
+  });
+
   test("detects only a bare stdin-driven shell as the command's final step", () => {
     for (const command of [
       "bash",

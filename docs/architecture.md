@@ -1114,15 +1114,22 @@ lifecycle states keep ordinary Send ordering. Human prompts are the reorderable
 queue surface; machine-origin inputs remain typed records and join a turn only
 through the claim transaction. A queued human/API prompt still never waits for
 the whole running turn: model-call admission, which runs before every model
-request after the previous step's tool results are durable, also reads
-`hasQueuedPromptBehindTurn`. When a prompt is queued no request is sent; the
-stream loop settles the turn `superseded`
+request, also reads `hasQueuedPromptBehindTurn` once the running turn has
+received at least one model response in its activity. When a prompt is queued
+and the turn owns no live process that ending it would stop (a yielded local,
+Docker or OpenSandbox shell that was not adopted as a session background
+command), admission throws `ModelStepHandover` before the request leaves the
+worker. The SDK routes it through its run error handlers like a turn cap, so
+the run finishes normally and every event of the completed step still reaches
+the consumer. The worker then settles the turn `superseded`
 (`turn.superseded{reason:"queued_prompt"}`) under the settlement precondition
 `requireQueuedPrompt`, re-checked under the session lock, and the prompt is
 claimed next on the unchanged history. If it was withdrawn in between, nothing
 is written and the turn rebuilds its input from durable history and keeps
-sampling. Unlike Steer this never interrupts a tool call in progress, and the
-timeline closes the handed-over turn quietly. A `requires_action` resume preserves that rule
+sampling. Each queued prompt therefore gets at least one model step of its own
+before it can hand over to a later one. Unlike Steer this never interrupts a
+tool call in progress, and the timeline closes the handed-over turn quietly.
+A `requires_action` resume preserves that rule
 without violating provider protocol: it first writes the interrupted
 call/result pair, then re-enters the exact attempt claim to attach only machine
 input whose durable pending-event sequence was inside the resume attempt's

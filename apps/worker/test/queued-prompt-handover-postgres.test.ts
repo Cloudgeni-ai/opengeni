@@ -309,3 +309,90 @@ test("a turn with nothing queued behind it never hands over", async () => {
   expect(timeline.some((event) => event.type === "turn.superseded")).toBe(false);
   expect(timeline.filter((event) => event.type === "turn.completed")).toHaveLength(1);
 });
+
+test("a handover after parallel tool calls keeps every call and result, even with slow persistence", async () => {
+  const ctx = await fixture();
+  const session = await startSession(ctx);
+  let sent = false;
+  const scripted = new ScriptedModel([
+    {
+      id: `step-1-${session.id}`,
+      output: [
+        functionCall("local_fixture", {}, "call-1"),
+        functionCall("local_fixture", {}, "call-2"),
+      ],
+    },
+    { id: `answer-${session.id}`, output: [assistantMessage("Status: both steps are done.")] },
+  ]);
+  const runtime = scriptedRuntime(scripted, async () => {
+    if (sent) return;
+    sent = true;
+    await send(ctx, session.id, "What is the status?");
+  });
+  // The stream consumer lags behind the SDK: the next model call is admitted
+  // while the completed step's tool events are still queued for it.
+  const append = opengeniDb.appendSessionHistoryItems;
+  const slowAppend = spyOn(opengeniDb, "appendSessionHistoryItems").mockImplementation(
+    async (...args: Parameters<typeof append>) => {
+      await Bun.sleep(150);
+      return await append(...args);
+    },
+  );
+  try {
+    const first = await runTurn(ctx, session.id, runtime);
+    expect(first.status).toBe("idle");
+  } finally {
+    slowAppend.mockRestore();
+  }
+  expect(scripted.calls).toBe(1);
+  const timeline = await events(ctx, session.id);
+  expect(timeline.filter((event) => event.type === "turn.superseded")).toHaveLength(1);
+  // Both calls and both outputs reached the live timeline, not only history.
+  const callIds = (type: string) =>
+    ["call-1", "call-2"].filter((id) =>
+      timeline.some(
+        (event) => event.type === type && JSON.stringify(event.payload).includes(`"${id}"`),
+      ),
+    );
+  expect(callIds("agent.toolCall.created")).toEqual(["call-1", "call-2"]);
+  expect(callIds("agent.toolCall.output")).toEqual(["call-1", "call-2"]);
+  const history = await getActiveSessionHistoryItemsPaged(app.db, ctx.workspaceId, session.id);
+  expect(historyShape(history)).toEqual([
+    "user:task",
+    "call:local_fixture",
+    "call:local_fixture",
+    "result",
+    "result",
+  ]);
+});
+
+test("each queued prompt gets its own model step before it can hand over to the next", async () => {
+  const ctx = await fixture();
+  const session = await startSession(ctx);
+  let sent = false;
+  const scripted = new ScriptedModel([
+    { id: `step-1-${session.id}`, output: [functionCall("local_fixture", {}, "call-1")] },
+    // The first queued prompt is answered by its own inference, although a
+    // second prompt is already queued behind it.
+    { id: `answer-b-${session.id}`, output: [assistantMessage("Status: step one is done.")] },
+    { id: `answer-c-${session.id}`, output: [assistantMessage("Noted.")] },
+  ]);
+  const runtime = scriptedRuntime(scripted, async () => {
+    if (sent) return;
+    sent = true;
+    await send(ctx, session.id, "What is the status?");
+    await send(ctx, session.id, "Also keep notes");
+  });
+
+  expect((await runTurn(ctx, session.id, runtime)).status).toBe("idle");
+  expect(scripted.calls).toBe(1);
+  expect((await runTurn(ctx, session.id, runtime)).status).toBe("idle");
+  expect(scripted.calls).toBe(2);
+  expect((await runTurn(ctx, session.id, runtime)).status).toBe("idle");
+  expect(scripted.calls).toBe(3);
+  expect((await turns(session.id)).map((turn) => turn.status)).toEqual([
+    "superseded",
+    "completed",
+    "completed",
+  ]);
+});

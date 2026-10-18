@@ -310,6 +310,13 @@ export type TurnToolCancellationFence = {
     args: ChannelAExecArgs,
   ): Promise<SynchronousCommandResult>;
   /**
+   * Whether ending the turn now would stop work the turn still owns: a
+   * yielded shell process that was not adopted as a session background
+   * command, a shell start or remote command still settling, or a sandbox
+   * call in flight. A voluntary turn handover waits while this holds.
+   */
+  holdsTurnOwnedProcesses(): boolean;
+  /**
    * Remove every attempt-scoped secret file the wrapped sessions wrote
    * (`secretfile` paths, leftover env files). Called at attempt end after the
    * writers drain; rejects with the first failure after trying every session.
@@ -995,6 +1002,15 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   async waitForQuiescence(): Promise<void> {
     this.cancel(this.reason);
     await this.ensureDrain();
+  }
+
+  holdsTurnOwnedProcesses(): boolean {
+    return (
+      this.shellSessions.size > 0 ||
+      this.pendingShellStarts.size > 0 ||
+      this.remoteExecs.size > 0 ||
+      this.inFlight.size > 0
+    );
   }
 
   async clearSecretFiles(): Promise<void> {
