@@ -8,9 +8,10 @@ export type Status = "pass" | "fail" | "skip" | "n/a";
  * `from` and `to`, when the next request woke it. */
 export type LevelProof = { kind: "level"; sandbox: string; level: string; from: string; to: string };
 
-/** That the host checkpointed the running sandbox (a completed checkpoint
- * step) between `from` and `to`, while the check's streams stayed open. */
-export type CheckpointProof = { kind: "checkpoint"; sandbox: string; from: string; to: string };
+/** That the host checkpointed the running sandbox (at least `min`, default
+ * one, completed checkpoint steps) between `from` and `to`, while the
+ * check's streams stayed open. */
+export type CheckpointProof = { kind: "checkpoint"; sandbox: string; from: string; to: string; min?: number };
 
 export type Proof = LevelProof | CheckpointProof;
 

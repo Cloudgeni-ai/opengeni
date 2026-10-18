@@ -90,6 +90,8 @@ frame), not only that a request was accepted.
 | desktop | the agent's computer session becomes active, a computer tool call succeeds, and a screen frame fetched through the API decodes as a real desktop (at least 640x400, several colours) |
 | run-as | not applicable: Opengeni never asks any backend to run a sandbox's commands as another user (the runtime's `sandboxRunAs` gives none), so no public API reaches it; the compute agent advertises `run_as`, which the agent's Linux tests cover as root |
 | sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level, and the host's state (`GET /v1/sandboxes/{id}/state`) must report the level with no step under way and keep it 3 s; the next Opengeni request wakes it, with its files, the same boot generation and a running process that holds 32 MiB of known memory (same pid, memory intact). After the run, `suite/verify.ts` checks the hosts' journals: the sandbox's last completed step before the wake must have reached that level, or the check fails; every wake inside a sleep's window and the one that ends it are reported with what asked for it (`compute.wake.by`) |
+| link-stream | for 170 s, 4 MiB of random bytes written through the files API and read back, and 4 MiB the guest makes read through it, each cycle compared by sha256 (the guest's and the API's); then a sleep to Saved woken by a read, after which every file matches both ways. The journals must show at least two checkpoints begun and completed during the transfers and the saved sleep as the sleep checks verify it, and the guest console on the host must show no new agent connection ("connected to control plane", "reconnecting at once", "lost this sandbox's connections") during the transfers or across the sleep |
+| stale-restore | a write, then a checkpoint the host's state shows begin and end, then a second write, then the suite kills that sandbox's Firecracker process on its host (by the jail's pid file, checked to be the VMM whose root is that jail). The next command must answer within 240 s on the same host with the first write and without the second (the expected loss for a crash after a running checkpoint), a 32 MiB process kept from the checkpoint, the agent connected exactly once more, and the host journal showing the old streams ended (`cannot go on`, ended streams, or the guest told they were lost) and no stream protocol error |
 | move | the sandbox sleeps (Saved) and the fabric moves it to another host; its files come along |
 | host-loss | after a sleep to remote that the host's state confirms, the sandbox's host is stopped; the sandbox wakes, with its files, on a different live host under a higher owner epoch, and the lost host no longer owns it |
 | delete | deleting the session deletes its sandbox on the fabric |
@@ -98,6 +100,12 @@ frame), not only that a request was accepted.
 | ui | Playwright in the web app: the Files tab lists the file, a command typed in the Terminal tab runs, the Desktop tab draws the desktop |
 
 A check whose needs failed is skipped, so every run reports every check.
+
+The link-stream and stale-restore checks reach the hosts from the stack VM
+with `gcloud compute ssh --internal-ip` as the stack VM's own identity:
+`env.sh fleet` grants it `roles/compute.osAdminLogin` on this
+environment's host instances only (an IAM condition on their names), and
+`env.sh down` removes the grant (`status` lists it while it exists).
 
 After each run `suite` also copies every host's `compute-*` journal since
 the run began into the run's results (`host-<name>.log`), over OS Login

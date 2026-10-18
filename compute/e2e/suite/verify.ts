@@ -9,7 +9,7 @@
 // check's window, and the one that ends it, is printed with what asked for it
 // (compute.wake.by: fleet, agent_link or guest_port). A checkpoint check
 // passes only if the journal shows a completed checkpoint of its sandbox
-// while its streams were open.
+// while its streams were open (begun and completed inside the window).
 //
 //   bun verify.ts <run directory>   (results.json and host-*.log)
 //
@@ -112,14 +112,20 @@ function checkpointed(proof: CheckpointProof): { ok: boolean; how: string } {
   if (journals.length === 0) return { ok: false, how: "no host journals to verify the checkpoint with" };
   const from = Date.parse(proof.from);
   const to = Date.parse(proof.to);
-  const done = steps.filter((s) => s.sandbox === proof.sandbox && s.step === "checkpoint" && s.at >= from && s.at <= to);
-  if (done.length === 0) return { ok: false, how: "host journal: no checkpoint of the sandbox completed while the streams were open" };
+  const done = steps.filter((s) => s.sandbox === proof.sandbox && s.step === "checkpoint" && s.start >= from && s.at <= to);
+  const min = proof.min ?? 1;
+  if (done.length < min) {
+    return {
+      ok: false,
+      how: `host journal: ${done.length} checkpoint(s) of the sandbox completed while the streams were open, not at least ${min}`,
+    };
+  }
   return { ok: true, how: `host journal: ${done.length} checkpoint(s) while streaming, at ${done.map((s) => `${clock(s.at)} on ${s.host}`).join(", ")}` };
 }
 
 // The checks whose pass rests on the journals: a pass with no proof to
 // verify is not one.
-const NEEDS_PROOF = /^(sleep-.*|checkpoint)$/;
+const NEEDS_PROOF = /^(sleep-.*|checkpoint|link-stream|stale-restore)$/;
 for (const result of saved.results) {
   if (result.status === "pass" && !result.proofs?.length && NEEDS_PROOF.test(result.id)) {
     result.status = "fail";

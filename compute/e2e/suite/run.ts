@@ -8,7 +8,7 @@
 // what it needs). A check passes, fails, is skipped, or is n/a when the
 // product has no surface for it (the reason is in its detail).
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { request as httpsRequest } from "node:https";
@@ -289,6 +289,58 @@ type Host = { name: string; state: string; epoch: number; sandboxes: number; awa
 type Sandbox = { id: string; host: string | null; owner_epoch: number; metadata: Record<string, string> };
 const hosts = () => fabric<Host[]>("GET", "/v1/hosts", undefined, OPERATOR_KEY);
 const sandbox = () => fabric<Sandbox>("GET", `/v1/sandboxes/${state.sandbox}`);
+
+// --- A host, as root's caller (OS Login as the stack VM's identity, which
+// env.sh lets log in to this environment's hosts only) ----------------------
+
+/** Runs `command` on `host` and returns its stdout; fails on a nonzero exit. */
+function onHost(host: string, command: string, timeoutMs = 120_000): string {
+  const run = spawnSync(
+    "gcloud",
+    ["compute", "ssh", host, "--zone", ZONE, "--project", PROJECT, "--internal-ip", "--quiet",
+      "--strict-host-key-checking=no", "--command", command],
+    { encoding: "utf8", timeout: timeoutMs },
+  );
+  if (run.status !== 0) {
+    throw new Error(`on ${host}, \`${command.slice(0, 100)}\` ended ${run.status ?? run.signal}: ${`${run.error ?? ""} ${run.stderr ?? ""}`.trim().slice(-400)}`);
+  }
+  return run.stdout;
+}
+const vmDir = (id: string) => `/var/lib/compute/state/vm/firecracker/${id}`;
+
+/** What the sandbox's guest console on `host` says so far about the agent's
+ * connections: each "connected to control plane" is one connection made;
+ * "lost this sandbox's connections" is the guest told its host lost them. */
+type Tally = { connected: number; reconnecting: number; lost: number; bytes: number; head: string };
+function consoleTally(host: string): Tally {
+  const file = `${vmDir(state.sandbox!)}/console.log`;
+  const out = onHost(
+    host,
+    `f=${file}; for p in 'connected to control plane' 'reconnecting at once' "lost this sandbox's connections"; do ` +
+      `sudo grep -c "$p" $f || true; done; sudo stat -c %s $f; sudo head -c 4096 $f | sha256sum | cut -c1-16`,
+  ).trim().split("\n");
+  const [connected, reconnecting, lost, bytes] = out.slice(0, 4).map(Number);
+  if (out.length < 5 || [connected, reconnecting, lost, bytes].some((n) => !Number.isFinite(n))) {
+    throw new Error(`the guest console on ${host} could not be read: ${out.join(" | ").slice(0, 300)}`);
+  }
+  return { connected: connected!, reconnecting: reconnecting!, lost: lost!, bytes: bytes!, head: out[4]! };
+}
+/** How the counts grew from `before` to `after`; a console that started over
+ * (a relaunched VMM writes a new one) counts from nothing. */
+function tallyGrowth(before: Tally, after: Tally) {
+  const continued = after.head === before.head && after.bytes >= before.bytes;
+  const base = continued ? before : { connected: 0, reconnecting: 0, lost: 0 };
+  return {
+    connected: after.connected - base.connected,
+    reconnecting: after.reconnecting - base.reconnecting,
+    lost: after.lost - base.lost,
+    how: continued ? "the same console, grown" : "a console that started over",
+  };
+}
+const describeGrowth = (g: ReturnType<typeof tallyGrowth>) =>
+  `"connected to control plane" +${g.connected}, "reconnecting at once" +${g.reconnecting}, "lost this sandbox's connections" +${g.lost} (${g.how})`;
+
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 /** How the sandbox's host says it is now (GET .../state): its level, the
  * step under way (the level stays the old one until a step ends), and its
@@ -998,6 +1050,246 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
     },
   );
 }
+
+// The agent's link through the guest is a set of resumable streams: they
+// carry on across the host's checkpoints and a sleep on the same host. This
+// moves 4 MiB files both ways through the files API (and the agent's link)
+// for a while, under the run's one-minute checkpoints, then sleeps the
+// sandbox to saved and wakes it with a read; every file must come back
+// whole, both as the guest sees it and through the API, and the agent must
+// not have had to reconnect anywhere in it.
+const LINK_WINDOW_MS = 170_000;
+const LINK_FILE_BYTES = 4 << 20;
+const LINK_SLOTS = 6;
+check(
+  "link-stream",
+  "4 MiB files both ways through the agent's link across at least two checkpoints and a saved sleep, with no reconnect",
+  ["files"],
+  async () => {
+    const host = (await sandbox()).host!;
+    const before = await step("the guest console before", async () => consoleTally(host));
+    const boot = (await sandboxState()).generation;
+    // What each file's sha256 must be: in/<n> written through the API, out/<n>
+    // made in the guest and read through the API.
+    const sums = new Map<string, string>();
+    const roundTrip = async (path: string, expected: string, what: string) => {
+      const read = await og<any>("POST", `${ses()}/fs/read`, { path, encoding: "base64", maxBytes: 2 * LINK_FILE_BYTES });
+      const bytes = Buffer.from(read.content, "base64");
+      if (read.truncated || bytes.length !== LINK_FILE_BYTES || sha256(bytes) !== expected) {
+        throw new Error(`${what}: ${path} read back ${bytes.length} bytes${read.truncated ? " (truncated)" : ""}, sha256 ${sha256(bytes).slice(0, 12)}, not ${expected.slice(0, 12)}`);
+      }
+    };
+    const guestSums = async () => {
+      const out = await execOk("cd e2e/link && sha256sum in-* out-*", 120_000);
+      const seen = new Map(out.trim().split("\n").map((line) => {
+        const [sum = "", name = ""] = line.trim().split(/\s+/);
+        return [`e2e/link/${name}`, sum] as const;
+      }));
+      for (const [path, sum] of sums) {
+        if (seen.get(path) !== sum) throw new Error(`the guest has ${path} with sha256 ${seen.get(path)?.slice(0, 12) ?? "none"}, not ${sum.slice(0, 12)}`);
+      }
+    };
+    await execOk("rm -rf e2e/link && mkdir -p e2e/link");
+    const from = new Date().toISOString();
+    const start = Date.now();
+    let cycles = 0;
+    const durations: number[] = [];
+    while (Date.now() - start < LINK_WINDOW_MS) {
+      const slot = cycles % LINK_SLOTS;
+      const began = Date.now();
+      await step(`cycle ${cycles + 1}`, async () => {
+        // In: random bytes written through the API, read back.
+        const data = randomBytes(LINK_FILE_BYTES);
+        const inPath = `e2e/link/in-${slot}`;
+        sums.set(inPath, sha256(data));
+        await og("POST", `${ses()}/fs/write`, { path: inPath, content: data.toString("base64"), encoding: "base64" });
+        await roundTrip(inPath, sums.get(inPath)!, "written then read");
+        // Out: random bytes the guest makes, read through the API.
+        const outPath = `e2e/link/out-${slot}`;
+        const made = await execOk(`head -c ${LINK_FILE_BYTES} /dev/urandom > ${outPath} && sha256sum ${outPath}`);
+        sums.set(outPath, made.trim().split(/\s+/)[0]!);
+        await roundTrip(outPath, sums.get(outPath)!, "made in the guest");
+      });
+      durations.push(Date.now() - began);
+      cycles += 1;
+    }
+    const to = new Date().toISOString();
+    const moved = cycles * LINK_FILE_BYTES;
+    await step("the guest's sums after the transfers", guestSums);
+    // A restore starts the guest console over (a new VMM writes it), so
+    // what the transfers left in it is counted before the sleep.
+    const beforeSleep = await step("the guest console before the sleep", async () => consoleTally(host));
+    const during = tallyGrowth(before, beforeSleep);
+    if (during.connected !== 0 || during.reconnecting !== 0 || during.lost !== 0) {
+      throw new Error(`the agent reconnected during the transfers: ${describeGrowth(during)}`);
+    }
+    // Then a saved sleep, woken by a read.
+    const sleepFrom = new Date().toISOString();
+    await step("sleep", () => fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level: "saved" }));
+    const reached = await step("reach saved", () => reachLevel("saved", REACH_MS.saved!));
+    const sleepTo = new Date().toISOString();
+    const wakeStart = Date.now();
+    await step("the read that wakes it", () => roundTrip("e2e/link/in-0", sums.get("e2e/link/in-0")!, "after the saved sleep"));
+    const woke = seconds(wakeStart);
+    await step("every file through the API after waking", async () => {
+      for (const [path, sum] of sums) await roundTrip(path, sum, "after the saved sleep");
+    });
+    await step("the guest's sums after waking", guestSums);
+    const awake = await sandboxState();
+    if (boot !== null && awake.generation !== null && awake.generation !== boot) {
+      throw new Error(`the sandbox rebooted (generation ${boot} -> ${awake.generation})`);
+    }
+    if (awake.host !== host) throw new Error(`the sandbox moved from ${host} to ${awake.host}; the check needs it on one host`);
+    const growth = tallyGrowth(beforeSleep, await step("the guest console after", async () => consoleTally(host)));
+    if (growth.connected !== 0 || growth.reconnecting !== 0 || growth.lost !== 0) {
+      throw new Error(`the agent reconnected across the saved sleep: ${describeGrowth(growth)}`);
+    }
+    proofs.push({ kind: "checkpoint", sandbox: state.sandbox!, from, to, min: 2 });
+    proofs.push({ kind: "level", sandbox: state.sandbox!, level: "saved", from: sleepFrom, to: sleepTo });
+    const mib = (n: number) => `${(n / (1 << 20)).toFixed(0)} MiB`;
+    return (
+      `${cycles} cycles in ${((Date.parse(to) - start) / 1000).toFixed(0)} s (each ${mib(LINK_FILE_BYTES)} in and ${mib(2 * LINK_FILE_BYTES)} out, ` +
+      `${(Math.min(...durations) / 1000).toFixed(1)}-${(Math.max(...durations) / 1000).toFixed(1)} s): ${mib(moved)} in, ${mib(2 * moved)} out, every sha256 matching; ` +
+      `saved in ${(reached.ms / 1000).toFixed(1)} s, a read woke it in ${woke}, and all ${sums.size} files matched both ways after; ` +
+      `generation ${boot}; on ${host} throughout; console during the transfers ${describeGrowth(during)}, across the sleep ${describeGrowth(growth)}`
+    );
+  },
+);
+
+// A host that loses a running sandbox's VMM restores it from its last
+// checkpoint: what the sandbox did after that checkpoint is lost (the
+// expected loss for a crash), and the restored guest's agent, whose
+// streams the host no longer has, reconnects exactly once.
+check(
+  "stale-restore",
+  "a killed VMM comes back from its last checkpoint on the same host: the write before it kept, the one after lost, one reconnect",
+  ["files"],
+  async () => {
+    const host = (await sandbox()).host!;
+    const before = await step("the guest console before", async () => consoleTally(host));
+    const boot = (await sandboxState()).generation;
+    // A process with memory, which only a restore of the VM's memory keeps.
+    const port = 8775;
+    const token = `w-${rand()}`;
+    await og("POST", `${ses()}/fs/write`, { path: "e2e/witness.py", content: WITNESS, encoding: "utf8" });
+    await execOk(`(setsid nohup python3 e2e/witness.py ${token} ${port} >/tmp/witness-${port}.log 2>&1 &) && sleep 2`);
+    const witness = await step("the process before", async () => {
+      for (let tries = 0; ; tries += 1) {
+        try {
+          return await askWitness(port);
+        } catch (error) {
+          if (tries >= 20) throw error;
+          await sleep(500);
+        }
+      }
+    });
+    const first = `first-${rand()}`;
+    const second = `second-${rand()}`;
+    await execOk(`rm -f e2e/stale-*.txt; printf ${first} > e2e/stale-1.txt && sync`);
+    const firstAt = new Date().toISOString();
+    // A checkpoint that begins after the first write and completes.
+    const checkpointed = await step("a checkpoint after the first write", async () => {
+      const limit = Date.now() + 150_000;
+      let idle = false;
+      let during = false;
+      let poked = 0;
+      for (;;) {
+        if (Date.now() > limit) throw new Error("no checkpoint began and completed within 150 s");
+        // A request now and then keeps it from pausing while idle (a
+        // checkpoint is taken of a running sandbox); not awaited, so a
+        // short checkpoint is not missed while one waits.
+        if (Date.now() - poked > 4_000) {
+          poked = Date.now();
+          exec("true").catch(() => undefined);
+        }
+        const now = await sandboxState();
+        if (now.level !== "running" && !now.step) throw new Error(`it went to ${now.level} while waiting for a checkpoint`);
+        if (!now.step) {
+          if (during) return Date.now();
+          idle = true;
+        } else if (idle && now.step === "checkpoint") {
+          during = true;
+        }
+        await sleep(200);
+      }
+    });
+    await execOk(`printf ${second} > e2e/stale-2.txt && sync`);
+    const secondAt = new Date().toISOString();
+    const killed = await step("kill the sandbox's Firecracker on its host", async () => {
+      const dir = vmDir(state.sandbox!);
+      // Only the VMM whose root is this sandbox's jail.
+      return onHost(
+        host,
+        `pid=$(sudo cat ${dir}/root/firecracker.pid); [ -n "$pid" ] || exit 3; ` +
+          `[ "$(sudo cat /proc/$pid/comm)" = firecracker ] || exit 4; ` +
+          `[ "$(sudo readlink /proc/$pid/root)" = ${dir}/root ] || exit 5; ` +
+          `sudo kill -9 $pid; for i in $(seq 50); do sudo kill -0 $pid 2>/dev/null || break; sleep 0.1; done; ` +
+          `sudo kill -0 $pid 2>/dev/null && exit 6; echo $pid`,
+      ).trim();
+    });
+    const killedAt = Date.now();
+    if (killedAt - checkpointed > 50_000) throw new Error(`the kill came ${((killedAt - checkpointed) / 1000).toFixed(0)} s after the checkpoint; the next one may have taken the second write`);
+    // The next command, within a bound.
+    let out = "";
+    let attempts = 0;
+    await step("the next command", async () => {
+      for (;;) {
+        attempts += 1;
+        const result = await exec("cat e2e/stale-1.txt; echo; cat e2e/stale-2.txt 2>/dev/null || echo second-missing", 120_000).catch(
+          (error) => ({ stdout: "", stderr: String(error), exitCode: -1 }),
+        );
+        if (result.exitCode === 0) {
+          out = result.stdout.trim();
+          return;
+        }
+        if (Date.now() - killedAt > 240_000) throw new Error(`no answer within 240 s of the kill (${attempts} tries); last ${result.stderr.slice(-300)}`);
+        await sleep(3_000);
+      }
+    });
+    const answered = ((Date.now() - killedAt) / 1000).toFixed(1);
+    if (out !== `${first}\nsecond-missing`) {
+      throw new Error(
+        `expected the first write and not the second after restoring the checkpoint; the sandbox answered ${JSON.stringify(out.slice(0, 200))}`,
+      );
+    }
+    const after = await step("the process after", () => askWitness(port, 120_000));
+    if (after.token !== token || after.pid !== witness.pid || after.memory !== "intact") {
+      throw new Error(`the process did not come back with the VM's memory: before ${JSON.stringify(witness)}, after ${JSON.stringify(after)}`);
+    }
+    const now = await sandboxState();
+    if (now.host !== host) throw new Error(`restored on ${now.host}, not on ${host}`);
+    // Wait out the agent's reconnect, then count it.
+    let growth = tallyGrowth(before, consoleTally(host));
+    for (let tries = 0; growth.connected < 1 && tries < 12; tries += 1) {
+      await sleep(5_000);
+      growth = tallyGrowth(before, consoleTally(host));
+    }
+    if (growth.connected !== 1) throw new Error(`the agent connected ${growth.connected} times after the restore, not once: ${describeGrowth(growth)}`);
+    // The old streams ended cleanly: the host ended them or told the guest
+    // they were gone, and nothing broke the protocol.
+    const since = Math.floor(Date.parse(secondAt) / 1000);
+    const [cannot = 0, ended = 0, broke = 0, nohello = 0] = onHost(
+      host,
+      `j=$(sudo journalctl --no-pager -o cat -u 'compute-*' --since @${since}); ` +
+        `for p in 'an agent-link stream cannot go on' 'agent-link streams the guest no longer has ended' 'broke the protocol' 'did not say hello'; do ` +
+        `printf '%s\\n' "$j" | grep -c "$p" || true; done`,
+    ).trim().split("\n").map(Number);
+    if (broke > 0 || nohello > 0) {
+      throw new Error(`the host journal after the kill: ${broke} stream(s) broke the protocol, ${nohello} connection(s) did not say hello`);
+    }
+    if (cannot + ended + growth.lost === 0) {
+      throw new Error(`nothing ended the old streams: no "cannot go on", no ended streams in the host journal, and the guest was not told they were lost`);
+    }
+    proofs.push({ kind: "checkpoint", sandbox: state.sandbox!, from: firstAt, to: secondAt });
+    return (
+      `killed Firecracker ${killed} on ${host} ${((killedAt - checkpointed) / 1000).toFixed(1)} s after a checkpoint; ` +
+      `the next command answered ${answered} s after the kill (${attempts} tries), restored on ${now.host}: ` +
+      `the write before the checkpoint kept and the one after it lost, which is the expected loss for a crash after a running checkpoint; ` +
+      `process ${after.pid} and its 32 MiB intact, generation ${boot} -> ${now.generation}; ` +
+      `console ${describeGrowth(growth)}; host journal: "cannot go on" ${cannot}, streams ended ${ended}, protocol errors 0`
+    );
+  },
+);
 
 check("move", "a move to another host keeps the sandbox's files", ["files", "hosts"], async () => {
   const before = await sandbox();

@@ -194,6 +194,11 @@ fleet() {
   g artifacts repositories add-iam-policy-binding "$PREFIX" --location "$REGION" \
     --member "serviceAccount:$(cat "$out/control_service_account")" --role roles/artifactregistry.writer \
     >/dev/null
+  # The suite's fault injection (stale-restore kills one sandbox's VMM) and
+  # its looks at a guest's console reach the hosts as the stack VM's
+  # identity over OS Login, on this environment's hosts only; down removes it.
+  g projects add-iam-policy-binding "$PROJECT" --member "serviceAccount:$(cat "$out/control_service_account")" \
+    --role roles/compute.osAdminLogin --condition "$(host_login_condition)" >/dev/null
   # The group takes a new template only for hosts it makes (hosts outlive
   # their agent, ADR 9). Between runs no sandbox here needs keeping, so the
   # environment replaces hosts that run an older bundle at once.
@@ -207,6 +212,20 @@ fleet() {
     g compute instance-groups managed wait-until "$group" --zone "$ZONE" --version-target-reached \
       --timeout 1800 >/dev/null
   fi
+}
+
+# The condition of the stack VM's OS Login on the hosts: this environment's
+# host instances, nothing else.
+host_login_condition() {
+  printf 'expression=resource.name.startsWith("projects/%s/zones/%s/instances/%s-host-"),title=%s-host-login' \
+    "$PROJECT" "$ZONE" "$PREFIX" "$PREFIX"
+}
+# Whether the project still grants <account> that OS Login.
+host_login_bound() {
+  g projects get-iam-policy "$PROJECT" --flatten bindings --format json |
+    jq -e --arg member "serviceAccount:$1" --arg title "$PREFIX-host-login" \
+      'any(.[]; .bindings.role == "roles/compute.osAdminLogin" and (.bindings.members | index($member)) and .bindings.condition.title == $title)' \
+      >/dev/null
 }
 
 # --- stack: the VM Opengeni and the fleet service run on -----------------
@@ -513,6 +532,14 @@ down() {
   if exists g compute instances describe "$STACK" --zone "$ZONE"; then
     g compute instances delete "$STACK" --zone "$ZONE" || left+=("stack VM $STACK")
   fi
+  local login_sa
+  login_sa=$(cat "$STATE/fleet/control_service_account" 2>/dev/null || true)
+  if [ -n "$login_sa" ] && host_login_bound "$login_sa"; then
+    log "the stack VM's OS Login on the hosts"
+    g projects remove-iam-policy-binding "$PROJECT" --member "serviceAccount:$login_sa" \
+      --role roles/compute.osAdminLogin --condition "$(host_login_condition)" >/dev/null ||
+      left+=("OS Login binding for $login_sa")
+  fi
   local dir=$STATE/terraform
   if [ -f "$dir/terraform.tfstate" ]; then
     log "terraform destroy (group, template, bucket, authority, accounts, rules)"
@@ -557,6 +584,11 @@ status() {
   g artifacts repositories list --location "$REGION" --filter "name~$PREFIX" --format 'value(name)' 2>/dev/null
   g iam service-accounts list --filter "email~^$PREFIX" --format 'value(email)'
   g iam roles list --project "$PROJECT" --filter "name~${PREFIX//-/_}" --format 'value(name,deleted)'
+  local login_sa
+  login_sa=$(cat "$STATE/fleet/control_service_account" 2>/dev/null || true)
+  if [ -n "$login_sa" ] && host_login_bound "$login_sa"; then
+    printf 'project IAM: roles/compute.osAdminLogin for %s on %s hosts\n' "$login_sa" "$PREFIX"
+  fi
   # A certificate authority's pool stays until its authorities are gone
   # (they wait out their deletion period).
   g privateca pools list --location "$REGION" --format 'value(name.basename())' | sed -n "s/^\($PREFIX-.*\)/ca pool \1/p"
