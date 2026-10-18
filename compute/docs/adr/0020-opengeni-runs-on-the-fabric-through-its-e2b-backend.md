@@ -1,6 +1,8 @@
 # 20. Opengeni runs on the fabric through its e2b backend
 
-Status: Accepted, 2026-10-17
+Status: Accepted, 2026-10-17. Superseded for Opengeni by
+[21](0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md) on
+2026-10-18.
 
 ## Context
 

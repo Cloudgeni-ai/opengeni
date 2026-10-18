@@ -79,14 +79,14 @@ spec:
             {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
             {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .)) | nindent 12 }}
             {{- end }}
-            {{- include "opengeni.computeControl.trustEnv" . | nindent 12 }}
+            {{- with include "opengeni.computeControl.trustEnv" . }}{{ . | nindent 12 }}{{- end }}
             {{- with $extraEnv }}
             {{- . | nindent 12 }}
             {{- end }}
           {{- $computeTrusted := include "opengeni.computeControl.trusted" . }}
           {{- if or .Values.worker.extraVolumeMounts $computeTrusted }}
           volumeMounts:
-            {{- include "opengeni.computeControl.trustVolumeMount" . | nindent 12 }}
+            {{- with include "opengeni.computeControl.trustVolumeMount" . }}{{ . | nindent 12 }}{{- end }}
             {{- with .Values.worker.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -105,7 +105,7 @@ spec:
           {{- end }}
       {{- if or .Values.worker.extraVolumes $computeTrusted }}
       volumes:
-        {{- include "opengeni.computeControl.trustVolume" . | nindent 8 }}
+        {{- with include "opengeni.computeControl.trustVolume" . }}{{ . | nindent 8 }}{{- end }}
         {{- with .Values.worker.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

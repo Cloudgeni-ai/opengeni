@@ -7,22 +7,31 @@ and gives up its memory only when the host needs the room. Using it wakes it.
 
 ## Status
 
-Opengeni does not use this yet. Its e2b backend can run sessions on it,
-with fixes to its E2B adapter that are still on a branch ([ADR 20](docs/adr/0020-opengeni-runs-on-the-fabric-through-its-e2b-backend.md)).
+Opengeni runs on it natively. Its `compute` sandbox backend gives a
+session a sandbox microVM that runs Opengeni's own machine agent, reached
+through its host agent's one relayed link to Opengeni
+([ADR 21](docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)).
+The backend is selected like Modal or Daytona: Modal stays Opengeni's
+default, and nothing defaults to compute. The human security review in
+[docs/operations.md](docs/operations.md#security) is the remaining
+condition before users move off Modal. The E2B front door stays for E2B
+clients.
 
-| Piece | State |
+| Piece | What it is |
 | --- | --- |
-| Host agent: jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite | on `feat/compute-lab` |
-| Templates and a ready pool for new sandboxes | on `feat/compute-lab` |
-| Admission with requests and limits, memory guarantees for running VMs | on `feat/compute-lab` |
-| Fleet decisions: placement, host leases with a safety budget, the VM guard, fences on every archive write, recovery and moves, with a seeded simulation of the whole protocol | on `feat/compute-lab` |
-| A host in a fleet: registering and renewing over mutual TLS, the guard service, owner epochs on every request, adopt, hand-off and reconcile, no decisions while the lease has run out | on `feat/compute-lab` |
-| The fleet service: Postgres store, public API and proxy, placement from the capacity hosts push, moves and recovery through object storage, checkpoints of running sandboxes, growing a Google Cloud host group; tested on three to five GCP hosts | on `feat/compute-lab` |
-| Observability: wide events, bounded metrics, zero alarms, per-sandbox host pressure, a canary, an OTLP exporter | on `feat/compute-lab` |
-| Sandbox images from OCI images, with our init and E2B's envd in every guest | on `feat/compute-lab` |
-| An E2B-compatible front door: E2B's REST API and sandbox traffic, for unchanged E2B clients | on `feat/compute-lab` |
-| An activations-per-second and latency benchmark against Kubernetes Agent Sandbox on GKE ([docs/benchmark.md](docs/benchmark.md), `lab/compare/`) | on `feat/compute-lab` |
-| Opengeni's E2B adapter fixes: terminal commands that finish, a workspace E2B's default user can write | on Opengeni's `feat/opengeni-e2b-endpoint`, in review |
+| Host agent | jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite |
+| Templates and a ready pool | new sandboxes from a template, or at once from a ready pool |
+| Admission | requests and limits, memory guarantees for running VMs |
+| Fleet decisions | placement, host leases with a safety budget, the VM guard, fences on every archive write, recovery and moves, with a seeded simulation of the whole protocol |
+| A host in a fleet | registering and renewing over mutual TLS, the guard service, owner epochs on every request, adopt, hand-off and reconcile, no decisions while the lease has run out |
+| The fleet service | Postgres store in its own schema, public API and proxy, placement from the capacity hosts push, moves and recovery through object storage, checkpoints of running sandboxes, growing a Google Cloud host group |
+| The agent link | each host's one link to Opengeni's agent gateway, carrying every sandbox agent's session, waking a sandbox on a request ([docs/agent-link.md](docs/agent-link.md)) |
+| Observability | wide events, bounded metrics, zero alarms, per-sandbox host pressure, a canary, an OTLP exporter |
+| Sandbox images | built from OCI images; our init runs each guest and supervises Opengeni's agent, which Opengeni's sandbox image carries, and E2B's envd for the front door |
+| E2B front door | E2B's REST API and sandbox traffic, for unchanged E2B clients |
+| Packaging | the fleet service's OCI image in Opengeni's Helm chart (`computeControl`, off by default), a verified host bundle, a Terraform module for GCP hosts, release and CI workflows |
+| End to end | an automated suite that runs a full Opengeni stack on a multi-host GCP fleet ([e2e/README.md](e2e/README.md), results in [docs/measurements.md](docs/measurements.md)) |
+| Benchmark | activations per second and latency against Kubernetes Agent Sandbox on GKE ([docs/benchmark.md](docs/benchmark.md), `lab/compare/`) |
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
 below are observations from our lab runs, with workloads and hosts in
