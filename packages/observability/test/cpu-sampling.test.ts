@@ -1,3 +1,7 @@
+// opengeni:test-wall-clock-sensitive
+// The live capture below relies on the sampler thread getting a CPU every
+// millisecond; with other test processes contending for the CPUs its samples
+// arrive tens of milliseconds apart and split one stall into short blocks.
 import { describe, expect, test } from "bun:test";
 import {
   analyzeCpuSamples,
