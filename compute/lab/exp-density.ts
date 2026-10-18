@@ -51,7 +51,9 @@ function snapshot(step: string) {
     asleep: asleep.length,
     elapsedS: Math.round((now() - t0) / 1000),
     hostMemUsedMiB: hostUsed,
-    hostMemUsedPerSandboxMiB: asleep.length ? Math.round((hostUsed / asleep.length) * 10) / 10 : null,
+    hostMemUsedPerSandboxMiB: asleep.length
+      ? Math.round((hostUsed / asleep.length) * 10) / 10
+      : null,
     cgroupPerSandboxMiB: asleep.length ? Math.round((current / asleep.length) * 10) / 10 : null,
     zswapPerSandboxMiB: asleep.length ? Math.round((zswap / asleep.length) * 10) / 10 : null,
     swapPerSandboxMiB: asleep.length ? Math.round((swap / asleep.length) * 10) / 10 : null,
@@ -61,7 +63,8 @@ function snapshot(step: string) {
 async function onePass(vm: Vm) {
   await vm.boot();
   const r = await vm.exec(WORKLOAD);
-  if (!r.out.includes("workload-done")) throw new Error(`${vm.id} workload failed: ${r.out.slice(-300)}`);
+  if (!r.out.includes("workload-done"))
+    throw new Error(`${vm.id} workload failed: ${r.out.slice(-300)}`);
   await vm.exec(PROBE);
   await vm.exec(GUEST_DROP_CACHES);
   await sleep(5000); // let free page reporting hand freed memory back
@@ -97,7 +100,12 @@ snapshot("full");
 record(FILE, { level, step: "stop", reason: stopReason, started, asleep: asleep.length });
 
 // A host full of sleeping sandboxes should cost close to no CPU.
-record(FILE, { level, step: "idle-cpu", asleep: asleep.length, hostCpuBusy: Math.round((await hostCpuBusy(20_000)) * 1000) / 1000 });
+record(FILE, {
+  level,
+  step: "idle-cpu",
+  asleep: asleep.length,
+  hostCpuBusy: Math.round((await hostCpuBusy(20_000)) * 1000) / 1000,
+});
 
 // Wake a random subset at the same instant while the rest stay asleep.
 const pick = [...asleep].sort(() => Math.random() - 0.5).slice(0, wakeCount);

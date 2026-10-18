@@ -49,8 +49,13 @@ function totals(vms: Vm[]) {
     const m = vm.memory();
     for (const k of Object.keys(sum) as (keyof typeof sum)[]) sum[k] += m[k];
   }
-  const per = Object.fromEntries(Object.entries(sum).map(([k, v]) => [k, Math.round((v / vms.length) * 10) / 10]));
-  return { total: Object.fromEntries(Object.entries(sum).map(([k, v]) => [k, Math.round(v)])), perVm: per };
+  const per = Object.fromEntries(
+    Object.entries(sum).map(([k, v]) => [k, Math.round((v / vms.length) * 10) / 10]),
+  );
+  return {
+    total: Object.fromEntries(Object.entries(sum).map(([k, v]) => [k, Math.round(v)])),
+    perVm: per,
+  };
 }
 
 const memBefore = hostMemAvailableMiB();
@@ -61,13 +66,20 @@ const tBoot = now();
 await pool(vms, bootConcurrency, async (vm) => {
   bootTimes.push(await vm.boot({ memMib }));
 });
-record(FILE, { count, profile, step: "boot", wallMs: Math.round(now() - tBoot), bootMs: summarize(bootTimes) });
+record(FILE, {
+  count,
+  profile,
+  step: "boot",
+  wallMs: Math.round(now() - tBoot),
+  bootMs: summarize(bootTimes),
+});
 
 const workTimes: number[] = [];
 const tWork = now();
 await pool(vms, workConcurrency, async (vm) => {
   const r = await vm.exec(WORKLOAD);
-  if (!r.out.includes("workload-done")) throw new Error(`${vm.id} workload failed: ${r.out.slice(-300)}`);
+  if (!r.out.includes("workload-done"))
+    throw new Error(`${vm.id} workload failed: ${r.out.slice(-300)}`);
   if (profile === "devserver") await vm.exec(DEV_SERVER);
   await vm.exec(GUEST_DROP_CACHES);
   workTimes.push(r.ms);

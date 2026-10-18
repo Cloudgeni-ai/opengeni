@@ -85,7 +85,11 @@ function kvmCounters(): Record<string, number> | undefined {
   return out;
 }
 
-function perVm(a: Record<string, number> | undefined, b: Record<string, number> | undefined, n: number) {
+function perVm(
+  a: Record<string, number> | undefined,
+  b: Record<string, number> | undefined,
+  n: number,
+) {
   if (!a || !b) return undefined;
   return Object.fromEntries(
     Object.keys(b)
@@ -95,7 +99,12 @@ function perVm(a: Record<string, number> | undefined, b: Record<string, number> 
 }
 
 function cpuTicks(): number[] {
-  return readFileSync("/proc/stat", "utf8").split("\n")[0]!.trim().split(/\s+/).slice(1).map(Number);
+  return readFileSync("/proc/stat", "utf8")
+    .split("\n")[0]!
+    .trim()
+    .split(/\s+/)
+    .slice(1)
+    .map(Number);
 }
 
 /** Share of host CPU time per category between two /proc/stat samples. */
@@ -112,7 +121,9 @@ function cpuSplit(a: number[], b: number[]) {
     steal: d[7]!,
     idle: d[3]!,
   };
-  return Object.fromEntries(Object.entries(parts).map(([k, v]) => [k, Math.round((v / total) * 1000) / 1000]));
+  return Object.fromEntries(
+    Object.entries(parts).map(([k, v]) => [k, Math.round((v / total) * 1000) / 1000]),
+  );
 }
 
 async function pool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>) {
@@ -139,7 +150,8 @@ async function together(
     n: vms.length,
     wallMs,
     ms: summarize(r.map((x) => x.ms)),
-    firstByteMs: r[0]?.firstByteMs === undefined ? undefined : summarize(r.map((x) => x.firstByteMs!)),
+    firstByteMs:
+      r[0]?.firstByteMs === undefined ? undefined : summarize(r.map((x) => x.firstByteMs!)),
     exitUs: r[0]?.exitUs === undefined ? undefined : summarize(r.map((x) => x.exitUs!)),
     cpu,
     kvmPerVm: kvm,

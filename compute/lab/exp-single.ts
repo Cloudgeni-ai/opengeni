@@ -25,7 +25,8 @@ import {
 } from "./fc";
 
 const profile = process.argv[2] ?? "plain";
-const levels = process.argv.slice(3).length > 0 ? process.argv.slice(3) : ["L0", "L1", "L2", "L3", "L4"];
+const levels =
+  process.argv.slice(3).length > 0 ? process.argv.slice(3) : ["L0", "L1", "L2", "L3", "L4"];
 const memMib = Number(process.env.MEM_MIB ?? 2048);
 const reps = Number(process.env.REPS ?? 3);
 const idleBeforeSleepMs = Number(process.env.IDLE_MS ?? 8000);
@@ -35,7 +36,9 @@ ensureCgroupRoot();
 console.error(`host ${hostLabel()} profile ${profile} levels ${levels.join(",")}`);
 
 async function guestMem(vm: Vm) {
-  const r = await vm.exec("grep -E '^(MemTotal|MemFree|Cached|AnonPages|Shmem):' /proc/meminfo | awk '{printf \"%s%d \", $1, $2/1024}'");
+  const r = await vm.exec(
+    "grep -E '^(MemTotal|MemFree|Cached|AnonPages|Shmem):' /proc/meminfo | awk '{printf \"%s%d \", $1, $2/1024}'",
+  );
   return r.out.trim();
 }
 
@@ -78,7 +81,15 @@ for (const level of levels) {
     if (level === "L0") {
       for (let i = 0; i < reps; i++) {
         const r = await probe(vm);
-        record(FILE, { profile, level, rep: i, wakeMs: 0, firstByteMs: r.firstByteMs, commandMs: r.ms, totalMs: r.ms });
+        record(FILE, {
+          profile,
+          level,
+          rep: i,
+          wakeMs: 0,
+          firstByteMs: r.firstByteMs,
+          commandMs: r.ms,
+          totalMs: r.ms,
+        });
         await sleep(1000);
       }
     } else if (level === "L1" || level === "L2" || level === "L3") {

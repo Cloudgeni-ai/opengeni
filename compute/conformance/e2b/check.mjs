@@ -19,14 +19,20 @@ export async function check(suite, name, fn) {
     passed += 1;
     const shown = detail === undefined ? "" : JSON.stringify(detail).slice(0, 160);
     console.log(`ok    ${name} ${ms} ms ${shown}`);
-    appendFileSync(join(results, `${suite}.jsonl`), `${JSON.stringify({ name, ok: true, ms, detail })}\n`);
+    appendFileSync(
+      join(results, `${suite}.jsonl`),
+      `${JSON.stringify({ name, ok: true, ms, detail })}\n`,
+    );
     return detail ?? true;
   } catch (error) {
     const ms = Math.round(performance.now() - start);
     const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     failures.push(name);
     console.log(`FAIL  ${name} ${ms} ms ${text.slice(0, 400)}`);
-    appendFileSync(join(results, `${suite}.jsonl`), `${JSON.stringify({ name, ok: false, ms, error: text })}\n`);
+    appendFileSync(
+      join(results, `${suite}.jsonl`),
+      `${JSON.stringify({ name, ok: false, ms, error: text })}\n`,
+    );
     return undefined;
   }
 }
@@ -67,7 +73,8 @@ export async function untilLevel(id, levels, ms) {
   for (;;) {
     const now = level(id);
     if (levels.includes(now)) return now;
-    if (Date.now() > deadline) throw new Error(`level ${now}, not ${levels.join(" or ")}, after ${ms} ms`);
+    if (Date.now() > deadline)
+      throw new Error(`level ${now}, not ${levels.join(" or ")}, after ${ms} ms`);
     await sleep(500);
   }
 }

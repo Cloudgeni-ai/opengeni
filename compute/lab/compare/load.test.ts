@@ -1,5 +1,13 @@
 import { expect, test } from "bun:test";
-import { type Clock, poissonArrivals, RestingSet, realClock, runOpenLoop, seededRandom, StarvedError } from "./load.ts";
+import {
+  type Clock,
+  poissonArrivals,
+  RestingSet,
+  realClock,
+  runOpenLoop,
+  seededRandom,
+  StarvedError,
+} from "./load.ts";
 
 test("the generator is reproducible and uniform enough", () => {
   const a = seededRandom(42);
@@ -28,7 +36,9 @@ test("Poisson arrivals have the offered rate and exponential gaps", () => {
   const longer = gaps.filter((gap) => gap > mean).length / gaps.length;
   expect(Math.abs(longer - Math.exp(-1))).toBeLessThan(0.01);
   // Sorted, inside the window.
-  expect(arrivals.every((at, i) => at < durationMs && (i === 0 || at >= arrivals[i - 1]))).toBe(true);
+  expect(arrivals.every((at, i) => at < durationMs && (i === 0 || at >= arrivals[i - 1]))).toBe(
+    true,
+  );
 });
 
 test("a low-rate window gets exactly the offered load, whatever the seed", () => {

@@ -18,7 +18,12 @@ test("with few samples the tail errs high", () => {
   expect(percentile(ten, 90)).toBe(9);
   expect(percentile(ten, 50)).toBe(5);
   // p99 of 90 samples is the 90th smallest.
-  expect(percentile(Array.from({ length: 90 }, (_, i) => i), 99)).toBe(89);
+  expect(
+    percentile(
+      Array.from({ length: 90 }, (_, i) => i),
+      99,
+    ),
+  ).toBe(89);
 });
 
 test("percentiles reject nonsense", () => {

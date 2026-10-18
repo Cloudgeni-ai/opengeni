@@ -6,11 +6,17 @@ export class TimedVm extends Vm {
   override async api(method: string, path: string, body?: unknown): Promise<any> {
     const deadline = now() + 10000;
     for (;;) {
-      try { return await super.api(method, path, body); }
-      catch (error) {
+      try {
+        return await super.api(method, path, body);
+      } catch (error) {
         // A bound Unix socket inode can appear before listen(). Only retry a
         // refused connection: no API request reached the server in that case.
-        if ((error as { code?: string }).code !== "ECONNREFUSED" || this.proc?.exitCode !== null || now() > deadline) throw error;
+        if (
+          (error as { code?: string }).code !== "ECONNREFUSED" ||
+          this.proc?.exitCode !== null ||
+          now() > deadline
+        )
+          throw error;
         await sleep(2);
       }
     }
@@ -24,7 +30,8 @@ export class TimedVm extends Vm {
         if (result.status !== 0) throw new Error("agent readiness command failed");
         return;
       } catch (error) {
-        if (now() > deadline) throw new Error(`${this.id}: agent not ready: ${error}`);
+        if (now() > deadline)
+          throw new Error(`${this.id}: agent not ready: ${error}`, { cause: error });
         await sleep(20);
       }
     }

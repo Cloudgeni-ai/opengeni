@@ -15,9 +15,23 @@ import { E2b } from "./e2b.ts";
 import { Gke } from "./gke.ts";
 import { poissonArrivals, RestingSet, runOpenLoop, seededRandom } from "./load.ts";
 import { Ours } from "./ours.ts";
-import { DEFAULT_CRITERIA, judgeStep, searchSustainedRate, type StepResult, stepWindow } from "./search.ts";
+import {
+  DEFAULT_CRITERIA,
+  judgeStep,
+  searchSustainedRate,
+  type StepResult,
+  stepWindow,
+} from "./search.ts";
 import { formatMs, summarize } from "./stats.ts";
-import { type CreateKind, READ_STATE_SCRIPT, type RunResult, type Sandbox, type System, WrongOutputError, writeStateScript } from "./system.ts";
+import {
+  type CreateKind,
+  READ_STATE_SCRIPT,
+  type RunResult,
+  type Sandbox,
+  type System,
+  WrongOutputError,
+  writeStateScript,
+} from "./system.ts";
 
 const ECHO = "echo compare-ok";
 const ECHO_OUTPUT = "compare-ok\n";
@@ -47,7 +61,11 @@ async function makeSystem(name: string, runLabel: string, withSnapshots: boolean
       return gke as unknown as System;
     }
     case "e2b":
-      return new E2b({ apiKey: env("E2B_API_KEY"), template: process.env.COMPARE_E2B_TEMPLATE, name: "e2b-cloud" }) as unknown as System;
+      return new E2b({
+        apiKey: env("E2B_API_KEY"),
+        template: process.env.COMPARE_E2B_TEMPLATE,
+        name: "e2b-cloud",
+      }) as unknown as System;
     case "front-door":
       return new E2b({
         apiKey: env("COMPARE_FRONT_DOOR_KEY"),
@@ -64,7 +82,9 @@ async function makeSystem(name: string, runLabel: string, withSnapshots: boolean
 
 function expectOutput(run: RunResult, expected: string, what: string) {
   if (run.status !== 0 || run.output !== expected) {
-    throw new WrongOutputError(`${what}: status ${run.status}, output ${JSON.stringify(run.output.slice(0, 120))}, expected ${JSON.stringify(expected)}`);
+    throw new WrongOutputError(
+      `${what}: status ${run.status}, output ${JSON.stringify(run.output.slice(0, 120))}, expected ${JSON.stringify(expected)}`,
+    );
   }
 }
 
@@ -73,7 +93,11 @@ function expectOutput(run: RunResult, expected: string, what: string) {
  * new item starts, and it rejects with the first error once the items
  * already started have finished, so callers can clean up after all of them.
  */
-export async function eachLimited<T, R>(items: readonly T[], limit: number, work: (item: T, index: number) => Promise<R>): Promise<R[]> {
+export async function eachLimited<T, R>(
+  items: readonly T[],
+  limit: number,
+  work: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let next = 0;
   let failure: { error: unknown } | undefined;
@@ -99,7 +123,10 @@ class Recorder {
   ) {}
 
   write(record: Record<string, unknown>) {
-    appendFileSync(this.path, `${JSON.stringify({ ...this.common, time: new Date().toISOString(), ...record })}\n`);
+    appendFileSync(
+      this.path,
+      `${JSON.stringify({ ...this.common, time: new Date().toISOString(), ...record })}\n`,
+    );
   }
 }
 
@@ -114,7 +141,12 @@ interface Settings {
 /** Time between runs, after the previous run's sandboxes are removed, so what they held is free again. */
 const RUN_GAP_MS = 5000;
 
-async function latencyCreate(system: System, kind: CreateKind, settings: Settings, record: Recorder) {
+async function latencyCreate(
+  system: System,
+  kind: CreateKind,
+  settings: Settings,
+  record: Recorder,
+) {
   for (let run = 1; run <= settings.runs; run++) {
     if (run > 1) await Bun.sleep(RUN_GAP_MS);
     for (let i = 0; i < settings.warmup + settings.count; i++) {
@@ -122,7 +154,17 @@ async function latencyCreate(system: System, kind: CreateKind, settings: Setting
       const { sandbox, run: result } = await system.create(kind, ECHO, started);
       try {
         expectOutput(result, ECHO_OUTPUT, `create ${sandbox.id}`);
-        record.write({ kind: "sample", op: `create:${kind}`, script: "echo", run, i, warmup: i < settings.warmup, sandbox: sandbox.id, ...result, output: undefined });
+        record.write({
+          kind: "sample",
+          op: `create:${kind}`,
+          script: "echo",
+          run,
+          i,
+          warmup: i < settings.warmup,
+          sandbox: sandbox.id,
+          ...result,
+          output: undefined,
+        });
       } finally {
         await system.remove(sandbox);
       }
@@ -150,7 +192,8 @@ async function prepare(
       expectOutput(run, ECHO_OUTPUT, `create ${sandbox.id}`);
       const token = randomBytes(12).toString("hex");
       const wrote = await system.run(sandbox, writeStateScript(token), performance.now());
-      if (wrote.status !== 0) throw new Error(`writing the state file in ${sandbox.id} failed: ${wrote.status}`);
+      if (wrote.status !== 0)
+        throw new Error(`writing the state file in ${sandbox.id} failed: ${wrote.status}`);
       await then?.(sandbox);
       return { sandbox, token };
     });
@@ -160,8 +203,14 @@ async function prepare(
   }
 }
 
-async function latencyActivate(system: System, level: string, settings: Settings, record: Recorder) {
-  if (!system.restLevels.includes(level)) throw new Error(`${system.name} has no level ${level}: ${system.restLevels.join(", ")}`);
+async function latencyActivate(
+  system: System,
+  level: string,
+  settings: Settings,
+  record: Recorder,
+) {
+  if (!system.restLevels.includes(level))
+    throw new Error(`${system.name} has no level ${level}: ${system.restLevels.join(", ")}`);
   for (let run = 1; run <= settings.runs; run++) {
     if (run > 1) await Bun.sleep(RUN_GAP_MS);
     const prepared = await prepare(system, settings.warmup + settings.count, settings.parallel);
@@ -178,11 +227,24 @@ async function latencyActivate(system: System, level: string, settings: Settings
           const started = performance.now();
           const result = await system.run(sandbox, script, started);
           expectOutput(result, expected, `${label} in ${sandbox.id} from ${level}`);
-          record.write({ kind: "sample", op: `activate:${level}`, script: label, run, i, warmup: i < settings.warmup, sandbox: sandbox.id, rest_ms: restMs, ...result, output: undefined });
+          record.write({
+            kind: "sample",
+            op: `activate:${level}`,
+            script: label,
+            run,
+            i,
+            warmup: i < settings.warmup,
+            sandbox: sandbox.id,
+            rest_ms: restMs,
+            ...result,
+            output: undefined,
+          });
         }
       }
     } finally {
-      await eachLimited(prepared, settings.parallel, ({ sandbox }) => system.remove(sandbox).catch(() => undefined));
+      await eachLimited(prepared, settings.parallel, ({ sandbox }) =>
+        system.remove(sandbox).catch(() => undefined),
+      );
     }
   }
 }
@@ -205,9 +267,12 @@ interface RateSettings {
 }
 
 async function rate(system: System, settings: RateSettings, record: Recorder) {
-  if (!system.restLevels.includes(settings.level)) throw new Error(`${system.name} has no level ${settings.level}`);
+  if (!system.restLevels.includes(settings.level))
+    throw new Error(`${system.name} has no level ${settings.level}`);
   // Each rests as soon as it is made: a host need not hold all N awake.
-  const prepared = await prepare(system, settings.sandboxes, settings.parallel, (sandbox) => system.rest(sandbox, settings.level));
+  const prepared = await prepare(system, settings.sandboxes, settings.parallel, (sandbox) =>
+    system.rest(sandbox, settings.level),
+  );
   const sandboxes = prepared.map(({ sandbox }) => sandbox);
   let restErrors = 0;
   try {
@@ -225,7 +290,9 @@ async function rate(system: System, settings: RateSettings, record: Recorder) {
       const arrivalRandom = seededRandom(settings.seed * 1000 + stepIndex);
       const arrivals = [
         ...poissonArrivals(offered, settings.warmupMs, arrivalRandom),
-        ...poissonArrivals(offered, window.measuredMs, arrivalRandom).map((at) => at + settings.warmupMs),
+        ...poissonArrivals(offered, window.measuredMs, arrivalRandom).map(
+          (at) => at + settings.warmupMs,
+        ),
       ];
       const restErrorsBefore = restErrors;
       const outcomes = await runOpenLoop(arrivals, async (scheduledAt) => {
@@ -248,11 +315,14 @@ async function rate(system: System, settings: RateSettings, record: Recorder) {
       // Steps never overlap: wait until every sandbox rests again. One that
       // has not by then leaves the next step a different system: stop.
       const settleBy = performance.now() + 300_000;
-      while (resting.size + restErrors < sandboxes.length && performance.now() < settleBy) await Bun.sleep(100);
+      while (resting.size + restErrors < sandboxes.length && performance.now() < settleBy)
+        await Bun.sleep(100);
       const outstanding = sandboxes.length - resting.size - restErrors;
       if (outstanding > 0) {
         record.write({ kind: "aborted", rate: offered, outstanding });
-        throw new Error(`${outstanding} sandboxes still not at rest five minutes after the ${offered}/s step`);
+        throw new Error(
+          `${outstanding} sandboxes still not at rest five minutes after the ${offered}/s step`,
+        );
       }
       const step = judgeStep(
         offered,
@@ -263,7 +333,15 @@ async function rate(system: System, settings: RateSettings, record: Recorder) {
         restErrors - restErrorsBefore,
       );
       const lag = summarize(outcomes.map((outcome) => outcome.lagMs));
-      record.write({ kind: "step", level: settings.level, sandboxes: settings.sandboxes, repeat, restErrors, clientLagP99: lag.p99, ...step });
+      record.write({
+        kind: "step",
+        level: settings.level,
+        sandboxes: settings.sandboxes,
+        repeat,
+        restErrors,
+        clientLagP99: lag.p99,
+        ...step,
+      });
       console.log(
         `${offered}/s${settings.repeats > 1 ? ` (${repeat + 1}/${settings.repeats})` : ""}: ${step.holds ? "holds" : `fails (${step.reason})`}, p50 ${formatMs(step.latency?.p50 ?? 0)}, p99 ${formatMs(step.latency?.p99 ?? 0)}, completed ${step.completedRate.toFixed(1)}/s`,
       );
@@ -283,10 +361,23 @@ async function rate(system: System, settings: RateSettings, record: Recorder) {
       },
       settings.refinements,
     );
-    record.write({ kind: "search", level: settings.level, sandboxes: settings.sandboxes, p99LimitMs: settings.p99LimitMs, sustained: result.sustained, errorOnset: result.errorOnset, clientLimited: result.clientLimited, restErrors });
-    console.log(`sustained ${result.sustained}/s, errors from ${result.errorOnset ?? "none"}${result.clientLimited ? ", client-limited" : ""}`);
+    record.write({
+      kind: "search",
+      level: settings.level,
+      sandboxes: settings.sandboxes,
+      p99LimitMs: settings.p99LimitMs,
+      sustained: result.sustained,
+      errorOnset: result.errorOnset,
+      clientLimited: result.clientLimited,
+      restErrors,
+    });
+    console.log(
+      `sustained ${result.sustained}/s, errors from ${result.errorOnset ?? "none"}${result.clientLimited ? ", client-limited" : ""}`,
+    );
   } finally {
-    await eachLimited(sandboxes, settings.parallel, (sandbox) => system.remove(sandbox).catch(() => undefined));
+    await eachLimited(sandboxes, settings.parallel, (sandbox) =>
+      system.remove(sandbox).catch(() => undefined),
+    );
   }
 }
 
@@ -359,10 +450,16 @@ async function main() {
   try {
     if (command === "cleanup") {
       const ids = await system.list();
-      console.log(`${ids.length} sandboxes on ${system.name}; remove them with the system's own tools if they are this harness's`);
+      console.log(
+        `${ids.length} sandboxes on ${system.name}; remove them with the system's own tools if they are this harness's`,
+      );
       return;
     }
-    const record = new Recorder(values.out as string, { system: system.name, runLabel, note: values.note });
+    const record = new Recorder(values.out as string, {
+      system: system.name,
+      runLabel,
+      note: values.note,
+    });
     record.write({ kind: "meta", command, args: values, describe: await system.describe() });
     const settings: Settings = {
       runs: Number(values.runs),
@@ -376,7 +473,10 @@ async function main() {
       if (op === "create") await latencyCreate(system, arg as CreateKind, settings, record);
       else if (op === "activate") await latencyActivate(system, arg, settings, record);
       else throw new Error("--op is create:cold, create:template, create:pool or activate:LEVEL");
-      for (const line of summarizeFile(values.out as string).filter((entry) => entry.startsWith(`${system.name} ${values.op} `))) console.log(line);
+      for (const line of summarizeFile(values.out as string).filter((entry) =>
+        entry.startsWith(`${system.name} ${values.op} `),
+      ))
+        console.log(line);
     } else if (command === "rate") {
       await rate(
         system,

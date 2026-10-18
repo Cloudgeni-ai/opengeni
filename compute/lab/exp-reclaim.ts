@@ -34,7 +34,9 @@ try {
   await vm.exec(GUEST_DROP_CACHES);
   await sleep(10_000);
   const afterGuestReclaim = vm.memory();
-  const order = (await vm.exec("cat /sys/module/page_reporting/parameters/page_reporting_order")).out.trim();
+  const order = (
+    await vm.exec("cat /sys/module/page_reporting/parameters/page_reporting_order")
+  ).out.trim();
   const guestUsed = (await vm.exec("free -m | awk '/Mem:/ {print $3}'")).out.trim();
   await vm.pause();
   vm.reclaim("zswap");

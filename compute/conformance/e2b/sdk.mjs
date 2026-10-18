@@ -101,12 +101,19 @@ await run("files write and read, text and 1 MiB binary", async () => {
 
 await run("pty create, input, resize and kill", async () => {
   let output = "";
-  const pty = await sandbox.pty.create({ cols: 80, rows: 24, onData: (data) => (output += text(data)) });
+  const pty = await sandbox.pty.create({
+    cols: 80,
+    rows: 24,
+    onData: (data) => (output += text(data)),
+  });
   await sandbox.pty.sendInput(pty.pid, new TextEncoder().encode("echo pty-$((6*7)); stty size\n"));
   await sandbox.pty.resize(pty.pid, { cols: 100, rows: 30 });
   await sandbox.pty.sendInput(pty.pid, new TextEncoder().encode("stty size\n"));
   for (let i = 0; i < 100 && !output.includes("30 100"); i += 1) await sleep(100);
-  expect(output.includes("pty-42") && output.includes("30 100"), JSON.stringify(output.slice(-300)));
+  expect(
+    output.includes("pty-42") && output.includes("30 100"),
+    JSON.stringify(output.slice(-300)),
+  );
   expect(await sandbox.pty.kill(pty.pid), "kill answered false");
 });
 
@@ -117,10 +124,16 @@ if (headers) {
 
 await run("files list, exists, getInfo, rename, remove and makeDir", async () => {
   expect(await sandbox.files.makeDir("/tmp/c/d/e"), "makeDir answered false");
-  expect(!(await sandbox.files.makeDir("/tmp/c/d/e")), "makeDir of an existing directory answered true");
+  expect(
+    !(await sandbox.files.makeDir("/tmp/c/d/e")),
+    "makeDir of an existing directory answered true",
+  );
   const names = (await sandbox.files.list("/tmp/c")).map((entry) => entry.name).sort();
   expect(JSON.stringify(names) === '["a.txt","blob.bin","d"]', JSON.stringify(names));
-  expect((await sandbox.files.list("/tmp/c", { depth: 2 })).some((e) => e.name === "e"), "depth 2");
+  expect(
+    (await sandbox.files.list("/tmp/c", { depth: 2 })).some((e) => e.name === "e"),
+    "depth 2",
+  );
   const info = await sandbox.files.getInfo("/tmp/c/blob.bin");
   expect(info.size === 1 << 20 && info.type === "file", JSON.stringify(info));
   await sandbox.files.rename("/tmp/c/a.txt", "/tmp/c/b.txt");
@@ -137,7 +150,10 @@ await run("watchDir reports a file written", async () => {
   await sandbox.files.write("/tmp/c/watched.txt", "w");
   for (let i = 0; i < 50 && !events.some((e) => e.name === "watched.txt"); i += 1) await sleep(100);
   await watch.stop();
-  expect(events.some((e) => e.name === "watched.txt"), JSON.stringify(events));
+  expect(
+    events.some((e) => e.name === "watched.txt"),
+    JSON.stringify(events),
+  );
 });
 
 await run("signed upload and download URLs work without other credentials", async () => {
@@ -150,7 +166,10 @@ await run("signed upload and download URLs work without other credentials", asyn
   const got = await fetch(download);
   expect(got.ok && (await got.text()) === "signed-body", `download ${got.status}`);
   const unsigned = await fetch(download.replace(/signature=[^&]+/, "signature=v1_wrong"));
-  expect(unsigned.status === 401 || unsigned.status === 403, `a wrong signature got ${unsigned.status}`);
+  expect(
+    unsigned.status === 401 || unsigned.status === 403,
+    `a wrong signature got ${unsigned.status}`,
+  );
 });
 
 await run("envd refuses a request without the sandbox's access token", async () => {
@@ -198,11 +217,14 @@ await run("a private sandbox's ports need the traffic token", async () => {
     const url = `https://${closed.getHost(8001)}/`;
     let open;
     for (let i = 0; i < 40; i += 1) {
-      open = await fetch(url, { headers: { "e2b-traffic-access-token": closed.trafficAccessToken } });
+      open = await fetch(url, {
+        headers: { "e2b-traffic-access-token": closed.trafficAccessToken },
+      });
       if (open.ok) break;
       await sleep(250);
     }
-    if (!open.ok) throw new Error(`with the token: ${open.status}; ${await serverReport(closed, 8001)}`);
+    if (!open.ok)
+      throw new Error(`with the token: ${open.status}; ${await serverReport(closed, 8001)}`);
     const refused = await fetch(url);
     expect(refused.status === 403, `without the token: ${refused.status}`);
   } finally {
@@ -227,7 +249,10 @@ await run("a background command alone does not keep it awake", async () => {
   const reached = await untilLevel(id, ["paused", "compressed", "saved"], 120_000);
   measured.backgroundAsleepAfterMs = Math.round(performance.now() - start);
   const list = await sandbox.commands.list();
-  expect(list.some((p) => p.pid === background.pid), "the background command is gone");
+  expect(
+    list.some((p) => p.pid === background.pid),
+    "the background command is gone",
+  );
   return { reached, ms: measured.backgroundAsleepAfterMs };
 });
 
@@ -260,21 +285,24 @@ await run("pause is complete when it answers, and the sandbox reads as paused", 
   return { ms: measured.pauseMs };
 });
 
-const resumed = await run("connect resumes it, keeping files, processes and the token", async () => {
-  const start = performance.now();
-  const again = await Sandbox.connect(id, { timeoutMs: 600_000 });
-  measured.resumeMs = Math.round(performance.now() - start);
-  expect((await again.getInfo()).state === "running", "not running after connect");
-  expect((await again.files.read("/tmp/c/signed.txt")) === "signed-body", "file lost");
-  const processes = await again.commands.list();
-  expect(
-    processes.some((p) => [p.cmd, ...(p.args ?? [])].join(" ").includes("sleep 600")),
-    `process lost: ${JSON.stringify(processes.map((p) => [p.cmd, p.args]))}`,
-  );
-  const refused = await fetch(`https://${again.getHost(49983)}/files?path=/etc/hostname`);
-  expect(refused.status === 401, `envd without the token after resume: ${refused.status}`);
-  return again;
-});
+const resumed = await run(
+  "connect resumes it, keeping files, processes and the token",
+  async () => {
+    const start = performance.now();
+    const again = await Sandbox.connect(id, { timeoutMs: 600_000 });
+    measured.resumeMs = Math.round(performance.now() - start);
+    expect((await again.getInfo()).state === "running", "not running after connect");
+    expect((await again.files.read("/tmp/c/signed.txt")) === "signed-body", "file lost");
+    const processes = await again.commands.list();
+    expect(
+      processes.some((p) => [p.cmd, ...(p.args ?? [])].join(" ").includes("sleep 600")),
+      `process lost: ${JSON.stringify(processes.map((p) => [p.cmd, p.args]))}`,
+    );
+    const refused = await fetch(`https://${again.getHost(49983)}/files?path=/etc/hostname`);
+    expect(refused.status === 401, `envd without the token after resume: ${refused.status}`);
+    return again;
+  },
+);
 
 await run("traffic to a paused sandbox with auto-resume resumes it", async () => {
   const handle = resumed ?? sandbox;
@@ -288,7 +316,9 @@ await run("traffic to a paused sandbox with auto-resume resumes it", async () =>
 });
 
 await run("traffic to a paused sandbox without auto-resume is refused until connect", async () => {
-  const still = await Sandbox.create("base", { lifecycle: { onTimeout: "pause", autoResume: false } });
+  const still = await Sandbox.create("base", {
+    lifecycle: { onTimeout: "pause", autoResume: false },
+  });
   try {
     await still.files.write("/tmp/kept.txt", "kept");
     await still.pause();
@@ -306,7 +336,10 @@ await run("traffic to a paused sandbox without auto-resume is refused until conn
 });
 
 await run("a timeout with onTimeout pause pauses, and connect brings it back", async () => {
-  const short = await Sandbox.create("base", { timeoutMs: 10_000, lifecycle: { onTimeout: "pause" } });
+  const short = await Sandbox.create("base", {
+    timeoutMs: 10_000,
+    lifecycle: { onTimeout: "pause" },
+  });
   await short.files.write("/tmp/kept.txt", "kept");
   const deadline = Date.now() + 90_000;
   while ((await Sandbox.getInfo(short.sandboxId)).state !== "paused") {
@@ -346,7 +379,10 @@ await run("the minimal image without bash runs commands and files", async () => 
 
 await run("list shows running and paused sandboxes, filtered by metadata", async () => {
   const items = await Sandbox.list({ query: { metadata: { suite } } }).nextItems();
-  expect(items.some((s) => s.sandboxId === id), `ids ${items.map((s) => s.sandboxId)}`);
+  expect(
+    items.some((s) => s.sandboxId === id),
+    `ids ${items.map((s) => s.sandboxId)}`,
+  );
   return { count: items.length };
 });
 
