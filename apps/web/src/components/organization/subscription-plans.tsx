@@ -154,16 +154,15 @@ export function SubscriptionPlans({
               </RowButton>
             ) : null}
           </div>
-          <UsageMeter
-            label="Monthly plan credit"
-            percent={
-              plan.creditGrantedMicros > 0
-                ? (plan.creditRemainingMicros / plan.creditGrantedMicros) * 100
-                : 0
-            }
-            valueLabel={`${formatMoneyMicros(plan.creditRemainingMicros, "usd")} of ${formatMoneyMicros(plan.creditGrantedMicros, "usd")} left`}
-            {...(reset ? { resetsLabel: reset } : {})}
-          />
+          {/* No grant this period (e.g. a Free org without monthly credit): show no empty meter. */}
+          {plan.creditGrantedMicros > 0 ? (
+            <UsageMeter
+              label="Monthly plan credit"
+              percent={(plan.creditRemainingMicros / plan.creditGrantedMicros) * 100}
+              valueLabel={`${formatMoneyMicros(plan.creditRemainingMicros, "usd")} of ${formatMoneyMicros(plan.creditGrantedMicros, "usd")} left`}
+              {...(reset ? { resetsLabel: reset } : {})}
+            />
+          ) : null}
           {plan.cancelAtPeriodEnd ? (
             <Notice title="Cancellation scheduled">
               Your paid plan ends{reset ? ` ${reset}` : " at the end of this period"}. You'll move
