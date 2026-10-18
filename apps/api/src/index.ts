@@ -71,6 +71,10 @@ import { startApiMetricsListener } from "./http/metrics-listener";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
 import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
 import {
+  startComputeAgentGateway,
+  type ComputeGatewayHandle,
+} from "./sandbox/compute-gateway-boot";
+import {
   createStandaloneEditableArtifactApplication,
   type StandaloneEditableArtifactApplication,
 } from "./editable-artifact-production";
@@ -474,7 +478,32 @@ export async function startApi(
   const localBrowserBoundary = createLocalBrowserBoundary(settings, {
     warn: (message, attributes) => observability.warn(message, attributes),
   });
-  const webSocketUpgrades = [interactionFrameProxies, artifactWebSockets];
+  // The compute agent gateway: hosts of the compute fabric link here to carry
+  // their sandboxes' agents (sandbox/compute-gateway.ts). Off unless configured.
+  let computeGateway: ComputeGatewayHandle | undefined;
+  try {
+    computeGateway = await startComputeAgentGateway({
+      db: dbClient.db,
+      settings,
+      natsAuth: controlPlaneAuth
+        ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
+        : undefined,
+      maxWebSocketMessageBytes: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
+      observability,
+    });
+  } catch {
+    // Other planes keep working; compute sandboxes stay unreachable until it is up.
+    observability.error("Opengeni compute agent gateway failed to start", {
+      errorClass: "ComputeAgentGatewayError",
+      errorCode: "compute_gateway_start_failed",
+      origin: "api",
+    });
+  }
+  const webSocketUpgrades = [
+    interactionFrameProxies,
+    artifactWebSockets,
+    ...(computeGateway ? [computeGateway.gateway] : []),
+  ];
   const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
@@ -499,6 +528,8 @@ export async function startApi(
       open: (socket) => socket.data.attach(socket),
       message: (socket, message) => socket.data.receive(message),
       close: (socket) => socket.data.transportClosed(),
+      ping: (socket) => socket.data.heard?.(),
+      pong: (socket) => socket.data.heard?.(),
     },
   });
   const metricsServer = startApiMetricsListener(settings, observability);
@@ -545,7 +576,9 @@ export async function startApi(
   // cannot connect — graceful). It runs on its OWN connection (the callout auth
   // user), separate from the privileged control-plane bus.
   let authCalloutResponder: ResponderConnection | undefined;
-  if (settings.sandboxSelfhostedEnabled) {
+  // Compute sandboxes run the same agent, so their heartbeats and Hellos are
+  // ingested whenever the compute gateway serves them.
+  if (settings.sandboxSelfhostedEnabled || computeGateway) {
     stopMetricsIngestion = startMetricsIngestion({
       db: dbClient.db,
       bus,
@@ -563,7 +596,8 @@ export async function startApi(
       observability,
     });
     observability.info("Opengeni machine-metrics + hello ingestion consumers started", {});
-
+  }
+  if (settings.sandboxSelfhostedEnabled) {
     const callout = resolveNatsCalloutConfig(settings);
     if (callout) {
       try {
@@ -613,6 +647,7 @@ export async function startApi(
         vaultProvidersClosed,
         Promise.resolve(editableArtifactComposition?.close()),
         authCalloutResponder?.close(),
+        computeGateway?.close(),
         bus.close(),
         workflowClient.close(),
         dbClient.close(),
