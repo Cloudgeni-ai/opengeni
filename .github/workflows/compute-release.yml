@@ -5,9 +5,11 @@ name: Compute Release
 #
 #   control-image  ghcr.io/cloudgeni-ai/opengeni-compute-control: the fleet
 #                  service and front door (compute/docker/control.Dockerfile),
-#                  with build provenance and an SBOM. Pushes to main tag it
-#                  sha-<commit> and main; a compute-v<version> tag adds
-#                  <version>.
+#                  with build provenance and an SBOM. Every run pushes it as
+#                  sha-<commit>, a candidate nothing names; once it runs, the
+#                  host bundle is reproducible and Compute CI has passed on
+#                  the same commit, a push to main moves `main` to it and a
+#                  compute-v<version> tag adds <version>.
 #   host-bundle    compute-host-<version>-x86_64-linux.tar.gz: the host agent
 #                  as a static binary, the guest programs every sandbox
 #                  image gets, the systemd units, install.sh and the pinned
@@ -15,7 +17,8 @@ name: Compute Release
 #                  (compute/deploy/host). Built twice, from two paths, and
 #                  the two must be identical. Kept as a workflow artifact;
 #                  a tag also publishes it as a GitHub Release with
-#                  SHA256SUMS and a build provenance attestation.
+#                  SHA256SUMS and a build provenance attestation, after the
+#                  same checks.
 #
 # Tags follow agent-release.yml: compute-v<version> must equal the
 # workspace version in compute/Cargo.toml, and tag pushes publish only once
@@ -85,6 +88,8 @@ jobs:
     needs: guard
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -100,21 +105,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Tags
-        id: tags
-        env:
-          VERSION: ${{ needs.guard.outputs.version }}
-          RELEASE: ${{ needs.guard.outputs.release }}
-        run: |
-          set -euo pipefail
-          {
-            echo "tags<<EOF"
-            echo "$IMAGE:sha-$GITHUB_SHA"
-            if [ "$RELEASE" = true ]; then echo "$IMAGE:$VERSION"; fi
-            if [ "$GITHUB_REF" = refs/heads/main ]; then echo "$IMAGE:main"; fi
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-      - name: Build and push
+      - name: Build and push the candidate
         id: build
         uses: docker/build-push-action@v7.3.0
         with:
@@ -125,7 +116,7 @@ jobs:
           push: true
           provenance: mode=max
           sbom: true
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ${{ env.IMAGE }}:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -146,7 +137,7 @@ jobs:
           set -euo pipefail
           docker run --rm "$IMAGE@$DIGEST" --help >/dev/null
           docker run --rm --entrypoint /usr/local/bin/compute-host "$IMAGE@$DIGEST" sweep --help >/dev/null
-          echo "Pushed \`$IMAGE@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pushed the candidate \`$IMAGE@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
 
   host-bundle:
     name: host bundle
@@ -207,9 +198,76 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  promote:
+    name: Promote once checked
+    needs: [guard, control-image, host-bundle]
+    if: ${{ github.ref == 'refs/heads/main' || needs.guard.outputs.release == 'true' }}
+    runs-on: ubuntu-24.04
+    # Compute CI's KVM job alone may take 75 minutes.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    steps:
+      - name: Wait for Compute CI on this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # A tag names a commit whose push to main ran Compute CI; a push
+          # to main runs it alongside this workflow. Any successful run on
+          # the commit counts; with none, a finished failed run ends this.
+          query="repos/$GITHUB_REPOSITORY/actions/workflows/compute-ci.yml/runs?head_sha=$GITHUB_SHA&per_page=50"
+          deadline=$(( $(date +%s) + 110 * 60 ))
+          while :; do
+            runs="$(gh api "$query" --jq '[.workflow_runs[] | {status, conclusion, url: .html_url}]')"
+            if jq -e 'any(.[]; .conclusion == "success")' <<<"$runs" >/dev/null; then
+              jq -r 'map(select(.conclusion == "success"))[0].url' <<<"$runs"
+              break
+            fi
+            if jq -e 'length > 0 and all(.[]; .status == "completed")' <<<"$runs" >/dev/null; then
+              echo "::error::Compute CI did not pass on $GITHUB_SHA: $(jq -c . <<<"$runs")" >&2
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::no finished Compute CI run on $GITHUB_SHA: $(jq -c . <<<"$runs")" >&2
+              exit 1
+            fi
+            sleep 60
+          done
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Name the candidate
+        env:
+          DIGEST: ${{ needs.control-image.outputs.digest }}
+          VERSION: ${{ needs.guard.outputs.version }}
+          RELEASE: ${{ needs.guard.outputs.release }}
+        run: |
+          set -euo pipefail
+          # Copies the checked index, attestations included, under each
+          # name: the digest, and so its provenance, stays the same.
+          tags=()
+          if [ "$GITHUB_REF" = refs/heads/main ]; then tags+=(--tag "$IMAGE:main"); fi
+          if [ "$RELEASE" = true ]; then tags+=(--tag "$IMAGE:$VERSION"); fi
+          docker buildx imagetools create "${tags[@]}" "$IMAGE@$DIGEST"
+          for tag in "${tags[@]}"; do
+            [ "$tag" = --tag ] && continue
+            named="$(docker buildx imagetools inspect "$tag" | awk '$1 == "Digest:" { print $2; exit }')"
+            if [ "$named" != "$DIGEST" ]; then
+              echo "::error::$tag is $named, not the checked $DIGEST" >&2
+              exit 1
+            fi
+            echo "\`$tag\` is \`$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+
   publish:
     name: GitHub Release
-    needs: [guard, control-image, host-bundle]
+    needs: [guard, promote]
     if: ${{ needs.guard.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
