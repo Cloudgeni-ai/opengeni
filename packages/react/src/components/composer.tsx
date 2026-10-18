@@ -81,6 +81,8 @@ export type ComposerDelivery = Pick<
   | "value"
   | "setValue"
   | "send"
+  | "sendToQueue"
+  | "busySend"
   | "steer"
   | "sending"
   | "canSend"
@@ -508,7 +510,13 @@ export function useChatComposerController({
       submittingRef.current = true;
       setSubmitting(true);
       try {
-        return mode === "steer" || resumesOnSend ? await delivery.steer() : await delivery.send();
+        if (resumesOnSend) return await delivery.steer();
+        if (mode !== "steer") return await delivery.send();
+        // The alternate action is the opposite of what a busy Send does:
+        // Steer when Send queues, queue when Send steers.
+        return delivery.busySend === "steer"
+          ? await (delivery.sendToQueue ?? delivery.send)()
+          : await delivery.steer();
       } finally {
         submittingRef.current = false;
         if (mountedRef.current) setSubmitting(false);
@@ -684,6 +692,7 @@ export function useChatComposerController({
     canSubmit,
     submitBlocker,
     submit,
+    busySend: delivery.busySend ?? "queue",
     handleKeyDown,
     handlePaste,
     handleFileChange,
@@ -1337,7 +1346,9 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
         ? controller.messages.annotationNotesRequired
         : controller.paused
           ? controller.messages.sendAndResumeTitle
-          : controller.messages.sendTitle);
+          : controller.busySend === "steer"
+            ? (controller.messages.steerSendTitle ?? controller.messages.sendTitle)
+            : controller.messages.sendTitle);
     return (
       <ComposerTip tip={tip}>
         <button

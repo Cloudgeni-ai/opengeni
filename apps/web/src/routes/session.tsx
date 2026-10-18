@@ -238,7 +238,7 @@ import {
   firstPartySessionToolOptionsFor,
   sessionPolicyPickerIds,
 } from "@/lib/session-tools";
-import { stableJson } from "@opengeni/contracts";
+import { resolveWorkspaceBusySend, stableJson } from "@opengeni/contracts";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
 import type { ChatSendContext } from "@/components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "@/lib/github-app-connect";
@@ -2600,6 +2600,7 @@ function SessionChatPane(props: {
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     sendDestination: () =>
       props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
+    busySend: resolveWorkspaceBusySend(workspace?.settings),
     // Ordinary Send is acknowledged locally. Clear only resources captured in
     // that immutable optimistic operation; later additions belong to the next
     // draft, while retry keeps the original resource refs in the failed bubble.

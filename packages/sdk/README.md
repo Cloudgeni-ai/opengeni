@@ -1410,8 +1410,14 @@ for await (const event of client.streamEvents(workspaceId, sessionId, {
 ## Messages, the turn queue, and steering
 
 Messages sent while a turn is running **queue by default** — visible,
-editable, reorderable, and deletable until the worker claims them. Steering is
-the explicit alternative: deliver now by interrupting the running turn.
+editable, reorderable, and deletable until the worker claims them, and they run
+after the whole running turn. Steering is the explicit alternative: the running
+turn reads the message at its next model step. Tool calls already running
+finish, then, before the next model request, the turn hands over
+(`turn.superseded` with reason `steer` and `atModelStep: true`) and the Steer
+runs next with the full history, so nothing is cut off. While it waits, the
+queue snapshot reports it as `pendingSteer`; `steerQueueItem` with
+`interrupt: true` stops the current step now instead.
 
 ```ts
 // Queue (default): stacks behind the running turn.
@@ -1420,7 +1426,7 @@ await client.sendMessage(workspaceId, sessionId, {
   clientEventId: crypto.randomUUID(),
 });
 
-// Steer: send + promote to the queue front + interrupt the running turn.
+// Steer: send + promote to the queue front; read at the next model step.
 await client.steerMessage(workspaceId, sessionId, {
   text: "Stop — prod is paging, look at that first",
   clientEventId: crypto.randomUUID(),
@@ -1428,6 +1434,15 @@ await client.steerMessage(workspaceId, sessionId, {
 
 // Manage the server-authoritative queue while it waits.
 const queue = await client.getQueue(workspaceId, sessionId);
+
+// "Send now": interrupt the running step for the waiting Steer.
+if (queue.pendingSteer) {
+  await client.steerQueueItem(workspaceId, sessionId, queue.pendingSteer.turnId, {
+    expectedTurnVersion: queue.pendingSteer.turnVersion,
+    interrupt: true,
+    clientEventId: crypto.randomUUID(),
+  });
+}
 const waiting = queue.items.at(-1)!;
 await client.moveQueueItem(workspaceId, sessionId, waiting.id, {
   expectedQueueVersion: queue.version,

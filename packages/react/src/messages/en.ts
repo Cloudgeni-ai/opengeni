@@ -596,6 +596,8 @@ export const englishMessages = {
   "composerMessages.sendMessage": "Send message",
   "composerMessages.showPauseDetails": "Show pause details",
   "composerMessages.slashCommands": "Slash commands",
+  "composerMessages.steerMessageEnterQueueWith":
+    "Send (Enter): the agent reads it after its current step. Queue with Cmd/Ctrl+Enter",
   "composerMessages.stillPausedByDisplayname": "Still paused by {displayName}",
   "composerMessages.stop": "Stop",
   "composerMessages.stopTheResponse": "Stop the response",
@@ -2360,6 +2362,11 @@ export const englishMessages = {
   "queueSurfaceState.queuedWorkStaysSavedUntil": "Queued work stays saved until you resume.",
   "queueSurfaceState.queueErrorDetails": "Queue error details",
   "queueSurfaceState.retryLoadingTheQueue": "Retry loading the queue",
+  "queueSurfaceState.steerNothingCutOff": "Nothing in progress is cut off.",
+  "queueSurfaceState.steerNow": "Send now",
+  "queueSurfaceState.steerNowAriaLabel": "Interrupt the current step and send your message now",
+  "queueSurfaceState.steerNowSending": "Sending…",
+  "queueSurfaceState.steerReadAfterStep": "The agent reads your message after its current step.",
   "queueSurfaceState.stoppingCurrentAttempt": "Stopping current attempt…",
   "queueSurfaceState.stoppingPreviousAttempt": "Stopping previous attempt…",
   "realtime.realtimeControl.audioMuted": "audio muted",
@@ -2691,6 +2698,7 @@ export const englishMessages = {
   "sessionChrome.queueNeedsAttention": "Queue needs attention",
   "sessionChrome.queueUnavailable": "Queue unavailable.",
   "sessionChrome.queueUnavailable2": "Queue unavailable",
+  "sessionChrome.readAfterCurrentStep": "Your message is read after the current step",
   "sessionChrome.removeQueuedPromptIndex": "Remove queued prompt {index}",
   "sessionChrome.resolveTheSessionFailureThen":
     "Resolve the session failure, then use Continue or send a message to continue this active goal.",

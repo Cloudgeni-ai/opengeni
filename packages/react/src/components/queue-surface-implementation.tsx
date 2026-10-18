@@ -58,7 +58,11 @@ import {
   queueTurnPreview,
 } from "../queue-presentation-model";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
-import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
+import {
+  QueueErrorAlert,
+  QueuePendingSteerStatus,
+  QueueStoppingStatus,
+} from "./queue-surface-state";
 import { TimelineAnnotationsChip } from "./timeline-annotations";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
@@ -307,7 +311,13 @@ export function QueueSurface({
     [canEditInComposer, composer, edit],
   );
 
-  if (totalCount === 0 && !queue.stoppingPreviousAttempt && !queue.error && !queue.mutationError)
+  if (
+    totalCount === 0 &&
+    !queue.stoppingPreviousAttempt &&
+    !queue.pendingSteer &&
+    !queue.error &&
+    !queue.mutationError
+  )
     return null;
 
   return (
@@ -317,6 +327,9 @@ export function QueueSurface({
       data-testid="queue-surface"
     >
       <div className="overflow-hidden rounded-lg border border-border bg-surface/80 shadow-sm">
+        {queue.pendingSteer && !queue.stoppingPreviousAttempt ? (
+          <QueuePendingSteerStatus queue={queue} dividerAfter />
+        ) : null}
         {queue.stoppingPreviousAttempt ? <QueueStoppingStatus queue={queue} dividerAfter /> : null}
         <button
           type="button"

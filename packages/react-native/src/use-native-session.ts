@@ -13,6 +13,7 @@ import {
   useSessionLineage,
   useSessionMcpApprovalPolicy,
   useTurnQueue,
+  type ComposerBusySend,
   type FileAttachmentClientLike,
   type GoalClientLike,
   type HumanInputSessionClientLike,
@@ -112,6 +113,12 @@ export function useOpenGeniNativeSession(input: {
   workspaceId: string;
   sessionId: string;
   mcpApprovalPolicyServerId?: string;
+  /**
+   * What an ordinary Send does while the agent is working: `queue` (default)
+   * runs it after the current turn; `steer` has the agent read it at its
+   * next model step, after the current step's tool calls finish.
+   */
+  busySend?: ComposerBusySend;
 }): OpenGeniNativeSessionController {
   const environment = useOpenGeniReactNativeEnvironment();
   const events = useSessionEvents(input.sessionId, {
@@ -147,6 +154,7 @@ export function useOpenGeniNativeSession(input: {
     // at once instead of flashing as a chat bubble before it is queued.
     sendDestination: () =>
       (session.session?.activeTurnId ?? null) !== null || queue.queue.length > 0 ? "queue" : "chat",
+    busySend: input.busySend,
     sendExtras: () => ({ resources: attachments.readyResources }),
     sendBlocked: () => attachments.hasUnresolved,
     ...nativeComposerAttachmentCallbacks(attachments),

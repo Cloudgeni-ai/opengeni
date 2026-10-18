@@ -857,6 +857,7 @@ export async function steerHumanQueuePrompt(
           turnId,
           expectedTurnVersion: input.expectedTurnVersion,
           controlEtag: input.controlEtag ?? null,
+          ...(input.interrupt === true ? { interrupt: true } : {}),
           actor: { type: "human", subjectId: context.subjectId },
           operationKey: input.clientEventId,
           controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),

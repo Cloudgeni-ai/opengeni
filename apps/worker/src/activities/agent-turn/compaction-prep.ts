@@ -443,20 +443,28 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       attemptId: input.attemptId,
     });
     if (!pending) return null;
-    if (
-      !(await eventing.settle({
-        events: [
-          {
-            type: "turn.superseded",
-            payload: { reason: "steer", deferredUntilCompaction: true },
-          },
-          { type: "session.status.changed", payload: { status: "queued" } },
-        ],
-        turnStatus: "superseded",
-        sessionStatus: "queued",
-        activeTurnId: null,
-      }))
-    ) {
+    // The same guard as the model-step handover: ending the turn now would
+    // stop a process it still owns, so the Steer waits for a later boundary
+    // (the next model-call admission re-checks it).
+    if (eventing.toolCancellationFenceRef.current?.holdsTurnOwnedProcesses() ?? false) {
+      return null;
+    }
+    const settled = await eventing.settle({
+      events: [
+        {
+          type: "turn.superseded",
+          payload: { reason: "steer", deferredUntilCompaction: true },
+        },
+        { type: "session.status.changed", payload: { status: "queued" } },
+      ],
+      turnStatus: "superseded",
+      sessionStatus: "queued",
+      activeTurnId: null,
+      requirePendingSteer: true,
+    });
+    // Withdrawn between the read and the locked settlement: keep working.
+    if (settled === "pending_steer_withdrawn") return null;
+    if (!settled) {
       return claimedResult({ status: "cancelled" });
     }
     // Metrics currently group user-directed supersession with cancellation;

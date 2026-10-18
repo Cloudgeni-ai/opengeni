@@ -28,9 +28,11 @@ A reload, a second client, or an audit all see the same history.
 ## Sending input
 
 - **Send** appends a prompt. If a turn is running, the message queues behind it. Queued messages stay editable and reorderable until they start.
-- **Steer** moves your message to the front and interrupts the running turn.
+- **Steer** moves your message to the front. The agent reads it after its current step: the tool calls already running finish, and its next model request includes your message, so nothing is cut off. Several Steers sent during one step are read together, in order. **Send now** on a waiting Steer stops the current step immediately instead.
 - **Pause** and **Resume** hold and release the session.
 - **Cancel** stops the session and its children for good.
+
+A workspace admin can make the console's normal Send act as Steer while the agent is working (**Workspace settings → Chats**). Cmd/Ctrl+Enter then queues instead. Products that embed the session screen choose the same with the composer's `busySend` option.
 
 If the session is waiting on you for an approval or a question, Send replaces that wait with your new prompt.
 

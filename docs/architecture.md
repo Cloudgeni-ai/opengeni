@@ -1120,8 +1120,36 @@ frozen start boundary. Pause blocks
 admission without pretending that physical execution has already stopped.
 Cancel fences a session subtree and is terminal for the affected sessions.
 
-Steer ordinarily inserts at the head and immediately supersedes the live
-direction. Active compaction is the exact exception: while a claimed standalone
+Steer inserts ahead of every queued Send and replaces the current direction.
+An ownerless current turn (approval, human input, recovery or capacity wait) is
+superseded at once. A live running attempt is not interrupted: Steer writes no
+`session_attempt_interruptions` row, records `deferredUntilModelStep` on the
+Steer turn and its `session.control.steer_requested` event (`stopping: false`),
+and the attempt keeps authority. Model-call admission, which runs before every
+model request, reads `hasPendingSteerForTurn` (a queued user/API turn with
+`delivery: "steer"`, or a pending agent Steer instruction). When one exists and
+the turn owns no live process that ending it would stop (a yielded local,
+Docker or OpenSandbox shell that was not adopted as a session background
+command), admission throws `ModelStepHandover` before the request leaves the
+worker. The SDK routes it through its run error handlers like a turn cap, so the
+run finishes normally and every event of the completed step, including all of
+its tool results, reaches the consumer. The worker then settles the turn
+`superseded` (`turn.superseded{reason:"steer", atModelStep:true}`) under the
+settlement precondition `requirePendingSteer`, re-checked under the session
+lock, and the Steer is claimed next on the unchanged history. If it was
+withdrawn in between, nothing is written and the turn rebuilds its input from
+durable history and keeps sampling. Steers that wait on the same boundary keep
+their send order, and a Steer turn that finds another waiting Steer at its own
+first admission hands over before any inference, so the next model request
+reads them together. The timeline closes a handed-over turn quietly. A queued
+Send is unaffected and still runs after the whole turn. `steerQueueItem` with
+`interrupt: true` ("Send now" on the waiting Steer, exposed as the queue
+snapshot's `pendingSteer`) keeps the earlier behaviour: it inserts the
+interruption row, moves the row to the head and stops the live attempt now. The
+workspace setting `busySend` (`queue` by default) and the composer's `busySend`
+option only choose which of the two an ordinary Send uses while a turn runs.
+
+Active compaction is the other exception: while a claimed standalone
 compaction is running, or an ordinary attempt's latest compaction landmark is
 `session.context.compaction.started`, Steer is accepted without inserting the
 interruption that would fence the terminal checkpoint write. A durable

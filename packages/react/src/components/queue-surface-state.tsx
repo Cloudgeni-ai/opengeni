@@ -16,11 +16,59 @@ export function EmptyQueueStateSurface({ queue }: QueueStateProps) {
       data-testid="queue-surface"
     >
       <div className="overflow-hidden rounded-lg border border-border bg-surface/80 shadow-sm">
+        {queue.pendingSteer && !queue.stoppingPreviousAttempt ? (
+          <QueuePendingSteerStatus queue={queue} dividerAfter={hasError} />
+        ) : null}
         {queue.stoppingPreviousAttempt ? (
           <QueueStoppingStatus queue={queue} dividerAfter={hasError} />
         ) : null}
         {hasError ? <QueueErrorAlert queue={queue} /> : null}
       </div>
+    </div>
+  );
+}
+
+/**
+ * A Steer the agent reads after its current step. Nothing is cut off while it
+ * waits; "Send now" interrupts the step for people who cannot wait.
+ */
+export function QueuePendingSteerStatus({
+  queue,
+  dividerAfter = false,
+}: QueueStateProps & { dividerAfter?: boolean }) {
+  const t = useOpenGeniText();
+  const pending = queue.pendingSteer;
+  if (!pending) return null;
+  const sending = queue.mutationFor(pending.turnId) === "steer";
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={`flex min-h-11 items-center gap-2.5 px-3 py-1.5 text-og-control text-fg ${
+        dividerAfter ? "border-b border-border" : ""
+      }`}
+      data-testid="pending-steer"
+    >
+      <Loader2Icon
+        aria-hidden="true"
+        className="size-3.5 shrink-0 animate-spin text-fg-muted motion-reduce:animate-none"
+      />
+      <span className="min-w-0 flex-1">
+        <span className="font-medium">{t("queueSurfaceState.steerReadAfterStep")}</span>{" "}
+        <span className="text-fg-muted">{t("queueSurfaceState.steerNothingCutOff")}</span>
+      </span>
+      {queue.steerNow ? (
+        <button
+          type="button"
+          className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-og-control font-medium text-fg-muted outline-hidden transition-colors hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60 pointer-coarse:h-11"
+          aria-label={t("queueSurfaceState.steerNowAriaLabel")}
+          title={t("queueSurfaceState.steerNowAriaLabel")}
+          disabled={sending}
+          onClick={() => void queue.steerNow?.()}
+        >
+          {sending ? t("queueSurfaceState.steerNowSending") : t("queueSurfaceState.steerNow")}
+        </button>
+      ) : null}
     </div>
   );
 }

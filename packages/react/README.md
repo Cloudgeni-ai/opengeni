@@ -1006,10 +1006,13 @@ state remains application-owned; durable draft and session state remain in
   or session change clears that failure. Loading older rows alone does not
   resolve a failed newer read. Late failures from a previous session are ignored.
   A host that discards the promise must handle its own rejected request.
-- `useComposer(sessionId, { sendExtras, effectiveControl })` — revisioned private
+- `useComposer(sessionId, { sendExtras, effectiveControl, busySend })` — revisioned private
   draft, Send, Steer, and workstream Pause/Resume state. `send()` appends in
   visible queue order (including while paused); `steer()` puts the new direction
-  directly in chat and supersedes the current direction. Resume is always an
+  directly in chat, and a running turn reads it at its next model step without
+  cutting off tool calls in progress. With `busySend: "steer"`, `send()` steers
+  while a turn is running (it still queues while paused) and `sendToQueue()`
+  always queues; the default `"queue"` keeps Send queueing. Resume is always an
   explicit control action and never an implicit side effect of Send. Drafts
   autosave with optimistic concurrency, survive failed sends, and reuse one
   `clientEventId` across retries so the server dedupes. Draft reads retry transient

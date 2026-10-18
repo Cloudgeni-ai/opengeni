@@ -177,6 +177,9 @@ function QueueHarness() {
     errorSource === "mutation" && initialErrorMessage ? new Error(initialErrorMessage) : null,
   );
   const [refreshCount, setRefreshCount] = useState(0);
+  const [steeringNow, setSteeringNow] = useState(false);
+  // `pendingSteer=1`: the first row is a Steer waiting for the next model step.
+  const pendingSteerTurn = params.get("pendingSteer") === "1" ? (turns[0] ?? null) : null;
   const [clearMutationErrorCount, setClearMutationErrorCount] = useState(0);
 
   useEffect(() => {
@@ -199,6 +202,15 @@ function QueueHarness() {
       activePersonalConnections: [],
       effectiveControl: null,
       stoppingPreviousAttempt: false,
+      ...(pendingSteerTurn
+        ? {
+            pendingSteer: { turnId: pendingSteerTurn.id, turnVersion: pendingSteerTurn.version },
+            steerNow: async () => {
+              setSteeringNow(true);
+              return true;
+            },
+          }
+        : {}),
       loading,
       error: queueError,
       refresh: async () => {
@@ -210,7 +222,8 @@ function QueueHarness() {
       steerTurn: async () => true,
       removeTurn: async () => true,
       pendingByTurn: {},
-      mutationFor: () => null,
+      mutationFor: (turnId: string) =>
+        steeringNow && turnId === pendingSteerTurn?.id ? "steer" : null,
       mutating: false,
       mutationError,
       clearMutationError: () => {
@@ -218,7 +231,7 @@ function QueueHarness() {
         setMutationError(null);
       },
     }),
-    [loading, mutationError, queueError, turns],
+    [loading, mutationError, pendingSteerTurn, queueError, steeringNow, turns],
   );
 
   return (

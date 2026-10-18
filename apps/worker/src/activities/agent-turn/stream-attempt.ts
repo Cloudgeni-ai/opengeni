@@ -22,11 +22,13 @@ import {
   attachOpenSuffixToPendingToolCalls,
   clearDurablePendingSessionToolCalls,
   isSessionCompactionRequested,
+  hasPendingSteerForTurn,
   nextSessionHistoryPosition,
   persistModelContextSnapshot,
   updateSessionTitleWithEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { handOverWaitToSteer } from "./waiting-steer";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
@@ -46,6 +48,7 @@ import {
   withRunCredentialsSession,
   runOwnedSandboxSetup,
   modelResponseHasVisibleText,
+  ModelStepHandover,
   type SandboxFileDownload,
   type OpenGeniRuntime,
   type GeneratedSessionTitle,
@@ -678,13 +681,26 @@ export async function runTurnStreamAttempt(
   let workerPreparationTotalRecorded = false;
   let toolsExecuted = false;
   let finalReplyNudged = false;
-  const revalidateModelCallAdmission = async () => {
-    // The three checks are independent, so they run together; this sits on the
+  // A Steer is read at the next model-step boundary of every ordinary turn:
+  // admission leaves the attempt running, and this check hands over before
+  // the next model request, after the completed step's tool calls finished.
+  // Standalone compaction is maintenance with no model step to yield from.
+  const yieldsToSteer = turn.source !== "compaction";
+  // Set when admission ends the stream at a step boundary for a Steer; the
+  // stream then completes normally and is settled as a handover.
+  let steerHandover = false;
+  const revalidateModelCallAdmission = async (options: { yieldToSteer?: boolean } = {}) => {
+    // Every model request of the stream yields, including the first one after
+    // a claim or recovery: a Steer admitted while the previous attempt was
+    // lost, or between claim and the first request, is read before any
+    // further inference.
+    const checkSteer = options.yieldToSteer === true && yieldsToSteer;
+    // The checks are independent, so they run together; this sits on the
     // critical path of every model call. All of them settle before any outcome
     // is reported, and failures surface in the original order (durable
-    // history, subscription source, then usage), so a refusal is the same one
-    // the sequential checks would have produced.
-    const [history, source, usage] = await Promise.allSettled([
+    // history, subscription source, usage, then a pending Steer), so a refusal
+    // is the same one the sequential checks would have produced.
+    const [history, source, usage, pendingSteer] = await Promise.allSettled([
       historySink.reconcileConversationTruth({ requireDurable: true }),
       revalidatePlacedSubscriptionCore(db, providerTurn),
       ensureRunAllowedBetweenModelCalls({
@@ -700,18 +716,41 @@ export async function runTurnStreamAttempt(
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
         sessionId: input.sessionId,
       }),
+      checkSteer
+        ? hasPendingSteerForTurn(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+          })
+        : Promise.resolve(false),
     ]);
     if (history.status === "rejected") throw history.reason;
     if (source.status === "rejected") throw source.reason;
     if (usage.status === "rejected") throw usage.reason;
     creditPolicyRevision = usage.value;
+    if (pendingSteer.status === "rejected") throw pendingSteer.reason;
+    // Ending the turn stops the processes it still owns (for example a
+    // yielded local shell command that was not adopted as a background
+    // command). Keep working until they finish; the Steer is read at the
+    // first step boundary after that.
+    if (
+      pendingSteer.value &&
+      !(eventing.toolCancellationFenceRef.current?.holdsTurnOwnedProcesses() ?? false)
+    ) {
+      // The request has not left the worker. The SDK finishes the run at
+      // this boundary after delivering every event of the completed step.
+      steerHandover = true;
+      throw new ModelStepHandover("steer");
+    }
   };
   const runStreamAttempt = async (options: {
     requireTerminalModelResponse: boolean;
-  }): Promise<RunAgentTurnResult | "reply_nudge"> => {
+  }): Promise<RunAgentTurnResult | "reply_nudge" | "resume_after_withdrawn_handover"> => {
     if (!runInput) {
       throw new Error("Run input was not prepared");
     }
+    steerHandover = false;
     // The previous stream was persisted before compaction; the sink is now
     // seeded from its durable replacement. Do not reconcile the old prefix
     // against that replacement while checking the next stream's admission.
@@ -722,7 +761,7 @@ export async function runTurnStreamAttempt(
     if (options.requireTerminalModelResponse) await revalidateModelCallAdmission();
     const modelCallAdmission = createModelCallAdmission({
       signal: runtimeCancellationSignal,
-      admit: revalidateModelCallAdmission,
+      admit: () => revalidateModelCallAdmission({ yieldToSteer: true }),
       observe: (phase, durationSeconds) =>
         recordModelStepPhase(observability, {
           provider: resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai",
@@ -1799,6 +1838,9 @@ export async function runTurnStreamAttempt(
     if (
       options.requireTerminalModelResponse &&
       !eventing.preparedTools?.inputWaitYield?.yielded &&
+      // A handover to a Steer deliberately ends this stream before its
+      // first request; it is settled below, not recovered.
+      !steerHandover &&
       eventing.stream.interruptions.length === 0 &&
       modelResponseState.responseCount === responseCountBeforeStream
     ) {
@@ -2105,10 +2147,60 @@ export async function runTurnStreamAttempt(
       }
       // The interruption and its preceding tool results are now durable.
       await finalizeTurnOpStreamOps();
+      // A Steer that was waiting for this turn's next model step would
+      // otherwise wait behind the approval or question: it replaces the
+      // wait now, as it would if it had arrived after the wait began.
+      if (
+        await handOverWaitToSteer(db, bus, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+        })
+      ) {
+        control.turnMetricOutcome = "cancelled";
+        control.activityStatus = "idle";
+        return claimedResult({ status: "idle" });
+      }
       control.activityStatus = "requires_action";
       return claimedResult({ status: "requires_action" });
     }
 
+    if (steerHandover) {
+      // Model-call admission found a Steer waiting for this turn and ended
+      // the stream before the next request left the worker. Every event of
+      // the completed step was consumed above. Hand over at this boundary:
+      // the turn ends `superseded`, and the Steer runs next on the same,
+      // unchanged history.
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+      await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
+      await finalizeTurnOpStreamOps();
+      await finishParallelSessionTitle();
+      await flushHeldSessionUsageReceipts(db, input.sessionId);
+      const settled = await eventing.settle!({
+        events: [
+          { type: "turn.superseded", payload: { reason: "steer", atModelStep: true } },
+          { type: "session.status.changed", payload: { status: "queued" } },
+        ],
+        turnStatus: "superseded",
+        sessionStatus: "queued",
+        activeTurnId: null,
+        requirePendingSteer: true,
+      });
+      if (settled === "pending_steer_withdrawn") {
+        // The Steer was withdrawn or claimed in between. Keep working:
+        // rebuild the input from the durable history and resume sampling.
+        await prepareRunAttemptInput();
+        return "resume_after_withdrawn_handover";
+      }
+      if (!settled) return claimedResult({ status: "cancelled" });
+      await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);
+      // Metrics group user-directed supersession with cancellation; the
+      // durable turn outcome remains the precise `superseded` truth.
+      control.turnMetricOutcome = "cancelled";
+      control.activityStatus = "idle";
+      return claimedResult({ status: "idle" });
+    }
     const inputWaitYielded = eventing.preparedTools?.inputWaitYield?.yielded === true;
     const finalOutput = String(
       requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded),
@@ -2365,7 +2457,7 @@ export async function runTurnStreamAttempt(
         const result = await runStreamAttempt({
           requireTerminalModelResponse: retriedAfterCompaction,
         });
-        if (result === "reply_nudge") continue;
+        if (result === "reply_nudge" || result === "resume_after_withdrawn_handover") continue;
         if (retriedAfterCompaction) {
           observability.info("context compaction recovery succeeded after in-activity retry", {
             sessionId: input.sessionId,
