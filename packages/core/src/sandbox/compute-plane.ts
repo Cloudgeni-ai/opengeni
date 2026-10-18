@@ -47,6 +47,7 @@ export function createComputeAgentPlane(deps: {
         opStream: enrollment.opStream === true,
         transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
         browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+        runAsSupported: enrollment.agentCapabilities.runAs === true,
       };
     },
     createEnrollment: async (input) => {

@@ -809,6 +809,11 @@ export class SelfhostedSession {
     return await this.admitOperation(true);
   }
 
+  /** Whether the live runner honors per-request `runAs` right now. */
+  protected async liveRunAsSupported(): Promise<boolean> {
+    return (await this.admitOperation(false)).runAsSupported;
+  }
+
   /** A proven-unstarted op-stream retry may reuse its stable op id, but it must
    * not reuse mutable authorization or silently retarget the command. Require a
    * fresh admission for the exact same physical route and effective policy;

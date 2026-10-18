@@ -151,6 +151,10 @@ class FakeAgentPlane implements ComputeAgentPlane {
   readonly sent: Array<{ subject: string; req: ControlRequest }> = [];
   /** enrollment id -> the instance whose session the gateway holds. */
   readonly sessions = new Map<string, string>();
+  /** The agent's Hello advertised `run_as`. */
+  runAs = false;
+  /** Every exec the agent ran over its op-stream. */
+  readonly execs: Array<{ cmd: string; runAs: string }> = [];
   private readonly runners = new Map<string, FakeOpRunner>();
 
   private runner(agentId: string, instance: string): FakeOpRunner {
@@ -163,6 +167,7 @@ class FakeAgentPlane implements ComputeAgentPlane {
         agentId,
         connectionInstanceId: instance,
         defaultScript: async (exec) => {
+          this.execs.push({ cmd: exec.command.join(" "), runAs: exec.runAs });
           const response = await this.responder.runExec(exec);
           return {
             frames:
@@ -219,6 +224,7 @@ class FakeAgentPlane implements ComputeAgentPlane {
       opStream: true,
       transactionalFsWriteSupported: false,
       browserControlHttpSupported: false,
+      runAsSupported: this.runAs,
     };
   }
 
@@ -426,6 +432,37 @@ describe("compute sandbox client", () => {
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
     const result = await session.exec({ cmd: "echo hi" });
     expect(result.exitCode).toBe(0);
+  });
+
+  test("a manifest applied as another user carries runAs when the agent supports it", async () => {
+    const { plane, client } = setup();
+    plane.runAs = true;
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    await session.materializeEntry({
+      path: "project",
+      entry: { type: "dir", permissions: "drwxr-x---" } as never,
+      runAs: "builder",
+    });
+    await session.writeFile({ path: "/workspace/project/a.txt", content: "x", runAs: "builder" });
+    expect(plane.execs.filter((e) => e.runAs === "builder").map((e) => e.cmd)).toEqual([
+      "mkdir -p -- '/workspace/project'",
+      "chmod 750 -- '/workspace/project'",
+    ]);
+    const write = plane.sent.find((s) => s.req.op?.$case === "fsWrite")?.req.op;
+    expect(write?.$case === "fsWrite" && write.fsWrite.runAs).toBe("builder");
+  });
+
+  test("a manifest applied as another user is refused when the agent lacks runAs", async () => {
+    const { plane, client } = setup();
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    await expect(
+      session.materializeEntry({
+        path: "project",
+        entry: { type: "dir" } as never,
+        runAs: "builder",
+      }),
+    ).rejects.toThrow("does not support runAs");
+    expect(plane.execs).toEqual([]);
   });
 
   test("resumeExact of a sandbox the fabric no longer has is an unavailable instance", async () => {

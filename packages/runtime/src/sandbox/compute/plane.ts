@@ -34,6 +34,8 @@ export interface ComputeAgentConnection {
   opStream: boolean;
   transactionalFsWriteSupported: boolean;
   browserControlHttpSupported: boolean;
+  /** The agent advertised per-request `run_as` (Hello `capabilities.run_as`). */
+  runAsSupported: boolean;
 }
 
 export interface ComputeAgentPlane {

@@ -85,13 +85,19 @@ set but something else is missing, the gateway logs
 `compute_gateway_misconfigured` and stays off. Compute also needs the relay
 and NATS like Connected Machines.
 
+## Run as another user
+
+The agent runs as root in the guest, so the descriptor sets `supportsRunAs`.
+Each request still gates on the live agent's Hello `capabilities.run_as`:
+commands, file operations and manifest materialization carry `runAs` only when
+the agent advertises it, and a manifest applied as another user is refused
+otherwise. See "Run as another local user" in `docs/connected-machines.md`.
+
 ## Not yet supported
 
-- `runAs`: the descriptor keeps it off until the agent advertises
-  `agent_capabilities.run_as`.
 - A disk size in the create request.
 
 Canonical code: `packages/runtime/src/sandbox/compute/`,
 `packages/runtime/src/sandbox/providers/compute.ts`,
 `packages/core/src/sandbox/compute-plane.ts`,
-`apps/api/src/sandbox/compute-gateway*.ts`, migrations 0839 and 0840.
+`apps/api/src/sandbox/compute-gateway*.ts`, migrations 0839 to 0841.

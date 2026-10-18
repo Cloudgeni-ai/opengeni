@@ -310,12 +310,6 @@ function workspacePath(path: string): string {
   return absolute;
 }
 
-function assertRunAsUnsupported(runAs: string | undefined): void {
-  if (runAs) {
-    throw new SandboxUnsupportedFeatureError("Compute sandboxes do not support runAs yet.");
-  }
-}
-
 function assertSupportedManifest(manifest: Manifest): void {
   if (manifest.root !== COMPUTE_WORKSPACE_ROOT) {
     throw new SandboxConfigurationError(`Compute manifest root must be ${COMPUTE_WORKSPACE_ROOT}.`);
@@ -386,6 +380,7 @@ export class ComputeSandboxSession extends SelfhostedSession {
         operationCpuQuotaSupported: false,
         transactionalFsWriteSupported: connection.transactionalFsWriteSupported,
         browserControlHttpSupported: connection.browserControlHttpSupported,
+        runAsSupported: connection.runAsSupported,
       };
     };
     super({
@@ -462,11 +457,20 @@ export class ComputeSandboxSession extends SelfhostedSession {
   /** The box keeps running (and sleeping) after a session is dropped. */
   async close(): Promise<void> {}
 
-  private async run(cmd: string, label: string, sandboxId = this.state.sandboxId) {
-    const result = await this.exec({ cmd, maxOutputTokens: 2_000 });
+  /** A manifest applied as another user needs the live agent's `run_as`. */
+  private async assertRunAsAvailable(runAs: string | undefined): Promise<void> {
+    if (runAs && !(await this.liveRunAsSupported())) {
+      throw new SandboxUnsupportedFeatureError(
+        "This compute sandbox's agent does not support runAs.",
+      );
+    }
+  }
+
+  private async run(cmd: string, label: string, runAs?: string) {
+    const result = await this.exec({ cmd, maxOutputTokens: 2_000, ...(runAs ? { runAs } : {}) });
     if (result.exitCode !== 0) {
       throw new SandboxProviderError(`Compute ${label} failed`, {
-        sandboxId,
+        sandboxId: this.state.sandboxId,
         exitCode: result.exitCode ?? null,
         stderr: result.stderr.slice(-1_000),
       });
@@ -474,8 +478,13 @@ export class ComputeSandboxSession extends SelfhostedSession {
     return result;
   }
 
-  private async writeChunked(path: string, bytes: Uint8Array): Promise<void> {
-    await this.writeFile({ path, content: bytes.subarray(0, SELFHOSTED_FILE_CHUNK_BYTES) });
+  private async writeChunked(path: string, bytes: Uint8Array, runAs?: string): Promise<void> {
+    const asUser = runAs ? { runAs } : {};
+    await this.writeFile({
+      path,
+      content: bytes.subarray(0, SELFHOSTED_FILE_CHUNK_BYTES),
+      ...asUser,
+    });
     for (
       let offset = SELFHOSTED_FILE_CHUNK_BYTES;
       offset < bytes.byteLength;
@@ -485,11 +494,12 @@ export class ComputeSandboxSession extends SelfhostedSession {
         path,
         content: bytes.subarray(offset, offset + SELFHOSTED_FILE_CHUNK_BYTES),
         append: true,
+        ...asUser,
       });
     }
   }
 
-  private async applyPermissions(target: string, entry: Entry): Promise<void> {
+  private async applyPermissions(target: string, entry: Entry, runAs?: string): Promise<void> {
     if (entry.group !== undefined) {
       throw new SandboxUnsupportedFeatureError(
         "Compute sandboxes do not materialize named manifest groups.",
@@ -497,24 +507,24 @@ export class ComputeSandboxSession extends SelfhostedSession {
     }
     if (entry.permissions === undefined) return;
     const mode = (new Permissions(entry.permissions).toMode() & 0o777).toString(8);
-    await this.run(`chmod ${mode} -- ${shellQuote(target)}`, "permission change");
+    await this.run(`chmod ${mode} -- ${shellQuote(target)}`, "permission change", runAs);
   }
 
-  private async materialize(path: string, entry: Entry): Promise<void> {
+  private async materialize(path: string, entry: Entry, runAs?: string): Promise<void> {
     const target = workspacePath(path);
     if (entry.type === "dir") {
-      await this.run(`mkdir -p -- ${shellQuote(target)}`, "directory materialization");
+      await this.run(`mkdir -p -- ${shellQuote(target)}`, "directory materialization", runAs);
       for (const [childPath, child] of Object.entries(entry.children ?? {})) {
-        await this.materialize(posix.join(path, childPath), child);
+        await this.materialize(posix.join(path, childPath), child, runAs);
       }
-      await this.applyPermissions(target, entry);
+      await this.applyPermissions(target, entry, runAs);
       return;
     }
     if (entry.type === "file") {
       const content =
         typeof entry.content === "string" ? new TextEncoder().encode(entry.content) : entry.content;
-      await this.writeChunked(target, content);
-      await this.applyPermissions(target, entry);
+      await this.writeChunked(target, content, runAs);
+      await this.applyPermissions(target, entry, runAs);
       return;
     }
     if (entry.type === "git_repo") {
@@ -536,8 +546,8 @@ export class ComputeSandboxSession extends SelfhostedSession {
           : `mv -- ${shellQuote(temp)} ${shellQuote(target)}`,
         subpath ? `rm -rf -- ${shellQuote(temp)}` : ":",
       ].join("\n");
-      await this.run(script, "git repository materialization");
-      await this.applyPermissions(target, entry);
+      await this.run(script, "git repository materialization", runAs);
+      await this.applyPermissions(target, entry, runAs);
       return;
     }
     // Host-local sources (local_file, local_dir) and mounts would read the
@@ -548,16 +558,16 @@ export class ComputeSandboxSession extends SelfhostedSession {
   }
 
   override async materializeEntry(args: MaterializeEntryArgs): Promise<void> {
-    assertRunAsUnsupported(args.runAs);
-    await this.materialize(args.path, args.entry);
+    await this.assertRunAsAvailable(args.runAs);
+    await this.materialize(args.path, args.entry, args.runAs);
     this.state.manifest = mergeManifestEntryDelta(this.state.manifest, args.path, args.entry);
   }
 
   async applyManifest(manifest: Manifest, runAs?: string): Promise<void> {
-    assertRunAsUnsupported(runAs);
+    await this.assertRunAsAvailable(runAs);
     assertSupportedManifest(manifest);
     for (const [path, entry] of Object.entries(manifest.entries)) {
-      await this.materialize(path, entry);
+      await this.materialize(path, entry, runAs);
     }
     const nextManifest = mergeManifestDelta(this.state.manifest, manifest);
     this.state.environment = await mergeMaterializedEnvironment(

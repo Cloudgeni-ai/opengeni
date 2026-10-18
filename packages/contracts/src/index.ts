@@ -803,7 +803,9 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     workspaceRoot: "/workspace",
     nativeBucketMount: false,
     persistable: true,
-    supportsRunAs: false,
+    // The box agent runs as root on Linux; each request still gates on the
+    // live agent's Hello `run_as` capability.
+    supportsRunAs: true,
   },
 };
 
