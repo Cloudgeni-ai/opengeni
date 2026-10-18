@@ -21,7 +21,6 @@ here=$(cd "$(dirname "$0")" && pwd)
 out=$HOME/e2e/out
 mkdir -p "$out"
 ogtag=e2e-${OPENGENI_SHA:0:12}
-cmtag=e2e-${COMPUTE_SHA:0:12}
 log() { printf '[build %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 imported() { sudo k3s ctr -n k8s.io images ls -q | grep -qx "docker.io/library/$1"; }
 to_k3s() {
@@ -34,6 +33,11 @@ log "checkouts"
 git -C /srv/e2e/src fetch -q origin "$OPENGENI_SHA" "$COMPUTE_SHA"
 git -C "$og" checkout -q --detach "$OPENGENI_SHA"
 git -C "$cm" checkout -q --detach "$COMPUTE_SHA"
+# The fleet's artifacts are named by compute/'s tree, so a commit that
+# changes only the chart or the suite reuses them (and the hosts keep their
+# bundle).
+cmtree=$(git -C "$cm" rev-parse "$COMPUTE_SHA:compute")
+cmtag=e2e-${cmtree:0:12}
 gcloud auth configure-docker "${REGISTRY%%/*}" --quiet >/dev/null 2>&1
 
 # The API image needs the artifact runtime bundle release automation stages
