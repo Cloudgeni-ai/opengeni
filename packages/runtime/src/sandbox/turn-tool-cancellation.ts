@@ -141,8 +141,6 @@ type ActiveShellSession = {
   identity: ShellProcessIdentity | null;
   identityValidated: boolean;
   cancellation: Promise<void> | null;
-  /** Never adopt as a session background command; finalization stops it. */
-  turnScoped?: boolean;
 };
 
 type CommandCancellationSession = {
@@ -172,6 +170,10 @@ type CommandCancellationSession = {
     providerSessionId: number,
     command?: string,
   ): Promise<void>;
+  /** Rebind a session background command started by an earlier turn so this
+   * turn reads and writes it through the retained-process path. False when the
+   * handle is not such a command. */
+  attachSessionProcess?(providerSessionId: number): Promise<boolean>;
   retainedProcessIdentity?(providerSessionId: number): { id: string } | null;
   cancelSupervisedCommand?(providerSessionId: number, reason: "explicit_stop"): Promise<boolean>;
   writeStdinForProcessRead?(args: {
@@ -371,27 +373,6 @@ export function modelWaitMs(value: unknown, cutPolling: boolean): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0
     ? Math.min(value, max)
     : TURN_DEFAULT_MODEL_WAIT_MS;
-}
-
-const BARE_INTERACTIVE_SHELL =
-  /^(?:exec\s+)?(?:(?:\/usr)?\/bin\/)?(?:ba|z|da|k|a|fi)?sh(?:\s+(?:-[A-Zabd-z]+|--[a-z][a-z-]*))*$/;
-
-/**
- * True when the command's final step starts a shell that only reads stdin (for
- * example `bash --noprofile --norc`): a REPL the model drives with write_stdin
- * during this turn. Such a shell never exits on its own, so adopting it as a
- * session background command would keep the sandbox busy indefinitely after
- * the turn. It stays turn-scoped instead and the ordinary finalization drain
- * stops it. A `-c` command string, a script argument, or any other trailing
- * token is not a bare shell and keeps normal background adoption.
- */
-export function isBareInteractiveShellCommand(command: string): boolean {
-  const steps = command
-    .split(/\n|;|&&|\|\|/)
-    .map((step) => step.trim())
-    .filter((step) => step.length > 0 && !step.startsWith("#"));
-  const last = steps.at(-1);
-  return last !== undefined && BARE_INTERACTIVE_SHELL.test(last);
 }
 
 // oxlint-disable-next-line no-control-regex
@@ -1505,6 +1486,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               return "command_input failed: provide a native session_id and nonempty chars; use command_read for observation";
             }
             try {
+              await session?.attachSessionProcess?.(input.session_id);
               if (session?.supportsCommandInput?.(input.session_id) === false) {
                 return "command_input unsupported: this retained provider command has no arbitrary stdin capability";
               }
@@ -1697,7 +1679,6 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   identity: null,
                   identityValidated: false,
                   cancellation: null,
-                  ...(isBareInteractiveShellCommand(parsed.cmd) ? { turnScoped: true } : {}),
                 });
                 pendingStart?.settle(retainedProcess.providerSessionId);
               }
@@ -1751,11 +1732,6 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 identity: null,
                 identityValidated: false,
                 cancellation: null,
-                // The exact marker kill is the finalization authority for a
-                // turn-scoped shell; op-stream (remote) launches have none.
-                ...(!useRemoteOpCancellation && isBareInteractiveShellCommand(parsed.cmd)
-                  ? { turnScoped: true }
-                  : {}),
               };
               // Provider retention preserves the physical process but does not
               // transfer it to the session. Keep it turn-owned and cancellable
@@ -1818,6 +1794,16 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
                 })
               : input;
+            if (sessionId !== null) {
+              // A command an earlier turn left running is session-owned. Bind
+              // it before choosing a path so this turn never claims it as its
+              // own shell and stops it at finalization.
+              try {
+                await cancellationSession?.attachSessionProcess?.(sessionId);
+              } catch (error) {
+                return renderDirectToolFault(error, sessionId);
+              }
+            }
             const directProcessSession =
               sessionId === null ? null : retainedProcessSession(cancellationSession, sessionId);
             const typedHandleLoss =
@@ -2020,8 +2006,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }): Promise<string> {
     const { state, startedAt, waitMs, quietReturnAfterMs, maxOutputTokens } = input;
     const canAdoptInBackground =
-      state.turnScoped !== true &&
-      (state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true);
+      state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true;
     if (!state.typedHandleLoss && isExecSessionLostBanner(input.initialOutput, state.sessionId)) {
       this.shellSessions.delete(state.sessionId);
       return input.initialOutput;
@@ -2135,9 +2120,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       return `${renderDirectToolFault(observationFailure, state.sessionId)}${commandId ? `\nCommand ID: ${commandId}` : ""}\nOutput:\n${output}`;
     }
     if (!canAdoptInBackground) {
-      // Docker/local handles belong to this exact worker session, and a bare
-      // interactive shell waits on stdin forever. Keep the shell registered
-      // with the turn fence: finalization must stop and settle it. Returning
+      // A handle held only in this worker's memory (no in-sandbox supervisor)
+      // cannot be controlled after the turn. Keep the shell registered with
+      // the turn fence: finalization must stop and settle it. Returning
       // control is not durable background-command adoption.
       return `${runningCommandBanner(state.sessionId, output)}\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n`;
     }

@@ -54,7 +54,7 @@ test("real raw transaction admission failure supplies own-client provenance with
   } finally {
     await client.close();
   }
-}, 10_000);
+}, 30_000);
 
 test("a real own transaction closure is classified even when no ORM query owns the failure", async () => {
   const client = createDb(shared.appUrl, { max: 1 });

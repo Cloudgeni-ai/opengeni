@@ -22,6 +22,7 @@ import {
 import type { Settings } from "@opengeni/config";
 import { refreshCoreCodexModelEntitlements } from "@opengeni/core";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { measureTurnStartupPhase } from "../../observability-metrics";
 import {
   CODEX_CORE_WAIT_BINDING,
   recoverCoreCodexHealthAndWake,
@@ -61,12 +62,22 @@ export const CODEX_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   recoverHealth: async ({ db, signalCodexCapacityWorkflow }, identity) => {
     await recoverCoreCodexHealthAndWake({ db, signalCodexCapacityWorkflow }, identity);
   },
-  beforePlacement: (deps, identity) =>
-    refreshCoreCodexModelEntitlements(deps.db, deps.settings, {
-      accountId: deps.input.accountId,
-      workspaceId: deps.input.workspaceId,
-      subjectId: identity.initiatingHumanSubjectId,
-    }),
+  beforePlacement: async (deps, identity) => {
+    await measureTurnStartupPhase(
+      deps.observability,
+      {
+        phase: "credential_entitlements",
+        provider: "codex-subscription",
+        backend: deps.turn.sandboxBackend,
+      },
+      () =>
+        refreshCoreCodexModelEntitlements(deps.db, deps.settings, {
+          accountId: deps.input.accountId,
+          workspaceId: deps.input.workspaceId,
+          subjectId: identity.initiatingHumanSubjectId,
+        }),
+    );
+  },
   adopt: ({ providerTurn, turnExecutionPolicy }, core, placement) => {
     providerTurn.codexSubscriptionCore = core;
     providerTurn.effectiveCodexCredentialId = placement.connectionId;

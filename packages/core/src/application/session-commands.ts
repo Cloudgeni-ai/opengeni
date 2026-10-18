@@ -18,6 +18,7 @@ import type {
 } from "@opengeni/contracts";
 import { DraftTimelineAnnotations } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
+import { prepareDraftModel } from "./draft-model-preparation";
 import { HTTPException } from "hono/http-exception";
 import {
   checkWorkspaceAllowance,
@@ -1110,7 +1111,7 @@ export async function getHumanComposerDraft(
 }
 
 export async function saveHumanComposerDraft(
-  deps: SessionAuthorizationCommandDeps,
+  deps: SessionAuthorizationCommandDeps & { settings?: Settings },
   context: HumanSessionCommandContext,
   input: SaveComposerDraftRequest,
 ): Promise<ComposerDraft> {
@@ -1137,7 +1138,9 @@ export async function saveHumanComposerDraft(
         }),
       ),
   );
-  return composerDraft(row)!;
+  const saved = composerDraft(row)!;
+  if (deps.settings) prepareDraftModel({ db: deps.db, settings: deps.settings }, context, saved);
+  return saved;
 }
 
 export async function controlHumanWorkspaceTimer(

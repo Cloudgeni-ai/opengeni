@@ -12,6 +12,9 @@ import {
   AuthRunListResponse,
   AuthRunMutationResponse,
   BrowserAction,
+  BrowserLocator,
+  INTERACTION_MAX_ACTIONS_PER_BATCH,
+  INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND,
   BrowserActionBatch,
   BrowserActionReceipt,
   BrowserClipboard,
@@ -100,7 +103,7 @@ import {
 import {
   describeInvalidToolArguments,
   interactionToolInputJsonSchema,
-  withRefShorthandLocators,
+  browserActModelInputSchema,
 } from "./interaction-tool-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
 import { compactComputerImage, compactComputerImageContent } from "./computer-image-encoding";
@@ -573,6 +576,50 @@ const BrowserObserveInput = z
     includeScreenshot: z.boolean().optional(),
   })
   .strict();
+/**
+ * An upload that names files in this session's workspace instead of workspace
+ * File IDs. The tool publishes each path exactly as sandbox_file_publish does
+ * and dispatches the ordinary upload with the resulting IDs, so a file the
+ * agent just wrote needs no separate publish call.
+ */
+const BrowserUploadPathsAction = z
+  .object({
+    type: z.literal("upload"),
+    locator: BrowserLocator,
+    paths: z
+      .array(z.string().min(1).max(4_096))
+      .min(1)
+      .max(INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND),
+  })
+  .strict();
+const AgentBrowserAction = z.union([...BrowserAction.options, BrowserUploadPathsAction]);
+type AgentBrowserAction = z.infer<typeof AgentBrowserAction>;
+const AgentBrowserActionBatch = z
+  .object({
+    type: z.literal("batch"),
+    actions: z.array(AgentBrowserAction).min(1).max(INTERACTION_MAX_ACTIONS_PER_BATCH),
+    fenceEachAction: z.literal(true).optional(),
+  })
+  .strict();
+type AgentBrowserActionBatch = z.infer<typeof AgentBrowserActionBatch>;
+
+/** Publish every upload path once and return the action with File IDs only. */
+async function withPublishedUploadPaths(
+  action: AgentBrowserAction | AgentBrowserActionBatch,
+  publish: (path: string) => Promise<string>,
+): Promise<BrowserAction | BrowserActionBatch> {
+  const resolve = async (item: AgentBrowserAction): Promise<BrowserAction> => {
+    if (item.type !== "upload" || !("paths" in item)) return item as BrowserAction;
+    const workspaceFileIds: string[] = [];
+    for (const path of item.paths) workspaceFileIds.push(await publish(path));
+    return { type: "upload", locator: item.locator, workspaceFileIds };
+  };
+  if (action.type !== "batch") return await resolve(action);
+  const actions: BrowserAction[] = [];
+  for (const item of action.actions) actions.push(await resolve(item));
+  return BrowserActionBatch.parse({ ...action, actions });
+}
+
 const BrowserActInput = z
   .object({
     browserSessionId: CurrentBrowserSessionId,
@@ -581,7 +628,11 @@ const BrowserActInput = z
     expectedDocumentGeneration: z.string().min(1).max(256).nullable().optional(),
     expectedFrameId: z.string().min(1).max(256).nullable().optional(),
     view: z.enum(["compact", "full", "none"]).optional(),
-    action: z.preprocess(expandRefShorthand, z.union([BrowserAction, BrowserActionBatch])),
+    includeScreenshot: z.boolean().optional(),
+    action: z.preprocess(
+      expandRefShorthand,
+      z.union([AgentBrowserAction, AgentBrowserActionBatch]),
+    ),
   })
   .strict();
 const BrowserClipboardInput = z.object({ browserSessionId: z.string().uuid() }).strict();
@@ -802,7 +853,9 @@ const BrowserDownloadSaveInput = BrowserDownloadSaveRequest.omit({ operationId: 
   .strict();
 
 export type CreateInteractionAttemptToolsInput = {
-  transport: InteractionTransport;
+  /** The session's API client. Publishing is optional so narrower transports
+   * still work; an upload by path then reports that it is unavailable. */
+  transport: InteractionTransport & Partial<Pick<OpenGeniClient, "publishSandboxFileArtifact">>;
   workspaceId: string;
   sessionId: string;
   selectedTools?: readonly FirstPartyMcpToolName[];
@@ -816,6 +869,27 @@ export function createInteractionAttemptToolDefinitions(
   const selected = new Set(input.selectedTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS);
   const permissions = input.permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
   const definitions: AttemptToolDefinition[] = [];
+  // A retried browser_act (same operation) must dispatch the same File IDs, so
+  // each operation publishes a given path at most once.
+  const publishedUploads = new Map<string, Promise<string>>();
+  const publishUploadPath = (operationId: string, path: string): Promise<string> => {
+    const key = `${operationId}\u0000${path}`;
+    let published = publishedUploads.get(key);
+    if (!published) {
+      const transport = input.transport;
+      if (!transport.publishSandboxFileArtifact) {
+        throw new Error(
+          "upload by path is unavailable here; publish the file with sandbox_file_publish and pass its artifactId in workspaceFileIds",
+        );
+      }
+      published = transport
+        .publishSandboxFileArtifact(input.workspaceId, input.sessionId, { path })
+        .then((receipt) => receipt.artifact.artifactId);
+      published.catch(() => publishedUploads.delete(key));
+      publishedUploads.set(key, published);
+    }
+    return published;
+  };
   const currentTab = new CurrentBrowserTab({
     listLiveSessions: async () =>
       filterDiscoveredSessions(
@@ -1243,15 +1317,18 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; set view=full for every element, or view=none when no post-action outline is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; set view=full for every element, or view=none when no post-action outline is needed. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
-    modelInputSchema: withRefShorthandLocators,
+    modelInputSchema: browserActModelInputSchema,
     output: BrowserAgentActionReceipt,
     readOnly: false,
     idempotent: true,
     modelText: agentActionText,
     execute: async (value, context) =>
       await onTab(value, async ({ browserSessionId, targetId }) => {
+        const action = await withPublishedUploadPaths(value.action, (path) =>
+          publishUploadPath(context.operationId, path),
+        );
         // Omitted fences are resolved by the API from the live target in the same
         // request, so acting on the current document costs one round trip.
         const receipt = await input.transport.actInBrowser(input.workspaceId, browserSessionId, {
@@ -1267,9 +1344,29 @@ export function createInteractionAttemptToolDefinitions(
             ? {}
             : { expectedFrameId: value.expectedFrameId }),
           ...(value.view === "none" ? { observationMode: "none" as const } : {}),
-          action: value.action,
+          action,
         });
-        return value.view === "full" ? receipt : compactActionReceipt(receipt);
+        const projected = value.view === "full" ? receipt : compactActionReceipt(receipt);
+        if (!value.includeScreenshot) return projected;
+        // The action has already run. A failed capture must not turn its
+        // receipt into an error the model could answer by replaying the action.
+        try {
+          const frame = await input.transport.captureBrowserTarget(
+            input.workspaceId,
+            browserSessionId,
+            targetId,
+          );
+          return new InteractionExecutionResult(projected, [
+            browserToolImageContent(frame.data, frame.mediaType),
+          ]);
+        } catch (error) {
+          return new InteractionExecutionResult(projected, [
+            {
+              type: "text" as const,
+              text: `The action ran, but its screenshot could not be captured: ${screenshotFailureReason(error)}`,
+            },
+          ]);
+        }
       }),
   });
 
@@ -3151,6 +3248,11 @@ export function interactionToolErrorOutput(error: unknown): InteractionToolError
   } catch {
     return null;
   }
+}
+
+function screenshotFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\s+/gu, " ").trim().slice(0, 300) || "unknown error";
 }
 
 function browserToolImageContent(

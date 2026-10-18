@@ -8,6 +8,7 @@ import {
   createDb,
   createOrganizationInvitation,
   createSession,
+  claimSessionWorkForAttempt,
   ensureManagedAccessForUser,
   forkSessionContent,
   getSessionForSubject,
@@ -98,6 +99,52 @@ async function organization() {
 }
 
 type Org = Awaited<ReturnType<typeof organization>>;
+
+test("a member's message is claimable after its owner shares a private chat", async () => {
+  const org = await organization();
+  const session = await createSession(client.db, sessionInput(org, org.owner, ""));
+  await makePrivate(org, session.id);
+  const send = () =>
+    withWorkspaceSubjectSessionActivityRls(client.db, org.workspaceId, org.member, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: org.accountId,
+          workspaceId: org.workspaceId,
+          sessionId: session.id,
+          subjectId: org.member,
+          actor: { type: "human", subjectId: org.member },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Member follow-up",
+          resources: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+        }),
+      ),
+    );
+  await expect(send()).rejects.toThrow();
+  await transitionSessionVisibility(client.db, {
+    workspaceId: org.workspaceId,
+    sessionId: session.id,
+    actorSubjectId: org.owner,
+    targetVisibility: "workspace_shared",
+    expectedAuthorityEpoch: 2,
+    operationKey: crypto.randomUUID(),
+  });
+  const accepted = await send();
+  const claim = await claimSessionWorkForAttempt(client.db, org.workspaceId, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  expect(claim.action).toBe("claimed");
+  if (claim.action !== "claimed") throw new Error("member turn was not claimed");
+  expect(claim.turn.id).toBe(accepted.turnId);
+  expect(claim.turn.initiatingHumanSubjectId).toBe(org.member);
+});
 
 function sessionInput(org: Org, subjectId: string, initialMessage: string) {
   return {

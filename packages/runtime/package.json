@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "3.4.0",
+  "version": "4.0.4",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -90,6 +90,7 @@
     "@opengeni/vaults": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
     "debug": "4.4.3",
+    "e2b": "2.56.0",
     "modal": "0.9.0",
     "openai": "6.47.0",
     "postal-mime": "2.7.5",

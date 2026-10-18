@@ -29,7 +29,7 @@ function session(reason = "database_claim_rejected", status = "requires_action")
     status,
     admissionBlock: {
       reason,
-      sqlState: "42501 secret-database-detail",
+      sqlState: "42501",
       retryPolicy: "explicit_recheck",
       blockedAt: "2026-09-18T12:00:00Z",
     },
@@ -189,19 +189,43 @@ describe("session admission notice", () => {
   });
 
   for (const [reason, copy] of [
-    ["database_claim_rejected", "Nothing is needed from you"],
+    ["database_claim_rejected", "blocked by a permission check"],
     ["initiator_membership_required", "person who started this work"],
     ["personal_resource_grant_required", "personal resource"],
-    ["future_reason", "Nothing is needed from you"],
+    ["future_reason", "Ask a workspace admin to investigate"],
   ] as const) {
     test(`safe explanation for ${reason}`, async () => {
       const recheck = await render({ session: session(reason) });
       expect(container.textContent).toContain(copy);
       expect(container.textContent).toContain("will not retry automatically");
+      expect(container.textContent).toContain("queued work is saved");
+      expect(container.textContent).not.toContain("Nothing is needed from you");
       expect(container.innerHTML).not.toContain("secret-database-detail");
       expect(container.innerHTML).not.toContain("42501");
       expect(container.querySelector('[role="status"]')).not.toBeNull();
       expect(recheck).not.toHaveBeenCalled();
+    });
+  }
+
+  test("permission denial explains the prerequisite before rechecking", async () => {
+    await render();
+    expect(container.textContent).toContain("Permission needed");
+    expect(container.textContent).toContain("machine and resources");
+    expect(container.textContent).toContain("After access changes");
+    expect(container.querySelector("button")?.textContent).toBe("Recheck access");
+  });
+
+  for (const sqlState of ["23514", null, "42501 secret-database-detail"]) {
+    test(`non-permission or malformed SQLSTATE gets honest generic recovery: ${sqlState}`, async () => {
+      const value = session();
+      await render({
+        session: { ...value, admissionBlock: { ...value.admissionBlock!, sqlState } } as Session,
+      });
+      expect(container.textContent).toContain("Couldn't start");
+      expect(container.textContent).toContain("Once the problem is fixed");
+      expect(container.textContent).not.toContain("permission check");
+      expect(container.innerHTML).not.toContain("secret-database-detail");
+      expect(container.querySelector("button")?.textContent).toBe("Try again");
     });
   }
 
@@ -256,7 +280,7 @@ describe("session admission notice", () => {
     expect(button.textContent).toBe("Rechecking…");
     await act(async () => finish());
     expect(button.disabled).toBe(false);
-    expect(container.textContent).toContain("Stuck");
+    expect(container.textContent).toContain("Permission needed");
   });
 
   test("failure is announced without exposing server errors", async () => {

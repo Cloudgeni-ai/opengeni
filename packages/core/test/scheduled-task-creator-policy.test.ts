@@ -194,7 +194,7 @@ describe("scheduled task frozen setup restriction", () => {
         } as ApiKey & { credentialKind: "organization" }),
       );
       track(
-        spyOn(db, "requireWorkspace").mockResolvedValue({
+        spyOn(db, "getWorkspace").mockResolvedValue({
           id: workspaceId,
           accountId,
           kind: "shared",

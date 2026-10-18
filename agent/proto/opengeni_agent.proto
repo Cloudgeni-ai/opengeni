@@ -210,6 +210,10 @@ message Capabilities {
   // controller of an exact authority scope. Absent/false runners keep the legacy
   // path (a shell + curl command per controller request).
   bool browser_control_http = 17;
+  // Transactional uploads also accept epoch 0 for machine-addressed operations.
+  // Requires transactional_fs_write. Older runners require a nonzero session
+  // epoch; callers MUST NOT invent one for a machine-addressed operation.
+  bool transactional_fs_write_machine = 18;
 }
 
 // The three macOS Privacy & Security grants desktop capture and input need.

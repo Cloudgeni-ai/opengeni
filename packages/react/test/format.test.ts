@@ -368,4 +368,15 @@ describe("humanizeFailureReason", () => {
     expect(humanizeFailureReason(englishText, "something else broke")).toBe("something else broke");
     expect(humanizeFailureReason(englishText, null)).toBeNull();
   });
+
+  test("a turn refused for a retired or removed model names the fix", () => {
+    for (const reason of [
+      "Turn execution policy model is retired from new selection",
+      "Turn execution policy model is not present in the configured catalog",
+    ]) {
+      expect(humanizeFailureReason(englishText, reason)).toBe(
+        englishText("lib.format.modelUnavailable"),
+      );
+    }
+  });
 });

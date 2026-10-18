@@ -617,6 +617,8 @@ export async function withFormerConnectedMachine<T>(
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
     transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+    transactionalFsWriteMachineSupported:
+      enrollment.agentCapabilities.transactionalFsWriteMachine === true,
     browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
     ...(settings.agentOpStreamEnabled === true &&
     enrollment.opStream === true &&
@@ -863,6 +865,8 @@ async function withChannelAOperation<T>(
           enrollment.agentCapabilities.operationResourcePolicy === true,
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+        transactionalFsWriteMachineSupported:
+          enrollment.agentCapabilities.transactionalFsWriteMachine === true,
         browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
         ...(settings.agentOpStreamEnabled === true &&
         enrollment?.opStream === true &&
@@ -1547,6 +1551,16 @@ export function channelAOperationFailureDiagnostic(
     };
   }
   if (error instanceof HTTPException) {
+    return {
+      reason: error.status >= 500 ? "unexpected" : "request_rejected",
+      status: error.status,
+      errorCode: "sandbox_channel_a_operation_failed",
+    };
+  }
+  // A browser or computer controller that refuses a request (a stale target,
+  // an ended session) answers with its own 4xx, and the route returns exactly
+  // that status. Count it as the rejection it is, not as an unexpected 500.
+  if (error instanceof BrowserControlRequestError) {
     return {
       reason: error.status >= 500 ? "unexpected" : "request_rejected",
       status: error.status,

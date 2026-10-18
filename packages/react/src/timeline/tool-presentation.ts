@@ -180,6 +180,33 @@ export function truncatePreview(text: string, max: number): string {
   return cleaned.length > max ? `${cleaned.slice(0, max - 1)}…` : cleaned;
 }
 
+/**
+ * The readable part of a tool error, for a one-line preview: the message inside
+ * a JSON error envelope, without the runtime's "please try again" wrapper, an
+ * HTTP status prefix or a trailing support reference. The full error stays in
+ * the row body.
+ */
+export function readableToolError(text: string): string {
+  const stripTransport = (value: string) =>
+    value
+      .trim()
+      .replace(/^An error occurred while running the tool\. Please try again\.\s*(Error:\s*)?/, "")
+      .replace(/^[A-Za-z][\w.-]{0,40} API \d{3}:\s*/, "");
+  let message = stripTransport(text);
+  const parsed = tryParseJson(message);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const envelope = parsed as { error?: unknown; message?: unknown };
+    const inner =
+      typeof envelope.error === "string"
+        ? envelope.error
+        : envelope.error && typeof envelope.error === "object"
+          ? (envelope.error as { message?: unknown }).message
+          : envelope.message;
+    if (typeof inner === "string" && inner.trim()) message = stripTransport(inner);
+  }
+  return message.replace(/\s*\(?Reference: [\w-]+\)?\.?$/, "").trim();
+}
+
 function textPreview(text: string, running?: boolean): ToolPreview {
   return running ? { kind: "text", text, running: true } : { kind: "text", text };
 }
@@ -771,6 +798,8 @@ type McpRowOptions = {
   omitEmptyResult?: boolean | undefined;
   /** Generic shows a goal preview as plain text (no pulse) while running. */
   plainRunningPreview?: boolean | undefined;
+  /** Machine steps say they failed in the title, so the preview stays empty. */
+  quietError?: boolean | undefined;
 };
 
 function mcpRowPresentation(
@@ -803,9 +832,15 @@ function mcpRowPresentation(
       ...base,
       iconTone: "failed",
       chip: { tone: "bad", text: t("timeline.chip.error") },
-      preview: textPreview(
-        truncatePreview(outText, 80) || errorFallback || t("timeline.toolPresentation.error"),
-      ),
+      ...(options.quietError
+        ? {}
+        : {
+            preview: textPreview(
+              truncatePreview(readableToolError(outText), 80) ||
+                errorFallback ||
+                t("timeline.toolPresentation.error"),
+            ),
+          }),
       body: {
         kind: "payloads",
         blocks: [
@@ -875,16 +910,54 @@ export function machinePresentation(t: OpenGeniText, item: ToolCallItem): ToolRo
   const args = parseToolArgs(item.arguments);
   const action = leaf === "computer_act" ? computerActAction(args) : null;
   const preview = (action && computerActPreview(action)) ?? null;
+  // A step that didn't work says so in words; the error itself stays one click
+  // away in the row body instead of leaking a raw API payload into the preview.
+  const failed =
+    item.status !== "running" &&
+    item.status !== "cancelled" &&
+    (item.status === "failed" || unwrapMcpOutput(item.output).isError);
   return mcpRowPresentation(t, item, {
     tool: "machine",
-    icon: leaf.startsWith("computer_") ? "panels" : "server",
-    title: machineTitle(t, leaf, args, action, item.output),
+    icon: isScreenTool(leaf) ? "panels" : "server",
+    title: failed ? machineFailureTitle(t, leaf) : machineTitle(t, leaf, args, action, item.output),
     runningPreview: preview,
     runningFallback: t("timeline.toolPresentation.running"),
     settledPreview: preview,
     settledFallback: t("timeline.toolPresentation.done"),
     plainRunningPreview: true,
+    quietError: true,
   });
+}
+
+function isScreenTool(leaf: string): boolean {
+  return leaf.startsWith("computer_") || leaf.startsWith("cua_") || leaf === "interaction_discover";
+}
+
+function machineFailureTitle(t: OpenGeniText, leaf: string): string {
+  switch (leaf) {
+    case "sandboxes_list":
+      return t("timeline.toolPresentation.couldNotLookForMachines");
+    case "sandbox_swap":
+      return t("timeline.toolPresentation.couldNotMoveToTheMachine");
+    case "computer_open":
+      return t("timeline.toolPresentation.couldNotOpenTheScreen");
+    default:
+      return t("timeline.toolPresentation.couldNotUseTheScreen");
+  }
+}
+
+/** Direct screen-driver steps, named by what they did on the screen. */
+function cuaTitle(t: OpenGeniText, leaf: string): string {
+  if (/^cua_(get_|list_|verify_|parse_|zoom$)/.test(leaf)) {
+    return t("timeline.toolPresentation.lookedAtTheScreen");
+  }
+  if (/^cua_(click|double_click|right_click)$/.test(leaf)) {
+    return t("timeline.toolPresentation.clickedOnTheScreen");
+  }
+  if (/^cua_(type_text|press_key|hotkey)$/.test(leaf)) {
+    return t("timeline.toolPresentation.typedOnTheKeyboard");
+  }
+  return t("timeline.toolPresentation.usedTheScreen");
 }
 
 type ComputerActAction = { type?: unknown; value?: unknown; locator?: unknown };
@@ -904,6 +977,8 @@ function machineTitle(
   switch (leaf) {
     case "sandboxes_list":
       return t("timeline.toolPresentation.lookedForMachines");
+    case "interaction_discover":
+      return t("timeline.toolPresentation.lookedForScreens");
     case "sandbox_swap": {
       if (args.target === "session") return t("timeline.toolPresentation.movedBack");
       const targetName = runOnTargetName(output);
@@ -920,7 +995,9 @@ function machineTitle(
           ? t("timeline.toolPresentation.typedOnTheKeyboard")
           : t("timeline.toolPresentation.usedTheScreen");
     default:
-      return t("timeline.toolPresentation.lookedAtTheScreen");
+      return leaf.startsWith("cua_")
+        ? cuaTitle(t, leaf)
+        : t("timeline.toolPresentation.lookedAtTheScreen");
   }
 }
 
@@ -1414,6 +1491,7 @@ const PRESENTERS_BY_NAME: Record<string, PresentedToolKind> = {
   computer_open: "machine",
   computer_observe: "machine",
   computer_act: "machine",
+  interaction_discover: "machine",
 };
 
 /**
@@ -1434,6 +1512,9 @@ export function presentedToolKind(item: ToolCallItem): PresentedToolKind {
   const leaf = mcpToolLeaf(item.name);
   if (leaf !== item.name && PRESENTERS_BY_NAME[leaf]) {
     return PRESENTERS_BY_NAME[leaf];
+  }
+  if (leaf.startsWith("cua_")) {
+    return "machine";
   }
   return "generic";
 }

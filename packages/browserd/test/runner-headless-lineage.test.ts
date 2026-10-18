@@ -355,6 +355,30 @@ test.skipIf(!native)(
 );
 
 test.skipIf(!native)(
+  "a browser whose launcher records were removed is adopted and retired on its own",
+  async () => {
+    const f = await fixture();
+    try {
+      const receipt = (await f.attest())!;
+      // A temp-directory cleanup removes the launcher's socket and pid records
+      // while it and its browser keep running.
+      await rm(join(f.options.socketDirectory, "namespaces"), { recursive: true });
+      expect(await inspectOwnedManagedBrowserProcess(receipt)).toBe("live");
+      const replacement = await f.reattach(receipt);
+      expect(await replacement.daemonPid()).toBeNull();
+      expect(await replacement.run<{ cdpUrl: string }>(["get", "cdp-url"])).toEqual({
+        cdpUrl: f.endpoint,
+      });
+      await replacement.terminate();
+      expect(() => process.kill(f.browserPid, 0)).toThrow();
+    } finally {
+      await f.close();
+    }
+  },
+  15_000,
+);
+
+test.skipIf(!native)(
   "a killed launcher's pid reused by an unrelated process refuses adoption",
   async () => {
     const f = await fixture();

@@ -287,6 +287,7 @@ export function buildSubscriptionCoreCodexConnectionTokenResolver(
   deps: SubscriptionCoreCodexConnectionResolverDeps = {},
 ): {
   getToken: () => Promise<CodexCredentialTokenSnapshot>;
+  getFreshToken: () => Promise<CodexCredentialTokenSnapshot | null>;
   refresh: () => Promise<CodexCredentialTokenSnapshot>;
 } {
   const bound = coreResolver(deps);
@@ -300,6 +301,10 @@ export function buildSubscriptionCoreCodexConnectionTokenResolver(
   );
   return {
     getToken: async () => codexTokenSnapshot(await resolver.getToken()),
+    getFreshToken: async () => {
+      const token = await resolver.getFreshToken();
+      return token === null ? null : codexTokenSnapshot(token);
+    },
     refresh: async () => codexTokenSnapshot(await resolver.refresh()),
   };
 }

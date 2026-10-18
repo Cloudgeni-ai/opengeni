@@ -75,13 +75,13 @@ import {
   askPresentation,
   execPresentation,
   genericToolIconKind,
-  genericToolPresentation,
   parseDisclosedTools,
   parseSearchHits,
   pathBasename,
   pathDirname,
   machinePresentation,
   runOnPresentation,
+  toolRowPresentation,
   toolSearchPreview,
   toolSearchQuery,
   truncatePreview,
@@ -428,17 +428,21 @@ function MachineRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
  * Baseline craft for unmatched tools: family icon + title-cased leaf + honest
  * status preview (Running… / Done / error snippet). No argument-field sniffing —
  * JSON stays in the expandable body only.
+ *
+ * A tool the shared presenter knows but no dedicated renderer claims (screen
+ * steps such as `cua_get_desktop_state`, `interaction_discover`) still reads
+ * the way the presenter words it, so the web row and other renderers agree.
  */
 function UnreviewedGenericRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
   const msg = useOpenGeniText();
   const logo = useToolConnectorLogo(item.display);
   const { images, output } = retainedToolResultImages(item.output);
   if (images.length === 0 || item.status === "running") {
-    return <PresentedToolRow presentation={genericToolPresentation(msg, item)} logo={logo} />;
+    return <PresentedToolRow presentation={toolRowPresentation(msg, item)} logo={logo} />;
   }
   // A tool that returned images shows them like a viewed image, with its
   // ordinary result text (and any further images) in the expanded body.
-  const presentation = genericToolPresentation(msg, { ...item, output });
+  const presentation = toolRowPresentation(msg, { ...item, output });
   const Icon = toolIcon(presentation.icon);
   const [first, ...rest] = images;
   return (

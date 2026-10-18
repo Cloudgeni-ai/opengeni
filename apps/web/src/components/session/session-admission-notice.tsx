@@ -61,34 +61,58 @@ export async function recheckSessionAdmission({
   }
 }
 
-// Read only the public reason. Older servers omit this optional projection;
+// Read only the public reason and an exact permission classification. Older servers omit this projection;
 // unknown future reasons get safe copy, never raw database diagnostics.
-function admissionReason(session: Session): string | null {
+function admissionReason(session: Session): { reason: string; permissionDenied: boolean } | null {
   if (session.status !== "requires_action" || !("admissionBlock" in session)) return null;
   const block = session.admissionBlock;
   if (!block || typeof block !== "object") return null;
-  return "reason" in block && typeof block.reason === "string" ? block.reason : "unknown";
+  return {
+    reason: "reason" in block && typeof block.reason === "string" ? block.reason : "unknown",
+    permissionDenied: "sqlState" in block && block.sqlState === "42501",
+  };
 }
 
-function reasonCopy(reason: string): { body: string; next: string } {
+function reasonCopy({ reason, permissionDenied }: { reason: string; permissionDenied: boolean }): {
+  title: string;
+  body: string;
+  next: string;
+  action: string;
+} {
   switch (reason) {
     case "initiator_membership_required":
       return {
-        body: "The person who started this work needs active workspace access before it can continue.",
-        next: "After the issue is resolved, recheck to try this work again. It will not retry automatically.",
+        title: "Workspace access needed",
+        body: "The person who started this work needs workspace access. Your queued work is saved.",
+        next: "Ask a workspace admin to restore their access, then recheck to continue. It will not retry automatically.",
+        action: "Recheck access",
       };
     case "personal_resource_grant_required":
       return {
-        body: "Access to a personal resource needed by this work must be restored before it can continue.",
-        next: "After the issue is resolved, recheck to try this work again. It will not retry automatically.",
+        title: "Resource permission needed",
+        body: "A personal resource needed by this chat hasn't been authorized. Your queued work is saved.",
+        next: "Ask its owner to grant access, or choose a resource you can use. Then recheck to continue. It will not retry automatically.",
+        action: "Recheck access",
       };
+    case "database_claim_rejected":
+      if (permissionDenied)
+        return {
+          title: "Permission needed",
+          body: "The next step was blocked by a permission check. Your queued work is saved.",
+          next: "Check access to this chat's machine and resources with their owner or a workspace admin. After access changes, recheck to continue. It will not retry automatically.",
+          action: "Recheck access",
+        };
+      // Other database rejections do not establish a permission problem.
+      break;
     default:
-      // Not a request of the person: the runtime refused to start the turn.
-      return {
-        body: "This work couldn't start its next step. Nothing is needed from you, and its work is kept.",
-        next: "Recheck to try again. It will not retry automatically.",
-      };
+      break;
   }
+  return {
+    title: "Couldn't start",
+    body: "Opengeni couldn't start the next step. Your queued work is saved.",
+    next: "Ask a workspace admin to investigate. Once the problem is fixed, try again. It will not retry automatically.",
+    action: "Try again",
+  };
 }
 
 export function SessionAdmissionNotice({
@@ -131,7 +155,7 @@ export function SessionAdmissionNotice({
   }
 
   return (
-    <Notice tone="failed" title="Stuck">
+    <Notice tone="failed" title={copy.title}>
       <div id={descriptionId} role="status" aria-live="polite">
         <p>{copy.body}</p>
         <p className="mt-1">{copy.next}</p>
@@ -159,7 +183,7 @@ export function SessionAdmissionNotice({
               : "Rechecking…"
             : refreshRequired
               ? "Refresh session status"
-              : "Recheck and resume"}
+              : copy.action}
         </Button>
       ) : (
         <p className="mt-2">

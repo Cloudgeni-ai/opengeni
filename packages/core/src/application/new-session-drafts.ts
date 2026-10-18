@@ -39,6 +39,7 @@ import {
   workspaceCatalogListsModel,
 } from "../default-session-model";
 import { canonicalizeConfiguredModelId, type Settings } from "@opengeni/config";
+import { prepareDraftModel } from "./draft-model-preparation";
 
 type NewSessionDraftDependencies = Pick<AppDependencies, "settings" | "db" | "objectStorage">;
 
@@ -413,11 +414,19 @@ export async function getActorNewSessionDraft(
 export async function saveActorNewSessionDraft(
   ...args: Parameters<typeof saveActorNewSessionDraftInFileScope>
 ): Promise<NewSessionDraftValue> {
-  const [deps, grant, , , , authorization] = args;
+  const [deps, grant, workspaceId, , , authorization] = args;
   const actor = authorization
     ? await fileOwnerContextForAccess(deps, authorization, "sessions:create")
     : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
-  return withSessionRlsActorContext(actor, () => saveActorNewSessionDraftInFileScope(...args));
+  const saved = await withSessionRlsActorContext(actor, () =>
+    saveActorNewSessionDraftInFileScope(...args),
+  );
+  prepareDraftModel(
+    deps,
+    { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+    saved,
+  );
+  return saved;
 }
 
 /**

@@ -26,6 +26,15 @@ export function toolMatchesLeaf(wireName: string, leaf: string): boolean {
 }
 
 /**
+ * Platform tools whose wire names describe plumbing, not what the person sees
+ * happen ("Tool list", "Sandbox file publish"). These read as plain steps.
+ */
+const PLAIN_PLATFORM_TOOL_TITLES = {
+  tool_list: "timeline.toolPresentation.lookedUpTools",
+  sandbox_file_publish: "timeline.toolDisplayName.publishFile",
+} as const;
+
+/**
  * Readable label for a tool call ("session_create" / "opengeni__session_create"
  * → "Session create"). Title-cases the first character of the leaf phrase. A
  * connector account is named only when the connector has several ("List
@@ -37,6 +46,12 @@ export function toolDisplayName(
   display?: ToolDisplayMetadata,
 ): string {
   if (!display && /^[a-f0-9]{64}$/.test(name)) return t("timeline.toolDisplayName.toolCall");
+  if (!display?.connector) {
+    const leaf = mcpToolLeaf(name);
+    if (Object.hasOwn(PLAIN_PLATFORM_TOOL_TITLES, leaf)) {
+      return t(PLAIN_PLATFORM_TOOL_TITLES[leaf as keyof typeof PLAIN_PLATFORM_TOOL_TITLES]);
+    }
+  }
   // "batch modify messages" → "Modify messages": batching is transport, not the action.
   const phrase = (display?.toolName ?? mcpToolLeaf(name))
     .replace(/[_-]+/g, " ")

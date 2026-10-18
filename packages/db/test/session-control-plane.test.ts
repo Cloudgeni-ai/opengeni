@@ -285,6 +285,76 @@ async function claimTestSessionWork(
 }
 
 describe("clean session control plane", () => {
+  test("history and event appends survive transient connection acquisition failures", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "persist despite connection pressure");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    expect(turn).not.toBeNull();
+    const existing = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const position = Math.max(-1, ...existing.map((row) => row.position)) + 1;
+    for (const [offset, code] of ["53300", "57P03", "ECONNREFUSED", "ECONNRESET"].entries()) {
+      let admissions = 0;
+      const interrupted = new Proxy(client.db, {
+        get(target, property, receiver) {
+          if (property !== "transaction") return Reflect.get(target, property, receiver);
+          return (...args: Parameters<typeof target.transaction>) => {
+            admissions += 1;
+            if (admissions === 1)
+              return Promise.reject(
+                Object.assign(new Error("injected connection failure"), { code }),
+              );
+            return target.transaction(...args);
+          };
+        },
+      });
+      expect(
+        await appendSessionHistoryItems(interrupted, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn!.id,
+          expectedExecutionGeneration: turn!.executionGeneration,
+          expectedAttemptId: attemptId,
+          items: [
+            {
+              position: position + offset,
+              item: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: `saved-${code}` }],
+              },
+            },
+          ],
+        }),
+      ).toBe(true);
+      expect(admissions).toBe(2);
+      admissions = 0;
+      const result = await appendSessionEventsForTurnAttempt(
+        interrupted,
+        grant.workspaceId!,
+        session.id,
+        turn!.id,
+        turn!.executionGeneration,
+        attemptId,
+        [{ type: "agent.reasoning.delta", payload: { delta: `saved-${code}` } }],
+      );
+      expect(result.accepted).toBe(true);
+      expect(admissions).toBe(2);
+    }
+    const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    expect(history.filter((row) => row.position >= position)).toHaveLength(4);
+    const events =
+      await shared.admin`select id from session_events where session_id = ${session.id} and type = 'agent.reasoning.delta'`;
+    expect(events).toHaveLength(4);
+  });
+
   describe("exact-attempt connector policy replay", () => {
     async function policyAttempt() {
       const { grant, session } = await fixture();

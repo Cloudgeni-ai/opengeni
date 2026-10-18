@@ -22,9 +22,16 @@
 //! ```text
 //! bin=$(cargo test -p opengeni-agent-platform --test cgroup_placement --no-run \
 //!         --message-format=json | jq -r 'select(.executable!=null).executable')
-//! systemd-run --user --wait --collect -p 'Delegate=cpu memory' \
+//! systemd-run --user --wait --collect --setenv="PATH=$PATH" -p 'Delegate=cpu memory' \
 //!   -p DelegateSubgroup=supervisor -p MemoryAccounting=yes -- \
-//!   "$bin" --exact child_is_accounted_and_task_abort_removes_op_cgroup --nocapture
+//!   "$bin" --exact linux::child_is_accounted_and_task_abort_removes_op_cgroup --nocapture
+//! ```
+//!
+//! To exercise real process-image update handover with unlimited operations, use
+//! a fresh service with the same properties and this exact test name instead:
+//!
+//! ```text
+//! linux::exec_handover_preserves_operation_cgroups_with_supervisor_children
 //! ```
 //!
 //! Off Linux the whole test compiles to a loud skip (isolation is Linux-only).
@@ -165,6 +172,204 @@ mod linux {
             .file_name()
             .to_string_lossy()
             .starts_with("op-")));
+    }
+
+    /// Run this test alone under systemd-run as described above. The predecessor
+    /// checks exclusive ownership before creating fixtures; the successor must
+    /// accept the supervisor helper that legitimately survives process-image exec.
+    #[tokio::test]
+    async fn exec_handover_preserves_operation_cgroups_with_supervisor_children() {
+        use std::os::unix::process::CommandExt as _;
+
+        const STATE_ENV: &str = "OPENGENI_TEST_CGROUP_HANDOVER";
+        if let Ok(state) = std::env::var(STATE_ENV) {
+            let state: HandoverFixture = serde_json::from_str(&state).unwrap();
+            // Match agent startup: inherited pipes/leases become private before
+            // the successor can spawn another child.
+            for fd in state.exec.descriptors() {
+                opengeni_agent_platform::keep_inherited_fd_private(fd).unwrap();
+            }
+            resume_handover_fixture(state).await;
+            return;
+        }
+        let Some(service_dir) = delegated_and_isolated() else {
+            eprintln!("SKIP: exec handover requires a dedicated delegated supervisor subgroup");
+            return;
+        };
+        let cgroups = establish_oom_isolation(OpCgroupConfig::default(), &[])
+            .expect("predecessor establishes operation cgroups");
+        let platform =
+            NativePlatform::with_root(std::env::current_dir().unwrap()).with_oom_isolation(cgroups);
+        let mut command = platform
+            .spawn_exec(&ExecRequest {
+                command: vec![
+                    "printf 'ready\\n'; read -r line; printf '%s\\n' \"$line\"; exit 7".into(),
+                ],
+                shell: true,
+                ..Default::default()
+            })
+            .expect("predecessor command");
+        let mut ready = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            BufReader::new(command.stdout.as_mut().unwrap()).read_line(&mut ready),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(ready, "ready\n");
+
+        // Infrastructure children are not operation commands. exec preserves
+        // them in the supervisor leaf; do not move or kill them to establish it.
+        let mut helper = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let exec = command
+            .into_handover()
+            .unwrap_or_else(|(_, error)| panic!("{error}"));
+        let state = HandoverFixture {
+            supervisor_pid: std::process::id(),
+            helper_pid: helper.id(),
+            service_dir,
+            exec,
+        };
+        assert_process_cgroup(state.helper_pid, &state.service_dir.join("supervisor"));
+        assert_process_cgroup(
+            u32::try_from(state.exec.child.pid.unwrap()).unwrap(),
+            state.exec.op_cgroup_dir().unwrap(),
+        );
+        state.exec.prepare_exec().unwrap();
+        let error = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "linux::exec_handover_preserves_operation_cgroups_with_supervisor_children",
+                "--nocapture",
+            ])
+            .env(STATE_ENV, serde_json::to_string(&state).unwrap())
+            .exec();
+        // On successful exec the successor reaps this child by PID. If exec
+        // itself fails, the predecessor still owns and must reap the helper.
+        let _ = helper.kill();
+        let _ = helper.wait();
+        panic!("fixture process-image exec failed: {error}");
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct HandoverFixture {
+        supervisor_pid: u32,
+        helper_pid: u32,
+        service_dir: PathBuf,
+        exec: opengeni_agent_platform::ExecHandover,
+    }
+
+    async fn resume_handover_fixture(state: HandoverFixture) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        assert_eq!(
+            std::process::id(),
+            state.supervisor_pid,
+            "exec keeps the PID"
+        );
+        let supervisor_dir = state.service_dir.join("supervisor");
+        assert_process_cgroup(state.supervisor_pid, &supervisor_dir);
+        assert_process_cgroup(state.helper_pid, &supervisor_dir);
+        let leaf = state.exec.op_cgroup_dir().unwrap().to_path_buf();
+        let cgroups =
+            establish_oom_isolation(OpCgroupConfig::default(), std::slice::from_ref(&leaf))
+                .expect("successor must retain containment with a surviving supervisor helper");
+        let platform =
+            NativePlatform::with_root(std::env::current_dir().unwrap()).with_oom_isolation(cgroups);
+        let mut adopted = platform
+            .adopt_exec(&state.exec)
+            .expect("adopt operation cgroup");
+        assert_process_cgroup(u32::try_from(state.exec.child.pid.unwrap()).unwrap(), &leaf);
+        assert_process_cgroup(
+            u32::try_from(state.exec.anchor.pid.unwrap()).unwrap(),
+            &leaf,
+        );
+        assert_eq!(
+            std::fs::read_to_string(leaf.join("memory.max"))
+                .unwrap()
+                .trim(),
+            "max"
+        );
+        assert_eq!(
+            std::fs::read_to_string(leaf.join("memory.high"))
+                .unwrap()
+                .trim(),
+            "max"
+        );
+
+        let mut fresh = platform
+            .spawn_exec(&ExecRequest {
+                command: vec!["read -r line".into()],
+                shell: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let fresh_handover = fresh
+            .into_handover()
+            .unwrap_or_else(|(_, error)| panic!("{error}"));
+        let fresh_leaf = fresh_handover.op_cgroup_dir().unwrap().to_path_buf();
+        assert_ne!(
+            fresh_leaf, leaf,
+            "successor allocates a distinct operation leaf"
+        );
+        assert_eq!(fresh_leaf.parent(), Some(state.service_dir.as_path()));
+        assert_process_cgroup(
+            u32::try_from(fresh_handover.child.pid.unwrap()).unwrap(),
+            &fresh_leaf,
+        );
+        fresh = platform.adopt_exec(&fresh_handover).unwrap();
+        fresh
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"finish\n")
+            .await
+            .unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), fresh.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success());
+        assert!(
+            !fresh_leaf.exists(),
+            "new command's operation leaf is reclaimed"
+        );
+
+        adopted
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"survived\n")
+            .await
+            .unwrap();
+        let mut stdout = adopted.stdout.take().unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(5), adopted.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.code(), Some(7));
+        let mut output = String::new();
+        stdout.read_to_string(&mut output).await.unwrap();
+        assert_eq!(output, "survived\n", "handed-over pipes still work");
+        assert!(!leaf.exists(), "handed-over operation leaf is reclaimed");
+        assert_process_cgroup(state.helper_pid, &supervisor_dir);
+        let helper = nix::unistd::Pid::from_raw(i32::try_from(state.helper_pid).unwrap());
+        nix::sys::signal::kill(helper, nix::sys::signal::Signal::SIGTERM).unwrap();
+        nix::sys::wait::waitpid(helper, None).unwrap();
+        eprintln!("PASS: real exec retained the helper, adopted command containment and fresh-command containment");
+    }
+
+    fn assert_process_cgroup(pid: u32, expected: &Path) {
+        let actual = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap();
+        assert_eq!(
+            Path::new("/sys/fs/cgroup")
+                .join(unified_cgroup_of(&actual).unwrap().trim_start_matches('/')),
+            expected,
+        );
     }
 
     async fn prove_descendant_placement_and_abort(

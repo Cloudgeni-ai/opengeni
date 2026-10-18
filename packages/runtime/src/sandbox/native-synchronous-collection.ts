@@ -47,6 +47,14 @@ type Adapter = {
 type Scope = { adapter: Adapter; captures: Set<Capture> };
 const adapters = new WeakMap<object, Adapter>();
 const scopes = new AsyncLocalStorage<Scope>();
+
+/** True while a worker synchronous runner's collection scope covers this
+ * session. Its one Start must then go through the SDK's own `exec`, which is
+ * where the scope observes the exact child and its separate streams. */
+export function nativeSynchronousCollectionCovers(session: object): boolean {
+  const adapter = adapters.get(session);
+  return adapter !== undefined && scopes.getStore()?.adapter === adapter;
+}
 type TerminalProviderScope = {
   session: object;
   pages: Map<string, ProviderCommandOutput>;

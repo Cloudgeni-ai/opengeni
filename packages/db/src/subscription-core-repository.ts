@@ -127,6 +127,8 @@ export async function listSubscriptionConnectionsForPlacement(
     allocator_enabled: boolean;
     entitled_model_ids: string[] | null;
     observed_model_slugs: string[] | null;
+    model_catalog_observed_at: Date | string | null;
+    model_catalog_expires_at: Date | string | null;
     excluded_models: string[];
     allowed_model_ids: string[] | null;
     refresh_generation: number | string;
@@ -147,6 +149,7 @@ export async function listSubscriptionConnectionsForPlacement(
         and quota.model_catalog_observed_at <= ${now}::timestamptz
         and quota.model_catalog_expires_at > ${now}::timestamptz
         then quota.model_catalog_slugs else null end as observed_model_slugs,
+      quota.model_catalog_observed_at, quota.model_catalog_expires_at,
       connection.allowed_model_ids, connection.refresh_generation,
       connection.scope_kind, connection.allow_personal_workspaces,
       connection.managed_by_workspace_id::text as managed_by_workspace_id,
@@ -251,6 +254,12 @@ export async function listSubscriptionConnectionsForPlacement(
       allocatorEnabled: row.allocator_enabled,
       entitledModelIds: row.entitled_model_ids,
       observedModelSlugs: row.observed_model_slugs,
+      modelCatalogObservedAt: row.model_catalog_observed_at
+        ? new Date(row.model_catalog_observed_at).getTime()
+        : null,
+      modelCatalogExpiresAt: row.model_catalog_expires_at
+        ? new Date(row.model_catalog_expires_at).getTime()
+        : null,
       excludedModelIds: row.excluded_models,
       allowedModelIds: row.allowed_model_ids,
       // A shared connection with no assignment-policy row for this workspace

@@ -1,5 +1,19 @@
 # @opengeni/agent-proto
 
+## 4.0.4
+
+### Patch Changes
+
+- a0c07e5: A browser controller on a Connected Machine that crashed, was stopped uncleanly or failed to start no longer blocks agent updates for the rest of the agent's life. On Linux and macOS the update now waits only until nothing remains of that controller's own process group, then proceeds. Previously the machine refused every managed update with "could not check whether the machine was idle" until the agent was restarted by hand.
+- 9482fe0: Report observed command-scope cleanup of background child processes with an
+  append-only result notice, preserving structured output and process containment.
+- 2708a32: Settle Connected Machine background commands promptly from authenticated runner
+  completion events after verified output capture, with retained notification replay
+  across reconnects, independent liveness capacity, shared race-safe settlement,
+  reconciliation as fallback and independently retryable output release. Delivery-only
+  receipts stop redundant notifications without releasing output; failed collection
+  retains reconciliation backoff rather than replaying on every notification.
+
 ## 3.4.0
 
 ## 3.3.0

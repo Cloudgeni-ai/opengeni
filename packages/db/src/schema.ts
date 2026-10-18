@@ -61,6 +61,7 @@ import {
   pgSchema,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -10894,6 +10895,11 @@ export const sandboxRetainedProcesses = pgTable(
     reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", {
       withTimezone: true,
     }),
+    // The oldest reconciler that can reach this process (migration 0840).
+    // Docker and local commands under the in-sandbox supervisor are 2: a
+    // worker built before that supervisor would look for them in its own
+    // memory and settle a live command as lost, so its claim skips them.
+    reconcilerVersion: smallint("reconciler_version").notNull().default(1),
   },
   (table) => ({
     workspaceAccount: foreignKey({

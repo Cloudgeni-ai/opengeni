@@ -170,3 +170,23 @@ test("protected sink is separate, opt-in, DB-independent and drainable", async (
   ).not.toContain(id);
   expect(JSON.stringify(exported)).not.toContain(sentinel);
 });
+
+test("statement identity is reviewed and never includes SQL values or arbitrary relation names", () => {
+  const inspect = (query: string) =>
+    failureDiagnostic({
+      code: "db_failure",
+      stage: "session_attempts.claim",
+      error: { query, params: [sentinel] },
+    });
+  expect(
+    inspect(`insert into "session_turn_attempts" values ('${sentinel}')`).databaseStatement,
+  ).toEqual({ operation: "insert", relation: "session_turn_attempts" });
+  for (const query of [
+    `insert into "${sentinel}" values (1)`,
+    `select '${sentinel}'`,
+    'insert into "session_turn_attempts_private" values (1)',
+  ]) {
+    expect(inspect(query).databaseStatement).toBeUndefined();
+    expect(JSON.stringify(inspect(query))).not.toContain(sentinel);
+  }
+});

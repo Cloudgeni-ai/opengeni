@@ -166,12 +166,23 @@ export const knowledgeSourceSyncActivity = proxyActivities<
   },
 });
 
+/**
+ * Turn failures whose fixed, secret-free message tells the person what is
+ * wrong. Any other cause stays behind the generic Temporal message, as it may
+ * carry provider or infrastructure detail.
+ */
+const DIAGNOSABLE_TURN_FAILURE_TYPES = new Set([
+  "TurnExecutionPolicyDefinitionMismatchError",
+  // The chat's model was retired or removed from the catalog after it was chosen.
+  "TurnExecutionPolicyModelUnavailableError",
+]);
+
 export function workflowFailureMessage(error: unknown): string {
   if (
     error instanceof ActivityFailure &&
     error.activityType === "runAgentTurn" &&
     error.cause instanceof ApplicationFailure &&
-    error.cause.type === "TurnExecutionPolicyDefinitionMismatchError"
+    DIAGNOSABLE_TURN_FAILURE_TYPES.has(error.cause.type ?? "")
   ) {
     return error.cause.message;
   }

@@ -222,7 +222,10 @@ export function siteClampedAgentGuard(deps: ApiRouteDeps) {
     // The route authenticates again (from the request's access cache) and
     // answers a request that cannot be authorized with its own error.
     const grant = await requireAccessGrant(c, deps, c.req.param("workspaceId") ?? "").catch(
-      () => null,
+      (error: unknown) => {
+        if (error instanceof HTTPException && error.status < 500) return null;
+        throw error;
+      },
     );
     if (!grant) {
       await next();

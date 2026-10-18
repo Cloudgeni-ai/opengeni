@@ -56,6 +56,12 @@ export type ArtifactReturnSearch = {
   q?: string;
   sort?: "newest" | "title";
   status?: "archived";
+  /**
+   * Opened from the Artifacts list: show the artifact's detail page with the
+   * list's previous/next controls. Without it (a link from a chat, a
+   * notification, a copied or pasted URL) the artifact opens straight in its
+   * full view, and leaving the full view shows the detail page.
+   */
   browse?: boolean;
   /** A Site's own sub-page: `publish` is Publish to web. */
   view?: "publish";

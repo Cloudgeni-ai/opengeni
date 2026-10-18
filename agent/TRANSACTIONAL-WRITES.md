@@ -13,10 +13,21 @@ is sufficient. Old runners leave this additive field false. The native platform
 advertises it on Linux and macOS; individual filesystem cases can still
 return typed unsupported errors. There is no destructive fallback.
 
-Use the authorized process-instance RPC subject and exact nonzero current epoch
+Machine-addressed operations (such as `run_on`) have no session route epoch.
+They additionally require `transactional_fs_write_machine` (Capabilities field
+18), which permits epoch 0. Older transactional agents reject epoch 0; never
+invent a session epoch or retry the write through another path. New control
+planes reject their machine-addressed replacements above 256 KiB before any
+file operation with an update-agent instruction. Nonzero session-scoped
+transfers remain compatible with those agents. Agents predating transactional
+support retain their legacy single-message transport and payload limit.
+
+Use the authorized process-instance RPC subject and exact current epoch
 for **every** begin, chunk, query, and cancel. Keep that scope, instance, epoch,
 and upload ID throughout the transaction. Do not resolve a successor and reuse
 the upload there. Each native WorkspaceLink owns an independent registry.
+Zero is an exact identity value, not a wildcard: it cannot adopt or query an
+upload begun under a different epoch, and nonzero epochs cannot adopt it.
 
 1. Choose a unique `fsw-` operation ID, normally `fsw-<UUID>`. IDs contain only
    ASCII letters, digits, hyphens, and underscores. The namespace is reserved:
@@ -94,8 +105,14 @@ begin, as the shell does (macOS `/tmp` is `/private/tmp`); the destination name
 itself is never followed. The transaction then uses only that physical path:
 traversal uses retained directory handles and refuses symlink components, so a
 symlink swapped in later fails closed. Parent traversal (`..`) is refused.
-Parent directories must already exist;
-`create_parents=true` does not permit visible directory creation during staging.
+For expected-absent creation, `create_parents=true` creates missing parent
+directories with ordinary mkdir/umask semantics through pinned directory handles.
+Existing parent symlinks resolve once before missing components are created;
+dangling links and newly substituted symlinks are refused. Without the option,
+parents must already exist. Created parents are visible before file publication
+and remain after failure or cancellation, because other actors may already use
+them. Commit never recreates a removed parent. Existing-base edits do not create
+missing directories even when the option is set.
 Observed parent-directory replacement is a conflict.
 
 Staging uses exclusive creation in a private mode-0700 directory under the
@@ -114,10 +131,14 @@ permissions are not repaired, and no `runAs` or expanded host authority is impli
 
 On macOS, descriptor-based extended ACL inspection lives in the small
 `opengeni-agent-files-ffi` crate, independent of desktop frameworks and TCC.
-ACLs and inode flags fail closed. The OS-generated `com.apple.provenance`
-attribute is permitted, but replacement requires identical bytes on the original
-and staged inode; other extended attributes remain unsupported. No protected
-metadata is removed or rewritten to make an upload succeed.
+Destination/staging ACLs and inode flags fail closed. Parent-directory
+metadata is not replaced: the standard home ACL (`group:everyone deny delete`)
+and other directory attributes remain untouched and kernel-enforced. Inherited
+ACLs on a staged file remain unsupported, rather than being silently stripped.
+The OS-generated `com.apple.provenance` attribute belongs to its inode; a
+replacement keeps whatever provenance macOS assigns to the new inode, without
+requiring it to match the original. Other file extended attributes remain
+unsupported. No protected metadata is removed or rewritten to make an upload succeed.
 
 For expected-absent creation, Linux `renameat2(RENAME_NOREPLACE)` or macOS
 `renameatx_np(RENAME_EXCL)` is the atomic
@@ -147,6 +168,12 @@ cargo test --locked -p opengeni-agent-platform transactional_write
 cargo test --locked -p opengeni-agent uploads::tests
 ```
 
+On macOS, set `OPENGENI_TEST_PROVENANCE_WRITER` to an installed provenance-tagged
+Node binary when running the platform tests to exercise an edit of a file created
+by that external application. The test requires real kernel-assigned provenance
+and never fabricates or alters the protected attribute. Without that fixture,
+the external-writer test reports its skip explicitly.
+
 Regenerate Rust protocol types with a Cargo build and TypeScript types with
 `bash packages/agent-proto/scripts/codegen.sh` from the repository root. Rollout
 also requires the runtime capability snapshot/negotiation and editor path to
@@ -157,7 +184,8 @@ use this exact schema, chunk bounds, stable identity, and verified receipt.
 `cargo build --locked -p opengeni-agent --example transactional-fs-fixture`
 builds a disposable pipe bridge at `agent/target/debug/examples/transactional-fs-fixture`.
 It is not an agent CLI command and is not built into the production agent.
-Invoke it with an existing dedicated synthetic directory and a nonzero epoch.
+Invoke it with an existing dedicated synthetic directory and its exact epoch
+(0 for machine-addressed operations, nonzero for session-scoped operations).
 Each stdin frame is a four-byte big-endian length followed by protobuf-encoded
 `ControlRequest`; each stdout frame uses the same framing for `ControlResponse`.
 Requests and responses have a 4 MiB **test framing** bound, independent of the

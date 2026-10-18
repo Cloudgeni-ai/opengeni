@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedBy": "bun run public-api:refresh",
-  "sdkMajor": 3,
+  "sdkMajor": 4,
   "routes": [
     {
       "method": "GET",
@@ -33172,6 +33172,8 @@
     "@opengeni/sdk/this-computer": {
       "allowAgentsOnComputer": "value",
       "ComputerGrantClient": "type",
+      "ComputerGrantRevokeClient": "type",
+      "disallowAgentsOnComputer": "value",
       "ENGLISH_MAC_SYSTEM_NAMES": "value",
       "MacSystemNameCatalog": "type",
       "macSystemNames": "value",

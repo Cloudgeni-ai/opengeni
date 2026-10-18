@@ -69,7 +69,38 @@ export const DIAGNOSTIC_SOURCE_FILES = [
   "packages/observability/src/index.ts",
 ] as const;
 
-export const DIAGNOSTIC_POSTGRES_FUNCTIONS = ["admit_session_attempt_personal_resources"] as const;
+export const DIAGNOSTIC_POSTGRES_FUNCTIONS = [
+  "admit_session_attempt_personal_resources",
+  "admit_session_attempt_personal_resources_v1",
+  "admit_session_attempt_personal_machine",
+  "admit_session_attempt_personal_machine_v1",
+  "admit_session_attempt_personal_documents",
+  "bind_session_attempt_machine_consent",
+  "guard_session_admission_block",
+  "workspace_instruction_policy_get_or_create_snapshot",
+  "preference_registry_get_or_create_snapshot",
+] as const;
+
+const DIAGNOSTIC_RELATIONS = new Set([
+  "sessions",
+  "session_turns",
+  "session_turn_attempts",
+  "session_events",
+  "session_history_items",
+  "workspace_inference_controls",
+  "preference_registry_snapshots",
+]);
+
+/** A statement identity, never its SQL text, identifiers outside this list, or parameters. */
+function databaseStatement(error: unknown): { operation: string; relation: string } | undefined {
+  const query = own(error, "query");
+  if (typeof query !== "string") return undefined;
+  const match = /^\s*(insert into|update|delete from)\s+"?([a-z_]+)"?(?=\s|\()/i.exec(
+    query.slice(0, 256),
+  );
+  if (!match || !DIAGNOSTIC_RELATIONS.has(match[2]!)) return undefined;
+  return { operation: match[1]!.toLowerCase().split(" ")[0]!, relation: match[2]! };
+}
 
 function reviewedSource(location: string): string | undefined {
   // Match an exact reviewed suffix; discard the host/deployment path entirely.
@@ -144,6 +175,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
   const pgContext: Array<{ functionName: string; line: number }> = [];
   const seen = new Set<unknown>();
   let causeSqlState: string | undefined;
+  let statement: ReturnType<typeof databaseStatement>;
   let error = input.error;
   while (error && typeof error === "object" && !seen.has(error) && causes.length < 4) {
     seen.add(error);
@@ -153,6 +185,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
       causeSqlState = driverCode;
     }
     pgContext.push(...postgresContext(error).slice(0, 8 - pgContext.length));
+    statement ??= databaseStatement(error);
     const stack = own(error, "stack");
     const frames =
       typeof stack === "string"
@@ -218,6 +251,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
     deploymentRevision: revision && /^[0-9a-f]{40}$/.test(revision) ? revision : undefined,
     causes,
     postgresContext: pgContext,
+    databaseStatement: statement,
     eventTypes: (input.eventTypes ?? [])
       .slice(0, 32)
       .filter((type) => SessionEventType.safeParse(type).success),
