@@ -197,6 +197,9 @@ fleet() {
     log "replacing the hosts of $group with the new template"
     g compute instance-groups managed rolling-action replace "$group" --zone "$ZONE" \
       --max-surge "$HOSTS" --max-unavailable "$HOSTS" >/dev/null
+    # Until the old hosts are gone, so no sandbox of the next run lands on one.
+    g compute instance-groups managed wait-until "$group" --zone "$ZONE" --version-target-reached \
+      --timeout 1800 >/dev/null
   fi
 }
 
