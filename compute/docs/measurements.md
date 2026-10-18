@@ -873,6 +873,7 @@ from that commit. Results carry the commits as `backend+agent`.
 | r10 18:28 | 746756d73+af0b4552f | a89c70f53 | 10 | 11 | none before create: create (first turn 28.2 s), commands, files, git, port, browser, sleep-paused pass; see below |
 | r11 20:23 | df78a13f3+af0b4552f | 53fe2cd59 | 13 | 10 | none before create: create (first turn 25.1 s), commands, egress, files, git, port, browser, sleep-paused (verified), move (32.3 s), connected-machine pass; see below |
 | r13 21:51 | cf5152969+5faf66b21+6270b6eae | a1972ae1a | 21 | 3 | ui (desktop view too small in the dock; the e2e now maximizes it), delete (409 for 10 minutes; the cleanup row fails with it); every other check passes, the four sleeps verified in the journals; see below |
+| r14 22:49 | 130eeb930+ac1951242+6270b6eae | 40a9c32dc | 24 | 0 | none; run-as is n/a (Opengeni cannot ask for it); see below |
 
 Checks after create were skipped through r6 because they need create.
 In r8 (every request now carries a nonzero agent epoch) create and most
@@ -1063,3 +1064,53 @@ stayed at 409 for 10 minutes: the lease still had the agent's browser and
 desktop holders (heartbeats stopped at 21:56 and 22:00) and a direct holder
 made during the host-loss recovery that kept its heartbeat 8 minutes after
 the check ended.
+
+### r14: every check passes
+
+r14 (22:49 to 23:04) ran on three freshly rolled hosts and a new
+database (`FRESH=1`), with the backend merged with current main
+(130eeb930, whose ancestors are the run-as branch ac1951242 and the agent
+fabric branch 6270b6eae) and compute 40a9c32dc (fabric 469570017, with the
+pager's permissions fix). Rerun it with:
+
+```sh
+. p4.env   # PROJECT, PREFIX, LABELS, the three refs, the Azure account
+compute/e2e/env.sh build && compute/e2e/env.sh fleet &&
+  FRESH=1 compute/e2e/env.sh deploy && RUN=r14 compute/e2e/env.sh suite
+```
+
+Shapes: three n2-standard-8 hosts (nested virtualization, a 26.6 GiB huge-page
+pool each), the n2-standard-32 stack VM with two API, two relay and two
+compute-control replicas, checkpoints every 60 s. 24 checks passed and
+run-as is not applicable; what each proves and how long it took:
+
+| check | what it proves | r14 |
+| --- | --- | --- |
+| health, hosts, workspace | the API answers; three hosts are live in the fleet | 0.1 s |
+| create | a session on the compute backend gets a fabric sandbox and its first model turn runs a shell command in it | 22.1 s to the reply |
+| commands | stdout, stderr and a nonzero exit status come back as the guest produced them | 0.3 s |
+| egress | the sandbox reaches the internet (HTTPS 200) | 0.4 s |
+| background | the agent's background command is read back by id with its output and status; a running one stopped through the API ends and its processes are gone | stopped in 8.7 s (61 s in r13) |
+| files, git | write, read and list agree; git works in the workspace | 0.4 s each |
+| terminal | a viewer terminal through the relay (two replicas, Caddy channel affinity) runs a typed command whose file appears | 0.8 s |
+| checkpoint | a viewer terminal (150 ticks) and a command (110 ticks) stream without a gap across running checkpoints the journal shows | 2 checkpoints, quiet at most 1.7 s |
+| port | a guest TCP port answers through the fabric's connect stream | 2.1 s |
+| browser | the agent's browser tool loads a page served in the sandbox and returns its random title | 14.7 s |
+| desktop | the agent opens a computer session, takes a screenshot, and the API's frame decodes to a real screen | 1024x640, 157 colours |
+| ui | Playwright: the web app's file browser, terminal and desktop view | 64.8 s |
+| sleep-paused, -saved, -archived, -remote | the host reached the level (state and journal), nothing began to wake it before the suite's request, the request woke it over the agent link, and a 32 MiB process kept its pid and memory under the same boot generation | reached in 0.3, 6.6, 15.2 and 19.0 s; first answer 0.1, 0.5, 0.5 and 8.3 s; each woken by `agent_link` 0.04 to 0.07 s after the request |
+| move | a saved sandbox moves to another host and answers there with its files | 29.9 s |
+| host-loss | a stopped host's sandbox comes back on another live host under a higher owner epoch, the old host fenced, from the archived copy | back in 280.9 s, owner epoch 3 to 5 |
+| delete | deleting the session deletes its fabric sandbox | 25.3 s |
+| connected-machine | the same agent build enrolled on the stack VM comes online, runs a turn and an exec, and still answers after 90 s idle with the same process | online in 3.1 s |
+| cleanup | the run's sessions are deleted and its enrollment revoked | nothing left |
+
+The saved sleep's paged wake left the pager's `learned.json`, and no
+pager logged "Permission denied" (it did once a second before the fabric's
+fix). The host journals show no agent-link connection limit, no early-EOF
+restore notice, no "host full" refusal, no stream protocol error and no
+`madvise` EINVAL. The delete that stayed at 409 in r13 finished in 25 s.
+The guest consoles cannot show the reconnects of this run: a VMM writes a
+new console at each launch, so the minute copies keep only the last
+launch, and the sandbox goes with the delete. From r15 the link-stream and
+stale-restore checks count them on the host during the check.
