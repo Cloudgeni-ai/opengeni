@@ -87,6 +87,8 @@ import {
   BrowserWorkingRuntimeUnavailableError,
   type BrowserWorkingRuntimeAuthority,
   type BrowserWorkingRuntimeReceipt,
+  type InterruptedRecovery,
+  recordedProcessReceipt,
 } from "./working-runtime-journal";
 import {
   ADOPTION_IN_FLIGHT,
@@ -430,6 +432,8 @@ export class BrowserSupervisor {
   private closed = false;
   private closePromise: Promise<void> | null = null;
   private cleanupUncertain = false;
+  /** Browsers whose failed reattach could not prove its transport detached. */
+  private readonly recoveryTransportsUncertain = new Set<string>();
 
   private constructor(options: BrowserSupervisorOptions) {
     this.rootDirectory = resolve(options.rootDirectory);
@@ -1493,10 +1497,52 @@ export class BrowserSupervisor {
           true,
         );
         let receipt: BrowserWorkingRuntimeReceipt | null;
+        let interruptedRecovery: InterruptedRecovery | null;
         try {
           receipt = reader.latest();
+          interruptedRecovery = reader.interruptedRecovery(receipt);
         } finally {
           reader.close();
+        }
+        if (
+          interruptedRecovery &&
+          receipt &&
+          JSON.stringify(receipt.authority) === JSON.stringify(options.workingRuntimeAuthority) &&
+          receipt.launchDigest === workingLaunchDigest(options) &&
+          receipt.profile.device === profile.device &&
+          receipt.profile.inode === profile.inode
+        ) {
+          // An earlier recovery of this browser was cut short, by a controller
+          // restart or a failure whose cleanup could not reinstate it. The
+          // receipt it started from is reinstated once its browser is provably
+          // the same live process, or provably gone with no process using the
+          // profile; an adopted copy whose browser is gone is resettled to its
+          // copy below instead. A transport this controller could not detach
+          // keeps the browser refused: another reattach would share it.
+          if (this.recoveryTransportsUncertain.has(options.browserSessionId))
+            throw workingRuntimeUnavailable("process_state_unknown");
+          const recorded =
+            interruptedRecovery.kind === "interrupted"
+              ? interruptedRecovery.base.process
+              : interruptedRecovery.receipt.process!;
+          const state = await this.inspectOwnedProcess(recorded).catch(() => {
+            throw workingRuntimeUnavailable("process_state_unknown");
+          });
+          if (state === "exited")
+            await this.assertProfileUnused(profileDirectory).catch(() => {
+              throw workingRuntimeUnavailable("process_state_unknown");
+            });
+          if (state === "live" || !receipt.adoption) {
+            const writer = await SqliteBrowserWorkingRuntimeJournal.open({
+              ...options,
+              sessionDirectory,
+            });
+            try {
+              receipt = writer.reinstate(interruptedRecovery);
+            } finally {
+              writer.close();
+            }
+          }
         }
         if (
           adoptedCopyNeedsResettle(receipt) &&
@@ -1868,6 +1914,36 @@ export class BrowserSupervisor {
           failures.push(cleanupError);
         }
       }
+      // A failed reattach left the browser running untouched once its
+      // transport detached. While it is provably the same live process, the
+      // receipt it was reattached from becomes the latest again, so the
+      // browser can be continued or ended instead of staying refused.
+      let recoveryReinstated = false;
+      if (
+        recoveredReceipt &&
+        !adoptedLaunch &&
+        !relaunchesProfile &&
+        recordedProcessReceipt(recoveredReceipt) &&
+        workingJournal &&
+        workingReceipt &&
+        !workingReceiptCompleted &&
+        driverClosed
+      ) {
+        try {
+          if ((await this.inspectOwnedProcess(recoveredReceipt.process)) === "live") {
+            workingJournal.reinstate({
+              kind: "interrupted",
+              base: recoveredReceipt,
+              interrupted: workingReceipt,
+            });
+            recoveryReinstated = true;
+          }
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
+      }
+      if (recoveredReceipt && !adoptedLaunch && !driverClosed)
+        this.recoveryTransportsUncertain.add(options.browserSessionId);
       if (workingReceipt) {
         console.error("browser launch failed before its working-runtime receipt completed", {
           browserSessionId: options.browserSessionId,
@@ -1878,7 +1954,9 @@ export class BrowserSupervisor {
             ? "completed"
             : launchReceiptSettled
               ? "failed"
-              : "dispatched",
+              : recoveryReinstated
+                ? "reinstated"
+                : "dispatched",
           failureCode: launchFailureCode(error),
           error,
         });

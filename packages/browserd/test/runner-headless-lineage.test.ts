@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   AgentBrowserJsonRunner,
@@ -11,7 +11,7 @@ import {
 
 const native = process.platform === "linux" || process.platform === "darwin";
 
-async function fixture() {
+async function fixture(fixtureOptions: { daemonRuntimeCopy?: boolean } = {}) {
   const directory = await mkdtemp("/tmp/og-headless-lineage-");
   const profileDirectory = join(directory, "profile");
   const socketDirectory = join(directory, "socket");
@@ -34,7 +34,7 @@ async function fixture() {
       process.exit(0);
     }); setInterval(()=>{},60000);`;
   const daemonScript = `import {writeFile,symlink} from "node:fs/promises";
-    const browser=Bun.spawn([process.execPath,"--no-env-file","-e",${JSON.stringify(childScript)},${JSON.stringify(`--user-data-dir=${profileDirectory}`)}],{stdout:"ignore",stderr:"ignore"});
+    const browser=Bun.spawn([${JSON.stringify(process.execPath)},"--no-env-file","-e",${JSON.stringify(childScript)},${JSON.stringify(`--user-data-dir=${profileDirectory}`)}],{stdout:"ignore",stderr:"ignore"});
     browser.exited.then(exitCode=>console.log(JSON.stringify({exitedBrowserPid:browser.pid,exitCode})));
     await writeFile(${JSON.stringify(pidFile)},String(process.pid)+"\\n",{mode:0o600});
     await symlink("synthetic-host-"+browser.pid,${JSON.stringify(join(profileDirectory, "SingletonLock"))});
@@ -44,7 +44,15 @@ async function fixture() {
   // browser outlives it. `bun test --no-orphans` (CI) exports this flag to nested
   // Bun processes, which would take the synthetic browser down with its launcher.
   const { BUN_FEATURE_FLAG_NO_ORPHANS: _noOrphans, ...daemonEnv } = process.env;
-  const daemon = Bun.spawn([process.execPath, "--no-env-file", script], {
+  // An agent update replaces the runtime directory its daemon was started from,
+  // so a daemon can run from an executable that no longer exists.
+  const daemonRuntime = join(directory, "runtime", "agent-browser");
+  if (fixtureOptions.daemonRuntimeCopy) {
+    await mkdir(join(directory, "runtime"), { mode: 0o700 });
+    await copyFile(process.execPath, daemonRuntime);
+  }
+  const daemonExecutable = fixtureOptions.daemonRuntimeCopy ? daemonRuntime : process.execPath;
+  const daemon = Bun.spawn([daemonExecutable, "--no-env-file", script], {
     env: daemonEnv,
     stdout: "pipe",
     stderr: "pipe",
@@ -78,7 +86,7 @@ async function fixture() {
     headed: false,
     browserExecutablePath: process.execPath,
     binary: {
-      path: process.execPath,
+      path: daemonExecutable,
       name: "agent-browser-darwin-arm64" as const,
       version: "0.33.2" as const,
       sha256: "synthetic",
@@ -100,11 +108,16 @@ async function fixture() {
       return await runner.ownedProcessIdentity(endpoint, browserPid);
     },
     async reattach(receipt: OwnedManagedBrowserProcess) {
+      // The replacement controller runs the release installed now.
       return await AgentBrowserJsonRunner.create({
         ...options,
+        binary: { ...options.binary, path: process.execPath },
         sessionName: "replacement",
         recoverOwnedProcess: receipt,
       });
+    },
+    async removeDaemonRuntime() {
+      await rm(join(directory, "runtime"), { recursive: true });
     },
     async browserExited() {
       // The runner proves exit, including a Linux zombie; only this synthetic
@@ -183,6 +196,30 @@ test.skipIf(!native)(
       expect(() => process.kill(f.browserPid, 0)).toThrow();
       expect(() => process.kill(f.daemon.pid, 0)).toThrow();
       await expect(readFile(f.pidFile)).rejects.toThrow();
+    } finally {
+      await f.close();
+    }
+  },
+  15_000,
+);
+
+test.skipIf(!native)(
+  "a live browser is reattached after an agent update removed its daemon's runtime",
+  async () => {
+    const f = await fixture({ daemonRuntimeCopy: true });
+    try {
+      const receipt = await f.attest();
+      expect(receipt?.pid).toBe(f.browserPid);
+      await f.removeDaemonRuntime();
+      const replacement = await f.reattach(receipt!);
+      expect(await replacement.daemonPid()).toBe(f.daemon.pid);
+      expect(await replacement.run<{ cdpUrl: string }>(["get", "cdp-url"])).toEqual({
+        cdpUrl: f.endpoint,
+      });
+      await replacement.terminate();
+      await f.daemon.exited;
+      expect(() => process.kill(f.browserPid, 0)).toThrow();
+      expect(() => process.kill(f.daemon.pid, 0)).toThrow();
     } finally {
       await f.close();
     }
