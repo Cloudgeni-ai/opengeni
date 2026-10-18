@@ -2,8 +2,10 @@ import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
 import {
   ArrowUpIcon,
   ChevronDownIcon,
+  CornerDownRightIcon,
   FileIcon,
   ImageIcon,
+  ListOrderedIcon,
   LoaderCircleIcon,
   PaperclipIcon,
   PauseIcon,
@@ -1340,6 +1342,9 @@ export type ComposerAlternateSendButtonProps = ComposerSendButtonProps;
  * The other way to send while the agent works, beside Send: Steer when Send
  * queues, Queue when Send steers. It appears once there is something to send,
  * so touch users (who have no Cmd/Ctrl+Enter) always have both choices.
+ * Narrow screens show only its icon (the queue list's icon for Queue, the
+ * queued item's Steer arrow for Steer) so the composer's other controls keep
+ * their room; the accessible name stays the label.
  */
 export const AlternateSendButton = forwardRef<HTMLButtonElement, ComposerAlternateSendButtonProps>(
   function ComposerAlternateSendButton(
@@ -1364,6 +1369,7 @@ export const AlternateSendButton = forwardRef<HTMLButtonElement, ComposerAlterna
       (queues
         ? (controller.messages.queueTitle ?? t("composerMessages.queueItToRunAfter"))
         : (controller.messages.steerTitle ?? t("composerMessages.steerTheAgentReadsIt")));
+    const Icon = queues ? ListOrderedIcon : CornerDownRightIcon;
     return (
       <ComposerTip tip={tip}>
         <button
@@ -1376,7 +1382,8 @@ export const AlternateSendButton = forwardRef<HTMLButtonElement, ComposerAlterna
           disabled={!controller.canSubmit}
           aria-label={ariaLabel ?? label}
           className={cn(
-            "inline-flex h-8 items-center justify-center rounded-og-md px-2.5 pointer-coarse:h-11 pointer-coarse:px-3.5",
+            "inline-flex h-8 items-center justify-center gap-1.5 rounded-og-md px-2.5 pointer-coarse:h-11 pointer-coarse:px-3.5",
+            "max-sm:w-8 max-sm:px-0 max-sm:pointer-coarse:w-11 max-sm:pointer-coarse:px-0",
             "border border-og-border bg-og-surface-1 text-og-control font-medium text-og-fg",
             "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
             "hover:bg-og-surface-2 active:scale-95",
@@ -1384,7 +1391,12 @@ export const AlternateSendButton = forwardRef<HTMLButtonElement, ComposerAlterna
             className,
           )}
         >
-          {children ?? label}
+          {children ?? (
+            <>
+              <Icon aria-hidden="true" className="size-4 sm:hidden" />
+              <span className="max-sm:hidden">{label}</span>
+            </>
+          )}
         </button>
       </ComposerTip>
     );

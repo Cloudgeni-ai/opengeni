@@ -429,12 +429,16 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           // Phone: the composer row also carries attach, dictate, voice, pause
           // and send, so the pill drops its chevron and tightens its padding
           // to keep the model's short name readable.
-          "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border px-2.5 text-og-control outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:gap-0.5 max-sm:px-1.5",
+          "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 overflow-hidden items-center gap-1 rounded-full border px-2.5 text-og-control outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:gap-0.5 max-sm:px-1.5",
           // With no usable model the pill is the one thing that unblocks the
-          // composer, so it takes the primary wash.
+          // composer, so it takes the primary wash and always keeps its place.
+          // Otherwise, when even the bare icon has no room (a narrow phone whose
+          // row also offers Queue or Steer while the agent works), the pill
+          // steps aside instead of painting over its neighbours, and returns
+          // once the row has room.
           needsModel
             ? "border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover"
-            : "border-transparent text-og-fg-muted hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg",
+            : "border-transparent text-og-fg-muted hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg @max-[2rem]/model-controls:hidden",
           props.className,
         )}
       >
