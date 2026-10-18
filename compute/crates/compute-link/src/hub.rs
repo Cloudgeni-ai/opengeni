@@ -95,12 +95,16 @@ impl fmt::Debug for HubConfig {
 }
 
 /// The host's agent links. Cheap to clone; the hub runs while a clone
-/// lives, and when the last goes its links close and its guest
-/// connections end.
+/// lives, or until [`Hub::shutdown`], and when the last goes its links
+/// close and its guest connections end.
 #[derive(Clone, Debug)]
 pub struct Hub {
     commands: mpsc::UnboundedSender<Command>,
     next_conn: Arc<AtomicU64>,
+    stop: CancellationToken,
+    /// Cancelled once the hub has stopped and no write of the sessions it
+    /// keeps is under way.
+    stopped: CancellationToken,
     /// Stops the hub when the last clone goes: its links and guest
     /// connections hold senders too, so the channel alone would not.
     _running: Arc<DropGuard>,
@@ -143,6 +147,7 @@ impl Hub {
     pub fn start(config: HubConfig) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let stop = CancellationToken::new();
+        let stopped = CancellationToken::new();
         let actor = Actor {
             core: Core::new(config.settings),
             started: Instant::now(),
@@ -155,15 +160,27 @@ impl Hub {
             conns: HashMap::new(),
             links: HashMap::new(),
             writers: HashMap::new(),
-            saver: Saver::start(stop.clone()),
+            saver: Saver::start(),
             link_ids: Arc::new(AtomicU64::new(1)),
         };
-        tokio::spawn(actor.run(receiver, stop.clone()));
+        tokio::spawn(actor.run(receiver, stop.clone(), stopped.clone()));
         Self {
             commands,
             next_conn: Arc::new(AtomicU64::new(1)),
+            stop: stop.clone(),
+            stopped,
             _running: Arc::new(stop.drop_guard()),
         }
+    }
+
+    /// Stops the hub now, whatever clones of it remain: its links close
+    /// and its guest connections end. Returns once every session it was
+    /// asked to keep is written, each failed write tried once more, so a
+    /// hub started after it for the same sandboxes reads the latest and
+    /// is never overwritten by this one.
+    pub async fn shutdown(&self) {
+        self.stop.cancel();
+        self.stopped.cancelled().await;
     }
 
     /// Attaches a sandbox whose agent is reached through `link`, keeping
@@ -236,13 +253,19 @@ impl Actor {
         mut self,
         mut commands: mpsc::UnboundedReceiver<Command>,
         stop: CancellationToken,
+        stopped: CancellationToken,
     ) {
+        // Even if this panics: whoever waits for it is not left waiting.
+        let _stopped = stopped.drop_guard();
         loop {
             let deadline = self
                 .core
                 .deadline()
                 .map(|ms| self.started + Duration::from_millis(ms));
             tokio::select! {
+                // First, so that once stopped it asks the saver for nothing
+                // more.
+                biased;
                 () = stop.cancelled() => break,
                 command = commands.recv() => match command {
                     Some(command) => self.command(command),
@@ -260,6 +283,7 @@ impl Actor {
         }
         // Dropping their handles ends the guest connections.
         self.conns.clear();
+        self.saver.finish().await;
     }
 
     fn command(&mut self, command: Command) {

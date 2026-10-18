@@ -283,10 +283,15 @@ What the host does, exactly (`compute-link`, its `core` module):
     slowed by its own socket;
   - at most 64 MiB waiting to be written to a connection: a guest that does
     not read its socket ends as a slow consumer, as with a NATS server.
+  - at most 1024 messages and 16 MiB waiting for a sandbox's agent to
+    subscribe again, each counted as the bytes it holds plus 64: one more
+    is dropped, as a NATS server drops a message for a slow consumer, and
+    its sender's request times out.
 
   Opengeni's agent holds two connections and a handful of subscriptions.
   The host's own record of a session is written by one writer that keeps
-  only the latest for each sandbox.
+  only the latest for each sandbox; a host agent that stops waits for it,
+  so the next one reads the latest record and is never overwritten.
 - **A link that goes ends its guests' connections,** as a NATS server that
   goes would, so each agent reconnects to a session that opens again on the
   next link. The host dials again with full-jitter back-off from 100 ms to

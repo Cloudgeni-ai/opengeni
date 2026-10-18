@@ -660,3 +660,89 @@ async fn paused_lifecycles<S: Store>(store: S) {
 async fn paused_e2b_lifecycles_are_read_a_page_at_a_time() {
     each(paused_lifecycles, paused_lifecycles).await;
 }
+
+/// A schema of its own in the test database, which `url` then uses, and
+/// a client to set it up and drop it with.
+async fn fresh_schema(url: &str) -> (String, String, tokio_postgres::Client) {
+    let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let schema = format!("compute_upgrade_{:x}", random());
+    client
+        .batch_execute(&format!("create schema {schema}"))
+        .await
+        .unwrap();
+    let scoped = format!("{url} options='-c search_path={schema}'");
+    (schema, scoped, client)
+}
+
+/// A database a build from before the schema had versions made keeps its
+/// create requests, deleted ones retired from the upgrade on, and replicas
+/// starting together migrate it once.
+#[tokio::test]
+async fn a_database_from_before_schema_versions_is_upgraded_keeping_its_requests() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let (schema, scoped, client) = fresh_schema(&url).await;
+    client
+        .batch_execute(&format!(
+            "set search_path = {schema}; \
+             create table compute_create_requests ( \
+                 team text not null, request_id text not null, id text not null, \
+                 digest text not null, created_ms bigint not null, gone boolean not null, \
+                 primary key (team, request_id)); \
+             create index compute_create_requests_gone on compute_create_requests (created_ms) \
+                 where gone; \
+             insert into compute_create_requests values \
+                 ('team', 'kept', '{live}', 'd1', 1, false), \
+                 ('team', 'deleted', '{gone}', 'd2', 2, true);",
+            live = Id(SandboxId(1)),
+            gone = Id(SandboxId(2)),
+        ))
+        .await
+        .unwrap();
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let replicas: Vec<_> = (0..4)
+        .map(|_| {
+            let scoped = scoped.clone();
+            tokio::spawn(async move { PostgresStore::connect(&scoped, None, 2).await })
+        })
+        .collect();
+    let mut stores = Vec::new();
+    for replica in replicas {
+        stores.push(replica.await.unwrap().expect("every replica starts"));
+    }
+    let store = &stores[0];
+    let kept = store.request("team", "kept").await.unwrap().unwrap();
+    assert_eq!((kept.id, kept.gone_ms), (Id(SandboxId(1)), None));
+    let deleted = store.request("team", "deleted").await.unwrap().unwrap();
+    assert_eq!(deleted.id, Id(SandboxId(2)));
+    let retired = u128::from(deleted.gone_ms.expect("still retired"));
+    assert!(
+        retired >= before,
+        "retired from the upgrade on: {retired} < {before}"
+    );
+    // Pruning counts from then, so a week-old deletion is not forgotten at
+    // once.
+    assert_eq!(store.prune_requests(1_000).await.unwrap(), 0);
+    let version: i32 = client
+        .query_one(&format!("select version from {schema}.compute_schema"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(version, 1);
+    drop(stores);
+    // Starting again changes nothing.
+    let again = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    assert_eq!(again.request("team", "kept").await.unwrap(), Some(kept));
+    drop(again);
+    client
+        .batch_execute(&format!("drop schema {schema} cascade"))
+        .await
+        .unwrap();
+}
