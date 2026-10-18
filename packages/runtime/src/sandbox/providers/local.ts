@@ -8,6 +8,7 @@ import { NoopSnapshotSpec } from "@openai/agents/sandbox";
 import { lstat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
+import { installDurableShellProcesses } from "../durable-shell-process";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
 import { REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
 
@@ -23,6 +24,17 @@ class OpenGeniUnixLocalSandboxClient extends UnixLocalSandboxClient {
   constructor(options: UnixLocalSandboxClientOptions = {}) {
     super(options);
     this.#openGeniOptions = options;
+  }
+
+  // Commands run under a supervisor in the workspace's own namespace, so any
+  // session object for this workspace (another turn, worker or the reaper)
+  // reaches them, not only the object that started them.
+  override async create(...args: Parameters<UnixLocalSandboxClient["create"]>) {
+    return installDurableShellProcesses(await super.create(...args), "local");
+  }
+
+  override async resume(...args: Parameters<UnixLocalSandboxClient["resume"]>) {
+    return installDurableShellProcesses(await super.resume(...args), "local");
   }
 
   /** The SDK's ordinary resume may restore an older snapshot, including into a
@@ -53,13 +65,16 @@ class OpenGeniUnixLocalSandboxClient extends UnixLocalSandboxClient {
       options?.archiveLimits === undefined
         ? this.#openGeniOptions.archiveLimits
         : options.archiveLimits;
-    return new UnixLocalSandboxSession({
-      state,
-      ...(this.#openGeniOptions.defaultShell !== undefined
-        ? { defaultShell: this.#openGeniOptions.defaultShell }
-        : {}),
-      ...(archiveLimits !== undefined ? { archiveLimits } : {}),
-    });
+    return installDurableShellProcesses(
+      new UnixLocalSandboxSession({
+        state,
+        ...(this.#openGeniOptions.defaultShell !== undefined
+          ? { defaultShell: this.#openGeniOptions.defaultShell }
+          : {}),
+        ...(archiveLimits !== undefined ? { archiveLimits } : {}),
+      }),
+      "local",
+    );
   }
 }
 

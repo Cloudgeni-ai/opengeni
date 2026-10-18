@@ -293,6 +293,7 @@ export interface SelfhostedBackgroundCommandAdoption {
  * every exec/Git admission; retries and already-started operations retain it. */
 export interface SelfhostedOperationAdmission {
   transactionalFsWriteSupported?: boolean;
+  transactionalFsWriteMachineSupported?: boolean;
   /** The live runner serves in-process browser/computer controller requests. */
   browserControlHttpSupported?: boolean;
   /** The live runner honors per-request `runAs` (Hello `capabilities.run_as`). */
@@ -321,6 +322,8 @@ export interface SelfhostedOperationAdmission {
 export interface SelfhostedSessionDeps {
   /** Exact live daemon capability; absent preserves legacy small-file writes. */
   transactionalFsWriteSupported?: boolean;
+  /** The exact live daemon also accepts machine-addressed (epoch-zero) uploads. */
+  transactionalFsWriteMachineSupported?: boolean;
   /** Exact live daemon capability; absent keeps controller requests on the
    * command transport. */
   browserControlHttpSupported?: boolean;
@@ -349,7 +352,8 @@ export interface SelfhostedSessionDeps {
   opStream?: SelfhostedOpStreamDeps;
   /** The lease/active epoch this session is fenced under (echoed on every
    *  ControlRequest so the agent can reject a stale op with ERROR_CODE_FENCED).
-   *  Defaults to 0 (no fence) for the negotiation-only / test path. */
+   *  Defaults to 0 for machine-addressed operations, which retain the exact
+   *  connection fence but have no session route epoch. */
   epoch?: number;
   /** The CONTROL-op timeout (ping/fs/desktop/pty and op-stream control RPCs). The
    *  agent's own control liveness must stay responsive, so this is short (the 30s
@@ -574,6 +578,7 @@ export class SelfhostedSession {
   private readonly resourcePolicySupported: boolean;
   private readonly operationCpuQuotaSupported: boolean;
   private readonly transactionalFsWriteSupported: boolean;
+  private readonly transactionalFsWriteMachineSupported: boolean;
   private readonly browserControlHttpSupported: boolean;
   private readonly runAsSupported: boolean;
   private readonly defaultOpStream: SelfhostedOpStreamDeps | undefined;
@@ -649,6 +654,7 @@ export class SelfhostedSession {
     this.resourcePolicySupported = deps.operationResourcePolicySupported === true;
     this.operationCpuQuotaSupported = deps.operationCpuQuotaSupported === true;
     this.transactionalFsWriteSupported = deps.transactionalFsWriteSupported === true;
+    this.transactionalFsWriteMachineSupported = deps.transactionalFsWriteMachineSupported === true;
     this.browserControlHttpSupported = deps.browserControlHttpSupported === true;
     this.runAsSupported = deps.runAsSupported === true;
     this.defaultOpStream = deps.opStream;
@@ -669,6 +675,7 @@ export class SelfhostedSession {
             resourcePolicy: this.resourcePolicy,
             opStream: deps.opStream,
             transactionalFsWriteSupported: this.transactionalFsWriteSupported,
+            transactionalFsWriteMachineSupported: this.transactionalFsWriteMachineSupported,
             browserControlHttpSupported: this.browserControlHttpSupported,
             runAsSupported: this.runAsSupported,
           })
@@ -739,6 +746,7 @@ export class SelfhostedSession {
 
   private async admitOperation(commandPolicy: boolean): Promise<{
     transactionalFsWriteSupported: boolean;
+    transactionalFsWriteMachineSupported: boolean;
     browserControlHttpSupported: boolean;
     runAsSupported: boolean;
     controlWorkspaceId: string;
@@ -762,6 +770,7 @@ export class SelfhostedSession {
         resourcePolicy: commandPolicy ? this.resourcePolicy : undefined,
         opStream: this.defaultOpStream,
         transactionalFsWriteSupported: this.transactionalFsWriteSupported,
+        transactionalFsWriteMachineSupported: this.transactionalFsWriteMachineSupported,
         browserControlHttpSupported: this.browserControlHttpSupported,
         runAsSupported: this.runAsSupported,
       };
@@ -799,6 +808,7 @@ export class SelfhostedSession {
       resourcePolicy: commandPolicy ? resourcePolicy : undefined,
       opStream: resolved.opStream,
       transactionalFsWriteSupported: resolved.transactionalFsWriteSupported === true,
+      transactionalFsWriteMachineSupported: resolved.transactionalFsWriteMachineSupported === true,
       browserControlHttpSupported: resolved.browserControlHttpSupported === true,
       runAsSupported: resolved.runAsSupported === true,
     };
@@ -1685,9 +1695,10 @@ export class SelfhostedSession {
         return;
       }
       const initial = await this.admitOperation(false);
-      if (!initial.transactionalFsWriteSupported) {
-        // Older agents may have a larger negotiated message budget. Preserve
-        // their existing writes; a real size rejection remains a typed fault.
+      if (!this.supportsFileTransfer(initial)) {
+        // Preserve small legacy writes. writeFile preflights an old transactional
+        // agent's missing machine scope; agents with no transactional support
+        // retain their existing single-message transport budget.
         await this.writeFile({ path, content, createParents: true, ...(await directWriteUser()) });
         return;
       }
@@ -1873,7 +1884,7 @@ export class SelfhostedSession {
       try {
         const current = await this.admitOperation(false);
         if (
-          !current.transactionalFsWriteSupported ||
+          !this.supportsFileTransfer(current) ||
           current.subject !== initial.subject ||
           current.connectionInstanceId !== initial.connectionInstanceId
         ) {
@@ -1925,6 +1936,15 @@ export class SelfhostedSession {
     };
   }
 
+  private supportsFileTransfer(
+    admission: Awaited<ReturnType<SelfhostedSession["admitOperation"]>>,
+  ): boolean {
+    return (
+      admission.transactionalFsWriteSupported &&
+      (this.epoch !== 0 || admission.transactionalFsWriteMachineSupported)
+    );
+  }
+
   /** Write a file onto the machine (the fs surface the descriptor advertises). */
   async writeFile(args: {
     path: string;
@@ -1945,6 +1965,15 @@ export class SelfhostedSession {
     }
     if (content.byteLength > SELFHOSTED_FILE_CHUNK_BYTES && !args.append) {
       const initial = await this.admitOperation(false);
+      if (initial.transactionalFsWriteSupported && !this.supportsFileTransfer(initial)) {
+        throw new SelfhostedControlError({
+          code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+          message:
+            "This Connected Machine's agent requires a session route epoch for transactional writes. Machine-addressed writes are limited to 262144 bytes (256 KiB) until the agent is updated; no file was written.",
+          reason: null,
+          retryable: false,
+        });
+      }
       if (initial.transactionalFsWriteSupported) {
         const asUser = runAs ? { runAs } : {};
         const baseContent = (await this.pathExists(args.path, runAs || undefined))
@@ -2364,6 +2393,7 @@ export class SelfhostedSandboxClient {
   private readonly operationResourcePolicySupported: boolean | undefined;
   private readonly operationCpuQuotaSupported: boolean | undefined;
   private readonly transactionalFsWriteSupported: boolean | undefined;
+  private readonly transactionalFsWriteMachineSupported: boolean | undefined;
   private readonly browserControlHttpSupported: boolean | undefined;
   private readonly runAsSupported: boolean | undefined;
   private readonly resolveOperationAdmission:
@@ -2407,6 +2437,7 @@ export class SelfhostedSandboxClient {
     operationResourcePolicySupported?: boolean;
     operationCpuQuotaSupported?: boolean;
     transactionalFsWriteSupported?: boolean;
+    transactionalFsWriteMachineSupported?: boolean;
     browserControlHttpSupported?: boolean;
     runAsSupported?: boolean;
     resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
@@ -2441,6 +2472,7 @@ export class SelfhostedSandboxClient {
     this.operationResourcePolicySupported = opts.operationResourcePolicySupported;
     this.operationCpuQuotaSupported = opts.operationCpuQuotaSupported;
     this.transactionalFsWriteSupported = opts.transactionalFsWriteSupported;
+    this.transactionalFsWriteMachineSupported = opts.transactionalFsWriteMachineSupported;
     this.browserControlHttpSupported = opts.browserControlHttpSupported;
     this.runAsSupported = opts.runAsSupported;
     this.resolveOperationAdmission = opts.resolveOperationAdmission;
@@ -2487,6 +2519,7 @@ export class SelfhostedSandboxClient {
         ? { operationCpuQuotaSupported: this.operationCpuQuotaSupported }
         : {}),
       transactionalFsWriteSupported: this.transactionalFsWriteSupported === true,
+      transactionalFsWriteMachineSupported: this.transactionalFsWriteMachineSupported === true,
       browserControlHttpSupported: this.browserControlHttpSupported === true,
       runAsSupported: this.runAsSupported === true,
       ...(this.resolveOperationAdmission !== undefined
@@ -2609,6 +2642,7 @@ export interface SelfhostedSessionBuild {
   /** Exact live CPU enforcement capability paired with the initial snapshot. */
   operationCpuQuotaSupported?: boolean;
   transactionalFsWriteSupported?: boolean;
+  transactionalFsWriteMachineSupported?: boolean;
   /** Exact live runner capability for in-process controller requests. */
   browserControlHttpSupported?: boolean;
   /** Exact live runner capability for per-request run-as. */
@@ -2669,6 +2703,7 @@ export async function buildSelfhostedBackendSession(
       ? { operationCpuQuotaSupported: deps.operationCpuQuotaSupported }
       : {}),
     transactionalFsWriteSupported: deps.transactionalFsWriteSupported === true,
+    transactionalFsWriteMachineSupported: deps.transactionalFsWriteMachineSupported === true,
     browserControlHttpSupported: deps.browserControlHttpSupported === true,
     runAsSupported: deps.runAsSupported === true,
     ...(deps.resolveOperationAdmission !== undefined

@@ -68,6 +68,7 @@ export interface SelfhostedConnectionBinding {
   operationResourcePolicySupported: boolean;
   operationCpuQuotaSupported: boolean;
   transactionalFsWriteSupported?: boolean;
+  transactionalFsWriteMachineSupported?: boolean;
   browserControlHttpSupported?: boolean;
   runAsSupported?: boolean;
 }
@@ -399,6 +400,8 @@ export function makeActiveBackendResolver(
         operationResourcePolicySupported: connection.operationResourcePolicySupported,
         operationCpuQuotaSupported: connection.operationCpuQuotaSupported,
         transactionalFsWriteSupported: connection.transactionalFsWriteSupported === true,
+        transactionalFsWriteMachineSupported:
+          connection.transactionalFsWriteMachineSupported === true,
         browserControlHttpSupported: connection.browserControlHttpSupported === true,
         runAsSupported: connection.runAsSupported === true,
         // The routing proxy caches this session by sandbox+epoch, but command

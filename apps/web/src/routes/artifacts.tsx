@@ -41,6 +41,7 @@ import {
   ARTIFACT_DETAIL_FRAME,
   ArtifactKindTile,
   useArtifactsBackLink,
+  useArtifactFullView,
 } from "@/components/artifacts/artifact-page-chrome";
 import { artifactKinds, type ArtifactKind } from "@/lib/artifact-catalog";
 import { invalidateArtifactCatalog, useArtifactCatalog } from "@/lib/use-artifact-catalog";
@@ -389,6 +390,7 @@ function ArtifactDetailPage({
   const navigate = useNavigate();
   const back = useArtifactsBackLink(workspaceId, fromSession);
   const search = useSearch({ strict: false }) as ArtifactReturnSearch;
+  const [fullView, setFullView] = useArtifactFullView();
   const viewer = useConsoleSiteViewer();
   const [tab, setTab] = useState<SiteTab>("site");
   const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(null);
@@ -708,6 +710,10 @@ function ArtifactDetailPage({
                   toolBridge={archived ? undefined : siteToolBridge}
                   viewer={viewer}
                   connectedToolCount={toolCount}
+                  // Links open the Site full screen; an archived one opens on
+                  // its page, which says so, and expands only on request.
+                  fullScreen={archived ? undefined : fullView}
+                  onFullScreenChange={archived ? undefined : setFullView}
                 />
               ) : (
                 <Notice

@@ -127,6 +127,7 @@ test("running-turn outages use structured database causes through SDK and histor
     "ECONNREFUSED",
     "ECONNRESET",
     "CONNECT_TIMEOUT",
+    "53300",
     "57P01",
     "57P02",
     "57P03",

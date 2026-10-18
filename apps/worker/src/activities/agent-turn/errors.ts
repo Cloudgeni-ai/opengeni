@@ -774,14 +774,14 @@ function isRunningTurnDatabaseTransportFailure(record: Record<string, unknown>):
 function isRunningTurnDatabaseConnectionSqlState(sqlState: string | null): boolean {
   return (
     sqlState !== null &&
-    (/^08[0-9A-Z]{3}$/.test(sqlState) || ["57P01", "57P02", "57P03"].includes(sqlState))
+    (/^08[0-9A-Z]{3}$/.test(sqlState) || ["53300", "57P01", "57P02", "57P03"].includes(sqlState))
   );
 }
 
 function isDatabaseConnectionSqlState(sqlState: string | null): boolean {
   return (
     sqlState !== null &&
-    (sqlState.startsWith("08") || ["57P01", "57P02", "57P03"].includes(sqlState))
+    (sqlState.startsWith("08") || ["53300", "57P01", "57P02", "57P03"].includes(sqlState))
   );
 }
 

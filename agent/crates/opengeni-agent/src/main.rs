@@ -694,7 +694,9 @@ async fn run_fabric(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
 
     let op_cgroups = operation_cgroups(&[])?;
     let _virtual_desktop = maybe_spawn_virtual_desktop(args);
-    let mut platform = NativePlatform::new();
+    // The link file names the root explicitly, `/` included: no fallback to
+    // the home directory as for a working directory a user started in.
+    let mut platform = NativePlatform::with_root(&fabric.workspace_root);
     if let Some(cgroups) = op_cgroups {
         platform = platform.with_oom_isolation(cgroups);
     }
@@ -728,8 +730,8 @@ async fn run_fabric(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     spawn_signal_handler(supervisor.shutdown_handle());
     spawn_reconnect_handler(supervisor.reconnect_handle());
 
-    let work = supervisor.work_in_progress();
     let silence = fabric.stream_silence;
+    let work = supervisor.work_in_progress(silence);
     let activity = tokio::spawn(fabric::report_activity(
         fabric::ActivityFile::new(&fabric.activity_dir, std::process::id()),
         move || work() + streams.moving(silence),

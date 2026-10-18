@@ -135,9 +135,34 @@ impl RelayChannel {
 
     /// Registers (or re-registers) presenting an explicit `resume_from_seq`.
     async fn register_from(config: ChannelConfig, resume_from_seq: u64) -> StreamResult<Self> {
-        let endpoint = config.credential.current().await?;
-        let transport = transport::dial(&config.dial_url(&endpoint.url)).await?;
-        Self::open_on(transport, config, endpoint.token, resume_from_seq).await
+        Self::register_through(config, resume_from_seq, |url| async move {
+            transport::dial(&url).await
+        })
+        .await
+    }
+
+    /// Dials through `dial` and registers. The relay checks the token when
+    /// the open arrives, and a slow dial can outlast the credential chosen
+    /// for it, so the open presents the credential current once the dial is
+    /// up; it dials again only if the relay's address changed meanwhile.
+    async fn register_through<F, D>(
+        config: ChannelConfig,
+        resume_from_seq: u64,
+        mut dial: F,
+    ) -> StreamResult<Self>
+    where
+        F: FnMut(String) -> D,
+        D: std::future::Future<Output = StreamResult<Box<dyn RelayTransport>>>,
+    {
+        let mut url = config.credential.current().await?.url;
+        loop {
+            let transport = dial(config.dial_url(&url)).await?;
+            let endpoint = config.credential.current().await?;
+            if endpoint.url == url {
+                return Self::open_on(transport, config, endpoint.token, resume_from_seq).await;
+            }
+            url = endpoint.url;
+        }
     }
 
     /// Performs the registration handshake over an already-dialed `transport`:
@@ -620,6 +645,125 @@ mod tests {
         assert_eq!(second.token, "ogr_second");
         drop(first.relay_side);
         drop(second.relay_side);
+    }
+
+    fn relay_endpoint(
+        url: &str,
+        token: &str,
+        expires_at_ms: Option<u64>,
+    ) -> crate::credential::RelayEndpoint {
+        crate::credential::RelayEndpoint {
+            url: url.to_string(),
+            token: token.to_string(),
+            expires_at_ms,
+        }
+    }
+
+    /// A registration presents the credential current once its dial is up:
+    /// one replaced during the dial, and one that expired during it and was
+    /// renewed after.
+    #[tokio::test]
+    async fn a_registration_presents_the_credential_current_once_its_dial_is_up() {
+        const RELAY: &str = "wss://relay.example/stream";
+
+        let credential = RelayCredential::fixed(RELAY, "ogr_first");
+        let channel_config = ChannelConfig {
+            credential: credential.clone(),
+            ..config()
+        };
+        let (agent_side, relay_side) = MockTransport::pair();
+        let relay = tokio::spawn(relay_double(relay_side, true));
+        let mut agent_side = Some(agent_side);
+        let channel = RelayChannel::register_through(channel_config, 0, |_url| {
+            credential.set(relay_endpoint(RELAY, "ogr_second", None));
+            let transport: Box<dyn RelayTransport> = Box::new(agent_side.take().expect("one dial"));
+            async move { Ok(transport) }
+        })
+        .await
+        .expect("register");
+        let opened = relay.await.expect("relay").expect("open");
+        assert_eq!(
+            opened.token, "ogr_second",
+            "the credential replaced during the dial"
+        );
+        drop(channel);
+        drop(opened.relay_side);
+
+        let now_ms = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        // Usable for 300 ms, past the expiry margin: it lapses mid-dial.
+        let credential = RelayCredential::pending();
+        credential.set(relay_endpoint(RELAY, "ogr_first", Some(now_ms + 2_300)));
+        let channel_config = ChannelConfig {
+            credential: credential.clone(),
+            ..config()
+        };
+        let renew = credential.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            renew.set(relay_endpoint(RELAY, "ogr_renewed", Some(now_ms + 600_000)));
+        });
+        let (agent_side, relay_side) = MockTransport::pair();
+        let relay = tokio::spawn(relay_double(relay_side, true));
+        let mut agent_side = Some(agent_side);
+        let channel = RelayChannel::register_through(channel_config, 0, |_url| {
+            let transport: Box<dyn RelayTransport> = Box::new(agent_side.take().expect("one dial"));
+            async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                Ok(transport)
+            }
+        })
+        .await
+        .expect("a credential that lapses during the dial is not fatal");
+        let opened = relay.await.expect("relay").expect("open");
+        assert_eq!(opened.token, "ogr_renewed");
+        drop(channel);
+        drop(opened.relay_side);
+    }
+
+    /// A relay address that changes during a dial is dialed afresh.
+    #[tokio::test]
+    async fn a_registration_redials_when_the_relay_moves_during_its_dial() {
+        let credential = RelayCredential::fixed("wss://relay-1.example/stream", "ogr_first");
+        let channel_config = ChannelConfig {
+            credential: credential.clone(),
+            ..config()
+        };
+        let (stale_agent, _stale_relay) = MockTransport::pair();
+        let (agent_side, relay_side) = MockTransport::pair();
+        let relay = tokio::spawn(relay_double(relay_side, true));
+        let mut sides = vec![agent_side, stale_agent];
+        let mut dialed = Vec::new();
+        let channel = RelayChannel::register_through(channel_config.clone(), 0, |url| {
+            if dialed.is_empty() {
+                credential.set(relay_endpoint(
+                    "wss://relay-2.example/stream",
+                    "ogr_moved",
+                    None,
+                ));
+            }
+            dialed.push(url);
+            let transport: Box<dyn RelayTransport> = Box::new(sides.pop().expect("a side"));
+            async move { Ok(transport) }
+        })
+        .await
+        .expect("register");
+        assert_eq!(
+            dialed,
+            [
+                channel_config.dial_url("wss://relay-1.example/stream"),
+                channel_config.dial_url("wss://relay-2.example/stream"),
+            ]
+        );
+        let opened = relay.await.expect("relay").expect("open");
+        assert_eq!(opened.token, "ogr_moved");
+        drop(channel);
+        drop(opened.relay_side);
     }
 
     #[tokio::test]
