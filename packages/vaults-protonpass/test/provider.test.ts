@@ -551,6 +551,31 @@ describe("items", () => {
 });
 
 describe("writes", () => {
+  for (const type of ["login", "note", "api_key"] as const) {
+    test(`an invalid successful ${type} create receipt stays unknown without replay`, async () => {
+      const { fake, provider } = setup((state) => {
+        // Leading '-' is valid. An embedded space is outside the supported ID
+        // alphabet, even when the CLI exits successfully after applying a write.
+        state.nextItemIds = ["invalid item id"];
+      });
+      const error = await errorOf(
+        provider.writeItem(ctx(), RW, {
+          name: "unconfirmed",
+          type,
+          websites: [],
+          fields: [],
+        }),
+      );
+      expect(error.code).toBe("provider_outcome_unknown");
+      expect(fake.state().nextItemIds).toEqual([]);
+      expect(fake.state().items[RW]!.filter((item) => item.id === "invalid item id")).toHaveLength(
+        1,
+      );
+      expect(commands(fake).filter((command) => command.startsWith("item create"))).toHaveLength(1);
+      expect(commands(fake).filter((command) => command.startsWith("item view"))).toHaveLength(0);
+    });
+  }
+
   test("creates logins with values only on stdin", async () => {
     const { fake, provider } = setup();
     const created = await provider.writeItem(ctx(), RW, {
