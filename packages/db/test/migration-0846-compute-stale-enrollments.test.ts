@@ -3,6 +3,7 @@ import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
+import { connect, createServer, type Socket } from "node:net";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
@@ -10,6 +11,7 @@ import {
   computeSandboxNamed,
   createDb,
   DatabaseWorkDeadlineError,
+  DatabaseWorkOutcomeUnknownError,
   listStaleComputeSandboxEnrollments,
   revokeStaleComputeSandboxEnrollment,
   STALE_COMPUTE_ENROLLMENT_PAGE_SIZE,
@@ -341,6 +343,155 @@ test("a bounded call ends its database work at the deadline and never commits la
     tenancy.release();
     row.release();
     await client.close();
+  }
+}, 60_000);
+
+async function freshStaleEnrollment(): Promise<{ workspaceId: string; enrollmentId: string }> {
+  const [source] = await fixture.admin`select account_id, workspace_id from enrollments
+    where id = ${stale[0]!}`;
+  const enrollmentId = crypto.randomUUID();
+  await fixture.admin`insert into enrollments(id,account_id,workspace_id,kind,sandbox_group_id,
+    pubkey,exposure,status,created_at)
+    values(${enrollmentId},${source!.account_id},${source!.workspace_id},'sandbox',
+      ${crypto.randomUUID()},null,'whole-machine','active',now() - interval '30 minutes')`;
+  return { workspaceId: source!.workspace_id as string, enrollmentId };
+}
+
+async function enrollmentStatus(id: string): Promise<string> {
+  const [row] = await fixture.admin`select status from enrollments where id = ${id}`;
+  return row!.status as string;
+}
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("a bounded call's deadline and stop cover its commit-time work, which then rolls back", async () => {
+  const late = await freshStaleEnrollment();
+  const stopped = await freshStaleEnrollment();
+  const ids = `'{${late.enrollmentId},${stopped.enrollmentId}}'::uuid[]`;
+  // On these rows only: the revoke's UPDATE takes 200 ms, and COMMIT would
+  // run another 200 ms of deferred trigger work, which PostgreSQL's statement
+  // timeout does not cover inside COMMIT.
+  await fixture.admin.unsafe(`
+    CREATE FUNCTION public.test_slow_row_${suffix}() RETURNS trigger LANGUAGE plpgsql
+      AS $$ BEGIN PERFORM pg_sleep(0.2); RETURN NEW; END $$;
+    CREATE FUNCTION public.test_slow_commit_${suffix}() RETURNS trigger LANGUAGE plpgsql
+      AS $$ BEGIN PERFORM pg_sleep(0.2); RETURN NULL; END $$;
+    CREATE TRIGGER test_slow_row_${suffix} BEFORE UPDATE ON enrollments FOR EACH ROW
+      WHEN (OLD.id = ANY(${ids})) EXECUTE FUNCTION public.test_slow_row_${suffix}();
+    CREATE CONSTRAINT TRIGGER test_slow_commit_${suffix} AFTER UPDATE ON enrollments
+      DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+      WHEN (OLD.id = ANY(${ids})) EXECUTE FUNCTION public.test_slow_commit_${suffix}();`);
+  const client = createDb(appUrl(), { max: 1 });
+  try {
+    // No signal: the deferred work is cancelled at the deadline, so the call
+    // reports a rollback, and nothing committed.
+    let started = Date.now();
+    const error = await revokeStaleComputeSandboxEnrollment(client.db, late, {
+      deadlineAtMs: started + 300,
+    }).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(DatabaseWorkDeadlineError);
+    expect(Date.now() - started).toBeLessThan(380);
+    await pause(500);
+    expect(await enrollmentStatus(late.enrollmentId)).toBe("active");
+
+    // A stop during the deferred work returns at once with its reason, and the
+    // work still rolls back once that statement ends.
+    const controller = new AbortController();
+    started = Date.now();
+    setTimeout(() => controller.abort(new Error("stop")), 300);
+    const stop = await revokeStaleComputeSandboxEnrollment(client.db, stopped, {
+      deadlineAtMs: started + 5_000,
+      signal: controller.signal,
+    }).catch((reason: unknown) => reason);
+    expect((stop as Error).message).toBe("stop");
+    expect(Date.now() - started).toBeLessThan(380);
+    await pause(500);
+    expect(await enrollmentStatus(stopped.enrollmentId)).toBe("active");
+  } finally {
+    await client.close();
+    await fixture.admin.unsafe(`
+      DROP TRIGGER test_slow_row_${suffix} ON enrollments;
+      DROP TRIGGER test_slow_commit_${suffix} ON enrollments;
+      DROP FUNCTION public.test_slow_row_${suffix}();
+      DROP FUNCTION public.test_slow_commit_${suffix}();`);
+  }
+}, 60_000);
+
+test("a bounded call stopped or cut off while COMMIT is in flight reports an unknown outcome", async () => {
+  // A relay to the database that can hold the client's COMMIT for a while, or
+  // cut the connection instead of passing it on.
+  type OnCommit = { hold: number; seen: () => void } | "cut" | undefined;
+  let onCommit: OnCommit;
+  const sockets = new Set<Socket>();
+  const target = new URL(appUrl());
+  const relay = createServer((client) => {
+    const upstream = connect(Number(target.port || 5432), target.hostname);
+    sockets.add(client).add(upstream);
+    const close = () => {
+      client.destroy();
+      upstream.destroy();
+    };
+    for (const socket of [client, upstream]) {
+      socket.on("close", close);
+      socket.on("error", close);
+    }
+    upstream.on("data", (chunk) => client.write(chunk));
+    client.on("data", (chunk) => {
+      const action = chunk.includes("commit\0") ? onCommit : undefined;
+      if (action === undefined) return void upstream.write(chunk);
+      onCommit = undefined;
+      if (action === "cut") return close();
+      client.pause();
+      action.seen();
+      setTimeout(() => {
+        upstream.write(chunk);
+        client.resume();
+      }, action.hold);
+    });
+  });
+  await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
+  const relayed = new URL(target);
+  relayed.hostname = "127.0.0.1";
+  relayed.port = String((relay.address() as { port: number }).port);
+  // Unprepared, so every COMMIT carries its text for the relay to spot.
+  const client = createDb(relayed.toString(), { max: 1, preparedStatements: false });
+  try {
+    // Stopped while COMMIT is held: the call returns at once, as an unknown
+    // outcome; here the commit went on to succeed.
+    const held = await freshStaleEnrollment();
+    const controller = new AbortController();
+    let seenAt = 0;
+    onCommit = {
+      hold: 400,
+      seen: () => {
+        seenAt = Date.now();
+        setTimeout(() => controller.abort(new Error("stop")), 100);
+      },
+    };
+    const stop = await revokeStaleComputeSandboxEnrollment(client.db, held, {
+      deadlineAtMs: Date.now() + 5_000,
+      signal: controller.signal,
+    }).catch((reason: unknown) => reason);
+    expect(stop).toBeInstanceOf(DatabaseWorkOutcomeUnknownError);
+    expect(seenAt).toBeGreaterThan(0);
+    expect(Date.now() - seenAt).toBeLessThan(300);
+    await pause(700);
+    expect(await enrollmentStatus(held.enrollmentId)).toBe("revoked");
+
+    // The connection lost with COMMIT unanswered: unknown, with no signal too.
+    // (Here the server never saw the COMMIT, so the work rolled back.)
+    const cut = await freshStaleEnrollment();
+    onCommit = "cut";
+    const lost = await revokeStaleComputeSandboxEnrollment(client.db, cut, {
+      deadlineAtMs: Date.now() + 5_000,
+    }).catch((reason: unknown) => reason);
+    expect(lost).toBeInstanceOf(DatabaseWorkOutcomeUnknownError);
+    await pause(300);
+    expect(await enrollmentStatus(cut.enrollmentId)).toBe("active");
+  } finally {
+    await client.close();
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => relay.close(resolve));
   }
 }, 60_000);
 

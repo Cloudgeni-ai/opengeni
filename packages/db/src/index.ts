@@ -62968,22 +62968,43 @@ export async function releaseSandboxAgentLink(
  * sets the statement timeout to the time left (`limit`), so a lock wait (the
  * workspace tenancy lock included) or a slow statement is cancelled by
  * PostgreSQL at the deadline, whatever the pool's state, and nothing else is
- * ever cancelled. Work that finishes after the deadline, or after the signal
- * aborts, rolls back instead of committing late; a stopped call returns at
- * once. A call whose deadline has passed, or that waited for a pooled
- * connection until then, does nothing.
+ * ever cancelled. PostgreSQL never times out COMMIT, so the work runs its
+ * commit-time work (deferred triggers) itself, under the same limit, just
+ * before it; COMMIT then only makes the work durable. A call whose deadline
+ * has passed, or that waited for a pooled connection until then, does nothing.
+ *
+ * How a bounded call ends says what happened to its work:
+ * - it returns: the work committed;
+ * - {@link DatabaseWorkDeadlineError}, the stop signal's reason or any other
+ *   error: the work rolled back, because COMMIT was never sent or the server
+ *   refused it;
+ * - {@link DatabaseWorkOutcomeUnknownError}: the call was stopped, or lost its
+ *   connection, while COMMIT was in flight, so the work may or may not have
+ *   committed. Read the state again before relying on either.
  */
 export type DatabaseWorkBound = { deadlineAtMs: number; signal?: AbortSignal | undefined };
 
 export class DatabaseWorkDeadlineError extends Error {
-  constructor() {
-    super("The maintenance deadline passed; the database work was rolled back.");
+  constructor(options?: { cause?: unknown }) {
+    super("The maintenance deadline passed; the database work was rolled back.", options);
     this.name = "DatabaseWorkDeadlineError";
+  }
+}
+
+export class DatabaseWorkOutcomeUnknownError extends Error {
+  constructor(options?: { cause?: unknown }) {
+    super(
+      "The maintenance work was interrupted while it committed; it may or may not have committed.",
+      options,
+    );
+    this.name = "DatabaseWorkOutcomeUnknownError";
   }
 }
 
 /** Give the next statements of bounded work at most the time left. */
 type LimitToDeadline = (db: Database) => Promise<void>;
+
+const QUERY_CANCELED_SQLSTATE = "57014";
 
 async function withinWorkBound<T>(
   db: Database,
@@ -63002,20 +63023,48 @@ async function withinWorkBound<T>(
   };
   signal?.throwIfAborted();
   if (Date.now() >= deadlineAtMs) throw new DatabaseWorkDeadlineError();
-  const work = db.transaction(async (tx) => {
-    const scoped = tx as unknown as Database;
-    await limit(scoped);
-    const value = await fn(scoped, limit);
-    // A stopped or late call rolls back rather than commit after its bound.
-    signal?.throwIfAborted();
-    if (Date.now() >= deadlineAtMs) throw new DatabaseWorkDeadlineError();
-    return value;
-  });
+  // Set once COMMIT may be on its way; until then every failure rolls back.
+  let committing = false;
+  const work = (async () => {
+    try {
+      return await db.transaction(async (tx) => {
+        const scoped = tx as unknown as Database;
+        await limit(scoped);
+        const value = await fn(scoped, limit);
+        // Run the deferred work COMMIT would run, while the deadline can still
+        // end it: PostgreSQL applies no statement timeout to COMMIT.
+        await limit(scoped);
+        await scoped.execute(sql`set constraints all immediate`);
+        // Checked in the same step that lets COMMIT go: a stop or deadline
+        // seen here rolls back, and any later one finds `committing` set.
+        signal?.throwIfAborted();
+        if (Date.now() >= deadlineAtMs) throw new DatabaseWorkDeadlineError();
+        committing = true;
+        return value;
+      });
+    } catch (error) {
+      if (error instanceof DatabaseWorkDeadlineError) throw error;
+      const sqlState = nestedPostgresSqlState(error);
+      // The server cancelled a statement at the deadline: the transaction
+      // rolled back.
+      if (sqlState === QUERY_CANCELED_SQLSTATE)
+        throw new DatabaseWorkDeadlineError({ cause: error });
+      // A COMMIT the server refused rolled back. One whose answer was lost
+      // (the connection failed, or the server ended the session or shut
+      // down, which can happen just after the commit) may have committed.
+      if (committing && (sqlState === null || /^(08|57P)/.test(sqlState)))
+        throw new DatabaseWorkOutcomeUnknownError({ cause: error });
+      throw error;
+    }
+  })();
   if (!signal) return await work;
   work.catch(() => {});
   let onAbort: (() => void) | undefined;
   const stopped = new Promise<never>((_, reject) => {
-    onAbort = () => reject(signal.reason ?? new Error("The maintenance work was stopped."));
+    onAbort = () => {
+      const reason = signal.reason ?? new Error("The maintenance work was stopped.");
+      reject(committing ? new DatabaseWorkOutcomeUnknownError({ cause: reason }) : reason);
+    };
     signal.addEventListener("abort", onAbort, { once: true });
   });
   stopped.catch(() => {});

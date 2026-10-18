@@ -82,9 +82,14 @@ skips sandbox enrollments, and machine routes list machines only.
   the statement timeout to the time left before the workspace lock wait and
   again before its main statement, so a lock wait or slow statement ends on
   the server by the deadline, whatever the connection pool's state, and no
-  other connection's work is ever touched.
-  Work that finishes after the deadline, or after the activity is stopped,
-  rolls back instead of committing late. Each sandbox's database work gets at
+  other connection's work is ever touched. PostgreSQL never times out
+  COMMIT, so the work runs its deferred commit-time work (constraint
+  triggers) itself under the same limit just before committing. Work that
+  finishes after the deadline, or after the activity is stopped, rolls back
+  instead of committing late. A stop, or a lost connection, while COMMIT is
+  in flight is reported as an unknown outcome rather than a rollback; every
+  sweep step is idempotent and re-checked, so the next pass settles it either
+  way. Each sandbox's database work gets at
   most five seconds of the pass. One stalled delete or lock
   therefore never holds up the others or the rest of maintenance. Each pass
   resumes after the last sandbox the previous one reached, and a sandbox whose
