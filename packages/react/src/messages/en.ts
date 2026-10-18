@@ -1285,7 +1285,7 @@ export const englishMessages = {
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
   "lib.format.now": "now",
   "lib.format.outOfCreditsThisWorkspace":
-    "No credits are available for this model. Add credits or choose another model; the conversation is preserved.",
+    "Out of credits for this model. Add credits to continue; the conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
   "lib.format.providerBlockedRequestDetail": "The model provider blocked this request. {detail}",
   "lib.format.reconcileBeforeRetry":

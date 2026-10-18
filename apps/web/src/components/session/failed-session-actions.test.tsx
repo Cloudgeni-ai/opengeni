@@ -792,12 +792,17 @@ test("free credit for other models offers a covered model before buying credits"
       { id: "azure-sol/gpt-6.1-sol", label: "GPT-6.1 Sol" },
       { id: "gpt-6-luna", label: "GPT-6 Luna" },
     ],
+    selectionUsable: false,
   };
-  const banner = (props: { modelChanged?: boolean; canBuyCredits?: boolean }) => (
+  const banner = (props: {
+    modelChanged?: boolean;
+    selectionUsable?: boolean;
+    canBuyCredits?: boolean;
+  }) => (
     <FailedSessionBanner
       failure={{ ...failure, reason: "insufficient Opengeni credits" }}
       creditExhausted
-      freeCreditGap={gap}
+      freeCreditGap={{ ...gap, selectionUsable: props.selectionUsable ?? false }}
       onChooseModel={(model) => chosen.push(model)}
       workspaceId="workspace-a"
       canBuyCredits={props.canBuyCredits ?? true}
@@ -822,8 +827,13 @@ test("free credit for other models offers a covered model before buying credits"
   expect(container.querySelector("button")!.textContent).toBe("Use GPT-6.1 Sol");
   expect(container.querySelector("a")).toBeNull();
 
-  // After switching, the copy says how to continue and no switch is offered again.
+  // Another uncovered model selected: the switch stays on offer.
   await act(async () => root!.render(banner({ modelChanged: true })));
+  expect(container.querySelector("button")!.textContent).toBe("Use GPT-6.1 Sol");
+  expect(container.textContent).toContain("Switch to a model they cover");
+
+  // A usable model selected: the copy says how to continue and no switch is offered.
+  await act(async () => root!.render(banner({ modelChanged: true, selectionUsable: true })));
   expect(container.textContent).toContain(
     "Your free credits don't cover Claude Opus 5.5. Send a message to continue with the selected model.",
   );

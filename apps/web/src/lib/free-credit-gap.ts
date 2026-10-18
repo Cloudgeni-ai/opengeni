@@ -1,4 +1,10 @@
-import { findPickerRow, type PickerModelRow } from "@/lib/model-policy";
+import type { LatencyMode, ReasoningEffort } from "@opengeni/sdk";
+import {
+  coerceReasoningEffortForModel,
+  findPickerRow,
+  runnableLatencyModesForModel,
+  type PickerModelRow,
+} from "@/lib/model-policy";
 
 /**
  * The session's model has no usable credit while free (promotional) credit
@@ -10,12 +16,17 @@ export type FreeCreditGap = {
   modelLabel: string;
   /** Selectable models the remaining free credits cover, preferred first. */
   covered: { id: string; label: string }[];
+  /**
+   * The composer already selects another model that can run: a covered or
+   * credit-funded model, or one paid another way (connected, subscription, free).
+   */
+  selectionUsable: boolean;
 };
 
 export function freeCreditGap(
   rows: PickerModelRow[],
   model: string,
-  preferredModel?: string | null,
+  options: { selectedModel?: string | null; preferredModel?: string | null } = {},
 ): FreeCreditGap | null {
   const current = findPickerRow(rows, model);
   if (current?.catalog.creditFunding !== "unavailable") return null;
@@ -23,19 +34,46 @@ export function freeCreditGap(
     (row) => row.id !== model && row.selectable && row.catalog.creditFunding === "promotional",
   );
   if (covered.length === 0) return null;
+  const { selectedModel, preferredModel } = options;
   const preferred = preferredModel ? covered.findIndex((row) => row.id === preferredModel) : -1;
   if (preferred > 0) covered.unshift(...covered.splice(preferred, 1));
+  const selected =
+    selectedModel && selectedModel !== model ? findPickerRow(rows, selectedModel) : null;
   return {
     modelLabel: current.label,
     covered: covered.map((row) => ({ id: row.id, label: row.label })),
+    selectionUsable: Boolean(
+      selected?.selectable && selected.catalog.creditFunding !== "unavailable",
+    ),
   };
 }
 
 /** Headline for a credit stop that free credits could avoid on another model. */
-export function freeCreditGapReason(gap: FreeCreditGap, modelChanged: boolean): string {
+export function freeCreditGapReason(gap: FreeCreditGap): string {
   const subject = `Your free credits don't cover ${gap.modelLabel}.`;
-  if (modelChanged) return `${subject} Send a message to continue with the selected model.`;
+  if (gap.selectionUsable) return `${subject} Send a message to continue with the selected model.`;
   const [first, second] = gap.covered;
   const examples = second ? `${first!.label} or ${second.label}` : first!.label;
   return `${subject} Switch to a model they cover, such as ${examples}, or add credits.`;
+}
+
+/**
+ * The banner's one-click switch, with the picker's coercion: keep the effort
+ * and speed when the new model runs them, otherwise fall back to its default
+ * effort and standard speed so the composer policy stays sendable.
+ */
+export function coveredModelChoice(
+  row: PickerModelRow,
+  effort: ReasoningEffort,
+  latencyMode: LatencyMode,
+): { model: string; effort: ReasoningEffort; latencyMode: LatencyMode | null } | null {
+  if (!row.selectable) return null;
+  return {
+    model: row.id,
+    effort: coerceReasoningEffortForModel(row.catalog, effort),
+    latencyMode:
+      latencyMode !== "standard" && !runnableLatencyModesForModel(row.catalog).includes(latencyMode)
+        ? "standard"
+        : null,
+  };
 }

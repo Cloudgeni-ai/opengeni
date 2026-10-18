@@ -81,8 +81,11 @@ export function FailedSessionBanner({
   const creditGap = billingFailure ? freeCreditGap : null;
   const { reason, unavailableModel, retryUnhelpful, detail, dailyLimit, compaction } =
     failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap);
+  // Offer the switch until the composer selects a model that can run.
   const switchTo =
-    creditGap && !modelChanged && chooseModel && onChooseModel ? creditGap.covered[0] : undefined;
+    creditGap && !creditGap.selectionUsable && chooseModel && onChooseModel
+      ? creditGap.covered[0]
+      : undefined;
   // The free model's daily allowance is deployment-wide: name it and offer the
   // ways to keep going. Every other model keeps the generic daily-limit copy.
   const freeModelLimit = freeModel && dailyLimit && !structuralFailure;

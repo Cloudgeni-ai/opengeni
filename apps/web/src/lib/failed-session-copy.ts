@@ -334,7 +334,7 @@ export function failedSessionCopy(
   }
   const reason = creditExhausted
     ? freeCreditGap
-      ? freeCreditGapReason(freeCreditGap, modelChanged)
+      ? freeCreditGapReason(freeCreditGap)
       : "This workspace is out of Opengeni credits."
     : failure.safetyRefusal
       ? "The model provider declined this request."
