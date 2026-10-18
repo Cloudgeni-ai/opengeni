@@ -8,6 +8,9 @@ export PATH=$HOME/.cargo/bin:$HOME/.bun/bin:/snap/bin:$PATH
 export KUBECONFIG=$HOME/.kube/config
 # shellcheck disable=SC1091
 . "$HOME/e2e/endpoints.env"
+# What was built (build.sh), which results name.
+# shellcheck disable=SC1091
+. "$HOME/e2e/out/build.env"
 sec=$HOME/e2e/secrets
 [ -s "$sec/model.env" ] || { echo "no model: run env.sh model-up and deploy first" >&2; exit 1; }
 # shellcheck disable=SC1091
@@ -41,11 +44,12 @@ OPENGENI_URL=$OPENGENI_URL API_CONTRACT=$contract MODEL=$MODEL_DEPLOYMENT OUT=$o
   COMPUTE_OPENGENI_KEY=$sec/compute-opengeni-key COMPUTE_OPERATOR_KEY=$sec/compute-operator-key \
   PROJECT=$PROJECT ZONE=$ZONE HOSTS=${HOSTS:-3} ONLY=${ONLY:-} \
   PLAYWRIGHT_MODULE=$og/node_modules/playwright/index.js \
-  OPENGENI_SHA=${OPENGENI_SHA:-} COMPUTE_SHA=${COMPUTE_SHA:-} \
+  OPENGENI_SHA=$OPENGENI_LABEL COMPUTE_SHA=$COMPUTE_SHA \
   bun "$HOME/e2e/suite/run.ts" || status=$?
-kubectl -n opengeni logs "deploy/${COMPUTE_SERVICE%%.*}" --since=2h >"$out/compute-control.log" 2>&1 || true
-for part in api worker-turns worker-control; do
-  kubectl -n opengeni logs "deploy/og-opengeni-$part" --since=2h --all-containers >"$out/$part.log" 2>&1 || true
+# Every replica's log, each line prefixed with its pod.
+for part in compute-control api worker-turns worker-control relay; do
+  kubectl -n opengeni logs -l "app.kubernetes.io/component=$part" --prefix --all-containers \
+    --max-log-requests=20 --since=2h >"$out/$part.log" 2>&1 || true
 done
 # Failure records since the run began (diagnostics.py).
 since=$(date -u -d "@$started" +%Y-%m-%dT%H:%M:%SZ)

@@ -145,6 +145,13 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg ogtag "$O
     config: ({
       OPENGENI_SANDBOX_BACKEND: "compute",
       OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
+      # The sandbox rollout controls of the managed deployment
+      # (values.preview-managed.example.yaml): turns own the
+      # sandbox lease, which enrolling a compute sandbox agent needs.
+      OPENGENI_SANDBOX_OWNERSHIP_ENABLED: "true",
+      OPENGENI_SANDBOX_LAZY_PROVISION: "true",
+      OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED: "false",
+      OPENGENI_SANDBOX_PREPARATION_PROFILES: "none",
       OPENGENI_PUBLIC_BASE_URL: "https://\($app)",
       OPENGENI_WEB_BASE_URL: "https://\($app)",
       OPENGENI_WEB_ALLOWED_HOSTS: $app,

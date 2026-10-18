@@ -26,6 +26,8 @@
 # Settings: PROJECT; ZONE (europe-west4-a); PREFIX (compute-e2e; every
 # resource's name starts with it); LABELS (purpose=compute-e2e, as k=v,...);
 # OPENGENI_REF, the commit Opengeni's images come from (origin/main);
+# OPENGENI_MERGE_REFS, further Opengeni refs merged into it on the stack VM
+# before building (space-separated; for branches not yet on one branch);
 # COMPUTE_REF, the commit of compute/ and the chart (this checkout's HEAD);
 # both must be pushed to REPO_URL. HOSTS (3), HOST_MACHINE (n2-standard-8),
 # STACK_MACHINE (n2-standard-32), SSH_FROM (this machine's address), STATE
@@ -70,8 +72,13 @@ registry() { printf '%s-docker.pkg.dev/%s/%s' "$REGION" "$PROJECT" "$PREFIX"; }
 
 resolve_refs() {
   OPENGENI_SHA=$(git -C "$CHECKOUT" rev-parse --verify "${OPENGENI_REF:-origin/main}^{commit}")
+  OPENGENI_MERGE=""
+  local ref
+  for ref in ${OPENGENI_MERGE_REFS:-}; do
+    OPENGENI_MERGE="${OPENGENI_MERGE:+$OPENGENI_MERGE }$(git -C "$CHECKOUT" rev-parse --verify "$ref^{commit}")"
+  done
   COMPUTE_SHA=$(git -C "$CHECKOUT" rev-parse --verify "${COMPUTE_REF:-HEAD}^{commit}")
-  printf 'OPENGENI_SHA=%s\nCOMPUTE_SHA=%s\n' "$OPENGENI_SHA" "$COMPUTE_SHA" >"$STATE/refs"
+  printf 'OPENGENI_SHA=%s\nOPENGENI_MERGE="%s"\nCOMPUTE_SHA=%s\n' "$OPENGENI_SHA" "$OPENGENI_MERGE" "$COMPUTE_SHA" >"$STATE/refs"
 }
 
 SSH_OPTS=(-i "$KEY" -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$STATE/known_hosts"
@@ -230,8 +237,8 @@ artifact_runtime_from() {
 build() {
   resolve_refs
   push_scripts
-  log "build on $STACK: Opengeni $OPENGENI_SHA, compute $COMPUTE_SHA (log in $STATE/build.log)"
-  on "OPENGENI_SHA=$OPENGENI_SHA COMPUTE_SHA=$COMPUTE_SHA REGISTRY=$(registry) BUCKET=$(bucket) ARTIFACT_RUNTIME_FROM=$(artifact_runtime_from) bash e2e/build.sh" \
+  log "build on $STACK: Opengeni $OPENGENI_SHA${OPENGENI_MERGE:+ merged with $OPENGENI_MERGE}, compute $COMPUTE_SHA (log in $STATE/build.log)"
+  on "OPENGENI_SHA=$OPENGENI_SHA OPENGENI_MERGE='$OPENGENI_MERGE' COMPUTE_SHA=$COMPUTE_SHA REGISTRY=$(registry) BUCKET=$(bucket) ARTIFACT_RUNTIME_FROM=$(artifact_runtime_from) bash e2e/build.sh" \
     >"$STATE/build.log" 2>&1 || { tail -60 "$STATE/build.log" >&2; return 1; }
   copy_from e2e/out/build.env "$STATE/build.env"
   # shellcheck disable=SC1091
@@ -286,8 +293,8 @@ suite() {
   push_scripts
   local run
   run=${RUN:-$(date -u +%Y%m%dT%H%M%SZ)}
-  log "suite run $run (Opengeni $OPENGENI_SHA, compute $COMPUTE_SHA)"
-  on "RUN=$run ONLY='${ONLY:-}' OPENGENI_SHA=$OPENGENI_SHA COMPUTE_SHA=$COMPUTE_SHA PROJECT=$PROJECT ZONE=$ZONE bash e2e/suite.sh" |
+  log "suite run $run (against the deployed build)"
+  on "RUN=$run ONLY='${ONLY:-}' PROJECT=$PROJECT ZONE=$ZONE bash e2e/suite.sh" |
     tee "$STATE/suite-$run.log" || true
   mkdir -p "$STATE/runs"
   copy_from "e2e/runs/$run" "$STATE/runs/" || true

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Builds, on the stack VM, everything the environment runs, from two
 # commits (env.sh build):
-#   - from OPENGENI_SHA: Opengeni's images (api, worker, web, relay),
-#     imported into k3s, and its sandbox and desktop images, pushed to
-#     REGISTRY. An image without /usr/local/bin/opengeni-agent
-#     (ADR 21) gets the agent built from the same commit (agent.Dockerfile);
+#   - from OPENGENI_SHA, merged with the commits in OPENGENI_MERGE when
+#     set (a fixed identity and date, so the same inputs give the same
+#     commit): Opengeni's images (api, worker, web, relay), imported into
+#     k3s, and its sandbox and desktop images, pushed to REGISTRY. Both
+#     must install /usr/local/bin/opengeni-agent (ADR 21), which the
+#     sandbox runs in fabric mode;
 #   - from COMPUTE_SHA: compute-control's image (into k3s) and the host
 #     bundle (deploy/host/bundle.sh), uploaded to gs://BUCKET/bundles;
 #   - the stored sandbox images: compute-host build-image of the sandbox
@@ -17,10 +19,8 @@ shopt -s inherit_errexit
 export PATH=$HOME/.cargo/bin:$HOME/.bun/bin:/snap/bin:$PATH
 og=/srv/e2e/opengeni
 cm=/srv/e2e/compute
-here=$(cd "$(dirname "$0")" && pwd)
 out=$HOME/e2e/out
 mkdir -p "$out"
-ogtag=e2e-${OPENGENI_SHA:0:12}
 log() { printf '[build %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 imported() { sudo k3s ctr -n k8s.io images ls -q | grep -qx "docker.io/library/$1"; }
 to_k3s() {
@@ -30,8 +30,19 @@ to_k3s() {
 has_agent() { docker run --rm --entrypoint /bin/sh "$1" -c 'test -x /usr/local/bin/opengeni-agent'; }
 
 log "checkouts"
-git -C /srv/e2e/src fetch -q origin "$OPENGENI_SHA" "$COMPUTE_SHA"
+# shellcheck disable=SC2086 # OPENGENI_MERGE is a list of commits.
+git -C /srv/e2e/src fetch -q origin "$OPENGENI_SHA" ${OPENGENI_MERGE:-} "$COMPUTE_SHA"
+git -C "$og" merge --abort 2>/dev/null || true
 git -C "$og" checkout -q --detach "$OPENGENI_SHA"
+for commit in ${OPENGENI_MERGE:-}; do
+  log "  merging $commit"
+  GIT_AUTHOR_DATE=2000-01-01T00:00:00Z GIT_COMMITTER_DATE=2000-01-01T00:00:00Z \
+    git -C "$og" -c user.name=e2e -c user.email=e2e@example.invalid merge -q --no-edit "$commit"
+done
+OPENGENI_BUILT=$(git -C "$og" rev-parse HEAD)
+OPENGENI_LABEL=${OPENGENI_SHA:0:12}
+for commit in ${OPENGENI_MERGE:-}; do OPENGENI_LABEL="$OPENGENI_LABEL+${commit:0:12}"; done
+ogtag=e2e-${OPENGENI_BUILT:0:12}
 git -C "$cm" checkout -q --detach "$COMPUTE_SHA"
 # The fleet's artifacts are named by the parts of compute/ they are built
 # from, so a commit that changes only the chart, the docs or this suite
@@ -82,17 +93,17 @@ to_k3s "opengeni-compute-control:$cmtag"
 # The sandbox images, by digest.
 sandbox_image() {
   local dockerfile=$2 ref=$REGISTRY/$1:$ogtag
-  if ! docker image inspect "$ref" >/dev/null 2>&1 || ! has_agent "$ref"; then
+  if ! docker image inspect "$ref" >/dev/null 2>&1; then
     log "  $ref"
     # The artifact runtime bundle (above) was assembled for another commit,
     # which the sandbox images verify; they build without it (the artifact
     # tool in the sandbox is then unavailable, which no check uses).
     docker build -q -f "$og/docker/$dockerfile" --build-arg OPENGENI_ARTIFACT_RUNTIME_BUNDLE=.release/none \
       -t "$ref" "$og" >/dev/null
-    if ! has_agent "$ref"; then
-      log "  $ref has no opengeni-agent: adding one built from $OPENGENI_SHA"
-      docker build -q -f "$here/agent.Dockerfile" --build-arg "BASE=$ref" -t "$ref" "$og/agent" >/dev/null
-    fi
+  fi
+  if ! has_agent "$ref"; then
+    log "$ref has no /usr/local/bin/opengeni-agent: build from Opengeni commits whose $dockerfile installs it"
+    return 1
   fi
   docker push -q "$ref" >/dev/null
   docker image inspect --format '{{index .RepoDigests 0}}' "$ref"
@@ -134,6 +145,9 @@ DESKTOP_IMAGE=$(stored "$DESKTOP_REF")
 
 cat >"$out/build.env" <<EOF
 OPENGENI_SHA=$OPENGENI_SHA
+OPENGENI_MERGE="${OPENGENI_MERGE:-}"
+OPENGENI_BUILT=$OPENGENI_BUILT
+OPENGENI_LABEL=$OPENGENI_LABEL
 COMPUTE_SHA=$COMPUTE_SHA
 OPENGENI_TAG=$ogtag
 COMPUTE_TAG=$cmtag
