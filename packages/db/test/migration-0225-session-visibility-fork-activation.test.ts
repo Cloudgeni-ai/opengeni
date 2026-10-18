@@ -496,9 +496,13 @@ describe("migration 0303 session tenancy product activation", () => {
     // workspace, and their source chat is only provenance, which the API
     // redacts for anyone who cannot read that chat. Task vaults (0739) name
     // their root session, but `vaults` has no direct app DML: every read goes
-    // through vault routines that check the caller's session reach.
+    // through vault routines that check the caller's session reach. Site chat
+    // access grants (0842) are authority, not content: a restrictive owner
+    // policy limits every row to the subject who owns both the chat and the
+    // Site, so a grant never reveals a chat its reader could not already see.
     expect(Array.from(missing)).toEqual([
       { tableName: "session_admin_access" },
+      { tableName: "site_session_access" },
       { tableName: "vaults" },
       { tableName: "workspace_artifact_events" },
       { tableName: "workspace_artifact_versions" },
