@@ -2326,6 +2326,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0838_reclaim_exited_backend_runtime_capabilities.sql",
+      "0841_session_machine_access_explanation.sql",
       "0837_hot_session_tables_analyze_cadence.sql",
       "0836_cheaper_session_write_fences.sql",
       "0832_schedule_defaults_and_turn_notifications.sql",

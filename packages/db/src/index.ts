@@ -1,3 +1,4 @@
+export { getSessionMachineAccess } from "./session-machine-access";
 import {
   decodeActivityXid,
   encodeActivityXid,

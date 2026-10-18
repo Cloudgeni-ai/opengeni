@@ -3,6 +3,27 @@ import { failureDiagnostic } from "../src/failure-diagnostic";
 import { createObservability } from "../src";
 
 const sentinel = "SECRET_CANARY_481FA";
+test("only the exact reviewed permission rejection receives a machine-owner reason", () => {
+  const known = {
+    name: "PostgresError",
+    code: "42501",
+    message: "only the personal machine owner may attach it",
+    where: "PL/pgSQL function admit_session_attempt_personal_machine() line 62 at RAISE",
+  };
+  const inspect = (error: unknown) =>
+    failureDiagnostic({ code: "db_failure", stage: "session_attempts.claim", error });
+  expect(inspect(known).rejectionReason).toBe("personal_machine_owner_required");
+  for (const changed of [
+    { code: "XX000" },
+    { message: sentinel },
+    { where: sentinel },
+    { name: "Error" },
+  ]) {
+    const diagnostic = inspect({ ...known, ...changed });
+    expect(diagnostic.rejectionReason).toBeUndefined();
+    expect(JSON.stringify(diagnostic)).not.toContain(sentinel);
+  }
+});
 test("caller-supplied correlation IDs and generations are validated, with driver SQLSTATE recovered", () => {
   const error = Object.assign(new Error(sentinel), { name: "PostgresError", code: "40P01" });
   const id = "00000000-0000-4000-8000-000000000009";

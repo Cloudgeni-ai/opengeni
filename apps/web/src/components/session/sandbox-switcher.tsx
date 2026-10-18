@@ -11,12 +11,15 @@ import { MACHINES_SESSION_POLL_MS, type MachineView } from "@opengeni/react/mach
 import type { SandboxBackend } from "@opengeni/sdk";
 import { LaptopIcon, Loader2Icon, ServerIcon } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
+import { Popover } from "radix-ui";
+import { Button } from "@/components/ui/button";
 
 import { ComposerMenuHeader } from "@/components/ui/composer-menu";
 import {
   MENU_LABEL_CLASS,
   MENU_NOTE_CLASS,
   MENU_SEPARATOR_CLASS,
+  MENU_SURFACE_CLASS,
 } from "@/components/ui/menu-styles";
 import { userErrorText } from "@/lib/api-error";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
@@ -69,13 +72,76 @@ export function useSessionRunsOn(sessionId: string, sandboxBackend: SandboxBacke
   const activeMachine = machines.find((machine) => machine.active) ?? null;
   const activeName = activeMachine
     ? machineDisplayName(t, activeMachine)
-    : sessionSandboxLabel(t, sandboxBackend);
+    : (fleet.sessionMachineAccess?.machineName ?? sessionSandboxLabel(t, sandboxBackend));
   const hasChoices =
     fleet.canAttach && machines.some((machine) => !machine.active && isSelectable(machine));
   return { fleet, machines, activeMachine, activeName, hasChoices, sandboxBackend };
 }
 
 export type SessionRunsOn = ReturnType<typeof useSessionRunsOn>;
+
+/** The same authorized picker as + → Runs on, reachable from an access notice. */
+export function SessionMachinePickerAction(props: {
+  runsOn: SessionRunsOn;
+  workspaceId: string;
+  rigId: string | null;
+  move: (machine: MachineView) => Promise<string | null>;
+  queuedWork?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!props.runsOn.fleet.canAttach) return null;
+  // Accepted messages keep their original personal-resource snapshots. A new
+  // consent message cannot retroactively authorize a different personal machine.
+  const runsOn = props.queuedWork
+    ? {
+        ...props.runsOn,
+        machines: props.runsOn.machines.filter(
+          (machine) => machine.scope !== "user" || machine.isSessionGroup,
+        ),
+        activeMachine:
+          props.runsOn.activeMachine?.scope === "user" ? null : props.runsOn.activeMachine,
+      }
+    : props.runsOn;
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <Button type="button" className="min-h-11">
+          Choose machine
+        </Button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          side="top"
+          align="start"
+          sideOffset={8}
+          collisionPadding={12}
+          aria-label="Choose a machine for this chat"
+          className={cn(
+            MENU_SURFACE_CLASS,
+            "z-50 flex max-h-[min(28rem,var(--radix-popover-content-available-height))] w-[min(22rem,calc(100vw-2rem))] flex-col outline-none",
+          )}
+        >
+          <SessionRunsOnMenuBody
+            {...props}
+            runsOn={runsOn}
+            presentation="dialog"
+            move={async (machine) => {
+              const error = await props.move(machine);
+              if (!error) setOpen(false);
+              return error;
+            }}
+          />
+          {props.queuedWork ? (
+            <p className={MENU_NOTE_CLASS}>
+              Use a workspace or cloud machine for the saved message. A new personal-machine
+              permission only applies to new messages.
+            </p>
+          ) : null}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
 
 /**
  * "+" > Runs on for a running chat: where it runs now, and the machines it can
@@ -152,7 +218,11 @@ export function SessionRunsOnMenuBody(props: {
                   setMovingSandboxId(machine.sandboxId);
                   void props
                     .move(machine)
-                    .then(setMoveError, () => setMoveError(null))
+                    .then(setMoveError, () =>
+                      setMoveError(
+                        "The machine change could not be confirmed. Refresh the machine list and try again.",
+                      ),
+                    )
                     .finally(() => setMovingSandboxId(null));
                 }}
                 label={machineDisplayName(t, machine)}

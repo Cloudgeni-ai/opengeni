@@ -106,6 +106,7 @@ export type UseMachinesOptions = ClientOverride & {
 };
 
 export type UseMachinesResult = {
+  sessionMachineAccess?: MachinesResponse["sessionMachineAccess"];
   machines: MachineView[];
   activeSandboxId: string | null;
   activeEpoch: number;
@@ -355,6 +356,7 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
   return {
     machines: data.machines,
     activeSandboxId: data.activeSandboxId,
+    sessionMachineAccess: data.sessionMachineAccess ?? null,
     activeEpoch: data.activeEpoch,
     loading,
     error,

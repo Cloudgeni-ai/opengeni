@@ -20902,16 +20902,25 @@ export const MachineView = /* @__PURE__ */ defineSchema(() =>
 );
 export type MachineView = z.infer<typeof MachineView>;
 
-/**
- * GET /v1/workspaces/:ws/machines — the dashboard list. `activeSandboxId` /
- * `activeEpoch` echo the session's epoch-fenced active-sandbox pointer (null
- * activeSandboxId == the session's own group box is active).
- */
+/** Chat-visible explanation only, never authority to discover or use the machine. */
+export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    sandboxId: z.string().uuid(),
+    machineName: z.string(),
+    ownerName: z.string().nullable(),
+    isOwner: z.boolean(),
+    queuedTurnBlocked: z.boolean(),
+  }),
+);
+export type SessionMachineAccess = z.infer<typeof SessionMachineAccess>;
+
+/** GET /v1/workspaces/:ws/machines; active pointer fields are session-scoped. */
 export const MachinesResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     activeSandboxId: z.string().nullable(),
     activeEpoch: z.number().int(),
     machines: z.array(MachineView),
+    sessionMachineAccess: SessionMachineAccess.nullable().optional(),
   }),
 );
 export type MachinesResponse = z.infer<typeof MachinesResponse>;

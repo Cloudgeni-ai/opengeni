@@ -32,6 +32,7 @@ import {
   prepareBrowserSessionCreate,
   revokeEnrollment,
   setActiveSandbox,
+  transitionSessionVisibility,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -588,7 +589,7 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
       sandboxBackend: "none",
     });
     const app = appFor(bus);
-    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`;
 
     const response = await app.request(
       `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
@@ -613,7 +614,7 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     const app = appFor(bus, {
       settings: testSettings({ ...settings, sandboxBackend: "modal" }),
     });
-    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`;
 
     const response = await app.request(
       `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
@@ -714,10 +715,14 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(machine.metrics).not.toBeNull();
     expect(machine.metrics!.cpuPct).toBe(42.5);
 
-    // In-session view: the synthetic Modal group box is prepended.
+    // In-session view additionally requires permission to read the chat.
     const sessRes = await app.request(
       `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
-      { headers: { authorization: auth } },
+      {
+        headers: {
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`,
+        },
+      },
     );
     expect(sessRes.status).toBe(200);
     const sessBody = (await sessRes.json()) as {
@@ -2202,6 +2207,81 @@ describe("who can use a machine: Workspace or Only me, changed in place", () => 
       from enrollments where id = ${enrollmentId}`;
     return row!;
   }
+
+  test("session-scoped explanation names a colleague's machine only for authorized chat readers", async () => {
+    if (!available) return;
+    const org = await audienceOrganization();
+    await admin`insert into auth_users(id, name, email) values (${org.owner.slice(5)}, 'Alex', ${`${crypto.randomUUID()}@example.test`})`;
+    const narrowed = await audienceRequest(
+      org,
+      await bearerFor(org, org.owner, ["workspace:admin"]),
+      "PUT",
+      {
+        audience: "only_me",
+        expectedGeneration: (await machineScope(org.enrollmentId)).generation,
+      },
+    );
+    expect(narrowed.status).toBe(200);
+    const session = await createSession(db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: org.owner },
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    expect(
+      await setActiveSandbox(db, {
+        ...org,
+        sessionId: session.id,
+        subjectId: org.owner,
+        targetSandboxId: org.sandboxId,
+        expectedEpoch: session.activeEpoch,
+      }),
+    ).toMatchObject({ swapped: true });
+    const app = appFor(new MemoryEventBus());
+    const request = async (permissions: Permission[], sessionId: string | null = session.id) =>
+      app.request(
+        `/v1/workspaces/${org.workspaceId}/machines${sessionId ? `?sessionId=${sessionId}` : ""}`,
+        { headers: { authorization: await bearerFor(org, org.member, permissions) } },
+      );
+    const response = await request(["enrollments:read", "sessions:read"]);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      machines: [],
+      sessionMachineAccess: {
+        sandboxId: org.sandboxId,
+        machineName: "Team build box",
+        ownerName: "Alex",
+        isOwner: false,
+        queuedTurnBlocked: false,
+      },
+    });
+    expect((await request(["enrollments:read"])).status).toBe(403);
+    expect((await request(["enrollments:read", "sessions:read"], "external")).status).toBe(400);
+    expect(await (await request(["enrollments:read"], null)).json()).toMatchObject({
+      machines: [],
+      sessionMachineAccess: null,
+    });
+    expect((await request(["enrollments:read", "sessions:read"], crypto.randomUUID())).status).toBe(
+      404,
+    );
+    await transitionSessionVisibility(db, {
+      workspaceId: org.workspaceId,
+      sessionId: session.id,
+      actorSubjectId: org.owner,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: crypto.randomUUID(),
+    });
+    const hidden = await request(["enrollments:read", "sessions:read"]);
+    expect(hidden.status).toBe(404);
+    expect(await hidden.text()).not.toContain("Alex");
+  }, 90_000);
 
   test("only the would-be owner, or a workspace admin for them, can narrow; sharing needs admin", async () => {
     if (!available) return;

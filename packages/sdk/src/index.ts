@@ -1606,6 +1606,7 @@ export type {
   UpdateMachineOperationPolicyRequest,
   MachineView,
   MachinesResponse,
+  SessionMachineAccess,
   MachineMetricsSeriesResponse,
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,
