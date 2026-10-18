@@ -303,4 +303,10 @@ export const embeddingMigrationTail = [
   // Replaces the 0345 tenancy fence and adds a WHEN clause over the 0275
   // scheduled-run accepted execution snapshot; replay after both.
   "0836_cheaper_session_write_fences.sql",
+  // Sets statistics options on the cursor table from 0374, withheld by these
+  // historical fixtures; replay after it.
+  "0837_hot_session_tables_analyze_cadence.sql",
+  // Empties the capability table from withheld 0642 and rewrites the reclaim
+  // routine from 0807; replay after both.
+  "0838_reclaim_exited_backend_runtime_capabilities.sql",
 ];
