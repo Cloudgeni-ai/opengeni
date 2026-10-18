@@ -82,6 +82,60 @@ function fixture(fetchImpl: CodexFetch) {
 }
 
 describe("core model discovery physical request custody", () => {
+  test("a fresh persisted catalog is reusable without credentials or provider I/O", async () => {
+    const upstream = mock<CodexFetch>(async () => {
+      throw new Error("must not dispatch");
+    });
+    const f = fixture(upstream);
+    const observedAt = Date.now() - 1_000;
+    f.connection.modelCatalog = {
+      slugs: [models[0]!.upstreamModelId],
+      observedAt,
+      expiresAt: observedAt + 60_000,
+    };
+    f.deps.getCoreToken = mock(async () => {
+      throw new Error("must not load credentials");
+    });
+    const readiness = await f.read();
+    expect(readiness.observations[models[0]!.definitionVersion]).toEqual({
+      status: "available",
+      reason: null,
+      checkedAt: new Date(observedAt).toISOString(),
+    });
+    expect(await refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps)).toBe(
+      observedAt + 60_000,
+    );
+    expect(f.deps.getCoreToken).not.toHaveBeenCalled();
+    expect(f.deps.recordModels).not.toHaveBeenCalled();
+    expect(upstream).not.toHaveBeenCalled();
+    expect(f.reserve).not.toHaveBeenCalled();
+    // Live scope/revocation still wins over reusable observations.
+    f.deps.listServing = async () => [];
+    expect(await f.read()).toEqual({ active: false, observations: {} });
+  });
+
+  test("empty persisted catalogs are definitive, but expired/future observations refresh", async () => {
+    const f = fixture(async () => Response.json({ models: [] }));
+    const now = Date.now();
+    f.connection.modelCatalog = { slugs: [], observedAt: now - 100, expiresAt: now + 60_000 };
+    expect((await f.read()).observations[models[0]!.definitionVersion]?.reason).toBe(
+      "not_entitled",
+    );
+    expect(f.reserve).not.toHaveBeenCalled();
+    f.connection.modelCatalog.expiresAt = now - 1;
+    await f.read();
+    expect(f.reserve).toHaveBeenCalledTimes(1);
+
+    const future = fixture(async () => Response.json({ models: [] }));
+    future.connection.modelCatalog = {
+      slugs: [],
+      observedAt: now + 60_000,
+      expiresAt: now + 120_000,
+    };
+    await future.read();
+    expect(future.reserve).toHaveBeenCalledTimes(1);
+  });
+
   test("SUB-ELIG-03: an unreachable eligible account stays selectable and unknown, not a pooled entitlement denial", async () => {
     const f = fixture(async () => Response.json({ models: [] }));
     const uncertain = { ...f.connection, connectionId: crypto.randomUUID() };

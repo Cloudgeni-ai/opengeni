@@ -49,6 +49,14 @@ for it until the matching requirement below is implemented:
 
 ## Scope and boundary
 
+Current state: Codex model discovery and placement reuse the same stored,
+per-connection catalog observation for its existing 60-second lifetime, only
+while the credential generation matches and the connection still serves the
+workspace. Successful durable draft saves may prepare this shared metadata;
+typing admits no turn, reserves no turn capacity and makes no inference call.
+Personal credentials are never probed outside their accepted-turn lease.
+See [typing preparation](design/typing-turn-preparation.md) for timing and verification.
+
 - **In scope:** accounts a person signs into (Codex, Claude, SuperGrok) and
   every consumer that spends them: chat turns, scheduled tasks, child agents,
   goal continuations, context compaction, transcription, realtime voice, image

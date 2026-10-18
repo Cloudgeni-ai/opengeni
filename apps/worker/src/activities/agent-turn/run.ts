@@ -575,29 +575,39 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         executionGeneration: attempt.executionGeneration,
       };
-      const learning = await measureTurnStartupPhase(
-        observability,
-        {
-          phase: "learning_policy_freeze",
-          provider: turnExecutionPolicy.providerId,
-          backend: turn.sandboxBackend,
-        },
-        () =>
-          freezeAgentLearningPolicy(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            actor: learningActor,
-          }),
-      );
-      const attachmentAuthority = await measureTurnStartupPhase(
-        observability,
-        {
-          phase: "attachment_authority_projection",
-          provider: turnExecutionPolicy.providerId,
-          backend: turn.sandboxBackend,
-        },
-        () => getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
-      );
+      // Both use the accepted attempt, but neither depends on the other.
+      // Finish both before installing the file-access context below.
+      const [learningResult, attachmentResult] = await Promise.allSettled([
+        measureTurnStartupPhase(
+          observability,
+          {
+            phase: "learning_policy_freeze",
+            provider: turnExecutionPolicy.providerId,
+            backend: turn.sandboxBackend,
+          },
+          () =>
+            freezeAgentLearningPolicy(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              actor: learningActor,
+            }),
+        ),
+        measureTurnStartupPhase(
+          observability,
+          {
+            phase: "attachment_authority_projection",
+            provider: turnExecutionPolicy.providerId,
+            backend: turn.sandboxBackend,
+          },
+          () => getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
+        ),
+      ]);
+      // Observe both operations before failure handling; the policy write
+      // must not outlive this stage if the independent authority read fails.
+      if (learningResult.status === "rejected") throw learningResult.reason;
+      if (attachmentResult.status === "rejected") throw attachmentResult.reason;
+      const learning = learningResult.value;
+      const attachmentAuthority = attachmentResult.value;
       if (!attachmentAuthority) throw new Error("Session attachment authority unavailable");
       return await withSessionRlsActorContext(
         {
