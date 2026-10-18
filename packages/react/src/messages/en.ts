@@ -597,7 +597,7 @@ export const englishMessages = {
   "composerMessages.showPauseDetails": "Show pause details",
   "composerMessages.slashCommands": "Slash commands",
   "composerMessages.steerMessageEnterQueueWith":
-    "Send (Enter): the agent reads it after its current step. Queue with Cmd/Ctrl+Enter",
+    "Send (Enter): the agent reads it within seconds. Queue with Cmd/Ctrl+Enter",
   "composerMessages.stillPausedByDisplayname": "Still paused by {displayName}",
   "composerMessages.stop": "Stop",
   "composerMessages.stopTheResponse": "Stop the response",

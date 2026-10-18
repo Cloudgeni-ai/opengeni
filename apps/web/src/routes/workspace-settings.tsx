@@ -597,8 +597,8 @@ function RenameWorkspaceDialog({
 /**
  * What Send does while the agent is working, for everyone in this workspace's
  * console. Steer suits people who should not need to know the difference:
- * the agent reads the message after its current step instead of after the
- * whole turn. Cmd/Ctrl+Enter keeps the other choice one keystroke away.
+ * the agent reads the message within seconds instead of after the whole
+ * turn. Cmd/Ctrl+Enter keeps the other choice one keystroke away.
  */
 function BusySendPreferenceRow({
   workspaceId,
@@ -638,7 +638,7 @@ function BusySendPreferenceRow({
       label="Send while the agent works"
       description={
         value === "steer"
-          ? "Steer: the agent reads your message after its current step. Cmd/Ctrl+Enter queues it instead."
+          ? "Steer: the agent reads your message within seconds, without stopping its work. Cmd/Ctrl+Enter queues it instead."
           : "Queue: your message runs after the current turn. Cmd/Ctrl+Enter steers instead."
       }
       controlWidth="auto"

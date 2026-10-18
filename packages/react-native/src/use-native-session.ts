@@ -115,8 +115,8 @@ export function useOpenGeniNativeSession(input: {
   mcpApprovalPolicyServerId?: string;
   /**
    * What an ordinary Send does while the agent is working: `queue` (default)
-   * runs it after the current turn; `steer` has the agent read it at its
-   * next model step, after the current step's tool calls finish.
+   * runs it after the current turn; `steer` has the agent read it within
+   * seconds, without stopping work in progress.
    */
   busySend?: ComposerBusySend;
 }): OpenGeniNativeSessionController {

@@ -1485,7 +1485,7 @@ function preemptedAnthropicMessage(
       role: "assistant",
       id: `${id}:${item}`,
       status: "completed",
-      content: parts.map((text) => ({ type: "output_text", text })),
+      content: parts.map((part) => ({ type: "output_text", text: part })),
     }));
   const currentUsage = current ? ((current.usage as Json | undefined) ?? {}) : undefined;
   return {

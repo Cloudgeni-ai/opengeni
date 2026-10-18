@@ -49,7 +49,7 @@ export type InitialComposerDraft = {
 
 /**
  * What an ordinary Send does while the agent is working: `queue` runs it after
- * the current turn, `steer` has the agent read it at its next model step.
+ * the current turn, `steer` has the agent read it within seconds.
  */
 export type ComposerBusySend = "queue" | "steer";
 
@@ -82,8 +82,7 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
      * What an ordinary Send does while the agent is working (while
      * `sendDestination` reports `queue`). `queue` (default) runs the message
      * after the current turn. `steer` delivers it as a Steer instead: the
-     * agent reads it at its next model step, after the current step's tool
-     * calls finish. `sendToQueue` and `steer` stay explicit either way.
+     * agent reads it within seconds, without stopping work in progress. `sendToQueue` and `steer` stay explicit either way.
      */
     busySend?: ComposerBusySend | undefined;
     /** Disable remote composer-draft reads and writes for embedded hosts. */

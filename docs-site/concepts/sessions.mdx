@@ -28,7 +28,7 @@ A reload, a second client, or an audit all see the same history.
 ## Sending input
 
 - **Send** appends a prompt. If a turn is running, the message queues behind it. Queued messages stay editable and reorderable until they start.
-- **Steer** moves your message to the front. The agent reads it after its current step: the tool calls already running finish, and its next model request includes your message, so nothing is cut off. Several Steers sent during one step are read together, in order. **Send now** on a waiting Steer stops the current step immediately instead.
+- **Steer** moves your message to the front, and the agent reads it within seconds without stopping work in progress. If the agent is still writing its answer, that answer is cut short (what it had finished stays) and the agent starts again with your message. Short tool calls finish first; long waits on commands or other sessions return early and the work keeps running in the background. Several Steers sent close together are read together, in order. To stop the current work outright, use **Pause** or **Cancel** (API callers can also pass `interrupt: true` to `steerQueueItem`).
 - **Pause** and **Resume** hold and release the session.
 - **Cancel** stops the session and its children for good.
 

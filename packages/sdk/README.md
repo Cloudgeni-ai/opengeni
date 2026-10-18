@@ -1412,12 +1412,14 @@ for await (const event of client.streamEvents(workspaceId, sessionId, {
 Messages sent while a turn is running **queue by default** — visible,
 editable, reorderable, and deletable until the worker claims them, and they run
 after the whole running turn. Steering is the explicit alternative: the running
-turn reads the message at its next model step. Tool calls already running
-finish, then, before the next model request, the turn hands over
-(`turn.superseded` with reason `steer` and `atModelStep: true`) and the Steer
-runs next with the full history, so nothing is cut off. While it waits, the
-queue snapshot reports it as `pendingSteer`; `steerQueueItem` with
-`interrupt: true` stops the current step now instead.
+turn reads the message within seconds and nothing in progress is killed. A
+model answer still being written is cut short (its completed text stays), short
+tool calls finish, and long command or session waits return early while the
+work keeps running. The turn then hands over (`turn.superseded` with reason
+`steer`, `atModelStep: true` and, when an answer was cut short, `cutOffText`)
+and the Steer runs next with the full history. While it waits, the queue
+snapshot reports it as `pendingSteer`; `steerQueueItem` with `interrupt: true`
+stops the running attempt now instead, including tool calls in flight.
 
 ```ts
 // Queue (default): stacks behind the running turn.
@@ -1426,7 +1428,7 @@ await client.sendMessage(workspaceId, sessionId, {
   clientEventId: crypto.randomUUID(),
 });
 
-// Steer: send + promote to the queue front; read at the next model step.
+// Steer: send + promote to the queue front; read within seconds.
 await client.steerMessage(workspaceId, sessionId, {
   text: "Stop — prod is paging, look at that first",
   clientEventId: crypto.randomUUID(),
@@ -1435,7 +1437,7 @@ await client.steerMessage(workspaceId, sessionId, {
 // Manage the server-authoritative queue while it waits.
 const queue = await client.getQueue(workspaceId, sessionId);
 
-// "Send now": interrupt the running step for the waiting Steer.
+// Hard interrupt: stop the running attempt for the waiting Steer.
 if (queue.pendingSteer) {
   await client.steerQueueItem(workspaceId, sessionId, queue.pendingSteer.turnId, {
     expectedTurnVersion: queue.pendingSteer.turnVersion,

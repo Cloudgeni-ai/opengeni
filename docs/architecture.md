@@ -1127,25 +1127,47 @@ superseded at once. A live running attempt is not interrupted: Steer writes no
 Steer turn and its `session.control.steer_requested` event (`stopping: false`),
 and the attempt keeps authority. Model-call admission, which runs before every
 model request, reads `hasPendingSteerForTurn` (a queued user/API turn with
-`delivery: "steer"`, or a pending agent Steer instruction). When one exists and
-the turn owns no live process that ending it would stop (a yielded local,
-Docker or OpenSandbox shell that was not adopted as a session background
-command), admission throws `ModelStepHandover` before the request leaves the
-worker. The SDK routes it through its run error handlers like a turn cap, so the
+`delivery: "steer"`, or a pending agent Steer instruction). When one exists,
+admission throws `ModelStepHandover` before the request leaves the worker.
+
+The turn does not wait for that boundary on its own schedule. A Steer watch
+per attempt (`steer-watch.ts`) subscribes to the session's live events
+(`session.control.steer_requested`, `session.queue.changed`,
+`system.update.pending`), re-reads the same predicate on each one, and rechecks
+every 10 seconds in case a live event is lost. When a Steer waits it does two
+things. A model request that is still generating is cut short: its abort
+signal fires with `ModelPreemption`, and the transport ends the stream with a
+`response_done` (`providerData.opengeniPreempted`) that keeps only the
+assistant messages the provider had already completed (Responses
+`output_item.done`, Claude `content_block_stop`); unfinished text, reasoning,
+hosted tool items and tool calls are dropped, and since the Agents SDK runs
+tools only after a response completes, none of those calls had started. Long
+foreground waits return early with their live handle: an `exec_command` or
+`write_stdin` wait leaves the tool-cancellation fence's loop and takes the
+normal adopt or running-banner path, and `command_wait`, `command_read` and
+`session_wait` return their current result (`session_wait` reports kind
+`steer` in `ownPendingUpdateKinds`). Short tool calls simply finish. Processes
+adopted as session background commands keep running after the handover; a
+turn-scoped process (a worker-local handle on local, Docker or OpenSandbox, or
+a bare interactive shell) cannot outlive the turn and stops at the handover,
+which its tool result already says. The SDK routes it through its run error handlers like a turn cap, so the
 run finishes normally and every event of the completed step, including all of
 its tool results, reaches the consumer. The worker then settles the turn
 `superseded` (`turn.superseded{reason:"steer", atModelStep:true}`) under the
 settlement precondition `requirePendingSteer`, re-checked under the session
-lock, and the Steer is claimed next on the unchanged history. If it was
+lock, and the Steer is claimed next on the unchanged history. A cut-off
+request's unfinished streamed text is recorded as `cutOffText` on that event for
+the timeline only; it never becomes model input. If it was
 withdrawn in between, nothing is written and the turn rebuilds its input from
 durable history and keeps sampling. Steers that wait on the same boundary keep
 their send order, and a Steer turn that finds another waiting Steer at its own
 first admission hands over before any inference, so the next model request
 reads them together. The timeline closes a handed-over turn quietly. A queued
 Send is unaffected and still runs after the whole turn. `steerQueueItem` with
-`interrupt: true` ("Send now" on the waiting Steer, exposed as the queue
-snapshot's `pendingSteer`) keeps the earlier behaviour: it inserts the
-interruption row, moves the row to the head and stops the live attempt now. The
+`interrupt: true` (an API option on the waiting Steer, exposed as the queue
+snapshot's `pendingSteer`; the web and React Native surfaces no longer offer it)
+keeps the earlier behaviour: it inserts the interruption row, moves the row to
+the head and stops the live attempt now, including tool calls in flight. The
 workspace setting `busySend` (`queue` by default) and the composer's `busySend`
 option only choose which of the two an ordinary Send uses while a turn runs.
 

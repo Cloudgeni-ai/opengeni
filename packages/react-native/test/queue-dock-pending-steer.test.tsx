@@ -1,5 +1,5 @@
 import { expect, mock, test } from "bun:test";
-import { act, createElement, type ComponentType, type ReactNode } from "react";
+import { createElement, type ComponentType, type ReactNode } from "react";
 import type { useTurnQueue } from "@opengeni/react/session";
 import { registerDom, renderComponent } from "../../react/test/render-hook";
 

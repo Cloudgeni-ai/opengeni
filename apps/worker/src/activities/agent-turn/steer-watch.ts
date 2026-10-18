@@ -58,7 +58,7 @@ export async function startSteerWatch(input: {
       return await checking;
     }
     checking = (async () => {
-      do {
+      for (;;) {
         again = false;
         try {
           const pending = await hasPendingSteerForTurn(input.db, {
@@ -76,7 +76,9 @@ export async function startSteerWatch(input: {
           // next model step, which checks again on its own.
           input.onError?.(error);
         }
-      } while (again && !closed && !controller.signal.aborted);
+        // `again` and `closed` change while the read is in flight.
+        if (!again || closed || controller.signal.aborted) break;
+      }
     })().finally(() => {
       checking = null;
     });
