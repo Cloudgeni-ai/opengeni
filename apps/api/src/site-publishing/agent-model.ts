@@ -88,17 +88,26 @@ export async function siteCreditModelIds(
   scope: { accountId: string; workspaceId: string },
   siteId: string,
 ): Promise<string[]> {
+  return (await siteCreditModelSelections(deps, scope, siteId)).map(
+    (selection) => selection.model.id,
+  );
+}
+
+/** The admissible credit-billed model selections people outside the workspace may use. */
+export async function siteCreditModelSelections(
+  deps: { db: Database; settings: Settings },
+  scope: { accountId: string; workspaceId: string },
+  siteId: string,
+): Promise<WorkspaceModelSelection[]> {
   const input = await loadWorkspaceModelSelectionInput(deps.db, deps.settings, {
     ...scope,
     subjectId: `site:${siteId}`,
   });
-  return resolveWorkspaceModelSelection(input)
-    .filter(
-      (selection) =>
-        selection.model.cost === "credits" &&
-        admissibleWorkspaceModel([selection], selection.model.id),
-    )
-    .map((selection) => selection.model.id);
+  return resolveWorkspaceModelSelection(input).filter(
+    (selection) =>
+      selection.model.cost === "credits" &&
+      admissibleWorkspaceModel([selection], selection.model.id),
+  );
 }
 
 /** Load the workspace's model selection and decide for people outside the workspace. */
