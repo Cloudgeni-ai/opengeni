@@ -114,6 +114,7 @@ export async function startComputeAgentGateway(input: {
     ...(observability
       ? {
           logger: {
+            debug: (message, attributes) => observability.debug(message, attributes),
             info: (message, attributes) => observability.info(message, attributes),
             warn: (message, attributes) => observability.warn(message, attributes),
           },

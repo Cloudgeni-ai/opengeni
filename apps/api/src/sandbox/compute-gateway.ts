@@ -86,6 +86,7 @@ export type ComputeAgentRelayMinter = {
 };
 
 type GatewayLogger = {
+  debug?(message: string, attributes?: Record<string, string | number | boolean>): void;
   info(message: string, attributes?: Record<string, string | number | boolean>): void;
   warn(message: string, attributes?: Record<string, string | number | boolean>): void;
 };
@@ -768,6 +769,30 @@ class AgentLink implements ApiWebSocketConnection {
           frame.queue,
           (message) => {
             if (!this.gateway.authorized(session)) return;
+            // Only a request (a message with a reply subject) wakes a sleeping
+            // sandbox at its host; any other message waits there until the
+            // agent next runs. Name each waker: an idle sandbox should get none.
+            if (session.reportedAsleep === true) {
+              const attributes = {
+                agentId: session.claim.agentId,
+                sandboxId: session.sandboxId,
+                subject: message.subject,
+              };
+              if (message.reply) {
+                this.gateway.options.logger?.info(
+                  "compute gateway: a request wakes a sleeping sandbox",
+                  {
+                    ...attributes,
+                    reply: message.reply,
+                  },
+                );
+              } else {
+                this.gateway.options.logger?.debug?.(
+                  "compute gateway: a message reaches a sleeping sandbox when it wakes",
+                  attributes,
+                );
+              }
+            }
             this.send({
               t: "msg",
               s: session.s,

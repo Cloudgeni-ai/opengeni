@@ -322,7 +322,16 @@ class FakeSocket {
   }
 }
 
-async function gatewayWithLink(options: { now?: () => number } = {}) {
+async function gatewayWithLink(
+  options: {
+    now?: () => number;
+    logger?: {
+      debug(message: string, attributes?: object): void;
+      info(message: string, attributes?: object): void;
+      warn(): void;
+    };
+  } = {},
+) {
   const nats = new FakeNats();
   const store = new FakeStore();
   let minted = 0;
@@ -345,6 +354,7 @@ async function gatewayWithLink(options: { now?: () => number } = {}) {
     },
     relay: { url: "wss://relay.test/stream", mint: async () => `ogr_token_${++minted}` },
     ...(options.now ? { now: options.now } : {}),
+    ...(options.logger ? { logger: options.logger } : {}),
   });
   /** Another host link to the same gateway. */
   const connect = async () => {
@@ -542,6 +552,54 @@ describe("agent gateway sessions", () => {
     send({ t: "state", s: 1, state: "awake" });
     await settle();
     expect(powerCalls()).toEqual(["power:sbx-1:awake", "power:sbx-1:asleep", "power:sbx-1:awake"]);
+  });
+
+  test("a request to a sleeping sandbox is logged as its waker; a plain message is not", async () => {
+    const logged: { level: string; message: string; attributes: unknown }[] = [];
+    const { send, settle, nats } = await gatewayWithLink({
+      logger: {
+        debug: (message, attributes) => logged.push({ level: "debug", message, attributes }),
+        info: (message, attributes) => {
+          if (message.includes("sleeping sandbox"))
+            logged.push({ level: "info", message, attributes });
+        },
+        warn: () => {},
+      },
+    });
+    send({ t: "open", s: 1, sandbox: "sbx-1", ticket: "t", connection: INSTANCE });
+    send({ t: "sub", s: 1, sid: "r", subject: `${SCOPE}.rpc` });
+    send({ t: "state", s: 1, state: "awake" });
+    await settle();
+    const [subscription] = [...nats.subscriptions.values()];
+    subscription!.deliver({
+      subject: `${SCOPE}.rpc`,
+      reply: "_INBOX.1",
+      data: new Uint8Array([1]),
+    });
+    expect(logged).toEqual([]);
+    send({ t: "state", s: 1, state: "asleep" });
+    await settle();
+    // A plain publish (an ack, say) waits at the host: debug only.
+    subscription!.deliver({ subject: `${SCOPE}.rpc`, data: new Uint8Array([2]) });
+    // A request wakes the sandbox: named at info, with its reply subject.
+    subscription!.deliver({
+      subject: `${SCOPE}.rpc`,
+      reply: "_INBOX.2",
+      data: new Uint8Array([3]),
+    });
+    const attributes = { agentId: AGENT, sandboxId: "sbx-1", subject: `${SCOPE}.rpc` };
+    expect(logged).toEqual([
+      {
+        level: "debug",
+        message: "compute gateway: a message reaches a sleeping sandbox when it wakes",
+        attributes,
+      },
+      {
+        level: "info",
+        message: "compute gateway: a request wakes a sleeping sandbox",
+        attributes: { ...attributes, reply: "_INBOX.2" },
+      },
+    ]);
   });
 
   test("a power write that failed is written again on the next tick, without messaging the agent", async () => {
