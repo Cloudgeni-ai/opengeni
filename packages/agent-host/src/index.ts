@@ -8,7 +8,12 @@ export {
   newlyGranted,
   type ThisComputerDeps,
 } from "./this-computer";
-export { allowAgentsOnComputer, type ComputerGrantClient } from "@opengeni/sdk/this-computer";
+export {
+  allowAgentsOnComputer,
+  disallowAgentsOnComputer,
+  type ComputerGrantClient,
+  type ComputerGrantRevokeClient,
+} from "@opengeni/sdk/this-computer";
 export { computerName, hostLabel } from "./computer-name";
 export {
   connectionFor,

@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 
 import type { UserResourceAuthorityGrant, UserResourceAuthoritySummary } from "../src/types";
 
-import { allowAgentsOnComputer, type ComputerGrantClient } from "../src/this-computer";
+import {
+  allowAgentsOnComputer,
+  disallowAgentsOnComputer,
+  type ComputerGrantClient,
+} from "../src/this-computer";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const MACHINE = "22222222-2222-4222-8222-222222222222";
@@ -104,5 +108,49 @@ describe("allowAgentsOnComputer", () => {
       "isn't listed as yours yet",
     );
     expect(h.issued).toHaveLength(0);
+  });
+});
+
+describe("disallowAgentsOnComputer", () => {
+  function revoking(authorities: UserResourceAuthoritySummary[]) {
+    const revoked: Array<{ workspaceId: string; grantId: string }> = [];
+    const api = {
+      listUserResourceAuthorities: async () => ({
+        scope: "user" as const,
+        authorities,
+        nextCursor: null,
+      }),
+      revokeUserResourceGrant: async (workspaceId: string, grantId: string) => {
+        revoked.push({ workspaceId, grantId });
+        return {};
+      },
+    };
+    return { api, revoked };
+  }
+
+  test("takes back only the standing permission in this workspace", async () => {
+    const keep = [
+      grant({ grantId: "one-chat", mode: "session", targetSessionId: "s" }),
+      grant({ grantId: "revoked", status: "revoked" }),
+      grant({ grantId: "elsewhere", targetWorkspaceId: "elsewhere" }),
+    ];
+    const h = revoking([
+      authority(MACHINE, [
+        grant({ grantId: "private", context: "user_private" }),
+        grant({ grantId: "shared", context: "workspace_shared" }),
+        ...keep,
+      ]),
+    ]);
+    await disallowAgentsOnComputer(h.api, WORKSPACE, MACHINE);
+    expect(h.revoked).toEqual([
+      { workspaceId: WORKSPACE, grantId: "private" },
+      { workspaceId: WORKSPACE, grantId: "shared" },
+    ]);
+  });
+
+  test("is done when the computer isn't listed", async () => {
+    const h = revoking([authority("other", [grant({})])]);
+    await disallowAgentsOnComputer(h.api, WORKSPACE, MACHINE);
+    expect(h.revoked).toHaveLength(0);
   });
 });

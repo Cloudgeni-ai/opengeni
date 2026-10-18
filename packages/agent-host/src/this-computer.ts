@@ -24,6 +24,7 @@ import type {
   ThisComputerStatus,
 } from "@opengeni/sdk/this-computer";
 import { macSystemNames, type MacSystemNameCatalog } from "@opengeni/sdk/this-computer";
+import { normalizeServerUrl } from "@opengeni/sdk/app-links";
 import {
   connectionFor,
   hostedAgentPath,
@@ -142,6 +143,12 @@ export interface ThisComputerDeps {
    */
   allowAgents(accountId: string, workspaceId: string, enrollmentId: string): Promise<void>;
   /**
+   * Takes back what `allowAgents` gave in one workspace, while other
+   * workspaces keep using this computer. Without it, turning the computer off
+   * in one workspace disconnects it everywhere.
+   */
+  disallowAgents?(accountId: string, workspaceId: string, enrollmentId: string): Promise<void>;
+  /**
    * After this computer is disconnected from a workspace, remove it there too,
    * so it stops showing as an offline machine. Optional.
    */
@@ -182,6 +189,18 @@ interface ComputerState {
   openAtLogin: boolean;
   /** Setting up began and some permission is still to be allowed. */
   setupPending: boolean;
+  /**
+   * Workspaces that use a connection made from another workspace, by server
+   * and workspace: the person's own computer serves every workspace they
+   * belong to on that server, so connecting there only allows their agents.
+   * The value is the connection's enrollment.
+   */
+  alsoIn: Record<string, string>;
+  /**
+   * Workspaces the computer was connected from and then turned off in while
+   * other workspaces still use it, by server and workspace.
+   */
+  turnedOff: string[];
 }
 
 /** What the agent reports and asks for itself: screen control. */
@@ -343,7 +362,7 @@ export class ThisComputer {
     }
     if (!existsSync(this.hostedPath)) return { ...base, state: "not_installed" };
     const connections = await this.connections();
-    if (!connectionFor(connections, baseUrl, workspaceId)) {
+    if (!this.connectionIn(connections, baseUrl, workspaceId)) {
       return { ...base, state: "not_connected" };
     }
     const permissions = await this.permissionList();
@@ -406,6 +425,7 @@ export class ThisComputer {
   ): Promise<ThisComputerStatus> {
     await this.act(async () => {
       const binary = await this.ensureInstalled(baseUrl);
+      if (await this.connectThroughAnother(accountId, baseUrl, workspaceId, options)) return;
       const token = await this.deps
         .mintEnrollToken(accountId, workspaceId, options.screenControl)
         .catch((caught: unknown) => {
@@ -435,6 +455,7 @@ export class ThisComputer {
         paused: false,
         screenControl: this.state.screenControl || options.screenControl,
         setupPending: options.screenControl && this.deps.platform === "darwin",
+        turnedOff: this.state.turnedOff.filter((key) => key !== useKey(baseUrl, workspaceId)),
       });
       // A running agent reads its connections when it starts.
       if (this.agent.state === "stopped") this.agent.start(baseUrl);
@@ -479,13 +500,43 @@ export class ThisComputer {
    */
   async disconnect(accountId: string, baseUrl: string, workspaceId: string): Promise<void> {
     await this.act(async () => {
-      const connection = connectionFor(await this.connections(true), baseUrl, workspaceId);
+      const connections = await this.connections(true);
+      const connection = this.connectionIn(connections, baseUrl, workspaceId);
       if (!connection) return;
+      const key = useKey(baseUrl, workspaceId);
+      const othersUsing = this.workspacesUsing(connection).filter((other) => other !== key);
+      if (othersUsing.length > 0 && this.deps.disallowAgents) {
+        // Other workspaces keep this computer: only this one stops using it.
+        await this.deps
+          .disallowAgents(accountId, workspaceId, connection.agentId)
+          .catch((caught: unknown) => {
+            throw serverFailure(caught, "Couldn't turn this computer off here");
+          });
+        const { [key]: _removed, ...alsoIn } = this.state.alsoIn;
+        this.saveState({
+          alsoIn,
+          turnedOff:
+            connection.workspaceId === workspaceId
+              ? [...this.state.turnedOff.filter((entry) => entry !== key), key]
+              : this.state.turnedOff,
+        });
+        return;
+      }
       await this.expect(
         this.run(this.hostedPath, ["disconnect", connection.connectionId], { timeoutMs: 30_000 }),
         "Couldn't disconnect this computer",
         "unknown",
       );
+      // Every workspace that used this connection stops with it.
+      const used = new Set(this.workspacesUsing(connection));
+      this.saveState({
+        alsoIn: Object.fromEntries(
+          Object.entries(this.state.alsoIn).filter(([entry]) => !used.has(entry)),
+        ),
+        turnedOff: this.state.turnedOff.filter(
+          (entry) => entry !== useKey(connection.apiUrl, connection.workspaceId),
+        ),
+      });
       const rest = await this.connections(true);
       if (rest.length === 0) {
         this.saveState({ paused: false, setupPending: false });
@@ -498,6 +549,82 @@ export class ThisComputer {
         .forgetComputer?.(accountId, workspaceId, connection.agentId)
         .catch(() => undefined);
     });
+  }
+
+  /**
+   * The connection agents in a workspace use: the one made there, unless it was
+   * turned off there, else one made from another workspace on the same server
+   * that this workspace was allowed to use.
+   */
+  private connectionIn(
+    connections: readonly AgentConnection[],
+    baseUrl: string,
+    workspaceId: string,
+  ): AgentConnection | null {
+    const key = useKey(baseUrl, workspaceId);
+    const own = connectionFor(connections, baseUrl, workspaceId);
+    if (own && !this.state.turnedOff.includes(key)) return own;
+    const shared = this.state.alsoIn[key];
+    if (!shared) return null;
+    const origin = normalizeServerUrl(baseUrl);
+    return (
+      connections.find(
+        (connection) => connection.agentId === shared && connection.apiUrl === origin,
+      ) ?? null
+    );
+  }
+
+  /** Every workspace that uses a connection, by server and workspace. */
+  private workspacesUsing(connection: AgentConnection): string[] {
+    const origin = useKey(connection.apiUrl, connection.workspaceId);
+    return [
+      ...(this.state.turnedOff.includes(origin) ? [] : [origin]),
+      ...Object.entries(this.state.alsoIn)
+        .filter(([, agentId]) => agentId === connection.agentId)
+        .map(([key]) => key),
+    ];
+  }
+
+  /**
+   * The person's own computer, once connected, serves every workspace they
+   * belong to on that server: connecting it in another one only lets their
+   * agents there use it. False when there is no such connection, or the server
+   * doesn't let this workspace use it, so the computer is set up as new.
+   */
+  private async connectThroughAnother(
+    accountId: string,
+    baseUrl: string,
+    workspaceId: string,
+    options: ThisComputerConnectOptions,
+  ): Promise<boolean> {
+    // A connection made without screen control can't give it.
+    if (options.screenControl && !this.state.screenControl) return false;
+    const connections = await this.connections(true);
+    const key = useKey(baseUrl, workspaceId);
+    const origin = normalizeServerUrl(baseUrl);
+    const own = connectionFor(connections, baseUrl, workspaceId);
+    const candidates = [
+      ...(own ? [own] : []),
+      ...connections.filter(
+        (connection) => connection.apiUrl === origin && connection.workspaceId !== workspaceId,
+      ),
+    ];
+    for (const connection of candidates) {
+      try {
+        await this.deps.allowAgents(accountId, workspaceId, connection.agentId);
+      } catch {
+        continue;
+      }
+      if (connection === own) {
+        this.saveState({ turnedOff: this.state.turnedOff.filter((entry) => entry !== key) });
+      } else {
+        this.saveState({ alsoIn: { ...this.state.alsoIn, [key]: connection.agentId } });
+      }
+      this.saveState({ paused: false });
+      if (this.agent.state === "stopped") this.agent.start(connection.apiUrl);
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -990,6 +1117,8 @@ export class ThisComputer {
       requested: [],
       openAtLogin: false,
       setupPending: false,
+      alsoIn: {},
+      turnedOff: [],
     };
     try {
       const saved = JSON.parse(readFileSync(this.statePath, "utf8")) as Partial<ComputerState>;
@@ -1002,6 +1131,17 @@ export class ThisComputer {
           : [],
         openAtLogin: saved.openAtLogin === true,
         setupPending: saved.setupPending === true,
+        alsoIn:
+          saved.alsoIn && typeof saved.alsoIn === "object" && !Array.isArray(saved.alsoIn)
+            ? Object.fromEntries(
+                Object.entries(saved.alsoIn).filter(
+                  (entry): entry is [string, string] => typeof entry[1] === "string",
+                ),
+              )
+            : {},
+        turnedOff: Array.isArray(saved.turnedOff)
+          ? saved.turnedOff.filter((entry): entry is string => typeof entry === "string")
+          : [],
       };
     } catch {
       return fallback;
@@ -1079,6 +1219,11 @@ function killTree(pid: number, platform: AgentPlatform, force: boolean, now = fa
 }
 
 /** A failed call to the server: unreachable, or refused. */
+/** A workspace on a server, as the state keeps it. */
+function useKey(baseUrl: string, workspaceId: string): string {
+  return `${normalizeServerUrl(baseUrl)} ${workspaceId}`;
+}
+
 function serverFailure(caught: unknown, failure: string): ThisComputerError {
   if (caught instanceof ThisComputerError) return caught;
   if (caught instanceof TypeError) {

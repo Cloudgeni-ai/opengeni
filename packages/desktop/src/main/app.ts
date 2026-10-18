@@ -28,7 +28,12 @@ import {
   serverLabel,
 } from "@opengeni/sdk/app-links";
 import { macSystemNames } from "@opengeni/sdk/this-computer";
-import { allowAgentsOnComputer, computerName, ThisComputer } from "@opengeni/agent-host";
+import {
+  allowAgentsOnComputer,
+  computerName,
+  disallowAgentsOnComputer,
+  ThisComputer,
+} from "@opengeni/agent-host";
 import {
   defaultPermissionGuideLabels,
   PermissionGuide,
@@ -230,6 +235,11 @@ export class DesktopShell {
         const client = await this.client(accountId);
         if (!client) throw new Error("Sign in again to connect this computer.");
         await allowAgentsOnComputer(client, workspaceId, enrollmentId);
+      },
+      disallowAgents: async (accountId, workspaceId, enrollmentId) => {
+        const client = await this.client(accountId);
+        if (!client) throw new Error("Sign in again to turn this computer off here.");
+        await disallowAgentsOnComputer(client, workspaceId, enrollmentId);
       },
       openSystemSettings: (url) => void shell.openExternal(url),
       onGuidePermission: (id, granted) => {

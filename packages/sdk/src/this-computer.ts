@@ -241,6 +241,14 @@ export type ComputerGrantClient = Pick<
   "listUserResourceAuthorities" | "issueUserResourceGrant"
 >;
 
+/** The part of the API client that stops the person's agents using their computer. */
+export type ComputerGrantRevokeClient = Pick<
+  OpenGeniDocumentAuthorityClient,
+  "listUserResourceAuthorities"
+> & {
+  revokeUserResourceGrant(workspaceId: string, grantId: string): Promise<unknown>;
+};
+
 /** Chats are private to the person or shared with the workspace. */
 const CHAT_CONTEXTS = ["user_private", "workspace_shared"] as const;
 
@@ -274,7 +282,7 @@ export async function allowAgentsOnComputer(
 }
 
 async function findAuthority(
-  client: ComputerGrantClient,
+  client: Pick<ComputerGrantClient, "listUserResourceAuthorities">,
   workspaceId: string,
   enrollmentId: string,
 ): Promise<UserResourceAuthoritySummary | null> {
@@ -294,6 +302,32 @@ async function findAuthority(
     cursor = listed.nextCursor;
   }
   return null;
+}
+
+/**
+ * Takes back what `allowAgentsOnComputer` gave in one workspace: the person's
+ * agents there need their consent in each chat again, and the computer stays
+ * connected for the other workspaces that use it. Grants given for one chat
+ * or one session are left alone. A computer that isn't listed is already done.
+ */
+export async function disallowAgentsOnComputer(
+  client: ComputerGrantRevokeClient,
+  workspaceId: string,
+  enrollmentId: string,
+): Promise<void> {
+  const authority = await findAuthority(client, workspaceId, enrollmentId);
+  if (!authority) return;
+  for (const grant of authority.grants) {
+    if (
+      grant.status === "active" &&
+      grant.mode === "always" &&
+      grant.action === "connected_machine.use" &&
+      grant.targetWorkspaceId === workspaceId &&
+      grant.targetSessionId === null
+    ) {
+      await client.revokeUserResourceGrant(workspaceId, grant.grantId);
+    }
+  }
 }
 
 function hasStandingGrant(
