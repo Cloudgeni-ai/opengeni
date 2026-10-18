@@ -1628,6 +1628,16 @@ export type SessionBackgroundCommandListResponse = {
   commands: SessionBackgroundCommand[];
 };
 
+export type WorkspaceBackgroundCommand = SessionBackgroundCommand & {
+  sessionTitle: string | null;
+  machineName: string | null;
+};
+
+export type WorkspaceBackgroundCommandListResponse = {
+  commands: WorkspaceBackgroundCommand[];
+  nextCursor: string | null;
+};
+
 export type CancelSessionBackgroundCommandResult = {
   command: SessionBackgroundCommand;
   accepted: boolean;

@@ -1,4 +1,5 @@
 export { getSessionMachineAccess } from "./session-machine-access";
+import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 import {
   decodeActivityXid,
   encodeActivityXid,
@@ -33310,6 +33311,51 @@ export async function searchSessionMessagesForSubject(
       );
     }),
   );
+}
+
+/** Console projection over live commands, with the same membership and audience
+ * boundary as ordinary chat discovery. Archived chats may still own live work. */
+export async function listWorkspaceBackgroundCommandsForSubject(
+  db: Database,
+  workspaceId: string,
+  authority: Pick<
+    ListSessionsForSubjectOptions,
+    "subjectId" | "authorizationScope" | "personalWorkspaceOwnerException"
+  >,
+  afterId?: string,
+) {
+  return withWorkspaceSubjectRls(db, workspaceId, authority.subjectId, async (tx) => {
+    await lockSessionPersonalStateShared(tx, workspaceId, authority.subjectId);
+    const [membership] = await tx
+      .select({ id: schema.workspaceMemberships.id })
+      .from(schema.workspaceMemberships)
+      .where(
+        and(
+          eq(schema.workspaceMemberships.workspaceId, workspaceId),
+          eq(schema.workspaceMemberships.subjectId, authority.subjectId),
+        ),
+      )
+      .limit(1);
+    if (
+      !membership &&
+      authority.subjectId.startsWith("user:") &&
+      !(
+        authority.personalWorkspaceOwnerException === true &&
+        (await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+          accountId: await accountIdInRlsScope(tx),
+          workspaceId,
+          subjectId: authority.subjectId,
+        }))
+      )
+    )
+      throw new SessionListAccessError();
+    return listWorkspaceBackgroundCommandsInScope(
+      tx,
+      workspaceId,
+      sessionFilters({ ...authority, archiveStatus: "all" }),
+      afterId,
+    );
+  });
 }
 
 /**

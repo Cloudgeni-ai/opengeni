@@ -87,6 +87,12 @@ initial clone, not just subsequent sandbox commands.
 
 ## 3. Core invariants
 
+The console Machines page also projects live background commands across authorized
+chats through the session-list endpoint (`view=running_commands`). It shares the
+ordinary subject/host list scope, reads immutable command launch targets, and uses
+the existing session command cancellation path; it does not create a separate
+process registry or agent tool surface.
+
 Hosted tool-call `status` survives replay; other annotations are stripped
 (`packages/codex/src/hosted-call-status.ts`).
 

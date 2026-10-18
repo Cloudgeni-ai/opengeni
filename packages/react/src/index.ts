@@ -240,6 +240,7 @@ export type {
   UseWorkspaceSessionsResult,
 } from "./hooks/use-workspace-sessions";
 export { useSessionBackgroundCommands } from "./hooks/use-session-background-commands";
+export { useWorkspaceBackgroundCommands } from "./hooks/use-workspace-background-commands";
 export type {
   UseSessionBackgroundCommandsOptions,
   UseSessionBackgroundCommandsResult,
