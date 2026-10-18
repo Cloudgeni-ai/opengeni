@@ -1,5 +1,46 @@
 # @opengeni/react-native
 
+## 4.0.4
+
+### Major Changes
+
+- 911c0b1: Apps can now show the components in their own words and languages. Every label, notice and user-facing error in `@opengeni/react` and `@opengeni/react-native` comes from one typed message catalog: pass `locale` and `messages` to `OpenGeniProvider` (or `OpenGeniMessagesProvider` from the new DOM-free `@opengeni/react/messages` entry), with plural forms chosen per language and English as the fallback. `englishMessages` is the full default catalog for translation tooling, and `OpenGeniMessageCatalog` types a complete translation.
+
+  Breaking: default label objects that used to be constants are now functions of the translator (for example `defaultChatComposerMessages(t)`, `SESSION_GROUP_LABELS(t)`, `DEFAULT_SESSION_USAGE_LIMIT_LABELS(t)`, `defaultNativeTimelineMessages(t)`, `DEFAULT_OPENGENI_NATIVE_LABELS(t)`), and exported helpers that produce text take the translator first (for example `buildTimeline(t, events)`, `machineDisplayName(t, machine)`, `orgLabel(t, accountId, grants)`). Get it with `useOpenGeniText()` in components, or `createOpenGeniText()` elsewhere.
+
+### Patch Changes
+
+- 5b10fc9: Opening a conversation reads each resource once, and reopening a recently viewed one draws at once.
+
+  - Session, queue, lineage, goal and human-input reads now report the session sequence they reflect (`X-OpenGeni-Session-Sequence`), so the shared event feed's opening burst no longer re-reads what the first read already covers. Opening one conversation drops from 11 requests (16 inside `OpenGeniProvider`) to 7 (8 with the provider's contract check). Older servers that do not send the header keep the previous refresh behaviour.
+  - `OpenGeniProvider` no longer runs its reconnect repair on the first open of a conversation; reconnects still repair every view.
+  - When the host retains reads (`OpenGeniProvider retainReadsAcrossMounts` or the new `useRetainedReads(client)`), reopening a conversation draws its last timeline, details, queue, goal, lineage and open questions from memory on the first render and refreshes behind it, with no spinner. Retained conversations are kept in memory only, per client object, within the event-browser byte budget; the composer draft is always read fresh.
+  - Workspace-scoped client config reads join one request per client and workspace (`readClientConfig`).
+
+- Updated dependencies [e7113e3]
+- Updated dependencies [2f6b8bd]
+- Updated dependencies [9482fe0]
+- Updated dependencies [2a81601]
+- Updated dependencies [2a93842]
+- Updated dependencies [911c0b1]
+- Updated dependencies [71dfe30]
+- Updated dependencies [f010292]
+- Updated dependencies [9fb9db3]
+- Updated dependencies [5581036]
+- Updated dependencies [79ec9fd]
+- Updated dependencies [5927aae]
+- Updated dependencies [6ab7b55]
+- Updated dependencies [3e061d6]
+- Updated dependencies [a22ed79]
+- Updated dependencies [5b10fc9]
+- Updated dependencies [b99865a]
+- Updated dependencies [e2e75c0]
+- Updated dependencies [24b346d]
+- Updated dependencies [a5a5500]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/sdk@4.0.0
+  - @opengeni/react@4.0.0
+
 ## 3.4.0
 
 ### Patch Changes

@@ -1,5 +1,30 @@
 # @opengeni/codemode
 
+## 4.0.4
+
+### Patch Changes
+
+- 26b4c24: Lead the compact browser outline with what needs attention on dense pages. An opened menu, dialog, listbox or tooltip, live messages such as toasts, and the focused or acted-on element with its small enclosing group now come first, the page's own content next, and site navigation last; empty live regions are left out. The omitted-element note names the largest regions it left out. A role or text locator that matches several elements now picks the single one whose whole name is the requested text, and an ambiguous locator lists its candidates with refs. A covered target names the element on top of it, and a failed step in a batch says which step failed.
+- 9ddadf6: Codemode calls and other reads of a turn's tool catalog no longer reload and re-verify the whole catalog every time. A catalog can be hundreds of tools and megabytes of JSON, and every Codemode call read it twice, once while holding the turn's admission lock. Verified catalogs are now kept in memory per server process, bounded by size, and each read still checks the stored row first, so access rules are unchanged.
+- Updated dependencies [e7113e3]
+- Updated dependencies [2f6b8bd]
+- Updated dependencies [9482fe0]
+- Updated dependencies [2a81601]
+- Updated dependencies [71dfe30]
+- Updated dependencies [f010292]
+- Updated dependencies [9fb9db3]
+- Updated dependencies [79ec9fd]
+- Updated dependencies [5927aae]
+- Updated dependencies [6ab7b55]
+- Updated dependencies [3e061d6]
+- Updated dependencies [a22ed79]
+- Updated dependencies [5b10fc9]
+- Updated dependencies [e2e75c0]
+- Updated dependencies [24b346d]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/sdk@4.0.0
+  - @opengeni/tool-gateway@4.0.0
+
 ## 3.4.0
 
 ### Patch Changes

@@ -1,5 +1,104 @@
 # @opengeni/core
 
+## 4.0.4
+
+### Patch Changes
+
+- e428801: Completed browser downloads stay saveable after the browser is suspended. Suspension removes the browser's working directory, so before an explicit suspend or an automatic idle or deadline save, each completed download is now kept as a workspace file. Listing, reading and saving a download then work while the browser is suspended, after it resumes on a new controller, and after the task moves to another machine, which imports the file from storage. A download that cannot be kept is logged and never blocks the suspension.
+- 9482fe0: Report observed command-scope cleanup of background child processes with an
+  append-only result notice, preserving structured output and process containment.
+- 79ec9fd: Let a machine owner move a running chat to their personal Connected Machine. Record the click as consent for the current logical turn, retain it across replacement attempts, and recheck ownership and access before each operation without exposing other personal machines or resources. Remove the obsolete busy-chat refusal.
+- 3e061d6: Preserve default-following tool selection in schedules while retaining explicit choices and permission limits. Route ordinary notifications to the human whose authority the calling turn uses, including scheduled turns in an existing chat.
+- Updated dependencies [e7113e3]
+- Updated dependencies [35dcfa0]
+- Updated dependencies [fb0a25f]
+- Updated dependencies [26b4c24]
+- Updated dependencies [a819a58]
+- Updated dependencies [b5fe653]
+- Updated dependencies [1e2ebb6]
+- Updated dependencies [e428801]
+- Updated dependencies [327d53a]
+- Updated dependencies [a8c5057]
+- Updated dependencies [6e8ab51]
+- Updated dependencies [958d157]
+- Updated dependencies [b4a3b7f]
+- Updated dependencies [88459ff]
+- Updated dependencies [3f21c12]
+- Updated dependencies [575b127]
+- Updated dependencies [2f6b8bd]
+- Updated dependencies [01b790e]
+- Updated dependencies [9482fe0]
+- Updated dependencies [2708a32]
+- Updated dependencies [09758fd]
+- Updated dependencies [08a7a88]
+- Updated dependencies [2a81601]
+- Updated dependencies [f2d5d8b]
+- Updated dependencies [903a3f5]
+- Updated dependencies [aeea237]
+- Updated dependencies [605af85]
+- Updated dependencies [d5b0003]
+- Updated dependencies [9cc3e18]
+- Updated dependencies [4098e67]
+- Updated dependencies [62a3815]
+- Updated dependencies [85889a5]
+- Updated dependencies [eeab688]
+- Updated dependencies [bf7a8f7]
+- Updated dependencies [b1b51e2]
+- Updated dependencies [0f1ea90]
+- Updated dependencies [71dfe30]
+- Updated dependencies [f010292]
+- Updated dependencies [9fb9db3]
+- Updated dependencies [6f005fa]
+- Updated dependencies [c378f15]
+- Updated dependencies [47584d8]
+- Updated dependencies [bd35473]
+- Updated dependencies [b1c5753]
+- Updated dependencies [42f4213]
+- Updated dependencies [e278e4d]
+- Updated dependencies [0eab0c8]
+- Updated dependencies [c6be5c7]
+- Updated dependencies [7931f9c]
+- Updated dependencies [79ec9fd]
+- Updated dependencies [40b175f]
+- Updated dependencies [6384b14]
+- Updated dependencies [ddaebe9]
+- Updated dependencies [1d24639]
+- Updated dependencies [7bac0d9]
+- Updated dependencies [a34aebb]
+- Updated dependencies [5927aae]
+- Updated dependencies [ff38f1d]
+- Updated dependencies [5632ffc]
+- Updated dependencies [790ac6e]
+- Updated dependencies [6ab7b55]
+- Updated dependencies [3e061d6]
+- Updated dependencies [9c61ebd]
+- Updated dependencies [a22ed79]
+- Updated dependencies [0ce7609]
+- Updated dependencies [cc182c7]
+- Updated dependencies [a312aaf]
+- Updated dependencies [6e15cfe]
+- Updated dependencies [2072131]
+- Updated dependencies [a2a47b3]
+- Updated dependencies [0c82106]
+- Updated dependencies [e47c979]
+- Updated dependencies [ba9ff31]
+- Updated dependencies [eaf6de4]
+- Updated dependencies [7b7b2b5]
+- Updated dependencies [23fc624]
+- Updated dependencies [9ddadf6]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/network@4.0.0
+  - @opengeni/runtime@4.0.0
+  - @opengeni/db@4.0.0
+  - @opengeni/codex@4.0.0
+  - @opengeni/observability@4.0.0
+  - @opengeni/config@4.0.0
+  - @opengeni/capabilities@4.0.0
+  - @opengeni/documents@4.0.0
+  - @opengeni/events@4.0.0
+  - @opengeni/storage@4.0.0
+  - @opengeni/vaults@4.0.0
+
 ## 3.4.0
 
 ### Patch Changes

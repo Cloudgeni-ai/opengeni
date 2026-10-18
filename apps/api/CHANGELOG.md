@@ -1,5 +1,138 @@
 # @opengeni/api-router
 
+## 4.0.4
+
+### Patch Changes
+
+- cf10a4c: Agent requests to the API no longer re-read the attempt's frozen learning policy on every call. The policy is a per-turn snapshot that never changes, so the API remembers it per exact attempt after the live-attempt check, which still runs on every request. This removes a row-locking database read from each agent tool call.
+- e8779af: When an older agent reports a full browser supervisor, opening a browser now fails right away with the clear capacity message. Previously the browser session sat in "starting" for about three minutes until its transition expired, and a later open could reuse that stuck session.
+- b5fe653: A browser that was marked lost because its suspension found the controller had restarted can now be resumed from its preserved working copy. The resume continues the same browser and profile on the generation that owns that copy, instead of refusing the browser forever. If the copy can't be continued, resume says so plainly and leaves the browser lost; it never silently rolls back to an older checkpoint.
+- 1e2ebb6: A browser resume that fails before its controller is dispatched (for example because the browser's machine is offline or the task moved to another machine) now returns the browser to suspended. Previously the browser stayed in restoring indefinitely and every later resume was refused.
+- 155106f: Resuming a browser that was lost when its controller restarted now says why its working copy could not be continued, for example that its last browser process could not be proven stopped, or that the chat that created it moved to another machine. Before, every such refusal gave the same message without a cause. The API also logs the controller's reason for operators.
+- e428801: Completed browser downloads stay saveable after the browser is suspended. Suspension removes the browser's working directory, so before an explicit suspend or an automatic idle or deadline save, each completed download is now kept as a workspace file. Listing, reading and saving a download then work while the browser is suspended, after it resumes on a new controller, and after the task moves to another machine, which imports the file from storage. A download that cannot be kept is logged and never blocks the suspension.
+- 38f74de: Suspending a browser whose controller restarted (for example after a Connected Machine agent update) no longer marks it `lost` with `controller_resource_missing`. Suspension first reaches the controller the way any use does, relaunching the browser from its intact private profile, and then saves that profile. A browser that cannot be recovered is still recorded as lost.
+- 402e43e: A browser or computer controller that refuses a request with its own 4xx (for example a stale computer target) is now counted in Channel-A failure telemetry as a rejected request with that status, not as an unexpected 500. The API response was already the controller's 409, but the failure counter and warning log reported every such refusal as an unexpected internal error, which made computer reads look like they were failing with 500s.
+- 5747f5d: Opening a computer session on a Connected Machine other than the one the chat is routed to now says so. Before, it could fail with the routed machine's own desktop state instead, for example "This Mac is locked" when the request named a Linux machine.
+- 3b87e9b: An agent can now end a managed browser or computer on its owner's personal (Only me) Connected Machine even when the chat that opened it is idle, or when the end comes from another chat. Previously the end needed that chat's live per-chat machine permission, failed with an "agent offline" error, and left the browser processes running on the machine until it ran out of browser capacity. Ending runs nothing new on the machine, so it now needs only the owner's access. Every other operation still needs the chat's permission.
+- 71dfe30: When a machine already runs its limit of Opengeni browsers or computer sessions, opening another now fails with a clear, non-retryable `capacity_exhausted` error (HTTP 409) telling the agent to end sessions it no longer needs. Previously it was a retryable `resource_unavailable` 503, which agents saw as "Opengeni is temporarily unavailable" and retried. The API gives errors from older agents the same message.
+- 5a1b30d: Browser and computer session lists check each distinct source chat's read access a bounded number at a time instead of one after another, so a workspace inventory spanning many chats no longer takes one database round trip per chat in sequence. Visibility rules are unchanged.
+- df545fe: Agents now choose where a remembered rule or fact is saved, and they tell the person when a save is refused.
+
+  `skill_save` and `skill_publish` gain an optional `scope` argument (`personal` or `workspace`), and `knowledge_save` gains an optional `scope: "workspace"`. With it, an agent can save a new Skill or Knowledge entry for everyone, or a Skill for only the person it acts for, when the person wants that. The descriptions of `skill_save`, `knowledge_save` and `instruction_policy_save` now say where a save goes by default. An explicit destination still follows its own Agent learning mode.
+
+  When a Skill, workspace instruction or Knowledge save is refused, the result says "Nothing was saved" and why in plain words. If the agent can fix the problem itself, it says how to retry. Otherwise it says what would make the save work and asks the agent to tell the person. It no longer says "Do not ask for approval to continue".
+
+- f010292: When an agent's Skill, workspace instruction or Knowledge save is refused, the chat now tells the person. A "Not saved to Skills" (or workspace instructions, or Knowledge) row appears beside the agent's reply and stays visible when the turn folds. It appears only for genuine refusals: Agent learning is off where the change would be saved, the chat isn't allowed to make the change, or the agent was started from a Site page. It says why in plain words and links to Agent learning settings or the item. Mistakes the agent can correct and retry itself, such as citing evidence the destination's readers can't see, show no row. Previously a refusal was visible only inside the folded tool call, so a request to remember something could be lost silently.
+
+  The refusal travels as a content-free `_meta["opengeni/learningRefusal"]` fact on the tool result (destination, reason and the targeted Skill ID only), which the model never sees. New exports: `learningRefusalFromToolOutput` and the `LearningRefusal` type from `@opengeni/sdk/learning-refusal`; the full fact from `@opengeni/contracts/learning-refusal`; and `LearningRefusalActionsProvider` and `LearningRefusalPlace` from `@opengeni/react`, which let a host open the right page. `NoticeItem` gains an optional `learningRefusal`.
+
+- 40b175f: Stamp session activity with transaction IDs instead of serializing new writers on a workspace counter. Preserve gap-free, at-least-once incremental monitoring with snapshot xmin watermarks, restart legacy cursors conservatively, and retain the old database gate during rolling upgrades.
+- 790ac6e: Stop browsers and Desktops a task leaves running on a Connected Machine it moved away from. Retiring a browser now also stops one that an agent restart left running detached (its profile and downloads stay on disk) and every later request that notices the move retries earlier retirements of that task's browsers and Desktops that found the machine offline or refusing.
+- 3e061d6: Preserve default-following tool selection in schedules while retaining explicit choices and permission limits. Route ordinary notifications to the human whose authority the calling turn uses, including scheduled turns in an existing chat.
+- ba9ff31: Browsers and Desktop sessions no longer keep running on a Connected Machine after the task that opened them moves to another machine. When such a session is marked lost, the server now reaches the former machine directly (with the owner's access, as any end does), ends that exact controller generation while keeping its on-disk state, and only then releases the record's controller binding; the session stays `lost`. Ending a lost session also stops it on the former machine first, instead of failing with a placement error and leaving its processes behind. If the machine is offline, nothing is released and the end explains that it can be retried once the machine is back.
+- Updated dependencies [e7113e3]
+- Updated dependencies [35dcfa0]
+- Updated dependencies [fb0a25f]
+- Updated dependencies [9c0c567]
+- Updated dependencies [26b4c24]
+- Updated dependencies [a0c07e5]
+- Updated dependencies [a819a58]
+- Updated dependencies [b5fe653]
+- Updated dependencies [1e2ebb6]
+- Updated dependencies [e428801]
+- Updated dependencies [327d53a]
+- Updated dependencies [a8c5057]
+- Updated dependencies [6e8ab51]
+- Updated dependencies [958d157]
+- Updated dependencies [b4a3b7f]
+- Updated dependencies [88459ff]
+- Updated dependencies [3f21c12]
+- Updated dependencies [575b127]
+- Updated dependencies [2f6b8bd]
+- Updated dependencies [01b790e]
+- Updated dependencies [9482fe0]
+- Updated dependencies [2708a32]
+- Updated dependencies [09758fd]
+- Updated dependencies [08a7a88]
+- Updated dependencies [2a81601]
+- Updated dependencies [f2d5d8b]
+- Updated dependencies [903a3f5]
+- Updated dependencies [aeea237]
+- Updated dependencies [605af85]
+- Updated dependencies [d5b0003]
+- Updated dependencies [9cc3e18]
+- Updated dependencies [4098e67]
+- Updated dependencies [62a3815]
+- Updated dependencies [85889a5]
+- Updated dependencies [eeab688]
+- Updated dependencies [bf7a8f7]
+- Updated dependencies [b1b51e2]
+- Updated dependencies [0f1ea90]
+- Updated dependencies [71dfe30]
+- Updated dependencies [f010292]
+- Updated dependencies [9fb9db3]
+- Updated dependencies [6f005fa]
+- Updated dependencies [c378f15]
+- Updated dependencies [47584d8]
+- Updated dependencies [bd35473]
+- Updated dependencies [b1c5753]
+- Updated dependencies [42f4213]
+- Updated dependencies [e278e4d]
+- Updated dependencies [0eab0c8]
+- Updated dependencies [c6be5c7]
+- Updated dependencies [7931f9c]
+- Updated dependencies [79ec9fd]
+- Updated dependencies [40b175f]
+- Updated dependencies [6384b14]
+- Updated dependencies [ddaebe9]
+- Updated dependencies [1d24639]
+- Updated dependencies [7bac0d9]
+- Updated dependencies [a34aebb]
+- Updated dependencies [5927aae]
+- Updated dependencies [ff38f1d]
+- Updated dependencies [5632ffc]
+- Updated dependencies [790ac6e]
+- Updated dependencies [6ab7b55]
+- Updated dependencies [3e061d6]
+- Updated dependencies [9c61ebd]
+- Updated dependencies [a22ed79]
+- Updated dependencies [0ce7609]
+- Updated dependencies [cc182c7]
+- Updated dependencies [a312aaf]
+- Updated dependencies [6e15cfe]
+- Updated dependencies [2072131]
+- Updated dependencies [a2a47b3]
+- Updated dependencies [0c82106]
+- Updated dependencies [e47c979]
+- Updated dependencies [ba9ff31]
+- Updated dependencies [eaf6de4]
+- Updated dependencies [7b7b2b5]
+- Updated dependencies [23fc624]
+- Updated dependencies [9ddadf6]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/network@4.0.0
+  - @opengeni/runtime@4.0.0
+  - @opengeni/db@4.0.0
+  - @opengeni/interaction@4.0.0
+  - @opengeni/codemode@4.0.0
+  - @opengeni/agent-proto@4.0.0
+  - @opengeni/core@4.0.0
+  - @opengeni/codex@4.0.0
+  - @opengeni/observability@4.0.0
+  - @opengeni/config@4.0.0
+  - @opengeni/artifact-tool@4.0.0
+  - @opengeni/capabilities@4.0.0
+  - @opengeni/documents@4.0.0
+  - @opengeni/events@4.0.0
+  - @opengeni/github@4.0.0
+  - @opengeni/storage@4.0.0
+  - @opengeni/tool-gateway@4.0.0
+  - @opengeni/vaults@4.0.0
+  - @opengeni/vaults-keeper@4.0.0
+  - @opengeni/vaults-onepassword@4.0.0
+  - @opengeni/vaults-protonpass@4.0.0
+  - @opengeni/xai-subscription@4.0.0
+
 ## 3.4.0
 
 ### Minor Changes
