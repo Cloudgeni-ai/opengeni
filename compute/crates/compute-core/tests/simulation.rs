@@ -388,6 +388,7 @@ impl World {
             sandbox: pending.sandbox,
             op: pending.op,
             outcome,
+            wrote: true,
         });
     }
 

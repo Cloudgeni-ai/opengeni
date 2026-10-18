@@ -77,7 +77,11 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
         };
         match settled {
-            None => return (Outcome::Cancelled, After::Kept(live)),
+            None => {
+                // Cancelled while it waited: nothing written.
+                self.untouched = true;
+                return (Outcome::Cancelled, After::Kept(live));
+            }
             Some(Err(error)) => {
                 live.memory.base = Base::Unknown;
                 return (failure(&error), After::Kept(live));

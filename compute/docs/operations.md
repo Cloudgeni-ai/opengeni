@@ -205,6 +205,26 @@ sudo install -m 600 host.pem host.key ca.pem -t /etc/compute/
 sudo ./install.sh --config host.env --state-device /dev/nvme1n1
 ```
 
+Nothing else on a host may drop forwarded traffic. A packet passes a
+firewall hook only if every chain on it accepts it, so another firewall
+whose forward chain drops by default, such as Docker's `FORWARD` chain or
+ufw's, cuts every sandbox off from everything unless it accepts traffic
+from and to the sandboxes' links, `ogc*`. The agent warns when it starts
+of each such chain it finds through nftables (it cannot see
+iptables-legacy rules). On a host running Docker with its iptables
+backend (its default, including over iptables-nft; its nftables backend
+has no `DOCKER-USER` chain):
+
+```sh
+sudo iptables -I DOCKER-USER -o 'ogc+' -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+sudo iptables -I DOCKER-USER -i 'ogc+' -j ACCEPT
+```
+
+These only keep the other firewall from dropping what the agent allows:
+the agent's own chain runs first, and what it drops stays dropped.
+Docker leaves `DOCKER-USER` alone, but rules added by hand are gone after
+a reboot: keep them the way the host keeps its other firewall rules.
+
 `install.sh` checks the bundle against `SHA256SUMS`; installs the packages
 the agent runs (iproute2, nftables, e2fsprogs, xfsprogs); installs the
 release under `/opt/compute/releases/<version>` behind

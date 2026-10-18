@@ -64,6 +64,17 @@ impl Rig {
             sandbox: SandboxId(id),
             op,
             outcome,
+            wrote: true,
+        })
+    }
+
+    /// Finishes `op`, which the host agent is certain wrote nothing.
+    fn finish_untouched(&mut self, id: u128, op: OpId, outcome: Outcome) -> Vec<Action> {
+        self.send(Input::Finished {
+            sandbox: SandboxId(id),
+            op,
+            outcome,
+            wrote: false,
         })
     }
 
@@ -440,6 +451,104 @@ fn the_image_a_checkpoint_wrote_stays_booked_until_a_reading() {
         .collect();
     starts.sort_unstable();
     assert_eq!(starts, [(1, Step::Checkpoint), (2, Step::Restore)]);
+}
+
+/// A checkpoint cancelled before it wrote anything, such as by a sleep
+/// that use then withdrew, books nothing: neither an image nor what the
+/// guest might have written over a clone of its disk. It is due again at
+/// once, and booking those each time would refuse other wakes for space
+/// nothing took.
+#[test]
+fn a_checkpoint_cancelled_before_it_wrote_anything_books_nothing() {
+    let mut rig = Rig::new(HostPolicy {
+        disk: Some(DiskPolicy {
+            reserve: GIB,
+            reserve_inodes: 100,
+        }),
+        ..HostPolicy::default()
+    });
+    let reading = Input::Disk {
+        available: DiskSpace {
+            bytes: 12 * GIB,
+            inodes: 1_000_000,
+        },
+    };
+    rig.send(reading);
+    // Sandbox 1 books its next save, 1 GiB, and what its disk may still
+    // grow by, 1 GiB of its 8; a checkpoint of it books the other 7 while
+    // it runs. Sandbox 2, saved, needs 1 GiB to wake and 1 GiB its disk
+    // may grow by, which fits while sandbox 1 has written nothing.
+    let size = Size {
+        disk: 8 * GIB,
+        ..Size::whole(GIB)
+    };
+    rig.add(1, State::RUNNING, checkpointed(), size);
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(1),
+        bytes: GIB,
+    });
+    let saved = State::new(Level::Saved, Durability::Local, true);
+    let rules = SleepPolicy::new(SleepRules::RECOMMENDED).unwrap();
+    rig.add(2, saved, rules, size);
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(2),
+        bytes: GIB,
+    });
+    // A reading shows what their disks took.
+    rig.send(reading);
+    let booked = |rig: &Rig| rig.host.disk().unwrap().booked.bytes;
+    assert_eq!(booked(&rig), 2 * GIB);
+
+    let (step, op) = only_start(&rig.at(FIRST_CHECKPOINT));
+    assert_eq!(step, Step::Checkpoint);
+    assert_eq!(booked(&rig), 9 * GIB, "and the rest of its disk's bound");
+    let actions = rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Paused,
+    });
+    assert_eq!(cancelled(&actions), [op], "{actions:?}");
+    // Used before the cancellation took effect: the sleep is withdrawn,
+    // and the checkpoint, still due, starts again once this one ends.
+    rig.send(Input::Touch {
+        sandbox: SandboxId(1),
+        priority: Priority::Interactive,
+    });
+    let (step, _) = only_start(&rig.finish_untouched(1, op, Outcome::Cancelled));
+    assert_eq!(step, Step::Checkpoint);
+    assert_eq!(rig.state(1), State::RUNNING);
+    assert_eq!(booked(&rig), 9 * GIB, "only what the new checkpoint books");
+    // With the disk as it was, sandbox 2 still fits: 12 GiB, less the
+    // reserve and the 9 booked, leaves the 2 it needs.
+    let (step, _) = only_start(&rig.hold(2));
+    assert_eq!(step, Step::Restore);
+
+    // One that did write, here cancelled while it uploaded, keeps both
+    // booked until a reading shows them: its retry waits for that reading.
+    let mut rig = Rig::new(HostPolicy {
+        disk: Some(DiskPolicy {
+            reserve: GIB,
+            reserve_inodes: 100,
+        }),
+        ..HostPolicy::default()
+    });
+    rig.send(reading);
+    rig.add(1, State::RUNNING, checkpointed(), size);
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(1),
+        bytes: GIB,
+    });
+    rig.send(reading);
+    let (step, op) = only_start(&rig.at(FIRST_CHECKPOINT));
+    assert_eq!(step, Step::Checkpoint);
+    assert_eq!(started(&rig.finish(1, op, Outcome::Cancelled)), Vec::new());
+    assert_eq!(
+        booked(&rig),
+        2 * GIB + 7 * GIB + GIB,
+        "its next save and growth, what the clone held, and the image"
+    );
+    let (step, _) = only_start(&rig.send(reading));
+    assert_eq!(step, Step::Checkpoint);
+    assert_eq!(booked(&rig), 9 * GIB);
 }
 
 #[test]

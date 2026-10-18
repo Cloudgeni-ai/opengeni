@@ -1,10 +1,11 @@
 //! Seeded random histories of sandboxes that write to local disk: guests
-//! growing their disks while they run, saves, and wakes from object
-//! storage that write their local copy before and after the guest runs;
-//! and work outside any sandbox that writes too: new sandboxes' first
-//! files, booked as writes, and spare VMs filling. After every decision
-//! the core's disk bookings must cover what an independent model says may
-//! still be written, plus what was written since the last reading.
+//! growing their disks while they run, saves, checkpoints, some cancelled
+//! before they wrote anything, and wakes from object storage that write
+//! their local copy before and after the guest runs; and work outside any
+//! sandbox that writes too: new sandboxes' first files, booked as writes,
+//! and spare VMs filling. After every decision the core's disk bookings
+//! must cover what an independent model says may still be written, plus
+//! what was written since the last reading.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -68,6 +69,7 @@ struct Sim {
     running: BTreeMap<OpId, (SandboxId, Step)>,
     removed: BTreeSet<SandboxId>,
     wakes: u64,
+    checkpoints: u64,
 }
 
 impl Sim {
@@ -95,6 +97,7 @@ impl Sim {
             running: BTreeMap::new(),
             removed: BTreeSet::new(),
             wakes: 0,
+            checkpoints: 0,
         };
         for id in 0..10 {
             let limit = (1 + sim.rng.below(2)) * GIB;
@@ -112,6 +115,15 @@ impl Sim {
                 State::new(Level::Remote, Durability::Remote, true)
             };
             let sandbox = SandboxId(id);
+            // Half are checkpointed while they run.
+            let rules = if sim.rng.below(2) == 0 {
+                SleepRules {
+                    checkpoint_every: Some(Duration::from_secs(120)),
+                    ..SleepRules::RECOMMENDED
+                }
+            } else {
+                SleepRules::RECOMMENDED
+            };
             sim.models.insert(
                 sandbox,
                 Model {
@@ -124,7 +136,7 @@ impl Sim {
             sim.send(vec![Input::Add {
                 sandbox,
                 state,
-                policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+                policy: SleepPolicy::new(rules).unwrap(),
                 size,
                 last_activity: At::ZERO,
             }]);
@@ -141,6 +153,9 @@ impl Sim {
                 self.running.insert(op, (sandbox, step));
                 if step.wakes() {
                     self.wakes += 1;
+                }
+                if step == Step::Checkpoint {
+                    self.checkpoints += 1;
                 }
                 if step == Step::Fetch
                     && let Some(model) = self.models.get_mut(&sandbox)
@@ -343,9 +358,14 @@ impl Sim {
         let op = ops[usize::try_from(self.rng.below(ops.len() as u64)).unwrap()];
         let (sandbox, step) = self.running.remove(&op).unwrap();
         let failed = self.rng.below(8) == 0 && matches!(step, Step::Fetch | Step::Save);
+        // A checkpoint may be cancelled before it writes anything; otherwise
+        // it writes up to a save's worth, its memory image, whatever it
+        // comes to.
+        let checkpoint = (step == Step::Checkpoint).then(|| self.rng.below(3));
+        let wrote = checkpoint != Some(0);
         if let Some(model) = self.models.get_mut(&sandbox) {
             match step {
-                Step::Save => {
+                Step::Save | Step::Checkpoint if wrote => {
                     let bytes = self.rng.below(model.size.save + 1);
                     self.used += bytes;
                     self.unread += bytes;
@@ -363,15 +383,16 @@ impl Sim {
                 _ => {}
             }
         }
-        let outcome = if failed {
-            Outcome::Failed(Failure::Transient)
-        } else {
-            Outcome::Done
+        let outcome = match checkpoint {
+            Some(0 | 1) => Outcome::Cancelled,
+            _ if failed => Outcome::Failed(Failure::Transient),
+            _ => Outcome::Done,
         };
         self.send(vec![Input::Finished {
             sandbox,
             op,
             outcome,
+            wrote,
         }]);
     }
 }
@@ -393,13 +414,15 @@ fn booking(key: SandboxId, spare: bool, disk: DiskSpace) -> Input {
 
 #[test]
 fn bookings_cover_every_write_still_to_come() {
-    let mut wakes = 0;
+    let (mut wakes, mut checkpoints) = (0, 0);
     for seed in 0..300 {
         let mut sim = Sim::new(seed);
         for _ in 0..1_500 {
             sim.step();
         }
         wakes += sim.wakes;
+        checkpoints += sim.checkpoints;
     }
     assert!(wakes > 3_000, "only {wakes} wakes");
+    assert!(checkpoints > 400, "only {checkpoints} checkpoints");
 }

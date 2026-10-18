@@ -120,6 +120,7 @@ impl Rig {
             sandbox: SandboxId(id),
             op,
             outcome: Outcome::Done,
+            wrote: true,
         })
     }
 
@@ -560,6 +561,7 @@ fn a_vm_backing_off_is_not_instant_relief() {
         sandbox: SandboxId(1),
         op,
         outcome: Outcome::Failed(Failure::Transient),
+        wrote: true,
     });
     assert_eq!(host_full(&actions, 2), Some((GIB, 0)));
     assert_eq!(started(&actions), []);
@@ -891,6 +893,7 @@ impl Sim {
                         sandbox,
                         op,
                         outcome,
+                        wrote: true,
                     }
                 }
             }

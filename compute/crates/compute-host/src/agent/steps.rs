@@ -19,7 +19,7 @@ use crate::net::Networks;
 use crate::observe::notes::Notes;
 use crate::observe::{Alarm, Cause, alarm_event};
 use crate::pool::{Loaning, Template};
-use crate::protocol::Id;
+use crate::protocol::{Id, StepStats};
 use crate::restore_notice::ask_commands;
 use crate::state::{Change, Disk, Fence, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory, Meter, Reading, Report};
@@ -27,7 +27,7 @@ use crate::store::{Owned, Store};
 
 use super::holds::Closing;
 use super::observe::Why;
-use super::{Event, HostAgent, HostError, Leftover, Reply, Running, TEARDOWN_RETRY, Woke};
+use super::{Event, HostAgent, HostError, Leftover, Reply, Running, Slot, TEARDOWN_RETRY, Woke};
 
 /// How long a guest may take to say whether commands still run before its
 /// sandbox sleeps anyway.
@@ -529,6 +529,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             fetcher: self.fetcher.clone(),
             pager: self.pager.clone(),
             launches: 0,
+            untouched: false,
             unthrottle: None,
             meter: None,
             last_used_ms: self.unix_ms(last_activity),
@@ -556,35 +557,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             slot.launches += u64::from(report.launches);
             if let Some(running) = slot.op.take().filter(|running| running.op == op) {
                 let stats = &mut self.stats[running.step.index()];
-                let micros =
-                    u64::try_from(running.started.elapsed().as_micros()).unwrap_or(u64::MAX);
-                stats.total_us = stats.total_us.saturating_add(micros);
-                stats.max_us = stats.max_us.max(micros);
-                tracing::debug!(%id, step = ?running.step, micros, ?outcome, "step finished");
-                match outcome {
-                    Outcome::Done => {
-                        stats.done += 1;
-                        if slot
-                            .failed
-                            .as_ref()
-                            .is_some_and(|(step, _)| *step == running.step)
-                        {
-                            slot.failed = None;
-                        }
-                    }
-                    Outcome::Cancelled => stats.cancelled += 1,
-                    Outcome::Failed(_) => {
-                        stats.failed += 1;
-                        slot.failed = Some((
-                            running.step,
-                            report
-                                .notes
-                                .error
-                                .clone()
-                                .unwrap_or_else(|| "no error recorded".to_owned()),
-                        ));
-                    }
-                }
+                count_step(id, stats, slot, &running, outcome, &report);
                 // It runs: the request that woke it is answered. A fetch
                 // only brings it back to the host; the restore after it
                 // still serves that request.
@@ -637,6 +610,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sandbox: id.0,
             op,
             outcome,
+            wrote: report.wrote,
         };
         let activity = busy.then_some(Input::Busy { sandbox: id.0 });
         // A step that found a later owner holding the sandbox began its
@@ -1099,6 +1073,47 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
                 }
                 _ => return Ok(()),
             }
+        }
+    }
+}
+
+/// Counts how the step `running` of `id` ended in its kind's `stats`, and
+/// keeps a failure's error for the sandbox's status, or clears an earlier
+/// failure of the same kind once one is done.
+fn count_step<V>(
+    id: Id,
+    stats: &mut StepStats,
+    slot: &mut Slot<V>,
+    running: &Running,
+    outcome: Outcome,
+    report: &Report,
+) {
+    let micros = u64::try_from(running.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    stats.total_us = stats.total_us.saturating_add(micros);
+    stats.max_us = stats.max_us.max(micros);
+    tracing::debug!(%id, step = ?running.step, micros, ?outcome, "step finished");
+    match outcome {
+        Outcome::Done => {
+            stats.done += 1;
+            if slot
+                .failed
+                .as_ref()
+                .is_some_and(|(step, _)| *step == running.step)
+            {
+                slot.failed = None;
+            }
+        }
+        Outcome::Cancelled => stats.cancelled += 1,
+        Outcome::Failed(_) => {
+            stats.failed += 1;
+            slot.failed = Some((
+                running.step,
+                report
+                    .notes
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "no error recorded".to_owned()),
+            ));
         }
     }
 }

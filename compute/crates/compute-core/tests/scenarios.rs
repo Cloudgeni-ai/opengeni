@@ -89,6 +89,7 @@ impl Rig {
             sandbox: SandboxId(id),
             op,
             outcome,
+            wrote: true,
         })
     }
 

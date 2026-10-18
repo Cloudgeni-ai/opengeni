@@ -92,6 +92,7 @@ impl Rig {
             sandbox: SandboxId(id),
             op,
             outcome: Outcome::Done,
+            wrote: true,
         })
     }
 
@@ -518,6 +519,7 @@ fn a_fetch_that_fails_keeps_its_booking_for_its_retry_and_gives_it_up_with_its_w
         sandbox: SandboxId(1),
         op,
         outcome: Outcome::Failed(compute_core::Failure::Transient),
+        wrote: true,
     });
     assert_eq!(rig.level(1), Level::Remote);
     // Its wake is still admitted and retries without asking again, so it

@@ -88,6 +88,7 @@ impl Rig {
                 sandbox: SandboxId(id),
                 op,
                 outcome: Outcome::Done,
+                wrote: true,
             });
             all.extend(actions.iter().copied());
         }
