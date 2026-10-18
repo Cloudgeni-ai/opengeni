@@ -18,7 +18,7 @@ use compute_control::store::{MemoryStore, PostgresStore, Store};
 use compute_control::tls::{Tls, TlsFiles, database_client};
 use compute_control::{Config, start};
 use compute_fleet::ScalePolicy;
-use compute_protocol::host::ImageId;
+use compute_protocol::host::{ImageId, SleepConfig};
 use compute_storage::store::ChunkStore;
 
 #[derive(Parser)]
@@ -107,6 +107,11 @@ struct Serve {
     /// Seconds a wake or connect may take in all.
     #[arg(long, default_value_t = 60)]
     wake_within_s: u64,
+    /// Seconds a sandbox whose create names no sleep config runs between
+    /// checkpoints, the fleet's target for how much work losing a host
+    /// costs; 0 takes none.
+    #[arg(long, default_value_t = 600)]
+    checkpoint_every_s: u64,
     /// The team whose keys manage hosts.
     #[arg(long, default_value = "operator")]
     operator_team: String,
@@ -341,6 +346,11 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
         settings: Settings {
             disk_mib: args.disk_mib,
             wake_within: Duration::from_secs(args.wake_within_s),
+            sleep: SleepConfig {
+                checkpoint_every_ms: (args.checkpoint_every_s > 0)
+                    .then(|| args.checkpoint_every_s.saturating_mul(1000)),
+                ..Settings::default().sleep
+            },
             image: args.image.clone(),
             images: args
                 .stored_images

@@ -17,6 +17,22 @@ set -eu
 if [ -n "${COMPUTE_HUGE_PAGES:-}" ] && [ "${COMPUTE_HUGE_PAGES}" != 0 ]; then
   echo "$COMPUTE_HUGE_PAGES" >/proc/sys/vm/nr_hugepages
   have=$(cat /proc/sys/vm/nr_hugepages)
+  # The kernel reserves only the 2 MiB runs it finds free. A host that has
+  # just unpacked its base image keeps most of its memory as page cache,
+  # and what is left is scattered: write back and drop the cache, compact
+  # what remains, and ask again. Each write of nr_hugepages takes what it
+  # can find; the host fails only if that still falls short.
+  tries=0
+  while [ "$have" -lt "$COMPUTE_HUGE_PAGES" ] && [ "$tries" -lt 3 ]; do
+    tries=$((tries + 1))
+    sync
+    echo 3 >/proc/sys/vm/drop_caches
+    if [ -e /proc/sys/vm/compact_memory ]; then
+      echo 1 >/proc/sys/vm/compact_memory
+    fi
+    echo "$COMPUTE_HUGE_PAGES" >/proc/sys/vm/nr_hugepages
+    have=$(cat /proc/sys/vm/nr_hugepages)
+  done
   if [ "$have" -lt "$COMPUTE_HUGE_PAGES" ]; then
     echo "host-setup: asked for $COMPUTE_HUGE_PAGES huge pages, the kernel reserved $have" >&2
     exit 1
