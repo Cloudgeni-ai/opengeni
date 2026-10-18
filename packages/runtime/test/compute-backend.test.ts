@@ -654,6 +654,19 @@ describe("compute sandbox client", () => {
         nowMs: Date.now() + 11 * 60_000,
       });
     expect(await sweep()).toMatchObject({ examined: 1, deleted: [], failed: 1 });
+    // A pass deletes at most its limit; the next pass continues.
+    fabric.failCleanup = false;
+    const capped = await sweepComputeOrphans({
+      fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+      gateway: GATEWAY,
+      named: async () => false,
+      revokeEnrollment: (input) => plane.revokeEnrollment(input),
+      nowMs: Date.now() + 11 * 60_000,
+      maxDeletions: 0,
+    });
+    expect(capped.deleted).toEqual([]);
+    expect(fabric.boxes.size).toBe(1);
+    fabric.failCleanup = true;
     expect(plane.revoked).toEqual([]);
     fabric.failCleanup = false;
     expect((await sweep()).deleted).toHaveLength(1);

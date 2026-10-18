@@ -3713,9 +3713,13 @@ async function sweepComputeOrphansForConfiguredBackend(
   if (nowMs - lastComputeOrphanSweepAtMs < COMPUTE_ORPHAN_SWEEP_INTERVAL_MS) return 0;
   lastComputeOrphanSweepAtMs = nowMs;
   const result = await sweepComputeOrphans({
+    // Short requests: an unreachable fabric must not hold up the rest of the
+    // maintenance pass; the next sweep tries again.
     fabric: new ComputeFabricClient({
       baseUrl: settings.computeApiUrl,
       apiKey: settings.computeApiKey,
+      requestTimeoutMs: 20_000,
+      maxAttempts: 2,
     }),
     gateway: settings.computeLinkUrl,
     named: async (identity) => await computeSandboxNamed(db, identity),

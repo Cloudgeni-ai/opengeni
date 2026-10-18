@@ -33,6 +33,9 @@ export type ComputeSandboxIdentity = {
   enrollmentId: string;
 };
 
+/** Deletions per sweep, so one pass stays short; the next pass continues. */
+export const COMPUTE_ORPHAN_SWEEP_LIMIT = 50;
+
 export type ComputeOrphanSweepResult = {
   examined: number;
   deleted: ComputeSandboxIdentity[];
@@ -72,11 +75,14 @@ export async function sweepComputeOrphans(input: {
   named(identity: ComputeSandboxIdentity): Promise<boolean>;
   revokeEnrollment(input: { workspaceId: string; enrollmentId: string }): Promise<void>;
   nowMs?: number;
+  maxDeletions?: number;
 }): Promise<ComputeOrphanSweepResult> {
   const nowMs = input.nowMs ?? Date.now();
+  const maxDeletions = input.maxDeletions ?? COMPUTE_ORPHAN_SWEEP_LIMIT;
   const views = await input.fabric.list({ [COMPUTE_METADATA.gateway]: input.gateway });
   const result: ComputeOrphanSweepResult = { examined: 0, deleted: [], failed: 0 };
   for (const view of views) {
+    if (result.deleted.length >= maxDeletions) break;
     const identity = identityOf(view);
     if (!identity) continue;
     result.examined += 1;
