@@ -85,8 +85,12 @@ export type ProtonPassVaultProvider = VaultProvider & {
   close(): Promise<void>;
 };
 
-/** Proton share and item ids are URL-safe base64; anything else cannot exist. */
-const PROTON_ID = /^[A-Za-z0-9_=+/][A-Za-z0-9_=+/-]{0,255}$/;
+/**
+ * Proton share and item ids are base64 or URL-safe base64, so a real id can
+ * start with "-"; anything else cannot exist. Ids only ever reach pass-cli as
+ * `--name=value`, so a leading dash is never parsed as an option.
+ */
+const PROTON_ID = /^[A-Za-z0-9_=+/-]{1,256}$/;
 function assertIds(...ids: string[]) {
   for (const id of ids) {
     if (!PROTON_ID.test(id)) {
