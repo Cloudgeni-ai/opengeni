@@ -51,13 +51,14 @@ impl Drop for ShrunkPool {
 /// as `COMPUTE_TEST_PROFILE` names it, or as an agent given none chooses
 /// by itself, from the CPU's hypervisor flag.
 pub(super) fn nested() -> bool {
-    match std::env::var("COMPUTE_TEST_PROFILE") {
-        Ok(profile) => profile == "nested",
-        Err(_) => std::fs::read_to_string("/proc/cpuinfo").is_ok_and(|cpuinfo| {
-            compute_engine::MemoryProfile::for_cpuinfo(&cpuinfo)
-                == compute_engine::MemoryProfile::nested()
-        }),
+    if let Ok(profile) = std::env::var("COMPUTE_TEST_PROFILE") {
+        return profile == "nested";
     }
+    // The agent refuses to start without it, so a test goes no further
+    // either.
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo")
+        .unwrap_or_else(|error| panic!("reading /proc/cpuinfo: {error}"));
+    compute_engine::MemoryProfile::for_cpuinfo(&cpuinfo) == compute_engine::MemoryProfile::nested()
 }
 
 async fn create_sized(client: &Client, sandbox: Id, memory_mib: u32) {
@@ -150,20 +151,28 @@ async fn a_guest_stalls_while_the_huge_page_pool_is_empty_and_resumes_after() {
     host.finish("pool");
 }
 
-/// Host memory `sandbox` holds, as the agent last sampled it.
-fn resident(status: &HostStatus, sandbox: Id) -> u64 {
-    status
+/// Host memory `sandbox` holds, as the agent last sampled it; `None` until
+/// it has. The sandbox must be there, running and whole: memory of one
+/// that ended or broke says nothing of what its guest gave back.
+fn resident(status: &HostStatus, sandbox: Id) -> Option<u64> {
+    let found = status
         .sandboxes
         .iter()
         .find(|found| found.id == sandbox)
-        .and_then(|found| found.resident_bytes)
-        .unwrap_or(0)
+        .unwrap_or_else(|| panic!("{sandbox} is gone"));
+    assert!(
+        found.level == LevelName::Running && !found.broken,
+        "{sandbox} no longer runs: {found:?}"
+    );
+    found.resident_bytes
 }
 
 /// A running guest hands back memory it frees, on both profiles. The host
 /// can give back only whole backing pages, so a guest on 2 MiB huge pages
 /// that reported its free memory in 4 KiB blocks would give back nothing;
 /// the engine has it report blocks no smaller than its backing pages.
+/// Its guest is large enough that its `/dev/shm`, half its memory, holds
+/// the fill with room to spare.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_running_guest_gives_back_memory_it_frees() {
     const FILL: u64 = 512 * MIB;
@@ -174,7 +183,7 @@ async fn a_running_guest_gives_back_memory_it_frees() {
     let host = Host::new(&lab, "reclaim", &[]);
     let agent = host.start().await;
     let sandbox = id(0);
-    create_sized(&agent.client, sandbox, 1024).await;
+    create_sized(&agent.client, sandbox, 2048).await;
     let (output, _) = exec(
         &agent.client,
         sandbox,
@@ -187,10 +196,10 @@ async fn a_running_guest_gives_back_memory_it_frees() {
     assert_eq!(output.trim(), "dd=0");
     agent
         .wait_until("the filled guest's memory to be sampled", |status| {
-            resident(status, sandbox) >= FILL
+            resident(status, sandbox).is_some_and(|bytes| bytes >= FILL)
         })
         .await;
-    let full = resident(&agent.status().await, sandbox);
+    let full = resident(&agent.status().await, sandbox).expect("sampled");
     let started = Instant::now();
     let (output, _) = exec(&agent.client, sandbox, "rm /dev/shm/fill; echo rm=$?").await;
     assert_eq!(output.trim(), "rm=0");
@@ -198,21 +207,28 @@ async fn a_running_guest_gives_back_memory_it_frees() {
     let deadline = started + Duration::from_secs(60);
     let freed = loop {
         let now = resident(&agent.status().await, sandbox);
-        if now + FILL / 2 <= full {
+        if let Some(now) = now
+            && now + FILL / 2 <= full
+        {
             break now;
         }
         assert!(
             Instant::now() < deadline,
-            "the guest gave back {} MiB of the {} MiB it freed ({} MiB held, {} MiB when full; \
+            "the guest gave back too little of the {} MiB it freed ({:?} MiB held, {} MiB when full; \
              huge pages: {})",
-            full.saturating_sub(now) / MIB,
             FILL / MIB,
-            now / MIB,
+            now.map(|bytes| bytes / MIB),
             full / MIB,
             nested()
         );
         sleep(Duration::from_millis(200)).await;
     };
+    let (output, _) = exec(&agent.client, sandbox, "echo alive").await;
+    assert_eq!(
+        output.trim(),
+        "alive",
+        "the guest runs on after giving memory back"
+    );
     eprintln!(
         "freed {} MiB in the guest; the host got {} MiB back within {:?} (huge pages: {})",
         FILL / MIB,

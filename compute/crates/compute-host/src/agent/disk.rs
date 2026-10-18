@@ -153,6 +153,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
+    /// Refuses with `error` the work that waits for a disk reading, none of
+    /// which has started: its creates, and those waiting for its fetches.
+    /// It frees their ids.
+    pub(super) fn refuse_after_reading(&mut self, error: &HostError) {
+        for work in std::mem::take(&mut self.after_reading) {
+            match work {
+                AfterReading::Create(id, _, _, reply) => {
+                    self.preparing.remove(&id.0);
+                    let _ = reply.send(Err(error.clone()));
+                }
+                AfterReading::Fetch(image, _) => self.fetch_ended(image, &Err(error.clone())),
+            }
+        }
+    }
+
     /// What a ready sandbox's fill may write until it is ready: its copy of
     /// the template's disk and what its guest writes to it until then,
     /// together never more than the most a disk may take.

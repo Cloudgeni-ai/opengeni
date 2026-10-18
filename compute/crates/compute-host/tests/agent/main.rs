@@ -30,6 +30,7 @@ use tokio::time::{Instant, sleep};
 mod admission;
 mod checkpoint;
 mod disk_lengths;
+mod disk_reading;
 mod fleet;
 mod images;
 mod link;
@@ -894,6 +895,7 @@ impl Lab {
             base_image: root.join("base.img"),
             policy,
             sample_every: Duration::from_millis(50),
+            disk_reading: None,
             stream_idle: HostConfig::STREAM_IDLE,
             guest_ports: Vec::new(),
             restore_notice_port: None,
@@ -1071,7 +1073,10 @@ impl Lab {
     async fn wait_until(&self, what: &str, done: impl Fn(&HostStatus) -> bool) -> HostStatus {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let status = self.status().await;
+            // A status that never comes times out too.
+            let status = tokio::time::timeout_at(deadline, self.status())
+                .await
+                .unwrap_or_else(|_| panic!("timed out waiting for {what}: no status"));
             if done(&status) {
                 return status;
             }

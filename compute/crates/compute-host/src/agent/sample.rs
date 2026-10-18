@@ -1,6 +1,8 @@
 //! Periodic sampling of host memory and disk, and of VM processor use and
 //! traffic.
 
+use std::sync::{Arc, Mutex, PoisonError};
+
 use compute_core::{DiskSpace, Input, Level, SandboxId, Step};
 use compute_engine::{Engine, PageSize};
 use tokio::time::Instant;
@@ -9,6 +11,38 @@ use crate::step::Reading;
 use crate::store::Store;
 
 use super::{BusyRule, HostAgent};
+
+/// Readings of the local disk handed to the agent one at a time, in place
+/// of its own of the state root's filesystem (see
+/// [`super::HostConfig::disk_reading`]): each one given is taken by the
+/// next sample, and samples take none until the next is given. Tests
+/// decide with it what the disk holds and when work waiting for a reading
+/// is decided.
+#[derive(Clone, Debug, Default)]
+pub struct DiskGauge {
+    next: Arc<Mutex<Option<DiskSpace>>>,
+}
+
+impl DiskGauge {
+    /// Has the next sample read `available`.
+    pub fn give(&self, available: DiskSpace) {
+        *self.lock() = Some(available);
+    }
+
+    /// Whether a sample has taken the reading last given.
+    #[must_use]
+    pub fn taken(&self) -> bool {
+        self.lock().is_none()
+    }
+
+    fn take(&self) -> Option<DiskSpace> {
+        self.lock().take()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<DiskSpace>> {
+        self.next.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn sample(&mut self) {
@@ -50,7 +84,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // being filled, then the disk reading that shows what they took.
         // The core ignores them without a disk policy.
         batch.extend(self.disk_readings());
-        let disk = read_disk(&self.root);
+        let disk = match &self.disk_gauge {
+            Some(gauge) => gauge.take(),
+            None => read_disk(&self.root),
+        };
         if let Some(available) = disk {
             batch.push(Input::Disk { available });
         }

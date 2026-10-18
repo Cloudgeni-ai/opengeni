@@ -177,6 +177,7 @@ impl Core {
             sandbox.subs.clear();
             sandbox.next_sid = 1;
             sandbox.waiting.clear();
+            sandbox.owes_nothing();
             sandbox.relay = None;
             sandbox.retry_at = None;
             sandbox.retry_delay = self.settings.retry_min_ms;
@@ -245,7 +246,7 @@ impl Core {
                 subject,
                 queue,
                 sid,
-            } => self.subscribe(conn, subject, queue, sid),
+            } => self.subscribe(now, conn, subject, queue, sid),
             ClientOp::Unsub { sid, max } => self.unsubscribe(conn, &sid, max),
             ClientOp::Pub(publish) => self.publish(now, conn, publish),
         }
@@ -259,6 +260,7 @@ impl Core {
 
     pub(super) fn subscribe(
         &mut self,
+        now: u64,
         conn: ConnId,
         subject: String,
         queue: Option<String>,
@@ -352,7 +354,7 @@ impl Core {
         }
         self.ok(conn);
         for queued in waiting {
-            self.deliver(&id, queued);
+            self.deliver(now, &id, queued);
         }
     }
 

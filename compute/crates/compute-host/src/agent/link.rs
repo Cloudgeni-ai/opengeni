@@ -13,6 +13,7 @@ use compute_protocol::link::{AGENT_LINK_PORT, Running};
 use super::{HostAgent, Level, Toucher};
 use crate::guest_ports::{self, Activity, Listeners};
 use crate::protocol::Id;
+use crate::resume::RunClock;
 use crate::store::Store;
 
 /// The file in a sandbox's directory holding its agent's session, which
@@ -28,8 +29,9 @@ impl compute_link::Wake for Toucher {
 impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Listens for sandbox `id`'s connections to its agent link, on a host
     /// that keeps agent links. A sandbox the hub has no link for has each
-    /// connection closed at once.
-    pub(super) fn listen_link(&self, id: Id, spec: &VmSpec) -> Option<Listeners> {
+    /// connection closed at once. `clock` counts the time its guest could
+    /// run (see [`Self::tell_clocks`]).
+    pub(super) fn listen_link(&self, id: Id, spec: &VmSpec, clock: &RunClock) -> Option<Listeners> {
         let hub = self.link.clone()?;
         let sandbox = id.to_string();
         let serve = move |stream| hub.serve(sandbox.clone(), stream);
@@ -37,6 +39,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             &spec.vsock_path(),
             AGENT_LINK_PORT,
             (spec.uid, spec.gid),
+            clock.clone(),
             serve,
         ) {
             Ok(listeners) => Some(listeners),
@@ -104,6 +107,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn unlink(&self, id: Id) {
         if let Some(hub) = &self.link {
             hub.detach(&id.to_string());
+        }
+    }
+
+    /// Tells each sandbox's agent-link streams whether its guest can run
+    /// now: its VM runs, with no step that pauses it, and the lease lets
+    /// VMs run. Streams its guest has not taken up again end only after
+    /// it could run for a while, since it takes them up as soon as it
+    /// runs.
+    pub(super) fn tell_clocks(&self) {
+        if self.link.is_none() {
+            return;
+        }
+        let acting = self.may_act();
+        for (id, slot) in &self.slots {
+            let runs = acting
+                && slot.vm.is_some()
+                && self
+                    .core
+                    .sandbox(*id)
+                    .is_some_and(|view| view.state.level == Level::Running && view.step.is_none());
+            slot.link_clock.set(runs);
         }
     }
 }

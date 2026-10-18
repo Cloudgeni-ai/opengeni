@@ -13,7 +13,7 @@ use std::io::{self, Read};
 use std::net::Shutdown;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::stream::{Delivery, Received, Stream};
 use super::wire::{Answer, CHUNK, Frame, LINE_MAX, StreamId};
@@ -22,8 +22,15 @@ use crate::relay::Duplex;
 /// Connections the guest tries in a row, after one under a stream ended,
 /// before it gives the stream up: about half a minute of the guest's own
 /// running time with [`pause`]'s back-off. A VM that pauses in between
-/// does not use it up.
+/// does not use it up. Each try is bounded, so a host that takes the
+/// connection and never answers uses it up too: a vsock connect waits at
+/// most the guest kernel's connect timeout, two seconds unless set, and
+/// the host's answer at most [`ANSWER_WITHIN`].
 const RECONNECTS: u32 = 40;
+
+/// How long the guest waits for the host's whole answer to its hello. The
+/// host answers as soon as it has read the hello. Shorter in tests.
+const ANSWER_WITHIN: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 5 });
 
 /// How a stream ended.
 #[derive(Debug, PartialEq, Eq)]
@@ -249,7 +256,10 @@ fn attach<H: Duplex>(
     connection
         .write_all(hello.line().as_bytes())
         .map_err(Refused::Failed)?;
-    let line = read_line(&mut connection).map_err(Refused::Failed)?;
+    // Only the answer is bounded: once the stream goes on, the connection
+    // waits for as long as the stream is quiet.
+    let line = read_answer(&mut connection, ANSWER_WITHIN).map_err(Refused::Failed)?;
+    connection.set_read_timeout(None).map_err(Refused::Failed)?;
     let Some(answer) = Answer::parse(&line) else {
         return Err(Refused::Gone);
     };
@@ -265,7 +275,35 @@ fn attach<H: Duplex>(
     Ok((connection, cursor))
 }
 
+/// One line, all of it within `within`: a host that answers a byte at a
+/// time is held to the same bound as one that never answers.
+fn read_answer<H: Duplex>(connection: &mut H, within: Duration) -> io::Result<String> {
+    let deadline = Instant::now() + within;
+    let mut line = Vec::with_capacity(32);
+    let mut byte = [0];
+    while line.len() < LINE_MAX {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        connection.set_read_timeout(Some(left))?;
+        match connection.read(&mut byte) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(_) => {
+                line.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return String::from_utf8(line).map_err(|_| io::ErrorKind::InvalidData.into());
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::ErrorKind::InvalidData.into())
+}
+
 /// One line, read a byte at a time so nothing after it is taken.
+#[cfg(test)]
 fn read_line(connection: &mut impl Read) -> io::Result<String> {
     let mut line = Vec::with_capacity(32);
     let mut byte = [0];
@@ -297,7 +335,11 @@ fn send<H: Duplex>(mut connection: H, mut cursor: u64, shared: &Arc<Shared>) -> 
     let Ok(reading) = connection.try_clone() else {
         return Carried::Broken;
     };
-    shared.lock().broken = false;
+    {
+        let mut state = shared.lock();
+        state.broken = false;
+        state.stream.carried_anew();
+    }
     let Some(reader) = spawn({
         let shared = Arc::clone(shared);
         move || read_host(reading, &shared)
@@ -447,7 +489,14 @@ mod tests {
         /// guest may not yet have read all the agent wrote, so it may say
         /// it sent less than `want` does.
         fn accept(listener: &TcpListener, stream: &Stream, want: Hello) -> Self {
-            let (mut connection, _) = listener.accept().unwrap();
+            let (connection, _) = listener.accept().unwrap();
+            Self::answer(connection, stream, want)
+        }
+
+        /// Checks the hello on `connection` and answers it, as
+        /// [`Host::accept`] does.
+        fn answer(mut connection: TcpStream, stream: &Stream, want: Hello) -> Self {
+            connection.set_nonblocking(false).unwrap();
             connection.set_read_timeout(Some(WAIT)).unwrap();
             let hello = Hello::parse(&read_line(&mut connection).unwrap()).unwrap();
             assert_eq!((hello.id, hello.received), (want.id, want.received));
@@ -557,6 +606,98 @@ mod tests {
         host.send(&mut stream);
         host.read_until(&mut stream, Stream::finished);
         assert_eq!(ended.recv_timeout(WAIT), Ok(Ended::Finished));
+    }
+
+    /// A host that takes a connection and never answers the hello holds
+    /// the stream up only for [`ANSWER_WITHIN`]: the guest tries again,
+    /// and the stream goes on.
+    #[test]
+    fn a_host_that_never_answers_is_tried_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let (mut agent, _ended) = relaying(listener.local_addr().unwrap());
+        let mut stream = Stream::new();
+        let id = StreamId(42);
+        agent.write_all(b"hello").unwrap();
+        let want = Hello {
+            id,
+            received: 0,
+            sent: 5,
+        };
+        let mut host = Host::accept(&listener, &stream, want);
+        host.read_until(&mut stream, |stream| stream.received() == 5);
+        assert_eq!(handed_on(&mut stream), b"hello");
+        host.connection.shutdown(Shutdown::Both).unwrap();
+        drop(host);
+
+        let (silent, _) = listener.accept().unwrap();
+        let taken = std::time::Instant::now();
+        let mut host = Host::accept(&listener, &stream, want);
+        assert!(
+            taken.elapsed() >= ANSWER_WITHIN / 2,
+            "it waited for an answer"
+        );
+        drop(silent);
+        stream.push(b"reply");
+        host.send(&mut stream);
+        assert_eq!(read_exactly(&mut agent, 5), b"reply");
+    }
+
+    /// A host that answers a byte at a time, each in less than
+    /// [`ANSWER_WITHIN`] but all of it in more, is held to the same bound:
+    /// the guest tries again rather than taking its slow `gone`, and the
+    /// stream goes on.
+    #[test]
+    fn a_host_that_answers_too_slowly_is_tried_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let (mut agent, ended) = relaying(listener.local_addr().unwrap());
+        let mut stream = Stream::new();
+        let id = StreamId(42);
+        agent.write_all(b"hello").unwrap();
+        let want = Hello {
+            id,
+            received: 0,
+            sent: 5,
+        };
+        let mut host = Host::accept(&listener, &stream, want);
+        host.read_until(&mut stream, |stream| stream.received() == 5);
+        assert_eq!(handed_on(&mut stream), b"hello");
+        host.connection.shutdown(Shutdown::Both).unwrap();
+        drop(host);
+
+        let (mut slow, _) = listener.accept().unwrap();
+        slow.set_read_timeout(Some(WAIT)).unwrap();
+        read_line(&mut slow).unwrap();
+        let trickle = thread::spawn(move || {
+            for byte in Answer::Gone.line().bytes() {
+                thread::sleep(ANSWER_WITHIN / 3);
+                if slow.write_all(&[byte]).is_err() {
+                    return;
+                }
+            }
+        });
+        // Were the slow `gone` taken, the stream would end and nothing
+        // would connect again.
+        listener.set_nonblocking(true).unwrap();
+        let started = Instant::now();
+        let connection = loop {
+            assert_ne!(
+                ended.try_recv(),
+                Ok(Ended::Gone),
+                "the guest took an answer that came too slowly"
+            );
+            assert!(started.elapsed() < WAIT, "the guest did not connect again");
+            match listener.accept() {
+                Ok((connection, _)) => break connection,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("{error}"),
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let mut host = Host::answer(connection, &stream, want);
+        stream.push(b"reply");
+        host.send(&mut stream);
+        assert_eq!(read_exactly(&mut agent, 5), b"reply");
+        trickle.join().unwrap();
     }
 
     #[test]

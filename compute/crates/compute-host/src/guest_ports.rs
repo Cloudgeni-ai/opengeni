@@ -186,12 +186,14 @@ pub(crate) fn listen<A: Activity>(
 /// `port`, each carrying a resumable stream (see [`crate::resume`]), and
 /// hands each new stream's end to `serve`. The streams end with the
 /// listeners. At most [`MAX_CONNECTIONS`] connections are open at once,
-/// and as many streams; more connections are closed as they come. Must
-/// run inside a Tokio runtime.
+/// and as many streams; more connections are closed as they come. `clock`
+/// counts the time the guest could run, by which streams it no longer
+/// takes up end. Must run inside a Tokio runtime.
 pub(crate) fn listen_link(
     vsock: &Path,
     port: u32,
     owner: (u32, u32),
+    clock: crate::resume::RunClock,
     serve: impl Fn(tokio::io::DuplexStream) + Send + Sync + 'static,
 ) -> io::Result<Listeners> {
     let mut listeners = Listeners {
@@ -200,7 +202,8 @@ pub(crate) fn listen_link(
     };
     let listener = bind(vsock, port, owner, &mut listeners)?;
     let open = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
-    let streams = crate::resume::Streams::new(serve, MAX_CONNECTIONS, crate::resume::TAKE_UP);
+    let streams =
+        crate::resume::Streams::new(serve, MAX_CONNECTIONS, crate::resume::TAKE_UP, clock);
     listeners.tasks.push(tokio::spawn(async move {
         // Hellos still being read; they end with the listener, and the
         // streams with the last of them.

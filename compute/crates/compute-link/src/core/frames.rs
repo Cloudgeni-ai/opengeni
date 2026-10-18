@@ -165,6 +165,8 @@ impl Core {
             Ending::Revoked | Ending::Superseded => {
                 tracing::warn!(sandbox = id, ?code, message, "a gateway ended a session");
                 sandbox.refused = true;
+                // What waits goes, and is owed nothing; what its agent got
+                // it may still answer, once a new ticket opens a session.
                 sandbox.waiting.clear();
             }
             Ending::Lost | Ending::Other => {
@@ -216,8 +218,8 @@ impl Core {
     }
 
     pub(super) fn message(&mut self, now: u64, id: &str, queued: Queued) {
-        if let Some(reply) = &queued.reply {
-            self.asked(now, id, reply);
+        if queued.reply.is_some() {
+            self.asked(now, id);
         }
         let Some(sandbox) = self.sandboxes.get_mut(id) else {
             return;
@@ -227,7 +229,7 @@ impl Core {
         };
         let open = matches!(sandbox.session, Session::Open { .. });
         if open && sub.guest.is_some() {
-            self.deliver(id, queued);
+            self.deliver(now, id, queued);
         } else if !sandbox.waiting.push(queued, &self.settings) && !sandbox.waiting.dropping {
             sandbox.waiting.dropping = true;
             tracing::warn!(
@@ -239,8 +241,9 @@ impl Core {
         }
     }
 
-    /// Sends a message to the connection that holds its subscription.
-    pub(super) fn deliver(&mut self, id: &str, queued: Queued) {
+    /// Sends a message to the connection that holds its subscription: a
+    /// request delivered is owed an answer.
+    pub(super) fn deliver(&mut self, now: u64, id: &str, queued: Queued) {
         let Some(sandbox) = self.sandboxes.get_mut(id) else {
             return;
         };
@@ -252,6 +255,7 @@ impl Core {
         };
         sub.delivered += 1;
         let done = sub.max.is_some_and(|max| sub.delivered >= max);
+        let asked = queued.reply.clone().map(|reply| (reply, queued.at));
         self.send(
             conn,
             ServerOp::Msg(Delivery {
@@ -265,6 +269,9 @@ impl Core {
         if done {
             self.remove_sub(id, queued.sid, true);
             self.save(id);
+        }
+        if let Some((reply, at)) = asked {
+            self.owes(now, at, id, reply);
         }
     }
 

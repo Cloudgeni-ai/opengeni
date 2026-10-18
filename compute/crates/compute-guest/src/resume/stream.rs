@@ -30,7 +30,7 @@ pub struct Stream {
     peer_ended: bool,
     /// What it handed on, the end counted once handed on.
     taken: u64,
-    /// What it last acknowledged.
+    /// What it last acknowledged on the connection that carries it now.
     acknowledged: u64,
 }
 
@@ -232,7 +232,7 @@ impl Stream {
     }
 
     /// Appends to `out` an acknowledgement of what was handed on since the
-    /// last one, if anything was; whether it did.
+    /// last one on this connection, if anything was; whether it did.
     pub fn acknowledge(&mut self, out: &mut Vec<u8>) -> bool {
         if self.taken <= self.acknowledged {
             return false;
@@ -240,6 +240,16 @@ impl Stream {
         Frame::Ack(self.taken).encode(out);
         self.acknowledged = self.taken;
         true
+    }
+
+    /// Another connection carries the stream from now on. An
+    /// acknowledgement sent on the one before may have been lost with it,
+    /// and the other side, its window full, would send nothing until it
+    /// heard one: the next [`Self::acknowledge`] repeats what was handed
+    /// on. What a hello says was received is not enough, since the other
+    /// side may keep only what was handed on.
+    pub fn carried_anew(&mut self) {
+        self.acknowledged = 0;
     }
 
     /// Whether both directions ended, each was handed on, and each end was
@@ -363,6 +373,27 @@ mod tests {
         assert_eq!(first.len(), 1000);
         ack(&mut host, &mut guest);
         assert_eq!(guest.room(), 1000);
+    }
+
+    /// A side whose window is full sends nothing until it hears an
+    /// acknowledgement, so one lost with its connection is sent again on
+    /// the next, or the stream would stall for good.
+    #[test]
+    fn an_acknowledgement_lost_with_its_connection_is_repeated_on_the_next() {
+        let (mut guest, mut host) = (Stream::new(), Stream::new());
+        guest.push(&vec![7; WINDOW]);
+        let (out, _) = frames(&guest, 0);
+        feed(&mut host, &out).unwrap();
+        assert_eq!(drain(&mut host).0.len(), WINDOW);
+        let mut lost = Vec::new();
+        assert!(host.acknowledge(&mut lost), "sent, then lost");
+        assert_eq!(guest.room(), 0);
+        let mut out = Vec::new();
+        assert!(!host.acknowledge(&mut out), "nothing new to acknowledge");
+        host.carried_anew();
+        assert!(host.acknowledge(&mut out), "repeated on the new connection");
+        feed(&mut guest, &out).unwrap();
+        assert_eq!(guest.room(), WINDOW);
     }
 
     #[test]
