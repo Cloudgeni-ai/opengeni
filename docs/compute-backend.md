@@ -156,6 +156,11 @@ BrowserSessions and ComputerSessions on a compute home sandbox use the agent's
 native controller, as on a Connected Machine; no controller URL is cached on
 the lease (`controllerHasCacheableDataPlane`).
 
+The durable PTY API (`POST .../terminal/pty`, a provider process retained
+under the session-home lease) refuses compute sessions with a 409 before any
+PTY is opened, as it does for Connected Machines: their terminals are the
+viewer's relay PTY streams.
+
 ## Ports
 
 Opengeni has no user-facing preview-port feature on any backend. On Modal,
@@ -194,7 +199,9 @@ Connected Machine, where an older agent runs commands and reads as its own
 account, a compute session refuses any request that names a user when that
 connection's agent does not advertise run-as: acting as root instead would
 elevate. A reconnect to such an agent between a capability check and the
-dispatch therefore ends in a refusal, never a dropped user. See "Run as another
+dispatch therefore ends in a refusal, never a dropped user. This holds for
+every request of a transactional upload too: each one, the begin included, is
+checked against the admission it is sent with. See "Run as another
 local user" in `docs/connected-machines.md`.
 
 ## Not yet supported

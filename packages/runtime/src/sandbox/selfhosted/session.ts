@@ -488,9 +488,25 @@ function requestedRunAs(op: NonNullable<ControlRequest["op"]>): string {
       return op.git.runAs;
     case "ptyOpen":
       return op.ptyOpen.runAs;
+    case "opStart":
+      switch (op.opStart.op?.$case) {
+        case "exec":
+          return op.opStart.op.exec.runAs;
+        case "fsRead":
+          return op.opStart.op.fsRead.runAs;
+        case "fsWrite":
+          return op.opStart.op.fsWrite.runAs;
+        default:
+          return "";
+      }
     default:
       return "";
   }
+}
+
+/** Whether an op writes files: a direct write or a transactional upload. */
+function writesFiles(op: NonNullable<ControlRequest["op"]>): boolean {
+  return op.$case === "fsWrite" || (op.$case === "opStart" && op.opStart.op?.$case === "fsWrite");
 }
 
 function runAsUnsupportedError(write: boolean): SelfhostedControlError {
@@ -517,8 +533,8 @@ function runAsForRunner(
   runAsRequired: boolean,
 ): NonNullable<ControlRequest["op"]> {
   if (runAsSupported || !requestedRunAs(op)) return op;
-  if (runAsRequired || op.$case === "fsWrite") {
-    throw runAsUnsupportedError(op.$case === "fsWrite");
+  if (runAsRequired || writesFiles(op)) {
+    throw runAsUnsupportedError(writesFiles(op));
   }
   switch (op.$case) {
     case "fsRead":
@@ -537,6 +553,22 @@ function runAsForRunner(
       return { ...op, git: { ...op.git, runAs: "" } };
     case "ptyOpen":
       return { ...op, ptyOpen: { ...op.ptyOpen, runAs: "" } };
+    case "opStart": {
+      const inner = op.opStart.op;
+      if (inner?.$case === "exec") {
+        return {
+          ...op,
+          opStart: { ...op.opStart, op: { ...inner, exec: { ...inner.exec, runAs: "" } } },
+        };
+      }
+      if (inner?.$case === "fsRead") {
+        return {
+          ...op,
+          opStart: { ...op.opStart, op: { ...inner, fsRead: { ...inner.fsRead, runAs: "" } } },
+        };
+      }
+      return op;
+    }
     default:
       return op;
   }
@@ -1955,12 +1987,16 @@ export class SelfhostedSession {
         if (
           !this.supportsFileTransfer(current) ||
           current.subject !== initial.subject ||
-          current.connectionInstanceId !== initial.connectionInstanceId ||
-          (requestedRunAs(op) !== "" && !current.runAsSupported)
+          current.connectionInstanceId !== initial.connectionInstanceId
         ) {
           throw new Error(
             "The authorized machine connection changed during the file transfer; the operation was not replayed.",
           );
+        }
+        // The exact admission this request is dispatched with decides run-as:
+        // a transfer that asks for a user is refused, never sent without it.
+        if (requestedRunAs(op) !== "" && !current.runAsSupported) {
+          throw runAsUnsupportedError(writesFiles(op));
         }
         const response = await this.controlRpc.request(
           current.subject,

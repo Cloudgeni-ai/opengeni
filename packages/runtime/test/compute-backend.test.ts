@@ -1074,6 +1074,33 @@ describe("compute sandbox client", () => {
     expect(plane.sent.length).toBe(sentBefore);
   });
 
+  test("a transactional runAs write is refused when the same agent stops advertising run-as before begin", async () => {
+    const { plane, client } = setup();
+    plane.runAs = true;
+    plane.transactional = true;
+    plane.transactionalMachine = true;
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    const instance = plane.sessions.get(session.state.enrollmentId);
+    const before = plane.sent.length;
+    const resolve = plane.resolveConnection.bind(plane);
+    // The write's own admission and its base-content check see run-as; the same
+    // connection then stops advertising it right before the transfer begins.
+    plane.resolveConnection = async (input) => {
+      if (plane.sent.slice(before).some((s) => s.req.op?.$case === "fsStat")) plane.runAs = false;
+      return await resolve(input);
+    };
+    await expect(
+      session.writeFile({
+        path: "/workspace/big.txt",
+        content: "x".repeat(300 * 1024),
+        runAs: "builder",
+      }),
+    ).rejects.toThrow("runAs");
+    expect(plane.sessions.get(session.state.enrollmentId)).toBe(instance);
+    expect(plane.uploads.size).toBe(0);
+    expect(plane.sent.slice(before).some((s) => s.req.op?.$case === "opStart")).toBe(false);
+  });
+
   test("resumeExact of a sandbox the fabric no longer has is an unavailable instance", async () => {
     const { client } = setup();
     const created = await client.create(undefined, { opengeniCreateIdentity: identity });

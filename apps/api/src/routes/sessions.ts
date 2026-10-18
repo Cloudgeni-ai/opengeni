@@ -311,6 +311,7 @@ import {
   resolveConnectedMachineWorkspaceRoot,
   selectBackend,
   SelfhostedSession,
+  usesAgentTransport,
 } from "@opengeni/runtime/sandbox";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -5206,7 +5207,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach", "terminal.pty.open");
     const req = await parseChannelABody(c, PtyOpenRequest);
-    if (ctx.session.sandboxBackend === "selfhosted" || ctx.session.activeSandboxId !== null) {
+    // A durable PTY is a provider process retained under the session-home lease.
+    // Agent-transport routes (Connected Machines and compute sandboxes) serve
+    // interactive terminals as relay streams from the agent instead (the
+    // viewer's `relay-pty` transport), so they are refused here before any PTY
+    // is opened.
+    if (usesAgentTransport(ctx.session.sandboxBackend) || ctx.session.activeSandboxId !== null) {
       throw new HTTPException(409, {
         message:
           "durable interactive terminals require the session-home provider route and are unavailable on active swaps or non-persistable routes; use synchronous exec or attach the session home sandbox",

@@ -609,3 +609,50 @@ for (const legacy of [false, true]) {
     ).toBe(true);
   });
 }
+
+test("a transactional runAs write is refused when the same runner stops advertising run-as before begin", async () => {
+  const agent = new MockAgentResponder();
+  let runAsSupported = true;
+  const dispatched: string[] = [];
+  const session = new SelfhostedSession({
+    workspaceId: "11111111-1111-4111-8111-111111111111",
+    agentId: "synthetic-agent",
+    connectionInstanceId: "22222222-2222-4222-8222-222222222222",
+    workspaceRoot: "/workspace",
+    relay: { host: "relay.test", port: 443, tls: true },
+    epoch: 1,
+    transactionalFsWriteSupported: true,
+    // The same physical connection throughout; only its run-as capability
+    // changes after the write's own admission and base-content check.
+    resolveOperationAdmission: async () => ({
+      connectionInstanceId: "22222222-2222-4222-8222-222222222222",
+      workspaceRoot: "/workspace",
+      opStream: true,
+      transactionalFsWriteSupported: true,
+      runAsSupported,
+      operationResourcePolicy: {
+        memoryMaxBytes: null,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 0,
+      },
+      operationResourcePolicySupported: true,
+      operationCpuQuotaSupported: true,
+    }),
+    controlRpc: {
+      request: async (subject, request, opts) => {
+        dispatched.push(request.op?.$case ?? "");
+        const response = await agent.request(subject, request, opts);
+        runAsSupported = false;
+        return response;
+      },
+    },
+  });
+  const error = await session
+    .writeFile({ path: "/workspace/big.bin", content: new Uint8Array(300 * 1024), runAs: "dev" })
+    .catch((reason: unknown) => reason);
+  expect(error).toBeInstanceOf(Error);
+  expect(String((error as Error).message)).toContain("runAs");
+  expect(dispatched).not.toContain("opStart");
+  expect(dispatched).not.toContain("fsWrite");
+});
