@@ -431,6 +431,19 @@ impl ShutdownSignal {
     pub async fn notified(&self) {
         self.notify.notified().await;
     }
+
+    /// Resolves once a shutdown is requested, at once if one already was:
+    /// level-triggered, unlike [`notified`](Self::notified). The waiter is
+    /// registered before the flag is read, so a request racing this call
+    /// is never missed.
+    pub async fn requested(&self) {
+        let mut notified = std::pin::pin!(self.notify.notified());
+        notified.as_mut().enable();
+        if self.is_requested() {
+            return;
+        }
+        notified.await;
+    }
 }
 
 /// Why the current NATS connection generation ended.
@@ -1023,10 +1036,13 @@ impl<P: Platform + 'static> Supervisor<P> {
         self.shutdown.is_requested() || link.shutdown.is_requested()
     }
 
+    /// Resolves once the process or this link is asked to stop, at once if
+    /// either already was, so a stop that came while nothing waited (say,
+    /// while a hello was being prepared) is still seen.
     async fn link_stop_notified(&self, link: &WorkspaceLink<P>) {
         tokio::select! {
-            () = self.shutdown.notified() => {},
-            () = link.shutdown.notified() => {},
+            () = self.shutdown.requested() => {},
+            () = link.shutdown.requested() => {},
         }
     }
 
@@ -5480,6 +5496,49 @@ mod tests {
             .expect("supervisor stops")
             .expect("run task")
             .expect("clean supervisor result");
+    }
+
+    /// A stop that came while nothing waited for one (as while a hello is
+    /// being prepared, between the control and the bulk dial) still ends a
+    /// later dial the server never answers, whether the process or the
+    /// link was asked to stop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_before_a_dial_ends_a_dial_the_server_never_answers() {
+        use opengeni_agent_platform::NativePlatform;
+
+        // It lets nothing through, so it needs no server behind it.
+        let gate = it::SilentGate::start("127.0.0.1:9".to_owned()).await;
+        for link_stops in [false, true] {
+            let mut credentials = it::test_credentials(&format!("nats://{}", gate.addr));
+            credentials.nats_bearer = String::new();
+            let definition = SupervisorLink::new(
+                "fabric-stop-before-dial-test",
+                Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+                credentials,
+            )
+            .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
+            .with_fabric(FabricLink {
+                relay: RelayCredential::pending(),
+            });
+            let link = WorkspaceLink::from_definition(definition.clone());
+            let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
+            let mut reconnect = supervisor.reconnect.subscribe();
+            if link_stops {
+                link.shutdown.request();
+            } else {
+                supervisor.shutdown_handle().request();
+            }
+            let dialed = tokio::time::timeout(
+                Duration::from_secs(2),
+                supervisor.dial(&link, &mut reconnect),
+            )
+            .await
+            .expect("a stop already asked for ends the dial");
+            assert!(
+                matches!(dialed, Err(ConnectionOutcome::CleanShutdown)),
+                "link_stops={link_stops}"
+            );
+        }
     }
 
     /// The op-stream wire round trip against a REAL nats-server + real
