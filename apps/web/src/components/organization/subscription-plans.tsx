@@ -202,11 +202,7 @@ export function SubscriptionPlans({
               >
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="text-sm font-semibold text-fg">{item.label}</h3>
-                  {selected ? (
-                    <MetaChip>Current</MetaChip>
-                  ) : item.key === "pro" ? (
-                    <MetaChip>Popular</MetaChip>
-                  ) : null}
+                  {selected ? <MetaChip>Current</MetaChip> : null}
                 </div>
                 <div>
                   <p className="text-xl font-semibold tracking-[-0.5px] text-fg">

@@ -115,6 +115,7 @@ test("upgrade confirms proration, fresh replacement credit and targets the selec
 test("checkout retries retain one UUID even after closing and reopening confirmation", async () => {
   const client = clientFixture();
   await mount(plans(client, "free"));
+  expect(document.body.textContent).not.toContain("Popular");
   await click("Get Pro");
   await submit();
   expect(document.body.textContent).toContain("Checkout transport unavailable");
