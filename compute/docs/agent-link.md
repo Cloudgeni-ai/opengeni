@@ -150,7 +150,10 @@ server would, for the subset the agent's client uses:
   reaches the gateway. The host sends the session's relay credential on it,
   as a `MSG` whose payload is `{"url": "...", "token": "...", "expires_at_ms": ...}`,
   as soon as both the subscription and a credential exist, and again for
-  each fresh credential.
+  each fresh credential. A fresh credential neither wakes a sleeping
+  sandbox nor counts as activity: the host keeps it, and a sandbox that
+  slept through it receives it once it runs again, on its existing
+  subscription or when its agent subscribes again.
 
 ## 4. The link
 

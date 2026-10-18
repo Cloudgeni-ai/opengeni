@@ -17,7 +17,9 @@
 //! - an agent hears `PONG` only once its gateway opened its session;
 //! - a gateway hears `sub`, `unsub`, `pub` and `state` only for sessions it
 //!   opened, within their scope, and each `open` names a new `s`;
-//! - a message for a sandbox wakes it, at most once per wake interval.
+//! - a message for a sandbox wakes it, at most once per wake interval,
+//!   and nothing else does (not a relay credential, a state change or
+//!   what the agent sends).
 //!
 //! And at the end, once everything is back, every message sent is
 //! delivered, both connections of each agent are up, and each sandbox's
@@ -332,6 +334,16 @@ impl Sim {
         }
         self.core.on(self.now, input);
         let effects = self.core.take();
+        // Only a message wakes a sandbox: a relay credential, a state
+        // change or anything the agent sends never does.
+        if message_for.is_none() {
+            assert!(
+                !effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Wake { .. })),
+                "a sandbox was woken by something other than a message"
+            );
+        }
         if let Some(sandbox) = message_for {
             let woke = effects
                 .iter()
