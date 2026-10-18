@@ -24,6 +24,9 @@ test("Site access listing is pinned to current, never a self-grant or an origin 
     "siteAccessId=other",
     "siteAccessId=current&originSiteId=current",
     "siteAccessId=current&siteAccessId=other",
+    "siteAccessId=current&view=running_commands",
+    "originSiteId=current&view=running_commands",
+    "siteAccessId=current&view=page&view=running_commands",
   ]) {
     expect(() => siteSessionPath(`${host}/sessions?${query}`, "ws", "GET", "site")).toThrow(
       SiteSessionPathError,

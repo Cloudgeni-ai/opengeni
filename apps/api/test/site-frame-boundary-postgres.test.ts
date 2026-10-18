@@ -344,6 +344,13 @@ test("an owner can allow an existing chat in one private console Site and revoke
   expect(page.siteAccessId).toBe(site.siteId);
   const originList = await f.call("GET", `/sessions?view=page&originSiteId=${site.siteId}`, frame);
   expect((await originList.json()).sessions).toEqual([]);
+  for (const filter of ["originSiteId", "siteAccessId"]) {
+    // Console-only projections do not honor Site filters and must never bypass them.
+    expect(
+      (await f.call("GET", `/sessions?view=running_commands&${filter}=${site.siteId}`, frame))
+        .status,
+    ).toBe(404);
+  }
   const draftPath = `/sessions/${sessionId}/composer-draft`;
   const initialDraft = await f.call("GET", draftPath, frame);
   expect(initialDraft.status).toBe(200);

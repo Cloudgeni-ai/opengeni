@@ -98,7 +98,13 @@ export function siteSessionPath(
   const url = new URL(rewritten, "http://site.invalid");
   const origins = url.searchParams.getAll("originSiteId");
   const access = url.searchParams.getAll("siteAccessId");
-  if (origins.length + access.length !== 1 || (origins[0] ?? access[0]) !== "current")
+  const views = url.searchParams.getAll("view");
+  if (
+    views.length > 1 ||
+    (views.length === 1 && views[0] !== "page") ||
+    origins.length + access.length !== 1 ||
+    (origins[0] ?? access[0]) !== "current"
+  )
     throw new SiteSessionPathError();
   if (workspaceId === "site-host") return path;
   url.searchParams.set(

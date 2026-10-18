@@ -75,7 +75,10 @@ export function siteFrameGuard(deps: ApiRouteDeps) {
       const params = new URL(c.req.url).searchParams;
       const origins = params.getAll("originSiteId");
       const access = params.getAll("siteAccessId");
+      const views = params.getAll("view");
       if (
+        views.length > 1 ||
+        (views.length === 1 && views[0] !== "page") ||
         origins.length + access.length !== 1 ||
         (origins[0] ?? access[0]) !== (origin.siteId ?? SITE_NO_ORIGIN_ID) ||
         (access.length > 0 && frame.marker !== "1")
