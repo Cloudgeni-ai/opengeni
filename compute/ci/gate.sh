@@ -83,7 +83,13 @@ if wants clippy; then
 fi
 if wants arch; then
   step arch
-  check arch '.' cargo arch
+  # The baseline is compared with the base branch's copy where git can
+  # find it; a copied tree without .git checks the rules alone.
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    check arch '.' cargo arch
+  else
+    check arch '.' cargo arch --no-base
+  fi
 fi
 if wants workspace; then
   step workspace tests

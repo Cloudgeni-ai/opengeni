@@ -59,6 +59,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          # The structure check compares the baseline with the base's copy.
+          fetch-depth: 0
       - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -71,7 +74,21 @@ jobs:
       - name: cargo clippy (pedantic, warnings are errors)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: cargo arch
-        run: cargo arch
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # Compare the baseline with the one at the commit this change
+          # starts from (the pull request's base, or the previous head of
+          # the pushed branch), whatever branch ARCHITECTURE.toml names.
+          base_copy="$RUNNER_TEMP/base-baseline.toml"
+          if [ -n "$BASE" ] && [ "$BASE" != 0000000000000000000000000000000000000000 ] &&
+            git cat-file -e "$BASE:compute/ARCHITECTURE.toml" 2>/dev/null; then
+            git show "$BASE:compute/architecture-baseline.toml" >"$base_copy" 2>/dev/null || : >"$base_copy"
+            cargo arch --base-baseline "$base_copy"
+          else
+            echo "the base has no compute/ARCHITECTURE.toml: nothing to compare the baseline with"
+            cargo arch --no-base
+          fi
 
   test:
     name: unit, simulation and property tests
