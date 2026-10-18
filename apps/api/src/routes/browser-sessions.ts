@@ -2477,11 +2477,14 @@ export function registerBrowserSessionRoutes(
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
         if (
           before.session.lifecycle === "lost" &&
-          before.session.failureCode === "controller_transition_expired"
+          (before.session.failureCode === "controller_transition_expired" ||
+            before.session.failureCode === "controller_resource_missing")
         ) {
-          // A resume whose transition expired never activated. When its
-          // controller still holds that generation's working copy, continue the
-          // same browser from it; nothing is restored over it or discarded.
+          // A resume whose transition expired never activated; a browser whose
+          // suspension found its controller restarted kept running past its
+          // checkpoint. When the controller still holds that generation's
+          // working copy, continue the same browser from it; nothing is
+          // restored over it or discarded.
           const continued = await continueExpiredBrowserResume(
             context,
             grant,
@@ -2494,8 +2497,8 @@ export function registerBrowserSessionRoutes(
             observeLifecycleResult(deps.observability, startedAtMs, parsed);
             return context.json(parsed, 200);
           }
-          // Otherwise end its retained controller generation, then resume
-          // normally from the same durable state.
+          // Otherwise end an expired resume's retained controller generation,
+          // then resume normally from the same durable state.
           await settleExpiredBrowserResume(context, grant, workspaceId, browserSessionId);
           before = await getBrowserSessionControlRecord(deps.db, {
             accountId: grant.accountId,
@@ -4093,13 +4096,16 @@ export function registerBrowserSessionRoutes(
       browserSessionId,
     });
     if (!expired?.controllerGeneration) return null;
+    const controllerGeneration = expired.controllerGeneration;
     const record = await getBrowserSessionControlRecord(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       browserSessionId,
     });
-    const binding = record.session.controller;
-    if (binding?.controllerGeneration !== expired.controllerGeneration) {
+    const retained = record.session.controller;
+    // A restarted controller's binding was cleared when its suspension failed;
+    // the generation of that suspension still owns the working copy.
+    if (retained ? retained.controllerGeneration !== controllerGeneration : expired.settleable) {
       throw new BrowserSessionStateError("BrowserSession controller authority changed");
     }
     // Only a private profile has a working copy the controller can adopt.
@@ -4116,10 +4122,15 @@ export function registerBrowserSessionRoutes(
       sourceSession,
       grant,
       record.session.placement,
-      binding.placementInstanceId,
+      retained?.placementInstanceId ?? null,
       "browser.resume",
       context.req.raw.signal,
       async (placement) => {
+        const binding = retained ?? {
+          controllerId: "opengeni-browserd",
+          controllerGeneration,
+          placementInstanceId: placement.placementInstanceId,
+        };
         const transport = browserRuntimeTransport(record.session, placement.transport);
         if (
           transport.kind !== "managed" ||
@@ -4258,6 +4269,13 @@ export function registerBrowserSessionRoutes(
       browserSessionId,
     });
     if (!expired) return;
+    if (!expired.settleable) {
+      // It ran past its checkpoint, so returning it to that checkpoint would
+      // silently discard newer state.
+      throw new BrowserSessionStateError(
+        "BrowserSession was lost when its controller restarted, and its working copy could not be recovered",
+      );
+    }
     const record = await getBrowserSessionControlRecord(deps.db, {
       accountId: grant.accountId,
       workspaceId,

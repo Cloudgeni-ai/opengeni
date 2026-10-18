@@ -1577,7 +1577,7 @@ describe("BrowserSession route discipline", () => {
     );
     // The same generation is re-adopted from its own working directory on the
     // controller instance that holds it; nothing is restored or discarded.
-    expect(continuation).toContain("binding.placementInstanceId");
+    expect(continuation).toContain("retained?.placementInstanceId ?? null");
     expect(continuation).toContain("controllerGeneration: binding.controllerGeneration");
     expect(continuation).toContain("recoverExistingWorkingDirectory: true");
     // Its operation is recorded only after adoption, so the heartbeat holds the
@@ -1589,6 +1589,32 @@ describe("BrowserSession route discipline", () => {
     expect(continuation).toContain('error.error.code === "resource_unavailable"');
     expect(continuation.indexOf("client.createSession(")).toBeLessThan(
       continuation.indexOf("continueExpiredBrowserSessionResume(deps.db"),
+    );
+  });
+
+  test("continues a browser lost to a restarted controller only from its working copy", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resume = source.slice(
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"'),
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"'),
+    );
+    expect(resume).toContain('before.session.failureCode === "controller_resource_missing"');
+    const continuation = source.slice(
+      source.indexOf("async function continueExpiredBrowserResume"),
+      source.indexOf("async function settleExpiredBrowserResume"),
+    );
+    // Its cleared binding is rebuilt for the failed suspension's generation on
+    // the placement instance that now hosts the controller.
+    expect(continuation).toContain("const binding = retained ?? {");
+    expect(continuation).toContain("placementInstanceId: placement.placementInstanceId,");
+    const settle = source.slice(
+      source.indexOf("async function settleExpiredBrowserResume"),
+      source.indexOf("async function finishSuspendedBrowserControllerCleanup"),
+    );
+    // It ran past its checkpoint, so it is never settled back to it.
+    expect(settle.indexOf("if (!expired.settleable)")).toBeGreaterThan(-1);
+    expect(settle.indexOf("if (!expired.settleable)")).toBeLessThan(
+      settle.indexOf("withBrowserPlacement("),
     );
   });
 
