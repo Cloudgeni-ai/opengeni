@@ -1,5 +1,14 @@
 # @opengeni/vaults-protonpass
 
+## 4.1.1
+
+### Patch Changes
+
+- Updated dependencies [57e3a3e]
+- Updated dependencies [9be9a82]
+  - @opengeni/contracts@4.1.0
+  - @opengeni/vaults@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes
