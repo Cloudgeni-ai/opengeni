@@ -2212,7 +2212,10 @@ describe("GET /v1/config/client", () => {
     expect(
       (await app.request("/v1/config/client", { headers: { cookie: "unrelated=expired" } })).status,
     ).toBe(200);
-    expect((await app.request("/v1/config/client?workspaceId=workspace")).status).toBe(401);
+    expect(
+      (await app.request("/v1/config/client?workspaceId=11111111-1111-4111-8111-111111111111"))
+        .status,
+    ).toBe(401);
     expect((await app.request("/v1/config/client?workspaceId=")).status).toBe(422);
   });
 
@@ -2238,7 +2241,10 @@ describe("GET /v1/config/client", () => {
     expect(bootstrap.status).toBe(200);
     expect(ClientConfig.parse(await bootstrap.json()).auth.mode).toBe("managedSession");
     expect(authReads).toBe(0);
-    const scoped = await app.request("/v1/config/client?workspaceId=workspace", { headers });
+    const scoped = await app.request(
+      "/v1/config/client?workspaceId=11111111-1111-4111-8111-111111111111",
+      { headers },
+    );
     expect(scoped.status).toBe(409);
     expect(authReads).toBe(1);
   });

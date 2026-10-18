@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { z } from "zod";
 
 import { registerClaudeSubscriptionAccountRoutes } from "./routes/claude-subscription-accounts";
 import { isPreparedMcpConnectPath } from "./prepared-mcp-permissions";
@@ -1401,8 +1402,11 @@ export function createAppComposition(deps: AppDependencies): {
     let voiceInputAvailable = false;
     let voiceInputProviders: string[] = [];
     const requestedWorkspaceId = c.req.query("workspaceId");
-    if (requestedWorkspaceId !== undefined && requestedWorkspaceId.trim() === "") {
-      throw new HTTPException(422, { message: "workspaceId must not be empty" });
+    if (
+      requestedWorkspaceId !== undefined &&
+      !z.string().uuid().safeParse(requestedWorkspaceId).success
+    ) {
+      throw new HTTPException(422, { message: "workspaceId must be a UUID" });
     }
     const callerScoped =
       requestedWorkspaceId !== undefined ||
