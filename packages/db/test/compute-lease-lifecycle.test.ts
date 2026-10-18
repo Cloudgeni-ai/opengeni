@@ -12,6 +12,7 @@ import {
   createSession,
   deleteSessionTreeIfQuiescent,
   forceDrainOverLimitViewerOnlyBoxes,
+  MANAGED_BROWSER_SESSION_CAPABILITIES,
   openSandboxAgentLink,
   releaseLeaseHolder,
   reapStaleLeaseHolders,
@@ -206,6 +207,79 @@ describe("compute leases and idle drain", () => {
       subjectId: grant.subjectId,
     });
     expect(second.status).toBe("deleted");
+  }, 60_000);
+
+  test("deleting the chat ends the browser and desktop an agent left open on its sandbox", async () => {
+    if (!available) return;
+    const { grant, session, ids } = await fixture("compute");
+    await releaseLastHolder(ids);
+    const opened = await openInteractions(ids);
+    const first = await deleteSessionTreeIfQuiescent(db, {
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+    });
+    expect(first.status).toBe("live_sandboxes");
+    expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("draining");
+    expect(await groupEndRequestedAt(ids)).not.toBeNull();
+    const [browser] = await admin<
+      { lifecycle: string; failure_code: string; controller_id: string | null }[]
+    >`
+      select lifecycle, failure_code, controller_id from browser_sessions where id = ${opened.browserId}`;
+    expect(browser).toEqual({
+      lifecycle: "lost",
+      failure_code: "sandbox_deleted",
+      controller_id: null,
+    });
+    const [computer] = await admin<{ lifecycle: string; failure_code: string }[]>`
+      select lifecycle, failure_code from computer_sessions where id = ${opened.computerId}`;
+    expect(computer).toEqual({ lifecycle: "lost", failure_code: "sandbox_deleted" });
+    const [holders] = await admin<{ n: number }[]>`
+      select count(*)::int as n from sandbox_lease_holders where lease_id = ${opened.leaseId}`;
+    expect(holders!.n).toBe(0);
+    await admin`
+      update sandbox_leases set liveness = 'cold', instance_id = null
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+    const second = await deleteSessionTreeIfQuiescent(db, {
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+    });
+    expect(second.status).toBe("deleted");
+  }, 60_000);
+
+  test("a browser mid-operation, or another holder, keeps the group until it settles", async () => {
+    if (!available) return;
+    for (const blocker of ["operation", "viewer"] as const) {
+      const { grant, session, ids } = await fixture("compute");
+      await releaseLastHolder(ids);
+      const opened = await openInteractions(ids);
+      if (blocker === "operation") {
+        await admin`insert into interaction_operations (operation_id, account_id, workspace_id,
+            resource_kind, resource_id, kind, request_digest, state, controller_generation,
+            actor_subject_id, dispatched_at)
+          values (${crypto.randomUUID()}, ${ids.accountId}, ${ids.workspaceId}, 'browser_session',
+            ${opened.browserId}, 'suspend', ${"b".repeat(64)}, 'dispatched',
+            ${opened.browserGeneration}, 'fixture-human', now())`;
+      } else {
+        await admin`insert into sandbox_lease_holders (account_id, workspace_id, lease_id, kind,
+            holder_id, last_heartbeat_at)
+          values (${ids.accountId}, ${ids.workspaceId}, ${opened.leaseId}, 'direct',
+            ${`direct:${crypto.randomUUID()}`}, now())`;
+        await admin`update sandbox_leases set refcount = 3 where id = ${opened.leaseId}`;
+      }
+      const result = await deleteSessionTreeIfQuiescent(db, {
+        workspaceId: ids.workspaceId,
+        sessionId: session.id,
+        subjectId: grant.subjectId,
+      });
+      expect(result.status).toBe("live_sandboxes");
+      expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("warm");
+      expect(await groupEndRequestedAt(ids)).toBeNull();
+      const [browser] = await admin<{ lifecycle: string }[]>`
+        select lifecycle from browser_sessions where id = ${opened.browserId}`;
+      expect(browser!.lifecycle).toBe("active");
+    }
   }, 60_000);
 
   test("a compute lease with a live holder is not ended by a deletion attempt", async () => {
@@ -414,3 +488,59 @@ describe("the compute orphan sweep's record check", () => {
     expect(await named(live, "compute-box", crypto.randomUUID())).toBe(false);
   }, 60_000);
 });
+
+/** The browser (shown in a desktop) an agent opened on the chat's sandbox and
+ * left open after its turn ended: only their holders keep the lease. */
+async function openInteractions(ids: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+}) {
+  const [lease] = await admin<{ id: string; instance_id: string }[]>`
+    select id, instance_id from sandbox_leases
+    where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+  const computerId = crypto.randomUUID();
+  const computerGeneration = crypto.randomUUID();
+  const computerOperationId = crypto.randomUUID();
+  await admin`insert into interaction_operations (operation_id, account_id, workspace_id,
+      resource_kind, resource_id, kind, request_digest, state, controller_generation,
+      actor_subject_id, dispatched_at, settled_at)
+    values (${computerOperationId}, ${ids.accountId}, ${ids.workspaceId}, 'computer_session',
+      ${computerId}, 'create', ${"a".repeat(64)}, 'completed', ${computerGeneration},
+      'fixture-human', now(), now())`;
+  await admin`insert into computer_sessions (id, account_id, workspace_id, name, lifecycle,
+      placement_kind, sandbox_group_id, controller_id, controller_generation,
+      placement_instance_id, platform, adapter, seat_id, display_id, capabilities,
+      create_operation_id, created_by_subject_id, controller_heartbeat_at)
+    values (${computerId}, ${ids.accountId}, ${ids.workspaceId}, 'Browser desktop', 'active',
+      'sandbox_group', ${ids.sandboxGroupId}, 'computerd:fixture', ${computerGeneration},
+      ${lease!.instance_id}, 'linux', 'native', 'seat-1', 'display-1', '{}'::jsonb,
+      ${computerOperationId}, 'fixture-human', now())`;
+  const browserId = crypto.randomUUID();
+  const browserGeneration = crypto.randomUUID();
+  const browserOperationId = crypto.randomUUID();
+  await admin`insert into interaction_operations (operation_id, account_id, workspace_id,
+      resource_kind, resource_id, kind, request_digest, state, controller_generation,
+      actor_subject_id, dispatched_at, settled_at)
+    values (${browserOperationId}, ${ids.accountId}, ${ids.workspaceId}, 'browser_session',
+      ${browserId}, 'create', ${"a".repeat(64)}, 'completed', ${browserGeneration},
+      'fixture-human', now(), now())`;
+  await admin`insert into browser_sessions (id, account_id, workspace_id, name, lifecycle,
+      placement_kind, sandbox_group_id, controller_host_sandbox_group_id, controller_id,
+      controller_generation, placement_instance_id, driver_id, engine, headless, capabilities,
+      create_operation_id, created_by_subject_id, controller_heartbeat_at,
+      linked_computer_session_id)
+    values (${browserId}, ${ids.accountId}, ${ids.workspaceId}, 'Browser', 'active',
+      'sandbox_group', ${ids.sandboxGroupId}, ${ids.sandboxGroupId}, 'browserd:fixture',
+      ${browserGeneration}, ${lease!.instance_id}, 'opengeni.cdp.v1', 'chromium', false,
+      ${JSON.stringify(MANAGED_BROWSER_SESSION_CAPABILITIES)}::text::jsonb,
+      ${browserOperationId}, 'fixture-human', now() - interval '1 hour', ${computerId})`;
+  for (const holderId of [`browser-session:${browserId}`, `computer-session:${computerId}`]) {
+    await admin`insert into sandbox_lease_holders (account_id, workspace_id, lease_id, kind,
+        holder_id, last_heartbeat_at)
+      values (${ids.accountId}, ${ids.workspaceId}, ${lease!.id}, 'interaction', ${holderId},
+        now() - interval '1 hour')`;
+  }
+  await admin`update sandbox_leases set refcount = 2 where id = ${lease!.id}`;
+  return { leaseId: lease!.id, browserId, browserGeneration, computerId };
+}

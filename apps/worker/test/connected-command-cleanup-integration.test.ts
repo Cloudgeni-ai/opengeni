@@ -4,6 +4,7 @@ import {
   bootstrapWorkspace,
   createDb,
   createEnrollment,
+  createSandboxEnrollment,
   createSession,
   sandboxMaintenanceDue,
   settleConnectedMachineSessionBackgroundCommand,
@@ -13,6 +14,7 @@ import { sql } from "drizzle-orm";
 import {
   recordConnectedCommandOutputConsumption,
   claimConnectedCommandOutputReleases,
+  requestSessionBackgroundCommandCancellation,
   settleConnectedCommandOutputReleaseClaim,
 } from "@opengeni/db/session-background-commands";
 import type { OpStreamConnection } from "@opengeni/events";
@@ -711,4 +713,115 @@ test("offline output is neither due nor claimed until reconnect, without changin
     expect(await due()).toBe(false);
     await parkSession(fixture.identity.sessionId);
   }
+});
+
+test("Stop on a compute sandbox's command delivers the cancel once and settles it", async () => {
+  // A running command on a compute sandbox is never polled (each message would
+  // wake the sandbox); a Stop is the one thing that must still reach its agent.
+  const id = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: id,
+    accountName: "Compute stop",
+    workspaceExternalSource: "test",
+    workspaceExternalId: id,
+    workspaceName: "Compute stop",
+    subjectId: `subject-${id}`,
+  });
+  const { accountId, workspaceId } = access.workspaceGrants[0]!;
+  const session = await createSession(client.db, {
+    accountId,
+    workspaceId: workspaceId!,
+    initialMessage: "Compute stop",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "compute",
+  });
+  const enrollment = await createSandboxEnrollment(client.db, {
+    accountId,
+    workspaceId: workspaceId!,
+    enrollmentId: crypto.randomUUID(),
+    sandboxGroupId: session.sandboxGroupId,
+    hasDisplay: false,
+    workspaceRoot: "/workspace",
+  });
+  await shared.admin`update enrollments set connection_instance_id='launch',connection_lease_expires_at=now()+interval '1 hour' where id=${enrollment.id}`;
+  const commandId = crypto.randomUUID();
+  const opId = `op-${commandId}`;
+  await shared.admin`insert into session_background_commands(id,account_id,workspace_id,session_id,provider,state,control_workspace_id,enrollment_id,connection_instance_id,op_id,reconcile_after)
+    values (${commandId},${accountId},${workspaceId!},${session.id},'connected_machine','running',${workspaceId!},${enrollment.id},'launch',${opId},'2000-01-01T00:00:00Z'::timestamptz)`;
+  const transport = new InMemoryOpStreamTransport();
+  const runner = new FakeOpRunner({
+    workspaceId: workspaceId!,
+    agentId: enrollment.id,
+    connectionInstanceId: "launch",
+    transport,
+  });
+  runner.script(opId, { frames: [], live: true, holdUntilCancel: true });
+  const subject = subjectFor(workspaceId!, enrollment.id, "launch");
+  await runner.request(
+    subject,
+    {
+      requestId: opId,
+      epoch: 0,
+      op: {
+        $case: "opStart",
+        opStart: {
+          op: { $case: "exec", exec: ExecRequest.fromPartial({ command: ["sleep", "900"] }) },
+          windowBytes: "65536",
+          deadlineMs: "0",
+          originId: session.id,
+        },
+      },
+    },
+    { timeoutMs: 1000 },
+  );
+  const operations: string[] = [];
+  const rpc: ControlRpc = {
+    request: async (target, request, options) => {
+      if (target !== subject) return await noRunnerRpc().request(target, request, options);
+      operations.push(request.op?.$case ?? "none");
+      return await runner.request(target, request, options);
+    },
+  };
+  const stopBus = {
+    ...bus,
+    getOpStreamConnection: () => opStreamConnectionFor(transport),
+  } as Parameters<typeof reconcile>[3];
+  const stored = async () =>
+    (await shared.admin`select * from session_background_commands where id=${commandId}`)[0]!;
+
+  // Running: no message reaches the sandbox.
+  await reconcile(client.db, settings, observability, stopBus, rpc);
+  expect(operations).toEqual([]);
+  expect((await stored()).reconcile_attempts).toBe(0);
+
+  const stop = await requestSessionBackgroundCommandCancellation(client.db, {
+    accountId,
+    workspaceId: workspaceId!,
+    sessionId: session.id,
+    commandId,
+    subjectId: `subject-${id}`,
+  });
+  expect(stop.accepted).toBe(true);
+  expect(await sandboxMaintenanceDue(client.db, { checkpointArtifactClaimTtlMs: 900000 })).toBe(
+    true,
+  );
+  await reconcile(client.db, settings, observability, stopBus, rpc);
+  expect(operations[0]).toBe("opCancel");
+  expect(operations).not.toContain("opStart");
+  expect(operations).not.toContain("opQuery");
+  const settled = await stored();
+  expect(settled.state).not.toBe("running");
+  expect(settled.state).not.toBe("stopping");
+  expect(settled.reconcile_attempts).toBe(1);
+
+  // Settled: later sweeps send nothing more.
+  const sent = operations.length;
+  await reconcile(client.db, settings, observability, stopBus, rpc);
+  expect(operations.length).toBe(sent);
+  await parkSession(session.id);
 });

@@ -49982,12 +49982,126 @@ function computeLeaseStaysWarmWhenIdle(
  * revokes its agent's enrollment. Runs inside a deletion transaction that has
  * already locked the leases; a lease with any holder is left alone and the
  * deletion keeps refusing until it drains.
+ *
+ * A browser or desktop an agent opened on the sandbox ends with it. On a
+ * compute sandbox those stay open across idle (the sandbox sleeps with them
+ * in memory), so their holders would otherwise keep a deleted chat's group
+ * forever. Only a lease held by nothing else qualifies, and only while none of
+ * those resources is mid-operation or mid-transition (the deletion retries).
  */
 async function requestComputeGroupEndTx(
   tx: Database,
   input: { workspaceId: string; sandboxGroupIds?: readonly string[] },
 ): Promise<void> {
   if (input.sandboxGroupIds && input.sandboxGroupIds.length === 0) return;
+  const groupFilter = input.sandboxGroupIds
+    ? sql`and lease.sandbox_group_id in (${sql.join(
+        input.sandboxGroupIds.map((id) => sql`${id}::uuid`),
+        sql`, `,
+      )})`
+    : sql``;
+  const interactionLeases = await rawRows<{ id: string }>(
+    tx,
+    sql`
+    select lease.id from sandbox_leases lease
+    where lease.workspace_id = ${input.workspaceId}
+      ${groupFilter}
+      and lease.backend = 'compute'
+      and lease.liveness = 'warm'
+      and lease.turn_holders = 0 and lease.viewer_holders = 0
+      and lease.reaper_hold_id is null
+      and lease.archive_capture_id is null
+      and exists (select 1 from sandbox_lease_holders h
+        where h.lease_id = lease.id and h.kind = 'interaction')
+      and not exists (select 1 from sandbox_lease_holders h
+        where h.lease_id = lease.id and h.kind <> 'interaction')
+      and not exists (
+        select 1 from sandbox_lease_holders h
+        join interaction_operations operation
+          on operation.workspace_id = h.workspace_id
+          and operation.state in ('prepared', 'dispatched')
+          and h.holder_id = (case operation.resource_kind
+            when 'browser_session' then 'browser-session:'
+            else 'computer-session:' end) || operation.resource_id::text
+        where h.lease_id = lease.id and h.kind = 'interaction')
+      and not exists (
+        select 1 from sandbox_lease_holders h
+        join browser_sessions browser
+          on h.holder_id = 'browser-session:' || browser.id::text
+          and browser.workspace_id = h.workspace_id
+        where h.lease_id = lease.id and h.kind = 'interaction'
+          and browser.lifecycle in ('starting', 'suspending', 'restoring', 'ending'))
+      and not exists (
+        select 1 from sandbox_lease_holders h
+        join computer_sessions computer
+          on h.holder_id = 'computer-session:' || computer.id::text
+          and computer.workspace_id = h.workspace_id
+        where h.lease_id = lease.id and h.kind = 'interaction'
+          and computer.lifecycle in ('starting', 'suspending', 'restoring', 'ending'))
+    order by lease.id
+    for update of lease
+  `,
+  );
+  if (interactionLeases.length > 0) {
+    const leaseIds = sql`(${sql.join(
+      interactionLeases.map((lease) => sql`${lease.id}::uuid`),
+      sql`, `,
+    )})`;
+    // The controller dies with the sandbox, so its binding is released too.
+    const browsers = await rawRows<{ id: string }>(
+      tx,
+      sql`
+      update browser_sessions browser set
+        lifecycle = 'lost',
+        controller_id = null,
+        controller_generation = null,
+        placement_instance_id = null,
+        controller_heartbeat_at = null,
+        failure_code = ${COMPUTE_GROUP_ENDED},
+        updated_at = now()
+      from sandbox_lease_holders h
+      where h.lease_id in ${leaseIds} and h.kind = 'interaction'
+        and h.holder_id = 'browser-session:' || browser.id::text
+        and browser.workspace_id = h.workspace_id
+        and browser.account_id = h.account_id
+        and browser.lifecycle = 'active'
+      returning browser.id
+    `,
+    );
+    const computers = await rawRows<{ id: string }>(
+      tx,
+      sql`
+      update computer_sessions computer set
+        lifecycle = 'lost',
+        controller_id = null,
+        controller_generation = null,
+        placement_instance_id = null,
+        controller_heartbeat_at = null,
+        failure_code = ${COMPUTE_GROUP_ENDED},
+        updated_at = now()
+      from sandbox_lease_holders h
+      where h.lease_id in ${leaseIds} and h.kind = 'interaction'
+        and h.holder_id = 'computer-session:' || computer.id::text
+        and computer.workspace_id = h.workspace_id
+        and computer.account_id = h.account_id
+        and computer.lifecycle = 'active'
+      returning computer.id
+    `,
+    );
+    await tx.execute(sql`
+      delete from sandbox_lease_holders
+      where lease_id in ${leaseIds} and kind = 'interaction'
+    `);
+    await tx.execute(sql`
+      update sandbox_leases set refcount = 0, updated_at = now() where id in ${leaseIds}
+    `);
+    if (browsers.length + computers.length > 0) {
+      await tx.execute(sql`
+        update workspace_interaction_revisions set revision = revision + 1, updated_at = now()
+        where workspace_id = ${input.workspaceId}
+      `);
+    }
+  }
   await tx.execute(sql`
     update sandbox_leases lease set
       liveness = 'draining',
@@ -49995,14 +50109,7 @@ async function requestComputeGroupEndTx(
       expires_at = now() - interval '1 millisecond',
       updated_at = now()
     where lease.workspace_id = ${input.workspaceId}
-      ${
-        input.sandboxGroupIds
-          ? sql`and lease.sandbox_group_id in (${sql.join(
-              input.sandboxGroupIds.map((id) => sql`${id}::uuid`),
-              sql`, `,
-            )})`
-          : sql``
-      }
+      ${groupFilter}
       and lease.backend = 'compute'
       and lease.liveness = 'warm'
       and lease.refcount = 0 and lease.turn_holders = 0 and lease.viewer_holders = 0
@@ -51594,6 +51701,8 @@ export type IdleInteractionRelease = {
 
 /** Failure code of a browser or desktop stopped because nobody used it. */
 export const IDLE_INTERACTION_RELEASED = "idle_released";
+/** A browser or desktop on a compute sandbox whose chat or workspace was deleted. */
+export const COMPUTE_GROUP_ENDED = "sandbox_deleted";
 
 const INTERACTION_HOLDER_RESOURCE =
   /^(browser-session|computer-session):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;

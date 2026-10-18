@@ -146,7 +146,12 @@ skips sandbox enrollments, and machine routes list machines only.
   and an ineligible delete gives its claim back for the next sweep. The
   lease's capture fence still decides who may terminate the box, and a fence
   loss leaves it for its new owner. The marker is cleared when the lease
-  re-arms or goes cold.
+  re-arms or goes cold. A browser or desktop an agent left open on the
+  sandbox does not keep the group: it stays open while the sandbox sleeps, so
+  only the deletion can end it. When nothing else holds the lease and none of
+  those resources is mid-operation or mid-transition, the deletion marks them
+  lost (`sandbox_deleted`), releases their holders and ends the group in the
+  same transaction; otherwise it refuses and the caller retries.
 - **Capture**: a portable tar only, to move a workspace to another backend
   (rotation and archive capture still drain with a capture). There are no
   warm checkpoints: the fabric persists the sandbox itself, so the turn-end
