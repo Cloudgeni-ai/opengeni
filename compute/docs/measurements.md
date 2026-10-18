@@ -943,3 +943,25 @@ terminal check attaches a terminal viewer and speaks its relay PTY as the
 web app does (from r10b on). The connected-machine check found the
 machine listed as `display_unavailable`, which is how a headless machine
 that is online is listed; the check accepts that from r10b on.
+
+Two targeted runs on the r10 deployment followed (`ONLY=`, each under ten
+minutes so the enrollment sweep above does not reach the sandbox). In
+r10b (terminal, saved, archived, connected-machine) the terminal opened
+its relay PTY but got no output: a scheduled checkpoint dropped the
+agent's connection and the PTY channel with it. Saved passed only because
+the sandbox had not yet gone to sleep when the command arrived, so the
+sleep checks now wait for the level to settle before the first command
+(2 s Paused, 15 s Saved, 45 s Archived, 60 s Remote), since the fabric
+API does not report a sandbox's level. Archived hung as Saved did in r10.
+Creating the Connected Machine's session without a first message got
+422, so the check now starts the session on the machine with its first
+message. In r10c (terminal, desktop, connected-machine) the terminal
+passed (the typed command was echoed through the relay PTY) and so did
+the Connected Machine: the same agent build enrolled on the stack VM was
+online 3.0 s after connecting, ran a session turn and an exec, and still
+answered an exec (0.1 s) after 90 s idle, never sleeping. The desktop
+failed for a reason outside the fabric: browserd in the guest refused the
+computer session with "This interaction runtime does not contain the
+experimental CUA SDK". The sandbox images ask for an isolated Linux seat,
+for which browserd chooses its CUA backend, and the CUA SDK it loads from
+beside its binary is not installed in the images.
