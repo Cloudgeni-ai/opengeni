@@ -30,6 +30,9 @@ domain=$(printf '%s' "$STACK_IP" | tr . -).sslip.io
 app=opengeni.$domain
 relay=relay.$domain
 files=files.$domain
+# NATS over wss for Connected Machines (the connected-machine check); the
+# hosts and their sandboxes reach Opengeni only over the agent link.
+nats=nats.$domain
 log() { printf '[deploy %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 k() { kubectl -n "$ns" "$@"; }
 mkdir -p "$sec"
@@ -120,7 +123,7 @@ sudo systemctl enable -q e2e-diagnostics
 sudo systemctl restart e2e-diagnostics
 
 log "values"
-jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg ogtag "$OPENGENI_TAG" \
+jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg nats "$nats" --arg ogtag "$OPENGENI_TAG" \
   --arg cmtag "$COMPUTE_TAG" --arg archive "$(cat "$fleet/archive")" --arg group "$(cat "$fleet/host_group")" \
   --argjson hostmib "$(cat "$fleet/host_memory_mib")" \
   --arg sandbox "$SANDBOX_IMAGE" --arg desktop "$DESKTOP_IMAGE" --arg hosts "$HOSTS" \
@@ -141,7 +144,7 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg ogtag "$O
     temporal: {enabled: true, postgres: {existingSecret: "opengeni-postgres"}},
     nats: {enabled: true, authCallout: {enabled: true}},
     garage: {enabled: true, publicEndpoint: "https://\($files)", sandboxEndpoint: "https://\($files)"},
-    selfhosted: {enabled: true, relayUrl: "wss://\($relay)"},
+    selfhosted: {enabled: true, relayUrl: "wss://\($relay)", natsUrl: "wss://\($nats)"},
     config: ({
       OPENGENI_SANDBOX_BACKEND: "compute",
       OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
@@ -192,7 +195,7 @@ for name in $(k get deploy -o name); do
   k rollout status "$name" --timeout 15m
 done
 
-log "Caddy for $app, $relay and $files"
+log "Caddy for $app, $relay, $files and $nats"
 ip() { k get svc "$1" -o jsonpath='{.spec.clusterIP}'; }
 port() { k get svc "$1" -o jsonpath="{.spec.ports[?(@.name==\"$2\")].port}"; }
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
@@ -206,6 +209,9 @@ $relay {
 }
 $files {
 	reverse_proxy $(ip "$full-garage"):3900
+}
+$nats {
+	reverse_proxy $(ip "$full-nats"):$(port "$full-nats" websocket)
 }
 EOF
 sudo systemctl reload caddy || sudo systemctl restart caddy

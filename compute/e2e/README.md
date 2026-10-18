@@ -73,11 +73,12 @@ subset with what it needs.
 | port | an HTTP server on a guest TCP port answers through the fabric's `connect` stream to the guest gateway (vsock 57, header `tcp <port>`) |
 | browser | the agent opens a page with the in-sandbox browser and reports its title |
 | desktop | the agent opens a computer session that comes up (not failed), takes a screenshot and describes it |
-| run-as | runs a command and writes a file as a non-root user of the image, then checks the uid and the file's owner; not applicable while Opengeni has no way to ask for a sandbox's commands to run as another user |
+| run-as | not applicable: Opengeni never asks any backend to run a sandbox's commands as another user (the runtime's `sandboxRunAs` gives none), so no public API reaches it; the compute agent advertises `run_as`, which the agent's Linux tests cover as root |
 | sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level; the next Opengeni request wakes it, with its files |
 | move | the sandbox sleeps (Saved) and the fabric moves it to another host; its files come along |
 | host-loss | after a sleep to remote, the sandbox's host is stopped; the sandbox wakes on another host from that copy |
 | delete | deleting the session deletes its sandbox on the fabric (a run that stops earlier still deletes its session) |
+| connected-machine | the agent build from the sandbox image connects the stack VM as a Connected Machine (an enroll token, `opengeni-agent connect`, then `run`); a session made to use it runs a command and a model turn there, and after 90 s idle it is still online and answers at once; the machine is then revoked |
 | ui | Playwright in the web app: the Files tab lists the file, a command typed in the Terminal tab runs, the Desktop tab draws the desktop |
 
 A check whose needs failed is skipped, so every run reports every check.

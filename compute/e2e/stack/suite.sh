@@ -33,6 +33,16 @@ if [ ! -f "$HOME/.cache/ms-playwright/.e2e-chromium" ]; then
 fi
 contract=$(grep -o 'OPENGENI_API_CONTRACT_REVISION = "[^"]*"' "$og/packages/contracts/src/index.ts" | cut -d'"' -f2)
 
+# The agent the sandbox image carries, for the connected-machine check: the
+# same build, enrolled as this VM.
+agent=$HOME/e2e/agent/$SANDBOX_REF
+if [ ! -x "$agent/opengeni-agent" ]; then
+  mkdir -p "$agent"
+  holder=$(docker create "$SANDBOX_REF")
+  docker cp "$holder:/usr/local/bin/opengeni-agent" "$agent/opengeni-agent"
+  docker rm "$holder" >/dev/null
+fi
+
 # The fleet service on the cluster network, which this node reaches directly.
 fabric=$(kubectl -n opengeni get svc "${COMPUTE_SERVICE%%.*}" -o jsonpath='{.spec.clusterIP}')
 
@@ -43,7 +53,7 @@ OPENGENI_URL=$OPENGENI_URL API_CONTRACT=$contract MODEL=$MODEL_DEPLOYMENT OUT=$o
   COMPUTE_SERVICE=$COMPUTE_SERVICE COMPUTE_ADDRESS=$fabric COMPUTE_PORT=8080 COMPUTE_CA=$sec/api-ca.pem \
   COMPUTE_OPENGENI_KEY=$sec/compute-opengeni-key COMPUTE_OPERATOR_KEY=$sec/compute-operator-key \
   PROJECT=$PROJECT ZONE=$ZONE HOSTS=${HOSTS:-3} ONLY=${ONLY:-} \
-  PLAYWRIGHT_MODULE=$og/node_modules/playwright/index.js \
+  PLAYWRIGHT_MODULE=$og/node_modules/playwright/index.js AGENT_BIN=$agent/opengeni-agent \
   OPENGENI_SHA=$OPENGENI_LABEL COMPUTE_SHA=$COMPUTE_SHA \
   bun "$HOME/e2e/suite/run.ts" || status=$?
 # Every replica's log, each line prefixed with its pod.

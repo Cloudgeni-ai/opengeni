@@ -7,9 +7,10 @@
 // skipped, so a run always reports every check. ONLY=a,b runs a subset (and
 // what it needs). A check passes, fails, is skipped, or is n/a when the
 // product has no surface for it (the reason is in its detail).
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { request as httpsRequest } from "node:https";
 import { connect as tlsConnect } from "node:tls";
 
@@ -37,6 +38,9 @@ const ZONE = env("ZONE");
 const HOSTS = Number(env("HOSTS", "3"));
 const ONLY = (process.env.ONLY ?? "").split(",").filter(Boolean);
 const TURN_TIMEOUT_S = Number(env("TURN_TIMEOUT_S", "900"));
+// The agent build in the sandbox image (stack/suite.sh copies it out), which
+// the connected-machine check enrolls as this VM.
+const AGENT_BIN = process.env.AGENT_BIN ?? "";
 
 mkdirSync(OUT, { recursive: true });
 const logLines: string[] = [];
@@ -574,6 +578,93 @@ check("delete", "deleting the session deletes its sandbox on the fabric", ["crea
     await sleep(5_000);
   }
 });
+
+check(
+  "connected-machine",
+  "the same agent build, enrolled as a Connected Machine, runs a session's turn and commands and never sleeps",
+  ["workspace"],
+  async () => {
+    if (!AGENT_BIN) throw new Error("AGENT_BIN is not set");
+    // The suite's helpers follow state.session; this check borrows them for
+    // its own session and gives the compute session back afterwards.
+    const saved = { session: state.session, seen };
+    const config = mkdtempSync(`${tmpdir()}/e2e-machine-`);
+    const agentEnv = { ...process.env, OPENGENI_CONFIG_DIR: config, OPENGENI_API_URL: OPENGENI_URL };
+    let agent: ReturnType<typeof spawn> | undefined;
+    let enrollment: string | undefined;
+    try {
+      const minted = await step("mint an enroll token", () => og<any>("POST", `${ws()}/enrollments/token`, {}));
+      const before = new Set(
+        ((await og<any>("GET", `${ws()}/enrollments`)).enrollments ?? []).map((one: any) => one.id),
+      );
+      const connect = spawnSync(AGENT_BIN, ["connect", "--token", minted.token, "--non-interactive"], {
+        env: agentEnv,
+        cwd: config,
+        encoding: "utf8",
+        timeout: 120_000,
+      });
+      if (connect.status !== 0) throw new Error(`connect exited ${connect.status}: ${(connect.stderr || connect.stdout).slice(0, 600)}`);
+      const logFile = openSync(`${OUT}/connected-machine-agent.log`, "a");
+      agent = spawn(AGENT_BIN, ["run"], { env: agentEnv, cwd: config, stdio: ["ignore", logFile, logFile] });
+      let machine: any;
+      const start = Date.now();
+      for (;;) {
+        const listed = (await og<any>("GET", `${ws()}/enrollments`)).enrollments ?? [];
+        enrollment ??= listed.find((one: any) => !before.has(one.id))?.id;
+        if (enrollment) {
+          const machines = (await og<any>("GET", `${ws()}/machines`)).machines ?? [];
+          machine = machines.find((one: any) => one.enrollmentId === enrollment);
+          if (machine?.state === "online") break;
+        }
+        if (Date.now() - start > 120_000) {
+          throw new Error(`no online machine 120 s after connecting (enrollment ${enrollment ?? "none"}, state ${machine?.state ?? "unlisted"})`);
+        }
+        await sleep(3_000);
+      }
+      if (machine.kind !== "selfhosted") throw new Error(`listed as ${machine.kind}`);
+      const online = seconds(start);
+
+      const created = await og<any>("POST", `${ws()}/sessions`, { model: MODEL, reasoningEffort: "low" });
+      state.session = { id: created.id };
+      seen = 0;
+      await step("make the machine the session's computer", () =>
+        og("POST", `${ses()}/active-sandbox`, { target: machine.sandboxId }),
+      );
+      const name = hostname();
+      const out = await step("a command", () => execOk("hostname"));
+      if (out.trim() !== name) throw new Error(`hostname ${out.trim()}, not this VM's ${name}`);
+      const id = readFileSync("/etc/machine-id", "utf8").trim();
+      const turn = await step("a turn", () =>
+        say("Run `cat /etc/machine-id` in the shell and reply with only its output."),
+      );
+      if (!turn.text.includes(id)) throw new Error(`the turn answered ${JSON.stringify(turn.text.slice(0, 200))}`);
+      // A compute sandbox would sleep after this long idle; a machine does not.
+      await sleep(90_000);
+      const idleStart = Date.now();
+      await step("a command after 90 s idle", () => execOk("true"));
+      const idle = Date.now() - idleStart;
+      const after = ((await og<any>("GET", `${ws()}/machines`)).machines ?? []).find(
+        (one: any) => one.enrollmentId === enrollment,
+      );
+      if (after?.state !== "online") throw new Error(`state ${after?.state} after the idle wait`);
+      if (idle > 10_000) throw new Error(`the command after the idle wait took ${(idle / 1000).toFixed(1)} s`);
+      await deleteSession(5 * 60_000).catch((error) => log(`connected-machine: deleting its session: ${error}`));
+      return `online ${online} after connecting; exec and a turn ran on ${name}; still online after 90 s idle (exec ${(idle / 1000).toFixed(1)} s)`;
+    } finally {
+      if (state.session && state.session.id !== saved.session?.id) {
+        await og("DELETE", ses()).catch(() => undefined);
+      }
+      state.session = saved.session;
+      seen = saved.seen;
+      agent?.kill("SIGTERM");
+      if (enrollment) {
+        await og("POST", `${ws()}/enrollments/${enrollment}/revoke`, {}).catch((error) =>
+          log(`connected-machine: revoking ${enrollment}: ${error}`),
+        );
+      }
+    }
+  },
+);
 
 // --- Run ------------------------------------------------------------------
 
