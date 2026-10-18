@@ -53,40 +53,53 @@ gateway and relay over HTTPS through the NAT. NATS stays inside the cluster.
 ## The suite
 
 `env.sh model-up` makes an Azure OpenAI deployment named after the model
-(`MODEL_NAME`, `MODEL_VERSION`); `deploy` hands it to Opengeni; `suite` runs
-`suite/run.ts` on the stack VM and copies the results to
-`$STATE/runs/<run>/` (results.json, results.md, logs, screenshots);
-`model-down` deletes the deployment. The deployment runs turns with the
+(`MODEL_NAME`, `MODEL_VERSION`) and records it in `$STATE/model.created`
+(account, group, name and Azure's creation time); `deploy` hands it to
+Opengeni; `suite` runs `suite/run.ts` on the stack VM and copies the results
+to `$STATE/runs/<run>/` (results.json, results.md, logs, screenshots);
+`model-down` deletes the deployment only if it matches that record, so a
+deployment this environment adopted rather than created is left alone. The deployment runs turns with the
 managed deployment's sandbox rollout controls (turns own their sandbox's
 lease, lazy provisioning), which the compute backend needs. `ONLY=create,git env.sh suite` runs a
-subset with what it needs.
+subset with what it needs (an unknown name is an error); `KEEP=1` keeps the
+run's session for inspection (delete it afterwards).
+
+Every check is meant to fail when the feature it names is broken: it asserts
+an effect the feature alone produces (a random value, a process id, a decoded
+frame), not only that a request was accepted.
 
 | check | what it does |
 | --- | --- |
 | health, hosts, workspace | the API answers; the fleet has `HOSTS` live hosts; a workspace exists |
 | create | a session with `sandboxBackend: compute` runs its first turn (the agent runs `uname -r`); the fabric holds its sandbox |
-| commands | `terminal/exec` runs a command |
-| background | the agent starts a long background command; the API lists it while it runs, and stopping it through the API ends it |
+| commands | `terminal/exec` runs a command, and a failing one keeps its exit status, stdout and stderr |
+| egress | a command in the sandbox fetches a public HTTPS page |
+| background | the agent runs a background command to completion and reads its output and exit status back by id; a long one is listed by the API while it runs, and stopping it through the API unlists it and ends its processes in the guest |
 | files | `fs/write`, `fs/read` and `fs/list` (the file browser's API) agree |
 | git | `git/status` and `git/log` of a repository made in the sandbox |
-| terminal | a PTY opened through the API echoes a typed command on the event stream |
-| port | an HTTP server on a guest TCP port answers through the fabric's `connect` stream to the guest gateway (vsock 57, header `tcp <port>`) |
-| browser | the agent opens a page with the in-sandbox browser and reports its title |
-| desktop | the agent opens a computer session that comes up (not failed), takes a screenshot and describes it |
+| terminal | a terminal opened through the viewer relay runs a typed command, which writes a random value to a file that is then read back |
+| port | an HTTP server on a guest TCP port answers through the fabric's `connect` stream to the guest gateway (vsock 57, header `tcp <port>`); this is the fabric's stream, not an Opengeni preview URL |
+| browser | a page with a random title is served in the sandbox; the agent opens it with the browser tools, a tool result carries the title and the reply names it |
+| desktop | the agent's computer session becomes active, a computer tool call succeeds, and a screen frame fetched through the API decodes as a real desktop (at least 640x400, several colours) |
 | run-as | not applicable: Opengeni never asks any backend to run a sandbox's commands as another user (the runtime's `sandboxRunAs` gives none), so no public API reaches it; the compute agent advertises `run_as`, which the agent's Linux tests cover as root |
-| sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level; the next Opengeni request wakes it, with its files |
+| sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level; the next Opengeni request wakes it, with its files and a running process that holds 32 MiB of known memory (same pid, memory intact). After the run, `suite/verify.ts` checks the hosts' journals: the sandbox's last completed step before the wake must have reached that level, or the check fails |
 | move | the sandbox sleeps (Saved) and the fabric moves it to another host; its files come along |
-| host-loss | after a sleep to remote, the sandbox's host is stopped; the sandbox wakes on another host from that copy |
-| delete | deleting the session deletes its sandbox on the fabric (a run that stops earlier still deletes its session) |
-| connected-machine | the agent build from the sandbox image connects the stack VM as a Connected Machine (an enroll token, `opengeni-agent connect`, then `run`); a session made to use it runs a command and a model turn there, and after 90 s idle it is still online and answers at once; the machine is then revoked |
+| host-loss | after a sleep to remote, the sandbox's host is stopped; the sandbox wakes, with its files, on a different live host under a higher owner epoch, and the lost host no longer owns it |
+| delete | deleting the session deletes its sandbox on the fabric |
+| cleanup | every session delete, viewer close and machine revoke the run made succeeded (not applicable with `KEEP=1`) |
+| connected-machine | the agent build from the sandbox image connects the stack VM as a Connected Machine (an enroll token, `opengeni-agent connect`, then `run`); a session made to use it runs a command and a model turn there; through 90 s idle the machine is listed online at every 5 s poll and its agent process stays alive, then it answers at once; the machine is then revoked |
 | ui | Playwright in the web app: the Files tab lists the file, a command typed in the Terminal tab runs, the Desktop tab draws the desktop |
 
 A check whose needs failed is skipped, so every run reports every check.
 
 After each run `suite` also copies every host's `compute-*` journal since
 the run began into the run's results (`host-<name>.log`), over OS Login
-through the stack VM; `env.sh host-logs [run]` does it alone. Each check
-has 30 minutes; one that hangs fails and the run goes on.
+through the stack VM, with the guest consoles of the run's sandboxes;
+`env.sh host-logs [run]` does it alone. `suite` then runs `suite/verify.ts`
+on those journals and exits nonzero if any check failed or was skipped, the
+remote run failed or no results came back. Each check has 30 minutes; one
+that hangs is aborted (its requests are cancelled) and fails, and the run goes
+on.
 
 ## Settings and cost
 
@@ -94,7 +107,9 @@ See the header of `env.sh`. Defaults: three n2-standard-8 hosts, an
 n2-standard-32 stack VM with 500 GB of SSD, one Cloud NAT, an Enterprise
 certificate authority. Run `env.sh down` (and `model-down`) when done: it
 deletes the VM, everything Terraform made, the registry, NAT, addresses
-and firewall rules. State, keys and results stay in `$STATE`, outside the
+and firewall rules. It carries on past a failed step and lists whatever is
+left at the end; `env.sh status` lists everything that still costs money,
+including the certificate pool, custom roles and the model deployment. State, keys and results stay in `$STATE`, outside the
 repository.
 
 The stack has no login (the chart's default local access mode); its HTTPS

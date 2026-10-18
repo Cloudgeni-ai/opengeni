@@ -230,7 +230,11 @@ for _ in $(seq 120); do
   [ "${count:-0}" -ge "$HOSTS" ] && break
   sleep 10
 done
-log "hosts ready: ${count:-0} of $HOSTS"
+if [ "${count:-0}" -lt "$HOSTS" ]; then
+  log "only ${count:-0} of $HOSTS hosts are live after 20 minutes"
+  exit 1
+fi
+log "hosts ready: $count of $HOSTS"
 cat >"$HOME/e2e/endpoints.env" <<EOF
 OPENGENI_URL=https://$app
 RELAY_URL=wss://$relay

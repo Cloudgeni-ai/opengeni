@@ -4,6 +4,7 @@
 // Writes $OUT/ui.json ({ files, terminal, desktop } → "pass: ..." or
 // "fail: ...") and a screenshot per tab.
 import { writeFileSync } from "node:fs";
+import { describeFrame, frameStats, notAFrame } from "./frame.ts";
 
 const need = (name: string): string => {
   const value = process.env[name];
@@ -76,17 +77,26 @@ await step("terminal", async () => {
 
 await step("desktop", async () => {
   await tab("Desktop");
+  // The desktop view's pixels as drawn (a capture of the element, so a WebGL
+  // canvas counts too), decoded on a blank page: an empty canvas fails.
+  const decoder = await browser.newPage();
   const deadline = Date.now() + 180_000;
+  let last = "no desktop canvas";
   while (Date.now() < deadline) {
     for (const canvas of await page.locator("canvas").all()) {
       const box = await canvas.boundingBox().catch(() => null);
-      if (box && box.width >= 400 && box.height >= 300) {
-        return `a ${Math.round(box.width)}x${Math.round(box.height)} desktop view is drawn`;
-      }
+      if (!box || box.width < 400 || box.height < 300) continue;
+      const shot: Uint8Array | null = await canvas.screenshot().catch(() => null);
+      if (!shot) continue;
+      const stats = await frameStats(decoder, shot, "image/png");
+      // The view is drawn at the dock's size; judge its content, not its size.
+      const wrong = notAFrame({ ...stats, width: Math.max(stats.width, 640), height: Math.max(stats.height, 400) });
+      if (!wrong) return `the desktop view draws a real frame (${describeFrame(stats)})`;
+      last = `the ${Math.round(box.width)}x${Math.round(box.height)} desktop view is ${wrong}`;
     }
     await page.waitForTimeout(2000);
   }
-  throw new Error("no desktop view within 3 minutes");
+  throw new Error(`${last} after 3 minutes`);
 });
 
 await browser.close();

@@ -7,8 +7,9 @@
 # real agent sessions through it. See README.md.
 #
 # Run it from a checkout (its compute/e2e) on a workstation with gcloud,
-# terraform, ssh, rsync, jq, gh (to find a published API image) and, for the
-# model, az:
+# terraform, ssh, rsync, jq, bun (to verify the suite's results against the
+# hosts' journals), gh (to find a published API image) and, for the model,
+# az:
 #
 #   PROJECT=p compute/e2e/env.sh up          # everything, idempotent
 #   PROJECT=p compute/e2e/env.sh model-up    # a model deployment for the run
@@ -269,6 +270,19 @@ deploy() {
 }
 
 # --- the model: an Azure OpenAI deployment for the run -------------------
+# A deployment this environment creates is recorded in $STATE/model.created
+# (account, group, name and Azure's creation time); model-down deletes only
+# a deployment that matches that record, and leaves one it found already
+# there.
+MODEL_RECORD=$STATE/model.created
+model_created_at() {
+  az cognitiveservices account deployment show -n "$1" -g "$2" --deployment-name "$3" \
+    --query systemData.createdAt -o tsv 2>/dev/null
+}
+model_recorded() {
+  [ -f "$MODEL_RECORD" ] &&
+    [ "$(cat "$MODEL_RECORD")" = "$(printf 'account=%s\ngroup=%s\nname=%s\ncreated=%s' "$1" "$2" "$3" "$(model_created_at "$1" "$2" "$3")")" ]
+}
 model_up() {
   local account=${AZURE_OPENAI_ACCOUNT:?AZURE_OPENAI_ACCOUNT} group=${AZURE_OPENAI_GROUP:?AZURE_OPENAI_GROUP}
   local name=${MODEL_DEPLOYMENT:-${MODEL_NAME:?MODEL_NAME}}
@@ -277,6 +291,12 @@ model_up() {
     az cognitiveservices account deployment create -n "$account" -g "$group" --deployment-name "$name" \
       --model-name "$MODEL_NAME" --model-version "$MODEL_VERSION" --model-format OpenAI \
       --sku-name "${MODEL_SKU:-GlobalStandard}" --sku-capacity "${MODEL_CAPACITY:-500}" >/dev/null
+    (umask 077 && printf 'account=%s\ngroup=%s\nname=%s\ncreated=%s' "$account" "$group" "$name" \
+      "$(model_created_at "$account" "$group" "$name")" >"$MODEL_RECORD")
+  elif model_recorded "$account" "$group" "$name"; then
+    log "reusing deployment $name, which this environment created"
+  else
+    log "using deployment $name, which was already there: model-down will leave it"
   fi
   local endpoint key
   endpoint=$(az cognitiveservices account show -n "$account" -g "$group" --query properties.endpoint -o tsv)
@@ -288,11 +308,15 @@ model_up() {
 model_down() {
   local account=${AZURE_OPENAI_ACCOUNT:?AZURE_OPENAI_ACCOUNT} group=${AZURE_OPENAI_GROUP:?AZURE_OPENAI_GROUP}
   local name=${MODEL_DEPLOYMENT:-${MODEL_NAME:?MODEL_NAME}}
-  if exists az cognitiveservices account deployment show -n "$account" -g "$group" --deployment-name "$name"; then
-    log "deleting Azure OpenAI deployment $name"
+  if ! exists az cognitiveservices account deployment show -n "$account" -g "$group" --deployment-name "$name"; then
+    log "no deployment $name on $account"
+  elif model_recorded "$account" "$group" "$name"; then
+    log "deleting Azure OpenAI deployment $name, which this environment created"
     az cognitiveservices account deployment delete -n "$account" -g "$group" --deployment-name "$name"
+  else
+    log "leaving deployment $name: this environment did not create it (no matching record in $MODEL_RECORD)"
   fi
-  rm -f "$STATE/model.env"
+  rm -f "$STATE/model.env" "$MODEL_RECORD"
 }
 
 # --- suite ----------------------------------------------------------------
@@ -302,17 +326,29 @@ suite() {
   local run
   run=${RUN:-$(date -u +%Y%m%dT%H%M%SZ)}
   log "suite run $run (against the deployed build)"
-  on "RUN=$run ONLY='${ONLY:-}' PROJECT=$PROJECT ZONE=$ZONE bash e2e/suite.sh" |
-    tee "$STATE/suite-$run.log" || true
+  # The remote suite's status (nonzero when a check failed or was skipped,
+  # or it could not run), then the results are copied and verified against
+  # the hosts' journals; any of it failing fails the step.
+  local status=0 verified=0 dir=$STATE/runs/$run
+  on "RUN=$run ONLY='${ONLY:-}' KEEP='${KEEP:-}' PROJECT=$PROJECT ZONE=$ZONE bash e2e/suite.sh" |
+    tee "$STATE/suite-$run.log" || status=$?
   mkdir -p "$STATE/runs"
-  copy_from "e2e/runs/$run" "$STATE/runs/" || true
-  RUN=$run host_logs || true
-  if [ -f "$STATE/runs/$run/results.md" ]; then cat "$STATE/runs/$run/results.md"; fi
+  copy_from "e2e/runs/$run" "$STATE/runs/" || log "could not copy the run's results"
+  RUN=$run host_logs || log "could not collect the hosts' journals"
+  if [ ! -f "$dir/results.json" ]; then
+    log "suite run $run left no results (the suite exited $status)"
+    return $((status == 0 ? 1 : status))
+  fi
+  bun "$HERE/suite/verify.ts" "$dir" || verified=$?
+  cat "$dir/results.md"
+  [ "$status" -eq 0 ] || return "$status"
+  return "$verified"
 }
 
 # Each host's journal since the run began (all of it without a run) into
-# $STATE/runs/$RUN: OS Login over the stack VM, which the hosts allow SSH
-# from.
+# $STATE/runs/$RUN, and the guest console of each sandbox the run's results
+# name that the host still has (a kept run's, KEEP=1): OS Login over the
+# stack VM, which the hosts allow SSH from.
 host_logs() {
   local run=${RUN:-} dir since=() name
   dir=$STATE/runs/${run:-hosts-$(date -u +%Y%m%dT%H%M%SZ)}
@@ -326,46 +362,64 @@ host_logs() {
   [ -f "$login" ] || ssh-keygen -q -t ed25519 -N '' -f "$login"
   g compute os-login ssh-keys add --key-file "$login.pub" --ttl 1d >/dev/null
   user=$(g compute os-login describe-profile --format='value(posixAccounts[0].username)')
-  local jump
+  local jump sandboxes
   jump="ssh ${SSH_OPTS[*]} -W %h:%p $USER_NAME@$(stack_ip)"
+  sandboxes=$(grep -oE 'sandbox [0-9a-f]{32}' "$dir/results.json" 2>/dev/null | cut -d' ' -f2 | sort -u | tr '\n' ' ' || true)
   while read -r name ip; do
     log "journal of $name"
     ssh -n -T -i "$login" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$STATE/known_hosts" \
       -o LogLevel=ERROR -o ConnectTimeout=20 -o "ProxyCommand=$jump" "$user@$ip" \
       "sudo journalctl --no-pager -o short-iso-precise ${since[*]} -u 'compute-*'" \
       >"$dir/host-$name.log" 2>"$dir/host-$name.err" || log "no journal from $name (see host-$name.err)"
+    [ -n "$sandboxes" ] || continue
+    ssh -n -T -i "$login" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$STATE/known_hosts" \
+      -o LogLevel=ERROR -o ConnectTimeout=20 -o "ProxyCommand=$jump" "$user@$ip" \
+      "for id in $sandboxes; do f=/var/lib/compute/state/vm/firecracker/\$id/console.log; if sudo test -f \$f; then echo \"== \$id\"; sudo cat \$f; fi; done" \
+      >"$dir/consoles-$name.log" 2>/dev/null || true
+    [ -s "$dir/consoles-$name.log" ] || rm -f "$dir/consoles-$name.log"
   done < <(g compute instances list --filter "name~^$PREFIX-host" --format 'value(name,networkInterfaces[0].networkIP)')
 }
 
 # --- down -----------------------------------------------------------------
+# Deletes everything up made, carrying on past a failure so one stuck
+# resource does not keep the rest alive; fails at the end naming what is
+# left, which status then lists.
 down() {
+  local left=()
   log "deleting the stack VM"
   if exists g compute instances describe "$STACK" --zone "$ZONE"; then
-    g compute instances delete "$STACK" --zone "$ZONE"
+    g compute instances delete "$STACK" --zone "$ZONE" || left+=("stack VM $STACK")
   fi
   local dir=$STATE/terraform
   if [ -f "$dir/terraform.tfstate" ]; then
     log "terraform destroy (group, template, bucket, authority, accounts, rules)"
-    tf destroy -input=false -auto-approve -state="$dir/terraform.tfstate" -var-file="$dir/e2e.tfvars.json" \
-      >"$STATE/terraform-destroy.log" 2>&1 || { tail -40 "$STATE/terraform-destroy.log" >&2; return 1; }
+    if ! tf destroy -input=false -auto-approve -state="$dir/terraform.tfstate" -var-file="$dir/e2e.tfvars.json" \
+      >"$STATE/terraform-destroy.log" 2>&1; then
+      tail -40 "$STATE/terraform-destroy.log" >&2
+      left+=("terraform (see $STATE/terraform-destroy.log)")
+    fi
   fi
   log "registry, firewall, NAT, addresses"
   if exists g artifacts repositories describe "$PREFIX" --location "$REGION"; then
-    g artifacts repositories delete "$PREFIX" --location "$REGION"
+    g artifacts repositories delete "$PREFIX" --location "$REGION" || left+=("registry $PREFIX")
   fi
   for r in "$PREFIX-ssh" "$PREFIX-ssh-hosts" "$PREFIX-https" "$PREFIX-acme"; do
-    if exists g compute firewall-rules describe "$r"; then g compute firewall-rules delete "$r"; fi
+    if exists g compute firewall-rules describe "$r"; then g compute firewall-rules delete "$r" || left+=("firewall rule $r"); fi
   done
   if exists g compute routers describe "$PREFIX-router" --region "$REGION"; then
-    g compute routers delete "$PREFIX-router" --region "$REGION"
+    g compute routers delete "$PREFIX-router" --region "$REGION" || left+=("router $PREFIX-router")
   fi
   for a in "$STACK-ip" "$STACK-internal" "$PREFIX-nat-ip"; do
     if exists g compute addresses describe "$a" --region "$REGION"; then
-      g compute addresses delete "$a" --region "$REGION"
+      g compute addresses delete "$a" --region "$REGION" || left+=("address $a")
     fi
   done
   rm -f "$STATE/bundle" "$STATE/build.env" "$STATE/stack_ip" "$STATE/known_hosts"
   status
+  if [ "${#left[@]}" -gt 0 ]; then
+    log "not deleted: ${left[*]}"
+    return 1
+  fi
 }
 
 status() {
@@ -379,6 +433,16 @@ status() {
   g storage buckets list --filter "name~^$PREFIX" --format 'value(name)'
   g artifacts repositories list --location "$REGION" --filter "name~$PREFIX" --format 'value(name)' 2>/dev/null
   g iam service-accounts list --filter "email~^$PREFIX" --format 'value(email)'
+  g iam roles list --project "$PROJECT" --filter "name~${PREFIX//-/_}" --format 'value(name,deleted)'
+  # A certificate authority's pool stays until its authorities are gone
+  # (they wait out their deletion period).
+  g privateca pools list --location "$REGION" --format 'value(name)' | sed -n "s/^\($PREFIX-.*\)/ca pool \1/p"
+  if [ -n "${AZURE_OPENAI_ACCOUNT:-}" ] && command -v az >/dev/null; then
+    local name=${MODEL_DEPLOYMENT:-${MODEL_NAME:-}}
+    az cognitiveservices account deployment list -n "$AZURE_OPENAI_ACCOUNT" -g "${AZURE_OPENAI_GROUP:-}" \
+      --query "[?name=='$name'].{deployment:name,created:systemData.createdAt}" -o tsv 2>/dev/null |
+      sed "s/^/azure openai deployment (record: $([ -f "$MODEL_RECORD" ] && echo created here || echo none)) /"
+  fi
 }
 
 case "${1:-}" in

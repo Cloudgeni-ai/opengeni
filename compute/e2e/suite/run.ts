@@ -13,6 +13,8 @@ import { mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "n
 import { hostname, tmpdir } from "node:os";
 import { request as httpsRequest } from "node:https";
 import { connect as tlsConnect } from "node:tls";
+import { describeFrame, frameStats, notAFrame } from "./frame.ts";
+import { counts, render, type LevelProof, type Result, type Status } from "./report.ts";
 
 const env = (name: string, fallback?: string): string => {
   const value = process.env[name] ?? fallback;
@@ -51,7 +53,36 @@ function log(message: string): void {
   logLines.push(line);
   console.log(line);
 }
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Each check runs under its own abort: when it outlives its time, the runner
+// aborts it, so its requests and waits end instead of carrying on against
+// the state the next check uses.
+let checkAbort = new AbortController();
+/** Waits `ms`, or rejects as soon as the running check is aborted. */
+function sleep(ms: number): Promise<void> {
+  const signal = checkAbort.signal;
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+/** A request or socket ends with the running check. */
+function onCheckAbort(stop: (reason: unknown) => void): void {
+  const signal = checkAbort.signal;
+  if (signal.aborted) stop(signal.reason);
+  else signal.addEventListener("abort", () => stop(signal.reason), { once: true });
+}
+// What cleanup could not undo (a session not deleted, an enrollment not
+// revoked); any of it fails the run.
+const cleanupErrors: string[] = [];
 
 // --- Opengeni's API ---------------------------------------------------------
 
@@ -65,7 +96,8 @@ class HttpError extends Error {
   }
 }
 
-async function og<T = any>(method: string, path: string, body?: unknown): Promise<T> {
+/** One API request; `cleanup` requests still run after their check was aborted. */
+async function og<T = any>(method: string, path: string, body?: unknown, { cleanup = false } = {}): Promise<T> {
   const response = await fetch(`${OPENGENI_URL}${path}`, {
     method,
     headers: {
@@ -75,11 +107,21 @@ async function og<T = any>(method: string, path: string, body?: unknown): Promis
     body: body === undefined ? undefined : JSON.stringify(body),
     // Longer than any request's own timeout (a 120 s command), so a request
     // that never answers fails its check instead of stopping the run.
-    signal: AbortSignal.timeout(600_000),
+    signal: cleanup ? AbortSignal.timeout(120_000) : AbortSignal.any([AbortSignal.timeout(600_000), checkAbort.signal]),
   });
   const text = await response.text();
   if (!response.ok) throw new HttpError(response.status, text, `${method} ${path}`);
   return (text ? JSON.parse(text) : undefined) as T;
+}
+
+/** A GET whose answer is bytes (an image), with its media type. */
+async function ogBytes(path: string): Promise<{ bytes: Uint8Array; type: string }> {
+  const response = await fetch(`${OPENGENI_URL}${path}`, {
+    headers: { "x-opengeni-api-contract": API_CONTRACT },
+    signal: AbortSignal.any([AbortSignal.timeout(120_000), checkAbort.signal]),
+  });
+  if (!response.ok) throw new HttpError(response.status, await response.text(), `GET ${path}`);
+  return { bytes: new Uint8Array(await response.arrayBuffer()), type: response.headers.get("content-type") ?? "" };
 }
 
 const state: {
@@ -107,20 +149,74 @@ async function eventsAfter(after: number): Promise<SessionEvent[]> {
   }
 }
 
+/** One tool call of a turn and, once it ended, its result. */
+type ToolCall = { id: string; name: string; args: any; output?: string; ok?: boolean };
+type Turn = { text: string; tools: string[]; calls: ToolCall[] };
+
+/** Whether a tool's result is a success, as Opengeni's own tool metrics
+ * count it (packages/observability agentToolCallOutcome). */
+function toolSucceeded(payload: any): boolean {
+  if (payload?.error === true || payload?.failed === true) return false;
+  const output = payload?.output;
+  if (output && typeof output === "object" && output.isError === true) return false;
+  const text = typeof output === "string" ? output : typeof output?.text === "string" ? output.text : null;
+  if (text === null) return true;
+  const trimmed = text.trim();
+  return !(
+    trimmed === "Tool execution was not approved." ||
+    trimmed === "aborted" ||
+    trimmed.startsWith("An error occurred while running the tool")
+  );
+}
+
+function parsedArgs(payload: any): any {
+  const args = payload?.arguments;
+  if (typeof args !== "string") return args;
+  try {
+    return JSON.parse(args);
+  } catch {
+    return args;
+  }
+}
+const invoked = (payload: any) => String(payload?.name ?? payload?.raw?.name ?? "?") === "tool_invoke";
+/** A deferred tool reached through tool_invoke is named by its target. */
+function toolName(payload: any): string {
+  const args = parsedArgs(payload);
+  return invoked(payload) && typeof args?.name === "string" ? args.name : String(payload?.name ?? payload?.raw?.name ?? "?");
+}
+function toolArgs(payload: any): any {
+  const args = parsedArgs(payload);
+  return invoked(payload) && args?.arguments ? args.arguments : args;
+}
+
+const callsText = (calls: ToolCall[]) =>
+  calls.map((call) => `${call.name}${call.ok === undefined ? "" : call.ok ? " ok" : " failed"}`).join(", ") || "none";
+
 let seen = 0;
-/** Waits for the session's next turn to end; returns the agent's reply. */
-async function nextTurn(timeoutS = TURN_TIMEOUT_S): Promise<{ text: string; tools: string[] }> {
+/** Waits for the session's next turn to end; returns the agent's reply and
+ * its tool calls with their results. */
+async function nextTurn(timeoutS = TURN_TIMEOUT_S): Promise<Turn> {
   const deadline = Date.now() + timeoutS * 1000;
   const texts: string[] = [];
-  const tools: string[] = [];
+  const calls: ToolCall[] = [];
   for (;;) {
     for (const event of await eventsAfter(seen)) {
       seen = Math.max(seen, event.sequence);
       if (event.type === "agent.message.completed") texts.push(String(event.payload?.text ?? ""));
       if (event.type === "agent.toolCall.created") {
-        tools.push(String(event.payload?.raw?.name ?? event.payload?.name ?? "?"));
+        calls.push({ id: String(event.payload?.id ?? ""), name: toolName(event.payload), args: toolArgs(event.payload) });
       }
-      if (event.type === "turn.completed") return { text: texts.join("\n"), tools };
+      if (event.type === "agent.toolCall.output") {
+        const call = calls.find((one) => one.id === String(event.payload?.id ?? ""));
+        if (call) {
+          const output = event.payload?.output;
+          call.output = typeof output === "string" ? output : JSON.stringify(output ?? null);
+          call.ok = toolSucceeded(event.payload);
+        }
+      }
+      if (event.type === "turn.completed") {
+        return { text: texts.join("\n"), tools: calls.map((call) => call.name), calls };
+      }
       if (event.type === "turn.failed") {
         throw new Error(`turn failed: ${JSON.stringify(event.payload).slice(0, 800)}`);
       }
@@ -142,7 +238,8 @@ async function exec(command: string, timeoutMs = 60_000): Promise<Exec> {
 async function execOk(command: string, timeoutMs?: number): Promise<string> {
   const result = await exec(command, timeoutMs);
   if (result.exitCode !== 0) {
-    throw new Error(`\`${command}\` exited ${result.exitCode}: ${result.stderr.slice(0, 400)}`);
+    // A traceback's last lines say what went wrong.
+    throw new Error(`\`${command}\` exited ${result.exitCode}: ${result.stderr.trim().slice(-400)}`);
   }
   return result.stdout;
 }
@@ -179,6 +276,7 @@ function fabric<T = any>(method: string, path: string, body?: unknown, key = OPE
     );
     request.on("error", reject);
     request.setTimeout(900_000, () => request.destroy(new Error(`fabric ${method} ${path} timed out`)));
+    onCheckAbort((reason) => request.destroy(reason instanceof Error ? reason : new Error(String(reason))));
     if (payload) request.write(payload);
     request.end();
   });
@@ -201,6 +299,7 @@ function connectGet(port: number, path: string): Promise<string> {
     let buffer = Buffer.alloc(0);
     let upgraded = false;
     const timer = setTimeout(() => socket.destroy(new Error("connect timed out")), 120_000);
+    onCheckAbort((reason) => socket.destroy(reason instanceof Error ? reason : new Error(String(reason))));
     socket.on("secureConnect", () => {
       socket.write(
         `GET /v1/sandboxes/${state.sandbox}/connect/${GATEWAY_PORT} HTTP/1.1\r\nHost: ${COMPUTE_SERVICE}\r\n` +
@@ -244,7 +343,6 @@ function connectGet(port: number, path: string): Promise<string> {
 
 // --- Checks ---------------------------------------------------------------
 
-type Status = "pass" | "fail" | "skip" | "n/a";
 type Check = { id: string; title: string; needs: string[]; run: () => Promise<string> };
 class NotApplicable extends Error {}
 
@@ -297,36 +395,90 @@ check("create", "a session on the compute backend runs its first turn", ["worksp
   return `first turn in ${seconds(start)}; sandbox ${box.id} on ${box.host}; reply "${turn.text.trim().slice(0, 80)}"`;
 });
 
-check("commands", "commands run in the sandbox", ["create"], async () => {
+check("commands", "commands run in the sandbox and report their output and exit status", ["create"], async () => {
   const out = await execOk("echo e2e-ok; id -un; uname -m");
   if (!out.includes("e2e-ok")) throw new Error(`stdout ${out}`);
-  return out.trim().replaceAll("\n", " | ");
+  const token = rand();
+  const failed = await exec(`echo out-${token}; echo err-${token} >&2; exit 7`);
+  if (failed.exitCode !== 7 || !failed.stdout.includes(`out-${token}`) || !failed.stderr.includes(`err-${token}`)) {
+    throw new Error(`a failing command answered ${JSON.stringify(failed).slice(0, 300)}`);
+  }
+  return `${out.trim().replaceAll("\n", " | ")}; a failing command kept its stdout, stderr and exit status 7`;
 });
 
-check("background", "a background command runs, is listed while it runs, and stops when asked", ["create"], async () => {
-  const marker = `bg-${rand()}`;
-  const turn = await say(
-    "Start this command with your exec_command tool with yield_time_ms 1000, so that it keeps running in the " +
-      `background, and do not wait for it or stop it; reply with its command ID only: \`sh -c 'echo ${marker}; sleep 900'\``,
+check("egress", "the sandbox reaches the internet", ["create"], async () => {
+  const out = await execOk(
+    "python3 -c \"import urllib.request; print(urllib.request.urlopen('https://example.com', timeout=30).status)\"",
   );
-  const active = async () => {
-    const listed = await og<any>("GET", `${ses()}/background-commands`);
-    return (listed.commands ?? []) as any[];
-  };
-  const mine = (await active()).filter((one) => JSON.stringify(one).includes(marker));
-  if (mine.length === 0) {
-    throw new Error(`not listed while running; reply "${turn.text.slice(0, 200)}"; tools ${turn.tools.join(", ")}`);
-  }
-  const command = mine[0];
-  const id = command.commandId ?? command.id;
-  await og("DELETE", `${ses()}/background-commands/${id}`);
-  const deadline = Date.now() + 60_000;
-  while ((await active()).some((one) => (one.commandId ?? one.id) === id)) {
-    if (Date.now() > deadline) throw new Error(`command ${id} still listed 60 s after it was stopped`);
-    await sleep(2_000);
-  }
-  return `command ${id} listed as ${command.state ?? command.status} and gone after the stop`;
+  if (out.trim() !== "200") throw new Error(`https://example.com answered ${out.trim()}`);
+  return "https://example.com answered 200 from inside the sandbox";
 });
+
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+check(
+  "background",
+  "the agent's background commands: output and exit status read back by command id; one listed while it runs ends when stopped",
+  ["create"],
+  async () => {
+    const done = `fin-${rand()}`;
+    const marker = `bg-${rand()}`;
+    const turn = await say(
+      "Do these two things with your shell tools, then reply with only the two command IDs.\n" +
+        `1. Start \`sh -c 'echo ${done}-start; sleep 5; echo ${done}-end; exit 3'\` with exec_command and yield_time_ms 1000, ` +
+        "then wait for that command by its command ID with your command wait or read tool until it has exited.\n" +
+        `2. Start \`sh -c 'echo ${marker}; sleep 900'\` with exec_command and yield_time_ms 1000, so that it keeps running ` +
+        "in the background; do not wait for it or stop it.",
+    );
+    // The finished command, through the agent's own reads by its id.
+    const started = turn.calls.find((call) => /exec_command$/.test(call.name) && call.output?.includes(`${done}-start`));
+    const startedId = started?.output?.match(UUID)?.[0];
+    if (!startedId) {
+      throw new Error(`no background start of the finishing command with a command id; tools ${callsText(turn.calls)}`);
+    }
+    const reads = turn.calls.filter(
+      (call) => /command_(wait|read)$/.test(call.name) && JSON.stringify(call.args ?? "").includes(startedId),
+    );
+    const finished = reads.find(
+      (call) => call.ok && call.output?.includes(`${done}-end`) && /exit[_ ]?code\\?"?\s*[:=]?\s*3\b|exited with (code )?3\b/i.test(call.output),
+    );
+    if (!finished) {
+      throw new Error(
+        `reading command ${startedId} by its id gave no output with ${done}-end and exit status 3: ` +
+          (reads.map((call) => `${call.name} ${call.ok ? "ok" : "failed"} ${call.output?.slice(0, 200)}`).join(" / ") || "no read by id"),
+      );
+    }
+    // The running one: listed, then stopped through the API, and its process gone.
+    const active = async () => ((await og<any>("GET", `${ses()}/background-commands`)).commands ?? []) as any[];
+    const mine = (await active()).filter((one) => JSON.stringify(one).includes(marker));
+    if (mine.length === 0) {
+      throw new Error(`not listed while running; reply "${turn.text.slice(0, 200)}"; tools ${callsText(turn.calls)}`);
+    }
+    const command = mine[0];
+    const id = command.commandId ?? command.id;
+    // pgrep's pattern does not match itself in the command line that runs it.
+    const pattern = `[${marker[0]}]${marker.slice(1)}`;
+    if (!(await exec(`pgrep -f '${pattern}'`)).stdout.trim()) throw new Error(`command ${id} is listed but no process runs it`);
+    await og("DELETE", `${ses()}/background-commands/${id}`);
+    const stopped = Date.now();
+    for (;;) {
+      const listed = (await active()).some((one) => (one.commandId ?? one.id) === id);
+      const running = (await exec(`pgrep -f '${pattern}'; pgrep -fx 'sleep 900'`)).stdout.trim();
+      if (!listed && !running) break;
+      if (Date.now() - stopped > 60_000) {
+        throw new Error(
+          `60 s after the stop, command ${id} is ${listed ? "still listed" : "unlisted"} and ` +
+            (running ? `its processes still run (${running.replaceAll("\n", " ")})` : "its process is gone"),
+        );
+      }
+      await sleep(2_000);
+    }
+    return (
+      `command ${startedId} read back by id with its output and exit status 3; ` +
+      `command ${id} listed as ${command.state ?? command.status}, then unlisted and its process gone ${seconds(stopped)} after the stop`
+    );
+  },
+);
 
 check("files", "files write, read and list (the file browser's API)", ["create"], async () => {
   state.marker = `e2e-${rand()}`;
@@ -352,7 +504,7 @@ check("git", "git status and log of a repository in the sandbox", ["create"], as
   return `head ${status.head}, untracked b.txt, one commit`;
 });
 
-check("terminal", "an interactive terminal echoes what is typed", ["create"], async () => {
+check("terminal", "a command typed into the interactive terminal runs in the sandbox", ["create"], async () => {
   // The web app's way in: attach a terminal viewer, which mints the terminal
   // plane, then speak that plane. On a compute sandbox the agent serves it as a
   // relay PTY (packages/react/src/hooks/use-terminal-stream.ts); the relay
@@ -462,7 +614,13 @@ check("terminal", "an interactive terminal echoes what is typed", ["create"], as
     });
     socket.onclose = null;
     socket.close();
-    return outcome;
+    // What proves the command ran, not just that its input was echoed: the
+    // file it wrote, holding the shell's own arithmetic.
+    const file = await og<any>("POST", `${ses()}/fs/read`, { path: `e2e/${marker}.txt`, encoding: "utf8" });
+    if (String(file?.content ?? "").trim() !== `${marker}-2`) {
+      throw new Error(`the typed command's file holds ${JSON.stringify(String(file?.content ?? "").slice(0, 80))}`);
+    }
+    return `${outcome}; its file e2e/${marker}.txt holds ${marker}-2`;
   } catch (error) {
     // Whether the typed command ran tells input from output apart.
     const ran = await og<any>("POST", `${ses()}/fs/read`, { path: `e2e/${marker}.txt`, encoding: "utf8" })
@@ -470,11 +628,13 @@ check("terminal", "an interactive terminal echoes what is typed", ["create"], as
       .catch(() => false);
     throw new Error(`${error instanceof Error ? error.message : String(error)}; the typed command ${ran ? "ran (its file exists)" : "did not run"}`);
   } finally {
-    await og("DELETE", `${ses()}/viewers/${viewer.viewerId}`).catch(() => undefined);
+    await og("DELETE", `${ses()}/viewers/${viewer.viewerId}`, undefined, { cleanup: true }).catch((error) =>
+      cleanupErrors.push(`terminal: closing its viewer: ${error}`),
+    );
   }
 });
 
-check("port", "a port in the sandbox is reachable through the fabric's front door", ["files"], async () => {
+check("port", "a guest TCP port answers through the fabric's connect stream (not an Opengeni preview URL)", ["files"], async () => {
   await execOk(
     "cd e2e && (setsid nohup python3 -m http.server 8765 --bind 127.0.0.1 >/tmp/e2e-http.log 2>&1 &) && sleep 2",
   );
@@ -488,33 +648,59 @@ check("port", "a port in the sandbox is reachable through the fabric's front doo
   return "GET /hello.txt to guest port 8765 through the gateway (connect/57) returned the file";
 });
 
-check("browser", "the agent browses with the in-sandbox browser", ["create"], async () => {
+check("browser", "the agent's browser opens a page in the sandbox and reads what only that page says", ["create"], async () => {
+  // A page nobody could guess, served inside the sandbox: the title is
+  // known only to the page, so a reply with it needs the browser to have
+  // loaded it, and the browser tool's own result must show it.
+  const page = `page-${rand()}`;
+  const title = `e2e title ${rand()}`;
+  await og("POST", `${ses()}/fs/write`, {
+    path: `e2e/${page}.html`,
+    content: `<!doctype html><html><head><title>${title}</title></head><body><p>${page}</p></body></html>`,
+    encoding: "utf8",
+  });
+  await execOk("cd e2e && (setsid nohup python3 -m http.server 8767 --bind 127.0.0.1 >/tmp/e2e-browser-http.log 2>&1 &) && sleep 2");
   const turn = await say(
-    "Use your browser to open https://example.com and reply with the exact title of the page.",
+    `Use your browser to open http://127.0.0.1:8767/${page}.html and reply with the exact title of the page. Do not use the shell or read files for this.`,
   );
-  if (!turn.text.includes("Example Domain")) {
-    throw new Error(`reply "${turn.text.slice(0, 300)}"; tools ${turn.tools.join(", ")}`);
-  }
-  return `tools ${turn.tools.join(", ")}`;
+  const browsing = turn.calls.filter((call) => /browser/.test(call.name));
+  const receipt = browsing.find((call) => call.ok && call.output?.includes(title));
+  if (!receipt) throw new Error(`no browser tool result shows the page's title; tools ${callsText(turn.calls)}`);
+  if (!turn.text.includes(title)) throw new Error(`reply "${turn.text.slice(0, 300)}"`);
+  return `${receipt.name} loaded the page and the reply names its title; tools ${callsText(turn.calls)}`;
 });
 
-check("desktop", "the agent opens the desktop and sees it", ["create"], async () => {
+check("desktop", "the agent opens the sandbox's desktop, and its screen is a real frame", ["create"], async () => {
   const turn = await say(
     "Open a computer (desktop) session for this sandbox, take a screenshot and describe in one sentence what is on the screen.",
   );
   const listed = await og<any>("GET", `${ws()}/computer-sessions`);
   const sessions = Array.isArray(listed) ? listed : (listed.computerSessions ?? listed.items ?? listed.sessions ?? []);
   const mine = sessions.filter((one: any) => JSON.stringify(one).includes(state.session!.id));
-  if (mine.length === 0) throw new Error(`no computer session; reply "${turn.text.slice(0, 200)}"; tools ${turn.tools.join(", ")}`);
-  const working = mine.filter((one: any) => !["failed", "closed", "ended"].includes(String(one.lifecycle)));
-  if (working.length === 0) {
-    const how = mine.map((one: any) => `${one.lifecycle} ${one.failure ?? one.failureReason ?? ""}`.trim()).join(", ");
-    throw new Error(`computer session ${how}; reply "${turn.text.slice(0, 200)}"; tools ${turn.tools.join(", ")}`);
+  if (mine.length === 0) throw new Error(`no computer session; reply "${turn.text.slice(0, 200)}"; tools ${callsText(turn.calls)}`);
+  const active = mine.find((one: any) => one.lifecycle === "active");
+  if (!active) {
+    const how = mine.map((one: any) => `${one.lifecycle}${one.failureCode ? ` (${one.failureCode})` : ""}`).join(", ");
+    throw new Error(`computer session ${how}; reply "${turn.text.slice(0, 200)}"; tools ${callsText(turn.calls)}`);
   }
-  if (!turn.tools.some((name) => /computer_(observe|screenshot|act)/.test(name))) {
-    throw new Error(`no screenshot taken; reply "${turn.text.slice(0, 200)}"; tools ${turn.tools.join(", ")}`);
+  const shot = turn.calls.find((call) => /computer_(observe|screenshot)/.test(call.name) && call.ok);
+  if (!shot) throw new Error(`no successful screenshot; tools ${callsText(turn.calls)}`);
+  // The screen through the API, decoded: a desktop that never drew fails.
+  const targets = (await og<any>("GET", `${ws()}/computer-sessions/${active.id}/targets`)).targets ?? [];
+  const target = targets.find((one: any) => one.kind === "screen") ?? targets[0];
+  if (!target) throw new Error(`computer session ${active.id} has no targets`);
+  const frame = await ogBytes(`${ws()}/computer-sessions/${active.id}/targets/${encodeURIComponent(target.id)}/screenshot`);
+  writeFileSync(`${OUT}/desktop-frame.${frame.type.split("/")[1]?.split(";")[0] ?? "bin"}`, frame.bytes);
+  const { chromium } = await import(env("PLAYWRIGHT_MODULE"));
+  const browser = await chromium.launch();
+  try {
+    const stats = await frameStats(await browser.newPage(), frame.bytes, frame.type);
+    const wrong = notAFrame(stats);
+    if (wrong) throw new Error(`the ${target.kind} frame is ${wrong}`);
+    return `computer session active, ${shot.name} ok; the ${target.kind} frame decodes to ${describeFrame(stats)}`;
+  } finally {
+    await browser.close();
   }
-  return `computer session ${working[0].lifecycle}; reply "${turn.text.trim().slice(0, 120)}"`;
 });
 
 check("ui", "the web UI: file browser, terminal and desktop (Playwright)", ["files"], async () => {
@@ -546,32 +732,99 @@ async function step<T>(name: string, run: () => Promise<T>): Promise<T> {
   }
 }
 
+// What the running check claims that only the hosts' journals can prove
+// (verify.ts checks it once env.sh has copied them).
+let proofs: LevelProof[] = [];
+
 // How long each level takes to reach after the request, so the next command
 // finds the sandbox asleep at that level rather than racing the sleep (a save
 // writes the memory locally, an archive also uploads it). The fabric's API
-// does not report a sandbox's level; the hosts' journals show it.
+// does not report a sandbox's level, and a host acknowledges a sleep before
+// it is done: the hosts' journals show whether the level was reached
+// (verify.ts).
 const SETTLE_MS: Record<string, number> = { paused: 2_000, saved: 15_000, archived: 45_000, remote: 60_000 };
 
+// A process that lives through the sleep: it holds 32 MiB derived from its
+// token and answers with its token, pid and whether that memory is intact.
+// (A restored guest's clock does not count the time it slept, so the guest
+// cannot measure the sleep itself; the hosts' journals do.)
+const WITNESS = `import hashlib, http.server, os, sys
+token, port = sys.argv[1], int(sys.argv[2])
+block = bytearray(hashlib.sha256(token.encode()).digest() * (1 << 20))
+digest = hashlib.sha256(block).hexdigest()
+class Answer(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        intact = "intact" if hashlib.sha256(block).hexdigest() == digest else "changed"
+        body = f"{token} {os.getpid()} {intact}\\n".encode()
+        self.send_response(200)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(("127.0.0.1", port), Answer).serve_forever()
+`;
+const WITNESS_PORTS: Record<string, number> = { paused: 8771, saved: 8772, archived: 8773, remote: 8774 };
+type Witness = { token: string; pid: string; memory: string };
+async function askWitness(port: number, timeoutMs?: number): Promise<Witness> {
+  const out = await execOk(
+    `python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:${port}/', timeout=60).read().decode().strip())"`,
+    timeoutMs,
+  );
+  const [token = "", pid = "", memory = ""] = out.trim().split(" ");
+  return { token, pid, memory };
+}
+
 for (const level of ["paused", "saved", "archived", "remote"]) {
-  check(`sleep-${level}`, `sleep at ${level} and wake on the next request`, ["files"], async () => {
-    const marker = `${level}-${rand()}`;
-    await step("write before sleeping", () =>
-      og("POST", `${ses()}/fs/write`, { path: `e2e/${level}.txt`, content: marker, encoding: "utf8" }),
-    );
-    const before = await sandbox();
-    let start = Date.now();
-    await step("sleep", () => fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level }));
-    const slept = seconds(start);
-    await sleep(SETTLE_MS[level]!);
-    start = Date.now();
-    const out = await step("first command after sleeping", () =>
-      execOk(`cat e2e/${level}.txt e2e/hello.txt`, 120_000),
-    );
-    const woke = seconds(start);
-    if (!out.includes(marker) || !out.includes(state.marker!)) throw new Error(`after wake: ${out}`);
-    const after = await sandbox();
-    return `asked to sleep in ${slept}, left ${SETTLE_MS[level]! / 1000} s, then woke and answered in ${woke}; host ${before.host} -> ${after.host}`;
-  });
+  check(
+    `sleep-${level}`,
+    `sleep at ${level} (the host's journal shows it), then the next request wakes it with its files, processes and memory`,
+    ["files"],
+    async () => {
+      const marker = `${level}-${rand()}`;
+      const port = WITNESS_PORTS[level]!;
+      await step("write before sleeping", async () => {
+        await og("POST", `${ses()}/fs/write`, { path: `e2e/${level}.txt`, content: marker, encoding: "utf8" });
+        await og("POST", `${ses()}/fs/write`, { path: "e2e/witness.py", content: WITNESS, encoding: "utf8" });
+      });
+      const token = `w-${rand()}`;
+      const witness = await step("start a process that holds memory", async () => {
+        // The pause lets it leave the command's process group before the command ends.
+        await execOk(`(setsid nohup python3 e2e/witness.py ${token} ${port} >/tmp/witness-${port}.log 2>&1 &) && sleep 2`);
+        for (let tries = 0; ; tries += 1) {
+          try {
+            return await askWitness(port);
+          } catch (error) {
+            if (tries >= 20) throw error;
+            await sleep(500);
+          }
+        }
+      });
+      if (witness.token !== token || witness.memory !== "intact") throw new Error(`witness answered ${JSON.stringify(witness)}`);
+      const before = await sandbox();
+      const from = new Date().toISOString();
+      let start = Date.now();
+      await step("sleep", () => fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level }));
+      const slept = seconds(start);
+      await sleep(SETTLE_MS[level]!);
+      const to = new Date().toISOString();
+      start = Date.now();
+      const out = await step("first command after sleeping", () => execOk(`cat e2e/${level}.txt e2e/hello.txt`, 120_000));
+      const woke = seconds(start);
+      if (!out.includes(marker) || !out.includes(state.marker!)) throw new Error(`after wake: ${out}`);
+      const after = await step("the process after waking", () => askWitness(port, 120_000));
+      if (after.token !== token || after.pid !== witness.pid) {
+        throw new Error(`the process did not live through the sleep: before ${JSON.stringify(witness)}, after ${JSON.stringify(after)}`);
+      }
+      if (after.memory !== "intact") throw new Error(`the process's memory changed across the sleep`);
+      proofs.push({ kind: "level", sandbox: state.sandbox!, level, from, to });
+      const moved = await sandbox();
+      return (
+        `asked to sleep in ${slept}, left ${SETTLE_MS[level]! / 1000} s, then woke and answered in ${woke}; ` +
+        `process ${after.pid} and its 32 MiB intact; host ${before.host} -> ${moved.host}`
+      );
+    },
+  );
 }
 
 check("move", "a move to another host keeps the sandbox's files", ["files", "hosts"], async () => {
@@ -609,14 +862,16 @@ check("host-loss", "a lost host's sandbox comes back elsewhere from its last arc
   await og("POST", `${ses()}/fs/write`, { path: "e2e/late.txt", content: late, encoding: "utf8" });
   const before = await sandbox();
   const lost = before.host!;
+  const lostEpoch = (await hosts()).find((host) => host.name === lost)?.epoch;
   // Stopped, the machine is plainly gone: its lease lapses, the service
   // fences it (finds it stopped) and the sandbox wakes elsewhere.
   log(`stopping ${lost}`);
   const start = Date.now();
   const stop = spawnSync("gcloud", ["compute", "instances", "stop", lost, "--zone", ZONE, "--project", PROJECT, "--quiet"], {
     encoding: "utf8",
+    timeout: 300_000,
   });
-  if (stop.status !== 0) throw new Error(`stop: ${stop.stderr}`);
+  if (stop.status !== 0) throw new Error(`stop: ${stop.error ?? ""} ${stop.stderr}`);
   let out = "";
   for (;;) {
     if (Date.now() - start > 20 * 60_000) throw new Error("no recovery within 20 minutes");
@@ -630,9 +885,23 @@ check("host-loss", "a lost host's sandbox comes back elsewhere from its last arc
     await sleep(10_000);
   }
   const after = await sandbox();
-  const lostState = (await hosts()).find((host) => host.name === lost)?.state ?? "gone";
-  return `${lost} stopped; back on ${after.host} (epoch ${before.owner_epoch} -> ${after.owner_epoch}) in ${seconds(start)}; ` +
-    `the save kept, the late write ${out.includes(late) ? "kept too" : "lost (after the last save)"}; ${lost} is now ${lostState}`;
+  const fleet = await hosts();
+  const owner = fleet.find((host) => host.name === after.host);
+  const old = fleet.find((host) => host.name === lost);
+  // A different live owner, under a later owner epoch, and the lost host
+  // fenced: given up on, or back only under a new host epoch.
+  if (!after.host || after.host === lost || owner?.state !== "live") {
+    throw new Error(`answered, but owned by ${after.host ?? "no host"} (${owner?.state ?? "unknown"}), not a different live host`);
+  }
+  if (!(after.owner_epoch > before.owner_epoch)) {
+    throw new Error(`owner epoch did not advance (${before.owner_epoch} -> ${after.owner_epoch})`);
+  }
+  if (old && old.state === "live" && old.epoch === lostEpoch) {
+    throw new Error(`${lost} is still live under its old epoch ${lostEpoch}, so it was never fenced`);
+  }
+  const fenced = old ? `${old.state} (host epoch ${lostEpoch} -> ${old.epoch})` : "gone from the fleet";
+  return `${lost} stopped; back on ${after.host} (owner epoch ${before.owner_epoch} -> ${after.owner_epoch}) in ${seconds(start)}; ` +
+    `the archived copy's file kept, the late write ${out.includes(late) ? "kept too" : "lost (after the last save)"}; ${lost} is ${fenced}`;
 });
 
 /** Deletes the session, retrying while the API answers 409 because its
@@ -675,7 +944,7 @@ const ONLINE_MACHINE = new Set(["online", "display_unavailable"]);
 
 check(
   "connected-machine",
-  "the same agent build, enrolled as a Connected Machine, runs a session's turn and commands and never sleeps",
+  "the same agent build, enrolled as a Connected Machine, runs a session's turn and commands, and stays online and its agent unrestarted through 90 s idle",
   ["workspace"],
   async () => {
     if (!AGENT_BIN) throw new Error("AGENT_BIN is not set");
@@ -738,28 +1007,40 @@ check(
       const name = hostname();
       const out = await step("a command", () => execOk("hostname"));
       if (out.trim() !== name) throw new Error(`hostname ${out.trim()}, not this VM's ${name}`);
-      // A compute sandbox would sleep after this long idle; a machine does not.
-      await sleep(90_000);
+      // A compute sandbox would sleep after this long idle; a machine stays
+      // online (asked every 5 s) and the same agent process serves it.
+      const idleFrom = Date.now();
+      const states = new Set<string>();
+      while (Date.now() - idleFrom < 90_000) {
+        await sleep(5_000);
+        const now = ((await og<any>("GET", `${ws()}/machines`)).machines ?? []).find(
+          (one: any) => one.enrollmentId === enrollment,
+        );
+        states.add(String(now?.state ?? "unlisted"));
+        if (!ONLINE_MACHINE.has(now?.state)) throw new Error(`state ${now?.state ?? "unlisted"} ${seconds(idleFrom)} into the idle wait`);
+        if (agent!.exitCode !== null) throw new Error(`the agent exited (${agent!.exitCode}) during the idle wait`);
+      }
       const idleStart = Date.now();
       await step("a command after 90 s idle", () => execOk("true"));
       const idle = Date.now() - idleStart;
-      const after = ((await og<any>("GET", `${ws()}/machines`)).machines ?? []).find(
-        (one: any) => one.enrollmentId === enrollment,
-      );
-      if (!ONLINE_MACHINE.has(after?.state)) throw new Error(`state ${after?.state} after the idle wait`);
       if (idle > 10_000) throw new Error(`the command after the idle wait took ${(idle / 1000).toFixed(1)} s`);
-      await deleteSession(5 * 60_000).catch((error) => log(`connected-machine: deleting its session: ${error}`));
-      return `online ${online} after connecting; exec and a turn ran on ${name}; still online after 90 s idle (exec ${(idle / 1000).toFixed(1)} s)`;
+      await deleteSession(5 * 60_000).catch((error) => cleanupErrors.push(`connected-machine: deleting its session: ${error}`));
+      return (
+        `online ${online} after connecting; exec and a turn ran on ${name}; ${[...states].join("/")} at every 5 s look ` +
+        `through 90 s idle with the same agent process (pid ${agent!.pid}), then exec in ${(idle / 1000).toFixed(1)} s`
+      );
     } finally {
       if (state.session && state.session.id !== saved.session?.id) {
-        await og("DELETE", ses()).catch(() => undefined);
+        await og("DELETE", ses(), undefined, { cleanup: true }).catch((error) =>
+          cleanupErrors.push(`connected-machine: deleting its session: ${error}`),
+        );
       }
       state.session = saved.session;
       seen = saved.seen;
       agent?.kill("SIGTERM");
       if (enrollment) {
-        await og("POST", `${ws()}/enrollments/${enrollment}/revoke`, {}).catch((error) =>
-          log(`connected-machine: revoking ${enrollment}: ${error}`),
+        await og("POST", `${ws()}/enrollments/${enrollment}/revoke`, {}, { cleanup: true }).catch((error) =>
+          cleanupErrors.push(`connected-machine: revoking enrollment ${enrollment}: ${error}`),
         );
       }
     }
@@ -780,7 +1061,12 @@ function wanted(): Set<string> {
   return set;
 }
 
-type Result = { id: string; title: string; status: Status; detail: string; seconds: number };
+const unknown = ONLY.filter((id) => !checks.some((c) => c.id === id));
+if (unknown.length > 0) {
+  console.error(`ONLY names unknown checks: ${unknown.join(", ")}; the checks are ${checks.map((c) => c.id).join(", ")}`);
+  process.exit(2);
+}
+
 const results: Result[] = [];
 const selected = wanted();
 for (const one of checks.filter((c) => selected.has(c.id))) {
@@ -793,35 +1079,62 @@ for (const one of checks.filter((c) => selected.has(c.id))) {
   const start = Date.now();
   let status: Status = "pass";
   let detail: string;
+  checkAbort = new AbortController();
+  proofs = [];
+  const running = one.run();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     detail = await Promise.race([
-      one.run(),
-      sleep(CHECK_TIMEOUT_MS).then(() => {
-        throw new Error(`no result within ${CHECK_TIMEOUT_MS / 60_000} min`);
+      running,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const late = new Error(`no result within ${CHECK_TIMEOUT_MS / 60_000} min`);
+          checkAbort.abort(late);
+          reject(late);
+        }, CHECK_TIMEOUT_MS);
       }),
     ]);
   } catch (error) {
     status = error instanceof NotApplicable ? "n/a" : "fail";
     detail = error instanceof Error ? error.message : String(error);
+  } finally {
+    clearTimeout(timer);
   }
-  const result = { id: one.id, title: one.title, status, detail, seconds: (Date.now() - start) / 1000 };
+  if (checkAbort.signal.aborted) {
+    // An aborted check's requests and waits end at once; let it unwind
+    // (its own cleanup included) before the next check starts.
+    await Promise.race([running.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 60_000))]);
+  }
+  const result: Result = { id: one.id, title: one.title, status, detail, seconds: (Date.now() - start) / 1000 };
+  if (status === "pass" && proofs.length > 0) result.proofs = proofs;
   results.push(result);
   log(`${status} ${one.id}: ${detail}`);
   writeFileSync(`${OUT}/results.json`, JSON.stringify({ results }, null, 2));
 }
+checkAbort = new AbortController();
 
 // A run that stopped before the delete check still deletes its session, so
-// reruns do not leave sandboxes on the fleet.
-if (state.workspace && state.session) {
-  await deleteSession(5 * 60_000).catch((error) => log(`cleanup: deleting the session failed: ${error}`));
+// reruns do not leave sandboxes on the fleet; KEEP=1 keeps it (and its
+// sandbox) to look at, and env.sh host-logs then copies the guest's console.
+const KEEP = process.env.KEEP === "1";
+if (KEEP && state.session) {
+  log(`keeping session ${state.session.id} and sandbox ${state.sandbox ?? "none"} (KEEP=1); delete it when done`);
+} else if (state.workspace && state.session) {
+  await deleteSession(5 * 60_000).catch((error) => cleanupErrors.push(`deleting the suite's session: ${error}`));
 }
+results.push({
+  id: "cleanup",
+  title: "what the run made is removed (sessions deleted, enrollments revoked)",
+  status: cleanupErrors.length > 0 ? "fail" : KEEP && state.session ? "n/a" : "pass",
+  detail:
+    cleanupErrors.length > 0
+      ? cleanupErrors.join("; ")
+      : KEEP && state.session
+        ? `session ${state.session.id} kept (KEEP=1)`
+        : "nothing left behind",
+  seconds: 0,
+});
 
-const counts = (status: Status) => results.filter((r) => r.status === status).length;
-const table = [
-  `| check | result | seconds | detail |`,
-  `| --- | --- | ---: | --- |`,
-  ...results.map((r) => `| ${r.id} | ${r.status} | ${r.seconds.toFixed(1)} | ${r.detail.replaceAll("|", "\\|").replaceAll("\n", " ")} |`),
-];
 const meta = {
   opengeni: process.env.OPENGENI_SHA ?? "",
   compute: process.env.COMPUTE_SHA ?? "",
@@ -830,16 +1143,6 @@ const meta = {
   finished: new Date().toISOString(),
 };
 writeFileSync(`${OUT}/results.json`, JSON.stringify({ ...meta, results }, null, 2));
-writeFileSync(
-  `${OUT}/results.md`,
-  [
-    `Opengeni ${meta.opengeni}, compute ${meta.compute.slice(0, 12)}, model ${MODEL}, ${meta.finished}`,
-    "",
-    `${counts("pass")} passed, ${counts("fail")} failed, ${counts("skip")} skipped, ${counts("n/a")} not applicable.`,
-    "",
-    ...table,
-    "",
-  ].join("\n"),
-);
+writeFileSync(`${OUT}/results.md`, render(meta, results, false));
 writeFileSync(`${OUT}/suite.log`, `${logLines.join("\n")}\n`);
-process.exit(counts("fail") + counts("skip") > 0 ? 1 : 0);
+process.exit(counts(results, "fail") + counts(results, "skip") > 0 ? 1 : 0);
