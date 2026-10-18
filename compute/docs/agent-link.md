@@ -215,8 +215,9 @@ Until `opened`, the host keeps what the guest sends for the session.
   finds a later epoch or another instance ends the session with `closed`.
 - **Sleep.** The host keeps a session open while its sandbox sleeps. A
   `msg` for a sandbox that is not running wakes it and waits, in order, until
-  the agent has subscribed again to the subject; a wake that fails drops the
-  waiting messages. A guest that reconnects with the same instance takes up
+  the agent has subscribed again to the subject, for up to 120 s; if the
+  sandbox does not come back by then they are dropped, and Opengeni's
+  request times out. A guest that reconnects with the same instance takes up
   the same session and subscriptions; with another instance, the host closes
   the old session and opens a new one.
 - **Records.** The host keeps each sandbox's instance and subscriptions in
@@ -225,6 +226,32 @@ Until `opened`, the host keeps what the guest sends for the session.
 - **Ending.** The host closes a session when it hands off or removes the
   sandbox. Revoking the enrollment, when the sandbox is deleted, makes the
   gateway end it with `revoked`.
+
+What the host does, exactly (`compute-link`, its `core` module):
+
+- **Connected means reachable.** A guest connection gets `INFO` only once
+  its gateway's link is up, and the `PONG` for the agent's first `PING`
+  only once its session is open, so a client that counts itself connected
+  is reachable end to end. What the agent sends before that waits, in
+  order, up to 4 MiB; beyond it the connection ends with `Slow Consumer`.
+- **A link that goes ends its guests' connections,** as a NATS server that
+  goes would, so each agent reconnects to a session that opens again on the
+  next link. The host dials again with full-jitter back-off from 100 ms to
+  10 s, back to the shortest after a link that stayed up 30 s.
+- **Messages wait for 120 s.** A message for a subscription no connection
+  holds waits that long for the agent to subscribe again, and wakes the
+  sandbox at most every 250 ms. Messages that arrive count as activity;
+  what the agent sends does not.
+- **Subscriptions not taken up within 10 s end.** After the agent
+  reconnects, the host unsubscribes those it did not subscribe to again.
+- **Refusals.** `duplicate` and `unavailable` are retried with jittered
+  back-off from 1 s doubling to 30 s; any other refusal, and `closed` with
+  `revoked` or `superseded`, shuts the agent out until the fleet gives the
+  sandbox a new ticket. `closed` with `lost` opens the session again.
+- **The host token is checked when a link opens.** A token that expires
+  later does not end the link; the host fetches a fresh one when less than
+  a third of its life is left and presents it on its next dial.
+- **A host that hangs up** sends every frame it queued before its `close`.
 
 ## 6. When no one answers
 

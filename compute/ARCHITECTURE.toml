@@ -65,6 +65,11 @@ allow = [
   "crates/compute-guest/**",
   "crates/compute-host/**",
   "crates/compute-image/**",
+  # The agent link's input and output; its core and NATS codec stay pure.
+  "crates/compute-link/src/guest.rs",
+  "crates/compute-link/src/hub.rs",
+  "crates/compute-link/src/link.rs",
+  "crates/compute-link/src/saved.rs",
   "crates/compute-pager/**",
   "crates/compute-storage/**",
 ]
