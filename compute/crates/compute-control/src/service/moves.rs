@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use compute_fleet::{HostId, HostState, Next, Op, Outcome};
-use compute_protocol::host::{ErrorCode, Id, LevelName, Request};
+use compute_protocol::host::{ErrorCode, Id, LevelName, Reply, Request, SandboxStatus};
 use futures::StreamExt as _;
 
 use super::{Asked, Failure, Service, host_failure};
@@ -16,6 +16,8 @@ use crate::store::{SandboxRow, Store};
 const HAND_OFF_WAIT: Duration = Duration::from_secs(300);
 /// How long a host may take to answer a sleep, which it answers at once.
 const SLEEP_WAIT: Duration = Duration::from_secs(10);
+/// How long a host may take to say how its sandboxes are.
+const STATUS_WAIT: Duration = Duration::from_secs(10);
 /// How many hand-offs a drain runs at once.
 const DRAIN_AT_ONCE: usize = 16;
 
@@ -30,6 +32,41 @@ pub struct Drained {
 }
 
 impl<S: Store> Service<S> {
+    /// How a team's sandbox is now, as its owner says: its host's name and
+    /// what the host reports of it. A sandbox nobody owns has no host, and
+    /// its state is in the store alone.
+    pub async fn state(
+        &self,
+        team: &str,
+        id: Id,
+    ) -> Result<Option<(String, SandboxStatus)>, Failure> {
+        let row = self.get(team, id).await?;
+        let Some(host) = row.ownership.owner else {
+            return Ok(None);
+        };
+        let target = self
+            .view
+            .target(host)
+            .ok_or_else(|| Failure::Unavailable("its host is not reachable".into()))?;
+        let answered = self
+            .hosts
+            .call(&target, None, &Request::Status, STATUS_WAIT)
+            .await
+            .map_err(|error| Failure::Unavailable(error.to_string()))?;
+        let Reply::Status(status) = answered.answer.reply else {
+            return Err(host_failure(&answered));
+        };
+        let epoch = row.ownership.epoch.0;
+        status
+            .sandboxes
+            .into_iter()
+            .find(|sandbox| sandbox.id == id && sandbox.owner_epoch == epoch)
+            .map(|sandbox| Some((target.name, sandbox)))
+            // Its owner took it up under another epoch, or not yet: as
+            // during a move.
+            .ok_or_else(|| Failure::Unavailable("its host does not hold it now".into()))
+    }
+
     /// Puts a team's sandbox at least as deep as `level` now. A sandbox
     /// nobody owns runs nowhere already.
     pub async fn sleep(&self, team: &str, id: Id, level: LevelName) -> Result<(), Failure> {

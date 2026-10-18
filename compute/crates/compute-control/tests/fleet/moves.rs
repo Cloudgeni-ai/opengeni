@@ -97,6 +97,49 @@ async fn a_move_without_a_target_leaves_it_for_its_next_wake_to_place() {
     assert!(epoch > 1, "adopted under a raised epoch: {row}");
 }
 
+/// A sandbox's state is what its owner says of it now, and with no owner
+/// it is in the store alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandboxs_state_is_what_its_owner_says_of_it() {
+    let fleet = Fleet::start().await;
+    let a = fleet.host("host-a.example").await;
+    let sandbox = fleet.create(json!({})).await;
+    let path = format!("/v1/sandboxes/{sandbox}/state");
+    let (status, state) = fleet.get(&path).await;
+    assert_eq!(status, 200, "{state}");
+    assert_eq!(
+        state,
+        json!({
+            "host": "host-a.example",
+            "level": "running",
+            "step": null,
+            "generation": 1,
+        })
+    );
+    assert!(matches!(
+        a.seen().last().unwrap().envelope.request,
+        Request::Status
+    ));
+
+    // Its host says nothing of it under its owner epoch, as before it
+    // takes it up: that is for later.
+    let wrong = a.holds(id(&sandbox)).unwrap() + 1;
+    a.hold(id(&sandbox), wrong);
+    let (status, refused) = fleet.get(&path).await;
+    assert_eq!(status, 503, "{refused}");
+
+    let (status, moved) = fleet
+        .post(&format!("/v1/sandboxes/{sandbox}/move"), json!({}))
+        .await;
+    assert_eq!(status, 200, "{moved}");
+    let (status, state) = fleet.get(&path).await;
+    assert_eq!(status, 200, "{state}");
+    assert_eq!(
+        state,
+        json!({ "host": null, "level": "remote", "step": null, "generation": null })
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_draining_host_hands_its_sandboxes_off_and_gets_nothing_new_until_undrained() {
     let fleet = Fleet::start().await;

@@ -587,6 +587,11 @@ impl FakeHost {
         self.inner.held.lock().unwrap().get(&id).copied()
     }
 
+    /// Holds sandbox `id` under `owner_epoch` from now on.
+    pub fn hold(&self, id: Id, owner_epoch: u64) {
+        self.inner.held.lock().unwrap().insert(id, owner_epoch);
+    }
+
     /// Archives `id` as its owner under `owner_epoch` would.
     pub async fn archive(&self, id: Id, owner_epoch: u64) {
         self.try_archive(id, owner_epoch).await.unwrap();
@@ -822,6 +827,38 @@ fn error(code: ErrorCode, message: &str) -> Reply {
     }
 }
 
+/// An ordinary host's status: each sandbox it holds runs its first boot.
+fn status(inner: &HostInner) -> Reply {
+    let sandboxes: Vec<Value> = inner
+        .held
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, owner_epoch)| {
+            serde_json::json!({
+                "id": id.to_string(),
+                "generation": 1,
+                "owner_epoch": owner_epoch,
+                "revision": 1,
+                "level": "running",
+                "durability": "volatile",
+                "memory_saved": true,
+                "step": null,
+                "holds": 0,
+                "broken": false,
+            })
+        })
+        .collect();
+    let status = serde_json::json!({
+        "sandboxes": sandboxes,
+        "steps": [],
+        "available_memory": null,
+    });
+    Reply::Status(Box::new(
+        serde_json::from_value(status).expect("a host's status"),
+    ))
+}
+
 /// What an ordinary host answers.
 async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
     let owner_epoch = envelope.sent.owner_epoch.unwrap_or(0);
@@ -842,6 +879,7 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
             generation: 1,
         },
         Request::Sleep { id, .. } if holds(id) => Reply::Done,
+        Request::Status => status(inner),
         Request::Wake { .. } | Request::Connect { .. } | Request::Sleep { .. } => {
             error(ErrorCode::NotFound, "no such sandbox")
         }

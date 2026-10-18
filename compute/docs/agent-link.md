@@ -74,6 +74,14 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
   places and adopts it; it answers `{"waited_us", "generation", "host"}`
   once it runs. `DELETE /v1/sandboxes/{id}` ends it; `404` means it is
   already gone.
+- `POST /v1/sandboxes/{id}/sleep` with `{"level": "paused" | "compressed" |
+  "saved" | "archived" | "remote"}` asks its host to put it at least that
+  deep; the host answers at once and sleeps it in the background.
+  `GET /v1/sandboxes/{id}/state` asks the host how it is now:
+  `{"host", "level", "step", "generation"}`, where `step` names a step
+  under way (`level` stays where it was until it finishes). A sandbox
+  with no owner answers `{"host": null, "level": "remote"}`; one its host
+  does not hold now, as during a move, answers `503 unavailable`.
 - `GET /v1/requests/{request_id}` answers the view of the sandbox that
   request made, `404 not_found` if no create named it, or `410 request_gone`
   once that sandbox was deleted, so a caller that crashed between a create
