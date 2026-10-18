@@ -3,7 +3,11 @@ import AxeBuilder from "@axe-core/playwright";
 import { createHash } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { chromium, type Browser, type Page, type Request } from "playwright";
-import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
+import {
+  DocumentRequestLedger,
+  isBrowserCancellation,
+  observeChromiumNeutralSessionSetRequestAuthority,
+} from "./browser-account-request-observation";
 import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
 
 const engine = process.env.OPENGENI_ACCOUNT_BROWSER_ENGINE ?? "chromium";
@@ -11,6 +15,148 @@ if (engine !== "chromium") {
   throw new Error("Chromium request-authority regression must run in the Chromium accounts lane");
 }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+
+test("the document ledger attributes requests to the document that issued them", () => {
+  const ledger = new DocumentRequestLedger();
+  const first = {};
+  const firstRead = {};
+  ledger.request(first, "http://127.0.0.1/a");
+  ledger.response(first);
+  expect(ledger.mainFrameNavigated("http://127.0.0.1/a#top")).toBe(true);
+  ledger.request(firstRead, null);
+  // A history-API navigation keeps the document.
+  expect(ledger.mainFrameNavigated("http://127.0.0.1/b")).toBe(false);
+  expect(ledger.replaced(firstRead)).toBe(false);
+  expect(ledger.replacing(firstRead)).toBe(false);
+
+  // A reload in flight is replacing the document; its own request is not.
+  const reload = {};
+  ledger.request(reload, "http://127.0.0.1/b");
+  expect(ledger.replacing(firstRead)).toBe(true);
+  expect(ledger.replacing(reload)).toBe(false);
+  // No commit before the document response, nor for another URL.
+  expect(ledger.mainFrameNavigated("http://127.0.0.1/b")).toBe(false);
+  ledger.response(reload);
+  expect(ledger.mainFrameNavigated("http://127.0.0.1/c")).toBe(false);
+  expect(ledger.replaced(firstRead)).toBe(false);
+
+  // A later document request supersedes the earlier one, which then commits nothing.
+  const navigation = {};
+  ledger.request(navigation, "http://127.0.0.1/c");
+  expect(ledger.replaced(reload)).toBe(true);
+  expect(ledger.replaced(navigation)).toBe(false);
+  ledger.response(navigation);
+  expect(ledger.mainFrameNavigated("http://127.0.0.1/c")).toBe(true);
+  expect(ledger.replaced(firstRead)).toBe(true);
+  const secondRead = {};
+  ledger.request(secondRead, null);
+  expect(ledger.replaced(secondRead)).toBe(false);
+  expect(ledger.replacing(secondRead)).toBe(false);
+
+  // A failed document request leaves the current document in place.
+  const failed = {};
+  ledger.request(failed, "http://127.0.0.1/d");
+  expect(ledger.replacing(secondRead)).toBe(true);
+  ledger.failed(failed);
+  expect(ledger.replacing(secondRead)).toBe(false);
+  expect(ledger.replaced(secondRead)).toBe(false);
+  // Unknown requests are never claimed.
+  expect(ledger.replaced({})).toBe(false);
+  expect(ledger.replacing({})).toBe(false);
+});
+
+test.each([
+  ["net::ERR_ABORTED", true],
+  ["NS_BINDING_ABORTED", true],
+  ["Load request cancelled", true],
+  ["cancelled", true],
+  ["net::ERR_CONNECTION_RESET", false],
+  ["net::ERR_CONNECTION_REFUSED", false],
+  ["net::ERR_ABORTED after timeout", false],
+])("%s is a browser cancellation: %p", (failure, expected) => {
+  expect(isBrowserCancellation(failure)).toBe(expected);
+});
+
+test("Chromium reports no terminal for a read its reloaded document took down", async () => {
+  const heldResponses: ServerResponse[] = [];
+  const server = createServer((request, response) => {
+    const pathname = new URL(request.url!, "http://127.0.0.1").pathname;
+    if (pathname === "/v1/held") {
+      heldResponses.push(response);
+      return;
+    }
+    if (pathname === "/v1/fast") {
+      response.end("ok");
+      return;
+    }
+    response.setHeader("Content-Type", "text/html");
+    response.end("<!doctype html><title>Document ledger fixture</title>");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Loopback fixture unavailable");
+  const origin = `http://127.0.0.1:${address.port}`;
+  let browser: Browser | undefined;
+  try {
+    browser = await chromium.launch(
+      process.env.OPENGENI_BROWSER_BIN ? { executablePath: process.env.OPENGENI_BROWSER_BIN } : {},
+    );
+    const page = await browser.newPage();
+    const ledger = new DocumentRequestLedger();
+    const terminals = new Map<Request, string>();
+    const commits: boolean[] = [];
+    let held: Request | undefined;
+    let fast: Request | undefined;
+    page.on("request", (request) => {
+      ledger.request(
+        request,
+        request.isNavigationRequest() && request.frame() === page.mainFrame()
+          ? request.url()
+          : null,
+      );
+      const pathname = new URL(request.url()).pathname;
+      if (pathname === "/v1/held") held = request;
+      if (pathname === "/v1/fast") fast = request;
+    });
+    page.on("response", (response) => ledger.response(response.request()));
+    page.on("requestfinished", (request) => terminals.set(request, "finished"));
+    page.on("requestfailed", (request) => {
+      ledger.failed(request);
+      terminals.set(request, "failed");
+    });
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) commits.push(ledger.mainFrameNavigated(frame.url()));
+    });
+    await page.goto(`${origin}/workspace`);
+    await page.evaluate(() => history.pushState(null, "", "/workspace/sessions"));
+    await page.evaluate(() => {
+      void fetch("/v1/held").catch(() => undefined);
+    });
+    while (heldResponses.length === 0) await Bun.sleep(10);
+    expect(ledger.replaced(held!)).toBe(false);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    expect(commits).toEqual([true, false, true]);
+    await page.evaluate(() => fetch("/v1/fast").then((response) => response.text()));
+    expect(terminals.get(fast!)).toBe("finished");
+    // The held read can no longer reach any document, and Chromium never says so.
+    heldResponses[0]!.end("late fixture response");
+    await page.evaluate(() => fetch("/v1/fast").then((response) => response.text()));
+    expect(terminals.has(held!)).toBe(false);
+    expect(ledger.replaced(held!)).toBe(true);
+    expect(ledger.replaced(fast!)).toBe(false);
+  } finally {
+    for (const response of heldResponses) if (!response.writableEnded) response.end();
+    try {
+      await browser?.close();
+    } finally {
+      const closed = new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      server.closeAllConnections();
+      await closed;
+    }
+  }
+}, 30_000);
 
 test("account axe scope diagnostics preserve failures and bound content-free evidence", async () => {
   const browser = await chromium.launch(
