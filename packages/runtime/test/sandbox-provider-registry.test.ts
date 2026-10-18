@@ -55,13 +55,14 @@ const CREDS: Record<SandboxBackendType, Record<string, unknown>> = {
     openSandboxImage:
       "registry.example.com/opengeni@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   },
-  // compute needs the fabric plus the Connected Machine plane its agents use.
+  // compute needs the fabric, its agent gateway and the relay its agents use.
   compute: {
     computeApiUrl: "https://compute.example.test",
     computeApiKey: "k",
+    computeLinkUrl: "wss://opengeni.example.test/v1/compute/agent-link",
     publicBaseUrl: "https://opengeni.example.test",
-    sandboxSelfhostedEnabled: true,
-    enrollmentSigningSecret: "enrollment-signing-secret",
+    selfhostedRelayUrl: "wss://relay.example.test",
+    selfhostedRelayTokenSecret: "relay-token-secret",
     selfhostedNatsUrl: "nats://nats.example.test:4222",
     agentOpStreamEnabled: true,
   },
