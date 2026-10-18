@@ -8,6 +8,11 @@ output "host_group" {
   value       = local.group
 }
 
+output "host_memory_mib" {
+  description = "Memory in MiB a new host offers sandboxes: computeControl.scaling.hostMemoryMib in the Helm chart."
+  value       = local.host_memory_mib
+}
+
 output "control_service_account" {
   description = "Google service account the fleet service runs as (Workload Identity, or a VM's identity)."
   value       = google_service_account.control.email

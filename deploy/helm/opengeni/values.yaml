@@ -1368,6 +1368,14 @@ computeControl:
   # projects/P/zones/Z/instanceGroupManagers/N. Empty: hosts are added and
   # removed by hand, and a lost host is fenced only by its own guard.
   gcpGroup: ""
+  # How the service grows gcpGroup. hostMemoryMib, the memory a new host
+  # offers sandboxes (the Terraform module's host_memory_mib output), is
+  # required with gcpGroup; min and max bound the group's size. Other
+  # --scale-* flags go in extraArgs.
+  scaling:
+    hostMemoryMib: 0
+    min: 1
+    max: 10
   # Further `compute-control serve` flags, for example --scale-* settings
   # or the E2B front door's --e2b-* ones.
   extraArgs: []

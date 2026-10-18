@@ -15,6 +15,17 @@ locals {
   hosts_tag = "${var.name_prefix}-host"
   store     = "gs://${google_storage_bucket.archive.name}/${var.archive_prefix}"
   group     = "projects/${var.project_id}/zones/${var.zone}/instanceGroupManagers/${var.name_prefix}-hosts"
+  # The memory a new host offers sandboxes, which the fleet service grows
+  # the group by: on a nested host its huge pages, a share of the kernel's
+  # MemTotal (host-startup.sh), here estimated as 95 % of the machine
+  # type's memory so the estimate errs low; on bare metal 85 % of it.
+  host_memory_mib = floor(one(data.google_compute_machine_types.host.machine_types).memory_mb * 95 / 100 * (var.nested ? var.huge_pages_percent : 85) / 100 / 2) * 2
+}
+
+data "google_compute_machine_types" "host" {
+  project = var.project_id
+  zone    = var.zone
+  filter  = "name = \"${var.machine_type}\""
 }
 
 resource "google_project_service" "apis" {

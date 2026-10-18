@@ -104,6 +104,7 @@ for name in "$sec"/k8s/*; do secret "$(basename "$name")"; done
 log "values"
 jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg ogtag "$OPENGENI_TAG" \
   --arg cmtag "$COMPUTE_TAG" --arg archive "$(cat "$fleet/archive")" --arg group "$(cat "$fleet/host_group")" \
+  --argjson hostmib "$(cat "$fleet/host_memory_mib")" \
   --arg sandbox "$SANDBOX_IMAGE" --arg desktop "$DESKTOP_IMAGE" --arg hosts "$HOSTS" \
   --argjson port "$HOSTS_PORT" --arg model "${MODEL_DEPLOYMENT:-}" --arg base "${AZURE_OPENAI_BASE_URL:-}" '
   def img($r): {repository: $r, tag: $ogtag, pullPolicy: "IfNotPresent"};
@@ -147,7 +148,7 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg ogtag "$O
       archive: $archive,
       storedImages: {opengeni: $sandbox, "opengeni-desktop": $desktop},
       gcpGroup: $group,
-      extraArgs: ["--scale-min=\($hosts)"],
+      scaling: {hostMemoryMib: $hostmib, min: ($hosts | tonumber), max: (($hosts | tonumber) + 2)},
       hostsService: {type: "NodePort", nodePort: $port}
     }
   }' >"$HOME/e2e/values.json"

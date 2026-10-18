@@ -172,7 +172,7 @@ fleet() {
   local out=$STATE/fleet
   mkdir -p "$out"
   chmod 700 "$out"
-  for name in archive host_group control_service_account host_service_account fleet_ca_pem \
+  for name in archive host_group host_memory_mib control_service_account host_service_account fleet_ca_pem \
     control_certificate_pem control_private_key_pem; do
     tf output -state="$dir/terraform.tfstate" -raw "$name" >"$out/$name"
   done

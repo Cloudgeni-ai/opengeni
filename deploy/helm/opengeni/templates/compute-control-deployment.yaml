@@ -98,8 +98,14 @@ spec:
             {{- range $name, $id := $cc.storedImages }}
             - --stored-image={{ $name }}={{ $id }}
             {{- end }}
-            {{- with $cc.gcpGroup }}
-            - --gcp-group={{ . }}
+            {{- if $cc.gcpGroup }}
+            - --gcp-group={{ $cc.gcpGroup }}
+            {{- if not $cc.scaling.hostMemoryMib }}
+            {{- fail "computeControl.scaling.hostMemoryMib is required with computeControl.gcpGroup (the Terraform module's host_memory_mib output)" }}
+            {{- end }}
+            - --scale-host-memory-mib={{ int64 $cc.scaling.hostMemoryMib }}
+            - --scale-min={{ int64 $cc.scaling.min }}
+            - --scale-max={{ int64 $cc.scaling.max }}
             {{- end }}
             {{- range $cc.extraArgs }}
             - {{ . | quote }}

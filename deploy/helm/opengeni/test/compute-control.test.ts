@@ -7,7 +7,12 @@ import { join, resolve } from "node:path";
 // default, and enabling it adds the service without changing any session's
 // sandbox backend.
 
-type Manifest = { kind: string; metadata: { name: string; annotations?: any }; spec?: any; data?: any };
+type Manifest = {
+  kind: string;
+  metadata: { name: string; annotations?: any };
+  spec?: any;
+  data?: any;
+};
 
 async function helmTemplate(values: Record<string, unknown>) {
   const helm = Bun.which("helm");
@@ -85,7 +90,9 @@ describe("computeControl", () => {
     );
     // The password variable precedes the one that refers to it.
     const names = container.env.map((e: any) => e.name);
-    expect(names.indexOf("COMPUTE_DATABASE_PASSWORD")).toBeLessThan(names.indexOf("COMPUTE_CONTROL_DATABASE"));
+    expect(names.indexOf("COMPUTE_DATABASE_PASSWORD")).toBeLessThan(
+      names.indexOf("COMPUTE_CONTROL_DATABASE"),
+    );
     expect(deployment.spec.template.spec.serviceAccountName).toBe("cc-opengeni-compute-control");
     // Its secrets are mounted 0440, readable through the pod's group.
     expect(deployment.spec.template.spec.securityContext.fsGroup).toBe(
@@ -139,14 +146,24 @@ describe("computeControl", () => {
     expect(container.args).toContain("--link-key=/etc/compute/link/link.pem");
     expect(container.args).toContain("--link-previous-key=/etc/compute/link/link-2026-09.pem");
     expect(container.args).toContain("--link-issuer=opengeni-compute");
-    expect(container.args).toContain("--team-link=opengeni=wss://opengeni.example.com/v1/compute/agent-link");
+    expect(container.args).toContain(
+      "--team-link=opengeni=wss://opengeni.example.com/v1/compute/agent-link",
+    );
     const link = deployment.spec.template.spec.volumes.find((v: any) => v.name === "link");
     expect(link.secret.items.map((i: any) => i.key)).toEqual(["link.pem", "link-2026-09.pem"]);
 
     const config = find(manifests, "ConfigMap", "cc-opengeni-config");
-    expect(config.data.OPENGENI_COMPUTE_API_URL).toBe("https://cc-opengeni-compute-control.default.svc:8080");
-    expect(config.data.OPENGENI_COMPUTE_LINK_URL).toBe("wss://opengeni.example.com/v1/compute/agent-link");
-    for (const name of ["cc-opengeni-api", "cc-opengeni-worker-control", "cc-opengeni-worker-turns"]) {
+    expect(config.data.OPENGENI_COMPUTE_API_URL).toBe(
+      "https://cc-opengeni-compute-control.default.svc:8080",
+    );
+    expect(config.data.OPENGENI_COMPUTE_LINK_URL).toBe(
+      "wss://opengeni.example.com/v1/compute/agent-link",
+    );
+    for (const name of [
+      "cc-opengeni-api",
+      "cc-opengeni-worker-control",
+      "cc-opengeni-worker-turns",
+    ]) {
       const pod = find(manifests, "Deployment", name).spec.template.spec;
       const env = pod.containers[0].env.find((e: any) => e.name === "NODE_EXTRA_CA_CERTS");
       expect(env?.value).toBe("/etc/opengeni/compute-control-ca/ca.crt");
@@ -164,9 +181,17 @@ describe("computeControl", () => {
   test("changes no other workload while it is off", async () => {
     const manifests = await render({
       ...enabled,
-      computeControl: { ...enabled.computeControl, enabled: false, apiTls: { secretName: "compute-api-tls" } },
+      computeControl: {
+        ...enabled.computeControl,
+        enabled: false,
+        apiTls: { secretName: "compute-api-tls" },
+      },
     });
-    for (const name of ["cc-opengeni-api", "cc-opengeni-worker-control", "cc-opengeni-worker-turns"]) {
+    for (const name of [
+      "cc-opengeni-api",
+      "cc-opengeni-worker-control",
+      "cc-opengeni-worker-turns",
+    ]) {
       const pod = find(manifests, "Deployment", name).spec.template.spec;
       expect(JSON.stringify(pod)).not.toContain("compute-control");
     }
@@ -175,10 +200,15 @@ describe("computeControl", () => {
   test("refuses team links it cannot sign for", async () => {
     const unsigned = await helmTemplate({
       ...enabled,
-      computeControl: { ...enabled.computeControl, teamLinks: { opengeni: "wss://opengeni.example.com/link" } },
+      computeControl: {
+        ...enabled.computeControl,
+        teamLinks: { opengeni: "wss://opengeni.example.com/link" },
+      },
     });
     expect(unsigned.exitCode).not.toBe(0);
-    expect(unsigned.stderr).toContain("computeControl.teamLinks needs computeControl.link.existingSecret");
+    expect(unsigned.stderr).toContain(
+      "computeControl.teamLinks needs computeControl.link.existingSecret",
+    );
     const plain = await helmTemplate({
       ...enabled,
       computeControl: {
@@ -197,12 +227,46 @@ describe("computeControl", () => {
       computeControl: { ...enabled.computeControl, image: { tag: "" } },
     });
     expect(noImage.exitCode).not.toBe(0);
-    expect(noImage.stderr).toContain("computeControl.image.tag or computeControl.image.digest is required");
+    expect(noImage.stderr).toContain(
+      "computeControl.image.tag or computeControl.image.digest is required",
+    );
     const localArchive = await helmTemplate({
       ...enabled,
       computeControl: { ...enabled.computeControl, archive: "/var/lib/archive" },
     });
     expect(localArchive.exitCode).not.toBe(0);
     expect(localArchive.stderr).toContain("computeControl.archive must be object storage");
+  });
+
+  test("grows a GCP group only knowing what a new host offers", async () => {
+    const group = "projects/p/zones/z/instanceGroupManagers/hosts";
+    const unsized = await helmTemplate({
+      ...enabled,
+      computeControl: { ...enabled.computeControl, gcpGroup: group },
+    });
+    expect(unsized.exitCode).not.toBe(0);
+    expect(unsized.stderr).toContain(
+      "computeControl.scaling.hostMemoryMib is required with computeControl.gcpGroup",
+    );
+    const manifests = await render({
+      ...enabled,
+      computeControl: {
+        ...enabled.computeControl,
+        gcpGroup: group,
+        scaling: { hostMemoryMib: 26_438, min: 3, max: 5 },
+      },
+    });
+    const args = find(manifests, "Deployment", "cc-opengeni-compute-control").spec.template.spec
+      .containers[0].args;
+    expect(args).toContain(`--gcp-group=${group}`);
+    expect(args).toContain("--scale-host-memory-mib=26438");
+    expect(args).toContain("--scale-min=3");
+    expect(args).toContain("--scale-max=5");
+    const fixed = (await render(enabled)).find(
+      (m) => m.metadata.name === "cc-opengeni-compute-control" && m.kind === "Deployment",
+    );
+    expect(
+      fixed!.spec.template.spec.containers[0].args.some((a: string) => a.startsWith("--scale-")),
+    ).toBe(false);
   });
 });
