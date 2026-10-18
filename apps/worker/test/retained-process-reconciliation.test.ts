@@ -87,6 +87,7 @@ import {
   probeRetainedProcessAtProvider,
   RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS,
   RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS,
+  RETAINED_PROCESS_STOP_SETTLE_WAIT_MS,
   type HistoricalModalSandboxLifecycleProbeFn,
   type RetainedProcessProbeFn,
 } from "../src/activities/sandbox-lease";
@@ -1626,6 +1627,71 @@ describe("retained-process terminal-owner reconciliation", () => {
     }
   }, 120_000);
 
+  test("a Stop of a supervised local command that ignores TERM settles in one reaper pass", async () => {
+    if (!available) throw new Error("PostgreSQL required for the supervised stop regression");
+    type LocalSession = {
+      state: { workspaceRootPath: string };
+      execCommand(args: Record<string, unknown>): Promise<string>;
+      close(): Promise<void>;
+    };
+    type LocalClient = { create(manifest: Manifest): Promise<LocalSession> };
+    const localClient = createSandboxClientForBackend("local", SETTINGS) as LocalClient;
+    const box = await localClient.create(
+      new Manifest({ environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }),
+    );
+    try {
+      const root = box.state.workspaceRootPath;
+      // A command that survives TERM ends only at the supervisor's KILL.
+      const command = "trap '' TERM; while :; do sleep 1; done";
+      const started = await box.execCommand({ cmd: command, yieldTimeMs: 200 });
+      const handle = Number(/Process running with session ID (\d+)/.exec(started)?.[1]);
+      const resumeState = await serializeEstablishedSandboxEnvelope({
+        client: localClient,
+        session: box,
+        sessionState: box.state,
+        instanceId: root,
+        backendId: "unix_local",
+      } as never);
+      if (!resumeState) throw new Error("Expected a resumable local envelope");
+      const supervised = await promoteTurnProcess({
+        providerSessionId: handle,
+        backgroundCommand: command,
+        inSandboxSupervisor: isInSandboxSupervisedProcess(box, handle),
+        box: { backend: "local", resumeBackendId: "unix_local", instanceId: root, resumeState },
+      });
+      await adoptManagedSessionBackgroundCommand(db, {
+        accountId: supervised.accountId,
+        workspaceId: supervised.workspaceId,
+        sessionId: supervised.sessionId,
+        turnId: supervised.attempt!.turnId,
+        executionGeneration: supervised.attempt!.executionGeneration,
+        attemptId: supervised.attempt!.attemptId,
+        processId: supervised.process.id,
+        expected: retainedProcessSettlementIdentity(supervised.process),
+        command,
+      });
+      await closeTurnOwner(supervised, supervised.attempt!, "completed");
+      const lease = await readLease(db, supervised.workspaceId, supervised.groupId);
+      if (!lease) throw new Error("Expected lease");
+      const retained = await durableProcess(supervised);
+
+      // The one cancelling probe waits through the KILL escalation, so the
+      // Stop settles in this pass instead of after a reconciliation backoff.
+      const startedAt = Date.now();
+      const stopped = await probeRetainedProcessAtProvider(
+        SETTINGS,
+        lease,
+        retained,
+        "cancel",
+        async () => {},
+      );
+      expect(stopped).toMatchObject({ status: "proved" });
+      expect(Date.now() - startedAt).toBeLessThan(RETAINED_PROCESS_STOP_SETTLE_WAIT_MS + 3_000);
+    } finally {
+      await box.close();
+    }
+  }, 120_000);
+
   test("running and terminal reaper output is retained without observing completion", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ outcome: "completed", backgroundCommand: "work" });
@@ -2107,6 +2173,15 @@ describe("retained-process terminal-owner reconciliation", () => {
       exitCode: 130,
       settlementReason: "provider_exit_banner",
     });
+    // The agent learns the command was stopped, not that it failed or (for a
+    // terminal wrapper that exits 0 on a stop) that it completed successfully.
+    const updates = await admin<{ classification: string; summary: string }[]>`
+      select classification, summary from session_system_updates
+      where session_id = ${fixture.sessionId} and source_id = ${fixture.process.id}
+        and kind = 'background_command_result'`;
+    expect(updates).toEqual([
+      { classification: "info", summary: "`bun test --watch` was stopped." },
+    ]);
   });
 
   test("command-result failure rolls back retained-process settlement and retries proof without replay", async () => {

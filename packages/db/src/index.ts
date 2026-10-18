@@ -83156,8 +83156,14 @@ function backgroundCommandTerminalMutation(input: {
         events.push(mapEvent(finishedEvent));
         return;
       }
-      const classification: SystemUpdateClassification =
-        command.state === "exited" && command.exitCode === 0 && !command.failure
+      // A command stopped on request (a person's Stop, the agent's own stop, or
+      // a session Pause/Cancel) did not finish on its own; its exit code says
+      // only how it ended (a terminal wrapper can even report 0).
+      const stoppedOnRequest =
+        command.state === "exited" && command.cancelRequestedAt !== null && !command.failure;
+      const classification: SystemUpdateClassification = stoppedOnRequest
+        ? "info"
+        : command.state === "exited" && command.exitCode === 0 && !command.failure
           ? "success"
           : "failure";
       const commandLabel = command.commandPreview || "Background command";
@@ -83172,9 +83178,11 @@ function backgroundCommandTerminalMutation(input: {
               ? `\`${commandLabel}\` is no longer running because its sandbox was shut down or lost; whether it finished is unknown. Check its effects before running it again.`
               : command.state === "lost"
                 ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
-                : command.exitCode === 0
-                  ? `${commandLabel}: completed successfully.`
-                  : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+                : stoppedOnRequest
+                  ? `\`${commandLabel}\` was stopped.`
+                  : command.exitCode === 0
+                    ? `${commandLabel}: completed successfully.`
+                    : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,

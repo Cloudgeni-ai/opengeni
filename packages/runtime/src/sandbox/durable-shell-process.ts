@@ -34,6 +34,9 @@ const MAX_READ_BYTES = 1024 * 1024;
 const DEFAULT_EXEC_YIELD_MS = 10_000;
 const DEFAULT_WRITE_YIELD_MS = 250;
 const ONE_SHOT_GRACE_MS = 30_000;
+/** A supervised stop sends TERM to the command's process group, then KILL
+ * this many seconds later, so a stopped command is gone within that bound. */
+export const SUPERVISED_STOP_KILL_AFTER_SECONDS = 5;
 const LAUNCH_ATTEMPTS = 5;
 
 export type DurableShellBackend = "docker" | "local";
@@ -306,7 +309,7 @@ og_stop() {
   # after its own shell exited. The escalation needs no run directory.
   og_signal TERM "$og_c" "$og_ci"
   (
-    sleep 5
+    sleep ${SUPERVISED_STOP_KILL_AFTER_SECONDS}
     og_signal KILL "$og_c" "$og_ci"
   ) </dev/null >/dev/null 2>&1 &
   return 0
