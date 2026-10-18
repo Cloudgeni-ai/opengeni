@@ -29,6 +29,10 @@ spec:
         - name: postgres
           image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          {{- with .Values.postgres.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             {{- toYaml .Values.postgres.securityContext | nindent 12 }}
           ports:

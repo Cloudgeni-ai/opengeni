@@ -33,10 +33,11 @@ log "checkouts"
 git -C /srv/e2e/src fetch -q origin "$OPENGENI_SHA" "$COMPUTE_SHA"
 git -C "$og" checkout -q --detach "$OPENGENI_SHA"
 git -C "$cm" checkout -q --detach "$COMPUTE_SHA"
-# The fleet's artifacts are named by compute/'s tree, so a commit that
-# changes only the chart or the suite reuses them (and the hosts keep their
-# bundle).
-cmtree=$(git -C "$cm" rev-parse "$COMPUTE_SHA:compute")
+# The fleet's artifacts are named by the parts of compute/ they are built
+# from, so a commit that changes only the chart, the docs or this suite
+# reuses them (and the hosts keep their bundle).
+cmtree=$(git -C "$cm" ls-tree "$COMPUTE_SHA" compute/ | grep -v -e '	compute/e2e$' -e '	compute/docs$' -e '	compute/lab$' |
+  sha256sum | cut -c1-40)
 cmtag=e2e-${cmtree:0:12}
 gcloud auth configure-docker "${REGISTRY%%/*}" --quiet >/dev/null 2>&1
 

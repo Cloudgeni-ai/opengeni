@@ -924,6 +924,10 @@ postgres:
     # this Secret instead of constructing an owner URL from postgres.auth.
     existingSecret: ""
     databaseUrlKey: OPENGENI_DATABASE_URL
+  # Server settings, as `postgres` arguments, for example
+  # ["-c", "max_connections=400"] when Temporal, the API, the workers and
+  # computeControl share this server.
+  args: []
   service:
     port: 5432
   persistence:

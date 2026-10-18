@@ -101,12 +101,31 @@ put compute-api-tls tls.key "$(cat "$sec/api.key")"
 put compute-api-tls ca.crt "$(cat "$sec/api-ca.pem")"
 for name in "$sec"/k8s/*; do secret "$(basename "$name")"; done
 
+log "diagnostics sink"
+# Opengeni exports a closed record of each failure rather than logging its
+# causes; diagnostics.py keeps them in a file the suite copies into its runs.
+internal=$(hostname -I | awk '{print $1}')
+sudo tee /etc/systemd/system/e2e-diagnostics.service >/dev/null <<UNIT
+[Unit]
+Description=Opengeni failure diagnostics for the e2e environment
+[Service]
+User=$USER
+ExecStart=/usr/bin/python3 $HOME/e2e/diagnostics.py $internal 4319 $HOME/e2e/diagnostics.jsonl
+Restart=always
+[Install]
+WantedBy=multi-user.target
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl enable -q e2e-diagnostics
+sudo systemctl restart e2e-diagnostics
+
 log "values"
 jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg ogtag "$OPENGENI_TAG" \
   --arg cmtag "$COMPUTE_TAG" --arg archive "$(cat "$fleet/archive")" --arg group "$(cat "$fleet/host_group")" \
   --argjson hostmib "$(cat "$fleet/host_memory_mib")" \
   --arg sandbox "$SANDBOX_IMAGE" --arg desktop "$DESKTOP_IMAGE" --arg hosts "$HOSTS" \
-  --argjson port "$HOSTS_PORT" --arg model "${MODEL_DEPLOYMENT:-}" --arg base "${AZURE_OPENAI_BASE_URL:-}" '
+  --argjson port "$HOSTS_PORT" --arg model "${MODEL_DEPLOYMENT:-}" --arg base "${AZURE_OPENAI_BASE_URL:-}" \
+  --arg diagnostics "http://$internal:4319" '
   def img($r): {repository: $r, tag: $ogtag, pullPolicy: "IfNotPresent"};
   {
     global: {imageRegistry: ""},
@@ -117,6 +136,7 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg ogtag "$O
     web: {image: img("opengeni-web")},
     relay: {enabled: true, replicaCount: 1, image: img("opengeni-relay")},
     postgres: {enabled: true, auth: {existingSecret: "opengeni-postgres"},
+      args: ["-c", "max_connections=500"],
       runtime: {existingSecret: "opengeni-runtime"}},
     temporal: {enabled: true, postgres: {existingSecret: "opengeni-postgres"}},
     nats: {enabled: true, authCallout: {enabled: true}},
@@ -129,7 +149,8 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg ogtag "$O
       OPENGENI_WEB_BASE_URL: "https://\($app)",
       OPENGENI_WEB_ALLOWED_HOSTS: $app,
       OPENGENI_COMPUTE_IMAGE: "opengeni",
-      OPENGENI_COMPUTE_DESKTOP_IMAGE: "opengeni-desktop"
+      OPENGENI_COMPUTE_DESKTOP_IMAGE: "opengeni-desktop",
+      OPENGENI_OBSERVABILITY_DIAGNOSTICS_ENDPOINT: $diagnostics
     } + (if $model == "" then {} else {
       OPENGENI_OPENAI_PROVIDER: "azure",
       OPENGENI_AZURE_OPENAI_BASE_URL: $base,
