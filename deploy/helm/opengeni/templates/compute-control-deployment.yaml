@@ -61,9 +61,11 @@ spec:
         {{- end }}
       {{- if $cc.database.provision }}
       initContainers:
-        # Waits until the role the database Job makes can log in, so that
-        # on an install, whose Job runs beside this Deployment, the service
-        # starts once its database is ready rather than failing until then.
+        # Waits until the role the database Job makes can log in with this
+        # pod's password and its schema exists. The Job runs beside this
+        # Deployment, so the service starts once its database is ready
+        # rather than failing until then, and after a new password only
+        # once the role has it.
         - name: database
           image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}

@@ -45,10 +45,14 @@ enabling it changes no session's backend.
    own Postgres only) a Job creates the role with the password from
    `database.existingSecret`, sets its search path to the schema, creates
    the schema it owns and grants it `connect`, using the migration owner
-   URL; nothing of Opengeni's is granted to it. On an install it runs
-   beside the release and the service's pods wait for it, so `helm
-   install --wait` completes; on an upgrade it is a hook that runs before
-   any pod is replaced. For any other database (`database.host`, required
+   URL; nothing of Opengeni's is granted to it. The Job is an ordinary
+   part of the release, never a hook, so it is applied together with what
+   it needs (the chart's Postgres and, under `networkPolicy`, the rule
+   that admits it), on an install and on the upgrade that first enables
+   the service alike, and the service's pods wait for it, so `--wait`
+   completes. Its name follows its inputs: an upgrade that changes none of
+   them leaves it alone, and one that does runs a new Job.
+   For any other database (`database.host`, required
    when the chart runs no Postgres, or a whole connection string in
    `database.urlKey`), turn `provision` off and have its owner run the
    same statements:
@@ -322,11 +326,14 @@ authority alone for agent links.
   the old one.
 - **The database password.** Change it in the Secret, set a new
   `computeControl.database.passwordRevision` (any string) and upgrade the
-  release: the hook Job gives the role the new password before any pod is
-  replaced, and the revision rolls the pods, which read it only at start.
-  Until each old pod is replaced, its open connections keep working but
-  new ones fail, so do it outside busy hours. Without `provision`, change
-  the role's password yourself before the upgrade.
+  release: the revision runs a new database Job, which gives the role the
+  new password, and rolls the pods, which read it only at start; each new
+  pod waits at its database init container until it can log in with the
+  new password, so the old pods keep serving until then. Once the role
+  has the new password, the old pods' open connections keep working but
+  new ones fail until each is replaced, so do it outside busy hours.
+  Without `provision`, change the role's password yourself before the
+  upgrade.
 - **The link signing key.** Make a new key, add it to the link Secret
   under a new entry, and make the new entry `link.key` and the old one a
   `link.previousKeys` entry: the service signs with the new key and still

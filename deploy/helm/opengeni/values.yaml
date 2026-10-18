@@ -1308,7 +1308,8 @@ computeControl:
     urlKey: ""
     # Pods read the password only at start: after changing it in the
     # Secret, set a new revision (any string) so the upgrade rolls them,
-    # after its hook has given the role the new password.
+    # and runs a new database Job that gives the role the new password;
+    # the new pods wait for it before they start.
     passwordRevision: ""
     role: compute
     schema: compute

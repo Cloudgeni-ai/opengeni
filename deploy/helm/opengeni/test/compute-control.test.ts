@@ -66,6 +66,14 @@ function find(manifests: Manifest[], kind: string, name: string): Manifest {
   return found;
 }
 
+function databaseJob(manifests: Manifest[]): Manifest {
+  const jobs = manifests.filter(
+    (m) => m.kind === "Job" && m.metadata.name.startsWith("cc-opengeni-compute-control-database-"),
+  );
+  expect(jobs).toHaveLength(1);
+  return jobs[0]!;
+}
+
 describe("computeControl", () => {
   test("is off by default and leaves the configuration alone", async () => {
     const manifests = await render({});
@@ -112,10 +120,11 @@ describe("computeControl", () => {
 
     find(manifests, "Service", "cc-opengeni-compute-control");
     find(manifests, "Service", "cc-opengeni-compute-control-hosts");
-    // On an install the database Job is part of the release, never a hook
-    // that Helm's --wait would hold back behind the pods that need it.
-    const job = find(manifests, "Job", "cc-opengeni-compute-control-database-install");
+    // The database Job is part of the release, never a hook that Helm's
+    // --wait would hold back behind the pods that need it.
+    const job = databaseJob(manifests);
     expect(job.metadata.annotations?.["helm.sh/hook"]).toBeUndefined();
+    expect(job.metadata.name).toMatch(/^cc-opengeni-compute-control-database-[0-9a-f]{10}$/u);
     const script = job.spec.template.spec.containers[0].command[2];
     expect(script).toContain("set search_path = %I");
     expect(script).toContain("create schema if not exists %I authorization %I");
@@ -132,11 +141,45 @@ describe("computeControl", () => {
     expect(config.data.OPENGENI_SANDBOX_BACKEND).toBe("modal");
   });
 
-  test("sets the role's password before an upgrade replaces any pod", async () => {
-    const manifests = await render(enabled, ["--is-upgrade"]);
-    const job = find(manifests, "Job", "cc-opengeni-compute-control-database");
-    expect(job.metadata.annotations["helm.sh/hook"]).toBe("pre-upgrade");
-    expect(manifests.some((m) => m.metadata.name.endsWith("-database-install"))).toBe(false);
+  test("provisions on the upgrade that first enables it, under network policy", async () => {
+    // An existing release with Postgres and network policy turns compute on:
+    // the Job is applied with the release's other resources, among them the
+    // Postgres policy that admits it, rather than as a hook that would run,
+    // and wait for a database it cannot reach, before that policy changes.
+    const manifests = await render({ ...enabled, networkPolicy: { enabled: true } }, [
+      "--is-upgrade",
+    ]);
+    const job = databaseJob(manifests);
+    expect(job.metadata.annotations?.["helm.sh/hook"]).toBeUndefined();
+    const labels = job.spec.template.metadata.labels;
+    const policy = find(manifests, "NetworkPolicy", "cc-opengeni-postgres");
+    expect(
+      policy.spec.ingress[0].from.some((from: any) =>
+        Object.entries(from.podSelector.matchLabels).every(
+          ([key, value]) => labels[key] === value,
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  test("makes a new database Job when its inputs change, and keeps it otherwise", async () => {
+    const name = async (values: Record<string, unknown>, flags: string[] = []) =>
+      databaseJob(await render(values, flags)).metadata.name;
+    const installed = await name(enabled);
+    // An upgrade with the same inputs leaves the Job that already ran alone.
+    expect(await name(enabled, ["--is-upgrade"])).toBe(installed);
+    // A new password revision runs it again, before the pods it rolls start.
+    const rotated = await name({
+      ...enabled,
+      computeControl: {
+        ...enabled.computeControl,
+        database: { ...enabled.computeControl.database, passwordRevision: "2026-10-18" },
+      },
+    });
+    expect(rotated).not.toBe(installed);
+    // A changed pod template cannot be applied to a Job in place.
+    const image = await name({ ...enabled, postgres: { enabled: true, image: { tag: "17.9" } } });
+    expect(image).not.toBe(installed);
   });
 
   test("quotes connection settings and rolls its pods for a new password revision", async () => {

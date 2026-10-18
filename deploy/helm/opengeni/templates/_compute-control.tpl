@@ -1,6 +1,6 @@
 {{/*
 Opengeni compute's fleet service (computeControl): names and settings shared
-by its Deployment, Services, hook Job and sweep.
+by its Deployment, Services, database Job and sweep.
 */}}
 {{- define "opengeni.computeControl.name" -}}
 {{- printf "%s-compute-control" (include "opengeni.fullname" .) | trunc 63 | trimSuffix "-" -}}

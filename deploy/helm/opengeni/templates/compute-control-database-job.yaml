@@ -3,91 +3,98 @@
 # Makes compute-control's login role and the schema it owns in Opengeni's
 # Postgres, idempotently; the role's search path is that schema alone, so its
 # tables land there, and it is granted nothing of Opengeni's. Runs with the
-# migration owner URL. On an upgrade it is a hook that runs before any pod is
-# replaced, so a new password is set before the pods that use it start. On an
-# install the chart's Postgres does not exist before the release, so it is an
-# ordinary Job of the release that waits for Postgres, while the service's
-# pods wait for it (their database init container): an install with --wait
-# completes once it has run.
+# migration owner URL.
+#
+# It is an ordinary Job of the release, never a hook, on an install, an
+# upgrade and the upgrade that first enables the service alike: the release's
+# own resources (the chart's Postgres, and the network policy that lets this
+# Job reach it) are applied with it, and nothing waits on it but the
+# service's pods, whose database init container holds them until the role
+# can log in with the password they were given and the schema exists. So
+# --wait completes once it has run, and a new password reaches the role
+# before any new pod starts, while the old pods keep serving.
+#
+# Its name ends in a digest of its spec and the password revision: a change
+# to either makes a new Job (Helm deletes the old one), since a Job's pod
+# template cannot change in place, and an unchanged Job is left as it is.
+{{- $spec := include "opengeni.computeControl.databaseJobSpec" . | trim }}
+{{- $digest := toJson (dict "spec" $spec "passwordRevision" $cc.database.passwordRevision) | sha256sum | trunc 10 }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  {{- if .Release.IsInstall }}
-  name: {{ printf "%s-database-install" (include "opengeni.computeControl.name" .) | trunc 63 | trimSuffix "-" }}
-  {{- else }}
-  name: {{ printf "%s-database" (include "opengeni.computeControl.name" .) | trunc 63 | trimSuffix "-" }}
-  {{- end }}
+  name: {{ printf "%s-%s" (printf "%s-database" (include "opengeni.computeControl.name" .) | trunc 52 | trimSuffix "-") $digest }}
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: compute-database
-  {{- if not .Release.IsInstall }}
-  annotations:
-    helm.sh/hook: pre-upgrade
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-    helm.sh/hook-weight: "-4"
-  {{- end }}
 spec:
-  backoffLimit: 6
-  ttlSecondsAfterFinished: {{ .Values.jobTtlSecondsAfterFinished }}
-  template:
-    metadata:
-      labels:
-        {{- include "opengeni.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: compute-database
-    spec:
-      restartPolicy: OnFailure
-      enableServiceLinks: false
-      automountServiceAccountToken: false
-      {{- with .Values.global.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 999
-        runAsGroup: 999
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-        - name: provision
-          image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
-          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-          env:
-            - name: OWNER_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "opengeni.migrationSecretName" . }}
-                  key: OPENGENI_MIGRATIONS_DATABASE_URL
-            - name: COMPUTE_DATABASE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $cc.database.existingSecret }}
-                  key: {{ $cc.database.passwordKey }}
-            - name: COMPUTE_ROLE
-              value: {{ $cc.database.role | quote }}
-            - name: COMPUTE_SCHEMA
-              value: {{ $cc.database.schema | quote }}
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              until pg_isready -q -d "$OWNER_URL"; do sleep 2; done
-              psql -v ON_ERROR_STOP=1 -q -d "$OWNER_URL" \
-                -v role="$COMPUTE_ROLE" -v schema="$COMPUTE_SCHEMA" -v password="$COMPUTE_DATABASE_PASSWORD" <<'SQL'
-              select format('create role %I login', :'role')
-                where not exists (select 1 from pg_roles where rolname = :'role') \gexec
-              select format('alter role %I login password %L', :'role', :'password') \gexec
-              select format('alter role %I set search_path = %I', :'role', :'schema') \gexec
-              select format('create schema if not exists %I authorization %I', :'schema', :'role') \gexec
-              select format('grant connect on database %I to %I', current_database(), :'role') \gexec
-              SQL
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
+  {{- $spec | nindent 2 }}
+{{- end }}
+
+{{- define "opengeni.computeControl.databaseJobSpec" -}}
+{{- $cc := .Values.computeControl -}}
+{{- with .Values.jobTtlSecondsAfterFinished }}
+ttlSecondsAfterFinished: {{ . }}
+{{- end }}
+backoffLimit: 6
+template:
+  metadata:
+    labels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: compute-database
+  spec:
+    restartPolicy: OnFailure
+    enableServiceLinks: false
+    automountServiceAccountToken: false
+    {{- with .Values.global.imagePullSecrets }}
+    imagePullSecrets:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      seccompProfile:
+        type: RuntimeDefault
+    containers:
+      - name: provision
+        image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
+        imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+        env:
+          - name: OWNER_URL
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "opengeni.migrationSecretName" . }}
+                key: OPENGENI_MIGRATIONS_DATABASE_URL
+          - name: COMPUTE_DATABASE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ $cc.database.existingSecret }}
+                key: {{ $cc.database.passwordKey }}
+          - name: COMPUTE_ROLE
+            value: {{ $cc.database.role | quote }}
+          - name: COMPUTE_SCHEMA
+            value: {{ $cc.database.schema | quote }}
+        command:
+          - /bin/sh
+          - -ec
+          - |
+            until pg_isready -q -d "$OWNER_URL"; do sleep 2; done
+            psql -v ON_ERROR_STOP=1 -q -d "$OWNER_URL" \
+              -v role="$COMPUTE_ROLE" -v schema="$COMPUTE_SCHEMA" -v password="$COMPUTE_DATABASE_PASSWORD" <<'SQL'
+            select format('create role %I login', :'role')
+              where not exists (select 1 from pg_roles where rolname = :'role') \gexec
+            select format('alter role %I login password %L', :'role', :'password') \gexec
+            select format('alter role %I set search_path = %I', :'role', :'schema') \gexec
+            select format('create schema if not exists %I authorization %I', :'schema', :'role') \gexec
+            select format('grant connect on database %I to %I', current_database(), :'role') \gexec
+            SQL
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
 {{- end }}
