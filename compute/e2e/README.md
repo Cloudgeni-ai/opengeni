@@ -75,6 +75,7 @@ subset with what it needs.
 | sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level; the next Opengeni request wakes it, with its files |
 | move | the fabric moves the sandbox to another host; its files come along |
 | host-loss | after a sleep to remote, the sandbox's host is stopped; the sandbox wakes on another host from that copy |
+| delete | deleting the session deletes its sandbox on the fabric (a run that stops earlier still deletes its session) |
 | ui | Playwright in the web app: the Files tab lists the file, a command typed in the Terminal tab runs, the Desktop tab draws the desktop |
 
 A check whose needs failed is skipped, so every run reports every check.

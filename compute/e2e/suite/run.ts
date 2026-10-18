@@ -473,6 +473,41 @@ check("host-loss", "a lost host's sandbox comes back elsewhere from its last arc
     `the save kept, the late write ${out.includes(late) ? "kept too" : "lost (after the last save)"}; ${lost} is now ${lostState}`;
 });
 
+/** Deletes the session, retrying while the API answers 409 because its
+ * sandbox is still being shut down (as the web app does). */
+async function deleteSession(limitMs: number): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    try {
+      await og("DELETE", ses());
+      state.session = undefined;
+      return;
+    } catch (error) {
+      if (!(error instanceof HttpError && error.status === 409) || Date.now() - start > limitMs) throw error;
+    }
+    await sleep(5_000);
+  }
+}
+
+check("delete", "deleting the session deletes its sandbox on the fabric", ["create"], async () => {
+  const start = Date.now();
+  const id = state.sandbox!;
+  await deleteSession(10 * 60_000);
+  log(`session deleted after ${seconds(start)}`);
+  for (;;) {
+    try {
+      await fabric("GET", `/v1/sandboxes/${id}`);
+    } catch (error) {
+      if (error instanceof HttpError && (error.status === 404 || error.status === 410)) {
+        return `sandbox ${id} gone ${seconds(start)} after the delete`;
+      }
+      throw error;
+    }
+    if (Date.now() - start > 15 * 60_000) throw new Error(`sandbox ${id} is still on the fabric 15 min after the delete`);
+    await sleep(5_000);
+  }
+});
+
 // --- Run ------------------------------------------------------------------
 
 function wanted(): Set<string> {
@@ -512,6 +547,12 @@ for (const one of checks.filter((c) => selected.has(c.id))) {
   writeFileSync(`${OUT}/results.json`, JSON.stringify({ results }, null, 2));
 }
 
+// A run that stopped before the delete check still deletes its session, so
+// reruns do not leave sandboxes on the fleet.
+if (state.workspace && state.session) {
+  await deleteSession(5 * 60_000).catch((error) => log(`cleanup: deleting the session failed: ${error}`));
+}
+
 const counts = (status: Status) => results.filter((r) => r.status === status).length;
 const table = [
   `| check | result | seconds | detail |`,
@@ -528,7 +569,7 @@ writeFileSync(`${OUT}/results.json`, JSON.stringify({ ...meta, results }, null, 
 writeFileSync(
   `${OUT}/results.md`,
   [
-    `Opengeni ${meta.opengeni.slice(0, 12)}, compute ${meta.compute.slice(0, 12)}, model ${MODEL}, ${meta.finished}`,
+    `Opengeni ${meta.opengeni}, compute ${meta.compute.slice(0, 12)}, model ${MODEL}, ${meta.finished}`,
     "",
     `${counts("pass")} passed, ${counts("fail")} failed, ${counts("skip")} skipped, ${counts("n/a")} not applicable.`,
     "",
