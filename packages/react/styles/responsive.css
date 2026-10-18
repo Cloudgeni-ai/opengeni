@@ -66,6 +66,15 @@
   display: var(--og-model-policy-label-short-display);
 }
 
+/* A host row too narrow for even the short model name (a phone composer that
+   also offers Queue or Steer beside Send) shows the pill's icon alone rather
+   than a clipped sliver of the name. */
+@container model-controls (max-width: 7.999rem) {
+  [data-og-responsive-basis="container"] .og-model-policy-label-short {
+    display: none;
+  }
+}
+
 [data-og-responsive-basis="container"] .og-model-policy-effort {
   display: var(--og-model-policy-effort-display);
 }

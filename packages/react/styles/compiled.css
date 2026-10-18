@@ -5366,6 +5366,11 @@
       display: none;
     }
   }
+:where(.og-root).\@max-\[8rem\]\/model-controls\:hidden,:where(.og-root) .\@max-\[8rem\]\/model-controls\:hidden {
+    @container model-controls (width < 8rem) {
+      display: none;
+    }
+  }
 :where(.og-root).\@max-\[2rem\]\/model-controls\:hidden,:where(.og-root) .\@max-\[2rem\]\/model-controls\:hidden {
     @container model-controls (width < 2rem) {
       display: none;
@@ -6814,6 +6819,11 @@
 }
 :where(.og-root)[data-og-responsive-basis="container"] .og-model-policy-label-short,:where(.og-root) [data-og-responsive-basis="container"] .og-model-policy-label-short {
   display: var(--og-model-policy-label-short-display);
+}
+@container model-controls (max-width: 7.999rem) {
+  :where(.og-root)[data-og-responsive-basis="container"] .og-model-policy-label-short,:where(.og-root) [data-og-responsive-basis="container"] .og-model-policy-label-short {
+    display: none;
+  }
 }
 :where(.og-root)[data-og-responsive-basis="container"] .og-model-policy-effort,:where(.og-root) [data-og-responsive-basis="container"] .og-model-policy-effort {
   display: var(--og-model-policy-effort-display);
