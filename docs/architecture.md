@@ -1343,7 +1343,9 @@ the upstream identity for Link/Refresh recovery, never destructive compensation.
 Persistent Responses connections share `packages/network/src/responses-websocket.ts`:
 one conversation lifecycle, continuation fingerprints and transport diagnostics for
 Codex, OpenAI API and Azure. Providers supply endpoint/authentication and framing;
-providers without socket support retain HTTP keep-alive. The durable worker owns
+only explicit main-conversation scopes own pooled sockets. Title side requests
+leave that scope and retain HTTP, without changing their content or custody.
+Providers without socket support retain HTTP keep-alive. The durable worker owns
 the step retry budget, with its last retry reserved for HTTP. Turn-only HTTP
 selection survives recovery in turn metadata and never carries into a new turn.
 The transport does not replay partial streams or bypass request custody.

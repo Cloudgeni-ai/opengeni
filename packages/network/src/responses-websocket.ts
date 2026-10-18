@@ -21,6 +21,24 @@ const inConnectionScope = AsyncResource.bind(<T>(operation: () => T): T => opera
 export const MODEL_TRANSPORT_HEADER = "x-opengeni-model-transport";
 export const MODEL_SOCKET_FAILURE_HEADER = "x-opengeni-model-socket-failure";
 
+/** Per-response server critical path, never the cumulative logical-turn totals. */
+export type ResponsesServerTiming = {
+  responsesPreInferenceMs?: number;
+  engineWallMs?: number;
+  responsesOtherMs?: number;
+  responsesHarnessUnblockedMs?: number;
+  clientToolPauseMs?: number;
+  numEngineCalls?: number;
+};
+
+export type ModelSocketTiming = {
+  /** Local transport entry through serialization/handshake to socket send. */
+  transportPreparationMs?: number;
+  /** Actual socket send to the first non-metadata response event. */
+  sendToFirstEventMs?: number;
+  server?: ResponsesServerTiming;
+};
+
 /**
  * How one Responses request was carried. A WebSocket request either
  * opened its connection or reused a warm one, and sent either its full input
@@ -39,6 +57,8 @@ export type ModelRequestTransport =
       input: "full" | "incremental";
       /** Milliseconds this request waited for its new connection's handshake. */
       handshakeMs?: number;
+      /** Populated as events arrive; request receipts snapshot these diagnostics. */
+      timing?: ModelSocketTiming;
     }
   | {
       kind: "http";
@@ -189,8 +209,8 @@ export type ResponsesWebSocketEndpoint = {
   /**
    * Give each conversation (see {@link withResponsesConversation}) its own
    * connection, and leave requests outside a conversation on HTTP. Needed
-   * where nothing in the request headers already tells conversations apart;
-   * the Codex backend's headers carry the session id.
+   * even when a side request carries the same session-affinity header. Only an
+   * explicitly scoped conversation owns its persistent connection.
    */
   conversationScoped?: boolean;
   /** Connection-level framing that projects provider metadata into HTTP headers. */
@@ -329,7 +349,7 @@ export function withResponsesConversation<T>(
         typeof conversation === "string" ? createResponsesTurn(conversation) : conversation,
         fn,
       )
-    : fn();
+    : responsesConversation.exit(fn);
 }
 
 /**
@@ -353,6 +373,35 @@ const TERMINAL_EVENTS = new Set([
 
 // Connection-level events that the SSE endpoint conveys as response headers.
 const TIMING_EVENT = "responsesapi.websocket_timing";
+
+function responseServerTiming(
+  event: Record<string, unknown>,
+  responseId: string | undefined,
+): ResponsesServerTiming | undefined {
+  const metrics = event.timing_metrics as Record<string, unknown> | undefined;
+  if (!responseId || metrics?.response_id !== responseId) return undefined;
+  const path = metrics.critical_path as Record<string, unknown> | undefined;
+  if (path?.scope !== "response") return undefined;
+  const result: ResponsesServerTiming = {};
+  for (const [wire, key] of [
+    ["responses_pre_inference_ms", "responsesPreInferenceMs"],
+    ["engine_wall_ms", "engineWallMs"],
+    ["responses_other_ms", "responsesOtherMs"],
+    ["responses_harness_unblocked_ms", "responsesHarnessUnblockedMs"],
+    ["client_tool_pause_ms", "clientToolPauseMs"],
+    ["num_engine_calls", "numEngineCalls"],
+  ] as const) {
+    const value = path[wire];
+    if (
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      value >= 0 &&
+      (key !== "numEngineCalls" || Number.isSafeInteger(value))
+    )
+      result[key] = value;
+  }
+  return Object.keys(result).length ? result : undefined;
+}
 
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
@@ -733,8 +782,9 @@ export function responsesTransport(
     }
     if (endpoint.beta) handshake["openai-beta"] = endpoint.beta;
     const wsUrl = url.replace(/^https:/, "wss:");
-    const conversation = responsesConversation.getStore()?.conversationId ?? handshake.session_id;
-    if (endpoint.conversationScoped && !conversation) return null;
+    const turn = responsesConversation.getStore();
+    if (endpoint.conversationScoped && !turn) return null;
+    const conversation = turn?.conversationId ?? handshake.session_id;
     return {
       wsUrl,
       handshake,
@@ -1002,6 +1052,9 @@ export function responsesTransport(
       let started = false;
       let finished = false;
       let continuationPending: Promise<void> | null = null;
+      let preparationStartedAt = startedAt;
+      let sentAt: number | undefined;
+      let responseId: string | undefined;
       const continuationAbort = new AbortController();
       let cacheUsage: Pick<ResponsesTransportDiagnostic, "promptTokens" | "cachedTokens"> = {};
       const pending: Uint8Array[] = [];
@@ -1061,6 +1114,12 @@ export function responsesTransport(
 
       const begin = (status = 200, errorBody?: string) => {
         started = true;
+        if (sentAt !== undefined) {
+          transport.timing = {
+            ...transport.timing,
+            sendToFirstEventMs: Math.max(0, performance.now() - sentAt),
+          };
+        }
         observe({ phase: "headers", transport, durationMs: performance.now() - startedAt });
         headers.set(MODEL_TRANSPORT_HEADER, formatModelRequestTransport(transport));
         if (errorBody !== undefined) {
@@ -1092,6 +1151,9 @@ export function responsesTransport(
             inputBytes: Buffer.byteLength(encoded),
             fullInputBytes: Buffer.byteLength(text),
           });
+          sentAt = performance.now();
+          responseId = undefined;
+          transport.timing = { transportPreparationMs: Math.max(0, sentAt - preparationStartedAt) };
           dispatchObservation.getStore()?.(transport);
           active.socket.send(encoded);
         } catch {
@@ -1118,7 +1180,14 @@ export function responsesTransport(
           if (!started) for (const [name, value] of eventHeaders) headers.set(name, value);
           return;
         }
-        if (type === TIMING_EVENT) return;
+        if (type === TIMING_EVENT) {
+          const server = responseServerTiming(event, responseId);
+          if (server) transport.timing = { ...transport.timing, server };
+          return;
+        }
+        const eventResponseId = (event.response as { id?: unknown } | undefined)?.id;
+        if (responseId === undefined && typeof eventResponseId === "string")
+          responseId = eventResponseId;
         if (
           !started &&
           type === "error" &&
@@ -1127,7 +1196,6 @@ export function responsesTransport(
         ) {
           // A definitive refusal before any event reaches the caller permits
           // full input, but it is a new physical request: settle/re-admit first.
-          transport.input = "full";
           const resumeEvents = active.onEvent;
           active.onEvent = null;
           const pendingAdmission = (async () => {
@@ -1135,6 +1203,10 @@ export function responsesTransport(
             continuationAbort.signal.throwIfAborted();
             if (finished) return;
             signal?.throwIfAborted();
+            // Like the first transport entry, replacement preparation begins
+            // after custody admission, not during the refused request's wait.
+            preparationStartedAt = performance.now();
+            transport.input = "full";
             active.onEvent = resumeEvents;
             sendMessage(payload);
           })();

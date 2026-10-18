@@ -15,6 +15,7 @@ import {
 import { parseCodexUsageHeaders } from "../src/fetch";
 import {
   markResponsesPrefixReady,
+  hasResponsesTurn,
   type ResponsesTransportDiagnostic,
 } from "@opengeni/network/responses-websocket";
 
@@ -103,6 +104,7 @@ function harness(
       );
   return {
     transport: scoped,
+    rawTransport: transport,
     sockets,
     httpCalls,
     prefixReady: () => withResponsesConversation(turn, markResponsesPrefixReady),
@@ -111,6 +113,74 @@ function harness(
     },
   };
 }
+
+test("a title outside the conversation cannot take its warmed main socket", async () => {
+  const { transport, rawTransport, sockets, httpCalls } = harness();
+  transport.warm(URL, request().headers);
+  await Bun.sleep(1);
+  const titlePending = rawTransport(
+    URL,
+    request(
+      { model: "m", input: [], stream: true },
+      {
+        headers: {
+          ...request().headers,
+          "x-codex-turn-metadata": JSON.stringify({ request_kind: "session_title" }),
+        },
+      },
+    ),
+  );
+  await Bun.sleep(1);
+  const main = transport(URL, request());
+  await Bun.sleep(1);
+  for (const socket of sockets)
+    socket.emit({ type: "response.completed", response: { id: "main-1", output: [] } });
+  const title = await titlePending;
+  expect(title.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=not_eligible");
+  expect(sockets).toHaveLength(1);
+  expect(sockets[0]!.sent).toHaveLength(1);
+  const first = await main;
+  expect(first.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+    "websocket; connection=new; input=full; handshake_ms=0",
+  );
+  await first.text();
+  expect(httpCalls).toHaveLength(1);
+});
+
+test("clearing an inherited conversation keeps title traffic off the socket and preserves continuation", async () => {
+  const { rawTransport, sockets, httpCalls } = harness();
+  const turn = createResponsesTurn("conversation");
+  const user = { role: "user", content: "Question" };
+  await withResponsesConversation(turn, async () => {
+    const first = rawTransport(URL, request({ model: "m", input: [user], stream: true }));
+    const socket = await nextSend(() => sockets[0]);
+    socket.emit({ type: "response.completed", response: { id: "main-first", output: [] } });
+    await (await first).text();
+    await withResponsesConversation(undefined, async () => {
+      expect(hasResponsesTurn()).toBe(false);
+      rawTransport.warm(URL, request().headers);
+      const title = await rawTransport(URL, request());
+      expect(title.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=not_eligible");
+    });
+    expect(hasResponsesTurn()).toBe(true);
+    const second = rawTransport(
+      URL,
+      request({ model: "m", input: [user, { role: "user", content: "Follow-up" }], stream: true }),
+    );
+    for (let i = 0; i < 50 && socket.sent.length < 2; i++) await Bun.sleep(1);
+    expect(socket.sent[1]).toMatchObject({
+      previous_response_id: "main-first",
+      input: [{ role: "user", content: "Follow-up" }],
+    });
+    socket.emit({ type: "response.completed", response: { id: "main-second", output: [] } });
+    await (await second).text();
+    expect(sockets).toHaveLength(1);
+    expect(socket.closed).toBe(false);
+    expect(httpCalls).toHaveLength(1);
+    socket.close();
+  });
+  expect(hasResponsesTurn()).toBe(false);
+});
 
 function request(
   body: Record<string, unknown> = { model: "m", input: [], stream: true },
@@ -335,7 +405,9 @@ test("persistent socket resources do not inherit the opening request context", a
       return socket;
     },
   });
-  const pending = execution.run({ turn: "opening-turn" }, () => transport(URL, request()));
+  const pending = execution.run({ turn: "opening-turn" }, () =>
+    withResponsesConversation("conversation", () => transport(URL, request())),
+  );
   await nextSend(() => socket);
   expect(openingContext).toBeUndefined();
   socket.emit({ type: "response.completed", response: { id: "first" } });
@@ -504,11 +576,15 @@ test("a streamed request body, as the model client sends it, goes over the socke
     },
   );
   const body = { model: "m", input: [{ role: "user", content: "hi" }], stream: true };
-  const pending = transport(URL, streamedRequest(body));
+  const pending = withResponsesConversation("conversation", () =>
+    transport(URL, streamedRequest(body)),
+  );
   const socket = await nextSend(() => sockets[0]);
   expect(socket.sent[0]).toMatchObject({ type: "response.create", ...body });
   // While the socket is busy, the same kind of request still reaches HTTP whole.
-  const busy = await transport(URL, streamedRequest(body));
+  const busy = await withResponsesConversation("conversation", () =>
+    transport(URL, streamedRequest(body)),
+  );
   expect(busy.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=connection_busy");
   expect(httpBodies).toEqual([JSON.stringify(body)]);
   socket.emit({ type: "response.completed", response: { id: "r1" } });

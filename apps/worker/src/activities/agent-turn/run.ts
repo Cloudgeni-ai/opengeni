@@ -1298,12 +1298,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeTitleUsage(() =>
-              xaiSessionTitleContext
-                ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
-                : codexSessionTitleContext
-                  ? codexRequestStorage.run(codexSessionTitleContext, fn)
-                  : fn(),
+            withResponsesConversation(undefined, () =>
+              withClaudeTitleUsage(() =>
+                xaiSessionTitleContext
+                  ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
+                  : codexSessionTitleContext
+                    ? codexRequestStorage.run(codexSessionTitleContext, fn)
+                    : fn(),
+              ),
             );
           const withCodexRemoteCompaction = <T>(fn: () => Promise<T>): Promise<T> =>
             withClaudeUsage(() =>

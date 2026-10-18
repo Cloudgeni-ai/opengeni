@@ -51,6 +51,7 @@ export function codexRateLimitHeaders(event: Record<string, unknown>): Array<[st
 }
 export const CODEX_RESPONSES_WEBSOCKET_ENDPOINT = {
   label: "Codex",
+  conversationScoped: true,
   url: /^https:\/\/[^/]+\/.*\/codex\/responses(?:\?|$)/,
   beta: CODEX_RESPONSES_WEBSOCKET_BETA,
   eventHeaders: (event: Record<string, unknown>) =>

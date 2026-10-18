@@ -1644,7 +1644,12 @@ WebSocket (`packages/network/src/responses-websocket.ts`), with the Codex
 endpoint and metadata adapter in `packages/codex/src/responses-websocket.ts`.
 Each worker process keeps one socket per conversation and handshake identity;
 concurrent cold callers share one handshake and credential changes retire the
-old idle connection. A busy socket, a refused handshake, a non-streaming request, or any non-Responses URL uses
+old idle connection. Only explicitly scoped main-turn requests own that pool,
+including on Codex: a session-affinity header alone is not socket ownership.
+Titles explicitly leave the main conversation scope and use HTTP with unchanged
+authentication, affinity, request content and custody. They cannot retire a
+warmed main connection or replace its continuation chain.
+A busy socket, a refused handshake, a non-streaming request, or any non-Responses URL uses
 ordinary HTTP instead. Rate-limit and response-metadata events are mapped back
 to the same `x-codex-*` response headers the HTTP path returns, so usage
 accounting is unchanged. `OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED=false`
@@ -1672,8 +1677,8 @@ full-input resend, retaining the original deadline.
 
 The same transport serves the OpenAI API (`https://api.openai.com/v1/responses`)
 and Azure OpenAI's v1 API (`https://<resource>.openai.azure.com/openai/v1/responses`).
-There, each agent turn's model requests run as one conversation with its own
-connection; requests outside a turn (titles, summaries) and every other
+For all three providers, each agent turn's model requests run as one conversation
+with its own connection; requests outside a conversation (titles, summaries) and every other
 OpenAI-compatible host use HTTP. Azure's legacy deployment URLs
 (`/openai/deployments/...`) stay on HTTP. `OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED=false`
 turns this off.
@@ -1695,11 +1700,31 @@ EOF. Use the provider model-request lifecycle for semantic success or failure;
 HTTP transport `completed` means a successful-status body reached EOF, not that
 the model succeeded. The transport does not parse HTTP SSE a second time just
 for telemetry.
+Codex model-request receipts also separate `dispatchDelayMs` (audit start to
+transport dispatch) from `transport.timing.transportPreparationMs` (transport
+entry through body preparation/handshake to socket send) and
+`transport.timing.sendToFirstEventMs` (socket send to the first protocol response
+event). These intervals overlap; do not sum them. Receipts snapshot timing at
+their own phase, so later metadata never changes a previously emitted receipt.
+For a refused-continuation replacement, preparation restarts after fresh custody
+admission; the rejected request's provider wait and settlement are not preparation.
+`transport.timing.server` retains only finite, nonnegative, allowlisted fields
+from `responsesapi.websocket_timing.timing_metrics.critical_path` with
+`scope: "response"` and a matching response ID. Logical-turn cumulative totals
+are not per-response latency and are excluded. Missing fields are unknown, not
+zero. Timing frames remain out of the model/SSE stream and never affect dispatch
+or retry policy.
 Handshake-only warming sends no model request. Speculative `generate:false`
 prewarm is not enabled: final tools/instructions emerge at request construction,
 after startup preparation, and the remaining credential and custody checks
 cannot be bypassed. These measurements keep that decision testable without
 blocking a turn or sending a different prefix to the provider.
+The October 18, 2026 comparison trace's `generate:false` warmup completed in
+413 ms with no engine calls, no output tokens, and no cache read/write tokens.
+That establishes request-state preparation, not inference prefill or a net
+latency saving. The measured title/main contention is fixed without adding a
+warmup request. Compare physical send-to-first-event clocks after that correction
+before attributing a residual gap to client overhead or introducing speculation.
 
 Azure API-key credentials use the `api-key` header for both HTTP and WebSocket
 requests; Entra tokens retain bearer authentication and explicit caller-owned

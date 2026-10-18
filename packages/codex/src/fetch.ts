@@ -254,6 +254,7 @@ export function parseCodexUsageHeaders(headers: Headers): CodexUsageHeaderSnapsh
 
 type RequestAudit = {
   transport?: ModelRequestTransport;
+  dispatchDelayMs?: number;
   nextTransportAttempt: () => number;
   ctx: CodexRequestContext;
   requestId: string;
@@ -411,6 +412,10 @@ function requestEventFor(
     durationMs: Math.max(0, performance.now() - audit.attemptStartedAtMonotonic),
     timeoutPolicy: audit.policy,
     ...event,
+    ...(audit.dispatchDelayMs === undefined ? {} : { dispatchDelayMs: audit.dispatchDelayMs }),
+    // The transport fills timing as provider events arrive. Snapshot per receipt
+    // so later frames never mutate an already delivered diagnostic event.
+    ...(audit.transport ? { transport: structuredClone(audit.transport) } : {}),
   };
 }
 
@@ -528,6 +533,8 @@ async function fetchBeforeHeaders(
           audit.terminalOutcome = null;
           audit.settlement = null;
           audit.admitted = false;
+          delete audit.transport;
+          delete audit.dispatchDelayMs;
           audit.attemptStartedAtMonotonic = performance.now();
           await emitRequestEvent(audit, { phase: "started", responseObserved: false });
           replacementSignal.throwIfAborted();
@@ -547,6 +554,10 @@ async function fetchBeforeHeaders(
         withModelTransportObservation(
           (transport) => {
             audit.transport = transport;
+            audit.dispatchDelayMs = Math.max(
+              0,
+              performance.now() - audit.attemptStartedAtMonotonic,
+            );
           },
           () => base(input, { ...init, redirect: "error", signal: controller.signal }),
         ),
