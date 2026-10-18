@@ -1990,6 +1990,58 @@ describe("interaction attempt tools", () => {
     ]);
   });
 
+  test("observes an app target from its tree when it has no screenshot", async () => {
+    const target: ComputerTarget = { ...computerTarget(), id: "app-1", kind: "app" };
+    const observation = { ...computerObservation(target), frameId: null };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => observation,
+        captureComputerTarget: async () => {
+          throw new Error("window capture is not available");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_observe"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { computerSessionId, targetId: target.id },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).not.toHaveProperty("capturedFrame");
+    expect(result.content).toEqual([
+      {
+        type: "text",
+        text: `${computerObservationText(observation)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`,
+      },
+    ]);
+  });
+
+  test("still fails a window observation whose screenshot cannot be captured", async () => {
+    const target = computerTarget();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => computerObservation(target),
+        captureComputerTarget: async () => {
+          throw new Error("window capture is not available");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_observe"],
+      permissions: ["sessions:read"],
+    });
+    await expect(
+      definitions[0]!.execute(
+        { computerSessionId, targetId: target.id },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      ),
+    ).rejects.toThrow("window capture is not available");
+  });
+
   test("returns browser pixels only when a still image is requested", async () => {
     const target = browserTarget();
     const observation = browserObservation(target);
