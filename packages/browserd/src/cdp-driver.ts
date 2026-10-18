@@ -115,6 +115,10 @@ const MAX_FRAME_PROFILES_PER_TARGET = 4;
 const MAX_FRAME_SUBSCRIPTIONS_PER_TARGET = 32;
 const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 const NETWORK_IDLE_MS = 500;
+/** How long a navigation may wait for its server to answer before the tab
+ * stops loading. Chromium itself waits for the operating system's connect
+ * timeout, which outlives every caller's deadline. */
+const NAVIGATION_COMMIT_TIMEOUT_MS = 20_000;
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
 const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
@@ -333,6 +337,8 @@ export type AgentBrowserDriverOptions = {
   /** Install a virtual WebAuthn authenticator into every page target. Acting
    * on a tab then brings it to the front first: WebAuthn needs page focus. */
   passkeys?: BrowserPasskeyManager;
+  /** Test seam for the navigation commit deadline. */
+  navigationCommitTimeoutMs?: number;
 };
 
 export type BrowserSessionEmulation = {
@@ -395,6 +401,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly engine: "chromium" | "chrome" | "lightpanda";
   private readonly targetLifecycle: "runner" | "cdp";
   private readonly closeUnusedOwnedTabsOnEnd: boolean;
+  private readonly navigationCommitTimeoutMs: number;
   /** Tabs this session created, in a browser it does not own. */
   private readonly createdTargetIds = new Set<string>();
   private readonly tabControl: boolean;
@@ -494,6 +501,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       : null;
     this.targetLifecycle = options.targetLifecycle ?? "runner";
     this.closeUnusedOwnedTabsOnEnd = options.closeUnusedOwnedTabsOnEnd ?? false;
+    this.navigationCommitTimeoutMs =
+      options.navigationCommitTimeoutMs ?? NAVIGATION_COMMIT_TIMEOUT_MS;
     this.tabControl = options.tabControl ?? true;
     this.focusEmulation = options.focusEmulation ?? false;
     this.frameStreaming = options.frameStreaming ?? true;
@@ -5019,9 +5028,28 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     options: BrowserTabNavigationOptions = {},
   ): Promise<void> {
     this.connection?.assertNavigable?.(url);
-    const result = await this.sendActionTarget<{ errorText?: unknown }>(state, "Page.navigate", {
-      url,
-    });
+    let result: { errorText?: unknown };
+    try {
+      result = await this.sendActionTarget<{ errorText?: unknown }>(
+        state,
+        "Page.navigate",
+        { url },
+        { timeoutMs: this.navigationCommitTimeoutMs },
+      );
+    } catch (error) {
+      if (!(error instanceof CdpCommandTimeoutError)) throw error;
+      // The server never answered. Stop the pending navigation so the tab
+      // keeps its current document instead of committing at some later time.
+      await this.sendActionTarget(
+        state,
+        "Page.stopLoading",
+        {},
+        { potentialEffect: false, timeoutMs: TARGET_CLOSE_SETTLE_TIMEOUT_MS },
+      ).catch(() => undefined);
+      const failure = new NavigationNotAnsweredError(this.navigationCommitTimeoutMs);
+      failure.cause = error;
+      throw failure;
+    }
     if (
       typeof result.errorText === "string" &&
       result.errorText &&
@@ -5029,7 +5057,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ) {
       throw new InteractionDefiniteDriverError(
         "resource_unavailable",
-        "browser could not navigate to the requested URL",
+        isPageLoadError(result.errorText)
+          ? `browser could not navigate to the requested URL (${result.errorText})`
+          : "browser could not navigate to the requested URL",
         true,
       );
     }
@@ -5337,7 +5367,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     method: string,
     params: Readonly<Record<string, unknown>> = {},
-    options: { potentialEffect?: boolean; sessionId?: string } = {},
+    options: { potentialEffect?: boolean; sessionId?: string; timeoutMs?: number } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
     this.assertCurrentTargetState(state);
@@ -5353,6 +5383,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.actionEffectCount += 1;
     const command = connection.send<T>(method, params, {
       sessionId: options.sessionId ?? this.commandSession(state, method),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
     try {
       const result = await Promise.race([
@@ -6870,9 +6901,25 @@ async function ownedCdpProcessId(connection: BrowserCdpConnection): Promise<numb
 
 function isNavigationTimeout(error: unknown): boolean {
   return (
-    error instanceof CdpCommandTimeoutError ||
-    (error instanceof InteractionDefiniteDriverError && error.code === "timeout")
+    !(error instanceof NavigationNotAnsweredError) &&
+    (error instanceof CdpCommandTimeoutError ||
+      (error instanceof InteractionDefiniteDriverError && error.code === "timeout"))
   );
+}
+
+/** The server never answered and the tab stopped loading: unlike a slow
+ * page, nothing will appear in it later. */
+class NavigationNotAnsweredError extends InteractionDefiniteDriverError {
+  constructor(timeoutMs: number) {
+    super(
+      "timeout",
+      `browser could not load the requested URL: its server did not respond within ${Math.round(
+        timeoutMs / 1_000,
+      )} seconds`,
+      true,
+    );
+    this.name = "NavigationNotAnsweredError";
+  }
 }
 
 /** Chromium reports a page that could not load (DNS, connection, TLS, ...)

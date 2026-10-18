@@ -2281,3 +2281,71 @@ chromiumE2e(
   },
   60_000,
 );
+
+chromiumE2e(
+  "a page whose server never answers fails within the commit deadline and names the cause",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-silent-server-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `silent_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+      navigationCommitTimeoutMs: 2_000,
+    });
+    // Accepts connections and never answers, like a server behind a stalled
+    // proxy; a black-holed address behaves the same from the browser's side.
+    const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+    const freed = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+    const refusedPort = freed.port;
+    freed.stop(true);
+    try {
+      const initial = await driver.start(fixture("Before"));
+      const started = Date.now();
+      // The request was sent, so the action outcome stays conservative, but
+      // the receipt names why the page did not load.
+      const navigation = driver.dispatch(
+        command(initial, { type: "navigate", url: `http://127.0.0.1:${silent.port}/` }),
+      );
+      await expect(navigation).rejects.toMatchObject({ code: "outcome_unknown" });
+      await expect(navigation).rejects.toThrow(
+        "timeout: browser could not load the requested URL: its server did not respond within 2 seconds",
+      );
+      expect(Date.now() - started).toBeLessThan(10_000);
+      // The tab stopped loading and still shows the page it had.
+      expect(names(await driver.observe(initial.target.id))).toContain("Static page content");
+      await expect(
+        driver.openTarget(`http://127.0.0.1:${silent.port}/opened`),
+      ).rejects.toMatchObject({ code: "timeout" });
+      expect(await driver.listTargets()).toHaveLength(1);
+      // A page that can't load names Chromium's reason.
+      await expect(
+        driver.openTarget(`http://127.0.0.1:${refusedPort}/refused`),
+      ).rejects.toMatchObject({
+        code: "resource_unavailable",
+        message: "browser could not navigate to the requested URL (net::ERR_CONNECTION_REFUSED)",
+      });
+    } finally {
+      silent.stop(true);
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
