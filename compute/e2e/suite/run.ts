@@ -449,16 +449,29 @@ check("run-as", "commands as another user", ["create"], async () => {
   );
 });
 
+/** Names the step a failure came from. */
+async function step<T>(name: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    throw new Error(`${name}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 for (const level of ["paused", "saved", "archived", "remote"]) {
   check(`sleep-${level}`, `sleep at ${level} and wake on the next request`, ["files"], async () => {
     const marker = `${level}-${rand()}`;
-    await og("POST", `${ses()}/fs/write`, { path: `e2e/${level}.txt`, content: marker, encoding: "utf8" });
+    await step("write before sleeping", () =>
+      og("POST", `${ses()}/fs/write`, { path: `e2e/${level}.txt`, content: marker, encoding: "utf8" }),
+    );
     const before = await sandbox();
     let start = Date.now();
-    await fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level });
+    await step("sleep", () => fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level }));
     const slept = seconds(start);
     start = Date.now();
-    const out = await execOk(`cat e2e/${level}.txt e2e/hello.txt`, 120_000);
+    const out = await step("first command after sleeping", () =>
+      execOk(`cat e2e/${level}.txt e2e/hello.txt`, 120_000),
+    );
     const woke = seconds(start);
     if (!out.includes(marker) || !out.includes(state.marker!)) throw new Error(`after wake: ${out}`);
     const after = await sandbox();
@@ -470,9 +483,22 @@ check("move", "a move to another host keeps the sandbox's files", ["files", "hos
   const before = await sandbox();
   const target = (await hosts()).find((host) => host.state === "live" && host.name !== before.host);
   if (!target) throw new Error("no other live host");
+  // A sandbox is handed off only while it sleeps; an operator's drain
+  // moves the sleeping ones, so the check puts it to sleep first.
   const start = Date.now();
-  await fabric("POST", `/v1/sandboxes/${state.sandbox}/move`, { to: target.name });
-  const out = await execOk("cat e2e/hello.txt", 120_000);
+  await step("sleep", () => fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level: "saved" }));
+  await step("move", async () => {
+    // A sleep the host is still finishing answers busy for a moment.
+    for (let tries = 0; ; tries += 1) {
+      try {
+        return await fabric("POST", `/v1/sandboxes/${state.sandbox}/move`, { to: target.name });
+      } catch (error) {
+        if (tries >= 30 || !String(error).includes('"busy"')) throw error;
+        await Bun.sleep(2_000);
+      }
+    }
+  });
+  const out = await step("first command after the move", () => execOk("cat e2e/hello.txt", 120_000));
   const after = await sandbox();
   if (!out.includes(state.marker!)) throw new Error(`after the move: ${out}`);
   if (after.host !== target.name) throw new Error(`on ${after.host}, not ${target.name}`);

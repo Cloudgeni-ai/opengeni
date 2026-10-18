@@ -70,12 +70,12 @@ subset with what it needs.
 | files | `fs/write`, `fs/read` and `fs/list` (the file browser's API) agree |
 | git | `git/status` and `git/log` of a repository made in the sandbox |
 | terminal | a PTY opened through the API echoes a typed command on the event stream |
-| port | an HTTP server in the sandbox answers through the fabric's `connect` stream |
+| port | an HTTP server on a guest TCP port answers through the fabric's `connect` stream to the guest gateway (vsock 57, header `tcp <port>`) |
 | browser | the agent opens a page with the in-sandbox browser and reports its title |
 | desktop | the agent opens a computer session that comes up (not failed), takes a screenshot and describes it |
 | run-as | runs a command and writes a file as a non-root user of the image, then checks the uid and the file's owner; not applicable while Opengeni has no way to ask for a sandbox's commands to run as another user |
 | sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level; the next Opengeni request wakes it, with its files |
-| move | the fabric moves the sandbox to another host; its files come along |
+| move | the sandbox sleeps (Saved) and the fabric moves it to another host; its files come along |
 | host-loss | after a sleep to remote, the sandbox's host is stopped; the sandbox wakes on another host from that copy |
 | delete | deleting the session deletes its sandbox on the fabric (a run that stops earlier still deletes its session) |
 | ui | Playwright in the web app: the Files tab lists the file, a command typed in the Terminal tab runs, the Desktop tab draws the desktop |
