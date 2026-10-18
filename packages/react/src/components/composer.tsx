@@ -1334,6 +1334,63 @@ export type ComposerSendButtonProps = Omit<
   OwnedButtonProps
 >;
 
+export type ComposerAlternateSendButtonProps = ComposerSendButtonProps;
+
+/**
+ * The other way to send while the agent works, beside Send: Steer when Send
+ * queues, Queue when Send steers. It appears once there is something to send,
+ * so touch users (who have no Cmd/Ctrl+Enter) always have both choices.
+ */
+export const AlternateSendButton = forwardRef<HTMLButtonElement, ComposerAlternateSendButtonProps>(
+  function ComposerAlternateSendButton(
+    { className, "aria-label": ariaLabel, title, children, ...props },
+    ref,
+  ) {
+    const t = useOpenGeniText();
+    const controller = useComposerController();
+    if (
+      !controller.running ||
+      controller.paused ||
+      controller.submitBlocker === "empty" ||
+      controller.submitBlocker === "disabled"
+    )
+      return null;
+    const queues = controller.busySend === "steer";
+    const label = queues
+      ? (controller.messages.queueLabel ?? t("composerMessages.queue"))
+      : (controller.messages.steerLabel ?? t("composerMessages.steer"));
+    const tip =
+      title ??
+      (queues
+        ? (controller.messages.queueTitle ?? t("composerMessages.queueItToRunAfter"))
+        : (controller.messages.steerTitle ?? t("composerMessages.steerTheAgentReadsIt")));
+    return (
+      <ComposerTip tip={tip}>
+        <button
+          data-analytics-action={queues ? "queue" : "steer"}
+          data-og-composer-alternate-send=""
+          {...props}
+          ref={ref}
+          type="button"
+          onClick={() => void controller.submit("steer")}
+          disabled={!controller.canSubmit}
+          aria-label={ariaLabel ?? label}
+          className={cn(
+            "inline-flex h-8 items-center justify-center rounded-og-md px-2.5 pointer-coarse:h-11 pointer-coarse:px-3.5",
+            "border border-og-border bg-og-surface-1 text-og-control font-medium text-og-fg",
+            "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
+            "hover:bg-og-surface-2 active:scale-95",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+            className,
+          )}
+        >
+          {children ?? label}
+        </button>
+      </ComposerTip>
+    );
+  },
+);
+
 export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>(
   function ComposerSendButton(
     { className, "aria-label": ariaLabel, title, children, ...props },

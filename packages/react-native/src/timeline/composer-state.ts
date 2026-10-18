@@ -26,6 +26,22 @@ export function composerTrailingMode(input: {
 }
 
 /**
+ * The other send choice beside Send while the agent works: Queue when Send
+ * steers, Steer when Send queues. Offered only while running (not paused),
+ * when the trailing action is Send and the host can deliver the alternate.
+ */
+export function composerAlternateSend(input: {
+  trailing: ComposerTrailingMode;
+  running?: boolean | undefined;
+  paused?: boolean | undefined;
+  busySend?: "queue" | "steer" | undefined;
+  available: boolean;
+}): "queue" | "steer" | null {
+  if (!input.available || !input.running || input.paused || input.trailing !== "send") return null;
+  return input.busySend === "steer" ? "queue" : "steer";
+}
+
+/**
  * The loading copy beside the orb: a host's own phrases replace both phases',
  * as the web timeline's loading `phrases` option does; otherwise the built-in
  * preparing or waiting copy.

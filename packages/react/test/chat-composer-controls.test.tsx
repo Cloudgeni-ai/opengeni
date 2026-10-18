@@ -139,6 +139,44 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     expect(textarea?.getAttribute("aria-keyshortcuts")).toContain("Meta+Enter");
   });
 
+  test("while the agent works, the other send choice sits beside Send", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    const alternate = () =>
+      mounted!.container.querySelector<HTMLButtonElement>("[data-og-composer-alternate-send]");
+    const queueing = (): ComposerState => ({
+      ...composer(spy),
+      busySend: "queue",
+      sendToQueue: async () => {
+        spy.sends.push("queue");
+        return true;
+      },
+    });
+    mounted = await renderComponent(<ChatComposer composer={queueing()} />);
+    // Idle: Send is the only way to send.
+    expect(alternate()).toBeNull();
+
+    // Working, Send queues: Steer sits beside it.
+    await mounted.rerender(<ChatComposer composer={queueing()} running />);
+    expect(alternate()?.textContent).toBe("Steer");
+    expect(alternate()?.getAttribute("title")).toContain("within seconds");
+    await act(async () => alternate()?.click());
+    expect(spy.sends).toEqual(["steer"]);
+
+    // Working, Send steers: Queue sits beside it, so touch users can still queue.
+    const steering: ComposerState = { ...queueing(), busySend: "steer" };
+    await mounted.rerender(<ChatComposer composer={steering} running />);
+    expect(alternate()?.textContent).toBe("Queue");
+    expect(alternate()?.getAttribute("data-analytics-action")).toBe("queue");
+    await act(async () => alternate()?.click());
+    expect(spy.sends).toEqual(["steer", "queue"]);
+
+    // Nothing to send: no alternate choice either.
+    await mounted.rerender(
+      <ChatComposer composer={{ ...steering, value: "", canSend: false }} running />,
+    );
+    expect(alternate()).toBeNull();
+  });
+
   test("running shows one Pause control; paused replaces it with one Resume control", async () => {
     const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
     const active: EffectiveSessionControl = {

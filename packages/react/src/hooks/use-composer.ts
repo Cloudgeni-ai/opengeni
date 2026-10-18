@@ -82,7 +82,9 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
      * What an ordinary Send does while the agent is working (while
      * `sendDestination` reports `queue`). `queue` (default) runs the message
      * after the current turn. `steer` delivers it as a Steer instead: the
-     * agent reads it within seconds, without stopping work in progress. `sendToQueue` and `steer` stay explicit either way.
+     * agent reads it within seconds (a reply still being written stops;
+     * running tools keep going). `sendToQueue` and `steer` stay explicit
+     * either way.
      */
     busySend?: ComposerBusySend | undefined;
     /** Disable remote composer-draft reads and writes for embedded hosts. */

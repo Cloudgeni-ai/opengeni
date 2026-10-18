@@ -273,6 +273,13 @@ function SessionScreenBody({
         value: composer.value,
         onChangeText: composer.setValue,
         onSend: () => void composer.send(),
+        // The other choice beside Send while the agent works: Queue when
+        // Send steers, Steer when Send queues.
+        onAlternateSend: () =>
+          void (composer.busySend === "steer"
+            ? (composer.sendToQueue ?? composer.send)()
+            : composer.steer()),
+        busySend: composer.busySend,
         canSend: composer.canSend && !busy,
         sending: composer.sending,
         running: controller.runActive,

@@ -67,6 +67,8 @@ export interface OpenGeniNativeLabels {
   composerPlaceholder: string;
   send: string;
   steer: string;
+  /** Queue a message behind the running work (the alternate action when Send steers). */
+  queue: string;
   pause: string;
   resume: string;
   savingDraft: string;
@@ -198,6 +200,7 @@ export const DEFAULT_OPENGENI_NATIVE_LABELS = (t: OpenGeniText) =>
     composerPlaceholder: t("native.presentation.messageTheAgent"),
     send: t("native.presentation.send"),
     steer: t("native.presentation.steer"),
+    queue: t("native.presentation.queue"),
     pause: t("native.presentation.pause"),
     resume: t("native.presentation.resume"),
     savingDraft: t("native.presentation.savingDraft"),

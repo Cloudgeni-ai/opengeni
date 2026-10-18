@@ -496,6 +496,39 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(adoptions).toBe(1);
   });
 
+  test("a waiting Steer leaves a turn-scoped command's wait alone, so the handover never stops it", async () => {
+    const controller = createTurnToolCancellationController();
+    let reads = 0;
+    const exec = functionTool("exec_command", async () => running(121, "compiling\n"));
+    // The third read reports the short command finished.
+    const write = functionTool("write_stdin", async () => {
+      reads += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return reads >= 3 ? "Process exited with code 0\n\nOutput:\ndone\n" : running(121, "");
+    });
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 121,
+      canAdoptRetainedProcessAsBackgroundCommand: () => false,
+    };
+    const [wrappedExec] = controller.wrapTools([exec, write], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    controller.setForegroundWaitYield(true);
+    const output = String(
+      await wrappedExec!.invoke(
+        runContext,
+        JSON.stringify({ cmd: "short-build", yield_time_ms: 30_000 }),
+      ),
+    );
+
+    // The wait ran on to the command's own exit instead of returning a
+    // turn-scoped handle that the Steer's handover would stop.
+    expect(reads).toBe(3);
+    expect(output).toContain("Process exited with code 0");
+    expect(output).toContain("done");
+  });
+
   test("a bare interactive shell is adopted like any other command and outlives the turn", async () => {
     const controller = createTurnToolCancellationController();
     let adoptions = 0;

@@ -101,10 +101,16 @@ export interface NativeComposerActionContext {
   canSubmit: boolean;
   draftSaving: boolean;
   submitLabel: string;
+  /**
+   * The other way to send while the agent works: Queue when Send steers,
+   * Steer when Send queues. Offered while `runActive` and not `paused`.
+   */
+  alternateSubmitLabel: string;
   onAttachDocument(): void;
   onAttachImage(): void;
   onTogglePause(): void;
   onSubmit(): void;
+  onAlternateSubmit(): void;
 }
 
 export type NativeComposerActionRenderer = (context: NativeComposerActionContext) => ReactNode;
@@ -1778,10 +1784,15 @@ function Composer({
     canSubmit: controller.composer.canSend && !busy,
     draftSaving: controller.composer.draftSaving,
     submitLabel: labels.send,
+    alternateSubmitLabel: controller.composer.busySend === "steer" ? labels.queue : labels.steer,
     onAttachDocument: () => void controller.attachments.pickDocuments(),
     onAttachImage: () => void controller.attachments.pickImages(),
     onTogglePause: () => void (paused ? controller.composer.resume() : controller.composer.pause()),
     onSubmit: () => void controller.composer.send(),
+    onAlternateSubmit: () =>
+      void (controller.composer.busySend === "steer"
+        ? (controller.composer.sendToQueue ?? controller.composer.send)()
+        : controller.composer.steer()),
   };
   const composerContext: NativeComposerRenderContext = {
     ...actionContext,
@@ -1887,6 +1898,15 @@ function DefaultComposerActions(context: NativeComposerActionContext) {
           variant="quiet"
           disabled={context.busy}
         />
+        {context.runActive && !context.paused ? (
+          <ActionButton
+            label={context.alternateSubmitLabel}
+            onPress={() => context.onAlternateSubmit()}
+            theme={context.theme}
+            variant="quiet"
+            disabled={!context.canSubmit}
+          />
+        ) : null}
         <ActionButton
           label={context.submitLabel}
           onPress={() => context.onSubmit()}

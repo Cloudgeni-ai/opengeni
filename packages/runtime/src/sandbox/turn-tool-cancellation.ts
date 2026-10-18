@@ -315,9 +315,11 @@ export type TurnToolCancellationFence = {
    * While active, every model-facing foreground wait (the exec_command and
    * write_stdin wait windows) returns at its next provider slice with the
    * process's live handle, exactly as when its window ends: the process keeps
-   * running and is adopted as a session background command where the provider
-   * allows. The worker activates this while a Steer waits for this turn, so
-   * the Steer is read within a slice instead of after the requested wait.
+   * running and is adopted as a session background command. A handle that
+   * cannot become one (turn-scoped, held in this worker's memory) keeps its
+   * requested wait, since the handover would stop it. The worker activates
+   * this while a Steer waits for this turn, so the Steer is read within a
+   * slice instead of after the requested wait.
    */
   setForegroundWaitYield(active: boolean): void;
   /**
@@ -2033,8 +2035,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       // that lands between slices never lets the command be adopted below.
       if (this.cancelled) throw cancellationError(this.reason);
       if (performance.now() - startedAt >= waitMs) break;
-      // A Steer is waiting: return control now, as if the window had ended.
-      if (this.foregroundWaitYield) break;
+      // A Steer is waiting: return control now, as if the window had ended,
+      // when the process keeps running as a session background command. A
+      // turn-scoped handle would stop at the handover, so its wait runs on
+      // and the Steer is read once the call returns.
+      if (this.foregroundWaitYield && canAdoptInBackground) break;
       if (quietReturnAfterMs !== undefined && lastOutputAt !== null) {
         const now = performance.now();
         const quietMs = now - lastOutputAt;

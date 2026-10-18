@@ -116,7 +116,7 @@ export function useOpenGeniNativeSession(input: {
   /**
    * What an ordinary Send does while the agent is working: `queue` (default)
    * runs it after the current turn; `steer` has the agent read it within
-   * seconds, without stopping work in progress.
+   * seconds (a reply still being written stops; running tools keep going).
    */
   busySend?: ComposerBusySend;
 }): OpenGeniNativeSessionController {

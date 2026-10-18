@@ -588,17 +588,11 @@ function RenameWorkspaceDialog({
 }
 
 /**
- * Jev-backed code_search agent tool. Shown only when the deployment offers it.
- * "Default" follows the deployment (which may give the tool to half of all
- * sessions during an experiment). Each session keeps the choice it was created
- * with, so its cached prompt stays stable; Off also pauses the tool in running
- * sessions until it is switched back.
- */
-/**
  * What Send does while the agent is working, for everyone in this workspace's
  * console. Steer suits people who should not need to know the difference:
  * the agent reads the message within seconds instead of after the whole
- * turn. Cmd/Ctrl+Enter keeps the other choice one keystroke away.
+ * turn. The other choice stays beside Send while the agent works (and on
+ * Cmd/Ctrl+Enter), so it is one tap away on phones too.
  */
 function BusySendPreferenceRow({
   workspaceId,
@@ -638,8 +632,8 @@ function BusySendPreferenceRow({
       label="Send while the agent works"
       description={
         value === "steer"
-          ? "Steer: the agent reads your message within seconds, without stopping its work. Cmd/Ctrl+Enter queues it instead."
-          : "Queue: your message runs after the current turn. Cmd/Ctrl+Enter steers instead."
+          ? "Steer: the agent reads your message within seconds. A reply it is writing stops and it answers with your message in mind; tools and commands it started keep running. Queue is next to Send while it works."
+          : "Queue: your message runs after the agent finishes its current work. Steer is next to Send while it works."
       }
       controlWidth="auto"
       control={
@@ -661,6 +655,13 @@ function BusySendPreferenceRow({
   );
 }
 
+/**
+ * Jev-backed code_search agent tool. Shown only when the deployment offers it.
+ * "Default" follows the deployment (which may give the tool to half of all
+ * sessions during an experiment). Each session keeps the choice it was created
+ * with, so its cached prompt stays stable; Off also pauses the tool in running
+ * sessions until it is switched back.
+ */
 function CodeSearchPreferenceRow({
   workspaceId,
   canManage,

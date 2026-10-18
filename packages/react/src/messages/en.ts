@@ -574,8 +574,11 @@ export const englishMessages = {
     "Pause this workstream; queued prompts and approvals are preserved",
   "composerMessages.previewName": "Preview {name}",
   "composerMessages.previewUnavailable": "Preview unavailable",
+  "composerMessages.queue": "Queue",
   "composerMessages.queuedAhead_one": "{count} waiting prompt; your message joins the queue.",
   "composerMessages.queuedAhead_other": "{count} waiting prompts; your message joins the queue.",
+  "composerMessages.queueItToRunAfter":
+    "Queue: runs after the agent finishes its current work (Cmd/Ctrl+Enter)",
   "composerMessages.queueMessageEnterSteerWith": "Queue message (Enter); steer with Cmd/Ctrl+Enter",
   "composerMessages.reasonsThisWorkstreamIsPaused": "Reasons this workstream is paused",
   "composerMessages.removeName": "Remove {name}",
@@ -596,6 +599,9 @@ export const englishMessages = {
   "composerMessages.sendMessage": "Send message",
   "composerMessages.showPauseDetails": "Show pause details",
   "composerMessages.slashCommands": "Slash commands",
+  "composerMessages.steer": "Steer",
+  "composerMessages.steerTheAgentReadsIt":
+    "Steer: the agent reads it within seconds; running tools keep going (Cmd/Ctrl+Enter)",
   "composerMessages.steerMessageEnterQueueWith":
     "Send (Enter): the agent reads it within seconds. Queue with Cmd/Ctrl+Enter",
   "composerMessages.stillPausedByDisplayname": "Still paused by {displayName}",
@@ -1837,6 +1843,7 @@ export const englishMessages = {
   "native.presentation.other": "Other",
   "native.presentation.pause": "Pause",
   "native.presentation.preparing": "Preparing…",
+  "native.presentation.queue": "Queue",
   "native.presentation.queued": "Queued",
   "native.presentation.queuedPrompts": "Queued prompts",
   "native.presentation.reasoning": "Reasoning",
@@ -2340,7 +2347,7 @@ export const englishMessages = {
     "Show full content for queued prompt {number}",
   "queueSurfaceImplementation.steer": "Steer",
   "queueSurfaceImplementation.steerInterruptTheCurrentTurn":
-    "Steer — the agent reads this message now, without stopping its work",
+    "Steer: the agent reads this message within seconds; running tools keep going",
   "queueSurfaceImplementation.steerQueuedPromptIndex": "Steer queued prompt {index}",
   "queueSurfaceImplementation.thatPromptChangedBeforeIt":
     "That prompt changed before it could be moved to the composer.",
@@ -2705,7 +2712,7 @@ export const englishMessages = {
   "sessionChrome.steer": "Steer",
   "sessionChrome.steerLatestQueuedMessage": "Steer latest queued message",
   "sessionChrome.steerQueuedPromptIndex": "Steer queued prompt {index}",
-  "sessionChrome.steerTip": "The agent reads this message now, without stopping its work",
+  "sessionChrome.steerTip": "The agent reads this message within seconds; running tools keep going",
   "sessionChrome.theApplicationSUsagePolicy":
     "The application's usage policy blocks another run. Resume when it allows.",
   "sessionChrome.theSelectedModelIsBlocked":

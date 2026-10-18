@@ -1,5 +1,6 @@
-// Console chrome around the shared chat composer. Enter queues; Cmd/Ctrl+Enter
-// steers, so there is no persistent delivery-mode switch to get out of sync.
+// Console chrome around the shared chat composer. While the agent works, Send
+// follows the workspace's choice (queue or steer) and the other choice sits
+// beside it (also Cmd/Ctrl+Enter), so there is no per-message mode to track.
 import {
   ChatComposer,
   useFileAttachments,
@@ -26,6 +27,8 @@ export function ConsoleComposer(props: {
   composer: ComposerState;
   attachments: UseFileAttachmentsResult;
   effectiveControl?: EffectiveSessionControl | null;
+  /** The agent is working; offers the other send choice beside Send. */
+  running?: boolean;
   queuedAheadCount?: number;
   canControlWorkspace?: boolean;
   controlLinks?: {
@@ -59,6 +62,7 @@ export function ConsoleComposer(props: {
       responsiveBasis="container"
       composer={props.composer}
       effectiveControl={props.effectiveControl}
+      running={props.running === true}
       queuedAheadCount={props.queuedAheadCount}
       canControlWorkspace={props.canControlWorkspace}
       controlLinks={props.controlLinks}
