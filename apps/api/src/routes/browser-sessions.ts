@@ -2748,24 +2748,36 @@ export function registerBrowserSessionRoutes(
     },
   );
 
-  /** Run one working-copy request against an active browser's own controller
-   * generation, with the same session.control and placement authority as any
-   * browser control. The controller binds every request to the exact
-   * controller authority the copy was launched under. Never replayed. */
+  /** Run one working-copy request against the controller generation that owns
+   * the browser's working copy, with the same session.control and placement
+   * authority as any browser control: an active browser's own generation, or
+   * for a lost browser the retained generation a resume would continue from.
+   * The controller binds every request to the exact controller authority the
+   * copy was launched under. Never replayed. */
   async function withPreservedWorkingCopy<T>(
     context: Context,
-    callback: (input: {
-      grant: AccessGrant;
-      workspaceId: string;
-      browserSessionId: string;
-      client: BrowserControlClient;
-      authority: PlacementBrowserWorkingCopyAuthority;
-    }) => Promise<T>,
+    callback: PreservedWorkingCopyCallback<T>,
   ): Promise<T> {
     const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
       context,
       "sessions:control",
     );
+    const current = await getBrowserSessionControlRecord(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    }).catch((error: unknown) => {
+      throw browserRouteError(error);
+    });
+    if (current.session.lifecycle === "lost") {
+      return await withLostBrowserWorkingCopy(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        callback,
+      );
+    }
     return await withActiveBrowserController(
       context,
       grant,
@@ -2808,6 +2820,119 @@ export function registerBrowserSessionRoutes(
       },
       // A missing controller session is the state being inspected; never
       // launch anything to "recover" it here.
+      false,
+    );
+  }
+
+  /** A lost browser has no active controller binding, but the controller
+   * generation of its last launch still owns its working copy, exactly as
+   * resume uses it. Inspecting, adopting or reverting that copy goes to the
+   * same generation; nothing is launched here. */
+  async function withLostBrowserWorkingCopy<T>(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    browserSessionId: string,
+    callback: PreservedWorkingCopyCallback<T>,
+  ): Promise<T> {
+    try {
+      return await reachLostBrowserWorkingCopy(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        callback,
+      );
+    } catch (error) {
+      throw browserRouteError(error);
+    }
+  }
+
+  async function reachLostBrowserWorkingCopy<T>(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    browserSessionId: string,
+    callback: PreservedWorkingCopyCallback<T>,
+  ): Promise<T> {
+    const record = await getBrowserSessionControlRecord(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    await authorizeSourceSession(deps, grant, record.sourceSessionId, "session.control");
+    const expired = await getExpiredBrowserSessionResume(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    if (!expired?.controllerGeneration) {
+      throw new BrowserSessionStateError(
+        "This browser was lost without a working copy that its controller still keeps, so there is nothing to inspect or adopt. Resume it to restore its last saved state.",
+      );
+    }
+    const retained = record.session.controller;
+    if (
+      retained ? retained.controllerGeneration !== expired.controllerGeneration : expired.settleable
+    ) {
+      throw new BrowserSessionStateError("BrowserSession controller authority changed");
+    }
+    const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+    if (
+      record.session.placement.kind === "connected_machine" &&
+      sourceSession.activeSandboxId !== record.session.placement.sandboxId
+    ) {
+      throw new BrowserSessionStateError(
+        "The chat that created this browser is no longer attached to the machine the browser ran on, so its working copy cannot be reached. Attach the chat to that machine again first.",
+      );
+    }
+    return await withBrowserPlacement(
+      sourceSession,
+      grant,
+      record.session.placement,
+      retained?.placementInstanceId ?? null,
+      "browser.control",
+      context.req.raw.signal,
+      async (placement) => {
+        const transport = browserRuntimeTransport(record.session, placement.transport);
+        if (
+          transport.kind !== "managed" ||
+          transport.engine !== "chromium" ||
+          transport.ephemeralPartition ||
+          browserSessionStorageMode(record.session) !== "private_profile"
+        ) {
+          throw new BrowserSessionStateError(WORKING_COPY_REFUSAL_EXPLANATIONS.unsupported_browser);
+        }
+        const client = await provisionController(
+          deps,
+          grant,
+          record,
+          placement,
+          requestOrigin(context, deps.settings),
+        );
+        const tokens = deriveBrowserSessionControllerTokens({
+          rootSecret: browserAuthorityRoot(deps),
+          accountId: grant.accountId,
+          workspaceId,
+          placement: record.session.placement,
+          placementInstanceId: placement.placementInstanceId,
+          browserSessionId,
+          controllerGeneration: expired.controllerGeneration!,
+          tokenGeneration: record.tokenGeneration,
+        });
+        return await callback({
+          grant,
+          workspaceId,
+          browserSessionId,
+          client,
+          authority: {
+            browserSessionId,
+            controllerGeneration: expired.controllerGeneration!,
+            tokenGeneration: record.tokenGeneration,
+            ...tokens,
+          },
+        });
+      },
       false,
     );
   }
@@ -6049,6 +6174,14 @@ function workingCopyAdoptionExplanation(
       return "The adoption stopped part way and is not running. Checking it never changes it. To finish it, retry the same adoption with the same operationId and manifestDigest under the authority that approved it; a retry repeats nothing already done. To undo it instead, revert it with revertBrowserSessionWorkingCopyAdoption. Do not start another.";
   }
 }
+
+type PreservedWorkingCopyCallback<T> = (input: {
+  grant: AccessGrant;
+  workspaceId: string;
+  browserSessionId: string;
+  client: BrowserControlClient;
+  authority: PlacementBrowserWorkingCopyAuthority;
+}) => Promise<T>;
 
 function browserRouteError(error: unknown): HTTPException {
   const tabDiagnosis = browserTabDiagnosisError(error);

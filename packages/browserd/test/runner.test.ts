@@ -921,7 +921,7 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       // A daemon whose browser still runs is never stopped.
       const serving = daemon(
         profile("2"),
-        `const c = require("node:child_process").spawn("/bin/sleep", ["60"], { stdio: "ignore" }); console.log(c.pid); ${idle}`,
+        `const c = require("node:child_process").spawn("/bin/sh", ["-c", "exec sleep 60"], { stdio: "ignore" }); console.log(c.pid); ${idle}`,
       );
       const outside = daemon(join(directory, "elsewhere", "profile"), idle);
       const reader = serving.stdout!.getReader();
