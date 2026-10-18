@@ -44,6 +44,8 @@ on:
       - "deploy/helm/opengeni/values.yaml"
       - "deploy/helm/opengeni/test/compute-control.test.ts"
       - ".github/workflows/compute-ci.yml"
+      # A release waits for this to pass on its commit.
+      - ".github/workflows/compute-release.yml"
   push:
     branches:
       - main
@@ -63,6 +65,8 @@ on:
       - "deploy/helm/opengeni/values.yaml"
       - "deploy/helm/opengeni/test/compute-control.test.ts"
       - ".github/workflows/compute-ci.yml"
+      # A release waits for this to pass on its commit.
+      - ".github/workflows/compute-release.yml"
   workflow_dispatch:
 
 concurrency:
