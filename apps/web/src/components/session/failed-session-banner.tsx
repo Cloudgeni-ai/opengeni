@@ -4,6 +4,7 @@ import { useEffect, useRef, type ComponentProps } from "react";
 import { Button } from "@/components/ui/button";
 import type { SessionFailureSummary } from "@/lib/events";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import type { FreeCreditGap } from "@/lib/free-credit-gap";
 import { analyticsAction } from "@/lib/analytics-actions";
 import {
   noteTurnFailureAction,
@@ -24,6 +25,8 @@ const NO_SUBSCRIPTIONS: ConnectableSubscriptions = { codex: false, supergrok: fa
 export function FailedSessionBanner({
   failure,
   creditExhausted,
+  freeCreditGap = null,
+  onChooseModel,
   workspaceId,
   canBuyCredits = false,
   canConnectModel = false,
@@ -41,6 +44,10 @@ export function FailedSessionBanner({
   /** Stable identity of this failure for the consent-gated recovery journey. */
   analyticsKey?: string;
   creditExhausted?: boolean;
+  /** Free credit remains for other models but not this one. */
+  freeCreditGap?: FreeCreditGap | null;
+  /** Select a model in the composer; offered for a covered model after a free-credit gap. */
+  onChooseModel?: (modelId: string) => void;
   workspaceId?: string;
   canBuyCredits?: boolean;
   canConnectModel?: boolean;
@@ -71,8 +78,11 @@ export function FailedSessionBanner({
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
   const billingFailure = creditExhausted && !structuralFailure;
   const chooseModel = canChooseModel && !structuralFailure;
+  const creditGap = billingFailure ? freeCreditGap : null;
   const { reason, unavailableModel, retryUnhelpful, detail, dailyLimit, compaction } =
-    failedSessionCopy(failure, billingFailure, modelChanged, chooseModel);
+    failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap);
+  const switchTo =
+    creditGap && !modelChanged && chooseModel && onChooseModel ? creditGap.covered[0] : undefined;
   // The free model's daily allowance is deployment-wide: name it and offer the
   // ways to keep going. Every other model keeps the generic daily-limit copy.
   const freeModelLimit = freeModel && dailyLimit && !structuralFailure;
@@ -163,7 +173,21 @@ export function FailedSessionBanner({
           </>
         ) : null}
         {billingFailure ? (
-          workspaceId && canBuyCredits ? (
+          switchTo ? (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                // The composer's model change reports the switch_model step.
+                onClick={() => onChooseModel!(switchTo.id)}
+              >
+                Use {switchTo.label}
+              </Button>
+              {workspaceId && canBuyCredits ? (
+                <BuyCreditsLink workspaceId={workspaceId} primary={false} />
+              ) : null}
+            </>
+          ) : workspaceId && canBuyCredits ? (
             <BuyCreditsLink workspaceId={workspaceId} primary />
           ) : workspaceId && canConnectModel ? (
             <ConnectModelLink workspaceId={workspaceId} label="Connect a model" />

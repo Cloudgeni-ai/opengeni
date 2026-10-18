@@ -30,6 +30,7 @@ import { useMessageSenderRenderer } from "@/components/session/message-senders";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { useSessionStartupTimeline } from "@/lib/session-startup-timeline";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { freeCreditGap } from "@/lib/free-credit-gap";
 import { timelineShowsFailure } from "@/lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import { useStreamHealthTelemetry } from "@/lib/stream-health";
@@ -2736,6 +2737,10 @@ function SessionChatPane(props: {
   const modelPickerDisabled =
     composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
   const canChooseRecoveryModel = !modelPickerDisabled;
+  // Free credit can still cover other models after this model's credit ran out.
+  const creditGap = props.creditExhausted
+    ? freeCreditGap(modelCatalog.rows, props.session.model, modelCatalog.defaultSelection?.model)
+    : null;
   // Shown while the banner chunk loads or if it fails. On the free model the
   // generic daily-limit line then gives way to the free-model copy; that brief
   // text change keeps the free-model copy out of the direct session bundle.
@@ -2747,6 +2752,7 @@ function SessionChatPane(props: {
           props.creditExhausted && !props.failure.structuralSandboxFailure,
           Boolean(composerPolicy && composerPolicy.model !== props.session.model),
           canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
+          creditGap,
         ).reason
       }
     </div>
@@ -3240,6 +3246,8 @@ function SessionChatPane(props: {
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
             creditExhausted={props.creditExhausted}
+            freeCreditGap={creditGap}
+            onChooseModel={setComposerModel}
             workspaceId={props.session.workspaceId}
             canBuyCredits={
               context.clientConfig.billingMode === "stripe" &&
@@ -3845,8 +3853,14 @@ function SessionChatPane(props: {
                     : props.creditExhausted &&
                         (props.session.status === "failed" || props.session.status === "idle")
                       ? // "Send a message to revive" is a dead end without credits —
-                        // the reply turn dies the same budget death.
-                        "Out of Opengeni credits — add credits to continue."
+                        // the reply turn dies the same budget death. With free
+                        // credit left for other models, a covered model revives it.
+                        creditGap
+                        ? selectedPolicyRow?.catalog.creditFunding === "promotional" ||
+                          selectedPolicyRow?.catalog.creditFunding === "general"
+                          ? "Send a follow-up…"
+                          : "Your free credits don't cover this model — choose another model or add credits."
+                        : "Out of Opengeni credits — add credits to continue."
                       : "Send a follow-up…"
                 }
                 controls={
