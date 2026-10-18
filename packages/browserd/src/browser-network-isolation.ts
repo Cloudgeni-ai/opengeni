@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -24,15 +24,21 @@ import { join, resolve } from "node:path";
  *     namespace root.
  *  1. As namespace root, turn off IPv6 duplicate-address detection (its late
  *     completion would itself be an address change inside the namespace),
- *     keep loopback IPv4-only (pasta forwards a host loopback port on both
- *     families and connects to the host on the same one, so a wrong-family
- *     connection is accepted and then reset; IPv4 is what nearly every local
- *     server listens on), point DNS at pasta's forwarder when the host's
- *     resolver is a loopback address, then wait for the helper to attach
- *     pasta to this namespace.
+ *     point DNS at pasta's forwarder when the host's resolver is a loopback
+ *     address, then wait for the helper to attach pasta to this namespace.
  *  2. Enter a nested user namespace that maps back to the person's own UID
  *     (Chrome refuses to run as root and needs a non-root sandbox), then
  *     exec Chrome with its DevTools port pinned to the one pasta forwards.
+ *
+ * Loopback keeps both address families, as on the host, so a server that
+ * listens only on ::1 (a dev server opened as localhost on many distributions)
+ * stays reachable. That needs a pasta that forwards each host loopback port
+ * only on the families the host listens on: a connection on the other family
+ * must be refused, so the browser falls back to the address that works, as it
+ * does on the host. Stock pasta listens on both families for every forwarded
+ * port and resets the wrong one after accepting it, which breaks localhost
+ * for any server listening on one family. The once-per-process probe checks
+ * exactly this with real listeners; a pasta that fails it is not used.
  */
 
 /** The namespace's own address. Not the host's: a page that loads the
@@ -67,8 +73,12 @@ export type BrowserNetworkIsolation =
   | { kind: "unavailable"; reason: string };
 
 const PROBE_TIMEOUT_MS = 5_000;
+/** How long the probe waits for each forwarded host port to answer. */
+const PROBE_CONNECT_DEADLINE_MS = 2_000;
 const NAMESPACE_READY_POLLS = 500;
 const NETWORK_READY_POLLS = 1_000;
+// At most about two seconds; past that, Chrome starts anyway.
+const ADDRESS_SETTLE_POLLS = 200;
 const REQUIRED_TOOLS = ["unshare", "setsid", "sleep", "rm", "mv", "cat", "mount"] as const;
 
 /** The one place that chooses which pasta managed browsers use. A pasta
@@ -124,7 +134,16 @@ async function probeBrowserNetworkIsolation(): Promise<BrowserNetworkIsolation> 
   }
   const tools = { pasta, shell, uid, gid, ...found } as BrowserNetworkIsolationTools;
   const directory = await mkdtemp(join(tmpdir(), "opengeni-browser-netns-probe-"));
+  const listeners: Server[] = [];
   try {
+    // One host server on IPv4 loopback only and one on IPv6 loopback only.
+    // Inside the namespace each must answer on its own family and refuse the
+    // other, which is how localhost behaves on the host itself.
+    const ipv4Only = await answeringListener("127.0.0.1");
+    if (!ipv4Only) return { kind: "unavailable", reason: "cannot listen on 127.0.0.1" };
+    listeners.push(ipv4Only.server);
+    const ipv6Only = await answeringListener("::1");
+    if (ipv6Only) listeners.push(ipv6Only.server);
     const script = join(directory, "probe.sh");
     await writeFile(
       script,
@@ -134,7 +153,7 @@ async function probeBrowserNetworkIsolation(): Promise<BrowserNetworkIsolation> 
         stateDirectory: directory,
         cdpPort: await freeLoopbackPort(),
         resolvOverride: null,
-        launch: "exit 0\n",
+        launch: loopbackFamilyCheck(ipv4Only.port, ipv6Only?.port ?? 0),
       }),
       { mode: 0o700, flag: "wx" },
     );
@@ -145,8 +164,76 @@ async function probeBrowserNetworkIsolation(): Promise<BrowserNetworkIsolation> 
       reason: result.stderr.trim().split("\n").at(-1) || "the namespace probe failed",
     };
   } finally {
+    for (const server of listeners) server.close();
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+/** A host loopback server on exactly one address that answers "ok". */
+async function answeringListener(
+  host: "127.0.0.1" | "::1",
+): Promise<{ server: Server; port: number } | null> {
+  const server = createServer((socket) => {
+    socket.on("error", () => undefined);
+    socket.end("ok\n");
+  });
+  return await new Promise((resolveListen) => {
+    server.once("error", () => resolveListen(null));
+    server.listen({ host, port: 0, ipv6Only: host === "::1" }, () => {
+      const address = server.address();
+      if (typeof address === "object" && address) resolveListen({ server, port: address.port });
+      else {
+        server.close();
+        resolveListen(null);
+      }
+    });
+  });
+}
+
+/** Script run inside the probe namespace: each host port answers on its own
+ * family and is refused (never accepted) on the other. Runs with the
+ * controller's own runtime, so no extra program is needed on the machine. */
+const LOOPBACK_FAMILY_CHECK = `
+const net = require("node:net");
+const [ipv4Port, ipv6Port] = process.argv.slice(-2).map(Number);
+const deadline = Date.now() + ${PROBE_CONNECT_DEADLINE_MS};
+const attempt = (host, port) => new Promise((done) => {
+  const socket = net.connect({ host, port });
+  let accepted = false;
+  let data = "";
+  socket.setTimeout(${PROBE_CONNECT_DEADLINE_MS}, () => socket.destroy());
+  socket.on("connect", () => (accepted = true));
+  socket.on("data", (chunk) => (data += chunk));
+  socket.on("error", () => undefined);
+  socket.on("close", () => done({ accepted, answered: data.startsWith("ok") }));
+});
+const answers = async (host, port) => {
+  for (;;) {
+    if ((await attempt(host, port)).answered) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((wait) => setTimeout(wait, 50));
+  }
+};
+const fail = (message) => {
+  console.error("browser network isolation: pasta " + message);
+  process.exit(1);
+};
+(async () => {
+  const checks = [["127.0.0.1", "::1", ipv4Port], ["::1", "127.0.0.1", ipv6Port]];
+  for (const [own, other, port] of checks) {
+    if (!port) continue;
+    if (!(await answers(own, port))) fail("does not forward a host server listening on " + own);
+    if ((await attempt(other, port)).accepted) {
+      fail("accepts " + other + " for a host server listening only on " + own + ", so localhost would break");
+    }
+  }
+  process.exit(0);
+})();
+`;
+
+function loopbackFamilyCheck(ipv4Port: number, ipv6Port: number): string {
+  const q = shellQuote;
+  return `BUN_BE_BUN=1 exec ${q(process.execPath)} -e ${q(LOOPBACK_FAMILY_CHECK)} ${ipv4Port} ${ipv6Port}\n`;
 }
 
 /** The pasta invocation that attaches to the namespace of a PID appended
@@ -170,9 +257,10 @@ export function pastaArguments(tools: BrowserNetworkIsolationTools, cdpPort: num
     "--tcp-ports",
     `127.0.0.1/${cdpPort}`,
     // Servers listening on the host's loopback are reachable from the
-    // browser's loopback, including ones started after launch.
+    // browser's loopback on the same families, including ones started after
+    // launch and ones on ephemeral ports (a bare "auto" leaves those out).
     "--tcp-ns",
-    "auto",
+    "auto,1-65535",
     "--udp-ports",
     "none",
     "--udp-ns",
@@ -231,8 +319,8 @@ export function browserNetworkIsolationScript(input: BrowserNetworkIsolationScri
     `exec ${q(tools.unshare)} ${stage1Namespaces} -- ${q(tools.shell)} ${wrapper} "$@"`,
     "fi",
     `if [ "$${STAGE}" = 1 ]; then`,
-    "  if [ -d /proc/sys/net/ipv6/conf/lo ]; then",
-    `    { echo 0 >/proc/sys/net/ipv6/conf/default/accept_dad && echo 0 >/proc/sys/net/ipv6/conf/all/accept_dad && echo 1 >/proc/sys/net/ipv6/conf/lo/disable_ipv6; } || ${fail("cannot configure the namespace")}`,
+    "  if [ -d /proc/sys/net/ipv6/conf/default ]; then",
+    `    { echo 0 >/proc/sys/net/ipv6/conf/default/accept_dad && echo 0 >/proc/sys/net/ipv6/conf/all/accept_dad; } || ${fail("cannot configure the namespace")}`,
     "  fi",
     input.resolvOverride
       ? `  ${q(tools.mount)} --bind ${q(input.resolvOverride)} /etc/resolv.conf || ${fail("cannot set the namespace's DNS")}`
@@ -241,12 +329,30 @@ export function browserNetworkIsolationScript(input: BrowserNetworkIsolationScri
     "  i=0",
     `  while [ ! -e ${marker("net-ready")} ]; do`,
     `    if [ -e ${marker("net-failed")} ]; then`,
-    `      while IFS= read -r line; do echo "$line" >&2; done <${marker("pasta.err")}`,
-    "      echo 'browser network isolation: pasta could not attach' >&2",
+    "      detail=",
+    `      while IFS= read -r line; do [ -n "$line" ] && detail=$line; done <${marker("pasta.err")}`,
+    `      echo "browser network isolation: pasta could not attach\${detail:+: $detail}" >&2`,
     "      exit 1",
     "    fi",
     `    i=$((i + 1)); [ "$i" -gt ${NETWORK_READY_POLLS} ] && { echo 'browser network isolation: pasta did not attach in time' >&2; exit 1; }`,
     `    ${q(tools.sleep)} 0.01`,
+    "  done",
+    // The kernel announces each new IPv6 address once more when its interface
+    // joins the address's solicited-node group, up to a second after pasta
+    // attaches. Chrome reads that late announcement as a network change and
+    // drops its connections, so start it once every group is joined.
+    "  i=0",
+    `  while [ -r /proc/net/if_inet6 ] && [ "$i" -lt ${ADDRESS_SETTLE_POLLS} ]; do`,
+    "    pending=",
+    "    while read -r address index length scope flags name; do",
+    '      [ "$name" = lo ] && continue',
+    "      group=ff0200000000000000000001ff${address#??????????????????????????}",
+    "      joined=",
+    '      while read -r gindex gname gaddress rest; do [ "$gname" = "$name" ] && [ "$gaddress" = "$group" ] && joined=1; done </proc/net/igmp6',
+    '      [ -n "$joined" ] || pending=1',
+    "    done </proc/net/if_inet6",
+    '    [ -z "$pending" ] && break',
+    `    i=$((i + 1)); ${q(tools.sleep)} 0.01`,
     "  done",
     `  ${STAGE}=2 exec ${q(tools.unshare)} --user --map-user=${tools.uid} --map-group=${tools.gid} -- ${q(tools.shell)} ${wrapper} "$@"`,
     "fi",
