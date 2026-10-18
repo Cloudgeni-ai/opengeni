@@ -8,19 +8,12 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::Router;
-use hyper_util::rt::TokioIo;
-use hyper_util::service::TowerToHyperService;
 use rustls::ServerConfig;
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
 
 use super::Settings;
-
-/// Longest a caller may take over its TLS handshake.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The front door of a replica.
 #[derive(Clone, Debug)]
@@ -33,40 +26,5 @@ pub struct Listen {
 
 /// Serves `router` on `listener` for ever, over TLS when `tls` is given.
 pub async fn serve(listener: TcpListener, router: Router, tls: Option<Arc<ServerConfig>>) {
-    let Some(tls) = tls else {
-        if let Err(error) = axum::serve(listener, router).await {
-            tracing::error!(%error, "the E2B front door stopped");
-        }
-        return;
-    };
-    let acceptor = TlsAcceptor::from(tls);
-    loop {
-        let (tcp, _) = match listener.accept().await {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                tracing::warn!(%error, "accepting an E2B connection failed");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
-        let (acceptor, router) = (acceptor.clone(), router.clone());
-        tokio::spawn(async move {
-            let _ = tcp.set_nodelay(true);
-            let stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(error)) => {
-                    tracing::debug!(%error, "an E2B caller's TLS handshake failed");
-                    return;
-                }
-                Err(_) => return,
-            };
-            let served = hyper::server::conn::http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), TowerToHyperService::new(router))
-                .with_upgrades()
-                .await;
-            if let Err(error) = served {
-                tracing::debug!(%error, "an E2B connection ended with an error");
-            }
-        });
-    }
+    crate::tls::serve(listener, router, tls, "the E2B front door").await;
 }

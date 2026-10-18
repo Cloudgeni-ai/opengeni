@@ -70,6 +70,58 @@ pub struct Spec {
     pub image: String,
     /// Its shape and sleep ladder.
     pub config: SandboxConfig,
+    /// The Opengeni agent it runs, which its host links to the team's
+    /// gateway ([ADR 21](../../../docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentRef>,
+}
+
+/// Which Opengeni agent a sandbox runs: its enrollment's workspace and
+/// agent ids, which name its subjects.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRef {
+    pub workspace: String,
+    pub agent: String,
+}
+
+impl AgentRef {
+    /// Refuses ids that are not one subject token each: 1 to 64 of
+    /// `[A-Za-z0-9_-]`.
+    ///
+    /// # Errors
+    ///
+    /// Why one is refused.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        for (what, id) in [("workspace", &self.workspace), ("agent", &self.agent)] {
+            let valid = (1..=64).contains(&id.len())
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+            if !valid {
+                return Err(format!(
+                    "the agent's {what} id must be 1 to 64 of [A-Za-z0-9_-]"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A create its caller named with a request id, which makes retrying it
+/// safe: the same id answers the sandbox it made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestRow {
+    pub team: String,
+    pub request_id: String,
+    /// The sandbox it makes.
+    pub id: Id,
+    /// The digest of what it asked for, to refuse the same id for
+    /// something else.
+    pub digest: String,
+    pub created_ms: u64,
+    /// The sandbox it made was deleted.
+    pub gone: bool,
 }
 
 /// A sandbox as the store holds it.
@@ -266,6 +318,23 @@ pub trait Store: Send + Sync + 'static {
 
     /// Adds an API key, by its digest, for `team`.
     fn add_key(&self, digest: &str, team: &str) -> impl Future<Output = Result<()>> + Send;
+
+    /// Records `row` unless its team already used its request id, and
+    /// answers the request as stored: `row` itself, or the one before it.
+    fn claim_request(&self, row: &RequestRow) -> impl Future<Output = Result<RequestRow>> + Send;
+
+    /// The create `team` named `request_id`.
+    fn request(
+        &self,
+        team: &str,
+        request_id: &str,
+    ) -> impl Future<Output = Result<Option<RequestRow>>> + Send;
+
+    /// Marks the requests of `team` that made sandbox `id` gone.
+    fn retire_requests(&self, team: &str, id: Id) -> impl Future<Output = Result<()>> + Send;
+
+    /// Forgets the gone requests made before `before_ms`. Answers how many.
+    fn prune_requests(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send;
 
     /// Inserts a sandbox's E2B lifecycle at the version it carries. False
     /// if one with its id exists.

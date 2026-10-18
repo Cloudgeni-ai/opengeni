@@ -121,12 +121,22 @@ pub enum GatewayFrame {
 }
 
 /// Where and how an agent registers its streams with Opengeni's relay.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Relay {
     pub url: String,
     pub token: String,
     pub expires_at_ms: u64,
+}
+
+impl std::fmt::Debug for Relay {
+    /// Never shows the token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Relay")
+            .field("url", &self.url)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Why a gateway did not open a session.
@@ -260,13 +270,22 @@ impl Carries for GatewayFrame {
 
 /// How the host reaches a sandbox's agent: the gateway of the sandbox's
 /// team and the fleet's ticket for this host and owner epoch.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentLink {
     /// The gateway's `wss://` (or, in tests, `ws://`) URL.
     pub gateway: String,
     /// The fleet's signed ticket.
     pub ticket: String,
+}
+
+impl std::fmt::Debug for AgentLink {
+    /// Never shows the ticket.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentLink")
+            .field("gateway", &self.gateway)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The subject permissions of a session whose scope is `scope`, as the

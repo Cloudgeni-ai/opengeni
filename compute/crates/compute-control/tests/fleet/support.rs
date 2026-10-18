@@ -233,6 +233,7 @@ impl Fleet {
             Arc::clone(&store),
             Config {
                 api: loopback,
+                api_tls: None,
                 hosts: loopback,
                 tls: pki.service(),
                 archive: Some(archive.clone()),
@@ -573,6 +574,29 @@ impl FakeHost {
     /// longer own it would.
     pub async fn try_archive(&self, id: Id, owner_epoch: u64) -> Result<(), String> {
         archive(&self.inner, id, owner_epoch).await
+    }
+
+    /// Asks the service, as this host over its mutual TLS, for link tokens
+    /// under `name` for `gateways`.
+    pub async fn link_tokens(&self, name: &str, gateways: &[&str]) -> (u16, Value) {
+        let response = self
+            .inner
+            .http
+            .post(format!(
+                "{}{}",
+                self.inner.hosts_url,
+                compute_protocol::fleet::LINK_TOKENS_PATH
+            ))
+            .json(&serde_json::json!({ "name": name, "gateways": gateways }))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap();
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        )
     }
 }
 

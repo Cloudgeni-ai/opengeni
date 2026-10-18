@@ -87,6 +87,7 @@ pub fn run() -> ! {
             access_token: None,
             default_user: Some(config::DEFAULT_USER.to_owned()),
             default_workdir: image.default_workdir().map(str::to_owned),
+            agent: None,
         },
         command,
     ));

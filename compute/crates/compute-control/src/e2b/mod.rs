@@ -92,7 +92,8 @@ impl From<Failure> for Refused {
         let status = match &failure {
             Failure::NotFound => 404,
             Failure::Invalid(_) => 400,
-            Failure::Busy(_) => 409,
+            Failure::Busy(_) | Failure::Mismatch(_) => 409,
+            Failure::Gone(_) => 410,
             Failure::NoCapacity | Failure::Unavailable(_) => 503,
             Failure::Unknown { .. } => 504,
             Failure::Host(_) => 502,

@@ -1,17 +1,22 @@
 //! The public API, version 1: sandboxes for a team's API key, and hosts for
 //! the operator's.
 //!
-//! - `POST /v1/sandboxes` creates one; `GET` lists a team's, filtered by
-//!   metadata given as query pairs.
+//! - `POST /v1/sandboxes` creates one, idempotently when it names a
+//!   `request_id`; `GET` lists a team's, filtered by metadata given as
+//!   query pairs.
+//! - `GET /v1/requests/{request_id}` answers the sandbox a create with that
+//!   request id made.
 //! - `GET` and `DELETE /v1/sandboxes/{id}`.
 //! - `POST /v1/sandboxes/{id}/wake`, `/sleep` and `/move`.
 //! - `GET /v1/sandboxes/{id}/connect/{port}` with `Upgrade: compute-stream`
 //!   turns the connection into a byte stream to the guest port.
+//! - `GET /v1/link/keys` lists the keys agent-link tokens are signed with
+//!   ([`docs/agent-link.md`](../../../docs/agent-link.md)).
 //! - `GET /v1/hosts`, `POST /v1/hosts/{name}/drain` and `/undrain`, for the
 //!   operator team.
 //!
 //! Every request names its key in `X-API-Key`; the store holds only the
-//! key's digest.
+//! key's digest. Errors are `{"code": "...", "message": "..."}`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -22,34 +27,65 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use compute_fleet::HostState;
+use compute_guest::envd::{AgentInit, InitData};
 use compute_protocol::host::{Id, LevelName, PriorityName, Reply, SandboxConfig, SleepConfig};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 
+use crate::init::InitError;
 use crate::keys::Keys;
 pub use crate::keys::key_digest;
-use crate::service::{Drained, Failure, Service};
-use crate::store::{SandboxRow, Spec, Store};
+use crate::link::LinkKeys;
+use crate::service::{Drained, Failure, Service, request_digest};
+use crate::store::{AgentRef, SandboxRow, Spec, Store};
 
 /// The protocol name a connect upgrades to.
 pub const STREAM_PROTOCOL: &str = "compute-stream";
 
-/// A failure as a response.
+/// A failure as a response: its status, a stable code and a message.
 #[derive(Debug)]
-pub struct ApiError(StatusCode, String);
+pub struct ApiError {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+}
+
+impl ApiError {
+    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code,
+            message: message.into(),
+        }
+    }
+}
 
 impl From<Failure> for ApiError {
     fn from(failure: Failure) -> Self {
-        let status = match &failure {
-            Failure::NotFound => StatusCode::NOT_FOUND,
-            Failure::Invalid(_) => StatusCode::BAD_REQUEST,
-            Failure::Busy(_) => StatusCode::CONFLICT,
-            Failure::NoCapacity | Failure::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Failure::Unknown { .. } => StatusCode::GATEWAY_TIMEOUT,
-            Failure::Host(_) => StatusCode::BAD_GATEWAY,
-            Failure::Store(_) | Failure::Archive(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, code) = match &failure {
+            Failure::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+            Failure::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
+            Failure::Busy(_) => (StatusCode::CONFLICT, "busy"),
+            Failure::Mismatch(_) => (StatusCode::CONFLICT, "request_mismatch"),
+            Failure::Gone(_) => (StatusCode::GONE, "request_gone"),
+            Failure::NoCapacity => (StatusCode::SERVICE_UNAVAILABLE, "no_capacity"),
+            Failure::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+            Failure::Unknown { .. } => (StatusCode::GATEWAY_TIMEOUT, "unknown_outcome"),
+            Failure::Host(_) => (StatusCode::BAD_GATEWAY, "host"),
+            Failure::Store(_) | Failure::Archive(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            }
         };
-        Self(status, failure.to_string())
+        Self::new(status, code, failure.to_string())
+    }
+}
+
+impl From<InitError> for ApiError {
+    fn from(error: InitError) -> Self {
+        match error {
+            InitError::Reach(failure) => failure.into(),
+            InitError::Refused(why) => Self::new(StatusCode::BAD_GATEWAY, "init_failed", why),
+        }
     }
 }
 
@@ -57,14 +93,14 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         #[derive(Serialize)]
         struct Body {
-            code: u16,
+            code: &'static str,
             message: String,
         }
         let body = Body {
-            code: self.0.as_u16(),
-            message: self.1,
+            code: self.code,
+            message: self.message,
         };
-        (self.0, Json(body)).into_response()
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -100,9 +136,10 @@ impl<S: Store> Api<S> {
             .await
             .map_err(Failure::from)?
             .ok_or_else(|| {
-                ApiError(
+                ApiError::new(
                     StatusCode::UNAUTHORIZED,
-                    "a valid X-API-Key is needed".into(),
+                    "unauthorized",
+                    "a valid X-API-Key is needed",
                 )
             })
     }
@@ -111,9 +148,10 @@ impl<S: Store> Api<S> {
         if self.team(headers).await? == self.0.operator {
             Ok(())
         } else {
-            Err(ApiError(
+            Err(ApiError::new(
                 StatusCode::FORBIDDEN,
-                "for the operator only".into(),
+                "forbidden",
+                "for the operator only",
             ))
         }
     }
@@ -126,6 +164,9 @@ pub struct SandboxView {
     pub image: String,
     pub config: SandboxConfig,
     pub metadata: BTreeMap<String, String>,
+    /// The Opengeni agent it runs, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentRef>,
     /// The host that owns it, if one does.
     pub host: Option<String>,
     pub owner_epoch: u64,
@@ -144,6 +185,7 @@ impl SandboxView {
             image: row.spec.image,
             config: row.spec.config,
             metadata: row.metadata,
+            agent: row.spec.agent,
             host,
             owner_epoch: row.ownership.epoch.0,
             created_ms: row.created_ms,
@@ -152,9 +194,13 @@ impl SandboxView {
 }
 
 /// A create.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateBody {
+    /// Makes the create idempotent for the team: the same id with the same
+    /// body answers the same sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     /// The image to start from; the fleet's default when omitted.
     #[serde(default)]
     pub image: Option<String>,
@@ -171,6 +217,55 @@ pub struct CreateBody {
     pub sleep: Option<SleepConfig>,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+    /// What the sandbox is given before the create answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init: Option<CreateInit>,
+}
+
+/// A create's init: the sandbox's own environment and defaults, and the
+/// Opengeni agent it runs. It holds no secret.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateInit {
+    #[serde(default)]
+    pub env_vars: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_workdir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<CreateAgent>,
+}
+
+/// The agent a create names: its enrollment's ids.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateAgent {
+    pub workspace_id: String,
+    pub agent_id: String,
+    /// Where its workspace is in the sandbox.
+    pub workspace_root: String,
+    /// Whether it starts a virtual desktop.
+    #[serde(default)]
+    pub desktop: bool,
+}
+
+impl CreateInit {
+    /// What the guest is given.
+    fn guest(&self) -> InitData {
+        InitData {
+            env_vars: self.env_vars.clone(),
+            access_token: None,
+            default_user: self.default_user.clone(),
+            default_workdir: self.default_workdir.clone(),
+            agent: self.agent.as_ref().map(|agent| AgentInit {
+                workspace_id: agent.workspace_id.clone(),
+                agent_id: agent.agent_id.clone(),
+                workspace_root: agent.workspace_root.clone(),
+                desktop: agent.desktop,
+            }),
+        }
+    }
 }
 
 /// A wake's answer.
@@ -223,7 +318,7 @@ pub struct HostView {
 
 fn parse_id(id: &str) -> Result<Id, ApiError> {
     id.parse()
-        .map_err(|error: String| ApiError(StatusCode::BAD_REQUEST, error))
+        .map_err(|error: String| ApiError::new(StatusCode::BAD_REQUEST, "invalid", error))
 }
 
 async fn create<S: Store>(
@@ -233,6 +328,8 @@ async fn create<S: Store>(
 ) -> Result<(StatusCode, Json<SandboxView>), ApiError> {
     let team = api.team(&headers).await?;
     let service = &api.0.service;
+    let digest = body.request_id.as_ref().map(|_| request_digest(&body));
+    let init = body.init.clone();
     let config = SandboxConfig {
         vcpus: body.vcpus,
         memory_mib: body.memory_mib,
@@ -243,14 +340,61 @@ async fn create<S: Store>(
         image: None,
         link: None,
     };
+    let agent = init
+        .as_ref()
+        .and_then(|init| init.agent.as_ref())
+        .map(|agent| AgentRef {
+            workspace: agent.workspace_id.clone(),
+            agent: agent.agent_id.clone(),
+        });
     let spec = Spec {
         image: body
             .image
             .unwrap_or_else(|| service.settings().image.clone()),
         config,
+        agent,
     };
-    let row = service.create(&team, spec, body.metadata).await?;
+    let row = match (&body.request_id, &digest) {
+        (Some(request_id), Some(digest)) => {
+            service
+                .create_requested(&team, request_id, digest, spec, body.metadata)
+                .await?
+        }
+        _ => service.create(&team, spec, body.metadata).await?,
+    };
+    if let Some(init) = &init {
+        crate::init::give(service, &team, row.id, &init.guest()).await?;
+    }
     Ok((StatusCode::CREATED, Json(SandboxView::of(service, row))))
+}
+
+async fn requested<S: Store>(
+    State(api): State<Api<S>>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+) -> Result<Json<SandboxView>, ApiError> {
+    let team = api.team(&headers).await?;
+    let service = &api.0.service;
+    let row = service.requested(&team, &request_id).await?;
+    Ok(Json(SandboxView::of(service, row)))
+}
+
+async fn link_keys<S: Store>(
+    State(api): State<Api<S>>,
+    headers: HeaderMap,
+) -> Result<Json<LinkKeys>, ApiError> {
+    let team = api.team(&headers).await?;
+    let links = api.0.service.settings().links.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "this fleet runs no agent links",
+        )
+    })?;
+    Ok(Json(LinkKeys {
+        team,
+        keys: links.keys(),
+    }))
 }
 
 async fn list<S: Store>(
@@ -355,8 +499,9 @@ async fn connect<S: Store>(
         .get(header::UPGRADE)
         .and_then(|value| value.to_str().ok());
     if upgrade != Some(STREAM_PROTOCOL) {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
+            "invalid",
             format!("a connect upgrades to {STREAM_PROTOCOL}"),
         ));
     }
@@ -454,6 +599,8 @@ pub fn router<S: Store>(service: Arc<Service<S>>, operator: String) -> Router {
     }));
     Router::new()
         .route("/v1/sandboxes", post(create::<S>).get(list::<S>))
+        .route("/v1/requests/{request_id}", get(requested::<S>))
+        .route("/v1/link/keys", get(link_keys::<S>))
         .route("/v1/sandboxes/{id}", get(one::<S>).delete(delete::<S>))
         .route("/v1/sandboxes/{id}/wake", post(wake::<S>))
         .route("/v1/sandboxes/{id}/sleep", post(sleep::<S>))

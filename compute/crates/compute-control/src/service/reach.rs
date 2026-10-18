@@ -249,7 +249,7 @@ impl<S: Store> Service<S> {
         let epoch = row.ownership.epoch;
         let request = Request::Adopt {
             id: row.id,
-            config: row.spec.config.clone(),
+            config: self.sent_config(row, target),
             owner_epoch: epoch.0,
         };
         let answered = match self

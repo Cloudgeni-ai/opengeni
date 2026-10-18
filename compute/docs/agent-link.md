@@ -42,23 +42,46 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
 ```
 
 - `request_id` makes the create idempotent for the team: the same id with
-  the same body (excluding `init`) answers the same sandbox; with a different
-  body, `409 request_mismatch`; after that sandbox was deleted,
-  `410 request_gone`. A `504` or a lost answer is retried with the same id.
-- The answer, `201`, is the sandbox's view once its guest has kept the init.
+  the same body, `init` included, answers the same sandbox, woken if it
+  sleeps, and gives its guest the init again; with any other body,
+  `409 request_mismatch`; after that sandbox was deleted, `410 request_gone`.
+  A `504` or a lost answer is retried with the same id. The service forgets
+  a request id seven days after its sandbox is deleted.
+- The answer, `201` for the first create and for each replay, is the
+  sandbox's view once its guest has kept the init. The view names the agent
+  as `"agent": {"workspace": "...", "agent": "..."}`; it never shows the
+  ticket.
 - `init.agent` holds no secret. The relay's address and token come from the
   gateway (section 4).
-- Errors are `{"code": "...", "message": "..."}`: `503 host_full` or
-  `no_capacity` (retry later, same id), `409 busy`, `504 unknown_outcome`
-  (retry, same id), `400` for a body the service does not accept.
+- A sandbox with an `agent` needs its team to have a gateway in the fleet's
+  configuration (section 4); otherwise the create is `400 invalid`.
+  `workspace_id` and `agent_id` are 1 to 64 of `[A-Za-z0-9_-]`.
+- Errors are `{"code": "...", "message": "..."}`:
+
+  | Status | `code` | What to do |
+  |---|---|---|
+  | 400 | `invalid` | Fix the request. |
+  | 401, 403 | `unauthorized`, `forbidden` | Fix the API key. |
+  | 404 | `not_found` | It does not exist (or is already gone, for a delete). |
+  | 409 | `busy` | Another operation holds it; retry. |
+  | 409 | `request_mismatch` | Use a new `request_id`. |
+  | 410 | `request_gone` | Its sandbox was deleted; use a new `request_id`. |
+  | 502 | `host`, `init_failed` | The host or the guest refused; retry with the same id, or delete. |
+  | 503 | `no_capacity`, `unavailable` | Retry later with the same id. |
+  | 504 | `unknown_outcome` | Retry with the same id. |
+  | 500 | `internal` | Retry with the same id. |
 - `POST /v1/sandboxes/{id}/wake` wakes and, for a sandbox with no owner,
   places and adopts it; it answers `{"waited_us", "generation", "host"}`
   once it runs. `DELETE /v1/sandboxes/{id}` ends it; `404` means it is
   already gone.
-- `GET /v1/sandboxes?request_id=<id>` answers `{"sandboxes": [...]}` with
-  the team's sandbox made by that request, if it still exists, so a caller
-  that crashed between a create and recording its answer can find the
-  sandbox and delete it.
+- `GET /v1/requests/{request_id}` answers the view of the sandbox that
+  request made, `404 not_found` if no create named it, or `410 request_gone`
+  once that sandbox was deleted, so a caller that crashed between a create
+  and recording its answer can find the sandbox and delete it, without
+  creating one.
+- The API serves TLS when the fleet service is given a certificate
+  (`--api-tls-cert`, `--api-tls-key`); a deployment that Opengeni reaches
+  over a network it does not own must.
 
 ## 2. In the guest
 
@@ -111,8 +134,10 @@ server would, for the subset the agent's client uses:
 
 - The host dials `GET <gateway>` as a WebSocket over TLS, with
   `Authorization: Bearer <host token>` and the subprotocol
-  `opengeni.agent-link.v1`. A team's gateway URL is the fleet's
-  configuration (`[[teams]] link = "wss://..."`), never part of a create.
+  `opengeni.agent-link.v1`. A team's gateway URL is the fleet service's
+  configuration (`--team-link <team>=wss://...`, with the signing key in
+  `--link-key` and keys being retired in `--link-previous-key`), never part
+  of a create.
 - Each WebSocket binary message is one frame: a JSON header, one `\n`
   byte, then the payload bytes (empty unless the frame carries a message).
   Text messages are a protocol error.
@@ -130,17 +155,20 @@ cached five minutes and read again for an unknown `kid`.
 
 - **Host token**, valid for an hour, which the host asks the fleet for over
   its mutual-TLS host API, `POST /v1/hosts/link-tokens` with
-  `{"gateways": ["wss://..."]}`, answering `{"tokens": [{"gateway", "token", "expires_at_ms"}]}`,
+  `{"name": "<host name>", "gateways": ["wss://..."]}`, answering
+  `{"tokens": [{"gateway", "token", "expires_at_ms"}]}` in the same order,
   and asks for again when a third of its life is left:
-  `{"typ": "compute-host", "iss", "aud": "<gateway URL>", "sub": "<host id>", "iat", "exp"}`.
-  The fleet only signs for gateways its teams name.
+  `{"typ": "compute-host", "iss", "aud": "<gateway URL>", "sub": "<host name>", "iat", "exp"}`.
+  The fleet signs only for the name in the host's client certificate and
+  only for gateways its teams name; anything else is `403`.
 - **Sandbox ticket**, given to the host with each create or adopt, valid
   for that owner epoch. It has no time in it, so the same placement always
   gives the same ticket and a retried create stays identical:
-  `{"typ": "compute-sandbox", "iss", "aud", "sub": "<sandbox id>", "host": "<host id>",
+  `{"typ": "compute-sandbox", "iss", "aud", "sub": "<sandbox id>", "host": "<host name>",
   "epoch": 3, "team", "workspace": "<workspace id>", "agent": "<agent id>"}`.
-  Deleting the sandbox revokes its enrollment, which ends what the ticket
-  allows.
+  Each hand-off and each adopt raises the epoch, so a move from one host to
+  another gives the new host a ticket two epochs on. Deleting the sandbox
+  revokes its enrollment, which ends what the ticket allows.
 
 The gateway accepts a link only for a valid host token whose `aud` is its
 own URL, allowing 60 seconds of clock skew.
