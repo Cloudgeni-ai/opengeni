@@ -53,7 +53,7 @@ OPENGENI_URL=$OPENGENI_URL API_CONTRACT=$contract MODEL=$MODEL_DEPLOYMENT OUT=$o
   COMPUTE_SERVICE=$COMPUTE_SERVICE COMPUTE_ADDRESS=$fabric COMPUTE_PORT=8080 COMPUTE_CA=$sec/api-ca.pem \
   COMPUTE_OPENGENI_KEY=$sec/compute-opengeni-key COMPUTE_OPERATOR_KEY=$sec/compute-operator-key \
   PROJECT=$PROJECT ZONE=$ZONE HOSTS=${HOSTS:-3} ONLY=${ONLY:-} \
-  PLAYWRIGHT_MODULE=$og/node_modules/playwright/index.js AGENT_BIN=$agent/opengeni-agent \
+  PLAYWRIGHT_MODULE=$og/node_modules/playwright/index.js AGENT_BIN=$agent/opengeni-agent OPENGENI_DIR=$og \
   OPENGENI_SHA=$OPENGENI_LABEL COMPUTE_SHA=$COMPUTE_SHA \
   bun "$HOME/e2e/suite/run.ts" || status=$?
 # Every replica's log, each line prefixed with its pod.

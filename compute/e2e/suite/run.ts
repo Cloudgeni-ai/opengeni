@@ -41,6 +41,8 @@ const TURN_TIMEOUT_S = Number(env("TURN_TIMEOUT_S", "900"));
 // The agent build in the sandbox image (stack/suite.sh copies it out), which
 // the connected-machine check enrolls as this VM.
 const AGENT_BIN = process.env.AGENT_BIN ?? "";
+// The Opengeni checkout the stack was built from (its relay wire module).
+const OPENGENI_DIR = env("OPENGENI_DIR", "/srv/e2e/opengeni");
 
 mkdirSync(OUT, { recursive: true });
 const logLines: string[] = [];
@@ -351,43 +353,125 @@ check("git", "git status and log of a repository in the sandbox", ["create"], as
 });
 
 check("terminal", "an interactive terminal echoes what is typed", ["create"], async () => {
+  // The web app's way in: attach a terminal viewer, which mints the terminal
+  // plane, then speak that plane. On a compute sandbox the agent serves it as a
+  // relay PTY (packages/react/src/hooks/use-terminal-stream.ts); the relay
+  // messages come from the same checkout's hand-mirrored wire module.
+  const wire = await import(`${OPENGENI_DIR}/packages/react/src/lib/relay-wire.ts`);
   const marker = `pty-${rand()}`;
-  const controller = new AbortController();
-  const stream = await fetch(`${OPENGENI_URL}${ses()}/events/stream?after=${seen}`, {
-    headers: { accept: "text/event-stream", "x-opengeni-api-contract": API_CONTRACT },
-    signal: controller.signal,
-  });
-  if (!stream.ok || !stream.body) throw new Error(`events stream HTTP ${stream.status}`);
-  const opened = await og<any>("POST", `${ses()}/terminal/pty`, { cols: 100, rows: 30 });
-  const found = (async () => {
-    const reader = stream.body!.getReader();
-    const decoder = new TextDecoder();
-    let text = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) return false;
-      text += decoder.decode(value, { stream: true });
-      for (const line of text.split("\n")) {
-        if (!line.startsWith("data:") || !line.includes("terminal.pty.output")) continue;
-        let data = line;
-        try {
-          const event = JSON.parse(line.slice(5));
-          const raw = event.payload?.data ?? event.payload?.chunk ?? "";
-          data += Buffer.from(String(raw), "base64").toString("utf8");
-        } catch {}
-        if (data.includes(`${marker}-done`)) return true;
-      }
-      text = text.slice(text.lastIndexOf("\n") + 1);
+  const viewer = await og<any>("POST", `${ses()}/viewers`, { terminal: true });
+  try {
+    if (viewer.terminalTransport !== "relay-pty" || !viewer.terminalUrl) {
+      throw new Error(
+        `viewer attach minted no relay terminal: transport ${viewer.terminalTransport}, url ${viewer.terminalUrl ? "set" : "null"}`,
+      );
     }
-  })();
-  await sleep(1500);
-  await og("POST", `${ses()}/terminal/pty/write`, { ptyId: opened.ptyId, data: `echo ${marker}-$((1+1)) && echo ${marker}-done\r` });
-  const timeout = sleep(60_000).then(() => false);
-  const ok = await Promise.race([found, timeout]);
-  controller.abort();
-  await og("POST", `${ses()}/terminal/pty/close`, { ptyId: opened.ptyId }).catch(() => undefined);
-  if (!ok) throw new Error("the typed command's output never arrived");
-  return `pty ${opened.ptyId} echoed the typed command`;
+    const endpoint = new URL(viewer.terminalUrl);
+    const channel = {
+      channelId: endpoint.searchParams.get("channel") ?? "",
+      workspaceId: endpoint.searchParams.get("ws") ?? "",
+      agentId: endpoint.searchParams.get("agent") ?? "",
+      kind: wire.STREAM_KIND_PTY,
+      port: Number(endpoint.searchParams.get("port") ?? "0"),
+    };
+    const datagram = (tag: number, body: Uint8Array) => {
+      const bytes = new Uint8Array(body.length + 1);
+      bytes[0] = tag;
+      bytes.set(body, 1);
+      return bytes;
+    };
+    const socket = new WebSocket(viewer.terminalUrl);
+    socket.binaryType = "arraybuffer";
+    const decoder = new TextDecoder();
+    let output = "";
+    // What the socket saw, for a failure's message.
+    const seenOnSocket: string[] = [];
+    const outcome = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `no echo within 60 s; socket ${seenOnSocket.join(", ") || "never opened"}; output ${JSON.stringify(output.slice(-300))}`,
+            ),
+          ),
+        60_000,
+      );
+      socket.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error("the relay socket failed"));
+      };
+      socket.onclose = (event) => {
+        clearTimeout(timer);
+        reject(new Error(`the relay socket closed (${event.code} ${event.reason})`));
+      };
+      socket.onopen = () => {
+        seenOnSocket.push("open");
+        socket.send(
+          datagram(1, wire.encodeStreamOpen({ channel, token: viewer.terminalToken ?? "", role: wire.STREAM_ROLE_CLIENT, resumeFromSeq: "0" })),
+        );
+      };
+      let inputSeq = 0n;
+      let typed = false;
+      // Type the command the way a person would, keystrokes ending in Enter,
+      // once the shell has printed something (its prompt) or after 3 s.
+      const type = () => {
+        if (typed) return;
+        typed = true;
+        seenOnSocket.push("typed");
+        socket.send(
+          datagram(
+            3,
+            wire.encodeStreamFrame({
+              channelId: channel.channelId,
+              seq: (inputSeq++).toString(),
+              data: new TextEncoder().encode(`echo ${marker}-$((1+1)) | tee e2e/${marker}.txt && echo ${marker}-done\r`),
+              producedAtMs: String(Date.now()),
+            }),
+          ),
+        );
+      };
+      socket.onmessage = (event) => {
+        if (typeof event.data === "string") {
+          seenOnSocket.push(`text ${event.data.slice(0, 80)}`);
+          return;
+        }
+        const bytes = new Uint8Array(event.data as ArrayBuffer);
+        if (bytes.length < 1) return;
+        const body = bytes.subarray(1);
+        if (bytes[0] === 2) {
+          const ack = wire.decodeStreamOpenAck(body);
+          seenOnSocket.push(`ack ${ack.accepted ? "accepted" : "refused"}`);
+          if (!ack.accepted) {
+            clearTimeout(timer);
+            reject(new Error(`the relay refused the terminal: ${ack.error?.message ?? "no reason"}`));
+            return;
+          }
+          setTimeout(type, 3_000);
+        } else if (bytes[0] === 3) {
+          if (!output) seenOnSocket.push("output");
+          setTimeout(type, 300);
+          output += decoder.decode(wire.decodeStreamFrame(body).data, { stream: true });
+          if (output.includes(`${marker}-2`) && output.includes(`${marker}-done`)) {
+            clearTimeout(timer);
+            resolve(`relay PTY echoed the typed command (${output.length} bytes of output)`);
+          }
+        } else {
+          seenOnSocket.push(`tag ${bytes[0]}`);
+        }
+      };
+    });
+    socket.onclose = null;
+    socket.close();
+    return outcome;
+  } catch (error) {
+    // Whether the typed command ran tells input from output apart.
+    const ran = await og<any>("POST", `${ses()}/fs/read`, { path: `e2e/${marker}.txt`, encoding: "utf8" })
+      .then((file) => JSON.stringify(file ?? "").includes(`${marker}-2`))
+      .catch(() => false);
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; the typed command ${ran ? "ran (its file exists)" : "did not run"}`);
+  } finally {
+    await og("DELETE", `${ses()}/viewers/${viewer.viewerId}`).catch(() => undefined);
+  }
 });
 
 check("port", "a port in the sandbox is reachable through the fabric's front door", ["files"], async () => {
@@ -462,6 +546,12 @@ async function step<T>(name: string, run: () => Promise<T>): Promise<T> {
   }
 }
 
+// How long each level takes to reach after the request, so the next command
+// finds the sandbox asleep at that level rather than racing the sleep (a save
+// writes the memory locally, an archive also uploads it). The fabric's API
+// does not report a sandbox's level; the hosts' journals show it.
+const SETTLE_MS: Record<string, number> = { paused: 2_000, saved: 15_000, archived: 45_000, remote: 60_000 };
+
 for (const level of ["paused", "saved", "archived", "remote"]) {
   check(`sleep-${level}`, `sleep at ${level} and wake on the next request`, ["files"], async () => {
     const marker = `${level}-${rand()}`;
@@ -472,6 +562,7 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
     let start = Date.now();
     await step("sleep", () => fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level }));
     const slept = seconds(start);
+    await sleep(SETTLE_MS[level]!);
     start = Date.now();
     const out = await step("first command after sleeping", () =>
       execOk(`cat e2e/${level}.txt e2e/hello.txt`, 120_000),
@@ -479,7 +570,7 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
     const woke = seconds(start);
     if (!out.includes(marker) || !out.includes(state.marker!)) throw new Error(`after wake: ${out}`);
     const after = await sandbox();
-    return `slept in ${slept}, woke and answered in ${woke}; host ${before.host} -> ${after.host}`;
+    return `asked to sleep in ${slept}, left ${SETTLE_MS[level]! / 1000} s, then woke and answered in ${woke}; host ${before.host} -> ${after.host}`;
   });
 }
 
@@ -579,6 +670,9 @@ check("delete", "deleting the session deletes its sandbox on the fabric", ["crea
   }
 });
 
+/** The machine states in which a Connected Machine is reachable. */
+const ONLINE_MACHINE = new Set(["online", "display_unavailable"]);
+
 check(
   "connected-machine",
   "the same agent build, enrolled as a Connected Machine, runs a session's turn and commands and never sleeps",
@@ -614,7 +708,9 @@ check(
         if (enrollment) {
           const machines = (await og<any>("GET", `${ws()}/machines`)).machines ?? [];
           machine = machines.find((one: any) => one.enrollmentId === enrollment);
-          if (machine?.state === "online") break;
+          // A machine without a display (this VM) is listed as
+          // display_unavailable: online, with no desktop stream.
+          if (machine && ONLINE_MACHINE.has(machine.state)) break;
         }
         if (Date.now() - start > 120_000) {
           throw new Error(`no online machine 120 s after connecting (enrollment ${enrollment ?? "none"}, state ${machine?.state ?? "unlisted"})`);
@@ -624,20 +720,24 @@ check(
       if (machine.kind !== "selfhosted") throw new Error(`listed as ${machine.kind}`);
       const online = seconds(start);
 
-      const created = await og<any>("POST", `${ws()}/sessions`, { model: MODEL, reasoningEffort: "low" });
+      // A session started on the machine, as the "Run on" picker does: its
+      // first turn runs there.
+      const id = readFileSync("/etc/machine-id", "utf8").trim();
+      const created = await step("start a session on the machine", () =>
+        og<any>("POST", `${ws()}/sessions`, {
+          initialMessage: "Run `cat /etc/machine-id` in the shell and reply with only its output.",
+          model: MODEL,
+          reasoningEffort: "low",
+          targetSandboxId: machine.sandboxId,
+        }),
+      );
       state.session = { id: created.id };
       seen = 0;
-      await step("make the machine the session's computer", () =>
-        og("POST", `${ses()}/active-sandbox`, { target: machine.sandboxId }),
-      );
+      const turn = await step("its first turn", () => nextTurn());
+      if (!turn.text.includes(id)) throw new Error(`the turn answered ${JSON.stringify(turn.text.slice(0, 200))}`);
       const name = hostname();
       const out = await step("a command", () => execOk("hostname"));
       if (out.trim() !== name) throw new Error(`hostname ${out.trim()}, not this VM's ${name}`);
-      const id = readFileSync("/etc/machine-id", "utf8").trim();
-      const turn = await step("a turn", () =>
-        say("Run `cat /etc/machine-id` in the shell and reply with only its output."),
-      );
-      if (!turn.text.includes(id)) throw new Error(`the turn answered ${JSON.stringify(turn.text.slice(0, 200))}`);
       // A compute sandbox would sleep after this long idle; a machine does not.
       await sleep(90_000);
       const idleStart = Date.now();
@@ -646,7 +746,7 @@ check(
       const after = ((await og<any>("GET", `${ws()}/machines`)).machines ?? []).find(
         (one: any) => one.enrollmentId === enrollment,
       );
-      if (after?.state !== "online") throw new Error(`state ${after?.state} after the idle wait`);
+      if (!ONLINE_MACHINE.has(after?.state)) throw new Error(`state ${after?.state} after the idle wait`);
       if (idle > 10_000) throw new Error(`the command after the idle wait took ${(idle / 1000).toFixed(1)} s`);
       await deleteSession(5 * 60_000).catch((error) => log(`connected-machine: deleting its session: ${error}`));
       return `online ${online} after connecting; exec and a turn ran on ${name}; still online after 90 s idle (exec ${(idle / 1000).toFixed(1)} s)`;

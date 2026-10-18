@@ -870,6 +870,7 @@ from that commit. Results carry the commits as `backend+agent`.
 | r6 14:51 | the same, lazy provisioning off | fec5f6e4d | 3 | 1 | create: the same failure; eager provisioning does not change it |
 | r8 15:38 | 1f341facf+e5441d3e1 | 6423207a7 | 10 | 9 | none before create: create (first turn 25.1 s), commands, files, git, browser, move (26.6 s to another host, files kept) pass; see below |
 | r9 16:38 | 5ca485cef+734a3ba3a | ab08a672b | 8 | 12 | none before create: create (first turn 25.1 s), commands, files, git, browser pass; see below |
+| r10 18:28 | 746756d73+af0b4552f | a89c70f53 | 10 | 11 | none before create: create (first turn 28.2 s), commands, files, git, port, browser, sleep-paused pass; see below |
 
 Checks after create were skipped through r6 because they need create.
 In r8 (every request now carries a nonzero agent epoch) create and most
@@ -915,3 +916,30 @@ disk had 481 GB free, so the host's disk booking had leaked. Later sleeps
 (Saved at 16:47:23, which idle then took to Remote by 16:48:02) were
 resumed by a request only at 16:49:24, again about 120 s after the
 command that should have woken them.
+
+r10 ran the fabric's fixes for those findings (the wake owed after a
+sleep, restore notices ordered by owner epoch, the guest relay closing
+fully, and the checkpoint and disk booking fix). In its host journals the
+checkpoint loop, the "host full: disk" refusal and the "more agent-link
+connections than a sandbox may hold" warning are gone; "guest not told of
+its restore ... early eof" appeared once, for an r9 sandbox adopted from
+its archive onto a freshly replaced host. The port check passed through
+the gateway (2.1 s) and Paused woke in 0.1 s. Saved did not: the host
+paused the sandbox and began a save, the suite's command arrived at
+once, the host cancelled the save after 5.2 s and resumed the guest, and
+the command was never answered (the client gave up after 293 s). The
+guest's console shows why: each snapshot of a running guest (every
+scheduled checkpoint and every save) drops the agent's control connection
+for 0.4 to 1.7 s, and a command in flight then is lost. Ten minutes after
+create Opengeni's maintenance revoked the live sandbox's enrollment as
+stale (its lease's resume state no longer named the enrollment) and the
+orphan sweep deleted the sandbox, so Archived, Remote, the move and the
+host-loss check found no sandbox, and the delete stayed at 409 (a stale
+browser holder and a direct holder still kept the lease). Stopping the
+background command was accepted but nothing settled it; the desktop's
+computer session failed in browserd ("interaction controller request
+failed"); the API's PTY endpoint now refuses compute by design, so the
+terminal check attaches a terminal viewer and speaks its relay PTY as the
+web app does (from r10b on). The connected-machine check found the
+machine listed as `display_unavailable`, which is how a headless machine
+that is online is listed; the check accepts that from r10b on.
