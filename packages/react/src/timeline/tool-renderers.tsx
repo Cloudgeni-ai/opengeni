@@ -80,6 +80,7 @@ import {
   parseSearchHits,
   pathBasename,
   pathDirname,
+  machinePresentation,
   runOnPresentation,
   toolSearchPreview,
   toolSearchQuery,
@@ -394,6 +395,33 @@ function AskRenderer({ item }: ToolRendererProps) {
 function RunOnRenderer({ item }: ToolRendererProps) {
   const msg = useOpenGeniText();
   return <PresentedToolRow presentation={runOnPresentation(msg, item)} />;
+}
+
+/**
+ * Finding machines, moving onto one and back, and using its screen. A look at
+ * the screen, or an action on it, shows the screenshot it took.
+ */
+function MachineRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
+  const msg = useOpenGeniText();
+  const presentation = machinePresentation(msg, item);
+  const retained = mcpToolLeaf(item.name).startsWith("computer_")
+    ? retainedScreenshotMetadata(item.output)
+    : null;
+  if (!retained?.available) return <PresentedToolRow presentation={presentation} />;
+  return (
+    <RetainedSessionImageDisclosure
+      artifact={retained}
+      load={loadRetainedScreenshot}
+      title={presentation.title}
+      caption={presentation.title}
+      noun="screenshot"
+      icon={<CameraIcon className={ICON_SIZE} />}
+      lightboxLabel={msg("timeline.toolRenderers.screenshot")}
+      batched={null}
+      failed={item.status === "failed"}
+      cancelled={item.status === "cancelled"}
+    />
+  );
 }
 
 /**
@@ -880,7 +908,7 @@ function LoadedRetainedSessionImageDisclosure({
       }
     >
       {state.kind === "ready" ? (
-        <ScreenshotFigure {...figure} />
+        <ScreenshotFigure {...figure} showCaption={caption !== title} />
       ) : state.kind === "loading" ? (
         <BodyNote>{msg("timeline.toolRenderers.loadingTheRetainedNoun", { noun })}</BodyNote>
       ) : state.kind === "unavailable" ? (
@@ -2070,6 +2098,11 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "exec_command", render: ExecRenderer },
   { match: "name", name: "request_human_input", render: AskRenderer },
   { match: "name", name: "run_on", render: RunOnRenderer },
+  { match: "name", name: "sandboxes_list", render: MachineRenderer },
+  { match: "name", name: "sandbox_swap", render: MachineRenderer },
+  { match: "name", name: "computer_open", render: MachineRenderer },
+  { match: "name", name: "computer_observe", render: MachineRenderer },
+  { match: "name", name: "computer_act", render: MachineRenderer },
   { match: "name", name: "write_stdin", render: WriteStdinRenderer },
   { match: "name", name: "apply_patch_call", render: ApplyPatchRenderer },
   { match: "name", name: "apply_patch", render: ApplyPatchRenderer },

@@ -4,6 +4,7 @@
   "commit": false,
   "fixed": [
     [
+      "@opengeni/agent-host",
       "@opengeni/agent-proto",
       "@opengeni/api-router",
       "@opengeni/artifact-kernel-wasm-document",

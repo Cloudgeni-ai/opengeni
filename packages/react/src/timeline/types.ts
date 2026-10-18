@@ -656,7 +656,14 @@ export type TimelineGroup =
          * running clock: that span is not work and ends on a quota reset or
          * a person's choice, not after a predictable time.
          */
-        waiting?: { label: string; since: string; detail?: string; untimed?: true };
+        waiting?: {
+          label: string;
+          since: string;
+          detail?: string;
+          untimed?: true;
+          /** The wait needs the reader. */
+          waitingOn?: "you";
+        };
         /**
          * Settled capacity-wait time inside this work span. It is not work:
          * the worked duration and the live working clock exclude it.

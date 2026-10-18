@@ -33,6 +33,7 @@ import { useEntranceAnimation, useEntranceAnimationLive } from "./entrance";
 import type { RetainedArtifactLoader, RetainedScreenshotLoader, ToolRegistry } from "./registry";
 import { useSeenActivityIds } from "./seen-activity-ids";
 import { BodyNote, PayloadBlock, ActivityDisclosure, ToolCallTruncationProvider } from "./shared";
+import { invokedToolCall } from "./invoked-tool";
 import { toolDisplayName } from "./tool-display-name";
 import type { ActivityItem, AgentMessageItem, MemoryItem, WorkerItem } from "./types";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
@@ -313,12 +314,17 @@ export function renderActivity(
         </Suspense>
       );
     case "tool-call": {
-      const Renderer = toolRegistry.resolve(item);
+      // A deferred tool run through tool_invoke reads as the tool it ran.
+      const shown = invokedToolCall(item);
+      const Renderer = toolRegistry.resolve(shown);
       return (
-        <ToolRowBoundary name={toolDisplayName(msg, item.name)} resetKeys={[item.status, Renderer]}>
+        <ToolRowBoundary
+          name={toolDisplayName(msg, shown.name)}
+          resetKeys={[item.status, Renderer]}
+        >
           <ToolCallTruncationProvider value={item.truncation ?? null}>
             <Renderer
-              item={item}
+              item={shown}
               loadRetainedScreenshot={loadRetainedScreenshot}
               loadRetainedArtifact={loadRetainedArtifact}
             />

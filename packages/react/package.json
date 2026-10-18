@@ -46,6 +46,11 @@
       "style": "./styles/connect.css",
       "default": "./styles/connect.css"
     },
+    "./this-computer.css": {
+      "types": "./styles/this-computer.d.ts",
+      "style": "./styles/this-computer.css",
+      "default": "./styles/this-computer.css"
+    },
     "./connect": {
       "types": "./src/connect.ts",
       "default": "./src/connect.ts"
@@ -81,6 +86,10 @@
     "./machines": {
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"
+    },
+    "./this-computer": {
+      "types": "./src/this-computer.ts",
+      "default": "./src/this-computer.ts"
     },
     "./queue-presentation-model": {
       "types": "./src/queue-presentation-model.ts",

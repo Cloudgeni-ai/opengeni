@@ -81,4 +81,52 @@ describe("shared tool row presentation", () => {
     expect(title.icon).toBe("sessions");
     expect(title.preview).toEqual({ kind: "text", text: "Fibonacci script" });
   });
+
+  test("moving between machines and using a screen read as plain steps", () => {
+    const row = (partial: Partial<ToolCallItem> & Pick<ToolCallItem, "name">) =>
+      toolRowPresentation(englishText, call(partial));
+    expect(row({ name: "opengeni__sandboxes_list" }).title).toBe("Looked for machines");
+    expect(row({ name: "sandbox_swap", arguments: { target: "m1" } }).title).toBe(
+      "Moved to a machine",
+    );
+    expect(row({ name: "sandbox_swap", arguments: { target: "session" } }).title).toBe(
+      "Moved back",
+    );
+    expect(row({ name: "interaction__computer_open" }).title).toBe("Opened the screen");
+    expect(row({ name: "computer_observe" }).title).toBe("Looked at the screen");
+    const typed = row({
+      name: "computer_act",
+      arguments: { action: { type: "keyboard", value: "hello" } },
+    });
+    expect(typed.title).toBe("Typed on the keyboard");
+    expect(typed.preview).toEqual({ kind: "text", text: "\u201chello\u201d" });
+    const clicked = row({
+      name: "computer_act",
+      status: "running",
+      arguments: { action: { type: "pointer", locator: { name: "Save" } } },
+    });
+    expect(clicked.title).toBe("Clicked on the screen");
+    expect(clicked.preview).toEqual({ kind: "text", text: "\u201cSave\u201d" });
+    expect(row({ name: "computer_act", arguments: {} }).title).toBe("Used the screen");
+    const swedish = createOpenGeniText({
+      locale: "sv",
+      messages: { "timeline.toolPresentation.openedTheScreen": "Öppnade skärmen" },
+    });
+    expect(toolRowPresentation(swedish, call({ name: "computer_open" })).title).toBe(
+      "Öppnade skärmen",
+    );
+  });
+
+  test("a tool_invoke call reads as the tool it ran", () => {
+    const row = toolRowPresentation(
+      englishText,
+      call({
+        name: "tool_invoke",
+        arguments: { name: "opengeni__run_on", arguments: { target: "m1", op: "exec", cmd: "ls" } },
+      }),
+    );
+    expect(row.tool).toBe("run_on");
+    const plain = toolRowPresentation(englishText, call({ name: "tool_invoke", arguments: {} }));
+    expect(plain.title).toBe("Tool invoke");
+  });
 });

@@ -35,6 +35,7 @@ export default defineConfig({
     "src/native-previews.ts",
     "src/session-ui.ts",
     "src/machines.ts",
+    "src/this-computer.ts",
     "src/usage.ts",
     "src/model-policy.ts",
     "src/queue-presentation-model.ts",

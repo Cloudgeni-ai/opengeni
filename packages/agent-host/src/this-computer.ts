@@ -1,4 +1,4 @@
-import { execFile, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, execFile, spawn, spawnSync } from "node:child_process";
 import {
   closeSync,
   createWriteStream,
@@ -18,10 +18,12 @@ import { dirname, join } from "node:path";
 
 import type {
   ThisComputerConnectOptions,
+  ThisComputerErrorCode,
   ThisComputerPermission,
   ThisComputerPermissionId,
   ThisComputerStatus,
-} from "../contract";
+} from "@opengeni/sdk/this-computer";
+import { macSystemNames, type MacSystemNameCatalog } from "@opengeni/sdk/this-computer";
 import {
   connectionFor,
   hostedAgentPath,
@@ -31,6 +33,7 @@ import {
   parsePermissions,
   standaloneMacAgentApp,
   type AgentConnection,
+  type AgentPermissionId,
   type AgentPlatform,
 } from "./agent-cli";
 import { agentAssetName, signedHash, verifyAgentSignature } from "./agent-download";
@@ -46,6 +49,18 @@ interface RunResult {
 
 /** Marks the agent as the app's helper: the app asks for permissions and restarts it. */
 const HOST_ENV = { OPENGENI_AGENT_HOST: "desktop-app" };
+
+/** A failure the screens can explain in their own words; `message` stays plain English. */
+export class ThisComputerError extends Error {
+  constructor(
+    readonly code: ThisComputerErrorCode,
+    message: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = "ThisComputerError";
+  }
+}
 
 function run(
   file: string,
@@ -83,8 +98,42 @@ export interface ThisComputerDeps {
   fetch(url: string): Promise<Response>;
   /** The app's own data folder, for its small state file. */
   dataDir: string;
+  /**
+   * The system's preferred languages, most preferred first (Electron's
+   * `app.getPreferredSystemLanguages()`), so screens can quote what the
+   * system calls things in its own language. English names when absent.
+   */
+  systemLanguages?(): readonly string[];
+  /**
+   * What macOS calls things in the languages the app translates for (see
+   * `macSystemNames`). English is built in.
+   */
+  systemNames?: MacSystemNameCatalog;
   /** Where the agent's log goes. */
   logDir: string;
+  /**
+   * Where the app keeps the agent it runs. By default the place the
+   * command-line installer uses, so there is one agent per person. An app
+   * that keeps its own agent apart from any other passes its own path.
+   */
+  agentPath?: string;
+  /**
+   * `agentPath` ships inside the app (e.g. a store package, where the app
+   * can't run code it downloads): it is never downloaded and updates with the
+   * app instead.
+   */
+  bundledAgent?: boolean;
+  /**
+   * The agent's own config folder (its machine identity and connections).
+   * By default the agent's usual one; an app with its own agent passes its own.
+   */
+  agentConfigDir?: string;
+  /**
+   * Take over an agent installed separately on this computer (its background
+   * service, and on a Mac the older standalone agent app). Default true; an
+   * app with its own agent leaves other agents alone.
+   */
+  adoptStandaloneAgent?: boolean;
   /** A single-use personal enroll token for the account's workspace. */
   mintEnrollToken(accountId: string, workspaceId: string, screenControl: boolean): Promise<string>;
   /**
@@ -92,8 +141,19 @@ export interface ThisComputerDeps {
    * chats in the workspace, without asking again in every chat.
    */
   allowAgents(accountId: string, workspaceId: string, enrollmentId: string): Promise<void>;
+  /**
+   * After this computer is disconnected from a workspace, remove it there too,
+   * so it stops showing as an offline machine. Optional.
+   */
+  forgetComputer?(accountId: string, workspaceId: string, enrollmentId: string): Promise<void>;
   /** Opens a page of the system settings, e.g. one Privacy & Security list. */
   openSystemSettings(url: string): void;
+  /**
+   * The person was sent to System Settings to allow one permission: the app
+   * can show its guide beside it. Called with null once it is allowed
+   * (`granted`) or no longer being waited for.
+   */
+  onGuidePermission?(id: ThisComputerPermissionId | null, granted?: boolean): void;
   /** Moves a file or folder to the Trash. */
   trash(path: string): Promise<void>;
   /**
@@ -120,25 +180,39 @@ interface ComputerState {
    * off in the system's settings keeps it off.
    */
   openAtLogin: boolean;
+  /** Setting up began and some permission is still to be allowed. */
+  setupPending: boolean;
 }
 
-const PERMISSION_ORDER: readonly ThisComputerPermissionId[] = [
+/** What the agent reports and asks for itself: screen control. */
+const SCREEN_PERMISSIONS: readonly AgentPermissionId[] = [
   "screenRecording",
   "accessibility",
   "inputMonitoring",
 ];
+/** Every step, in order: screen control, then the folders macOS guards. */
+const PERMISSION_ORDER: readonly ThisComputerPermissionId[] = [...SCREEN_PERMISSIONS, "files"];
 
 const SETTINGS_PANES: Record<ThisComputerPermissionId, string> = {
   screenRecording: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
   accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
   inputMonitoring: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+  files: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders",
 };
 
-const REQUEST_ARGUMENT: Record<ThisComputerPermissionId, string> = {
+const REQUEST_ARGUMENT: Record<AgentPermissionId, string> = {
   screenRecording: "screen-recording",
   accessibility: "accessibility",
   inputMonitoring: "input-monitoring",
 };
+
+/**
+ * The folders macOS asks about before any app opens them. The agent runs as
+ * the app's helper, so one answer for the app covers both.
+ */
+const GUARDED_FOLDERS = ["Desktop", "Documents", "Downloads"] as const;
+/** A folder that doesn't answer this fast is still waiting on its question. */
+const FOLDER_CHECK_MS = 1_500;
 
 const CONNECTIONS_TTL_MS = 3_000;
 /** Short, so a permission granted in System Settings shows up while the person watches. */
@@ -170,16 +244,28 @@ export class ThisComputer {
   /** The last connections read, kept when the cache is cleared, to notice a change. */
   private lastConnections: AgentConnection[] | null = null;
   private checking: Promise<Permissions> | null = null;
+  /** The guarded-folder check in flight, shared by status reads meanwhile. */
+  private checkingFolders: Promise<boolean> | null = null;
+  /** The folder questions being asked in setup, shared by a second ask meanwhile. */
+  private requestingFolders: Promise<void> | null = null;
+  /** Helper processes opening guarded folders, stopped when the app ends. */
+  private readonly folderChecks = new Set<ChildProcess>();
   private installing: Promise<string> | null = null;
   /** How much of the agent has downloaded, from 0 to 1, while it downloads. */
   private progress: number | null = null;
   private busy = false;
   private error: string | null = null;
+  private errorCode: ThisComputerErrorCode | null = null;
   private childPid: number | null = null;
   private grantWatch: { timer: NodeJS.Timeout; until: number } | null = null;
+  /** The permission the person was sent to System Settings for, while it is missing. */
+  private guiding: ThisComputerPermissionId | null = null;
+  /** Environment every agent command gets: the host marker and, when set, its own config. */
+  private readonly agentEnv: Record<string, string>;
 
   constructor(private readonly deps: ThisComputerDeps) {
-    this.hostedPath = hostedAgentPath(deps.platform, deps.home, deps.env);
+    this.hostedPath = deps.agentPath ?? hostedAgentPath(deps.platform, deps.home, deps.env);
+    this.agentEnv = deps.agentConfigDir ? { OPENGENI_CONFIG_DIR: deps.agentConfigDir } : {};
     this.statePath = join(deps.dataDir, "this-computer.json");
     this.state = this.loadState();
     this.agent = new HostedAgent({
@@ -194,6 +280,19 @@ export class ThisComputer {
 
   get supported(): boolean {
     return ["darwin", "linux", "win32"].includes(this.deps.platform);
+  }
+
+  /** Whether an agent installed separately is taken over (see the deps). */
+  private get adopts(): boolean {
+    return this.deps.adoptStandaloneAgent !== false;
+  }
+
+  private run(
+    file: string,
+    args: readonly string[],
+    options: { env?: Record<string, string>; timeoutMs: number },
+  ): Promise<RunResult> {
+    return run(file, args, { ...options, env: { ...this.agentEnv, ...options.env } });
   }
 
   /** Whether the app opens at login, without a window, for this computer. */
@@ -226,7 +325,7 @@ export class ThisComputer {
       const first = connections[0];
       if (first) this.agent.start(first.apiUrl);
     } catch (caught) {
-      this.error = message(caught);
+      this.fail(caught);
       this.deps.onChange();
     }
   }
@@ -235,6 +334,7 @@ export class ThisComputer {
     const base = {
       busy: this.busy || this.installing !== null,
       error: this.error,
+      ...(this.errorCode ? { errorCode: this.errorCode } : {}),
       machineName: await computerName(),
       ...(this.progress !== null ? { setupProgress: this.progress } : {}),
     };
@@ -247,10 +347,18 @@ export class ThisComputer {
       return { ...base, state: "not_connected" };
     }
     const permissions = await this.permissionList();
+    const missing = permissions?.some((permission) => !permission.granted) ?? false;
     return {
       ...base,
       state: this.state.paused ? "paused" : "connected",
-      ...(permissions ? { permissions } : {}),
+      ...(permissions
+        ? {
+            permissions,
+            systemNames: macSystemNames(this.deps.systemLanguages?.() ?? [], this.deps.systemNames),
+          }
+        : {}),
+      ...(missing && this.state.setupPending ? { setupPending: true } : {}),
+      ...(!this.state.paused && this.agent.state !== "running" ? { reconnecting: true } : {}),
     };
   }
 
@@ -259,6 +367,8 @@ export class ThisComputer {
     installed: boolean;
     connected: boolean;
     running: boolean;
+    /** On, but the agent is starting again, so agents can't use it for the moment. */
+    reconnecting: boolean;
     needsPermissions: boolean;
     /** In the order to allow them. */
     missingPermissions: ThisComputerPermissionId[];
@@ -268,6 +378,7 @@ export class ThisComputer {
         installed: false,
         connected: false,
         running: false,
+        reconnecting: false,
         needsPermissions: false,
         missingPermissions: [],
       };
@@ -281,6 +392,7 @@ export class ThisComputer {
       installed: existsSync(this.hostedPath),
       connected: connections.length > 0,
       running: !this.state.paused && this.agent.state !== "stopped",
+      reconnecting: !this.state.paused && connections.length > 0 && this.agent.state !== "running",
       needsPermissions: missingPermissions.length > 0,
       missingPermissions,
     };
@@ -294,24 +406,46 @@ export class ThisComputer {
   ): Promise<ThisComputerStatus> {
     await this.act(async () => {
       const binary = await this.ensureInstalled(baseUrl);
-      const token = await this.deps.mintEnrollToken(accountId, workspaceId, options.screenControl);
+      const token = await this.deps
+        .mintEnrollToken(accountId, workspaceId, options.screenControl)
+        .catch((caught: unknown) => {
+          throw serverFailure(caught, "Couldn't start setting up this computer");
+        });
       await this.expect(
-        run(binary, ["--api-url", baseUrl, "connect", "--non-interactive"], {
-          env: { OPENGENI_API_URL: baseUrl, OPENGENI_ENROLL_TOKEN: token },
-          timeoutMs: 120_000,
-        }),
+        // The name people know the computer by, not its network hostname.
+        this.run(
+          binary,
+          [
+            "--api-url",
+            baseUrl,
+            "connect",
+            "--non-interactive",
+            "--machine-name",
+            await computerName(),
+          ],
+          {
+            env: { OPENGENI_API_URL: baseUrl, OPENGENI_ENROLL_TOKEN: token },
+            timeoutMs: 120_000,
+          },
+        ),
         "Couldn't connect this computer",
+        "connect_failed",
       );
       this.saveState({
         paused: false,
         screenControl: this.state.screenControl || options.screenControl,
+        setupPending: options.screenControl && this.deps.platform === "darwin",
       });
       // A running agent reads its connections when it starts.
       if (this.agent.state === "stopped") this.agent.start(baseUrl);
       else await this.agent.restart();
       const connection = connectionFor(await this.connections(true), baseUrl, workspaceId);
-      if (!connection) throw new Error("Couldn't connect this computer. Try again.");
-      await this.deps.allowAgents(accountId, workspaceId, connection.agentId);
+      if (!connection) {
+        throw new ThisComputerError("connect_failed", "Couldn't connect this computer. Try again.");
+      }
+      await this.deps.allowAgents(accountId, workspaceId, connection.agentId).catch((caught) => {
+        throw serverFailure(caught, "Couldn't let agents use this computer");
+      });
     });
     return await this.status(baseUrl, workspaceId);
   }
@@ -328,29 +462,149 @@ export class ThisComputer {
       this.saveState({ paused: false });
       await this.ensureInstalled(null);
       const first = (await this.connections(true))[0];
-      if (!first) throw new Error("This computer isn't connected to a workspace yet.");
+      if (!first) {
+        throw new ThisComputerError(
+          "connect_failed",
+          "This computer isn't connected to a workspace yet.",
+        );
+      }
       this.agent.start(first.apiUrl);
+    });
+  }
+
+  /**
+   * Stops agents using this computer in the workspace: its connection there is
+   * removed, and the agent stops when it serves nothing else. Connecting again
+   * later sets it up as new.
+   */
+  async disconnect(accountId: string, baseUrl: string, workspaceId: string): Promise<void> {
+    await this.act(async () => {
+      const connection = connectionFor(await this.connections(true), baseUrl, workspaceId);
+      if (!connection) return;
+      await this.expect(
+        this.run(this.hostedPath, ["disconnect", connection.connectionId], { timeoutMs: 30_000 }),
+        "Couldn't disconnect this computer",
+        "unknown",
+      );
+      const rest = await this.connections(true);
+      if (rest.length === 0) {
+        this.saveState({ paused: false, setupPending: false });
+        await this.agent.stop();
+      } else {
+        await this.agent.restart();
+      }
+      // The local link is gone either way; removing the machine there is a courtesy.
+      await this.deps
+        .forgetComputer?.(accountId, workspaceId, connection.agentId)
+        .catch(() => undefined);
     });
   }
 
   /**
    * Asks for one screen-control permission. The first time the system shows
    * its own prompt, under the app's name; after that the person turns it on in
-   * System Settings, which opens at the right list.
+   * System Settings, which opens at the right list. The request is made every
+   * time, before System Settings opens: it is what puts the app in that list,
+   * and macOS forgets the app when its permissions are reset or it is
+   * reinstalled. The system prompt only shows while macOS hasn't asked yet.
    */
   async requestPermission(id: ThisComputerPermissionId): Promise<void> {
     if (this.deps.platform !== "darwin" || !PERMISSION_ORDER.includes(id)) return;
+    if (id === "files") return await this.requestFolders();
     this.watchForGrants();
-    if (this.state.requested.includes(id) || !existsSync(this.hostedPath)) {
-      this.deps.openSystemSettings(SETTINGS_PANES[id]);
-      return;
+    this.guide(id);
+    const askedBefore = this.state.requested.includes(id);
+    let requested = false;
+    if (existsSync(this.hostedPath)) {
+      if (!askedBefore) this.saveState({ requested: [...this.state.requested, id] });
+      requested = await this.run(
+        this.hostedPath,
+        ["permissions", "--request", REQUEST_ARGUMENT[id]],
+        { timeoutMs: 30_000 },
+      ).then(
+        () => true,
+        () => false,
+      );
     }
-    this.saveState({ requested: [...this.state.requested, id] });
-    await run(this.hostedPath, ["permissions", "--request", REQUEST_ARGUMENT[id]], {
-      timeoutMs: 30_000,
-    });
+    // Without a system prompt to answer, the switch in System Settings is the way.
+    if (askedBefore || !requested) this.deps.openSystemSettings(SETTINGS_PANES[id]);
     this.permissionsCache = null;
     this.deps.onChange();
+  }
+
+  /**
+   * Opening each guarded folder makes macOS ask about it, one question after
+   * another, while the person is in setup expecting them. It is tried every
+   * time: macOS forgets its answers when permissions are reset or the app is
+   * reinstalled, and then only asking again brings the question back. A
+   * folder refused earlier opens at once without a question; for those, the
+   * switch in System Settings is the way. Asking twice at once shares the
+   * first request.
+   */
+  private requestFolders(): Promise<void> {
+    this.requestingFolders ??= (async () => {
+      if (!this.state.requested.includes("files")) {
+        this.saveState({ requested: [...this.state.requested, "files"] });
+      }
+      let allowed = true;
+      for (const folder of GUARDED_FOLDERS) {
+        if (!(await this.opensFolder(join(this.deps.home, folder), null))) allowed = false;
+      }
+      if (!allowed) {
+        this.watchForGrants();
+        this.guide("files");
+        this.deps.openSystemSettings(SETTINGS_PANES.files);
+      }
+      this.permissionsCache = null;
+      this.deps.onChange();
+    })().finally(() => {
+      this.requestingFolders = null;
+    });
+    return this.requestingFolders;
+  }
+
+  /**
+   * Whether every guarded folder opens. Only once they've been asked about:
+   * before that, opening one would put macOS's question up unexpectedly.
+   * One check at a time: a status read while one runs shares it.
+   */
+  private foldersAllowed(): Promise<boolean> {
+    if (!this.state.requested.includes("files")) return Promise.resolve(false);
+    this.checkingFolders ??= Promise.all(
+      GUARDED_FOLDERS.map((folder) =>
+        this.opensFolder(join(this.deps.home, folder), FOLDER_CHECK_MS),
+      ),
+    )
+      .then((results) => results.every(Boolean))
+      .finally(() => {
+        this.checkingFolders = null;
+      });
+    return this.checkingFolders;
+  }
+
+  /**
+   * Whether a guarded folder opens, tried in a short-lived helper process.
+   * While macOS's question about the folder is up, opening it waits for the
+   * answer; in the app's own process that wait would hold one of its few
+   * file-system threads, and the app could not quit until the question was
+   * answered. A helper is stopped after `timeoutMs` (null: wait for the answer)
+   * and when the app ends. macOS asks about the helper under the app's name.
+   * A folder that doesn't exist needs no permission.
+   */
+  private opensFolder(path: string, timeoutMs: number | null): Promise<boolean> {
+    if (!existsSync(path)) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      const child = spawn("/bin/ls", [path], { stdio: "ignore" });
+      this.folderChecks.add(child);
+      const timer = timeoutMs === null ? null : setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+      const done = (opened: boolean) => {
+        if (timer) clearTimeout(timer);
+        this.folderChecks.delete(child);
+        resolve(opened);
+      };
+      child.once("error", () => done(false));
+      child.once("exit", (code) => done(code === 0));
+    });
   }
 
   /**
@@ -380,11 +634,20 @@ export class ThisComputer {
   private stopWatchingForGrants(): void {
     if (this.grantWatch) clearTimeout(this.grantWatch.timer);
     this.grantWatch = null;
+    this.guide(null);
+  }
+
+  /** Tells the app which permission the person is allowing in System Settings now. */
+  private guide(id: ThisComputerPermissionId | null, granted = false): void {
+    if (this.guiding === id) return;
+    this.guiding = id;
+    this.deps.onGuidePermission?.(id, granted);
   }
 
   /** Stops the agent with the app. It starts again when the app next opens. */
   async shutdown(): Promise<void> {
     this.stopWatchingForGrants();
+    for (const check of this.folderChecks) check.kill("SIGKILL");
     await this.agent.stop();
   }
 
@@ -394,6 +657,7 @@ export class ThisComputer {
    */
   shutdownNow(): void {
     this.stopWatchingForGrants();
+    for (const check of this.folderChecks) check.kill("SIGKILL");
     const pid = this.childPid;
     if (pid !== null) killTree(pid, this.deps.platform, false, true);
   }
@@ -409,7 +673,9 @@ export class ThisComputer {
   private hasAnyAgent(): boolean {
     return (
       existsSync(this.hostedPath) ||
-      (this.deps.platform === "darwin" && existsSync(standaloneMacAgentApp(this.deps.home)))
+      (this.adopts &&
+        this.deps.platform === "darwin" &&
+        existsSync(standaloneMacAgentApp(this.deps.home)))
     );
   }
 
@@ -427,17 +693,25 @@ export class ThisComputer {
   }
 
   private async install(server: string | null): Promise<string> {
-    const learned = this.state.adopted ? null : await this.adoptStandalone();
+    const learned = this.state.adopted || !this.adopts ? null : await this.adoptStandalone();
     if (await this.versionOf(this.hostedPath)) return this.hostedPath;
+    if (this.deps.bundledAgent) {
+      throw new ThisComputerError(
+        "unsupported",
+        "This app's copy of the agent is missing or damaged. Reinstall the app.",
+      );
+    }
     const from = server ?? learned;
-    if (!from) throw new Error("Set up this computer again from a workspace.");
+    if (!from) {
+      throw new ThisComputerError("connect_failed", "Set up this computer again from a workspace.");
+    }
     await this.download(from);
     return this.hostedPath;
   }
 
   private async versionOf(binary: string): Promise<string | null> {
     if (!existsSync(binary)) return null;
-    const result = await run(binary, ["--version"], { timeoutMs: 15_000 });
+    const result = await this.run(binary, ["--version"], { timeoutMs: 15_000 });
     return result.code === 0 ? parseAgentVersion(result.output) : null;
   }
 
@@ -448,14 +722,23 @@ export class ThisComputer {
    */
   private async download(server: string): Promise<void> {
     const asset = agentAssetName(this.deps.platform, this.deps.arch);
-    if (!asset) throw new Error("Agents can't use this kind of computer yet.");
+    if (!asset) {
+      throw new ThisComputerError("unsupported", "Agents can't use this kind of computer yet.");
+    }
     const url = new URL(`/agent/latest/${asset}`, server).toString();
     const [file, signature] = await Promise.all([
       this.deps.fetch(url),
       this.deps.fetch(`${url}.minisig`),
-    ]);
+    ]).catch((caught: unknown) => {
+      throw new ThisComputerError(
+        "offline",
+        `Couldn't reach ${new URL(server).host}. Check your connection and try again.`,
+        { cause: caught },
+      );
+    });
     if (!file.ok || !file.body || !signature.ok) {
-      throw new Error(
+      throw new ThisComputerError(
+        "download_failed",
         `Couldn't download the agent from ${new URL(server).host} (${file.ok ? signature.status : file.status}).`,
       );
     }
@@ -488,7 +771,13 @@ export class ThisComputer {
     } catch (caught) {
       out.destroy();
       rmSync(staged, { force: true });
-      throw new Error(`Couldn't set up the agent: ${message(caught)}`, { cause: caught });
+      throw new ThisComputerError(
+        "download_failed",
+        `Couldn't set up the agent: ${errorText(caught)}`,
+        {
+          cause: caught,
+        },
+      );
     }
     this.moveIntoPlace(staged);
   }
@@ -526,11 +815,12 @@ export class ThisComputer {
     );
     let server: string | null = null;
     if (existing) {
-      const listed = await run(existing, ["connections"], { timeoutMs: 15_000 });
+      const listed = await this.run(existing, ["connections"], { timeoutMs: 15_000 });
       server = listed.code === 0 ? (parseConnections(listed.output)[0]?.apiUrl ?? null) : null;
-      const removed = await run(existing, ["service", "uninstall"], { timeoutMs: 60_000 });
+      const removed = await this.run(existing, ["service", "uninstall"], { timeoutMs: 60_000 });
       if (removed.code !== 0) {
-        throw new Error(
+        throw new ThisComputerError(
+          "takeover_failed",
           failureMessage("Couldn't take over the agent already on this computer", removed),
         );
       }
@@ -553,7 +843,9 @@ export class ThisComputer {
     try {
       const child = spawn(this.hostedPath, ["--api-url", apiUrl, "run"], {
         // Plain text: the log is a file, not a terminal.
-        env: { ...process.env, ...HOST_ENV, NO_COLOR: "1" },
+        // The app's own config folder, so it runs this app's connections and
+        // never meets another agent's single-instance lock.
+        env: { ...process.env, ...HOST_ENV, ...this.agentEnv, NO_COLOR: "1" },
         stdio: ["ignore", log ?? "ignore", log ?? "ignore"],
         windowsHide: true,
       });
@@ -613,7 +905,7 @@ export class ThisComputer {
     if (!fresh && cached && Date.now() - cached.at < CONNECTIONS_TTL_MS) return cached.value;
     this.reading ??= (async () => {
       if (!existsSync(this.hostedPath)) return [] as AgentConnection[];
-      const result = await run(this.hostedPath, ["connections"], { timeoutMs: 15_000 });
+      const result = await this.run(this.hostedPath, ["connections"], { timeoutMs: 15_000 });
       // A read that failed (busy, timed out) says nothing new: keep what was known.
       return result.code === 0 ? parseConnections(result.output) : null;
     })()
@@ -648,7 +940,15 @@ export class ThisComputer {
     if (!this.state.screenControl || this.deps.platform !== "darwin") return null;
     const permissions = await this.permissions();
     if (!permissions?.required) return null;
-    return PERMISSION_ORDER.map((id) => ({ id, granted: permissions.granted[id] }));
+    const list: ThisComputerPermission[] = [
+      ...SCREEN_PERMISSIONS.map((id) => ({ id, granted: permissions.granted[id] })),
+      { id: "files", granted: await this.foldersAllowed() },
+    ];
+    if (this.guiding === "files" && list.at(-1)?.granted) this.guide(null, true);
+    if (this.state.setupPending && list.every((permission) => permission.granted)) {
+      this.saveState({ setupPending: false });
+    }
+    return list;
   }
 
   private async permissions(): Promise<Permissions> {
@@ -657,7 +957,7 @@ export class ThisComputer {
     this.checking ??= (async () => {
       if (!existsSync(this.hostedPath)) return null;
       // A fresh process each time: a running one can keep an old answer.
-      const result = await run(this.hostedPath, ["permissions"], { timeoutMs: 10_000 });
+      const result = await this.run(this.hostedPath, ["permissions"], { timeoutMs: 10_000 });
       return result.code === 0 ? parsePermissions(result.output) : null;
     })()
       .then((value) => {
@@ -667,6 +967,10 @@ export class ThisComputer {
           // The running agent learns about a new grant only by starting again.
           void this.agent.restart();
           this.deps.onChange();
+        }
+        if (value?.required) {
+          const guiding = this.guiding;
+          if (guiding && guiding !== "files" && value.granted[guiding]) this.guide(null, true);
         }
         return value;
       })
@@ -685,6 +989,7 @@ export class ThisComputer {
       screenControl: false,
       requested: [],
       openAtLogin: false,
+      setupPending: false,
     };
     try {
       const saved = JSON.parse(readFileSync(this.statePath, "utf8")) as Partial<ComputerState>;
@@ -696,6 +1001,7 @@ export class ThisComputer {
           ? saved.requested.filter((id) => PERMISSION_ORDER.includes(id))
           : [],
         openAtLogin: saved.openAtLogin === true,
+        setupPending: saved.setupPending === true,
       };
     } catch {
       return fallback;
@@ -712,21 +1018,36 @@ export class ThisComputer {
     }
   }
 
-  private async expect(pending: Promise<RunResult>, failure: string): Promise<RunResult> {
+  private async expect(
+    pending: Promise<RunResult>,
+    failure: string,
+    code: ThisComputerErrorCode,
+  ): Promise<RunResult> {
     const result = await pending;
-    if (result.code !== 0) throw new Error(failureMessage(failure, result));
+    if (result.code !== 0) {
+      throw new ThisComputerError(
+        result.timedOut ? "offline" : code,
+        failureMessage(failure, result),
+      );
+    }
     return result;
   }
 
+  private fail(caught: unknown): void {
+    this.error = errorText(caught);
+    this.errorCode = caught instanceof ThisComputerError ? caught.code : "unknown";
+  }
+
   private async act(action: () => Promise<void>): Promise<void> {
-    if (this.busy) throw new Error("This computer is already being set up.");
+    if (this.busy) throw new ThisComputerError("busy", "This computer is already being set up.");
     this.busy = true;
     this.error = null;
+    this.errorCode = null;
     this.deps.onChange();
     try {
       await action();
     } catch (caught) {
-      this.error = message(caught);
+      this.fail(caught);
       throw caught;
     } finally {
       this.busy = false;
@@ -739,7 +1060,7 @@ export class ThisComputer {
 /** Some permission went from missing to granted between two readings. */
 export function newlyGranted(before: Permissions, after: Permissions): boolean {
   if (!before?.required || !after?.required) return false;
-  return PERMISSION_ORDER.some((id) => !before.granted[id] && after.granted[id]);
+  return SCREEN_PERMISSIONS.some((id) => !before.granted[id] && after.granted[id]);
 }
 
 function killTree(pid: number, platform: AgentPlatform, force: boolean, now = false): void {
@@ -757,6 +1078,19 @@ function killTree(pid: number, platform: AgentPlatform, force: boolean, now = fa
   }
 }
 
+/** A failed call to the server: unreachable, or refused. */
+function serverFailure(caught: unknown, failure: string): ThisComputerError {
+  if (caught instanceof ThisComputerError) return caught;
+  if (caught instanceof TypeError) {
+    return new ThisComputerError("offline", `${failure}: the server couldn't be reached.`, {
+      cause: caught,
+    });
+  }
+  return new ThisComputerError("connect_failed", `${failure}: ${errorText(caught)}`, {
+    cause: caught,
+  });
+}
+
 function isSymlink(path: string): boolean {
   try {
     return lstatSync(path).isSymbolicLink();
@@ -765,7 +1099,7 @@ function isSymlink(path: string): boolean {
   }
 }
 
-function message(caught: unknown): string {
+function errorText(caught: unknown): string {
   return caught instanceof Error ? caught.message : String(caught);
 }
 

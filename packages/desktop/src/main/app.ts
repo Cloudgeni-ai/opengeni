@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 
 import {
   app,
+  BrowserWindow,
   dialog,
   ipcMain,
   Menu,
@@ -12,6 +13,7 @@ import {
   Notification,
   powerMonitor,
   safeStorage,
+  screen,
   session,
   shell,
   type IpcMainEvent,
@@ -25,6 +27,12 @@ import {
   parseAppLink,
   serverLabel,
 } from "@opengeni/sdk/app-links";
+import { macSystemNames } from "@opengeni/sdk/this-computer";
+import { allowAgentsOnComputer, computerName, ThisComputer } from "@opengeni/agent-host";
+import {
+  defaultPermissionGuideLabels,
+  PermissionGuide,
+} from "@opengeni/agent-host/permission-guide";
 
 import {
   DESKTOP_IPC,
@@ -49,10 +57,7 @@ import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
-import { computerName } from "./computer-name";
-import { allowAgentsOnComputer } from "./computer-grants";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
-import { ThisComputer } from "./this-computer";
 import { AppTray } from "./tray";
 import { AppUpdates } from "./updates";
 import { MainWindow, openExternalSafely } from "./window";
@@ -143,6 +148,8 @@ export class DesktopShell {
   /** Read once; "" when the app wasn't installed by a server's install script. */
   private installedFrom: string | null = null;
   private readonly computer: ThisComputer;
+  /** Beside System Settings while a screen-control permission is being allowed there. */
+  private readonly permissionGuide: PermissionGuide;
   private readonly inbox: InboxNotifier;
   private tray: AppTray | null = null;
   private updates: AppUpdates | null = null;
@@ -180,6 +187,26 @@ export class DesktopShell {
       encrypt: (plain) => keyring().encryptString(plain),
       decrypt: (sealed) => keyring().decryptString(sealed),
     });
+    this.permissionGuide = new PermissionGuide({
+      electron: { BrowserWindow, screen, nativeTheme },
+      appName: config.productName,
+      labels: defaultPermissionGuideLabels(
+        config.productName,
+        macSystemNames(app.getPreferredSystemLanguages()),
+      ),
+      // The bundle's icon; the executable inside it has a generic one.
+      appIcon: async () =>
+        (
+          await app.getFileIcon(process.execPath.replace(/\/Contents\/MacOS\/[^/]+$/u, ""), {
+            size: "normal",
+          })
+        ).toDataURL(),
+      // Back to the app, where the next step or the finish waits.
+      onFinished: () => {
+        app.focus({ steal: true });
+        this.reveal();
+      },
+    });
     this.computer = new ThisComputer({
       platform: process.platform as "darwin" | "linux" | "win32",
       arch: process.arch,
@@ -188,6 +215,7 @@ export class DesktopShell {
       agentSigningKey: config.agentSigningKey,
       fetch: (url) => net.fetch(url),
       dataDir: app.getPath("userData"),
+      systemLanguages: () => app.getPreferredSystemLanguages(),
       logDir: app.getPath("logs"),
       mintEnrollToken: async (accountId, workspaceId, screenControl) => {
         const client = await this.client(accountId);
@@ -204,6 +232,11 @@ export class DesktopShell {
         await allowAgentsOnComputer(client, workspaceId, enrollmentId);
       },
       openSystemSettings: (url) => void shell.openExternal(url),
+      onGuidePermission: (id, granted) => {
+        if (id) this.permissionGuide.show(id);
+        else if (granted) this.permissionGuide.granted();
+        else this.permissionGuide.hide();
+      },
       trash: (path) => shell.trashItem(path),
       onScreenControlHandedOver: () =>
         showSimpleNotification(
@@ -901,6 +934,9 @@ export class DesktopShell {
     handle(DESKTOP_IPC.computerRequestPermission, (_account, id) =>
       this.computer.requestPermission(id as ThisComputerPermissionId),
     );
+    handle(DESKTOP_IPC.computerDisconnect, (account, workspaceId) =>
+      this.computer.disconnect(account.id, account.baseUrl, String(workspaceId)),
+    );
     handle(DESKTOP_IPC.openExternal, (_account, url) => {
       if (typeof url === "string") openExternalSafely(url);
     });
@@ -1005,6 +1041,7 @@ export class DesktopShell {
           installed: false,
           connected: false,
           running: false,
+          reconnecting: false,
           needsPermissions: false,
           missingPermissions: [],
         };
