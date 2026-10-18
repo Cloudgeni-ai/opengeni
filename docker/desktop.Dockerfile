@@ -47,9 +47,10 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     --mount=type=cache,id=opengeni-sandbox-cargo-git,target=/usr/local/cargo/git,sharing=shared \
     --mount=type=cache,id=opengeni-desktop-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
     set -eux; \
-    cargo build --locked --release -p opengeni-computer-native; \
+    cargo build --locked --release -p opengeni-computer-native -p opengeni-agent; \
     mkdir -p /out; \
-    install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native
+    install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native; \
+    install -m 0755 target/release/opengeni-agent /out/opengeni-agent
 
 RUN cc -O2 -std=c11 -Wall -Wextra -Werror \
       native/command-supervisor/supervisor.c -o /out/opengeni-command-supervisor
@@ -228,6 +229,7 @@ RUN set -eux; \
     } > /out/SHA256SUMS
 
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
+COPY --from=computer-native-build /out/opengeni-agent /out/opengeni-agent
 COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
 COPY --from=computer-native-build /out/opengeni-terminal-ready.so /out/opengeni-terminal-ready.so
 RUN printf '%s  %s\n' \
@@ -239,6 +241,10 @@ RUN printf '%s  %s\n' \
 RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-computer-native | awk '{print $1}')" \
       /usr/local/lib/opengeni/opengeni-computer-native \
+      >> /out/SHA256SUMS
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-agent | awk '{print $1}')" \
+      /usr/local/bin/opengeni-agent \
       >> /out/SHA256SUMS
 
 FROM node:22.22.0-bookworm-slim AS node-runtime
@@ -627,6 +633,10 @@ COPY --from=browserd-build /out/lightpanda-0.3.5-source.tar.gz /usr/local/share/
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
 COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
 COPY --from=browserd-build /out/opengeni-terminal-ready.so /usr/local/lib/opengeni/opengeni-terminal-ready.so
+# The machine agent an Opengeni compute sandbox runs as its guest agent
+# (`opengeni-agent run --fabric --virtual-desktop`). It sits beside
+# opengeni-browserd so its browser controller finds the sidecar.
+COPY --from=browserd-build /out/opengeni-agent /usr/local/bin/opengeni-agent
 COPY docker/desktop/opengeni-terminal-ready.sh /etc/profile.d/00-opengeni-terminal-ready.sh
 COPY agent/native/terminal-ready/tests/test_ready.py /tmp/opengeni-terminal-ready-test.py
 RUN python3 /tmp/opengeni-terminal-ready-test.py /usr/local/lib/opengeni/opengeni-terminal-ready.so --installed \
@@ -646,7 +656,9 @@ RUN set -eux; \
                /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser \
                /usr/local/lib/opengeni/lightpanda \
                /usr/local/bin/opengeni-command-supervisor \
-               /usr/local/lib/opengeni/opengeni-computer-native; \
+               /usr/local/lib/opengeni/opengeni-computer-native \
+               /usr/local/bin/opengeni-agent; \
+    opengeni-agent --version; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
     chmod 0755 /opt/opengeni/anydoc/node_modules/@firecrawl/anydoc/cli.js; \

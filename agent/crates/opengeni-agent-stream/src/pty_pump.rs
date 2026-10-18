@@ -341,8 +341,8 @@ mod tests {
                 kind: v1::StreamKind::Pty as i32,
                 port: 7681,
             },
-            token: "ogs_x".to_string(),
-            relay_url: "wss://relay/stream".to_string(),
+            credential: crate::RelayCredential::fixed("wss://relay/stream", "ogs_x"),
+            activity: crate::ActivityStamp::untracked(),
         }
     }
 

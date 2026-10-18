@@ -162,3 +162,9 @@ doc_markdown = "allow"
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# The agent hashes its own executable at startup. Unoptimized, SHA-256 over a
+# Linux debug test binary (hundreds of MB with its debug info) takes longer
+# than the tests that start agents wait for one to come online.
+[profile.dev.package.sha2]
+opt-level = 3

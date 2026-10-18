@@ -113,8 +113,8 @@ fn producer_config(base: &str, port: u32) -> ChannelConfig {
             kind: v1::StreamKind::Pty as i32,
             port,
         },
-        token: agent_token(),
-        relay_url: base.to_string(),
+        credential: opengeni_agent_stream::RelayCredential::fixed(base, agent_token()),
+        activity: opengeni_agent_stream::ActivityStamp::untracked(),
     }
 }
 

@@ -22,7 +22,9 @@ use std::time::Duration;
 
 use opengeni_agent_proto::v1::{self, StreamChannel, StreamOpen, StreamRole};
 
+use crate::activity::ActivityStamp;
 use crate::codec::RelayMessage;
+use crate::credential::RelayCredential;
 use crate::error::{StreamError, StreamResult};
 use crate::transport::{self, RelayTransport};
 
@@ -59,12 +61,12 @@ impl ChannelKey {
 pub struct ChannelConfig {
     /// The channel descriptor (id, key, kind, port) sent in the [`StreamOpen`].
     pub channel: StreamChannel,
-    /// The scoped `ogs_` stream token authorizing the channel. Presented on every
-    /// (re)registration; the relay validates it. NEVER logged.
-    pub token: String,
-    /// The relay base URL to dial (`wss://relay…`). The channel appends the
-    /// [`ChannelKey::query`] so the relay can route.
-    pub relay_url: String,
+    /// The relay address and producer token. Every (re)registration presents
+    /// the credential current at that moment; the relay validates it. Its
+    /// token is never logged.
+    pub credential: RelayCredential,
+    /// Where the channel records its traffic for the agent's idle report.
+    pub activity: ActivityStamp,
 }
 
 impl ChannelConfig {
@@ -79,15 +81,12 @@ impl ChannelConfig {
         }
     }
 
-    /// The full relay dial URL for this channel (`relay_url` + the routing query).
+    /// The full relay dial URL for this channel: the relay base URL
+    /// (`wss://relay…`) and the routing query.
     #[must_use]
-    pub fn dial_url(&self) -> String {
-        let sep = if self.relay_url.contains('?') {
-            '&'
-        } else {
-            '?'
-        };
-        format!("{}{}{}", self.relay_url, sep, self.key().query())
+    pub fn dial_url(&self, relay_url: &str) -> String {
+        let sep = if relay_url.contains('?') { '&' } else { '?' };
+        format!("{relay_url}{sep}{}", self.key().query())
     }
 }
 
@@ -136,8 +135,9 @@ impl RelayChannel {
 
     /// Registers (or re-registers) presenting an explicit `resume_from_seq`.
     async fn register_from(config: ChannelConfig, resume_from_seq: u64) -> StreamResult<Self> {
-        let transport = transport::dial(&config.dial_url()).await?;
-        Self::open_on(transport, config, resume_from_seq).await
+        let endpoint = config.credential.current().await?;
+        let transport = transport::dial(&config.dial_url(&endpoint.url)).await?;
+        Self::open_on(transport, config, endpoint.token, resume_from_seq).await
     }
 
     /// Performs the registration handshake over an already-dialed `transport`:
@@ -148,11 +148,12 @@ impl RelayChannel {
     async fn open_on(
         mut transport: Box<dyn RelayTransport>,
         config: ChannelConfig,
+        token: String,
         resume_from_seq: u64,
     ) -> StreamResult<Self> {
         let open = RelayMessage::Open(StreamOpen {
             channel: Some(config.channel.clone()),
-            token: config.token.clone(),
+            token,
             role: StreamRole::Agent as i32,
             resume_from_seq,
         });
@@ -196,7 +197,8 @@ impl RelayChannel {
         config: ChannelConfig,
         resume_from_seq: u64,
     ) -> StreamResult<Self> {
-        Self::open_on(transport, config, resume_from_seq).await
+        let token = config.credential.current().await?.token;
+        Self::open_on(transport, config, token, resume_from_seq).await
     }
 
     /// Re-establishes the channel after a transport drop, asking the relay to replay
@@ -229,7 +231,9 @@ impl RelayChannel {
     /// opening the replacement channel.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn reconnect_on(&mut self, transport: Box<dyn RelayTransport>) -> StreamResult<()> {
-        let resumed = Self::open_on(transport, self.config.clone(), self.recv_next_seq).await?;
+        let token = self.config.credential.current().await?.token;
+        let resumed =
+            Self::open_on(transport, self.config.clone(), token, self.recv_next_seq).await?;
         self.transport = resumed.transport;
         self.recv_next_seq = resumed.recv_next_seq.max(self.recv_next_seq);
         Ok(())
@@ -288,6 +292,11 @@ impl RelayChannel {
         });
         self.transport.send(&frame).await?;
         self.send_next_seq = self.send_next_seq.wrapping_add(1);
+        // A desktop pump captures at a fixed rate whatever happens on screen,
+        // so only what its viewer sends counts as use (see `activity`).
+        if self.kind() != v1::StreamKind::Desktop {
+            self.config.activity.touch();
+        }
         Ok(seq)
     }
 
@@ -308,7 +317,12 @@ impl RelayChannel {
                 }
                 Some(RelayMessage::Frame(frame)) => {
                     self.recv_next_seq = frame.seq.wrapping_add(1);
+                    self.config.activity.touch();
                     return Ok(Some(RelayMessage::Frame(frame)));
+                }
+                Some(RelayMessage::DesktopInput(input)) => {
+                    self.config.activity.touch();
+                    return Ok(Some(RelayMessage::DesktopInput(input)));
                 }
                 other => return Ok(other),
             }
@@ -361,8 +375,8 @@ mod tests {
                 kind: v1::StreamKind::Pty as i32,
                 port: 7681,
             },
-            token: "ogs_secret".to_string(),
-            relay_url: "wss://relay.example/stream".to_string(),
+            credential: RelayCredential::fixed("wss://relay.example/stream", "ogs_secret"),
+            activity: ActivityStamp::untracked(),
         }
     }
 
@@ -377,14 +391,12 @@ mod tests {
     #[test]
     fn dial_url_appends_the_routing_query() {
         assert_eq!(
-            config().dial_url(),
+            config().dial_url("wss://relay.example/stream"),
             "wss://relay.example/stream?ws=ws-1&agent=ag-1&port=7681&channel=ch-1"
         );
-        // A relay_url that already has a query gets an `&` separator.
-        let mut c = config();
-        c.relay_url = "wss://relay.example/stream?x=1".to_string();
+        // A relay URL that already has a query gets an `&` separator.
         assert_eq!(
-            c.dial_url(),
+            config().dial_url("wss://relay.example/stream?x=1"),
             "wss://relay.example/stream?x=1&ws=ws-1&agent=ag-1&port=7681&channel=ch-1"
         );
     }
@@ -398,6 +410,7 @@ mod tests {
     struct DoubleResult {
         channel_id: String,
         resume_from_seq: u64,
+        token: String,
         relay_side: MockTransport,
     }
 
@@ -436,6 +449,7 @@ mod tests {
                 Some(DoubleResult {
                     channel_id: channel.channel_id,
                     resume_from_seq: open.resume_from_seq,
+                    token: open.token,
                     relay_side,
                 })
             }
@@ -571,5 +585,98 @@ mod tests {
         // Keep both relay ends alive to end-of-test (explicit, documents intent).
         drop(first.relay_side);
         drop(second.relay_side);
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_presents_the_credential_current_then() {
+        // A fabric agent's producer token is replaced before it expires; a
+        // stream registered with the old one must present the new one when it
+        // reconnects.
+        let credential = RelayCredential::fixed("wss://relay.example/stream", "ogr_first");
+        let channel_config = ChannelConfig {
+            credential: credential.clone(),
+            ..config()
+        };
+        let (agent_side, relay_side) = MockTransport::pair();
+        let relay = tokio::spawn(relay_double(relay_side, true));
+        let mut channel = RelayChannel::register_on(Box::new(agent_side), channel_config, 0)
+            .await
+            .expect("register");
+        let first = relay.await.expect("relay").expect("open");
+        assert_eq!(first.token, "ogr_first");
+
+        credential.set(crate::credential::RelayEndpoint {
+            url: "wss://relay.example/stream".to_string(),
+            token: "ogr_second".to_string(),
+            expires_at_ms: None,
+        });
+        let (new_agent, new_relay) = MockTransport::pair();
+        let relay2 = tokio::spawn(relay_double(new_relay, true));
+        channel
+            .reconnect_on(Box::new(new_agent))
+            .await
+            .expect("reconnect");
+        let second = relay2.await.expect("relay2").expect("open");
+        assert_eq!(second.token, "ogr_second");
+        drop(first.relay_side);
+        drop(second.relay_side);
+    }
+
+    #[tokio::test]
+    async fn traffic_marks_the_stream_moving_except_desktop_frames() {
+        use crate::activity::StreamActivity;
+        const SILENCE: Duration = Duration::from_secs(600);
+
+        for (kind, output_counts) in [
+            (v1::StreamKind::Pty, true),
+            (v1::StreamKind::Browser, true),
+            (v1::StreamKind::Desktop, false),
+        ] {
+            let activity = StreamActivity::new();
+            let stamp = activity.track();
+            let mut channel_config = config();
+            channel_config.channel.kind = kind as i32;
+            channel_config.activity = stamp.clone();
+            let (agent_side, mut relay_side) = MockTransport::pair();
+            let mut channel = RelayChannel::with_transport(channel_config, Box::new(agent_side));
+
+            // Silence the stream, then let the agent send.
+            stamp.set_silent_for_test();
+            assert_eq!(activity.moving(SILENCE), 0);
+            channel
+                .send_frame(bytes::Bytes::from_static(b"out"))
+                .await
+                .expect("send");
+            assert_eq!(
+                activity.moving(SILENCE),
+                usize::from(output_counts),
+                "{kind:?} output"
+            );
+
+            // What a viewer sends always counts.
+            stamp.set_silent_for_test();
+            relay_side
+                .send(&RelayMessage::Frame(v1::StreamFrame {
+                    channel_id: "ch-1".to_string(),
+                    seq: 0,
+                    data: bytes::Bytes::from_static(b"in"),
+                    produced_at_ms: 0,
+                }))
+                .await
+                .expect("inbound");
+            assert!(channel.recv().await.expect("recv").is_some());
+            assert_eq!(activity.moving(SILENCE), 1, "{kind:?} input");
+
+            stamp.set_silent_for_test();
+            relay_side
+                .send(&RelayMessage::DesktopInput(v1::DesktopInput::default()))
+                .await
+                .expect("input");
+            assert!(channel.recv().await.expect("recv").is_some());
+            assert_eq!(activity.moving(SILENCE), 1, "{kind:?} desktop input");
+            drop(channel);
+            drop(stamp);
+            assert_eq!(activity.moving(SILENCE), 0, "{kind:?} closed");
+        }
     }
 }
