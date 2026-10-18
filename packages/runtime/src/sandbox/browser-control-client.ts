@@ -272,6 +272,8 @@ export type PlacementBrowserSession = PlacementBrowserSessionReference & {
   observation: BrowserObservationValue;
   /** The tab inventory at creation, when the controller reports it. */
   targets?: BrowserTargetValue[];
+  /** A plain line about how the controller launched this browser. */
+  notice?: string;
 };
 
 export type PlacementComputerSessionReference = {
@@ -722,6 +724,7 @@ export class BrowserControlClient {
       ...returnedReference,
       observation: BrowserObservation.parse(data.observation),
       ...creationTargets(data.targets, returnedReference),
+      ...creationNotice(data.notice),
     };
   }
 
@@ -2891,6 +2894,14 @@ function creationTargets(
     targets.push(parsed.data);
   }
   return { targets };
+}
+
+/** A launch notice is advisory text; an older controller omits it and a
+ * malformed one is dropped rather than failing a browser that did launch. */
+function creationNotice(value: unknown): { notice?: string } {
+  if (typeof value !== "string") return {};
+  const notice = value.replace(/\s+/gu, " ").trim();
+  return notice.length > 0 && notice.length <= 1_024 ? { notice } : {};
 }
 
 function parseComputerReference(value: unknown): PlacementComputerSessionReference {

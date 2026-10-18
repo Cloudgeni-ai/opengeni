@@ -50,6 +50,7 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
     ...(config.socketRootDirectory ? { socketRootDirectory: config.socketRootDirectory } : {}),
     maxSessions: config.maxSessions,
     ephemeralContextPoolEnabled: environment.OPENGENI_BROWSERD_EPHEMERAL_CONTEXT_POOL === "1",
+    networkIsolation: environment.OPENGENI_BROWSERD_NETWORK_ISOLATION !== "off",
     ...(headlessShell ? { headlessShell } : {}),
     ...(agentBrowserBinary ? { agentBrowserBinary } : {}),
     ...(lightpandaBinary ? { lightpandaBinary } : {}),
