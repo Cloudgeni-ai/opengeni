@@ -1,6 +1,6 @@
 [package]
 name = "compute-protocol"
-description = "Wire types of Opengeni compute: the host agent's API, and the fleet service's host API"
+description = "Wire types of Opengeni compute: the host agent's API, the fleet service's host API and the agent link"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,9 +12,8 @@ publish.workspace = true
 [dependencies]
 compute-core = { path = "../compute-core" }
 serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
 serde_json = "1"
+thiserror = "2"
 
 [lints]
 workspace = true

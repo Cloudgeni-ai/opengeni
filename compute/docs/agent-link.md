@@ -55,6 +55,10 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
   places and adopts it; it answers `{"waited_us", "generation", "host"}`
   once it runs. `DELETE /v1/sandboxes/{id}` ends it; `404` means it is
   already gone.
+- `GET /v1/sandboxes?request_id=<id>` answers `{"sandboxes": [...]}` with
+  the team's sandbox made by that request, if it still exists, so a caller
+  that crashed between a create and recording its answer can find the
+  sandbox and delete it.
 
 ## 2. In the guest
 
@@ -64,8 +68,7 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
 
   ```json
   {"workspace_id": "...", "agent_id": "...", "workspace_root": "/workspace",
-   "nats_url": "nats://127.0.0.1:4222", "relay_url": "", "relay_token": "",
-   "relay_expires_at_ms": 0}
+   "nats_url": "nats://127.0.0.1:4222"}
   ```
 
   and starts `opengeni-agent run --fabric /run/compute/agent/link.json`
@@ -73,14 +76,15 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
   after it exits, with back-off.
 - It listens on `127.0.0.1:4222` and forwards each connection to the host,
   vsock CID 2, port 58, byte for byte.
-- When the host sends a relay credential (section 3), `compute-guest`
-  rewrites the relay fields of `link.json` atomically. The agent reads them
-  when it opens a stream.
+- The agent subscribes to `_compute.relay` and keeps the latest relay
+  credential it receives there (section 3) in memory, for the streams it
+  opens.
 - After each restore notice it sends the agent `SIGUSR1`: the agent drops
   its NATS connection and dials again at once.
 - The agent registers activity as files `/run/compute/activity/<label>.<pid>`
   holding a decimal count; the guest adds the counts of files whose pid is
-  alive to its answer to the host's `activity` question.
+  alive to its answer to the host's `activity` question. The guest empties
+  the directory when it boots.
 
 ## 3. Host and guest
 
@@ -97,9 +101,11 @@ server would, for the subset the agent's client uses:
 - A subject outside the session's permissions gets
   `-ERR 'Permissions Violation for Publish to "<subject>"'` (or `Subscription`),
   as from a real server, and the connection stays open.
-- The host sends the relay credential to the guest on its notice port as
-  one line, `relay {"url": "...", "token": "...", "expires_at_ms": ...}`,
-  which the guest answers `ok`.
+- `_compute.relay` is the host's own subject: a subscription to it never
+  reaches the gateway. The host sends the session's relay credential on it,
+  as a `MSG` whose payload is `{"url": "...", "token": "...", "expires_at_ms": ...}`,
+  as soon as both the subscription and a credential exist, and again for
+  each fresh credential.
 
 ## 4. The link
 
@@ -122,12 +128,19 @@ the fleet service. Opengeni reads the keys, and its own team, from
 `{"team": "...", "keys": [{"kty": "OKP", "crv": "Ed25519", "kid": "...", "x": "<base64url>"}]}`,
 cached five minutes and read again for an unknown `kid`.
 
-- **Host token**, renewed with the host's lease and valid for an hour:
+- **Host token**, valid for an hour, which the host asks the fleet for over
+  its mutual-TLS host API, `POST /v1/hosts/link-tokens` with
+  `{"gateways": ["wss://..."]}`, answering `{"tokens": [{"gateway", "token", "expires_at_ms"}]}`,
+  and asks for again when a third of its life is left:
   `{"typ": "compute-host", "iss", "aud": "<gateway URL>", "sub": "<host id>", "iat", "exp"}`.
+  The fleet only signs for gateways its teams name.
 - **Sandbox ticket**, given to the host with each create or adopt, valid
-  for that owner epoch:
+  for that owner epoch. It has no time in it, so the same placement always
+  gives the same ticket and a retried create stays identical:
   `{"typ": "compute-sandbox", "iss", "aud", "sub": "<sandbox id>", "host": "<host id>",
-  "epoch": 3, "team", "workspace": "<workspace id>", "agent": "<agent id>", "iat"}`.
+  "epoch": 3, "team", "workspace": "<workspace id>", "agent": "<agent id>"}`.
+  Deleting the sandbox revokes its enrollment, which ends what the ticket
+  allows.
 
 The gateway accepts a link only for a valid host token whose `aud` is its
 own URL, allowing 60 seconds of clock skew.

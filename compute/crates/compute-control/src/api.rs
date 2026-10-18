@@ -241,6 +241,7 @@ async fn create<S: Store>(
         sleep: body.sleep.unwrap_or(service.settings().sleep),
         // Set by the service from the image the create names.
         image: None,
+        link: None,
     };
     let spec = Spec {
         image: body

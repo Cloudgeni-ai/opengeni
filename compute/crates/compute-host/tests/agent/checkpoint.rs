@@ -61,6 +61,7 @@ fn config(sleep: SleepConfig) -> SandboxConfig {
         cpu_request_millis: None,
         sleep,
         image: None,
+        link: None,
     }
 }
 

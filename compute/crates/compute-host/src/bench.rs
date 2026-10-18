@@ -785,6 +785,7 @@ async fn run(
         memory_request_mib: None,
         cpu_request_millis: None,
         sleep: SleepConfig::default(),
+        link: None,
     };
     let started = Instant::now();
     let mut creates = JoinSet::new();

@@ -552,6 +552,7 @@ dependencies = [
  "compute-core",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]

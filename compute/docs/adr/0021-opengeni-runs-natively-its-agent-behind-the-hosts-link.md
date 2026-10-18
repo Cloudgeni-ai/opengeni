@@ -56,8 +56,8 @@ and 16.1).
   like any OCI image (ADR 19). Another backend ignores the binary.
 - **A create names the agent, without a secret.** The native API's create
   takes ADR 19's `init`, now with an `agent` section: the workspace and
-  agent ids of the sandbox's enrollment, the relay's address, the
-  workspace root, and whether to start a virtual desktop. The guest keeps
+  agent ids of the sandbox's enrollment, the workspace root, and whether
+  to start a virtual desktop. The guest keeps
   it on its disk before it answers, as it does for envd. A clone from the
   ready pool is a create and gets its own init, so no two sandboxes share an
   identity. A create is idempotent by the caller's `request_id`.
@@ -86,8 +86,9 @@ and 16.1).
   opens them again before its guests run.
 - **One link per host and Opengeni deployment.** The host agent dials
   Opengeni's agent gateway: a WebSocket over TLS, authenticated by a host
-  token the fleet service signs (Ed25519) for that gateway and renews with
-  the host's lease. A link is opened when the first sandbox that needs it
+  token the fleet service signs (Ed25519) for that gateway, which the host
+  asks for, and again before it expires, over its mutual-TLS host API. A
+  link is opened when the first sandbox that needs it
   arrives and kept while any does. Which gateway a team's sandboxes use is
   the fleet's configuration for the team, never something a create names,
   so a host never presents its token to an address a tenant chose.
@@ -106,8 +107,9 @@ and 16.1).
 - **Streams go to the relay as on a Connected Machine.** Terminals,
   desktop frames and ports are dialed by the agent to Opengeni's relay,
   with a relay producer token the gateway mints for an hour when the
-  session opens and again before it expires. The host passes it to the
-  guest, which keeps it in memory-backed `/run` only. It can register
+  session opens and again before it expires. The host hands it to the
+  agent on a subject only the host answers, and the agent keeps it in
+  memory only. It can register
   streams for that one agent and nothing else; no sandbox holds a
   credential that reaches Opengeni's control plane.
 - **After a restore the agent reconnects at once.** The restore notice
