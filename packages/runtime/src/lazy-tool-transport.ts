@@ -139,6 +139,8 @@ type GenericSearchMarker = {
 type FamilyDisclosureMarker = {
   version: 1;
   tools: Record<string, unknown>[];
+  /** The turn's transport has tool_invoke, so the declaration may name it. */
+  viaToolInvoke: boolean;
 };
 
 type FunctionCallItem = {
@@ -966,18 +968,25 @@ function withFamilyDisclosure(candidate: unknown, runtime: LazyToolRuntime): unk
     ...candidate,
     providerData: {
       ...providerData,
-      [FAMILY_DISCLOSURE_MARKER_KEY]: { version: 1, tools } satisfies FamilyDisclosureMarker,
+      [FAMILY_DISCLOSURE_MARKER_KEY]: {
+        version: 1,
+        tools,
+        viaToolInvoke: runtime.transport === "generic_dispatch",
+      } satisfies FamilyDisclosureMarker,
     },
   };
 }
 
-function familyDisclosureTools(candidate: Record<string, unknown>): Record<string, unknown>[] {
+function familyDisclosure(
+  candidate: Record<string, unknown>,
+): { tools: Record<string, unknown>[]; viaToolInvoke: boolean } | null {
   const providerData = isRecord(candidate.providerData) ? candidate.providerData : null;
   const marker = providerData?.[FAMILY_DISCLOSURE_MARKER_KEY];
-  if (!isRecord(marker) || marker.version !== 1 || !Array.isArray(marker.tools)) return [];
-  return marker.tools.filter(
+  if (!isRecord(marker) || marker.version !== 1 || !Array.isArray(marker.tools)) return null;
+  const tools = marker.tools.filter(
     (tool): tool is Record<string, unknown> => isRecord(tool) && typeof tool.name === "string",
   );
+  return tools.length > 0 ? { tools, viaToolInvoke: marker.viaToolInvoke === true } : null;
 }
 
 function disclosedToolNames(tools: unknown): string[] {
@@ -1010,16 +1019,18 @@ const STEP_RESULT_ITEM_TYPES = new Set([
  * later request reproduces the identical prefix.
  */
 export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
-  const pending = new Map<string, Record<string, unknown>[]>();
+  const pending = new Map<string, { tools: Record<string, unknown>[]; viaToolInvoke: boolean }>();
   const disclosed = new Set<string>();
   let ready: Record<string, unknown>[] = [];
+  let readyViaToolInvoke = false;
   let readyAfter: object | null = null;
   let expanded = null as T[] | null;
   const flush = (index: number) => {
     if (!readyAfter || ready.length === 0) return;
     expanded ??= input.slice(0, index);
-    expanded.push(cachedToolDisclosureItem(readyAfter, ready) as T);
+    expanded.push(cachedToolDisclosureItem(readyAfter, ready, readyViaToolInvoke) as T);
     ready = [];
+    readyViaToolInvoke = false;
     readyAfter = null;
   };
   for (let index = 0; index < input.length; index += 1) {
@@ -1040,8 +1051,8 @@ export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
         for (const name of genericSearchOutputNames(searchMarker.output)) disclosed.add(name);
       }
       const id = callId(candidate);
-      const tools = familyDisclosureTools(candidate);
-      if (id && tools.length > 0) pending.set(id, tools);
+      const disclosure = familyDisclosure(candidate);
+      if (id && disclosure) pending.set(id, disclosure);
       continue;
     }
     if (candidate.type !== "function_call_result") continue;
@@ -1050,14 +1061,15 @@ export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
       continue;
     }
     const id = callId(candidate);
-    const tools = id ? pending.get(id) : undefined;
-    if (!id || !tools) continue;
+    const disclosure = id ? pending.get(id) : undefined;
+    if (!id || !disclosure) continue;
     pending.delete(id);
-    for (const tool of tools) {
+    for (const tool of disclosure.tools) {
       const name = String(tool.name);
       if (disclosed.has(name)) continue;
       disclosed.add(name);
       ready.push(tool);
+      readyViaToolInvoke ||= disclosure.viaToolInvoke;
     }
     readyAfter = candidate;
   }
@@ -1078,11 +1090,12 @@ const toolDisclosureItemCache = new WeakMap<
 function cachedToolDisclosureItem(
   after: object,
   tools: Record<string, unknown>[],
+  viaToolInvoke: boolean,
 ): Record<string, unknown> {
-  const key = tools.map((tool) => String(tool.name)).join("\u0000");
+  const key = `${viaToolInvoke}\u0000${tools.map((tool) => String(tool.name)).join("\u0000")}`;
   const cached = toolDisclosureItemCache.get(after);
   if (cached?.key === key) return cached.item;
-  const item = toolDisclosureItem(tools);
+  const item = toolDisclosureItem(tools, { viaToolInvoke });
   toolDisclosureItemCache.set(after, { key, item });
   return item;
 }

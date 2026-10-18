@@ -12,6 +12,12 @@ export type ProviderHistoryOptions = {
    * Mid-conversation declarations then use a machine-origin user message.
    */
   hoistsSystemMessages?: boolean;
+  /**
+   * The Responses route accepts the `additional_tools` input item (see
+   * responsesRouteDeclaresAdditionalTools). Other Responses routes get the
+   * same declaration as a developer message carrying the definitions as text.
+   */
+  declaresAdditionalTools?: boolean;
 };
 
 const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/;
@@ -19,21 +25,45 @@ const HISTORICAL_FACT_MAX_CHARS = 32_000;
 
 /** Marks a request-local item that declares tools newly available to the model. */
 export const TOOL_DISCLOSURE_KEY = "opengeni.tool_disclosure.v1";
-const TOOL_DISCLOSURE_TEXT =
+const TOOL_DISCLOSURE_TEXT_WITH_INVOKE =
   "These tools are now available. Call one by its name, or through tool_invoke with its name and a nested arguments object. Definitions:";
+const TOOL_DISCLOSURE_TEXT_BY_NAME =
+  "These tools are now available. Call one by its name. Definitions:";
 const MACHINE_ORIGIN_PREFIX = "Opengeni tool update (machine-origin input; no new human message).";
+
+/**
+ * Responses routes verified live to accept `additional_tools`, call a declared
+ * tool by name on the next step, and keep the earlier prefix cached. Every
+ * other Responses route (direct OpenAI, Azure OpenAI, xAI, OpenAI-compatible
+ * gateways) gets the developer-message form until it is verified: gateways
+ * that do not know the item reject the whole request.
+ */
+const RESPONSES_ROUTES_WITH_ADDITIONAL_TOOLS: ReadonlySet<string> = new Set(["codex-subscription"]);
+
+/** True when the Responses provider kind accepts the `additional_tools` item. */
+export function responsesRouteDeclaresAdditionalTools(providerKind: string): boolean {
+  return RESPONSES_ROUTES_WITH_ADDITIONAL_TOOLS.has(providerKind);
+}
 
 /**
  * A provider-neutral declaration of tools that became available mid-turn. It
  * is a developer message carrying the frozen definitions; each provider
  * projection renders it in that API's own form: a Responses `additional_tools`
- * item, or a system message with the definitions as text on Claude and Chat.
+ * item where the route accepts it, otherwise a developer or system message
+ * with the definitions as text. The text names tool_invoke only when the
+ * turn's tool transport has that router.
  */
-export function toolDisclosureItem(tools: Record<string, unknown>[]): Record<string, unknown> {
+export function toolDisclosureItem(
+  tools: Record<string, unknown>[],
+  options: { viaToolInvoke: boolean },
+): Record<string, unknown> {
+  const text = options.viaToolInvoke
+    ? TOOL_DISCLOSURE_TEXT_WITH_INVOKE
+    : TOOL_DISCLOSURE_TEXT_BY_NAME;
   return {
     type: "message",
     role: "developer",
-    content: `${TOOL_DISCLOSURE_TEXT}\n${JSON.stringify({ tools })}`,
+    content: `${text}\n${JSON.stringify({ tools })}`,
     providerData: { [TOOL_DISCLOSURE_KEY]: { tools } },
   };
 }
@@ -362,7 +392,15 @@ function projectWireHistory(
     const projected = items.map((item, index) => {
       const tools = disclosedTools(item);
       const next = tools
-        ? { type: "unknown", providerData: { type: "additional_tools", role: "developer", tools } }
+        ? options.declaresAdditionalTools
+          ? {
+              type: "unknown",
+              providerData: { type: "additional_tools", role: "developer", tools },
+            }
+          : {
+              type: "unknown",
+              providerData: { type: "message", role: "developer", content: item.content },
+            }
         : item.type === "message" && item.role === "developer"
           ? { type: "unknown", providerData: item }
           : (foreignReasoningFact(item, providerApi) ??

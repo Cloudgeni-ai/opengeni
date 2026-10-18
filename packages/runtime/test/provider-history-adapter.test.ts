@@ -6,6 +6,7 @@ import {
   chatRouteHoistsSystemMessages,
   projectHistoryForProvider,
   ProviderHistoryIncompatibleError,
+  responsesRouteDeclaresAdditionalTools,
   toolDisclosureItem,
 } from "../src/provider-history-adapter";
 
@@ -26,7 +27,7 @@ const OBSERVE = {
 };
 
 describe("tool disclosure projection", () => {
-  const disclosure = toolDisclosureItem([OBSERVE]);
+  const disclosure = toolDisclosureItem([OBSERVE], { viaToolInvoke: true });
   const history = [
     { type: "message", role: "user", content: "open the page" },
     C("a"),
@@ -36,13 +37,54 @@ describe("tool disclosure projection", () => {
     disclosure,
   ];
 
-  test("Responses declares the tools with one additional_tools item", () => {
-    const projected = projectHistoryForProvider(history, "responses");
+  test("Responses declares the tools with one additional_tools item where the route accepts it", () => {
+    const projected = projectHistoryForProvider(history, "responses", {
+      declaresAdditionalTools: true,
+    });
     expect(projected.slice(0, 5)).toEqual(history.slice(0, 5));
     expect(projected[5]).toEqual({
       type: "unknown",
       providerData: { type: "additional_tools", role: "developer", tools: [OBSERVE] },
     });
+  });
+
+  test("other Responses routes get a developer message with the definitions as text", () => {
+    const projected = projectHistoryForProvider(history, "responses");
+    expect(projected.slice(0, 5)).toEqual(history.slice(0, 5));
+    // Only the wire message: the disclosure marker never reaches the provider.
+    expect(projected[5]).toEqual({
+      type: "unknown",
+      providerData: { type: "message", role: "developer", content: disclosure.content },
+    });
+    expect(projectHistoryForProvider(history, "responses")).toEqual(projected);
+  });
+
+  test("only verified Responses routes receive additional_tools", () => {
+    expect(responsesRouteDeclaresAdditionalTools("codex-subscription")).toBe(true);
+    for (const kind of [
+      "openai",
+      "azure-openai",
+      "azure-mai",
+      "direct-openai-workspace",
+      "direct-azure-workspace",
+      "xai-subscription",
+      "supergrok-subscription",
+      "api-key",
+      "vercel-gateway-managed",
+      "openrouter-workspace",
+    ]) {
+      expect(responsesRouteDeclaresAdditionalTools(kind)).toBe(false);
+    }
+  });
+
+  test("the text names tool_invoke only when the transport has it", () => {
+    expect(String(disclosure.content)).toStartWith(
+      "These tools are now available. Call one by its name, or through tool_invoke with its name and a nested arguments object. Definitions:\n",
+    );
+    const byName = toolDisclosureItem([OBSERVE], { viaToolInvoke: false });
+    expect(String(byName.content)).toBe(
+      `These tools are now available. Call one by its name. Definitions:\n${JSON.stringify({ tools: [OBSERVE] })}`,
+    );
   });
 
   test("Claude gets a system message with the definitions after the step's results", () => {

@@ -15,6 +15,7 @@ import { projectChatToolImages } from "./chat-tool-images";
 import {
   chatRouteHoistsSystemMessages,
   projectHistoryForProvider,
+  responsesRouteDeclaresAdditionalTools,
 } from "./provider-history-adapter";
 import {
   appendChatReasoningDetails,
@@ -320,7 +321,9 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
       const input =
         typeof request.input === "string"
           ? request.input
-          : (projectHistoryForProvider(request.input, "responses") as ModelRequest["input"]);
+          : (projectHistoryForProvider(request.input, "responses", {
+              declaresAdditionalTools: responsesRouteDeclaresAdditionalTools(this.provider.kind),
+            }) as ModelRequest["input"]);
       return super._buildResponsesCreateRequest(
         input === request.input ? request : { ...request, input },
         stream,

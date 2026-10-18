@@ -166,11 +166,22 @@ describe("interaction family disclosure", () => {
       expect(declaration.role).toBe("developer");
       expect(disclosedNames(declaration)).toEqual([OBSERVE, ACT]);
       expect(JSON.stringify(second)).not.toContain("tool_search");
+      // Native transports have no tool_invoke router, so the text names none.
+      expect(String(declaration.content)).not.toContain("tool_invoke");
 
-      // The provider sees the standard Responses form.
-      const wire = projectHistoryForProvider(second, "responses").at(-1)!;
+      // A verified route sees the standard Responses form.
+      const wire = projectHistoryForProvider(second, "responses", {
+        declaresAdditionalTools: true,
+      }).at(-1)!;
       expect(wire.type).toBe("unknown");
       expect((wire.providerData as Record<string, unknown>).type).toBe("additional_tools");
+      // Any other Responses route gets the developer-message form.
+      const fallback = projectHistoryForProvider(second, "responses").at(-1)!;
+      expect(fallback.providerData).toEqual({
+        type: "message",
+        role: "developer",
+        content: declaration.content,
+      });
 
       // Later requests reproduce the identical prefix, and the marker never
       // reaches the provider.
@@ -195,6 +206,7 @@ describe("interaction family disclosure", () => {
       const second = model.requests[1]!.input as Array<Record<string, unknown>>;
       expect(itemTypes(second).slice(-2)).toEqual([`function_call_result:${OPEN}`, "message"]);
       expect(disclosedNames(second.at(-1)!)).toEqual([OBSERVE, ACT]);
+      expect(String(second.at(-1)!.content)).toContain("through tool_invoke");
       expect(JSON.stringify(second)).not.toContain("tool_search");
       for (const request of model.requests) {
         expect(JSON.stringify(request.input)).not.toContain(MARKER);
