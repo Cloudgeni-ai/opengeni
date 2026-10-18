@@ -25,6 +25,7 @@ import {
   beforeModelRequest,
   modelResponseSettlement,
   notifyModelRequestCapture,
+  streamPreemptibleModelRequest,
 } from "./model-request-capture";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
@@ -1137,7 +1138,9 @@ class LazyToolModel implements Model {
     const prepared = prepareLazyToolRequest(request, this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
-    for await (const event of this.inner.getStreamedResponse(prepared)) {
+    for await (const event of streamPreemptibleModelRequest(prepared, (preemptible) =>
+      this.inner.getStreamedResponse(preemptible),
+    )) {
       if (event.type === "response_done") {
         if (responseRequiresToolPreparation(event.response, this.runtime)) {
           await this.runtime.ensurePrepared();

@@ -186,6 +186,28 @@ describe("projectPendingApprovals", () => {
     expect(projectPendingApprovals(log).map((approval) => approval.id)).toEqual(["appr-1"]);
   });
 
+  test("a Steer that replaces the approval wait clears its approvals", () => {
+    reset();
+    expect(
+      projectPendingApprovals([
+        requiresAction([{ id: "appr-1", name: "run_command" }]),
+        event(
+          "user.message",
+          { text: "do this instead", delivery: "steer" },
+          { turnId: "steer-1" },
+        ),
+        event("turn.superseded", { reason: "steer", targetTurnId: "steer-1" }),
+      ]),
+    ).toEqual([]);
+    // Another turn's supersession leaves this turn's approval pending.
+    expect(
+      projectPendingApprovals([
+        requiresAction([{ id: "appr-2", name: "run_command" }]),
+        event("turn.superseded", { reason: "steer" }, { turnId: "other-turn" }),
+      ]).map((approval) => approval.id),
+    ).toEqual(["appr-2"]);
+  });
+
   test("an unknown decision id leaves the pending set alone", () => {
     reset();
     const log = [

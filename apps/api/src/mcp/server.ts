@@ -333,6 +333,7 @@ import {
 } from "./session-event-errors";
 import {
   acknowledgeConsumedChildEvents,
+  hasPendingSteerForTurn,
   listOutstandingSessionSystemUpdatesForAttempt,
   recordConsumedChildAnswers,
 } from "@opengeni/db";
@@ -5048,6 +5049,33 @@ function registerWorkspaceOrchestrationTools(
         )
       : await listOutstandingSessionSystemUpdates(deps.db, grant.workspaceId, ownSessionId);
   };
+  // Whether a Steer is waiting for the caller's own running turn. A foreground
+  // wait then returns early so the turn reaches its next model step, where the
+  // Steer is read; whatever was waited on keeps running.
+  const callerTurnSteerPending = async (ownSessionId: string): Promise<boolean> => {
+    const claims = exactAgentAttemptClaims(grant);
+    if (!claims || claims.sessionId !== ownSessionId) return false;
+    try {
+      return await hasPendingSteerForTurn(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: ownSessionId,
+        turnId: claims.turnId,
+      });
+    } catch {
+      // The next model step checks on its own; a failed read only delays it.
+      return false;
+    }
+  };
+  const listOwnPendingKinds = async (ownSessionId: string): Promise<string[]> => {
+    const [updates, steer] = await Promise.all([
+      listOwnPendingUpdates(ownSessionId),
+      callerTurnSteerPending(ownSessionId),
+    ]);
+    const kinds = updates.map((update) => update.kind);
+    // An agent Steer is already listed as its own pending update.
+    return steer && !kinds.includes("agent_steer_instruction") ? [...kinds, "steer"] : kinds;
+  };
   if (callerSessionId && can("sessions:read")) {
     server.registerTool(
       "session_target_get",
@@ -5803,10 +5831,7 @@ function registerWorkspaceOrchestrationTools(
               return { events: page.events, hasMore: page.hasMore };
             },
             readOwnPendingUpdateKinds:
-              ownSessionId === null
-                ? null
-                : async () =>
-                    (await listOwnPendingUpdates(ownSessionId)).map((update) => update.kind),
+              ownSessionId === null ? null : async () => await listOwnPendingKinds(ownSessionId),
             subscribe: (targetSessionId, onEvents) =>
               deps.bus.subscribe(workspaceId, targetSessionId, onEvents),
           },
@@ -5824,14 +5849,9 @@ function registerWorkspaceOrchestrationTools(
             // The returned answer may be the pending input this result
             // counted; report what is still pending so the caller is not told
             // to end its turn only to receive the answer it already has.
-            const pending = await listOwnPendingUpdates(ownSessionId);
+            const pending = await listOwnPendingKinds(ownSessionId);
             if (pending.length !== result.ownPendingUpdates) {
-              return json(
-                withOwnPendingUpdateKinds(
-                  result,
-                  pending.map((update) => update.kind),
-                ),
-              );
+              return json(withOwnPendingUpdateKinds(result, pending));
             }
           }
         }
@@ -5882,6 +5902,7 @@ function registerWorkspaceOrchestrationTools(
                 },
                 subscribe: (onEvents) =>
                   deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
+                yieldTo: async () => await callerTurnSteerPending(callerSessionId),
               }),
             );
           },

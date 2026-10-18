@@ -124,6 +124,205 @@ describe("projection lifecycle audit regressions", () => {
     expect(work(replacement)[1]!.work!.endedAt).toBeUndefined();
   });
 
+  test("a Steer read at the next model step closes the old turn quietly, not as interrupted", () => {
+    const handover = event(5, "turn.superseded", { reason: "steer", atModelStep: true });
+    const events = [
+      event(1, "turn.started"),
+      event(2, "agent.message.completed", { messageId: "before", text: "Checking" }),
+      event(3, "agent.toolCall.created", { id: "read", name: "exec_command", arguments: {} }),
+      event(4, "agent.toolCall.output", { id: "read", output: "ok" }),
+      handover,
+    ];
+    const groups = fold(events);
+    expect(work(groups)[0]!.work!.endedAt).toBe(handover.occurredAt);
+    expect(work(groups)[0]!.outcome).toBe("complete");
+    expect(work(groups)[0]!.items[0]).toMatchObject({ kind: "tool-call", status: "complete" });
+    const timeline = buildTimeline(englishText, events);
+    expect(timeline.some((item) => item.kind === "notice")).toBe(false);
+  });
+
+  test("a Steer that cut the answer short keeps the streamed partial text once, never as an error", () => {
+    const handover = event(5, "turn.superseded", {
+      reason: "steer",
+      atModelStep: true,
+      cutOffText: "Looking through the",
+    });
+    const streamed = [
+      event(1, "turn.started"),
+      event(2, "agent.message.completed", { messageId: "before", text: "Checking" }),
+      event(3, "agent.message.delta", { messageId: "cut", text: "Looking through the" }),
+      handover,
+    ];
+    const live = buildTimeline(englishText, streamed);
+    const liveMessages = live.filter((item) => item.kind === "agent-message");
+    expect(liveMessages.map((item) => item.text)).toEqual(["Checking", "Looking through the"]);
+    expect(liveMessages.every((item) => !item.streaming)).toBe(true);
+    expect(live.some((item) => item.kind === "notice")).toBe(false);
+
+    // Without the deltas (an archived history) the recorded cut-off text
+    // stands in, as a finished progress note.
+    const archived = buildTimeline(englishText, [streamed[0]!, streamed[1]!, handover]);
+    const archivedMessages = archived.filter((item) => item.kind === "agent-message");
+    expect(archivedMessages.map((item) => item.text)).toEqual(["Checking", "Looking through the"]);
+    expect(archivedMessages[1]).toMatchObject({ phase: "commentary", streaming: false });
+    expect(work(fold([streamed[0]!, streamed[1]!, handover]))[0]!.outcome).toBe("complete");
+  });
+
+  test("cut-off text stays above the Steer that cut it, live or archived", () => {
+    const steer = event(
+      4,
+      "user.message",
+      { text: "What is the status?", delivery: "steer", routing: "accepted_for_steering" },
+      "turn-2",
+    );
+    const handover = event(5, "turn.superseded", {
+      reason: "steer",
+      atModelStep: true,
+      cutOffText: "Looking through the",
+    });
+    const order = (events: SessionEvent[]) =>
+      buildTimeline(englishText, events).flatMap((item) =>
+        item.kind === "agent-message" || item.kind === "user-message" ? [item.text] : [],
+      );
+    const started = event(1, "turn.started");
+    const finished = event(2, "agent.message.completed", { messageId: "a", text: "Checking" });
+    const cut = event(3, "agent.message.delta", { messageId: "b", text: "Looking through the" });
+    const expected = ["Checking", "Looking through the", "What is the status?"];
+    expect(order([started, finished, cut, steer, handover])).toEqual(expected);
+    expect(order([started, finished, steer, handover])).toEqual(expected);
+    // Only the cut message streamed in this turn.
+    expect(order([started, cut, steer, handover])).toEqual([
+      "Looking through the",
+      "What is the status?",
+    ]);
+    // Archived, and nothing else from this turn is in view.
+    expect(order([started, steer, handover])).toEqual([
+      "Looking through the",
+      "What is the status?",
+    ]);
+  });
+
+  test("a finished message completing after the Steer bubble still stays above it", () => {
+    // Claude settles completions only when the cut request ends, which is
+    // after the Steer bubble was drawn.
+    const timeline = buildTimeline(englishText, [
+      event(1, "turn.started"),
+      event(2, "agent.message.delta", { messageId: "a", text: "Checking" }),
+      event(3, "agent.message.delta", { messageId: "b", text: "Next I wi" }),
+      event(
+        4,
+        "user.message",
+        { text: "What is the status?", delivery: "steer", routing: "accepted_for_steering" },
+        "turn-2",
+      ),
+      event(5, "agent.message.completed", {
+        messageId: "a",
+        text: "Checking",
+        phase: "commentary",
+      }),
+      event(6, "turn.superseded", { reason: "steer", atModelStep: true, cutOffText: "Next I wi" }),
+    ]);
+    expect(
+      timeline.flatMap((item) =>
+        item.kind === "agent-message" || item.kind === "user-message" ? [item.text] : [],
+      ),
+    ).toEqual(["Checking", "Next I wi", "What is the status?"]);
+  });
+
+  test("a Steer bubble from an earlier, finished turn does not reorder a later handover", () => {
+    const order = buildTimeline(englishText, [
+      event(1, "turn.started"),
+      event(
+        2,
+        "user.message",
+        { text: "Also check prices", delivery: "steer", routing: "accepted_for_steering" },
+        "turn-2",
+      ),
+      event(3, "agent.message.completed", { messageId: "a", text: "Done" }),
+      event(4, "turn.completed"),
+      event(5, "turn.started", {}, "turn-2"),
+      event(6, "agent.message.completed", { messageId: "b", text: "Prices look fine" }, "turn-2"),
+      event(
+        7,
+        "turn.superseded",
+        { reason: "steer", atModelStep: true, cutOffText: "Then I" },
+        "turn-2",
+      ),
+    ]).flatMap((item) =>
+      item.kind === "agent-message" || item.kind === "user-message" ? [item.text] : [],
+    );
+    expect(order).toEqual(["Also check prices", "Done", "Prices look fine", "Then I"]);
+  });
+
+  test("a Steer bubble drawn during a compaction turn does not reorder the next handover", () => {
+    const steer = (seq: number, text: string, turnId: string) =>
+      event(
+        seq,
+        "user.message",
+        { text, delivery: "steer", routing: "accepted_for_steering" },
+        turnId,
+      );
+    const order = buildTimeline(englishText, [
+      event(1, "turn.started", {}, "compact"),
+      steer(2, "Start the report", "turn-a"),
+      event(3, "turn.completed", { maintenance: "context_compaction" }, "compact"),
+      event(4, "turn.started", {}, "turn-a"),
+      event(5, "agent.message.completed", { messageId: "a", text: "Answer A" }, "turn-a"),
+      steer(6, "Shorter please", "turn-b"),
+      event(
+        7,
+        "turn.superseded",
+        { reason: "steer", atModelStep: true, cutOffText: "Partial A" },
+        "turn-a",
+      ),
+    ]).flatMap((item) =>
+      item.kind === "agent-message" || item.kind === "user-message" ? [item.text] : [],
+    );
+    expect(order).toEqual(["Start the report", "Answer A", "Partial A", "Shorter please"]);
+  });
+
+  test("a Steer that replaces an approval wait closes the turn quietly; the hard interrupt does not", () => {
+    const waiting = [
+      event(1, "turn.started"),
+      event(2, "agent.toolCall.created", { id: "deploy", name: "deploy", arguments: {} }),
+      event(3, "session.requiresAction", { approvals: [{ id: "deploy", name: "deploy" }] }),
+      event(4, "user.message", { text: "Do the staging one first", delivery: "steer" }, "turn-2"),
+    ];
+    const replaced = [
+      ...waiting,
+      event(5, "turn.superseded", { reason: "steer", targetTurnId: "turn-2" }),
+    ];
+    expect(work(fold(replaced))[0]!.outcome).toBe("complete");
+    // Only the historical approval note; nothing reads as interrupted.
+    expect(
+      buildTimeline(englishText, replaced).filter(
+        (item) => item.kind === "notice" && item.tone !== "waiting",
+      ),
+    ).toEqual([]);
+    // The API hard interrupt stops a live attempt and still reads as stopped.
+    const interrupted = [...waiting, event(5, "turn.superseded", { reason: "steer" })];
+    expect(work(fold(interrupted))[0]!.outcome).toBe("cancelled");
+  });
+
+  test("a finished message completing after the cut-off one keeps stream order, without repeating it", () => {
+    // Claude settles completions only when the cut request ends, after the
+    // unfinished message's deltas.
+    const timeline = buildTimeline(englishText, [
+      event(1, "turn.started"),
+      event(2, "agent.message.delta", { messageId: "a", text: "Checking" }),
+      event(3, "agent.message.delta", { messageId: "b", text: "Next I wi" }),
+      event(4, "agent.message.completed", {
+        messageId: "a",
+        text: "Checking",
+        phase: "commentary",
+      }),
+      event(5, "turn.superseded", { reason: "steer", atModelStep: true, cutOffText: "Next I wi" }),
+    ]);
+    expect(
+      timeline.filter((item) => item.kind === "agent-message").map((item) => item.text),
+    ).toEqual(["Checking", "Next I wi"]);
+  });
+
   test("human Retry reopens the failed logical turn without prematurely folding its progress", () => {
     const failed = [
       event(1, "agent.message.completed", { messageId: "before", text: "Checking records" }),

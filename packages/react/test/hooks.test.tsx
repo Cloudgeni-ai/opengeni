@@ -2956,6 +2956,109 @@ describe("useComposer queue-vs-steer", () => {
     await hook.unmount();
   });
 
+  test("busySend steer makes a busy Send a Steer; idle Send, paused Send and sendToQueue still queue", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return {
+          ...makeEvent(calls.length, "user.message"),
+          clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+        };
+      },
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "steer", text: text(input) });
+        return steerResult();
+      },
+    });
+    let destination: "chat" | "queue" = "queue";
+    let control = queueSnapshot([]).effectiveControl;
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: control,
+          sendDestination: () => destination,
+          busySend: "steer",
+        }),
+      undefined,
+    );
+    expect(hook.result.current.busySend).toBe("steer");
+    expect(hook.result.current.alternateSend).toBe("queue");
+
+    await flushing(async () => expect(await hook.result.current.send("busy")).toBe(true));
+    await flushing(async () =>
+      expect(await hook.result.current.sendToQueue?.("after the turn")).toBe(true),
+    );
+    await flushing(async () =>
+      expect(await hook.result.current.sendAlternate?.("alternate queues")).toBe(true),
+    );
+    destination = "chat";
+    await hook.rerender(undefined);
+    expect(hook.result.current.alternateSend).toBeNull();
+    await flushing(async () => expect(await hook.result.current.send("idle")).toBe(true));
+    destination = "queue";
+    control = { ...control, state: "paused", directState: "paused" };
+    await hook.rerender(undefined);
+    expect(hook.result.current.alternateSend).toBeNull();
+    await flushing(async () => expect(await hook.result.current.send("paused")).toBe(true));
+
+    expect(calls).toEqual([
+      { delivery: "steer", text: "busy" },
+      { delivery: "send", text: "after the turn" },
+      { delivery: "send", text: "alternate queues" },
+      { delivery: "send", text: "idle" },
+      { delivery: "send", text: "paused" },
+    ]);
+    await hook.unmount();
+  });
+
+  test("in queue mode the alternate beside Send is Steer and steers", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return {
+          ...makeEvent(calls.length, "user.message"),
+          clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+        };
+      },
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "steer", text: text(input) });
+        return steerResult();
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          sendDestination: () => "queue",
+        }),
+      undefined,
+    );
+    expect(hook.result.current.alternateSend).toBe("steer");
+    await flushing(async () => expect(await hook.result.current.send("queued")).toBe(true));
+    await flushing(async () =>
+      expect(await hook.result.current.sendAlternate?.("steered")).toBe(true),
+    );
+    expect(calls).toEqual([
+      { delivery: "send", text: "queued" },
+      { delivery: "steer", text: "steered" },
+    ]);
+    await hook.unmount();
+  });
+
   test("accepted Steer reports host-owned resources through onSent", async () => {
     let submitted: SendMessageInput | undefined;
     let accepted: SendMessageInput | undefined;

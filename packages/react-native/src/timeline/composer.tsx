@@ -24,7 +24,7 @@ import type { NativeVoiceInput } from "../voice-input";
 import type { NativePickedFile } from "../adapters";
 import { useNativeTimelineMessages, type NativeTimelineMessages } from "./messages";
 import { useComposerImagePaste } from "./paste";
-import { composerTrailingMode } from "./composer-state";
+import { composerAlternateSend, composerTrailingMode } from "./composer-state";
 
 /* ----------------------------------------------------------------------------
    The session composer, designed for each platform rather than copied from
@@ -46,6 +46,14 @@ export interface SessionComposerProps {
   placeholder?: string | undefined;
   /** Run state drives the trailing action: pause while running, resume when paused. */
   running?: boolean | undefined;
+  /**
+   * The other way to send while the agent works, shown beside Send once there
+   * is something to send: `queue` when Send steers, `steer` when Send queues,
+   * `null` when Send is not taking its busy path. Pass the composer's
+   * `alternateSend` and `sendAlternate`; omit to offer Send only.
+   */
+  alternateSend?: "queue" | "steer" | null | undefined;
+  onAlternateSend?: (() => void) | undefined;
   paused?: boolean | undefined;
   onPause?: (() => void) | undefined;
   onResume?: (() => void) | undefined;
@@ -349,7 +357,8 @@ export function SessionComposer(props: SessionComposerProps) {
           >
             {leading}
             <View style={{ flex: 1, minWidth: 0 }}>{field(true)}</View>
-            <View style={{ paddingBottom: 0 }}>
+            <View style={{ paddingBottom: 0, flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <AlternateSendAction {...props} messages={messages} />
               <TrailingAction {...props} messages={messages} />
             </View>
           </View>
@@ -371,6 +380,7 @@ export function SessionComposer(props: SessionComposerProps) {
               <View style={{ flex: 1, flexDirection: "row", alignItems: "center", minWidth: 0 }}>
                 {props.options}
               </View>
+              <AlternateSendAction {...props} messages={messages} />
               <TrailingAction {...props} messages={messages} />
             </View>
           </>
@@ -604,6 +614,68 @@ function VoiceStrip({ voice }: { voice: NativeVoiceInput }) {
         />
       </Pressable>
     </View>
+  );
+}
+
+/**
+ * Queue or Steer beside Send while the agent works, so a phone (no
+ * Cmd/Ctrl+Enter) always has both choices. Shown only with something to send.
+ */
+function AlternateSendAction(props: SessionComposerProps & { messages: ChatComposerMessages }) {
+  const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
+  const c = theme.colors;
+  const alternate = composerAlternateSend({
+    trailing: composerTrailingMode({
+      value: props.value,
+      canSend: props.canSend,
+      paused: props.paused,
+      running: props.running,
+      canResume: Boolean(props.onResume),
+      canPause: Boolean(props.onPause),
+      canCall: Boolean(props.call),
+    }),
+    alternateSend: props.alternateSend,
+    available: props.onAlternateSend !== undefined,
+  });
+  const onAlternateSend = props.onAlternateSend;
+  if (alternate === null || !onAlternateSend) return null;
+  const label =
+    alternate === "queue"
+      ? (props.messages.queueLabel ?? t("composerMessages.queue"))
+      : (props.messages.steerLabel ?? t("composerMessages.steer"));
+  const hint =
+    alternate === "queue"
+      ? (props.messages.queueTitle ?? t("composerMessages.queueRunsAfterCurrentWork"))
+      : (props.messages.steerTitle ?? t("composerMessages.steerReadsItSoon"));
+  const disabled = !props.canSend || Boolean(props.sending);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityHint={hint}
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      hitSlop={6}
+      onPress={() => {
+        props.onActionFeedback?.();
+        onAlternateSend();
+      }}
+      style={({ pressed }) => ({
+        height: 34,
+        paddingHorizontal: 14,
+        borderRadius: 17,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: withAlpha(c.fg, 0.08),
+        opacity: disabled ? 0.42 : pressed ? 0.8 : 1,
+        transform: [{ scale: pressed ? 0.96 : 1 }],
+      })}
+    >
+      <Text style={{ ...fontStyle(theme, 600), fontSize: 14, lineHeight: 18, color: c.fg }}>
+        {label}
+      </Text>
+    </Pressable>
   );
 }
 

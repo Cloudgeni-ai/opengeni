@@ -434,6 +434,15 @@ import {
 } from "./sandbox/codemode-client";
 import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
 export { InputWaitYield, modelResponseHasVisibleText } from "./input-wait-yield";
+import { withModelStepHandover } from "./model-step-handover";
+export { ModelStepHandover } from "./model-step-handover";
+export {
+  ModelPreemption,
+  isModelPreempted,
+  isPreemptedModelResponse,
+  preemptedResponseCutOffText,
+  preemptedResponseDone,
+} from "./model-preemption";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -9052,6 +9061,8 @@ export type RunAgentStreamOptions = {
   beforeModelRequest?: ModelCallLifecycle["beforeModelRequest"];
   /** Register terminal response settlement before the next producer model request. */
   onModelResponse?: ModelCallLifecycle["onModelResponse"];
+  /** Lets a Steer cut the in-flight model request short (see streamWithPreemption). */
+  modelPreemption?: ModelCallLifecycle["modelPreemption"];
   /** Abort the provider/tool loop when the owning activity is cancelled. */
   signal?: AbortSignal;
   /** Nonblocking phase measurements for request preparation before provider I/O. */
@@ -9306,6 +9317,7 @@ export async function runAgentStream(
           ? { beforeModelRequest: overrides.beforeModelRequest }
           : {}),
         ...(overrides.onModelResponse ? { onModelResponse: overrides.onModelResponse } : {}),
+        ...(overrides.modelPreemption ? { modelPreemption: overrides.modelPreemption } : {}),
       },
       () =>
         withPreparedCompactionRequest(agent, () =>
@@ -9545,7 +9557,7 @@ async function runAgentStreamInternal(
       toolExecution: { preApprovalInputGuardrails: true },
       ...lazyToolRunBindings(agent),
       callModelInputFilter: ownedFilter,
-      ...(inputWaitYield ? { errorHandlers: inputWaitYield.errorHandlers } : {}),
+      errorHandlers: withModelStepHandover(inputWaitYield?.errorHandlers),
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
     ownedRunOptions.sandbox = {
@@ -9711,7 +9723,7 @@ async function runAgentStreamInternal(
     // raise the proactive compaction signal. This runs for turn-start replay AND
     // every mid-turn follow-up.
     callModelInputFilter,
-    ...(inputWaitYield ? { errorHandlers: inputWaitYield.errorHandlers } : {}),
+    errorHandlers: withModelStepHandover(inputWaitYield?.errorHandlers),
     ...(overrides.signal ? { signal: overrides.signal } : {}),
   };
   if (client) {

@@ -40864,6 +40864,69 @@ export async function recordSkippedContextCompaction(
 }
 
 /**
+ * Whether a Steer is waiting for this session's running turn: a queued prompt
+ * marked `delivery: "steer"` (human, API, or a queue row an agent steered) or
+ * a pending Agent Steer instruction. Steer admission leaves a live attempt
+ * running, and the worker reads this before each model request: a pending
+ * Steer is delivered at that model-step boundary by settling the running turn
+ * `superseded` (reason `steer`, `atModelStep`), after the completed step's
+ * tool calls and results are recorded, so nothing in flight is cut off. The
+ * Steer then runs next on the same history.
+ *
+ * This unlocked read only decides whether that settlement is worth trying.
+ * The settlement's `requirePendingSteer` precondition re-checks the same
+ * predicate under the session lock, so a Steer withdrawn in between leaves
+ * the turn running.
+ */
+export async function hasPendingSteerForTurn(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+): Promise<boolean> {
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await pendingSteerExists(scopedDb, input.workspaceId, input.sessionId, input.turnId),
+  );
+}
+
+/** The single predicate for a Steer waiting for a running turn's next model step. */
+async function pendingSteerExists(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<boolean> {
+  const [steerPrompt] = await db
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, sessionId),
+        eq(schema.sessionTurns.status, "queued"),
+        ne(schema.sessionTurns.id, turnId),
+        sql`${schema.sessionTurns.metadata} ->> 'delivery' = 'steer'`,
+      ),
+    )
+    .limit(1);
+  if (steerPrompt) return true;
+  const [agentSteer] = await db
+    .select({ id: schema.sessionSystemUpdates.id })
+    .from(schema.sessionSystemUpdates)
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+        eq(schema.sessionSystemUpdates.sessionId, sessionId),
+        eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+        eq(schema.sessionSystemUpdates.state, "pending"),
+      ),
+    )
+    .limit(1);
+  return agentSteer !== undefined;
+}
+
+/**
  * Read the durable handoff condition immediately after one exact compaction
  * landmark settles. Steer admission deliberately leaves the active attempt
  * unfenced while its latest compaction event is `started`; the worker calls
@@ -40963,34 +41026,7 @@ export async function hasPendingSteerAfterContextCompaction(
         return false;
       }
 
-      const [humanSteer] = await scopedDb
-        .select({ id: schema.sessionTurns.id })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, input.workspaceId),
-            eq(schema.sessionTurns.sessionId, input.sessionId),
-            eq(schema.sessionTurns.status, "queued"),
-            inArray(schema.sessionTurns.source, ["user", "api"]),
-            sql`${schema.sessionTurns.metadata} ->> 'delivery' = 'steer'`,
-          ),
-        )
-        .limit(1);
-      if (humanSteer) return true;
-
-      const [agentSteer] = await scopedDb
-        .select({ id: schema.sessionSystemUpdates.id })
-        .from(schema.sessionSystemUpdates)
-        .where(
-          and(
-            eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
-            eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-            eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-            eq(schema.sessionSystemUpdates.state, "pending"),
-          ),
-        )
-        .limit(1);
-      return agentSteer !== undefined;
+      return await pendingSteerExists(scopedDb, input.workspaceId, input.sessionId, input.turnId);
     },
   );
 }
@@ -77893,6 +77929,13 @@ export type ApplySessionTurnSettlementInput = {
   allowanceGoalPause?: { rationale: string; reason?: "allowance" | "session_usage_limit" };
   events: AppendEventInput[];
   /**
+   * Apply this settlement only while a Steer is still waiting for the turn
+   * (see `hasPendingSteerForTurn`), checked under the session lock. Otherwise
+   * nothing is written and the result is `pending_steer_withdrawn`, so the
+   * caller keeps running the turn.
+   */
+  requirePendingSteer?: boolean;
+  /**
    * A mid-turn requires_action freeze. Human-input rows and interaction
    * interventions are public protocol; ordinary approvals remain in
    * pendingApprovals. Pause attaches the bounded open suffix on
@@ -77946,6 +77989,11 @@ export type ApplySessionTurnSettlementResult =
       events: [];
       turnStatus: SessionTurnStatus | null;
       activeTurnId: string | null;
+    }
+  | {
+      /** `requirePendingSteer` found no waiting Steer; nothing was written. */
+      action: "pending_steer_withdrawn";
+      events: [];
     };
 
 export type ApplySessionTurnSettlementHooks = {
@@ -78381,6 +78429,16 @@ export async function applySessionTurnSettlement(
           turnStatus,
           activeTurnId: session.activeTurnId,
         };
+      }
+
+      if (
+        input.requirePendingSteer &&
+        !(await pendingSteerExists(tx, workspaceId, input.sessionId, input.turnId))
+      ) {
+        // The session row lock serializes this with queue edits, deletes,
+        // claims and Agent Steer replacement, so the Steer this settlement
+        // yields to is still waiting.
+        return { action: "pending_steer_withdrawn" as const, events: [] as [] };
       }
 
       const humanInputRequests = (input.runState?.humanInputRequests ?? []).map((request) => ({

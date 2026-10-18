@@ -24,6 +24,16 @@ export type ChatComposerMessages = {
   sendMessageAriaLabel: string;
   sendAndResumeAriaLabel: string;
   sendTitle: string;
+  /** Send tooltip while a busy Send steers (`busySend="steer"`). */
+  steerSendTitle?: string | undefined;
+  /**
+   * The alternate action beside Send while the agent works: Steer when Send
+   * queues, Queue when Send steers.
+   */
+  steerLabel?: string | undefined;
+  steerTitle?: string | undefined;
+  queueLabel?: string | undefined;
+  queueTitle?: string | undefined;
   sendAndResumeTitle: string;
   annotationNotesRequired: string;
   workspacePaused: string;
@@ -94,6 +104,11 @@ export const defaultChatComposerMessages = (t: OpenGeniText): ChatComposerMessag
   sendMessageAriaLabel: t("composerMessages.sendMessage"),
   sendAndResumeAriaLabel: t("composerMessages.addMessageToQueue"),
   sendTitle: t("composerMessages.queueMessageEnterSteerWith"),
+  steerSendTitle: t("composerMessages.steerMessageEnterQueueWith"),
+  steerLabel: t("composerMessages.steer"),
+  steerTitle: t("composerMessages.steerReadsItSoon"),
+  queueLabel: t("composerMessages.queue"),
+  queueTitle: t("composerMessages.queueRunsAfterCurrentWork"),
   sendAndResumeTitle: t("composerMessages.addToQueueEnterSteer"),
   annotationNotesRequired: t("composerMessages.addANoteToEach"),
   workspacePaused: t("composerMessages.workspacePaused"),
