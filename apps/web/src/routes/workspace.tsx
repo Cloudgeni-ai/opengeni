@@ -4,7 +4,7 @@
 import { t } from "@/lib/console-text";
 import { OpenGeniProvider, SecretsUiProvider, useOpenGeni } from "@opengeni/react";
 import type { WorkspaceControlEvent } from "@opengeni/sdk";
-import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
+import { Link, Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import {
   lazy,
   Suspense,
@@ -63,6 +63,24 @@ type SlackAccessState = {
   error: string | null;
   busy: boolean;
 };
+
+function useWorkspaceManagementLocation(workspaceId: string) {
+  // The URL can advance while Outlet still renders the outgoing matches.
+  // Choose its shell from those same matches, or a pending settings navigation
+  // removes RailProvider from a session that still needs it.
+  return useMatches({
+    select: (matches) => {
+      const match = matches.at(-1);
+      return match
+        ? workspaceManagementLocation(
+            match.pathname,
+            workspaceId,
+            "section" in match.search ? match.search.section : undefined,
+          )
+        : null;
+    },
+  });
+}
 
 export function workspaceControlEventInvalidatesWorkspace(
   event: Pick<WorkspaceControlEvent, "scope">,
@@ -531,12 +549,7 @@ function AuthorizedWorkspaceShell({
   children: ReactNode;
   onMount?: () => void;
 }) {
-  const location = useRouterState({ select: (state) => state.location });
-  const managementLocation = workspaceManagementLocation(
-    location.pathname,
-    workspaceId,
-    location.search.section,
-  );
+  const managementLocation = useWorkspaceManagementLocation(workspaceId);
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const organizationName = activeWorkspace
@@ -594,17 +607,13 @@ function WorkspaceStreamHealth(): null {
 export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const location = useRouterState({ select: (state) => state.location });
+  const managementLocation = useWorkspaceManagementLocation(workspaceId);
   return (
     <WorkspaceShellRouteContent
       workspaceId={workspaceId}
       context={context}
       navigate={navigate}
-      managementLocation={workspaceManagementLocation(
-        location.pathname,
-        workspaceId,
-        location.search.section,
-      )}
+      managementLocation={managementLocation}
     />
   );
 }
