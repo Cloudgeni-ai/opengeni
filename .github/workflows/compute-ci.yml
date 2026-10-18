@@ -239,6 +239,15 @@ jobs:
           pages=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 2 / 2048 ))
           echo "$pages" | sudo tee /proc/sys/vm/nr_hugepages
           grep -i hugepages_total /proc/meminfo
+      - name: Let sandbox traffic through Docker's firewall
+        run: |
+          # The runner runs Docker, whose FORWARD chain drops forwarded
+          # traffic it did not set up, and a packet must pass every chain
+          # on the hook: without these rules no sandbox reaches anything.
+          # They are what docs/operations.md asks of any host running
+          # Docker; the agent's own rules still decide what guests reach.
+          sudo iptables -I DOCKER-USER -o 'ogc+' -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          sudo iptables -I DOCKER-USER -i 'ogc+' -j ACCEPT
       - name: The KVM gate
         env:
           STEPS: lab-setup pager networking engine save_wake lab guest smoke conformance

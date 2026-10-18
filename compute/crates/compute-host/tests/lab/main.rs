@@ -362,7 +362,7 @@ async fn try_exec(
 /// network, for a test whose guest could not reach out: the guest's own
 /// view (its link counters, neighbours, TCP state, and whether its timers
 /// and a new connection work) and the namespace's link counters,
-/// connections and the host's netfilter chains.
+/// the host's connection count and its whole firewall.
 async fn network_report(client: &Client, sandbox: Id) -> String {
     const GUEST: &str = "timeout 5 cat /proc/uptime
 timeout 5 cat /sys/devices/system/clocksource/clocksource0/current_clocksource
@@ -392,9 +392,9 @@ if timeout 10 bash -c 'exec 3<>/dev/tcp/1.1.1.1/80'; then echo connect ok; else 
     let report = [
         host(&["ip", "netns", "exec", &namespace, "ip", "-s", "link"]),
         host(&["ip", "netns", "exec", &namespace, "ip", "neigh"]),
-        host(&["ip", "netns", "exec", &namespace, "conntrack", "-L"]),
+        host(&["cat", "/proc/sys/net/netfilter/nf_conntrack_count"]),
         host(&["ip", "-s", "-br", "link"]),
-        host(&["nft", "list", "chains"]),
+        host(&["nft", "list", "ruleset"]),
         host(&["sysctl", "net.ipv4.ip_forward"]),
     ]
     .concat();

@@ -564,6 +564,7 @@ impl Networks {
         std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
             .map_err(|error| NetError::new("enable forwarding", error))?;
         run("nft", &["-f", "-"], Some(&config.host_rules()))?;
+        warn_of_foreign_forward_drops();
         let mtu = uplink_mtu().unwrap_or_else(|error| {
             tracing::warn!(%error, "could not find the host's uplink MTU; assuming 1500");
             1500
@@ -693,6 +694,64 @@ fn uplink_mtu() -> Result<u32, NetError> {
         .trim()
         .parse()
         .map_err(|error| NetError::new(&path, error))
+}
+
+/// Warns of each chain [`foreign_forward_drops`] finds. Never fails: such
+/// a chain may well have a rule that accepts sandbox traffic.
+fn warn_of_foreign_forward_drops() {
+    const LIST: &str = "nft -j list chains";
+    let found = output("nft", &["-j", "list", "chains"]).and_then(|listing| {
+        foreign_forward_drops(&listing).map_err(|error| NetError::new(LIST, error))
+    });
+    match found {
+        Ok(chains) => {
+            for chain in chains {
+                tracing::warn!(
+                    %chain,
+                    "another firewall drops forwarded traffic by default: sandboxes reach \
+                     nothing unless it accepts traffic from and to their links ({PREFIX}*); \
+                     see the host requirements in docs/operations.md"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not look for firewalls that drop sandbox traffic");
+        }
+    }
+}
+
+/// Other tables' chains on the forward hook whose policy drops, named as
+/// `nft` names them, from `listing`, the output of `nft -j list chains`.
+/// A packet passes a hook only if every base chain on it accepts it, so
+/// such a chain drops sandbox traffic unless one of its own rules accepts
+/// it: Docker's `FORWARD` chain, for one, drops by default and accepts
+/// only its own bridges' traffic. Only IPv4 chains count, the only
+/// traffic guests have.
+fn foreign_forward_drops(listing: &str) -> Result<Vec<String>, serde_json::Error> {
+    let listing: serde_json::Value = serde_json::from_str(listing)?;
+    let entries = listing["nftables"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    Ok(entries
+        .iter()
+        .filter_map(|entry| entry.get("chain"))
+        .filter(|chain| {
+            let family = chain["family"].as_str().unwrap_or_default();
+            matches!(family, "ip" | "inet")
+                && chain["hook"] == "forward"
+                && chain["policy"] == "drop"
+                && !(family == "inet" && chain["table"] == HOST_TABLE)
+        })
+        .map(|chain| {
+            let text = |key: &str| chain[key].as_str().unwrap_or_default().to_owned();
+            format!(
+                "table {} {} chain {}",
+                text("family"),
+                text("table"),
+                text("name")
+            )
+        })
+        .collect())
 }
 
 /// Kernel settings of every sandbox namespace, under `/proc/sys/net`.
@@ -976,6 +1035,39 @@ mod tests {
             NetworkConfig::default().boot_args(),
             "ip=169.254.0.21::169.254.0.22:255.255.255.252::eth0:off:1.1.1.1:8.8.8.8"
         );
+    }
+
+    #[test]
+    fn other_firewalls_that_drop_forwarded_traffic_are_found() {
+        // Docker's chains as `nft -j list chains` lists them, with
+        // firewalld's, an input chain and the agent's own.
+        let listing = r#"{"nftables": [
+            {"metainfo": {"version": "1.0.9", "json_schema_version": 1}},
+            {"chain": {"family": "ip", "table": "filter", "name": "FORWARD", "handle": 2,
+                "type": "filter", "hook": "forward", "prio": 0, "policy": "drop"}},
+            {"chain": {"family": "ip", "table": "filter", "name": "DOCKER-USER", "handle": 9}},
+            {"chain": {"family": "ip6", "table": "filter", "name": "FORWARD", "handle": 2,
+                "type": "filter", "hook": "forward", "prio": 0, "policy": "drop"}},
+            {"chain": {"family": "ip", "table": "filter", "name": "INPUT", "handle": 1,
+                "type": "filter", "hook": "input", "prio": 0, "policy": "drop"}},
+            {"chain": {"family": "inet", "table": "firewalld", "name": "filter_FORWARD",
+                "handle": 4, "type": "filter", "hook": "forward", "prio": 10,
+                "policy": "accept"}},
+            {"chain": {"family": "inet", "table": "opengeni_compute", "name": "forward",
+                "handle": 3, "type": "filter", "hook": "forward", "prio": -10,
+                "policy": "accept"}}
+        ]}"#;
+        assert_eq!(
+            foreign_forward_drops(listing).unwrap(),
+            ["table ip filter chain FORWARD"]
+        );
+        let only_ours = r#"{"nftables": [{"chain": {"family": "inet",
+            "table": "opengeni_compute", "name": "forward", "type": "filter",
+            "hook": "forward", "prio": -10, "policy": "accept"}}]}"#;
+        let none: [&str; 0] = [];
+        assert_eq!(foreign_forward_drops(only_ours).unwrap(), none);
+        assert_eq!(foreign_forward_drops(r#"{"nftables": []}"#).unwrap(), none);
+        assert!(foreign_forward_drops("not json").is_err());
     }
 
     #[test]
