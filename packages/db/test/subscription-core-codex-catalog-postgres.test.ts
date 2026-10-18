@@ -231,6 +231,25 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
       observedAt,
       expiresAt: observedAt + 60_000,
     });
+    // Accepted-turn preparation can run before installing the worker's ambient
+    // file-access actor. Catalog authority comes from its explicit scope, not
+    // that ambient actor or an unrelated initiating human.
+    const beforeActor = await read();
+    expect(
+      await withSessionRlsActorContext(
+        {
+          subjectId: "service:agent-turn",
+          initiatingHumanSubjectId: org.ownerSubjectId,
+        },
+        read,
+      ),
+    ).toEqual(beforeActor);
+    expect(
+      await withSessionRlsActorContext(
+        { subjectId: "service:agent-turn", initiatingHumanSubjectId: "user:unrelated" },
+        read,
+      ),
+    ).toEqual(beforeActor);
     expect(
       (await read(new Date(observedAt + 60_000))).find((c) => c.connectionId === connectionId)
         ?.modelCatalog,
