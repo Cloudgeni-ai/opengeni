@@ -1415,6 +1415,11 @@ credits](scoped-promotional-credits.md).
 
 Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
 
+Codex Responses cache affinity is a stable workspace/person cohort, independent
+of the actual session's body key, socket and continuation chain. Unknown human
+identity retains per-session routing. No prompt text or history participates in
+the affinity calculation. See [cache-affinity design](design/codex-cache-affinity.md).
+
 Provider-normalized calls freeze nullable provider/equivalent-credit comparisons.
 `priced_cost_micros` is requested price, not debit; external calls record zero.
 Telemetry/comparison prices cannot authorize capacity/debits. `agent.model.usage`
