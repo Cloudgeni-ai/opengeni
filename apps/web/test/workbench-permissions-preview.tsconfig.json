@@ -1,0 +1,4 @@
+{
+  "extends": "../tsconfig.json",
+  "include": ["workbench-permissions-preview*.ts", "workbench-permissions-preview*.tsx"]
+}

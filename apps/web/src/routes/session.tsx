@@ -2562,13 +2562,15 @@ function SessionChatPane(props: {
     context.client,
     workspace?.id ?? null,
     props.session.rigId,
-    fixedResourceCatalogEnabled,
+    fixedResourceCatalogEnabled &&
+      hasWorkspacePermission(context.accessContext, props.session.workspaceId, "rigs:use"),
   );
   const personalAttachment = usePersonalResourceAttachment({
     client: context.client,
     authMode: context.clientConfig.auth.mode,
     authSession: context.authSession,
     accessSubjectId: context.accessContext.subjectId,
+    accessContext: context.accessContext,
     managedSelfContext: context.managedSelfContext,
     workspace,
     session: props.session,

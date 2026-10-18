@@ -7,7 +7,17 @@ GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const list = mock(async (_workspace: string, _request: unknown) => ({ entries: [{}] }));
 const client = { listKnowledgeEntries: list };
-mock.module("@/context", () => ({ useAppContext: () => ({ client }) }));
+let permissions = ["documents:manage", "documents:search"];
+let subjectId = "user:manager";
+mock.module("@/context", () => ({
+  useAppContext: () => ({
+    client,
+    accessContext: {
+      subjectId,
+      workspaceGrants: ["one", "two"].map((workspaceId) => ({ workspaceId, permissions })),
+    },
+  }),
+}));
 const { useKnowledgeReviewIndicator, notifyKnowledgeReviewUpdated } =
   await import("./use-knowledge-review-indicator");
 function Probe({ workspace }: { workspace: string }) {
@@ -42,6 +52,45 @@ test("refreshes after decisions, retains the cue on failure, and fences workspac
     list.mockResolvedValueOnce({ entries: [] });
     await act(async () => root.render(<Probe workspace="two" />));
     await act(async () => finish({ entries: [{}] }));
+    expect(container.textContent).toBe("none");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("reader navigation never requests pending knowledge; authority changes fence late responses", async () => {
+  permissions = ["documents:search", "workspace:read"];
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  list.mockClear();
+  try {
+    await act(async () => root.render(<Probe workspace="one" />));
+    await act(async () => notifyKnowledgeReviewUpdated());
+    expect(list).not.toHaveBeenCalled();
+    expect(container.textContent).toBe("none");
+    permissions = ["documents:manage", "documents:search"];
+    let finish!: (value: { entries: {}[] }) => void;
+    list.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await act(async () => root.render(<Probe workspace="one" />));
+    expect(list).toHaveBeenCalledTimes(1);
+    permissions = ["documents:search"];
+    await act(async () => root.render(<Probe workspace="one" />));
+    await act(async () => finish({ entries: [{}] }));
+    expect(container.textContent).toBe("none");
+    await act(async () => notifyKnowledgeReviewUpdated());
+    expect(list).toHaveBeenCalledTimes(1);
+    permissions = ["workspace:admin"];
+    list.mockResolvedValueOnce({ entries: [{}] });
+    await act(async () => root.render(<Probe workspace="one" />));
+    expect(container.textContent).toBe("pending");
+    subjectId = "user:other-manager";
+    list.mockResolvedValueOnce({ entries: [] });
+    await act(async () => root.render(<Probe workspace="one" />));
     expect(container.textContent).toBe("none");
   } finally {
     await act(async () => root.unmount());
