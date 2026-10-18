@@ -1,5 +1,27 @@
 # @opengeni/react-native
 
+## 4.1.1
+
+### Minor Changes
+
+- 843bd39: Products that embed the chat can give people one Send and nothing to learn. With `busySend: "steer"` (web `composerOptions`, native `useOpenGeniNativeSession`), a message sent while the agent works is read as soon as it can, and the stock screens show no Queue choice beside Send and no Queue or Steer words: paused or lined-up messages show as waiting messages, without Steer actions. `offerQueue: true` brings the Queue choice back. `SingleSendWording` applies the same wording around your own composition of the parts.
+
+### Patch Changes
+
+- 9be9a82: Steer reaches the agent within seconds and no longer kills work in progress. A model request still generating when a Steer arrives is cut short: assistant messages the provider had completed stay in history, unfinished text and unstarted tool calls are dropped, and the next request carries the Steer on the unchanged history. Short tool calls finish; long `exec_command`/`write_stdin`, `command_wait`/`command_read` and `session_wait` waits return early with their handle while the work keeps running (`session_wait` reports kind `steer`). The turn then hands over (`turn.superseded` with reason `steer`, `atModelStep: true` and, for a cut-off answer, `cutOffText`) and the Steer runs next. Several Steers are read together, in the order they were sent. Agent Steer (`session_steer`) behaves the same way. Queue (an ordinary Send) is unchanged and still runs after the whole turn. Custom model transports can honour preemption with the exported `isModelPreempted` and `preemptedResponseDone`.
+
+  The web and React Native session screens show a Steer only as the person's message: no status row, chip or "Send now". API callers can still stop the running attempt with `interrupt: true` on `steerQueueItem` on the turn that `steerMessage` returned. A new workspace setting `busySend` (`queue` by default, or `steer`) and a matching `busySend` option on `useComposer`, `SessionConversation` composer options and `useOpenGeniNativeSession` let a product make a normal Send act as Steer while the agent is busy; Cmd/Ctrl+Enter then does the other one.
+
+- Updated dependencies [1e16831]
+- Updated dependencies [04019de]
+- Updated dependencies [34081e9]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [843bd39]
+- Updated dependencies [9be9a82]
+  - @opengeni/react@4.1.0
+  - @opengeni/sdk@4.1.0
+  - @opengeni/contracts@4.1.0
+
 ## 4.0.4
 
 ### Major Changes

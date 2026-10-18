@@ -1,5 +1,55 @@
 # @opengeni/runtime
 
+## 4.1.1
+
+### Minor Changes
+
+- 373f408: browser_act accepts `includeScreenshot: true` and then returns a still image of the tab after the action in the same call, so screenshot-driven flows no longer need a separate browser_screenshot call after every action. A failed capture keeps the action's receipt and says why the image is missing.
+
+  An upload action also accepts `paths` of files in the session's workspace. The tool publishes each path the same way sandbox_file_publish does and uploads the resulting files, so a file the agent just wrote no longer needs a separate publish call (and a tool search to find it) before the upload. `workspaceFileIds` keep working unchanged.
+
+- 6156fab: browser_open accepts `includeScreenshot: true` and then returns a still image of the opened tab in the same call, so visual tasks no longer need a separate browser_screenshot call right after opening the browser. A failed capture keeps the opened browser's result and says why the image is missing.
+
+### Patch Changes
+
+- e6f56a1: Agents that can drive a browser or computer now always know that CAPTCHAs are theirs to solve. The rule moved from the secrets instructions, which only some sessions receive, into the `browser_open` and `computer_open` tool descriptions, which every session with those tools sees from its first request.
+- cf899f4: Commands on the e2b sandbox backend now finish. E2B's terminal always runs an interactive bash, and the command was typed into it, so the shell went on running after the command ended: a tty command never reported its exit status, and every turn that waited for one hung until the sandbox timed out. Its whole wrapper script was also echoed back as output. The command is now staged in a file, and the one short line typed replaces that bash with a shell running the file, which runs the command as a job of its own and reports its status in the terminal. A tty command therefore ends when it does, with its status: also when it is interrupted with Ctrl-C (exit status 130), and also when it leaves a process running in the background, which keeps running and keeps E2B's terminal open. Its output no longer includes bash's prompt or the typed line.
+
+  The backend also works with images whose workspace root is owned by root or lacks write permission. E2B runs commands as its default user, so in such an image every write to the workspace failed. Creating a sandbox now checks that the default user can write and enter the workspace root and, if not, hands it to that user as root with full access for them, then checks again as that user; if either step fails, creating the sandbox fails with the reason.
+
+- cf899f4: The e2b sandbox backend now works and can point at any E2B-compatible API. The E2B SDK (2.56.0) is installed, and the API key, now with `OPENGENI_E2B_DOMAIN`, `OPENGENI_E2B_API_URL` and `OPENGENI_E2B_SANDBOX_URL`, is passed to it explicitly on every create and resume instead of relying on ambient `E2B_*` variables. Before, the key was checked but never reached the SDK, and the SDK itself was missing. The connection is kept out of saved session state.
+- c602300: Fix large Connected Machine writes for machine-addressed operations, including run_on. Negotiate epoch-zero transactional upload support without inventing session epochs or replaying mutations. Older transactional agents receive a preflight 256 KiB limit and update guidance; nonzero session transfers remain compatible. Large machine-addressed transfers require the corresponding native agent release.
+- e4e30b8: Reuse integrity verification for the exact immutable catalog snapshot produced by `createAttemptToolEnvironment`, reducing repeated turn-start parsing and hashing. The factory's catalog is now deeply frozen and detached from caller-owned schemas; callers constructing modified fixtures should clone it first. Deserialized catalogs and database reads retain full integrity checks. Catalog bytes, tool definitions and execution authority are unchanged.
+
+  Allow an owning runtime to start deferred tool preparation at provider dispatch rather than during first-request setup. Earlier tool demand starts the same operation, while closing before either event releases resources without starting unused preparation. Existing embedded callers retain immediate background preparation by default.
+
+- 89ac8a8: When an agent opens a browser or computer, the tools it can now use reach the model as an honest declaration instead of a made-up tool_search call. The declaration follows the step's results: an `additional_tools` item on Responses routes verified to accept it (the Codex subscription), a developer message with the definitions on every other Responses route, and a system message with the definitions on Claude and Chat Completions, or a machine-origin user message on Gemini routes, which move system messages. The tools can be called by name or through tool_invoke; on built-in OpenAI and Azure, which have no tool_invoke, the message asks the model to load them with tool_search. Claude and Chat no longer need the request-time pass that kept a step's results together, so it is removed. browser_act shows its locator and batch item once instead of three times, which cuts a browser declaration by about a third. Existing chats take one prompt-cache miss when they switch.
+- 9be9a82: Steer reaches the agent within seconds and no longer kills work in progress. A model request still generating when a Steer arrives is cut short: assistant messages the provider had completed stay in history, unfinished text and unstarted tool calls are dropped, and the next request carries the Steer on the unchanged history. Short tool calls finish; long `exec_command`/`write_stdin`, `command_wait`/`command_read` and `session_wait` waits return early with their handle while the work keeps running (`session_wait` reports kind `steer`). The turn then hands over (`turn.superseded` with reason `steer`, `atModelStep: true` and, for a cut-off answer, `cutOffText`) and the Steer runs next. Several Steers are read together, in the order they were sent. Agent Steer (`session_steer`) behaves the same way. Queue (an ordinary Send) is unchanged and still runs after the whole turn. Custom model transports can honour preemption with the exported `isModelPreempted` and `preemptedResponseDone`.
+
+  The web and React Native session screens show a Steer only as the person's message: no status row, chip or "Send now". API callers can still stop the running attempt with `interrupt: true` on `steerQueueItem` on the turn that `steerMessage` returned. A new workspace setting `busySend` (`queue` by default, or `steer`) and a matching `busySend` option on `useComposer`, `SessionConversation` composer options and `useOpenGeniNativeSession` let a product make a normal Send act as Steer while the agent is busy; Cmd/Ctrl+Enter then does the other one.
+
+- 3b980e6: A Steer now cuts the in-flight model answer within 200 ms even when the model transport ignores the abort signal or is stalled between events. Before, the handover waited until such a stream ended on its own, so a Steer could take as long as the rest of the answer. The cut-off answer is kept exactly as before.
+- Updated dependencies [84688e2]
+- Updated dependencies [04019de]
+- Updated dependencies [cf899f4]
+- Updated dependencies [c602300]
+- Updated dependencies [e4e30b8]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [9be9a82]
+  - @opengeni/codex@4.1.0
+  - @opengeni/sdk@4.1.0
+  - @opengeni/config@4.1.0
+  - @opengeni/agent-proto@4.1.0
+  - @opengeni/codemode@4.1.0
+  - @opengeni/contracts@4.1.0
+  - @opengeni/capabilities@4.1.0
+  - @opengeni/interaction@4.1.0
+  - @opengeni/observability@4.1.0
+  - @opengeni/tool-gateway@4.1.0
+  - @opengeni/vaults@4.1.0
+  - @opengeni/network@4.1.0
+  - @opengeni/xai-subscription@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes
