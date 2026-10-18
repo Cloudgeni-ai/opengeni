@@ -467,33 +467,76 @@ export interface SelfhostedExecResult {
   backgroundChildrenStopped?: boolean;
 }
 
-/** A request-reply op exactly as this runner may receive it: a runner that does
- * not advertise run-as never receives a user (it would ignore the field and run
- * as its own account), so the op keeps that runner's legacy behavior. */
+/** The user a request-reply op asks to act as ("" when none). */
+function requestedRunAs(op: NonNullable<ControlRequest["op"]>): string {
+  switch (op.$case) {
+    case "fsRead":
+      return op.fsRead.runAs;
+    case "fsWrite":
+      return op.fsWrite.runAs;
+    case "fsList":
+      return op.fsList.runAs;
+    case "fsMkdir":
+      return op.fsMkdir.runAs;
+    case "fsMove":
+      return op.fsMove.runAs;
+    case "fsStat":
+      return op.fsStat.runAs;
+    case "fsRemove":
+      return op.fsRemove.runAs;
+    case "git":
+      return op.git.runAs;
+    case "ptyOpen":
+      return op.ptyOpen.runAs;
+    default:
+      return "";
+  }
+}
+
+function runAsUnsupportedError(write: boolean): SelfhostedControlError {
+  return new SelfhostedControlError({
+    code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+    message: write
+      ? "Native file writes do not support runAs impersonation; no file was written."
+      : "This machine's agent does not support runAs impersonation; the operation was not sent.",
+    reason: null,
+    retryable: false,
+  });
+}
+
+/** A request-reply op exactly as the runner of its dispatch admission may
+ * receive it. A runner that does not advertise run-as never receives a user (it
+ * would ignore the field and act as its own account). Where acting as the
+ * runner's own account would be wrong (a write, or a session whose sandbox
+ * requires run-as), the op is refused instead. The decision always uses the
+ * admission the op is dispatched with, so a reconnect to a runner without
+ * run-as between a capability check and dispatch can never drop the user. */
 function runAsForRunner(
   op: NonNullable<ControlRequest["op"]>,
   runAsSupported: boolean,
+  runAsRequired: boolean,
 ): NonNullable<ControlRequest["op"]> {
-  if (runAsSupported) return op;
+  if (runAsSupported || !requestedRunAs(op)) return op;
+  if (runAsRequired || op.$case === "fsWrite") {
+    throw runAsUnsupportedError(op.$case === "fsWrite");
+  }
   switch (op.$case) {
     case "fsRead":
-      return op.fsRead.runAs ? { ...op, fsRead: { ...op.fsRead, runAs: "" } } : op;
-    case "fsWrite":
-      return op.fsWrite.runAs ? { ...op, fsWrite: { ...op.fsWrite, runAs: "" } } : op;
+      return { ...op, fsRead: { ...op.fsRead, runAs: "" } };
     case "fsList":
-      return op.fsList.runAs ? { ...op, fsList: { ...op.fsList, runAs: "" } } : op;
+      return { ...op, fsList: { ...op.fsList, runAs: "" } };
     case "fsMkdir":
-      return op.fsMkdir.runAs ? { ...op, fsMkdir: { ...op.fsMkdir, runAs: "" } } : op;
+      return { ...op, fsMkdir: { ...op.fsMkdir, runAs: "" } };
     case "fsMove":
-      return op.fsMove.runAs ? { ...op, fsMove: { ...op.fsMove, runAs: "" } } : op;
+      return { ...op, fsMove: { ...op.fsMove, runAs: "" } };
     case "fsStat":
-      return op.fsStat.runAs ? { ...op, fsStat: { ...op.fsStat, runAs: "" } } : op;
+      return { ...op, fsStat: { ...op.fsStat, runAs: "" } };
     case "fsRemove":
-      return op.fsRemove.runAs ? { ...op, fsRemove: { ...op.fsRemove, runAs: "" } } : op;
+      return { ...op, fsRemove: { ...op.fsRemove, runAs: "" } };
     case "git":
-      return op.git.runAs ? { ...op, git: { ...op.git, runAs: "" } } : op;
+      return { ...op, git: { ...op.git, runAs: "" } };
     case "ptyOpen":
-      return op.ptyOpen.runAs ? { ...op, ptyOpen: { ...op.ptyOpen, runAs: "" } } : op;
+      return { ...op, ptyOpen: { ...op.ptyOpen, runAs: "" } };
     default:
       return op;
   }
@@ -819,6 +862,21 @@ export class SelfhostedSession {
     return await this.admitOperation(true);
   }
 
+  /** Whether a requested `runAs` must be honored rather than dropped for a
+   * runner that does not advertise run-as. A Connected Machine keeps its legacy
+   * behavior (commands and reads run as the runner's own account; writes are
+   * refused); a session whose sandbox requires run-as overrides this. */
+  protected get runAsRequired(): boolean {
+    return false;
+  }
+
+  /** The exec `runAs` for a dispatch admission (see `runAsForRunner`). */
+  private execRunAs(runAs: string, runAsSupported: boolean): string {
+    if (!runAs || runAsSupported) return runAs;
+    if (this.runAsRequired) throw runAsUnsupportedError(false);
+    return "";
+  }
+
   /** Whether the live runner honors per-request `runAs` right now. */
   protected async liveRunAsSupported(): Promise<boolean> {
     return (await this.admitOperation(false)).runAsSupported;
@@ -916,7 +974,7 @@ export class SelfhostedSession {
   private async call(
     op: NonNullable<ControlRequest["op"]>,
     timeoutMs = this.timeoutMs,
-    admittedCommand?: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
+    admitted?: Awaited<ReturnType<SelfhostedSession["admitOperation"]>>,
   ): Promise<NonNullable<ControlResponse["result"]>> {
     const opKind = op.$case;
     // This is the last shared boundary before every request/reply provider
@@ -924,7 +982,7 @@ export class SelfhostedSession {
     // authority here; an already-admitted Git operation threads its exact
     // snapshot. Exec uses the op-stream client and never enters this helper.
     const commandOperation = opKind === "git";
-    let operationAdmission = admittedCommand ?? (await this.admitOperation(commandOperation));
+    let operationAdmission = admitted ?? (await this.admitOperation(commandOperation));
     const startedAt = Date.now();
     let drainingRetries = 0;
     let timeoutRetries = 0;
@@ -936,7 +994,7 @@ export class SelfhostedSession {
         requestId: crypto.randomUUID(),
         epoch: this.epoch,
         resourcePolicy,
-        op: runAsForRunner(op, operationAdmission.runAsSupported),
+        op: runAsForRunner(op, operationAdmission.runAsSupported, this.runAsRequired),
       };
       const res = await this.controlRpc.request(operationAdmission.subject, req, {
         timeoutMs,
@@ -1162,8 +1220,9 @@ export class SelfhostedSession {
         stdin,
         timeoutMs: executionTimeoutMs,
         // Only a runner that advertises run-as receives a user; older runners
-        // keep running the command as their own account.
-        runAs: admission.runAsSupported ? (args.runAs ?? "") : "",
+        // keep running the command as their own account unless this session
+        // requires run-as. Decided on the exact admission this command uses.
+        runAs: this.execRunAs(args.runAs ?? "", admission.runAsSupported),
       };
       opStreamClient = this.opStreamClientFor(admission);
       if (!opStreamClient) throw execRequiresOpStream();
@@ -1684,8 +1743,12 @@ export class SelfhostedSession {
       decoder.decode(await this.readFile({ path, ...(runAs ? { runAs } : {}) }));
     // Direct writes carry the user only to a runner that honors it; older
     // runners keep their existing behavior.
+    // A session that requires run-as always sends the user, so writeFile refuses
+    // it on a runner without run-as instead of writing as the runner's account.
     const directWriteUser = async (): Promise<{ runAs?: string }> =>
-      runAs && (await this.admitOperation(false)).runAsSupported ? { runAs } : {};
+      runAs && (this.runAsRequired || (await this.admitOperation(false)).runAsSupported)
+        ? { runAs }
+        : {};
     const writeText = async (
       path: string,
       content: string,
@@ -1892,7 +1955,8 @@ export class SelfhostedSession {
         if (
           !this.supportsFileTransfer(current) ||
           current.subject !== initial.subject ||
-          current.connectionInstanceId !== initial.connectionInstanceId
+          current.connectionInstanceId !== initial.connectionInstanceId ||
+          (requestedRunAs(op) !== "" && !current.runAsSupported)
         ) {
           throw new Error(
             "The authorized machine connection changed during the file transfer; the operation was not replayed.",
@@ -1961,16 +2025,12 @@ export class SelfhostedSession {
   }): Promise<number> {
     const content = typeof args.content === "string" ? encoder.encode(args.content) : args.content;
     const runAs = args.runAs ?? "";
-    if (runAs && !(await this.admitOperation(false)).runAsSupported) {
-      throw new SelfhostedControlError({
-        code: ErrorCode.ERROR_CODE_UNSUPPORTED,
-        message: "Native file writes do not support runAs impersonation; no file was written.",
-        reason: null,
-        retryable: false,
-      });
-    }
+    // One admission decides run-as support and carries the write: a reconnect
+    // between a separate check and the dispatch could otherwise reach a runner
+    // that never advertised run-as.
+    const initial = await this.admitOperation(false);
+    if (runAs && !initial.runAsSupported) throw runAsUnsupportedError(true);
     if (content.byteLength > SELFHOSTED_FILE_CHUNK_BYTES && !args.append) {
-      const initial = await this.admitOperation(false);
       if (initial.transactionalFsWriteSupported && !this.supportsFileTransfer(initial)) {
         throw new SelfhostedControlError({
           code: ErrorCode.ERROR_CODE_UNSUPPORTED,
@@ -1996,17 +2056,21 @@ export class SelfhostedSession {
         return content.byteLength;
       }
     }
-    const result = await this.call({
-      $case: "fsWrite",
-      fsWrite: {
-        path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
-        content,
-        createParents: args.createParents ?? true,
-        append: args.append ?? false,
-        mode: 0,
-        runAs,
+    const result = await this.call(
+      {
+        $case: "fsWrite",
+        fsWrite: {
+          path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
+          content,
+          createParents: args.createParents ?? true,
+          append: args.append ?? false,
+          mode: 0,
+          runAs,
+        },
       },
-    });
+      this.timeoutMs,
+      initial,
+    );
     if (result.$case !== "fsWrite") {
       throw new Error(`selfhosted writeFile: unexpected result ${result.$case}`);
     }

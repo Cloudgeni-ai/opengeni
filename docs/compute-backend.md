@@ -180,10 +180,14 @@ and NATS like Connected Machines.
 ## Run as another user
 
 The agent runs as root in the guest, so the descriptor sets `supportsRunAs`.
-Each request still gates on the live agent's Hello `capabilities.run_as`:
-commands, file operations and manifest materialization carry `runAs` only when
-the agent advertises it, and a manifest applied as another user is refused
-otherwise. See "Run as another local user" in `docs/connected-machines.md`.
+Each request still gates on the live agent's Hello `capabilities.run_as`,
+decided on the exact connection the request is dispatched on. Unlike a
+Connected Machine, where an older agent runs commands and reads as its own
+account, a compute session refuses any request that names a user when that
+connection's agent does not advertise run-as: acting as root instead would
+elevate. A reconnect to such an agent between a capability check and the
+dispatch therefore ends in a refusal, never a dropped user. See "Run as another
+local user" in `docs/connected-machines.md`.
 
 ## Not yet supported
 

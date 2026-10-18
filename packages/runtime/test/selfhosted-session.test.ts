@@ -644,6 +644,51 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     ).rejects.toThrow("Native file writes do not support runAs impersonation");
   });
 
+  test("a runAs write is refused, never stripped, when a reconnect swaps in a runner without run-as", async () => {
+    const mock = new MockAgentResponder();
+    let dropped = false;
+    const rpc: ControlRpc = {
+      request: async (subject, request, opts) => {
+        if (!dropped && request.op?.$case === "fsWrite") {
+          dropped = true;
+          return offlineControlResponse(request.requestId, true);
+        }
+        return await mock.request(subject, request, opts);
+      },
+    };
+    const admissions = [
+      { connectionInstanceId: CONNECTION_INSTANCE, runAsSupported: true },
+      { connectionInstanceId: "33333333-3333-4333-8333-333333333333", runAsSupported: false },
+    ];
+    let reads = 0;
+    const session = sessionWith(rpc, 0, undefined, {
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () => ({
+        ...admissions[Math.min(reads++, admissions.length - 1)]!,
+        workspaceRoot: "/home/user/project",
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+        },
+        operationResourcePolicySupported: true,
+        operationCpuQuotaSupported: true,
+      }),
+    });
+
+    const error = await session
+      .writeFile({ path: "/tmp/as-dev", content: "x", runAs: "dev" })
+      .catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(SelfhostedControlError);
+    expect((error as SelfhostedControlError).code).toBe(ErrorCode.ERROR_CODE_UNSUPPORTED);
+    expect((error as Error).message).toContain("no file was written");
+    // The write was checked and dispatched on one admission; only the retry
+    // re-admitted, and it refused the replacement runner.
+    expect(reads).toBe(2);
+    expect(mock.requests.filter((r) => r.req.op?.$case === "fsWrite")).toHaveLength(0);
+  });
+
   test("writeFile then readFile round-trips through the mock (binary-safe)", async () => {
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);

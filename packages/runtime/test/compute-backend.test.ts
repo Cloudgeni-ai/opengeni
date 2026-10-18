@@ -28,7 +28,9 @@ import {
   type NatsRequestConnection,
   sweepComputeOrphans,
 } from "../src/sandbox";
+import { applyDiff } from "@openai/agents";
 import { Manifest } from "@openai/agents/sandbox";
+import { setSelfhostedApplyDiff } from "../src/sandbox/selfhosted/session";
 import { fileContentDigest } from "../src/sandbox/selfhosted/file-transfer";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
 
@@ -650,6 +652,7 @@ describe("compute sandbox client", () => {
       },
     });
     const asked: string[] = [];
+    setSelfhostedApplyDiff(applyDiff);
     const sentBefore = plane.sent.length;
     const result = await sweepComputeOrphans({
       fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
@@ -814,6 +817,7 @@ describe("compute sandbox client", () => {
     };
     // The wake places and adopts it; the new host reopens the same instance.
     fabric.onWake = () => plane.open(session.state.enrollmentId, instance);
+    setSelfhostedApplyDiff(applyDiff);
     const sentBefore = plane.sent.length;
 
     const bytes = await session.readFile({ path: "/workspace/c.txt" });
@@ -931,6 +935,42 @@ describe("compute sandbox client", () => {
       }),
     ).rejects.toThrow("does not support runAs");
     expect(plane.execs).toEqual([]);
+  });
+
+  test("runAs is refused, never dropped, when the agent stops advertising it after a check", async () => {
+    const { plane, client } = setup();
+    plane.runAs = true;
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    const resolve = plane.resolveConnection.bind(plane);
+    // The capability check sees run-as; the agent then reconnects without it
+    // before the command is dispatched.
+    plane.resolveConnection = async (input) => {
+      const connection = await resolve(input);
+      plane.runAs = false;
+      return connection;
+    };
+    await expect(
+      session.materializeEntry({
+        path: "project",
+        entry: { type: "dir" } as never,
+        runAs: "builder",
+      }),
+    ).rejects.toThrow("does not support runAs");
+    expect(plane.execs).toEqual([]);
+    // A compute agent runs as root: every other runAs operation is refused
+    // rather than run as root, and nothing reaches the agent.
+    setSelfhostedApplyDiff(applyDiff);
+    const sentBefore = plane.sent.length;
+    for (const attempt of [
+      () => session.exec({ cmd: "id -u", runAs: "builder" }),
+      () => session.readFile({ path: "/workspace/a.txt", runAs: "builder" }),
+      () => session.writeFile({ path: "/workspace/a.txt", content: "x", runAs: "builder" }),
+      () => session.createEditor("builder").deleteFile({ path: "a.txt" }),
+    ]) {
+      await expect(attempt()).rejects.toThrow("runAs");
+    }
+    expect(plane.execs).toEqual([]);
+    expect(plane.sent.length).toBe(sentBefore);
   });
 
   test("resumeExact of a sandbox the fabric no longer has is an unavailable instance", async () => {

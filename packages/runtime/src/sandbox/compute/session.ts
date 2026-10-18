@@ -479,6 +479,12 @@ export class ComputeSandboxSession extends SelfhostedSession {
   /** The box keeps running (and sleeping) after a session is dropped. */
   async close(): Promise<void> {}
 
+  /** A compute sandbox's agent runs as root, so acting as its own account in
+   * place of a requested user would silently elevate: refuse instead. */
+  protected override get runAsRequired(): boolean {
+    return true;
+  }
+
   /** A manifest applied as another user needs the live agent's `run_as`. */
   private async assertRunAsAvailable(runAs: string | undefined): Promise<void> {
     if (runAs && !(await this.liveRunAsSupported())) {
