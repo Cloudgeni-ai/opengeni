@@ -552,7 +552,7 @@ mod unix {
         /// destination name for a creation (no-replace), else under a fresh
         /// name that is then atomically exchanged with the destination and
         /// checked, the previous file put back if anything else arrived.
-        fn publish(&self, flags: RenameFlags) -> PlatformResult<()> {
+        fn publish(&mut self, flags: RenameFlags) -> PlatformResult<()> {
             let conflict = |error: rustix::io::Errno| {
                 if error == rustix::io::Errno::EXIST {
                     failure("WRITE_CONFLICT", "destination appeared before commit")
@@ -570,7 +570,7 @@ mod unix {
         }
 
         #[cfg(target_os = "linux")]
-        fn publish_unnamed(&self) -> PlatformResult<()> {
+        fn publish_unnamed(&mut self) -> PlatformResult<()> {
             use std::os::fd::AsRawFd as _;
 
             // The calling thread's own descriptor table entry: always
@@ -594,8 +594,19 @@ mod unix {
                     }
                 });
             }
+            // A replacement has no single call that links a descriptor over an
+            // existing name, so the verified inode gets a fresh private name
+            // and is exchanged with the destination. That name is reachable by
+            // the identity this write runs as until the exchange, so the
+            // exchange is followed by proof, through our own descriptor and the
+            // destination name, that the published file is exactly the verified
+            // inode with exactly the verified bytes. Anything else is put back,
+            // and a put-back that cannot be confirmed is an unknown outcome,
+            // never a clean conflict.
             let fresh = OsString::from(format!(".opengeni-publish-{}", uuid::Uuid::new_v4()));
             link(&fresh).map_err(io)?;
+            #[cfg(test)]
+            window::run(&window::BEFORE_EXCHANGE, &fresh);
             if let Err(error) = fs::renameat_with(
                 &self.parent,
                 &fresh,
@@ -606,35 +617,66 @@ mod unix {
                 let _ = fs::unlinkat(&self.parent, &fresh, AtFlags::empty());
                 return Err(io(error));
             }
-            let ours = self.content.metadata().map_err(io)?;
-            let published = fs::statat(&self.parent, &self.name, AtFlags::SYMLINK_NOFOLLOW);
-            let exact = published.is_ok_and(|named| {
-                named.st_ino == ours.ino() && i128::from(named.st_dev) == i128::from(ours.dev())
-            });
-            if !exact {
-                // Something replaced our link before the exchange: put the
-                // previous destination back and publish nothing.
-                let _ = fs::renameat_with(
-                    &self.parent,
-                    &fresh,
-                    &self.parent,
-                    &self.name,
-                    RenameFlags::EXCHANGE,
-                );
+            if self.published_verified() {
+                // The fresh name now holds the previous destination.
+                let _ = fs::unlinkat(&self.parent, &fresh, AtFlags::empty());
+                return Ok(());
+            }
+            #[cfg(test)]
+            window::run(&window::BEFORE_RESTORE, &fresh);
+            let restored = fs::renameat_with(
+                &self.parent,
+                &fresh,
+                &self.parent,
+                &self.name,
+                RenameFlags::EXCHANGE,
+            )
+            .is_ok()
+                && self.base.as_ref().is_some_and(|(_, previous)| {
+                    fs::statat(&self.parent, &self.name, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(
+                        |named| {
+                            named.st_ino == previous.ino()
+                                && i128::from(named.st_dev) == i128::from(previous.dev())
+                        },
+                    )
+                });
+            if restored {
                 let _ = fs::unlinkat(&self.parent, &fresh, AtFlags::empty());
                 return Err(failure(
                     "WRITE_CONFLICT",
-                    "staged content was replaced before publication",
+                    "staged content changed before publication; the previous file was restored",
                 ));
             }
-            // The fresh name now holds the previous destination.
-            let _ = fs::unlinkat(&self.parent, &fresh, AtFlags::empty());
-            Ok(())
+            Err(failure(
+                "WRITE_OUTCOME_UNKNOWN",
+                &format!(
+                    "staged content changed before publication and the previous file could not be confirmed restored; inspect the destination and {}",
+                    fresh.to_string_lossy()
+                ),
+            ))
+        }
+
+        /// Whether the destination name now holds exactly the verified inode,
+        /// and that inode exactly the verified bytes.
+        #[cfg(target_os = "linux")]
+        fn published_verified(&mut self) -> bool {
+            let Ok(ours) = self.content.metadata() else {
+                return false;
+            };
+            let named = fs::statat(&self.parent, &self.name, AtFlags::SYMLINK_NOFOLLOW);
+            if !named.is_ok_and(|named| {
+                named.st_ino == ours.ino() && i128::from(named.st_dev) == i128::from(ours.dev())
+            }) {
+                return false;
+            }
+            digest(&mut self.content).is_ok_and(|(bytes, hash)| {
+                Some(bytes) == self.request.content_size && hash == self.request.content_digest
+            })
         }
 
         #[cfg(not(target_os = "linux"))]
         #[allow(clippy::unused_self)]
-        fn publish_unnamed(&self) -> PlatformResult<()> {
+        fn publish_unnamed(&mut self) -> PlatformResult<()> {
             Err(unsupported("unnamed transactional staging requires Linux"))
         }
     }
@@ -722,6 +764,27 @@ mod unix {
             // atomic visibility, not a durable receipt across power/process loss.
             self.published = true;
             Ok(())
+        }
+    }
+
+    /// Test-only actions in the publication window of an unnamed replacement.
+    #[cfg(test)]
+    pub(super) mod window {
+        use std::cell::RefCell;
+        use std::ffi::OsStr;
+
+        type Hook = RefCell<Option<Box<dyn FnMut(&OsStr)>>>;
+        thread_local! {
+            pub(in super::super) static BEFORE_EXCHANGE: Hook = const { RefCell::new(None) };
+            pub(in super::super) static BEFORE_RESTORE: Hook = const { RefCell::new(None) };
+        }
+
+        pub(in super::super) fn run(hook: &'static std::thread::LocalKey<Hook>, fresh: &OsStr) {
+            hook.with(|slot| {
+                if let Some(action) = slot.borrow_mut().as_mut() {
+                    action(fresh);
+                }
+            });
         }
     }
 }
@@ -854,6 +917,108 @@ mod tests {
             .success());
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn failure_code(error: &PlatformError) -> String {
+        match error {
+            PlatformError::Os { detail, .. } => {
+                detail.get("failure_code").cloned().unwrap_or_default()
+            }
+            other => format!("{other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    type RestoreHook = Box<dyn FnMut(&std::path::Path, &std::ffi::OsStr)>;
+
+    /// Run one unnamed replacement of `old` by `new` with actions in its
+    /// publication window; returns the commit result and the destination.
+    #[cfg(target_os = "linux")]
+    fn replace_unnamed_with_window(
+        before_exchange: impl FnMut(&std::path::Path, &std::ffi::OsStr) + 'static,
+        before_restore: Option<RestoreHook>,
+    ) -> (PlatformResult<()>, tempfile::TempDir, std::path::PathBuf) {
+        use super::unix::window;
+        let dir = tempdir();
+        let path = dir.path().join("document");
+        std::fs::write(&path, b"old").unwrap();
+        let mut write = begin_unnamed(&path, &request(b"new", Some(b"old"))).unwrap();
+        write.append(b"new").unwrap();
+        let root = dir.path().to_path_buf();
+        let mut exchange = before_exchange;
+        window::BEFORE_EXCHANGE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |fresh| exchange(&root, fresh)));
+        });
+        let root = dir.path().to_path_buf();
+        window::BEFORE_RESTORE.with(|slot| {
+            *slot.borrow_mut() = before_restore.map(|mut restore| {
+                Box::new(move |fresh: &std::ffi::OsStr| restore(&root, fresh))
+                    as Box<dyn FnMut(&std::ffi::OsStr)>
+            });
+        });
+        let result = write.commit(&|| true);
+        window::BEFORE_EXCHANGE.with(|slot| *slot.borrow_mut() = None);
+        window::BEFORE_RESTORE.with(|slot| *slot.borrow_mut() = None);
+        (result, dir, path)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn leftover_publish_names(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".opengeni-publish-"))
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unnamed_replacement_publishes_only_verified_bytes() {
+        // Untouched window: the verified bytes are published, nothing is left.
+        let (result, dir, path) = replace_unnamed_with_window(|_, _| {}, None);
+        result.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(leftover_publish_names(dir.path()), Vec::<String>::new());
+
+        // The private name is written in place before the exchange: same inode,
+        // other bytes. The previous file is restored; a clean conflict.
+        let (result, dir, path) = replace_unnamed_with_window(
+            |root, fresh| std::fs::write(root.join(fresh), b"tampered").unwrap(),
+            None,
+        );
+        assert_eq!(failure_code(&result.unwrap_err()), "WRITE_CONFLICT");
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(leftover_publish_names(dir.path()), Vec::<String>::new());
+
+        // Another inode is put under the private name before the exchange.
+        let (result, dir, path) = replace_unnamed_with_window(
+            |root, fresh| {
+                let other = root.join("other");
+                std::fs::write(&other, b"new").unwrap();
+                std::fs::rename(&other, root.join(fresh)).unwrap();
+            },
+            None,
+        );
+        assert_eq!(failure_code(&result.unwrap_err()), "WRITE_CONFLICT");
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(leftover_publish_names(dir.path()), Vec::<String>::new());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unnamed_replacement_with_an_unconfirmed_restore_is_an_unknown_outcome() {
+        // Tampered before the exchange, and the private name (now holding the
+        // previous file) moved away before the put-back: never a clean conflict.
+        let (result, dir, _path) = replace_unnamed_with_window(
+            |root, fresh| std::fs::write(root.join(fresh), b"tampered").unwrap(),
+            Some(Box::new(|root, fresh| {
+                std::fs::rename(root.join(fresh), root.join("moved")).unwrap();
+            })),
+        );
+        let error = result.unwrap_err();
+        assert_eq!(failure_code(&error), "WRITE_OUTCOME_UNKNOWN");
+        assert_eq!(std::fs::read(dir.path().join("moved")).unwrap(), b"old");
     }
 
     #[test]

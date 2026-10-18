@@ -1500,7 +1500,11 @@ environment. A PTY without a command starts the user's login shell, and the user
 owns the terminal device. File requests run on a dedicated agent thread switched
 to the user, so the kernel enforces the user's permissions and everything the
 request creates is the user's; `~` expands to the user's home. Transactional
-uploads stage as the user, so the published file is the user's. Exec and git
+uploads stage as the user, so the published file is the user's. Because that
+user can also reach its own staged file, a replacement re-checks the published
+inode and its content right after the atomic exchange: on any difference the
+agent exchanges the previous file back and reports `WRITE_CONFLICT`, or reports
+`WRITE_OUTCOME_UNKNOWN` when it cannot confirm that restore. Exec and git
 children switch identity after their cgroup placement, which still uses the
 agent's privileges.
 
