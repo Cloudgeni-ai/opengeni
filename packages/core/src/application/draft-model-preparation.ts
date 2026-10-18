@@ -53,7 +53,9 @@ export function prepareDraftModel(
         model?.credentialSource.kind === "connected_subscription" &&
         model.credentialSource.provider === "codex"
       )
-        entry.until = await refresh(deps.db, settings, scope);
+        entry.until = await refresh(deps.db, settings, scope, undefined, {
+          refreshCredentials: false,
+        });
     })
     .catch(() => {
       entry.until = Date.now() + 5_000;

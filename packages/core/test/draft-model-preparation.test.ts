@@ -48,7 +48,9 @@ describe("draft model preparation", () => {
     prepareDraftModel(deps, context, { ...draft, model: codexModel.id }, refresh);
     await flush();
     expect(refresh).toHaveBeenCalledTimes(1);
-    expect(refresh).toHaveBeenCalledWith(deps.db, settings, context);
+    expect(refresh).toHaveBeenCalledWith(deps.db, settings, context, undefined, {
+      refreshCredentials: false,
+    });
     prepareDraftModel(deps, context, draft, refresh);
     await flush();
     expect(refresh).toHaveBeenCalledTimes(1);

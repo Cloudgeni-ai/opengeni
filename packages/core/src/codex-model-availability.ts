@@ -52,7 +52,8 @@ type CatalogDependencies = {
     settings: Settings,
     context: WorkspaceCodexCatalogContext,
     connectionId: string,
-  ) => Promise<CodexCredentialTokenSnapshot>;
+    refreshCredentials: boolean,
+  ) => Promise<CodexCredentialTokenSnapshot | null>;
 };
 
 const CATALOG_SERVICE_SUBJECT = "service:subscription-core";
@@ -65,8 +66,8 @@ const defaultCatalogDependencies = (): CatalogDependencies => ({
   // A connection-level read (no operation lease), like live usage: the 0671
   // seam serves only shared organization- or workspace-scoped connections in
   // this workspace's scope, and refreshes under the per-connection key.
-  getCoreToken: (targetDb, targetSettings, context, connectionId) =>
-    buildSubscriptionCoreCodexConnectionTokenResolver(
+  getCoreToken: (targetDb, targetSettings, context, connectionId, refreshCredentials) => {
+    const resolver = buildSubscriptionCoreCodexConnectionTokenResolver(
       targetDb,
       targetSettings,
       {
@@ -77,7 +78,9 @@ const defaultCatalogDependencies = (): CatalogDependencies => ({
       },
       connectionId,
       null,
-    ).getToken(),
+    );
+    return refreshCredentials ? resolver.getToken() : resolver.getFreshToken();
+  },
 });
 
 function codexCatalogModels(settings: Settings) {
@@ -95,6 +98,7 @@ async function loadCoreConnectionCatalog(
   context: WorkspaceCodexCatalogContext,
   connection: SubscriptionCoreCodexServingConnection,
   deps: CatalogDependencies,
+  refreshCredentials = true,
 ): Promise<{ ok: boolean; slugs: string[]; checkedAt: string; expiresAt: number }> {
   // listServing has just checked live scope, cutover, health and credential
   // generation. Reuse the database observation across API/worker processes;
@@ -112,7 +116,23 @@ async function loadCoreConnectionCatalog(
   try {
     // The token read rechecks the enabled cutover and the workspace scope
     // before the cache is consulted.
-    const token = await deps.getCoreToken(db, settings, context, connection.connectionId);
+    const token = await deps.getCoreToken(
+      db,
+      settings,
+      context,
+      connection.connectionId,
+      refreshCredentials,
+    );
+    if (token === null) {
+      // Typing is only a hint. Renewal can rotate secrets or mark an account
+      // needs-sign-in, so it belongs to ordinary access, never preparation.
+      return {
+        ok: false,
+        slugs: [],
+        checkedAt: new Date().toISOString(),
+        expiresAt: Date.now() + CATALOG_ERROR_CACHE_MS,
+      };
+    }
     const key = `core:${context.workspaceId}:${connection.connectionId}:${token.credentialVersion}`;
     const cached = catalogs.get(key);
     if (cached && cached.expiresAt > Date.now()) return await cached.result;
@@ -189,6 +209,7 @@ export async function refreshCoreCodexModelEntitlements(
   settings: Settings,
   context: WorkspaceCodexCatalogContext,
   deps: CatalogDependencies = defaultCatalogDependencies(),
+  options: { refreshCredentials?: boolean } = {},
 ): Promise<number> {
   const idleExpiry = Date.now() + CATALOG_CACHE_MS;
   if ((await deps.disposition(db, context.accountId, context.workspaceId)) !== "core")
@@ -197,7 +218,16 @@ export async function refreshCoreCodexModelEntitlements(
   const observations = await Promise.all(
     connections
       .filter((connection) => connection.ownership === "shared")
-      .map((connection) => loadCoreConnectionCatalog(db, settings, context, connection, deps)),
+      .map((connection) =>
+        loadCoreConnectionCatalog(
+          db,
+          settings,
+          context,
+          connection,
+          deps,
+          options.refreshCredentials !== false,
+        ),
+      ),
   );
   // A draft hint may suppress later hints only while the facts it reused
   // remain fresh, not for another full TTL starting at the hint itself.
