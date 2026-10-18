@@ -9751,6 +9751,7 @@ export type MachineConnectionAuthority = {
   leaseExpiresAt: string | null;
   duplicateRunnerDeniedCount: number;
   duplicateRunnerDeniedAt: string | null;
+  authenticationError?: "credentials_expired" | null | undefined;
 };
 
 export type MachineRuntimeCapabilities = {

@@ -298,7 +298,10 @@ fn message_is_authentication_denial(message: &str) -> bool {
 /// Persisted connection metadata predates strict URL validation, so unexpected
 /// shell metacharacters are replaced by a visible placeholder instead of being
 /// reflected into copy/pasteable operator guidance.
-fn rejected_bearer_reconnect_command(api_url: Option<&str>, workspace_id: &str) -> String {
+pub(crate) fn rejected_bearer_reconnect_command(
+    api_url: Option<&str>,
+    workspace_id: &str,
+) -> String {
     fn safe_argument(value: &str) -> bool {
         !value.is_empty()
             && value.bytes().all(|byte| {
@@ -504,6 +507,8 @@ pub struct SupervisorLink<P: Platform> {
     pub credentials: StoredCredentials,
     /// Authoritative deployment origin persisted by a non-legacy enrollment.
     pub api_url: Option<String>,
+    /// Persisted authentication recovery state for these exact credentials.
+    pub authentication_state: Option<crate::config::AuthenticationState>,
     /// Random for this daemon process and stable across control/bulk reconnects.
     /// Auth-callout leases this exact value and operational subjects include it.
     pub connection_instance_id: String,
@@ -516,6 +521,7 @@ impl<P: Platform> Clone for SupervisorLink<P> {
             platform: self.platform.clone(),
             credentials: self.credentials.clone(),
             api_url: self.api_url.clone(),
+            authentication_state: self.authentication_state,
             connection_instance_id: self.connection_instance_id.clone(),
         }
     }
@@ -534,6 +540,7 @@ impl<P: Platform> SupervisorLink<P> {
             platform,
             credentials,
             api_url: None,
+            authentication_state: None,
             connection_instance_id: uuid::Uuid::new_v4().to_string(),
         }
     }
@@ -542,6 +549,16 @@ impl<P: Platform> SupervisorLink<P> {
     #[must_use]
     pub fn with_api_url(mut self, api_url: impl Into<String>) -> Self {
         self.api_url = Some(api_url.into());
+        self
+    }
+
+    /// Suspend transport dialing while the connection store owns recovery.
+    #[must_use]
+    pub fn with_authentication_state(
+        mut self,
+        state: Option<crate::config::AuthenticationState>,
+    ) -> Self {
+        self.authentication_state = state;
         self
     }
 
@@ -561,6 +578,7 @@ struct WorkspaceLink<P: Platform> {
     platform: Arc<P>,
     creds: StoredCredentials,
     api_url: Option<String>,
+    authentication_state: Option<crate::config::AuthenticationState>,
     connection_instance_id: String,
     epoch: Arc<EpochCell>,
     shutdown: ShutdownSignal,
@@ -585,6 +603,7 @@ impl<P: Platform> WorkspaceLink<P> {
             platform: definition.platform,
             creds: definition.credentials,
             api_url: definition.api_url,
+            authentication_state: definition.authentication_state,
             connection_instance_id: definition.connection_instance_id,
             epoch: Arc::new(EpochCell::default()),
             shutdown: ShutdownSignal::default(),
@@ -949,6 +968,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         }
                         let unchanged = same_scope && next.get(id).is_some_and(|candidate| {
                             candidate.credentials == link.creds
+                                && candidate.authentication_state == link.authentication_state
                         });
                         if !unchanged {
                             link.shutdown.request();
@@ -1011,6 +1031,12 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// Runs one workspace link's dial → serve → reconnect loop until a clean
     /// shutdown is requested.
     async fn run_link(&self, link: &WorkspaceLink<P>) {
+        if link.authentication_state.is_some() {
+            // Keep the frame/reply scope alive. Returning would make the outer
+            // reconciler respawn this same rejected link in a tight loop.
+            self.link_stop_notified(link).await;
+            return;
+        }
         let mut backoff = Backoff::standard();
         info!(
             connection_id = %link.connection_id,
@@ -1034,6 +1060,28 @@ impl<P: Platform + 'static> Supervisor<P> {
 
             match self.serve_one_connection(link, &mut backoff).await {
                 ConnectionOutcome::CleanShutdown => return,
+                ConnectionOutcome::AuthenticationRejected => {
+                    // The file watcher adopts recovery state and later renewed
+                    // credentials without discarding retained work. If the disk
+                    // is temporarily unwritable, retry only that local write,
+                    // never the rejected network credential.
+                    loop {
+                        match crate::credential_renewal::record_authentication_rejection(
+                            &link.connection_id,
+                            &link.creds.nats_bearer,
+                        ) {
+                            Ok(()) => break,
+                            Err(error) => warn!(connection_id = %link.connection_id, %error,
+                                "could not persist authentication recovery; transport retries remain paused"),
+                        }
+                        tokio::select! {
+                            () = self.link_stop_notified(link) => return,
+                            () = tokio::time::sleep(backoff.next_delay()) => {}
+                        }
+                    }
+                    self.link_stop_notified(link).await;
+                    return;
+                }
                 ConnectionOutcome::CredentialRotation => {
                     info!(
                         connection_id = %link.connection_id,
@@ -1093,9 +1141,9 @@ impl<P: Platform + 'static> Supervisor<P> {
                 error!(
                     connection_id = %link.connection_id,
                     error = %e,
-                    "control plane rejected the enrollment bearer; automatic renewal and reconnect will retry. If renewal cannot authorize the existing grant, reconnect explicitly with `{reconnect_command}`"
+                    "control plane rejected this connection's credentials; transport retries paused pending renewal. Inspect `opengeni-agent connections`; if reconnect is required, use `{reconnect_command}`"
                 );
-                return ConnectionOutcome::Disconnected(e.to_string());
+                return ConnectionOutcome::AuthenticationRejected;
             }
             Err(e) => return ConnectionOutcome::Disconnected(e.to_string()),
         };
@@ -1147,6 +1195,9 @@ impl<P: Platform + 'static> Supervisor<P> {
             transport_lost: bulk_transport_lost,
         } = match self.connect(link).await {
             Ok(connection) => connection,
+            Err(SupervisorError::Authentication(_)) => {
+                return ConnectionOutcome::AuthenticationRejected
+            }
             Err(e) => return ConnectionOutcome::Disconnected(format!("bulk dial failed: {e}")),
         };
         let (bulk_tx, bulk_rx) =
@@ -1296,6 +1347,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             let reason = match &outcome {
                 ConnectionOutcome::CleanShutdown => "shutdown",
                 ConnectionOutcome::CredentialRotation => "credential_rotation",
+                ConnectionOutcome::AuthenticationRejected => "authentication_rejected",
                 ConnectionOutcome::Disconnected(_) => "disconnect",
             };
             info!(
@@ -2675,6 +2727,8 @@ async fn publish_response(
 
 /// The outcome of one connection generation.
 enum ConnectionOutcome {
+    /// Stop transport attempts until the connection store resolves authority.
+    AuthenticationRejected,
     /// The connection dropped (transient); the supervisor backs off + reconnects.
     Disconnected(String),
     /// The short-lived NATS user credential expired as designed. Reconnect with
@@ -4799,6 +4853,130 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    #[allow(clippy::too_many_lines)] // one real multi-link transport lifecycle
+    async fn rejected_link_stops_dialing_and_recovers_without_interrupting_healthy_links() {
+        use opengeni_agent_platform::NativePlatform;
+        let Some(nats_bin) = it::find_nats_server() else {
+            panic!("authentication regression requires nats-server");
+        };
+        let (_lock, _dir) = crate::config::tests::with_temp_config();
+        let port = it::free_local_port();
+        let monitor_port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn_authenticated(&nats_bin, port, monitor_port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let client = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match async_nats::ConnectOptions::new()
+                    .token("accepted-test-token".into())
+                    .connect(&url)
+                    .await
+                {
+                    Ok(client) => break client,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .expect("authenticated test broker should start");
+        let platform = Arc::new(NativePlatform::new());
+        let mut rejected_credentials = it::test_credentials(&url);
+        rejected_credentials.nats_bearer = "rejected-test-token".into();
+        let stored = crate::config::StoredConnection::new(
+            "https://api.example",
+            rejected_credentials.clone(),
+        );
+        crate::config::save_connection(&stored).unwrap();
+        let rejected = SupervisorLink::new(
+            stored.connection_id.clone(),
+            platform.clone(),
+            rejected_credentials,
+        )
+        .with_api_url(stored.api_url.clone())
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let mut healthy_credentials = it::test_credentials(&url);
+        healthy_credentials.nats_bearer = "accepted-test-token".into();
+        healthy_credentials.workspace_id = "healthy-workspace".into();
+        let healthy = SupervisorLink::new("healthy", platform, healthy_credentials)
+            .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let healthy_link = WorkspaceLink::from_definition(healthy.clone());
+        let mut healthy_events = client
+            .subscribe(healthy_link.events_subject())
+            .await
+            .unwrap();
+        let rejected_link = WorkspaceLink::from_definition(rejected.clone());
+        let mut rejected_events = client
+            .subscribe(rejected_link.events_subject())
+            .await
+            .unwrap();
+        let supervisor = Supervisor::new_links(&[rejected.clone(), healthy.clone()], "test");
+        let shutdown = supervisor.shutdown_handle();
+        let (updates, receiver) =
+            tokio::sync::watch::channel(vec![rejected.clone(), healthy.clone()]);
+        let run = tokio::spawn(async move { supervisor.run_with_updates(receiver).await });
+        assert!(
+            it::wait_for_event(
+                &mut healthy_events,
+                Duration::from_secs(10),
+                |event| matches!(event.event, Some(Event::Heartbeat(_)))
+            )
+            .await
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if crate::config::load_connection(&stored.connection_id)
+                    .unwrap()
+                    .unwrap()
+                    .authentication_state
+                    == Some(crate::config::AuthenticationState::RenewalRequired)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("rejected credential must be suspended");
+        let monitor = format!("http://127.0.0.1:{monitor_port}/varz");
+        let before: serde_json::Value = reqwest::get(&monitor).await.unwrap().json().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let after: serde_json::Value = reqwest::get(&monitor).await.unwrap().json().await.unwrap();
+        assert_eq!(
+            before["total_connections"], after["total_connections"],
+            "no rejected transport redials or healthy-link restarts"
+        );
+        let mut recovered = rejected;
+        recovered.credentials.nats_bearer = "accepted-test-token".into();
+        recovered.authentication_state =
+            Some(crate::config::AuthenticationState::ReconnectRequired);
+        updates
+            .send(vec![recovered.clone(), healthy.clone()])
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), rejected_events.next())
+                .await
+                .is_err(),
+            "a persisted terminal state must not dial, even with a transport that would accept it"
+        );
+        recovered.authentication_state = None;
+        updates.send(vec![recovered, healthy]).unwrap();
+        assert!(
+            it::wait_for_event(
+                &mut rejected_events,
+                Duration::from_secs(10),
+                |event| matches!(event.event, Some(Event::Heartbeat(_)))
+            )
+            .await
+        );
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
     /// Real-transport proof of the live reconciliation contract: two independent
     /// workspace links are online concurrently, removing one announces only that
     /// link offline, and the other still answers control RPC immediately.
@@ -6220,6 +6398,26 @@ mod tests {
         pub struct NatsServerGuard(Child);
 
         impl NatsServerGuard {
+            pub fn spawn_authenticated(bin: &Path, port: u16, monitor_port: u16) -> Self {
+                Self(
+                    Command::new(bin)
+                        .args([
+                            "-a",
+                            "127.0.0.1",
+                            "-p",
+                            &port.to_string(),
+                            "-m",
+                            &monitor_port.to_string(),
+                            "--auth",
+                            "accepted-test-token",
+                        ])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .expect("spawn authenticated nats-server"),
+                )
+            }
             pub fn spawn(bin: &Path, port: u16) -> Self {
                 let child = Command::new(bin)
                     .args(["-a", "127.0.0.1", "-p", &port.to_string()])

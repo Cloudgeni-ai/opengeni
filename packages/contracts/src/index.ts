@@ -20575,6 +20575,7 @@ export const MachineConnectionAuthority = /* @__PURE__ */ defineSchema(() =>
     leaseExpiresAt: z.string().nullable(),
     duplicateRunnerDeniedCount: z.number().int().nonnegative(),
     duplicateRunnerDeniedAt: z.string().nullable(),
+    authenticationError: z.literal("credentials_expired").nullable().optional(),
   }),
 );
 export type MachineConnectionAuthority = z.infer<typeof MachineConnectionAuthority>;

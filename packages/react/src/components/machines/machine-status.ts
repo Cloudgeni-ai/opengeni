@@ -242,6 +242,12 @@ export function describeAgentConnection(
   label: string;
   detail: string | null;
 } {
+  if (authority.state !== "active" && authority.authenticationError === "credentials_expired") {
+    return {
+      label: t("machines.machineStatus.credentialsExpired"),
+      detail: t("machines.machineStatus.credentialsRecovery"),
+    };
+  }
   const label =
     authority.state === "active"
       ? t("machines.machineStatus.agentConnected")
@@ -251,7 +257,12 @@ export function describeAgentConnection(
   const n = authority.supersededCount;
   return {
     label,
-    detail: n > 0 ? t("machines.machineStatus.reconnectedTimesSinceSetup", { count: n }) : null,
+    detail:
+      authority.state === "expired" || authority.state === "unclaimed"
+        ? t("machines.machineStatus.offlineRecovery")
+        : n > 0
+          ? t("machines.machineStatus.reconnectedTimesSinceSetup", { count: n })
+          : null,
   };
 }
 

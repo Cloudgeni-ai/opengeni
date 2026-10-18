@@ -27,6 +27,7 @@ import {
   sessionsWithActiveOpOnEnrollment,
   setActiveSandbox,
   setEnrollmentWentOffline,
+  recordEnrollmentExpiredCredentials,
   touchEnrollmentLastSeen,
   updateEnrollmentOperationPolicy,
   upsertMachineMetricsLatest,
@@ -418,6 +419,43 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
         credentialGeneration: 2,
       }),
     ).toEqual({ matched: true, revoked: true });
+  }, 60_000);
+
+  test("expired-credential diagnostics are generation-fenced, deduplicated and cannot override a live runner", async () => {
+    if (!available) throw new Error("credential diagnostic test requires PostgreSQL");
+    const { accountId, workspaceId } = await freshWorkspace();
+    const created = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:EXPIRED",
+    });
+    const input = {
+      accountId,
+      workspaceId,
+      enrollmentId: created.id,
+      credentialGeneration: created.credentialGeneration,
+    };
+    await recordEnrollmentExpiredCredentials(db, {
+      ...input,
+      credentialGeneration: input.credentialGeneration + 1,
+    });
+    expect((await getEnrollment(db, workspaceId, created.id))?.wentOfflineReason).toBeNull();
+    await recordEnrollmentExpiredCredentials(db, input);
+    const rejected = await getEnrollment(db, workspaceId, created.id);
+    expect(rejected?.wentOfflineReason).toBe("credentials_expired");
+    await recordEnrollmentExpiredCredentials(db, input);
+    expect((await getEnrollment(db, workspaceId, created.id))?.updatedAt).toBe(rejected?.updatedAt);
+    await touchEnrollmentLastSeen(db, input);
+    await recordEnrollmentExpiredCredentials(db, input);
+    expect((await getEnrollment(db, workspaceId, created.id))?.wentOfflineReason).toBeNull();
+    await admin`UPDATE enrollments SET last_seen_at = NULL WHERE id = ${created.id}`;
+    await claimEnrollmentConnection(db, {
+      ...input,
+      connectionInstanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      leaseMs: 20_000,
+    });
+    await recordEnrollmentExpiredCredentials(db, input);
+    expect((await getEnrollment(db, workspaceId, created.id))?.wentOfflineReason).toBeNull();
   }, 60_000);
 
   test("clean going-offline marker: set → clear-on-heartbeat and clear-on-Hello (change-guarded)", async () => {
