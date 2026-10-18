@@ -139,42 +139,139 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     expect(textarea?.getAttribute("aria-keyshortcuts")).toContain("Meta+Enter");
   });
 
-  test("while the agent works, the other send choice sits beside Send", async () => {
+  test("the other send choice sits beside Send exactly while Send takes its busy path", async () => {
     const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
     const alternate = () =>
       mounted!.container.querySelector<HTMLButtonElement>("[data-og-composer-alternate-send]");
-    const queueing = (): ComposerState => ({
+    const state = (alternateSend: "queue" | "steer" | null): ComposerState => ({
       ...composer(spy),
-      busySend: "queue",
-      sendToQueue: async () => {
-        spy.sends.push("queue");
+      busySend: alternateSend === "queue" ? "steer" : "queue",
+      alternateSend,
+      sendAlternate: async () => {
+        spy.sends.push(`alternate:${alternateSend}`);
         return true;
       },
     });
-    mounted = await renderComponent(<ChatComposer composer={queueing()} />);
-    // Idle: Send is the only way to send.
+    // Nothing running or waiting: Send is the only way to send, even when the
+    // host reports a run (the button follows the composer, not the host).
+    mounted = await renderComponent(<ChatComposer composer={state(null)} running />);
     expect(alternate()).toBeNull();
 
-    // Working, Send queues: Steer sits beside it.
-    await mounted.rerender(<ChatComposer composer={queueing()} running />);
+    // Send queues: Steer sits beside it, labelled on every width.
+    await mounted.rerender(<ChatComposer composer={state("steer")} />);
     expect(alternate()?.textContent).toBe("Steer");
-    expect(alternate()?.getAttribute("title")).toContain("within seconds");
+    expect(alternate()?.getAttribute("title")).toContain("usually within seconds");
+    // The shortcut is announced as a shortcut, not read out in the description.
+    expect(alternate()?.getAttribute("title")).not.toContain("Cmd/Ctrl");
+    expect(alternate()?.getAttribute("aria-keyshortcuts")).toBe("Meta+Enter Control+Enter");
     await act(async () => alternate()?.click());
-    expect(spy.sends).toEqual(["steer"]);
+    expect(spy.sends).toEqual(["alternate:steer"]);
 
-    // Working, Send steers: Queue sits beside it, so touch users can still queue.
-    const steering: ComposerState = { ...queueing(), busySend: "steer" };
-    await mounted.rerender(<ChatComposer composer={steering} running />);
+    // Send steers: Queue sits beside it, so touch users can still queue.
+    await mounted.rerender(<ChatComposer composer={state("queue")} />);
     expect(alternate()?.textContent).toBe("Queue");
     expect(alternate()?.getAttribute("data-analytics-action")).toBe("queue");
     await act(async () => alternate()?.click());
-    expect(spy.sends).toEqual(["steer", "queue"]);
+    expect(spy.sends).toEqual(["alternate:steer", "alternate:queue"]);
+
+    // Cmd/Ctrl+Enter is the same choice.
+    const textarea = mounted.container.querySelector("textarea")!;
+    await press(textarea, { metaKey: true });
+    expect(spy.sends).toEqual(["alternate:steer", "alternate:queue", "alternate:queue"]);
+
+    // A host without the alternate delivery never shows a Queue that steers.
+    await mounted.rerender(
+      <ChatComposer composer={{ ...state("queue"), sendAlternate: undefined }} />,
+    );
+    expect(alternate()).toBeNull();
 
     // Nothing to send: no alternate choice either.
     await mounted.rerender(
-      <ChatComposer composer={{ ...steering, value: "", canSend: false }} running />,
+      <ChatComposer composer={{ ...state("queue"), value: "", canSend: false }} />,
     );
     expect(alternate()).toBeNull();
+  });
+
+  test("after sending the other way, focus returns to the message box and only that control spins", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    let finish: (sent: boolean) => void = () => {};
+    const state: ComposerState = {
+      ...composer(spy),
+      alternateSend: "steer",
+      sendAlternate: () => new Promise<boolean>((resolve) => (finish = resolve)),
+    };
+    mounted = await renderComponent(<ChatComposer composer={state} />);
+    const alternate = mounted.container.querySelector<HTMLButtonElement>(
+      "[data-og-composer-alternate-send]",
+    )!;
+    const send = mounted.container.querySelector<HTMLButtonElement>(
+      'button[data-analytics-action="send"]',
+    )!;
+    alternate.focus();
+    await act(async () => alternate.click());
+    // In flight: the alternate shows progress; Send keeps its arrow.
+    expect(alternate.querySelector(".animate-og-spin")).not.toBeNull();
+    expect(send.querySelector(".animate-og-spin")).toBeNull();
+    await act(async () => finish(true));
+    expect(document.activeElement).toBe(mounted.container.querySelector("textarea"));
+  });
+
+  test("an annotation note blocking Send also explains the disabled alternate", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    mounted = await renderComponent(
+      <ChatComposer
+        composer={{
+          ...composer(spy),
+          alternateSend: "steer",
+          sendAlternate: async () => true,
+          annotations: [
+            {
+              id: "a1",
+              kind: "text",
+              quote: "x",
+              note: "",
+            } as never,
+          ],
+        }}
+      />,
+    );
+    const alternate = mounted.container.querySelector<HTMLButtonElement>(
+      "[data-og-composer-alternate-send]",
+    );
+    const send = mounted.container.querySelector<HTMLButtonElement>(
+      'button[data-analytics-action="send"]',
+    );
+    expect(alternate?.getAttribute("title")).toBe(send?.getAttribute("title"));
+  });
+
+  test("with a draft, Pause steps aside on narrow composers so Send and its choice keep room", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    const active: EffectiveSessionControl = {
+      state: "active",
+      controlVersion: 0,
+      controlEtag: "active",
+      directState: "active",
+      primaryBlocker: null,
+      additionalBlockerCount: 0,
+      blockers: [],
+      resumeOptions: [],
+      override: null,
+      settlement: null,
+    };
+    const pause = () =>
+      mounted!.container.querySelector<HTMLButtonElement>('button[data-analytics-action="pause"]');
+    mounted = await renderComponent(
+      <ChatComposer composer={composer(spy)} effectiveControl={active} />,
+    );
+    expect(pause()?.className).toContain("og-composer-pause-yields");
+    expect(pause()?.className).toContain("max-sm:hidden");
+    await mounted.rerender(
+      <ChatComposer
+        composer={{ ...composer(spy), value: "", canSend: false }}
+        effectiveControl={active}
+      />,
+    );
+    expect(pause()?.className).not.toContain("og-composer-pause-yields");
   });
 
   test("running shows one Pause control; paused replaces it with one Resume control", async () => {

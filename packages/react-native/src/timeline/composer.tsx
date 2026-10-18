@@ -48,12 +48,12 @@ export interface SessionComposerProps {
   running?: boolean | undefined;
   /**
    * The other way to send while the agent works, shown beside Send once there
-   * is something to send: Queue when Send steers (`busySend="steer"`), Steer
-   * when Send queues. Omit to offer Send only.
+   * is something to send: `queue` when Send steers, `steer` when Send queues,
+   * `null` when Send is not taking its busy path. Pass the composer's
+   * `alternateSend` and `sendAlternate`; omit to offer Send only.
    */
+  alternateSend?: "queue" | "steer" | null | undefined;
   onAlternateSend?: (() => void) | undefined;
-  /** What Send does while the agent works; names the alternate action. */
-  busySend?: "queue" | "steer" | undefined;
   paused?: boolean | undefined;
   onPause?: (() => void) | undefined;
   onResume?: (() => void) | undefined;
@@ -635,9 +635,7 @@ function AlternateSendAction(props: SessionComposerProps & { messages: ChatCompo
       canPause: Boolean(props.onPause),
       canCall: Boolean(props.call),
     }),
-    running: props.running,
-    paused: props.paused,
-    busySend: props.busySend,
+    alternateSend: props.alternateSend,
     available: props.onAlternateSend !== undefined,
   });
   const onAlternateSend = props.onAlternateSend;
@@ -646,11 +644,16 @@ function AlternateSendAction(props: SessionComposerProps & { messages: ChatCompo
     alternate === "queue"
       ? (props.messages.queueLabel ?? t("composerMessages.queue"))
       : (props.messages.steerLabel ?? t("composerMessages.steer"));
+  const hint =
+    alternate === "queue"
+      ? (props.messages.queueTitle ?? t("composerMessages.queueRunsAfterCurrentWork"))
+      : (props.messages.steerTitle ?? t("composerMessages.steerReadsItSoon"));
   const disabled = !props.canSend || Boolean(props.sending);
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={label}
+      accessibilityHint={hint}
       accessibilityState={{ disabled }}
       disabled={disabled}
       hitSlop={6}

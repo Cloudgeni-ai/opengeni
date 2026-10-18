@@ -49,7 +49,8 @@ export type InitialComposerDraft = {
 
 /**
  * What an ordinary Send does while the agent is working: `queue` runs it after
- * the current turn, `steer` has the agent read it within seconds.
+ * the current turn, `steer` has the agent read it as soon as it can, usually
+ * within seconds.
  */
 export type ComposerBusySend = "queue" | "steer";
 
@@ -82,8 +83,9 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
      * What an ordinary Send does while the agent is working (while
      * `sendDestination` reports `queue`). `queue` (default) runs the message
      * after the current turn. `steer` delivers it as a Steer instead: the
-     * agent reads it within seconds (a reply still being written stops;
-     * running tools keep going). `sendToQueue` and `steer` stay explicit
+     * agent reads it as soon as it can, usually within seconds (a reply still
+     * being written stops; running tools are not cut off). `sendToQueue`,
+     * `sendAlternate` and `steer` stay explicit
      * either way.
      */
     busySend?: ComposerBusySend | undefined;
@@ -531,6 +533,15 @@ export type ComposerState = {
   sendToQueue?: ((text?: string) => Promise<boolean>) | undefined;
   /** What an ordinary Send does while the agent is working. */
   busySend?: ComposerBusySend | undefined;
+  /**
+   * The other way to send right now, or `null` when Send is not taking its
+   * busy path (nothing running or waiting, or the workstream is paused):
+   * `steer` when Send queues, `queue` when Send steers. Hosts offer it next to
+   * Send exactly when it is not `null`.
+   */
+  alternateSend?: ComposerBusySend | null | undefined;
+  /** Send the draft the other way: Steer when Send queues, queue when Send steers. */
+  sendAlternate?: ((text?: string) => Promise<boolean>) | undefined;
   /** Locally acknowledged ordinary sends awaiting durable timeline reconciliation. */
   optimisticMessages?: ComposerOptimisticMessage[] | undefined;
   retryOptimisticMessage?: ((clientEventId: string) => void) | undefined;
@@ -2278,23 +2289,39 @@ export function useComposer(
     ],
   );
   const steer = useCallback(async (text?: string) => await dispatch("steer", text), [dispatch]);
+  // Send takes its busy path while a turn runs or prompts wait, except in a
+  // paused workstream, where it keeps ordinary queueing so a Send never
+  // resumes it implicitly.
+  const takesBusyPath = useCallback(
+    (): boolean =>
+      effectiveControlRef.current?.state !== "paused" && sendDestinationRef.current?.() === "queue",
+    [],
+  );
   const send = useCallback(
     async (explicit?: string): Promise<boolean> => {
       // A retained uncertain Send keeps its own delivery; only fresh input
-      // follows the busy-send preference. A paused workstream keeps ordinary
-      // queueing so a Send never resumes it implicitly.
+      // follows the busy-send preference.
       if (
         busySendRef.current === "steer" &&
         pendingOperationRef.current?.delivery !== "send" &&
-        effectiveControlRef.current?.state !== "paused" &&
-        sendDestinationRef.current?.() === "queue"
+        takesBusyPath()
       ) {
         return await steer(explicit);
       }
       return await sendToQueue(explicit);
     },
+    [sendToQueue, steer, takesBusyPath],
+  );
+  const sendAlternate = useCallback(
+    async (explicit?: string): Promise<boolean> =>
+      busySendRef.current === "steer" ? await sendToQueue(explicit) : await steer(explicit),
     [sendToQueue, steer],
   );
+  const alternateSend: ComposerBusySend | null = takesBusyPath()
+    ? busySend === "steer"
+      ? "queue"
+      : "steer"
+    : null;
 
   const retryOptimisticMessage = useCallback(
     (clientEventId: string): void => {
@@ -2882,6 +2909,8 @@ export function useComposer(
     send,
     sendToQueue,
     busySend,
+    alternateSend: identityMatches ? alternateSend : null,
+    sendAlternate,
     optimisticMessages: visibleOptimisticMessages,
     retryOptimisticMessage,
     restoreOptimisticMessage:

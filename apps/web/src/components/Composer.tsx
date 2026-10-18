@@ -27,8 +27,6 @@ export function ConsoleComposer(props: {
   composer: ComposerState;
   attachments: UseFileAttachmentsResult;
   effectiveControl?: EffectiveSessionControl | null;
-  /** The agent is working; offers the other send choice beside Send. */
-  running?: boolean;
   queuedAheadCount?: number;
   canControlWorkspace?: boolean;
   controlLinks?: {
@@ -62,7 +60,6 @@ export function ConsoleComposer(props: {
       responsiveBasis="container"
       composer={props.composer}
       effectiveControl={props.effectiveControl}
-      running={props.running === true}
       queuedAheadCount={props.queuedAheadCount}
       canControlWorkspace={props.canControlWorkspace}
       controlLinks={props.controlLinks}

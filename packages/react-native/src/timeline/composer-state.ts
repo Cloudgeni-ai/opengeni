@@ -27,18 +27,17 @@ export function composerTrailingMode(input: {
 
 /**
  * The other send choice beside Send while the agent works: Queue when Send
- * steers, Steer when Send queues. Offered only while running (not paused),
- * when the trailing action is Send and the host can deliver the alternate.
+ * steers, Steer when Send queues. Offered exactly while Send takes its busy
+ * path (`alternateSend` from the composer), when the trailing action is Send
+ * and the host can deliver it.
  */
 export function composerAlternateSend(input: {
   trailing: ComposerTrailingMode;
-  running?: boolean | undefined;
-  paused?: boolean | undefined;
-  busySend?: "queue" | "steer" | undefined;
+  alternateSend?: "queue" | "steer" | null | undefined;
   available: boolean;
 }): "queue" | "steer" | null {
-  if (!input.available || !input.running || input.paused || input.trailing !== "send") return null;
-  return input.busySend === "steer" ? "queue" : "steer";
+  if (!input.available || input.trailing !== "send") return null;
+  return input.alternateSend ?? null;
 }
 
 /**

@@ -74,6 +74,14 @@ const CUT_POLLING_MAX_MODEL_WAIT_MS = 240_000;
 const CUT_POLLING_OUTPUT_QUIET_MS = 5_000;
 /** Output that ends in an input prompt returns after this much silence. */
 const CUT_POLLING_PROMPT_QUIET_MS = 2_000;
+/**
+ * A Steer returns a foreground wait at once when the process keeps running as
+ * a session background command. A turn-scoped process (a handle held in one
+ * worker's memory) stops at the Steer's handover, as at any turn end, so its
+ * wait gets this much longer to see a short command finish and keep its
+ * result; after that the Steer is read and the process stops at the handover.
+ */
+export const TURN_SCOPED_STEER_GRACE_MS = 5_000;
 const SHELL_HELPER_YIELD_MS = 1_000;
 const SHELL_GRACEFUL_POLLS = 2;
 const SHELL_POLL_MS = 100;
@@ -316,10 +324,11 @@ export type TurnToolCancellationFence = {
    * write_stdin wait windows) returns at its next provider slice with the
    * process's live handle, exactly as when its window ends: the process keeps
    * running and is adopted as a session background command. A handle that
-   * cannot become one (turn-scoped, held in this worker's memory) keeps its
-   * requested wait, since the handover would stop it. The worker activates
-   * this while a Steer waits for this turn, so the Steer is read within a
-   * slice instead of after the requested wait.
+   * cannot become one (turn-scoped, held in this worker's memory) first gets
+   * up to TURN_SCOPED_STEER_GRACE_MS of its requested wait to finish, since
+   * the handover stops it. The worker activates this while a Steer waits for
+   * this turn, so the Steer is read within seconds instead of after the
+   * requested wait.
    */
   setForegroundWaitYield(active: boolean): void;
   /**
@@ -2029,17 +2038,21 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     let lastOutputAt: number | null = output ? performance.now() : null;
     let observationFailure: ProviderCommandObservationUnavailableError | null =
       input.initialObservationFailure ?? null;
+    let steerSeenAt: number | null = null;
     for (;;) {
       if (observationFailure?.readRetryAllowed === false) break;
       // Check cancellation before any return-control exit, so a Pause/Steer
       // that lands between slices never lets the command be adopted below.
       if (this.cancelled) throw cancellationError(this.reason);
       if (performance.now() - startedAt >= waitMs) break;
-      // A Steer is waiting: return control now, as if the window had ended,
-      // when the process keeps running as a session background command. A
-      // turn-scoped handle would stop at the handover, so its wait runs on
-      // and the Steer is read once the call returns.
-      if (this.foregroundWaitYield && canAdoptInBackground) break;
+      // A Steer is waiting: return control as if the window had ended. The
+      // process keeps running as a session background command; a turn-scoped
+      // one first gets a short grace to finish (TURN_SCOPED_STEER_GRACE_MS).
+      if (this.foregroundWaitYield) {
+        if (canAdoptInBackground) break;
+        steerSeenAt ??= performance.now();
+        if (performance.now() - steerSeenAt >= TURN_SCOPED_STEER_GRACE_MS) break;
+      }
       if (quietReturnAfterMs !== undefined && lastOutputAt !== null) {
         const now = performance.now();
         const quietMs = now - lastOutputAt;

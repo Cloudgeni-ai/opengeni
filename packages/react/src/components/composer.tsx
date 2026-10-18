@@ -2,10 +2,8 @@ import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
 import {
   ArrowUpIcon,
   ChevronDownIcon,
-  CornerDownRightIcon,
   FileIcon,
   ImageIcon,
-  ListOrderedIcon,
   LoaderCircleIcon,
   PaperclipIcon,
   PauseIcon,
@@ -85,6 +83,8 @@ export type ComposerDelivery = Pick<
   | "send"
   | "sendToQueue"
   | "busySend"
+  | "alternateSend"
+  | "sendAlternate"
   | "steer"
   | "sending"
   | "canSend"
@@ -299,6 +299,8 @@ export function useChatComposerController({
   const [controlDetailsOpen, setControlDetailsOpen] = useState(false);
   const [paletteMounted, setPaletteMounted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // Which control's submission is in flight, so only that control shows it.
+  const [submittingMode, setSubmittingMode] = useState<ComposerSubmitMode | null>(null);
   const submittingRef = useRef(false);
   const controlOperationRef = useRef(false);
   const deliveryValue = delivery.value;
@@ -511,17 +513,19 @@ export function useChatComposerController({
       if (!delivery.canSend) return false;
       submittingRef.current = true;
       setSubmitting(true);
+      setSubmittingMode(mode);
       try {
         if (resumesOnSend) return await delivery.steer();
         if (mode !== "steer") return await delivery.send();
-        // The alternate action is the opposite of what a busy Send does:
+        // Cmd/Ctrl+Enter and the button beside Send send the other way:
         // Steer when Send queues, queue when Send steers.
-        return delivery.busySend === "steer"
-          ? await (delivery.sendToQueue ?? delivery.send)()
-          : await delivery.steer();
+        return delivery.sendAlternate ? await delivery.sendAlternate() : await delivery.steer();
       } finally {
         submittingRef.current = false;
-        if (mountedRef.current) setSubmitting(false);
+        if (mountedRef.current) {
+          setSubmitting(false);
+          setSubmittingMode(null);
+        }
       }
     },
     [
@@ -695,6 +699,8 @@ export function useChatComposerController({
     submitBlocker,
     submit,
     busySend: delivery.busySend ?? "queue",
+    alternateSend: delivery.sendAlternate ? (delivery.alternateSend ?? null) : null,
+    submittingMode,
     handleKeyDown,
     handlePaste,
     handleFileChange,
@@ -1244,6 +1250,10 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
       return null;
     const busy = controller.pausing || controller.resuming;
     const tip = title ?? controller.messages.pauseTitle;
+    // On a narrow composer, Send and its Queue/Steer choice need the room
+    // while there is a draft, so Pause steps aside until it is sent or
+    // cleared, as the phone app's single trailing control does.
+    const yieldsToDraft = controller.submitBlocker !== "empty";
     return (
       <ComposerTip tip={tip}>
         <button
@@ -1259,6 +1269,7 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
             "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
             "hover:border-og-status-waiting/50 hover:text-og-status-waiting",
             "disabled:opacity-50",
+            yieldsToDraft && "og-composer-pause-yields max-sm:hidden",
             className,
           )}
         >
@@ -1342,9 +1353,9 @@ export type ComposerAlternateSendButtonProps = ComposerSendButtonProps;
  * The other way to send while the agent works, beside Send: Steer when Send
  * queues, Queue when Send steers. It appears once there is something to send,
  * so touch users (who have no Cmd/Ctrl+Enter) always have both choices.
- * Narrow screens show only its icon (the queue list's icon for Queue, the
- * queued item's Steer arrow for Steer) so the composer's other controls keep
- * their room; the accessible name stays the label.
+ * It is shown exactly when Send takes its busy path (`alternateSend`), and
+ * keeps its word on every width; on narrow composers Pause steps aside while
+ * there is a draft to make room, as on phones.
  */
 export const AlternateSendButton = forwardRef<HTMLButtonElement, ComposerAlternateSendButtonProps>(
   function ComposerAlternateSendButton(
@@ -1354,22 +1365,24 @@ export const AlternateSendButton = forwardRef<HTMLButtonElement, ComposerAlterna
     const t = useOpenGeniText();
     const controller = useComposerController();
     if (
-      !controller.running ||
+      controller.alternateSend === null ||
       controller.paused ||
       controller.submitBlocker === "empty" ||
       controller.submitBlocker === "disabled"
     )
       return null;
-    const queues = controller.busySend === "steer";
+    const queues = controller.alternateSend === "queue";
     const label = queues
       ? (controller.messages.queueLabel ?? t("composerMessages.queue"))
       : (controller.messages.steerLabel ?? t("composerMessages.steer"));
     const tip =
       title ??
-      (queues
-        ? (controller.messages.queueTitle ?? t("composerMessages.queueItToRunAfter"))
-        : (controller.messages.steerTitle ?? t("composerMessages.steerTheAgentReadsIt")));
-    const Icon = queues ? ListOrderedIcon : CornerDownRightIcon;
+      (controller.submitBlocker === "annotations"
+        ? controller.messages.annotationNotesRequired
+        : queues
+          ? (controller.messages.queueTitle ?? t("composerMessages.queueRunsAfterCurrentWork"))
+          : (controller.messages.steerTitle ?? t("composerMessages.steerReadsItSoon")));
+    const inFlight = controller.sending && controller.submittingMode === "steer";
     return (
       <ComposerTip tip={tip}>
         <button
@@ -1378,12 +1391,19 @@ export const AlternateSendButton = forwardRef<HTMLButtonElement, ComposerAlterna
           {...props}
           ref={ref}
           type="button"
-          onClick={() => void controller.submit("steer")}
+          onClick={(event) => {
+            // This button goes away once the draft is sent. Return keyboard
+            // and screen-reader focus to the message box instead of the page.
+            const hadFocus = event.currentTarget === document.activeElement;
+            void controller.submit("steer").then((sent) => {
+              if (sent && hadFocus) controller.focusInput();
+            });
+          }}
           disabled={!controller.canSubmit}
           aria-label={ariaLabel ?? label}
+          aria-keyshortcuts="Meta+Enter Control+Enter"
           className={cn(
-            "inline-flex h-8 items-center justify-center gap-1.5 rounded-og-md px-2.5 pointer-coarse:h-11 pointer-coarse:px-3.5",
-            "max-sm:w-8 max-sm:px-0 max-sm:pointer-coarse:w-11 max-sm:pointer-coarse:px-0",
+            "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-og-md px-2.5 pointer-coarse:h-11 pointer-coarse:px-3.5",
             "border border-og-border bg-og-surface-1 text-og-control font-medium text-og-fg",
             "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
             "hover:bg-og-surface-2 active:scale-95",
@@ -1391,12 +1411,15 @@ export const AlternateSendButton = forwardRef<HTMLButtonElement, ComposerAlterna
             className,
           )}
         >
-          {children ?? (
-            <>
-              <Icon aria-hidden="true" className="size-4 sm:hidden" />
-              <span className="max-sm:hidden">{label}</span>
-            </>
-          )}
+          {children ??
+            (inFlight ? (
+              <>
+                <LoaderCircleIcon aria-hidden="true" className="size-3.5 animate-og-spin" />
+                <span>{label}</span>
+              </>
+            ) : (
+              label
+            ))}
         </button>
       </ComposerTip>
     );
@@ -1425,7 +1448,14 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
           {...props}
           ref={ref}
           type="button"
-          onClick={() => void controller.submit("queue")}
+          onClick={(event) => {
+            // Send is disabled once the draft is sent; keep keyboard and
+            // screen-reader focus in the message box.
+            const hadFocus = event.currentTarget === document.activeElement;
+            void controller.submit("queue").then((sent) => {
+              if (sent && hadFocus) controller.focusInput();
+            });
+          }}
           disabled={!controller.canSubmit}
           data-og-tip={tip}
           aria-label={
@@ -1444,7 +1474,7 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
           )}
         >
           {children ??
-            (controller.sending ? (
+            (controller.sending && controller.submittingMode !== "steer" ? (
               <LoaderCircleIcon className="size-4 animate-og-spin" />
             ) : (
               <ArrowUpIcon className="size-4" />

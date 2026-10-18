@@ -74,6 +74,12 @@
   display: var(--og-model-policy-chevron-display);
 }
 
+/* Pause steps aside on a narrow composer while there is a draft, so Send and
+   its Queue/Steer choice keep their room. */
+[data-og-responsive-basis="container"] .og-composer-pause-yields {
+  display: inline-flex;
+}
+
 [data-og-responsive-basis="container"] .og-model-picker-native {
   max-width: var(--_og-c-native-max);
 }
@@ -143,6 +149,10 @@
 
   [data-og-responsive-basis="container"] .og-composer-actions {
     flex-wrap: nowrap;
+  }
+
+  [data-og-responsive-basis="container"] .og-composer-pause-yields {
+    display: none;
   }
 
   [data-og-responsive-basis="container"]

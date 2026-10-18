@@ -3660,7 +3660,6 @@ function SessionChatPane(props: {
                 composer={composer}
                 attachments={attachments}
                 effectiveControl={composer.effectiveControl}
-                running={props.session.activeTurnId !== null}
                 queuedAheadCount={props.queue.queue.length}
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{

@@ -1009,10 +1009,13 @@ state remains application-owned; durable draft and session state remain in
 - `useComposer(sessionId, { sendExtras, effectiveControl, busySend })` — revisioned private
   draft, Send, Steer, and workstream Pause/Resume state. `send()` appends in
   visible queue order (including while paused); `steer()` puts the new direction
-  directly in chat, and a running turn reads it within seconds without killing
-  work in progress. With `busySend: "steer"`, `send()` steers
-  while a turn is running (it still queues while paused) and `sendToQueue()`
-  always queues; the default `"queue"` keeps Send queueing. Resume is always an
+  directly in chat, and a running turn reads it as soon as it can, usually
+  within seconds, without cutting off running tools. With `busySend: "steer"`,
+  `send()` steers while a turn is running or prompts wait (it still queues
+  while paused) and `sendToQueue()` always queues; the default `"queue"` keeps
+  Send queueing. `alternateSend` names the other choice while Send takes that
+  busy path (`null` otherwise) and `sendAlternate()` performs it; hosts show it
+  beside Send exactly when it is not `null`. Resume is always an
   explicit control action and never an implicit side effect of Send. Drafts
   autosave with optimistic concurrency, survive failed sends, and reuse one
   `clientEventId` across retries so the server dedupes. Draft reads retry transient

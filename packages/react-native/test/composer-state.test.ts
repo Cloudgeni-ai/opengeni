@@ -41,19 +41,22 @@ describe("composer trailing action", () => {
 });
 
 describe("composer alternate send", () => {
-  const working = { trailing: "send" as const, running: true, paused: false, available: true };
+  const working = { trailing: "send" as const, available: true };
 
   test("a phone can always queue or steer while the agent works", () => {
-    expect(composerAlternateSend({ ...working, busySend: "steer" })).toBe("queue");
-    expect(composerAlternateSend({ ...working, busySend: "queue" })).toBe("steer");
-    expect(composerAlternateSend({ ...working })).toBe("steer");
+    expect(composerAlternateSend({ ...working, alternateSend: "queue" })).toBe("queue");
+    expect(composerAlternateSend({ ...working, alternateSend: "steer" })).toBe("steer");
   });
 
-  test("only beside Send, while running, unpaused and when the host offers it", () => {
-    expect(composerAlternateSend({ ...working, trailing: "pause" })).toBeNull();
-    expect(composerAlternateSend({ ...working, running: false })).toBeNull();
-    expect(composerAlternateSend({ ...working, paused: true })).toBeNull();
-    expect(composerAlternateSend({ ...working, available: false })).toBeNull();
+  test("only beside Send, while Send takes its busy path, and when the host offers it", () => {
+    expect(
+      composerAlternateSend({ ...working, alternateSend: "steer", trailing: "pause" }),
+    ).toBeNull();
+    expect(composerAlternateSend({ ...working, alternateSend: null })).toBeNull();
+    expect(composerAlternateSend({ ...working })).toBeNull();
+    expect(
+      composerAlternateSend({ ...working, alternateSend: "steer", available: false }),
+    ).toBeNull();
   });
 });
 
