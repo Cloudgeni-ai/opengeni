@@ -405,6 +405,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "blake3",
  "bytes",
  "clap",
@@ -422,6 +423,7 @@ dependencies = [
  "object_store",
  "rcgen",
  "reqwest",
+ "ring",
  "rustls",
  "rustls-webpki",
  "serde",

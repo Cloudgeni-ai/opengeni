@@ -16,8 +16,8 @@ use tokio_postgres::Row;
 use tokio_postgres::types::Json;
 
 use super::{
-    Admission, Admits, HostRow, LifecycleRow, Result, SandboxRow, Spec, Store, StoreError, Write,
-    admits, rule,
+    Admission, Admits, HostRow, LifecycleRow, RequestRow, Result, SandboxRow, Spec, Store,
+    StoreError, Write, admits, rule,
 };
 use crate::e2b::lifecycle::Record;
 
@@ -75,6 +75,18 @@ create table if not exists compute_lifecycles (
 );
 create index if not exists compute_lifecycles_team on compute_lifecycles (team);
 create index if not exists compute_lifecycles_due on compute_lifecycles (due_ms, id collate \"C\");
+create table if not exists compute_create_requests (
+    team text not null,
+    request_id text not null,
+    id text not null,
+    digest text not null,
+    created_ms bigint not null,
+    gone boolean not null,
+    primary key (team, request_id)
+);
+create index if not exists compute_create_requests_id on compute_create_requests (id);
+create index if not exists compute_create_requests_gone on compute_create_requests (created_ms)
+    where gone;
 commit;
 ";
 
@@ -156,6 +168,20 @@ fn lifecycle_row(row: &Row) -> Result<LifecycleRow> {
         team: row.get(1),
         record,
         version: small(row.get(3))?,
+    })
+}
+
+const REQUEST_COLUMNS: &str = "team, request_id, id, digest, created_ms, gone";
+
+fn request_row(row: &Row) -> Result<RequestRow> {
+    let id: String = row.get(2);
+    Ok(RequestRow {
+        team: row.get(0),
+        request_id: row.get(1),
+        id: Id::from_str(&id).map_err(corrupt)?,
+        digest: row.get(3),
+        created_ms: small(row.get(4))?,
+        gone: row.get(5),
     })
 }
 
@@ -754,6 +780,85 @@ impl Store for PostgresStore {
             .await
             .map_err(database)?;
         Ok(())
+    }
+
+    async fn claim_request(&self, row: &RequestRow) -> Result<RequestRow> {
+        let client = self.client().await?;
+        // An insert that meets a concurrent one waits for it, then does
+        // nothing; the select that follows is a new statement, so it sees
+        // the row that won.
+        let inserted = client
+            .execute(
+                &format!(
+                    "insert into compute_create_requests ({REQUEST_COLUMNS}) \
+                     values ($1, $2, $3, $4, $5, $6) on conflict (team, request_id) do nothing"
+                ),
+                &[
+                    &row.team,
+                    &row.request_id,
+                    &row.id.to_string(),
+                    &row.digest,
+                    &big(row.created_ms)?,
+                    &row.gone,
+                ],
+            )
+            .await
+            .map_err(database)?;
+        if inserted == 1 {
+            return Ok(row.clone());
+        }
+        let stored = client
+            .query_one(
+                &format!(
+                    "select {REQUEST_COLUMNS} from compute_create_requests \
+                     where team = $1 and request_id = $2"
+                ),
+                &[&row.team, &row.request_id],
+            )
+            .await
+            .map_err(database)?;
+        request_row(&stored)
+    }
+
+    async fn request(&self, team: &str, request_id: &str) -> Result<Option<RequestRow>> {
+        self.client()
+            .await?
+            .query_opt(
+                &format!(
+                    "select {REQUEST_COLUMNS} from compute_create_requests \
+                     where team = $1 and request_id = $2"
+                ),
+                &[&team, &request_id],
+            )
+            .await
+            .map_err(database)?
+            .as_ref()
+            .map(request_row)
+            .transpose()
+    }
+
+    async fn retire_requests(&self, team: &str, id: Id) -> Result<()> {
+        self.client()
+            .await?
+            .execute(
+                "update compute_create_requests set gone = true \
+                 where id = $1 and team = $2 and not gone",
+                &[&id.to_string(), &team],
+            )
+            .await
+            .map_err(database)?;
+        Ok(())
+    }
+
+    async fn prune_requests(&self, before_ms: u64) -> Result<u64> {
+        self.client()
+            .await?
+            .execute(
+                "delete from compute_create_requests where gone and created_ms < $1",
+                &[&big(before_ms)?],
+            )
+            .await
+            .map_err(database)
     }
 
     async fn insert_lifecycle(&self, row: &LifecycleRow) -> Result<bool> {

@@ -12,15 +12,14 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use compute_guest::GATEWAY_PORT;
 use compute_guest::envd::InitData;
 use compute_protocol::host::{Id, LevelName, PriorityName, SandboxConfig};
-use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::time::Instant;
 
 use super::lifecycle::{self, Due, OnConnect, OnPause, OnTimeout, Record, State};
 use super::wire::NewSandbox;
 use super::{Front, Refused};
+use crate::init::InitError;
 use crate::service::{Depth, Failure, new_id};
 use crate::store::{LifecycleRow, Spec, Store, replace_lifecycle};
 
@@ -28,8 +27,6 @@ use crate::store::{LifecycleRow, Spec, Store, replace_lifecycle};
 /// the replica's name (see [`super::traffic`]).
 pub const STREAM_HOLD: &str = "e2b-streams-";
 
-/// How long the guest may take to pass a create's `init` to envd.
-const INIT_WITHIN: Duration = Duration::from_secs(60);
 /// How often a pause asks its host how deep the sandbox sleeps.
 const POLL_EVERY: Duration = Duration::from_millis(250);
 /// How often a pause asks its host again to save the sandbox.
@@ -150,6 +147,7 @@ pub async fn create<S: Store>(
         access_token: Some(row.record.envd_token.clone()),
         default_user: None,
         default_workdir: None,
+        agent: None,
     };
     let spec = Spec {
         image: template.image.clone(),
@@ -160,6 +158,7 @@ pub async fn create<S: Store>(
             template.memory_mib,
             front.service.settings().sleep,
         ),
+        agent: None,
     };
     let metadata: BTreeMap<String, String> = body.metadata.unwrap_or_default();
     let started = async {
@@ -193,33 +192,12 @@ async fn give_init<S: Store>(
     id: Id,
     init: &InitData,
 ) -> Result<(), Refused> {
-    let reached = front
-        .service
-        .connect(team, id, GATEWAY_PORT, PriorityName::Interactive)
-        .await?;
-    let mut stream = reached.answered.stream;
-    let json = serde_json::to_string(init)
-        .map_err(|error| Refused::internal(format!("encoding init: {error}")))?;
-    let answer = tokio::time::timeout(INIT_WITHIN, async {
-        stream
-            .get_mut()
-            .write_all(format!("init {json}\n").as_bytes())
-            .await?;
-        stream.get_mut().flush().await?;
-        let mut line = String::new();
-        (&mut stream).take(1024).read_line(&mut line).await?;
-        Ok::<_, std::io::Error>(line)
-    })
-    .await
-    .map_err(|_| Refused::new(502, "the sandbox's envd did not take its init in time"))?
-    .map_err(|error| Refused::new(502, format!("giving the sandbox its init: {error}")))?;
-    match answer.trim_end() {
-        "ok" => Ok(()),
-        other => Err(Refused::new(
-            502,
-            format!("the sandbox refused its init: {other}"),
-        )),
-    }
+    crate::init::give(&front.service, team, id, init)
+        .await
+        .map_err(|error| match error {
+            InitError::Reach(failure) => Refused::from(failure),
+            InitError::Refused(why) => Refused::new(502, why),
+        })
 }
 
 /// Applies `change` to a sandbox's record until a write lands, and answers

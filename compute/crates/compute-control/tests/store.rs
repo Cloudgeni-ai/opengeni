@@ -10,8 +10,8 @@ use std::future::Future;
 
 use compute_control::e2b::lifecycle::{OnTimeout, Record, State};
 use compute_control::store::{
-    Admission, LifecycleRow, MemoryStore, PostgresStore, SandboxRow, Spec, Store, Write,
-    replace_lifecycle,
+    Admission, AgentRef, LifecycleRow, MemoryStore, PostgresStore, RequestRow, SandboxRow, Spec,
+    Store, Write, replace_lifecycle,
 };
 use compute_fleet::{HostId, HostState, OwnerEpoch, Ownership, SandboxId, Sends};
 use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Verdict};
@@ -72,6 +72,10 @@ fn sandbox(owner: HostId) -> SandboxRow {
                 image: None,
                 link: None,
             },
+            agent: Some(AgentRef {
+                workspace: "w".into(),
+                agent: "a".into(),
+            }),
         },
         metadata: BTreeMap::from([("purpose".to_owned(), "conformance".to_owned())]),
         ownership: Ownership::created(owner),
@@ -343,6 +347,66 @@ async fn keys<S: Store>(store: S) {
 #[tokio::test]
 async fn keys_name_their_team() {
     each(keys, keys).await;
+}
+
+async fn requests<S: Store>(store: S) {
+    let team = format!("team-{:x}", random());
+    let first = RequestRow {
+        team: team.clone(),
+        request_id: "lease-1".into(),
+        id: Id(SandboxId(u128::from(random()))),
+        digest: "d1".into(),
+        created_ms: 10,
+        gone: false,
+    };
+    assert_eq!(store.claim_request(&first).await.unwrap(), first);
+    let again = RequestRow {
+        id: Id(SandboxId(u128::from(random()))),
+        digest: "d2".into(),
+        ..first.clone()
+    };
+    assert_eq!(
+        store.claim_request(&again).await.unwrap(),
+        first,
+        "a request id answers what it first made"
+    );
+    let other_team = RequestRow {
+        team: format!("team-{:x}", random()),
+        ..again.clone()
+    };
+    assert_eq!(store.claim_request(&other_team).await.unwrap(), other_team);
+    assert_eq!(
+        store.request(&team, "lease-1").await.unwrap(),
+        Some(first.clone())
+    );
+    assert_eq!(store.request(&team, "lease-2").await.unwrap(), None);
+    store
+        .retire_requests(&other_team.team, first.id)
+        .await
+        .unwrap();
+    assert!(
+        !store.request(&team, "lease-1").await.unwrap().unwrap().gone,
+        "only the deleting team's requests retire"
+    );
+    store.retire_requests(&team, first.id).await.unwrap();
+    let gone = store.request(&team, "lease-1").await.unwrap().unwrap();
+    assert!(gone.gone);
+    assert!(store.claim_request(&first).await.unwrap().gone);
+    assert_eq!(store.prune_requests(10).await.unwrap(), 0);
+    assert!(store.prune_requests(11).await.unwrap() >= 1);
+    assert_eq!(store.request(&team, "lease-1").await.unwrap(), None);
+    assert!(
+        store
+            .request(&other_team.team, "lease-1")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn create_requests_answer_their_first_sandbox_until_it_is_gone() {
+    each(requests, requests).await;
 }
 
 fn lifecycle(team: &str, state: State, end_ms: u64) -> LifecycleRow {

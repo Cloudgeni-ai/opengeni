@@ -11,7 +11,8 @@ use compute_protocol::fleet::{Register, Renew, Report, Ruling};
 use compute_protocol::host::Id;
 
 use super::{
-    Admission, Admits, HostRow, LifecycleRow, Result, SandboxRow, Store, Write, admits, rule,
+    Admission, Admits, HostRow, LifecycleRow, RequestRow, Result, SandboxRow, Store, Write, admits,
+    rule,
 };
 
 #[derive(Debug)]
@@ -28,6 +29,8 @@ struct Inner {
     sandboxes: BTreeMap<Id, SandboxRow>,
     keys: HashMap<String, String>,
     lifecycles: BTreeMap<Id, LifecycleRow>,
+    /// By team, then request id.
+    requests: BTreeMap<(String, String), RequestRow>,
     next_host: u64,
     next_host_epoch: u64,
     changes: u64,
@@ -325,6 +328,31 @@ impl MemoryStore {
         self.lock().keys.insert(digest.to_owned(), team.to_owned());
     }
 
+    fn claim_request_now(&self, row: &RequestRow) -> RequestRow {
+        self.lock()
+            .requests
+            .entry((row.team.clone(), row.request_id.clone()))
+            .or_insert_with(|| row.clone())
+            .clone()
+    }
+
+    fn retire_requests_now(&self, team: &str, id: Id) {
+        for request in self.lock().requests.values_mut() {
+            if request.id == id && request.team == team {
+                request.gone = true;
+            }
+        }
+    }
+
+    fn prune_requests_now(&self, before_ms: u64) -> u64 {
+        let mut inner = self.lock();
+        let before = inner.requests.len();
+        inner
+            .requests
+            .retain(|_, request| !(request.gone && request.created_ms < before_ms));
+        u64::try_from(before - inner.requests.len()).unwrap_or(u64::MAX)
+    }
+
     fn insert_lifecycle_now(&self, row: &LifecycleRow) -> bool {
         let mut inner = self.lock();
         if inner.lifecycles.contains_key(&row.id) {
@@ -499,6 +527,28 @@ impl Store for MemoryStore {
     fn add_key(&self, digest: &str, team: &str) -> impl Future<Output = Result<()>> + Send {
         self.add_key_now(digest, team);
         ready(Ok(()))
+    }
+
+    fn claim_request(&self, row: &RequestRow) -> impl Future<Output = Result<RequestRow>> + Send {
+        ready(Ok(self.claim_request_now(row)))
+    }
+
+    fn request(
+        &self,
+        team: &str,
+        request_id: &str,
+    ) -> impl Future<Output = Result<Option<RequestRow>>> + Send {
+        let key = (team.to_owned(), request_id.to_owned());
+        ready(Ok(self.lock().requests.get(&key).cloned()))
+    }
+
+    fn retire_requests(&self, team: &str, id: Id) -> impl Future<Output = Result<()>> + Send {
+        self.retire_requests_now(team, id);
+        ready(Ok(()))
+    }
+
+    fn prune_requests(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send {
+        ready(Ok(self.prune_requests_now(before_ms)))
     }
 
     fn insert_lifecycle(&self, row: &LifecycleRow) -> impl Future<Output = Result<bool>> + Send {

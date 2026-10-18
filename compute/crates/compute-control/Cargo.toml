@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+base64 = "0.22"
 blake3 = "1.8"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
@@ -30,6 +31,7 @@ getrandom = { version = "0.3", features = ["std"] }
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["server", "service", "tokio", "http1"] }
+ring = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }

@@ -1,4 +1,5 @@
-//! The API hosts call: register, renew and report, over mutual TLS.
+//! The API hosts call: register, renew and report, and ask for their
+//! agent-link tokens, over mutual TLS.
 //!
 //! Each connection carries the names its client certificate is valid for,
 //! and a host may act only under one of them.
@@ -12,7 +13,8 @@ use axum::routing::post;
 use axum::{Router, response::IntoResponse};
 use compute_fleet::LeaseTerms;
 use compute_protocol::fleet::{
-    REGISTER_PATH, RENEW_PATH, REPORT_PATH, Register, Registered, Renew, Renewed, Report, Terms,
+    LINK_TOKENS_PATH, LinkTokens, LinkTokensAsked, REGISTER_PATH, RENEW_PATH, REPORT_PATH,
+    Register, Registered, Renew, Renewed, Report, Terms,
 };
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
@@ -20,6 +22,7 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt as _;
 
+use crate::link::Links;
 use crate::store::{Admission, Store};
 use crate::tls::names_of;
 
@@ -49,6 +52,7 @@ pub fn wire_terms(terms: LeaseTerms) -> Terms {
 struct Inner<S> {
     store: Arc<S>,
     terms: LeaseTerms,
+    links: Option<Arc<Links>>,
 }
 
 /// The host API's state.
@@ -145,13 +149,61 @@ async fn report<S: Store>(
     }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// Signs a token for each gateway the host asks for, under the name its
+/// certificate holds. Only gateways some team's sandboxes use are signed
+/// for.
+async fn link_tokens<S: Store>(
+    State(api): State<HostApi<S>>,
+    Extension(peer): Extension<Peer>,
+    Json(asked): Json<LinkTokensAsked>,
+) -> Result<Json<LinkTokens>, (StatusCode, String)> {
+    if !peer.0.contains(&asked.name) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("the certificate does not name {}", asked.name),
+        ));
+    }
+    let Some(links) = &api.0.links else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "this fleet runs no agent links".into(),
+        ));
+    };
+    if let Some(unknown) = asked.gateways.iter().find(|url| !links.knows(url)) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("no team's sandboxes use the gateway {unknown}"),
+        ));
+    }
+    let now = now_ms();
+    let tokens = asked
+        .gateways
+        .iter()
+        .map(|gateway| links.host_token(gateway, &asked.name, now))
+        .collect();
+    Ok(Json(LinkTokens { tokens }))
+}
+
 /// The host API's routes.
-pub fn router<S: Store>(store: Arc<S>, terms: LeaseTerms) -> Router {
+pub fn router<S: Store>(store: Arc<S>, terms: LeaseTerms, links: Option<Arc<Links>>) -> Router {
     Router::new()
         .route(REGISTER_PATH, post(register::<S>))
         .route(RENEW_PATH, post(renew::<S>))
         .route(REPORT_PATH, post(report::<S>))
-        .with_state(HostApi(Arc::new(Inner { store, terms })))
+        .route(LINK_TOKENS_PATH, post(link_tokens::<S>))
+        .with_state(HostApi(Arc::new(Inner {
+            store,
+            terms,
+            links,
+        })))
 }
 
 /// Serves `router` on `listener` to clients `acceptor` verifies, each

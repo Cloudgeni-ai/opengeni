@@ -25,6 +25,23 @@ pub struct InitData {
     pub default_user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_workdir: Option<String>,
+    /// The Opengeni agent the guest runs, never sent to envd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentInit>,
+}
+
+/// What the guest needs to run Opengeni's agent
+/// ([`docs/agent-link.md`](../../../docs/agent-link.md) section 2).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentInit {
+    pub workspace_id: String,
+    pub agent_id: String,
+    /// Where the agent's workspace is, which it serves files under.
+    pub workspace_root: String,
+    /// Whether it starts a virtual desktop.
+    #[serde(default)]
+    pub desktop: bool,
 }
 
 impl fmt::Debug for InitData {
@@ -35,19 +52,21 @@ impl fmt::Debug for InitData {
             .field("access_token", &self.access_token.as_ref().map(|_| "<set>"))
             .field("default_user", &self.default_user)
             .field("default_workdir", &self.default_workdir)
+            .field("agent", &self.agent)
             .finish()
     }
 }
 
 impl InitData {
-    /// The `/init` body: all of `self`, and the time `nanos` (Unix
-    /// nanoseconds) when given.
+    /// The `/init` body: all of `self` but the agent, and the time `nanos`
+    /// (Unix nanoseconds) when given.
     #[must_use]
     pub fn body(&self, nanos: Option<u64>) -> String {
         let mut body = match serde_json::to_value(self) {
             Ok(Value::Object(map)) => map,
             _ => Map::new(),
         };
+        body.remove("agent");
         if let Some(nanos) = nanos {
             body.insert("timestamp".into(), Value::String(rfc3339(nanos)));
         }
@@ -147,6 +166,12 @@ mod tests {
             access_token: Some("secret".into()),
             default_user: Some("user".into()),
             default_workdir: None,
+            agent: Some(AgentInit {
+                workspace_id: "w".into(),
+                agent_id: "a".into(),
+                workspace_root: "/workspace".into(),
+                desktop: true,
+            }),
         };
         let body: Value = serde_json::from_str(&data.body(Some(0))).unwrap();
         assert_eq!(

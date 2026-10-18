@@ -10,6 +10,7 @@
 mod holds;
 mod moves;
 mod reach;
+mod requests;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -23,12 +24,14 @@ use compute_protocol::host::{ErrorCode, Id, ImageId, Reply, Request, SandboxConf
 use compute_storage::store::ChunkStore;
 
 use crate::hosts::{Answered, Hosts};
+use crate::link::Links;
 use crate::store::{SandboxRow, Spec, Store, StoreError, Write, replace};
 use crate::view::{Target, View, shape_key};
 
 pub use holds::Depth;
 pub use moves::Drained;
 pub use reach::Reached;
+pub use requests::request_digest;
 
 /// How a fleet sandbox sleeps when its create says nothing: the
 /// recommended ladder, with a checkpoint after every ten minutes it runs,
@@ -58,6 +61,12 @@ pub enum Failure {
     NoCapacity,
     #[error("busy: {0}")]
     Busy(String),
+    /// A create's request id was used before for another create.
+    #[error("request {0} was used for another create")]
+    Mismatch(String),
+    /// A create's request id made a sandbox that was deleted since.
+    #[error("request {0} made a sandbox that was deleted since")]
+    Gone(String),
     #[error("unavailable for now: {0}")]
     Unavailable(String),
     /// A host was asked and did not answer, so the request may or may not
@@ -109,6 +118,9 @@ pub struct Settings {
     /// for the hosts' own base image. The default image is always known,
     /// as the base image unless named here.
     pub images: BTreeMap<String, Option<ImageId>>,
+    /// The agent link's keys and each team's gateway, if sandboxes may run
+    /// Opengeni's agent.
+    pub links: Option<Arc<Links>>,
 }
 
 impl Settings {
@@ -133,6 +145,7 @@ impl Default for Settings {
             image: "base".into(),
             sleep: DEFAULT_SLEEP,
             images: BTreeMap::new(),
+            links: None,
         }
     }
 }
@@ -229,6 +242,32 @@ impl<S: Store> Service<S> {
             disk_mib: self.settings.disk_mib,
             prefer,
         }
+    }
+
+    /// The config `target` is sent for `row`'s sandbox, which it holds
+    /// under the row's owner epoch: the spec's, and for a sandbox that runs
+    /// Opengeni's agent, the ticket for that host and epoch.
+    pub(crate) fn sent_config(&self, row: &SandboxRow, target: &Target) -> SandboxConfig {
+        let mut config = row.spec.config.clone();
+        if let Some(agent) = &row.spec.agent {
+            config.link = self.settings.links.as_ref().and_then(|links| {
+                links.ticket(
+                    &row.team,
+                    &row.id.to_string(),
+                    &target.name,
+                    row.ownership.epoch.0,
+                    agent,
+                )
+            });
+            if config.link.is_none() {
+                tracing::warn!(
+                    sandbox = %row.id,
+                    team = %row.team,
+                    "the sandbox runs an agent but its team has no agent link now"
+                );
+            }
+        }
+        config
     }
 
     /// Places `demand` on a host not in `exclude`.
@@ -384,7 +423,7 @@ impl<S: Store> Service<S> {
             };
             let request = Request::Create {
                 id,
-                config: row.spec.config.clone(),
+                config: self.sent_config(&row, &target),
             };
             let answered = self
                 .hosts
@@ -421,6 +460,21 @@ impl<S: Store> Service<S> {
         metadata: BTreeMap<String, String>,
     ) -> Result<(SandboxRow, Demand), Failure> {
         spec.config.validate().map_err(Failure::Invalid)?;
+        // Only the service names a link, per host and owner epoch.
+        spec.config.link = None;
+        if let Some(agent) = &spec.agent {
+            agent.validate().map_err(Failure::Invalid)?;
+            let linked = self
+                .settings
+                .links
+                .as_ref()
+                .is_some_and(|links| links.gateway(team).is_some());
+            if !linked {
+                return Err(Failure::Invalid(
+                    "a sandbox that runs an agent needs its team to have an agent link".into(),
+                ));
+            }
+        }
         // The host boots the image the config names, fetching it by id;
         // a name the fleet does not know must not boot something else.
         spec.config.image = self
@@ -485,8 +539,15 @@ impl<S: Store> Service<S> {
     /// Deletes a team's sandbox: its owner removes it, or, with no owner,
     /// the service raises its epoch, leaves a tombstone in object storage
     /// under that epoch, so no former owner's archive lands after, and
-    /// deletes the row.
+    /// deletes the row. A create's request that made it then answers that
+    /// it is gone.
     pub async fn delete(&self, team: &str, id: Id) -> Result<(), Failure> {
+        self.delete_row(team, id).await?;
+        self.store.retire_requests(team, id).await?;
+        Ok(())
+    }
+
+    async fn delete_row(&self, team: &str, id: Id) -> Result<(), Failure> {
         loop {
             let Some(mut row) = self.store.sandbox(id).await? else {
                 return Ok(());

@@ -23,6 +23,9 @@ pub const REGISTER_PATH: &str = "/v1/hosts/register";
 pub const RENEW_PATH: &str = "/v1/hosts/renew";
 /// See [`REGISTER_PATH`].
 pub const REPORT_PATH: &str = "/v1/hosts/report";
+/// See [`REGISTER_PATH`]: where a host asks for its agent-link tokens
+/// ([`LinkTokensAsked`]).
+pub const LINK_TOKENS_PATH: &str = "/v1/hosts/link-tokens";
 
 /// How long a lease lasts and how often it is renewed, as the service
 /// tells a host when it registers.
@@ -268,6 +271,44 @@ impl Answered {
 pub struct Answer {
     pub answered: Answered,
     pub reply: Reply,
+}
+
+/// A host asks for a token to present to each of `gateways` for its agent
+/// links ([`crate::link`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkTokensAsked {
+    /// The host's name, which its certificate must hold.
+    pub name: String,
+    pub gateways: Vec<String>,
+}
+
+/// The answer to [`LinkTokensAsked`]: one token per gateway asked for, in
+/// the same order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkTokens {
+    pub tokens: Vec<LinkToken>,
+}
+
+/// A host's token for one gateway.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkToken {
+    pub gateway: String,
+    pub token: String,
+    /// When it stops being valid, in milliseconds since the Unix epoch.
+    pub expires_at_ms: u64,
+}
+
+impl std::fmt::Debug for LinkToken {
+    /// Never shows the token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkToken")
+            .field("gateway", &self.gateway)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

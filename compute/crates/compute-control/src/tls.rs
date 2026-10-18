@@ -133,3 +133,55 @@ pub fn names_of(certificate: &CertificateDer<'_>) -> Vec<String> {
         |certificate| certificate.valid_dns_names().map(str::to_owned).collect(),
     )
 }
+
+/// Longest a caller may take over its TLS handshake.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Serves `router` on `listener` for ever, over TLS when `tls` is given,
+/// with HTTP/1.1 upgrades; `what` names it in logs.
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    router: axum::Router,
+    tls: Option<Arc<ServerConfig>>,
+    what: &'static str,
+) {
+    use hyper_util::rt::TokioIo;
+    use hyper_util::service::TowerToHyperService;
+
+    let Some(tls) = tls else {
+        if let Err(error) = axum::serve(listener, router).await {
+            tracing::error!(%error, "{what} stopped");
+        }
+        return;
+    };
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls);
+    loop {
+        let (tcp, _) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                tracing::warn!(%error, "{what}: accepting a connection failed");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        let (acceptor, router) = (acceptor.clone(), router.clone());
+        tokio::spawn(async move {
+            let _ = tcp.set_nodelay(true);
+            let stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "{what}: a caller's TLS handshake failed");
+                    return;
+                }
+                Err(_) => return,
+            };
+            let served = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), TowerToHyperService::new(router))
+                .with_upgrades()
+                .await;
+            if let Err(error) = served {
+                tracing::debug!(%error, "{what}: a connection ended with an error");
+            }
+        });
+    }
+}

@@ -12,6 +12,7 @@ use compute_control::api::key_digest;
 use compute_control::e2b;
 use compute_control::group::{COMPUTE_API, GcpGroup, METADATA};
 use compute_control::leader::Scaling;
+use compute_control::link::Links;
 use compute_control::service::Settings;
 use compute_control::store::{MemoryStore, PostgresStore, Store};
 use compute_control::tls::{Tls, TlsFiles, database_client};
@@ -63,6 +64,13 @@ struct Serve {
     /// Where the public API listens.
     #[arg(long, default_value = "0.0.0.0:8080")]
     api: SocketAddr,
+    /// The public API's certificate chain, PEM; with it the API serves
+    /// HTTPS itself, without it plain HTTP for a TLS terminator in front.
+    #[arg(long, requires = "api_tls_key")]
+    api_tls_cert: Option<PathBuf>,
+    /// The key of `--api-tls-cert`, PEM.
+    #[arg(long, requires = "api_tls_cert")]
+    api_tls_key: Option<PathBuf>,
     /// Where hosts reach the service, over mutual TLS.
     #[arg(long, default_value = "0.0.0.0:8443")]
     hosts: SocketAddr,
@@ -97,6 +105,20 @@ struct Serve {
     /// A file of `team key` lines whose keys are added at start.
     #[arg(long)]
     keys_file: Option<PathBuf>,
+    /// The Ed25519 key (PKCS#8 PEM) agent-link tokens are signed with.
+    /// Without it no sandbox may run Opengeni's agent.
+    #[arg(long, env = "COMPUTE_CONTROL_LINK_KEY")]
+    link_key: Option<PathBuf>,
+    /// A key tokens were signed with before, still listed until they
+    /// expire; repeat for more.
+    #[arg(long = "link-previous-key")]
+    link_previous_keys: Vec<PathBuf>,
+    /// The issuer link tokens name.
+    #[arg(long, default_value = "opengeni-compute")]
+    link_issuer: String,
+    /// A team's agent gateway, as `team=wss://...`; repeat for more.
+    #[arg(long = "team-link", value_parser = parse_team_link)]
+    team_links: Vec<(String, String)>,
     /// A Google Cloud managed instance group of hosts to grow, as
     /// `projects/P/zones/Z/instanceGroupManagers/N`.
     #[arg(long)]
@@ -154,6 +176,13 @@ fn parse_image(text: &str) -> Result<(String, ImageId), String> {
     Ok((name.to_owned(), id.parse()?))
 }
 
+fn parse_team_link(text: &str) -> Result<(String, String), String> {
+    let (team, url) = text
+        .split_once('=')
+        .ok_or("a team link is `team=wss://...`")?;
+    Ok((team.to_owned(), url.to_owned()))
+}
+
 fn parse_template(text: &str) -> Result<(String, e2b::Template), String> {
     let shape = "a template is `id=image:VCPUSxMEMORY_MIB`";
     let (id, rest) = text.split_once('=').ok_or(shape)?;
@@ -171,6 +200,27 @@ fn parse_template(text: &str) -> Result<(String, e2b::Template), String> {
 }
 
 impl Serve {
+    fn links(&self) -> anyhow::Result<Option<Arc<Links>>> {
+        let Some(key) = &self.link_key else {
+            anyhow::ensure!(
+                self.team_links.is_empty(),
+                "--team-link needs --link-key to sign with"
+            );
+            return Ok(None);
+        };
+        let teams: BTreeMap<String, String> = self.team_links.iter().cloned().collect();
+        anyhow::ensure!(
+            teams.len() == self.team_links.len(),
+            "a team has more than one --team-link"
+        );
+        Ok(Some(Arc::new(Links::load(
+            key,
+            &self.link_previous_keys,
+            self.link_issuer.clone(),
+            teams,
+        )?)))
+    }
+
     fn e2b_listen(&self) -> anyhow::Result<Option<e2b::listen::Listen>> {
         let Some(address) = self.e2b_listen else {
             return Ok(None);
@@ -270,8 +320,13 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
         ),
         None => None,
     };
+    let api_tls = match (&args.api_tls_cert, &args.api_tls_key) {
+        (Some(cert), Some(key)) => Some(compute_control::tls::public_server(cert, key)?),
+        _ => None,
+    };
     let config = Config {
         api: args.api,
+        api_tls,
         hosts: args.hosts,
         tls,
         archive,
@@ -284,6 +339,7 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
                 .iter()
                 .map(|(name, id)| (name.clone(), Some(*id)))
                 .collect::<BTreeMap<_, _>>(),
+            links: args.links()?,
             ..Settings::default()
         },
         operator: args.operator_team.clone(),
