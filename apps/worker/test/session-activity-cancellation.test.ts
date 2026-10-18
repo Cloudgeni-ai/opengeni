@@ -63,6 +63,25 @@ test("definition mismatch diagnostics survive Temporal without unwrapping arbitr
   expect(workflowFailureMessage(new Error("ordinary failure"))).toBe("ordinary failure");
 });
 
+test("a turn refused because its model is no longer available says so", () => {
+  for (const message of [
+    "Turn execution policy model is retired from new selection",
+    "Turn execution policy model is not present in the configured catalog",
+  ]) {
+    expect(
+      workflowFailureMessage(
+        activityFailure(
+          ApplicationFailure.create({
+            message,
+            type: "TurnExecutionPolicyModelUnavailableError",
+            nonRetryable: true,
+          }),
+        ),
+      ),
+    ).toBe(message);
+  }
+});
+
 describe("turn activity fence-cancellation arbitration", () => {
   test("accepts both direct and Temporal ActivityFailure-wrapped cancellation", () => {
     const cancelled = new CancelledFailure("TURN_ATTEMPT_FENCED");

@@ -329,6 +329,14 @@ export function humanizeFailureReason(t: OpenGeniText, reason: string | null): s
   if (isCreditExhaustion(reason)) {
     return CREDIT_EXHAUSTION_MESSAGE(t);
   }
+  // A turn refused because the chat's model was retired or removed.
+  if (
+    /^Turn execution policy model is (?:retired from new selection|not present in the configured catalog|no longer configured)$/.test(
+      reason.trim(),
+    )
+  ) {
+    return t("lib.format.modelUnavailable");
+  }
   const normalized = reason.toLowerCase();
   const authFailure =
     normalized.includes("incorrect api key") ||
