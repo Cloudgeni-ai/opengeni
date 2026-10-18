@@ -10,6 +10,10 @@ name: Compute CI
 #             the core and the fleet protocol, property and crash-boundary
 #             tests, the fleet store against Postgres, checkpoints on XFS,
 #             and the smoke framework's own tests
+#   deploy    the release packaging and deployment around it: shellcheck of
+#             the host bundle's scripts, the GCP host fleet's Terraform
+#             (fmt, validate), and the Helm chart's computeControl render
+#             tests
 #   kvm       real Firecracker VMs on the runner's KVM through the gate
 #             script (compute/ci/gate.sh): the pager's kernel tests, the
 #             per-sandbox network, the engine, save and wake with an agent
@@ -26,6 +30,8 @@ on:
   pull_request:
     paths:
       - "compute/**"
+      - "deploy/terraform/gcp-compute/**"
+      - "deploy/helm/opengeni/templates/*compute-control*"
       - ".github/workflows/compute-ci.yml"
   push:
     branches:
@@ -34,6 +40,8 @@ on:
       - feat/compute-prod
     paths:
       - "compute/**"
+      - "deploy/terraform/gcp-compute/**"
+      - "deploy/helm/opengeni/templates/*compute-control*"
       - ".github/workflows/compute-ci.yml"
   workflow_dispatch:
 
@@ -130,6 +138,33 @@ jobs:
         working-directory: compute/smoke
         run: python3 -m unittest discover -s compute_smoke/tests -t .
 
+  deploy:
+    name: packaging and deployment
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v6
+      - name: shellcheck
+        run: |
+          shellcheck --severity=warning compute/deploy/host/install.sh compute/deploy/host/bundle.sh \
+            compute/deploy/host/check-host compute/deploy/host/host-setup compute/ci/*.sh \
+            deploy/terraform/gcp-compute/host-startup.sh
+      - uses: hashicorp/setup-terraform@v4
+      - name: Terraform (GCP host fleet)
+        run: |
+          terraform -chdir=deploy/terraform/gcp-compute fmt -check
+          terraform -chdir=deploy/terraform/gcp-compute init -backend=false -input=false
+          terraform -chdir=deploy/terraform/gcp-compute validate
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+      - name: Helm chart (computeControl)
+        run: bun test deploy/helm/opengeni/test/compute-control.test.ts
+
   kvm:
     name: real Firecracker on KVM
     runs-on: ubuntu-24.04
@@ -153,7 +188,9 @@ jobs:
         working-directory: .
         run: |
           sudo apt-get install -y -qq xfsprogs >/dev/null
-          sudo truncate -s 60G /mnt/lab.img
+          # Sparse: it takes only what the gate writes. Each step's
+          # sandboxes book their whole disk, so the room must be real.
+          sudo truncate -s 90G /mnt/lab.img
           sudo mkfs.xfs -q /mnt/lab.img
           sudo mkdir -p /lab
           sudo mount -o loop,noatime /mnt/lab.img /lab
@@ -165,7 +202,7 @@ jobs:
           stat -fc %T /sys/fs/cgroup
           free -m
       - name: Cache the prepared lab (Firecracker, guest kernel, base image)
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: |
             /lab/bin
@@ -186,3 +223,8 @@ jobs:
           PROFILE: nested
           SANDBOXES: "4"
         run: bash ci/gate.sh
+      - name: Where the lab's room went
+        if: failure()
+        run: |
+          df -h / /lab
+          sudo du -xsh /lab/* 2>/dev/null | sort -h | tail -15

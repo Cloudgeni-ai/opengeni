@@ -1,0 +1,19 @@
+# What a compute host's kernel must be set to before the guard and the
+# agent start, applied at every boot: huge pages for the nested profile,
+# no transparent huge pages, the software watchdog where the machine has
+# no hardware one, and no suspend. Installed by install.sh.
+[Unit]
+Description=Opengeni compute host kernel settings
+Documentation=https://github.com/Cloudgeni-ai/opengeni/blob/main/compute/docs/operations.md
+DefaultDependencies=no
+After=local-fs.target
+Before=compute-guard.service compute-host.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/compute/host.env
+ExecStart=/opt/compute/current/host-setup
+
+[Install]
+WantedBy=multi-user.target

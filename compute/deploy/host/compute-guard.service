@@ -1,0 +1,21 @@
+# The guard of a compute host in a fleet (ADR 18): it stops every VM when
+# the host's lease runs out, whatever happens to the agent, and feeds the
+# watchdog while it runs. It is never restarted and never stopped by an
+# upgrade: if it ends, the watchdog resets the machine, which is what
+# keeps a host that lost its lease from running sandboxes the fleet has
+# already given to another host. Installed by install.sh.
+[Unit]
+Description=Opengeni compute host guard: stops the VMs when the fleet lease ends
+Documentation=https://github.com/Cloudgeni-ai/opengeni/blob/main/compute/docs/operations.md
+After=local-fs.target compute-host-setup.service
+Requires=compute-host-setup.service
+
+[Service]
+ExecStart=/opt/compute/current/compute-host guard
+Restart=no
+# The guard holds no memory worth reclaiming and must never be the one the
+# kernel ends.
+OOMScoreAdjust=-1000
+
+[Install]
+WantedBy=multi-user.target

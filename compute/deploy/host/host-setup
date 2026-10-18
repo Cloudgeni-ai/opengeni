@@ -1,0 +1,33 @@
+#!/bin/sh
+# Kernel settings a compute host needs, applied at every boot by
+# compute-host-setup.service before the guard and the agent start.
+# Configured by /etc/compute/host.env:
+#
+#   COMPUTE_HUGE_PAGES  2 MiB huge pages to reserve, for hosts that are
+#                       themselves VMs (the nested memory profile). Empty
+#                       or 0 reserves none (bare metal).
+set -eu
+
+if [ -n "${COMPUTE_HUGE_PAGES:-}" ] && [ "${COMPUTE_HUGE_PAGES}" != 0 ]; then
+  echo "$COMPUTE_HUGE_PAGES" >/proc/sys/vm/nr_hugepages
+  have=$(cat /proc/sys/vm/nr_hugepages)
+  if [ "$have" -lt "$COMPUTE_HUGE_PAGES" ]; then
+    echo "host-setup: asked for $COMPUTE_HUGE_PAGES huge pages, the kernel reserved $have" >&2
+    exit 1
+  fi
+fi
+# The agent decides what is in memory; the kernel does not merge pages
+# behind it.
+echo never >/sys/kernel/mm/transparent_hugepage/enabled
+
+# The guard feeds a watchdog that resets the machine 3 s after it stops
+# and that nothing can disarm. A machine without a hardware watchdog gets
+# the kernel's software one with those terms.
+if [ ! -e /dev/watchdog0 ]; then
+  modprobe softdog soft_margin=3 nowayout=1
+fi
+[ -e /dev/watchdog0 ] || { echo "host-setup: no watchdog device" >&2; exit 1; }
+
+# A machine that suspends could run its VMs again on resuming before the
+# guard fences them, so it never suspends.
+systemctl mask --now sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true

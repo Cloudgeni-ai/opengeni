@@ -22,9 +22,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const COPY: libc::c_ulong = 0xc028_aa03;
-const WAKE: libc::c_ulong = 0x8010_aa02;
-const UNREGISTER: libc::c_ulong = 0x8010_aa01;
+const COPY: libc::Ioctl = ioctl_number(0xc028_aa03);
+const WAKE: libc::Ioctl = ioctl_number(0x8010_aa02);
+const UNREGISTER: libc::Ioctl = ioctl_number(0x8010_aa01);
 const PRESENT: u8 = 1;
 const REMOVED: u8 = 2;
 const UNMAPPED: u8 = 4;
@@ -46,6 +46,17 @@ const LOOKAHEAD: usize = 256;
 const REPORT_WHEN_QUIET_FOR: Duration = Duration::from_millis(250);
 /// The least time between two reports of an open recording window.
 const REPORT_AT_MOST_EVERY: Duration = Duration::from_secs(1);
+
+/// An ioctl request number in the type this C library's `ioctl` takes
+/// (`c_ulong` with glibc, `c_int` with musl).
+#[allow(
+    clippy::unnecessary_cast,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+const fn ioctl_number(code: libc::c_ulong) -> libc::Ioctl {
+    code as libc::Ioctl
+}
 
 #[repr(C)]
 #[derive(Default, Debug)]

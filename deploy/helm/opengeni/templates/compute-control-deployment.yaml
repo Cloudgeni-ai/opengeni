@@ -1,0 +1,208 @@
+{{- if .Values.computeControl.enabled }}
+{{- include "opengeni.computeControl.assert" . }}
+{{- $cc := .Values.computeControl }}
+{{- if $cc.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "opengeni.computeControl.serviceAccountName" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-control
+  {{- with $cc.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: false
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.computeControl.name" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-control
+spec:
+  replicas: {{ $cc.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: compute-control
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: compute-control
+      annotations:
+        # Replicas reload keys and TLS material only at start.
+        opengeni.ai/compute-control-settings: {{ toJson (dict "keys" $cc.keys "tls" $cc.hostsTls "apiTls" $cc.apiTls "link" $cc.link "db" $cc.database) | sha256sum | trunc 16 | quote }}
+    spec:
+      serviceAccountName: {{ include "opengeni.computeControl.serviceAccountName" . }}
+      enableServiceLinks: false
+      {{- with (include "opengeni.priorityClassName" (dict "root" . "explicit" $cc.priorityClassName "tier" "control")) }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+        {{- with $cc.podSecurityContext }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      containers:
+        - name: compute-control
+          image: {{ include "opengeni.computeControl.image" . | quote }}
+          imagePullPolicy: {{ $cc.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          args:
+            - serve
+            - --api=0.0.0.0:{{ $cc.service.apiPort }}
+            - --hosts=0.0.0.0:8443
+            - --connections={{ $cc.database.connections }}
+            - --cert=/etc/compute/tls/tls.crt
+            - --key=/etc/compute/tls/tls.key
+            - --host-ca=/etc/compute/tls/ca.crt
+            {{- if $cc.apiTls.secretName }}
+            - --api-tls-cert=/etc/compute/api-tls/tls.crt
+            - --api-tls-key=/etc/compute/api-tls/tls.key
+            {{- end }}
+            {{- if $cc.link.existingSecret }}
+            - --link-key=/etc/compute/link/{{ $cc.link.key }}
+            {{- range $cc.link.previousKeys }}
+            - --link-previous-key=/etc/compute/link/{{ . }}
+            {{- end }}
+            - --link-issuer={{ $cc.link.issuer }}
+            {{- end }}
+            {{- range $team, $url := $cc.teamLinks }}
+            - --team-link={{ $team }}={{ $url }}
+            {{- end }}
+            - --keys-file=/etc/compute/keys/keys
+            - --operator-team={{ $cc.operatorTeam }}
+            - --archive={{ $cc.archive }}
+            - --image={{ $cc.defaultImage }}
+            - --disk-mib={{ $cc.diskMib }}
+            {{- range $name, $id := $cc.storedImages }}
+            - --stored-image={{ $name }}={{ $id }}
+            {{- end }}
+            {{- with $cc.gcpGroup }}
+            - --gcp-group={{ . }}
+            {{- end }}
+            {{- range $cc.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: RUST_LOG
+              value: info
+            {{- if $cc.database.urlKey }}
+            - name: COMPUTE_CONTROL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cc.database.existingSecret }}
+                  key: {{ $cc.database.urlKey }}
+            {{- else }}
+            - name: COMPUTE_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cc.database.existingSecret }}
+                  key: {{ $cc.database.passwordKey }}
+            - name: COMPUTE_CONTROL_DATABASE
+              value: {{ printf "%s password=$(COMPUTE_DATABASE_PASSWORD)" (include "opengeni.computeControl.databaseSettings" .) | quote }}
+            {{- end }}
+            {{- with $cc.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $cc.service.apiPort }}
+            - name: hosts
+              containerPort: 8443
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml $cc.resources | nindent 12 }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/compute/tls
+              readOnly: true
+            - name: keys
+              mountPath: /etc/compute/keys
+              readOnly: true
+            {{- if $cc.apiTls.secretName }}
+            - name: api-tls
+              mountPath: /etc/compute/api-tls
+              readOnly: true
+            {{- end }}
+            {{- if $cc.link.existingSecret }}
+            - name: link
+              mountPath: /etc/compute/link
+              readOnly: true
+            {{- end }}
+            {{- with $cc.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ $cc.hostsTls.secretName }}
+            defaultMode: 0440
+        - name: keys
+          secret:
+            secretName: {{ $cc.keys.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ $cc.keys.key }}
+                path: keys
+        {{- if $cc.apiTls.secretName }}
+        - name: api-tls
+          secret:
+            secretName: {{ $cc.apiTls.secretName }}
+            defaultMode: 0440
+        {{- end }}
+        {{- if $cc.link.existingSecret }}
+        - name: link
+          secret:
+            secretName: {{ $cc.link.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ $cc.link.key }}
+                path: {{ $cc.link.key }}
+              {{- range $cc.link.previousKeys }}
+              - key: {{ . }}
+                path: {{ . }}
+              {{- end }}
+        {{- end }}
+        {{- with $cc.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $cc.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cc.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cc.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

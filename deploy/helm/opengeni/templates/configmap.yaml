@@ -37,6 +37,11 @@ data:
   {{- if ((.Values.observability).otel).enabled }}
   OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT: {{ default (printf "http://%s-otel-collector:4318" (include "opengeni.fullname" .)) ((.Values.observability).otel).endpoint | quote }}
   {{- end }}
+  {{- if and .Values.computeControl.enabled (not (hasKey .Values.config "OPENGENI_COMPUTE_API_URL")) }}
+  # The compute backend's fleet service in this release (computeControl); the
+  # API key is OPENGENI_COMPUTE_API_KEY in the runtime Secret.
+  OPENGENI_COMPUTE_API_URL: {{ include "opengeni.computeControl.apiUrl" . | quote }}
+  {{- end }}
   {{- if .Values.selfhosted.enabled }}
   # Bring-your-own-compute (selfhosted SandboxBackend) NON-SECRET wiring. The
   # SECRET keys (enrollment signing secret, relay/stream token secrets, the NATS

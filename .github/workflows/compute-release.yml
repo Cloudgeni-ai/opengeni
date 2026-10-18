@@ -1,0 +1,246 @@
+name: Compute Release
+
+# Release packaging for compute/, the sandbox fabric. Nothing in Opengeni
+# uses these unless a deployment turns the compute backend on.
+#
+#   control-image  ghcr.io/cloudgeni-ai/opengeni-compute-control: the fleet
+#                  service and front door (compute/docker/control.Dockerfile),
+#                  with build provenance and an SBOM. Pushes to main tag it
+#                  sha-<commit> and main; a compute-v<version> tag adds
+#                  <version>.
+#   host-bundle    compute-host-<version>-x86_64-linux.tar.gz: the host agent
+#                  as a static binary, the guest programs every sandbox
+#                  image gets, the systemd units, install.sh and the pinned
+#                  Firecracker, jailer and kernel it downloads
+#                  (compute/deploy/host). Built twice, from two paths, and
+#                  the two must be identical. Kept as a workflow artifact;
+#                  a tag also publishes it as a GitHub Release with
+#                  SHA256SUMS and a build provenance attestation.
+#
+# Tags follow agent-release.yml: compute-v<version> must equal the
+# workspace version in compute/Cargo.toml, and tag pushes publish only once
+# the repository opts in (vars.RELEASE_ENABLED).
+
+on:
+  push:
+    branches:
+      - main
+      # Until this branch merges: proves the workflow on its own pushes,
+      # which tag the image sha-<commit> only.
+      - feat/compute-prod
+    paths:
+      - "compute/**"
+      - ".github/workflows/compute-release.yml"
+    tags:
+      - "compute-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: compute-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/cloudgeni-ai/opengeni-compute-control
+  # Also the control image's toolchain (control.Dockerfile's RUST_VERSION).
+  RUST_VERSION: 1.99.1
+
+jobs:
+  guard:
+    name: Guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: ${{ github.ref_type != 'tag' || vars.RELEASE_ENABLED == 'true' }}
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Resolve the version
+        id: v
+        run: |
+          set -euo pipefail
+          crate_version="$(sed -nE '/^\[workspace.package\]/,/^\[/ s/^version = "([^"]+)"/\1/p' compute/Cargo.toml)"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#compute-v}"
+            if [ "$version" != "$crate_version" ]; then
+              echo "::error::tag $version != compute/Cargo.toml $crate_version" >&2
+              exit 1
+            fi
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            version="$crate_version-sha.${GITHUB_SHA::12}"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+          [[ "$version" =~ ^[0-9A-Za-z.+-]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version $version"
+
+  control-image:
+    name: compute-control image
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tags
+        id: tags
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          RELEASE: ${{ needs.guard.outputs.release }}
+        run: |
+          set -euo pipefail
+          {
+            echo "tags<<EOF"
+            echo "$IMAGE:sha-$GITHUB_SHA"
+            if [ "$RELEASE" = true ]; then echo "$IMAGE:$VERSION"; fi
+            if [ "$GITHUB_REF" = refs/heads/main ]; then echo "$IMAGE:main"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: compute
+          file: compute/docker/control.Dockerfile
+          platforms: linux/amd64
+          build-args: RUST_VERSION=${{ env.RUST_VERSION }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.guard.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.description=Opengeni compute fleet service
+          cache-from: type=gha,scope=compute-control
+          cache-to: type=gha,mode=min,scope=compute-control,ignore-error=true
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Check the pushed image runs
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker run --rm "$IMAGE@$DIGEST" --help >/dev/null
+          docker run --rm --entrypoint /usr/local/bin/compute-host "$IMAGE@$DIGEST" sweep --help >/dev/null
+          echo "Pushed \`$IMAGE@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+
+  host-bundle:
+    name: host bundle
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-musl
+      - name: Tools
+        run: sudo apt-get install -y -qq musl-tools >/dev/null
+      - name: Build the bundle
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_VERSION }}
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/a" compute/deploy/host/bundle.sh
+      - name: Build it again elsewhere; the two must match
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_VERSION }}
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          mkdir -p "$RUNNER_TEMP/elsewhere"
+          cp -r compute "$RUNNER_TEMP/elsewhere/compute"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/elsewhere/target" OUT="$RUNNER_TEMP/b" \
+            "$RUNNER_TEMP/elsewhere/compute/deploy/host/bundle.sh"
+          name="compute-host-$VERSION-x86_64-linux.tar.gz"
+          if ! cmp "$RUNNER_TEMP/a/$name" "$RUNNER_TEMP/b/$name"; then
+            mkdir "$RUNNER_TEMP/x"
+            tar -xzf "$RUNNER_TEMP/a/$name" -C "$RUNNER_TEMP/x" --transform 's|^[^/]*|a|'
+            tar -xzf "$RUNNER_TEMP/b/$name" -C "$RUNNER_TEMP/x" --transform 's|^[^/]*|b|'
+            diff "$RUNNER_TEMP/x/a/SHA256SUMS" "$RUNNER_TEMP/x/b/SHA256SUMS" || true
+            echo "::error::the host bundle is not reproducible" >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/a/$name.sha256" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ runner.temp }}/a/compute-host-*.tar.gz
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: compute-host-${{ needs.guard.outputs.version }}
+          path: ${{ runner.temp }}/a/
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    name: GitHub Release
+    needs: [guard, control-image, host-bundle]
+    if: ${{ needs.guard.outputs.release == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: compute-host-${{ needs.guard.outputs.version }}
+          path: dist
+      - name: SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          cat ./*.sha256 > SHA256SUMS
+          ls -l
+      - name: Create the GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          tag_name: compute-v${{ needs.guard.outputs.version }}
+          name: compute v${{ needs.guard.outputs.version }}
+          body: |
+            Opengeni compute (the sandbox fabric) v${{ needs.guard.outputs.version }}.
+
+            - Fleet service image: `${{ env.IMAGE }}:${{ needs.guard.outputs.version }}`
+            - Host agent bundle: `compute-host-${{ needs.guard.outputs.version }}-x86_64-linux.tar.gz`
+              (unpack, then `sudo ./install.sh --config host.env`)
+
+            Both carry GitHub build provenance (`gh attestation verify`). See
+            compute/docs/operations.md for deployment, upgrades and recovery.
+          files: dist/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
