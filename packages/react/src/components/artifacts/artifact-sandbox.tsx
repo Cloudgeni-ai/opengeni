@@ -36,6 +36,13 @@ export type ArtifactSandboxProps = {
   connectedToolCount?: number | undefined;
   sourceFileCount?: number | undefined;
   fill?: boolean | undefined;
+  /**
+   * Control full screen from the host (for example from its URL). Omit to let
+   * the frame's own expand and back buttons manage it.
+   */
+  fullScreen?: boolean | undefined;
+  /** Called when the person expands the frame or leaves full screen. */
+  onFullScreenChange?: ((fullScreen: boolean) => void) | undefined;
 };
 
 /**
@@ -46,7 +53,12 @@ export type ArtifactSandboxProps = {
 export function ArtifactSandbox(props: ArtifactSandboxProps) {
   const labels = useArtifactLabels();
   const [reloadKey, setReloadKey] = useState(0);
-  const [focused, setFocused] = useState(false);
+  const [ownFocused, setOwnFocused] = useState(false);
+  const focused = props.fullScreen ?? ownFocused;
+  const setFocused = (next: boolean) => {
+    if (props.fullScreen === undefined) setOwnFocused(next);
+    props.onFullScreenChange?.(next);
+  };
   const frameRef = useRef<HTMLDialogElement>(null);
   const modalRef = useRef(false);
   useLayoutEffect(() => {
