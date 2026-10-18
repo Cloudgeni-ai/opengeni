@@ -1421,6 +1421,7 @@ export function buildTimeline(
       }
 
       case "turn.completed": {
+        steerBubblesAwaitingHandover = [];
         // A standalone manual compaction uses the turn ledger for fencing and
         // recovery, but it is maintenance rather than a conversational turn.
         // The dedicated context-compaction landmark is the complete UI truth;
@@ -1432,7 +1433,6 @@ export function buildTimeline(
           takePendingWaitOutcome(turnId);
           break;
         }
-        steerBubblesAwaitingHandover = [];
         // Credit exhaustion arrives as a NOMINALLY completed turn (`detail:
         // "insufficient Opengeni credits"`, `segmentLimit: "budget_exhausted"`)
         // — the engine ended the segment early, it did not finish the work.

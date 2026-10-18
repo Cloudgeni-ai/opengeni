@@ -254,6 +254,33 @@ describe("projection lifecycle audit regressions", () => {
     expect(order).toEqual(["Also check prices", "Done", "Prices look fine", "Then I"]);
   });
 
+  test("a Steer bubble drawn during a compaction turn does not reorder the next handover", () => {
+    const steer = (seq: number, text: string, turnId: string) =>
+      event(
+        seq,
+        "user.message",
+        { text, delivery: "steer", routing: "accepted_for_steering" },
+        turnId,
+      );
+    const order = buildTimeline(englishText, [
+      event(1, "turn.started", {}, "compact"),
+      steer(2, "Start the report", "turn-a"),
+      event(3, "turn.completed", { maintenance: "context_compaction" }, "compact"),
+      event(4, "turn.started", {}, "turn-a"),
+      event(5, "agent.message.completed", { messageId: "a", text: "Answer A" }, "turn-a"),
+      steer(6, "Shorter please", "turn-b"),
+      event(
+        7,
+        "turn.superseded",
+        { reason: "steer", atModelStep: true, cutOffText: "Partial A" },
+        "turn-a",
+      ),
+    ]).flatMap((item) =>
+      item.kind === "agent-message" || item.kind === "user-message" ? [item.text] : [],
+    );
+    expect(order).toEqual(["Start the report", "Answer A", "Partial A", "Shorter please"]);
+  });
+
   test("a Steer that replaces an approval wait closes the turn quietly; the hard interrupt does not", () => {
     const waiting = [
       event(1, "turn.started"),
