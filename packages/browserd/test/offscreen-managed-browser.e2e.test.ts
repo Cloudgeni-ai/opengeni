@@ -7,6 +7,14 @@ import { BrowserSupervisor, CdpConnection } from "../src";
 
 const e2e =
   process.env.OPENGENI_BROWSERD_E2E === "1" && process.platform === "darwin" ? test : test.skip;
+// A server, or an agent running outside the desktop session, has no display.
+const linuxWithoutDisplayE2e =
+  process.env.OPENGENI_BROWSERD_E2E === "1" &&
+  process.platform === "linux" &&
+  !process.env.DISPLAY &&
+  !process.env.WAYLAND_DISPLAY
+    ? test
+    : test.skip;
 
 function output(command: string, args: readonly string[]): string {
   return spawnSync(command, args, { encoding: "utf8" }).stdout.trim();
@@ -126,6 +134,84 @@ e2e(
       expect(frontmostApplication()).toBe(frontBefore);
       await supervisor.endSession(reference, { removeState: true });
       expect(profileBrowserPids(profileDirectory)).toEqual([]);
+    } finally {
+      await supervisor.endSession(reference, { removeState: true }).catch(() => undefined);
+      await supervisor.close();
+      server.stop(true);
+      await rm(root, { recursive: true, force: true });
+      await rm(sockets, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+linuxWithoutDisplayE2e(
+  "a headed managed browser on a Linux host without a display runs offscreen",
+  async () => {
+    const root = await mkdtemp("/tmp/og-ol-");
+    const sockets = await mkdtemp("/tmp/og-ol-s-");
+    const supervisor = await BrowserSupervisor.open({
+      rootDirectory: root,
+      socketRootDirectory: sockets,
+    });
+    const reference = {
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+    };
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response("<h1>Offscreen</h1>", { headers: { "content-type": "text/html" } }),
+    });
+    try {
+      // Windowed Chrome exits before DevTools starts when there is no display.
+      const created = await supervisor.createSession({
+        ...reference,
+        headed: true,
+        transport: { kind: "managed", engine: "chromium" },
+        ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+          ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+          : {}),
+        initialUrl: `http://127.0.0.1:${server.port}/`,
+      });
+      const profileDirectory = join(root, "sessions", reference.browserSessionId, "profile");
+      const [port, path] = (await readFile(join(profileDirectory, "DevToolsActivePort"), "utf8"))
+        .trim()
+        .split("\n");
+      const connection = await CdpConnection.connect(`ws://127.0.0.1:${port}${path}`);
+      try {
+        const attached = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+          targetId: created.observation.target.id,
+          flatten: true,
+        });
+        const evaluated = await connection.send<{ result: { value: string } }>(
+          "Runtime.evaluate",
+          {
+            expression:
+              "JSON.stringify({ua: navigator.userAgent, brands: navigator.userAgentData.brands.map((b) => b.brand), width: screen.width, availHeight: screen.availHeight, height: screen.height})",
+            returnByValue: true,
+          },
+          { sessionId: attached.sessionId },
+        );
+        const page = JSON.parse(evaluated.result.value) as {
+          ua: string;
+          brands: string[];
+          width: number;
+          height: number;
+          availHeight: number;
+        };
+        expect(page.ua).not.toContain("Headless");
+        expect(page.ua).toContain("(X11; Linux x86_64)");
+        expect(page.brands.join("|")).not.toContain("Headless");
+        expect(page.width).not.toBe(800);
+        expect(page.availHeight).toBeLessThan(page.height);
+      } finally {
+        connection.close();
+      }
+      expect(
+        (await supervisor.screenshot(reference, created.observation.target.id)).data.byteLength,
+      ).toBeGreaterThan(1000);
+      await supervisor.endSession(reference, { removeState: true });
     } finally {
       await supervisor.endSession(reference, { removeState: true }).catch(() => undefined);
       await supervisor.close();

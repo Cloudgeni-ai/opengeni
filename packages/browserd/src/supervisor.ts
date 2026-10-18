@@ -2907,7 +2907,13 @@ async function createBrowserDriver(
   // would appear in front of them, take focus and intercept their typing;
   // the agent and the person's live view work through CDP, so it stays
   // offscreen. A linked ComputerSession drives the native window itself.
-  const offscreen = process.platform === "darwin" && context.headed && !context.linkedComputer;
+  // A Linux host without a graphical display (a server, or an agent running
+  // outside the desktop session) cannot open a window at all: windowed Chrome
+  // would exit before DevTools starts. There a headed browser is offscreen too.
+  const offscreen =
+    context.headed &&
+    !context.linkedComputer &&
+    (process.platform === "darwin" || (process.platform === "linux" && !linuxGraphicalDisplay()));
   const runner = await AgentBrowserJsonRunner.create({
     namespace: "og",
     // A close followed immediately by another daemon using the same socket
@@ -2981,6 +2987,13 @@ async function createBrowserDriver(
         }
       : {}),
   });
+}
+
+/** Whether this host offers a graphical display a browser window could open
+ * on. A browser launch environment exists only for a linked ComputerSession,
+ * which always brings its own display. */
+export function linuxGraphicalDisplay(environment: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(environment.DISPLAY || environment.WAYLAND_DISPLAY);
 }
 
 /** Graceful shutdown keeps this owned browser running and its next causal

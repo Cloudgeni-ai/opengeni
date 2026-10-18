@@ -111,7 +111,8 @@ export type AgentBrowserRunnerOptions = {
    * own desktop a windowed managed browser shows up in front of them, takes
    * focus and joins the Dock; an offscreen browser is the same real browser
    * and profile in Chrome's new headless mode, presenting the host display's
-   * geometry and an ordinary User-Agent. Supported on macOS. */
+   * geometry and an ordinary User-Agent. Supported on macOS, and on Linux
+   * hosts without a graphical display, where no window can open. */
   offscreen?: boolean;
   browserExecutablePath?: string;
   /** macOS lifecycle-preserving background launcher. Defaults to the packaged
