@@ -638,6 +638,7 @@ export {
   ComputeWakeGate,
   ComputeWakingControlRpc,
   deleteComputeBox,
+  wakeComputeSandboxOnNoResponders,
   type ComputeCreateIdentity,
   type ComputeSessionState,
   type ComputeTurnDeps,

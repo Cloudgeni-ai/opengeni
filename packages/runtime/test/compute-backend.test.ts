@@ -30,6 +30,7 @@ import {
   createComputeOrphanSweepProgress,
   reconcileStaleComputeEnrollments,
   serializeEstablishedSandboxEnvelope,
+  wakeComputeSandboxOnNoResponders,
 } from "../src/sandbox";
 import { COMPUTE_ORPHAN_SWEEP_LIMIT } from "../src/sandbox/compute/orphans";
 import { applyDiff } from "@openai/agents";
@@ -1511,5 +1512,83 @@ describe("compute at the transport points", () => {
       desktopEnabled: true,
     });
     expect(modal.DesktopStream.transport).toBe("vnc-ws");
+  });
+});
+
+describe("waking a compute sandbox for an exact-locator request", () => {
+  const ENROLLMENT = "44444444-4444-4444-8444-444444444444";
+  const subject = `agent.${WORKSPACE}.${ENROLLMENT}.connection.launch.rpc`;
+
+  test("wakes the enrollment's sandbox at most once per interval and keeps retrying", async () => {
+    let nowMs = 0;
+    const wakes: string[] = [];
+    const lookups: Array<{ workspaceId: string; enrollmentId: string }> = [];
+    const onNoResponders = wakeComputeSandboxOnNoResponders({
+      fabric: {
+        wake: async (sandboxId) => {
+          wakes.push(sandboxId);
+          return {} as never;
+        },
+      },
+      sandboxOf: async (agent) => {
+        lookups.push(agent);
+        return "box-1";
+      },
+      now: () => nowMs,
+    });
+    expect(await onNoResponders(subject)).toBe(true);
+    nowMs = 1_000;
+    expect(await onNoResponders(subject)).toBe(true);
+    nowMs = 6_000;
+    expect(await onNoResponders(subject)).toBe(true);
+    expect(wakes).toEqual(["box-1", "box-1"]);
+    expect(lookups).toEqual([{ workspaceId: WORKSPACE, enrollmentId: ENROLLMENT }]);
+  });
+
+  test("a Connected Machine is never woken; a deleted sandbox stops the retries", async () => {
+    const wakes: string[] = [];
+    const machine = wakeComputeSandboxOnNoResponders({
+      fabric: {
+        wake: async (sandboxId) => {
+          wakes.push(sandboxId);
+          return {} as never;
+        },
+      },
+      sandboxOf: async () => null,
+    });
+    expect(await machine(subject)).toBe(true);
+    expect(await machine("not.an.agent.subject")).toBe(true);
+    expect(wakes).toEqual([]);
+    const gone = wakeComputeSandboxOnNoResponders({
+      fabric: {
+        wake: async () => {
+          throw new ComputeFabricError({ kind: "not_found", status: 404, message: "gone" });
+        },
+      },
+      sandboxOf: async () => "box-1",
+    });
+    expect(await gone(subject)).toBe(false);
+  });
+
+  test("a failed lookup is asked again, and a failed wake keeps retrying", async () => {
+    let lookups = 0;
+    let nowMs = 0;
+    const onNoResponders = wakeComputeSandboxOnNoResponders({
+      fabric: {
+        wake: async () => {
+          throw new ComputeFabricError({ kind: "unavailable", status: 503, message: "busy" });
+        },
+      },
+      sandboxOf: async () => {
+        lookups += 1;
+        if (lookups === 1) throw new Error("database unavailable");
+        return "box-1";
+      },
+      now: () => nowMs,
+    });
+    expect(await onNoResponders(subject)).toBe(true);
+    nowMs = 10_000;
+    expect(await onNoResponders(subject)).toBe(true);
+    expect(lookups).toBe(2);
   });
 });

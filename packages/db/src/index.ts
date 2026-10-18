@@ -63375,6 +63375,55 @@ export async function computeSandboxNamed(
   }
 }
 
+/**
+ * The compute sandbox an active sandbox enrollment runs in, as its group's
+ * lease names it (its envelope's provider state, else the lease's instance),
+ * or null for any other enrollment: a Connected Machine's, a revoked one, or
+ * one no lease names. With a bound, the read ends by its deadline.
+ */
+export async function computeSandboxOfEnrollment(
+  db: Database,
+  input: { workspaceId: string; enrollmentId: string },
+  bound?: DatabaseWorkBound,
+): Promise<string | null> {
+  const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
+    withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
+      // The tenancy lock is held: the statement below gets only the time left.
+      await limit(scopedDb);
+      const rows = await rawRows<{ sandbox_id: string | null }>(
+        scopedDb,
+        sql`
+        select coalesce(
+          lease.resume_state #>> '{sessionState,providerState,sandboxId}',
+          lease.instance_id
+        ) as sandbox_id
+        from enrollments e
+        join sandbox_leases lease
+          on lease.workspace_id = e.workspace_id
+         and lease.sandbox_group_id = e.sandbox_group_id
+        where e.workspace_id = ${input.workspaceId}
+          and e.id::text = ${input.enrollmentId}
+          and e.kind = 'sandbox'
+          and e.status = 'active'
+          and lease.resume_state #>> '{sessionState,providerState,enrollmentId}' =
+            ${input.enrollmentId}
+        limit 1
+      `,
+      );
+      return rows[0]?.sandbox_id ?? null;
+    }),
+  );
+  try {
+    return await scoped;
+  } catch (error) {
+    // A deleted workspace took its enrollments and leases with it.
+    if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 /** The most entries one page of the stale compute enrollment inventory holds. */
 export const STALE_COMPUTE_ENROLLMENT_PAGE_SIZE = 100;
 

@@ -7,6 +7,7 @@ import {
   bootstrapWorkspace,
   commitWarmingToWarm,
   computeSandboxNamed,
+  computeSandboxOfEnrollment,
   createDb,
   createSandboxEnrollment,
   createSession,
@@ -547,6 +548,41 @@ describe("the compute orphan sweep's record check", () => {
     await revokeSandboxEnrollment(db, { workspaceId: ids.workspaceId, enrollmentId: stray });
     expect(await named(stray, "new-box")).toBe(false);
     expect(await named(live, "compute-box", crypto.randomUUID())).toBe(false);
+  }, 60_000);
+});
+
+describe("the sandbox an enrollment runs in", () => {
+  test("is the box its group's lease names for it; nothing for anything else", async () => {
+    if (!available) return;
+    const { ids } = await fixture("compute");
+    const enrollmentId = crypto.randomUUID();
+    await createSandboxEnrollment(db, {
+      ...ids,
+      enrollmentId,
+      hasDisplay: false,
+      workspaceRoot: "/workspace",
+    });
+    const of = (id: string, workspaceId = ids.workspaceId) =>
+      computeSandboxOfEnrollment(db, { workspaceId, enrollmentId: id });
+    const envelope = (providerState: Record<string, string>) => admin`update sandbox_leases
+      set resume_state = jsonb_build_object('backendId', 'compute', 'sessionState',
+        jsonb_build_object('providerState', ${admin.json(providerState)}::jsonb))
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+    // The lease names the enrollment and its box.
+    await envelope({ enrollmentId, sandboxId: "parked-box" });
+    expect(await of(enrollmentId)).toBe("parked-box");
+    // Without a box in the envelope, the lease's instance is the box.
+    await envelope({ enrollmentId });
+    expect(await of(enrollmentId)).toBe("compute-box");
+    // The lease runs another enrollment: this one is in no sandbox.
+    await envelope({ enrollmentId: crypto.randomUUID(), sandboxId: "other-box" });
+    expect(await of(enrollmentId)).toBeNull();
+    // Not an enrollment id, another workspace, a revoked enrollment: nothing.
+    await envelope({ enrollmentId, sandboxId: "parked-box" });
+    expect(await of("not-an-enrollment")).toBeNull();
+    expect(await of(enrollmentId, crypto.randomUUID())).toBeNull();
+    await revokeSandboxEnrollment(db, { workspaceId: ids.workspaceId, enrollmentId });
+    expect(await of(enrollmentId)).toBeNull();
   }, 60_000);
 });
 

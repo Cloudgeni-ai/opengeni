@@ -305,7 +305,10 @@ import {
   type ChannelAHandle,
   type ChannelAOperation,
 } from "../sandbox/channel-a";
-import { deliverConnectedCommandStop } from "../sandbox/command-completion";
+import {
+  connectedCommandStopRpc,
+  deliverConnectedCommandStop,
+} from "../sandbox/command-completion";
 import {
   NatsControlRpc,
   negotiateCapabilities,
@@ -1456,13 +1459,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         // Deliver the cancellation now rather than on the next reconciliation
         // pass. The runner's pushed exit settles the command; when this
         // delivery fails, the reconciler delivers it on its next pass.
+        const budgetMs = Math.min(
+          settings.sandboxSelfhostedControlTimeoutMs,
+          BACKGROUND_COMMAND_STOP_DELIVERY_TIMEOUT_MS,
+        );
         const delivery = await deliverConnectedCommandStop(
-          new NatsControlRpc(async () => bus.getRequestConnection()),
+          connectedCommandStopRpc({
+            db,
+            settings,
+            connect: async () => bus.getRequestConnection(),
+            budgetMs,
+          }),
           stopTarget,
-          Math.min(
-            settings.sandboxSelfhostedControlTimeoutMs,
-            BACKGROUND_COMMAND_STOP_DELIVERY_TIMEOUT_MS,
-          ),
+          budgetMs,
         );
         if (!delivery.delivered) {
           deps.observability?.warn("background command stop delivery deferred", {

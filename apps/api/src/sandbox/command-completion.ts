@@ -1,5 +1,10 @@
 import { AgentEventAck, type OperationCompleted } from "@opengeni/agent-proto";
-import { settleCollectedConnectedMachineBackgroundCommand, type Database } from "@opengeni/db";
+import type { Settings } from "@opengeni/config";
+import {
+  computeSandboxOfEnrollment,
+  settleCollectedConnectedMachineBackgroundCommand,
+  type Database,
+} from "@opengeni/db";
 import {
   locateConnectedCommandCompletion,
   claimPushedConnectedCommandCompletion,
@@ -11,8 +16,11 @@ import { createConnectedCommandOutputCapture } from "@opengeni/db/session-comman
 import type { EventBus } from "@opengeni/events";
 import {
   cancelSelfhostedOp,
+  ComputeFabricClient,
   type ControlRpc,
   NatsControlRpc,
+  type NatsRequestConnection,
+  wakeComputeSandboxOnNoResponders,
   NatsOpStreamTransport,
   OpStreamExecClient,
   defaultSelfhostedRetryClock,
@@ -22,12 +30,74 @@ import {
 } from "@opengeni/runtime/sandbox";
 
 /**
- * Deliver a stop to an adopted command at its frozen locator, at once. Best
- * effort: the command is already `stopping`, and when this fails the
- * reconciler delivers the cancellation on its next pass. The runner then pushes
- * the exit, which settles the command.
+ * The transport of an immediate stop. One absolute budget covers capability
+ * negotiation, retries and the cancel itself: no recovery allowance runs past
+ * it, and the reconciler delivers whatever does not fit. A stop that no host
+ * receives wakes the compute sandbox it addresses, as any other request to
+ * that sandbox does, and is retried at the same locator; a Connected Machine
+ * keeps its ordinary offline retry.
+ */
+export function connectedCommandStopRpc(input: {
+  db: Database;
+  settings: Pick<Settings, "computeApiUrl" | "computeApiKey">;
+  connect: () => Promise<NatsRequestConnection | null>;
+  budgetMs: number;
+  /** Injected for tests: the fabric, and the sandbox an enrollment runs in. */
+  compute?: {
+    fabric: Pick<ComputeFabricClient, "wake">;
+    sandboxOf: (agent: { workspaceId: string; enrollmentId: string }) => Promise<string | null>;
+  };
+}): ControlRpc {
+  const deadlineAtMs = Date.now() + input.budgetMs;
+  const signal = AbortSignal.timeout(input.budgetMs);
+  const { computeApiUrl, computeApiKey } = input.settings;
+  const compute =
+    input.compute ??
+    (computeApiUrl && computeApiKey
+      ? {
+          fabric: new ComputeFabricClient({
+            baseUrl: computeApiUrl,
+            apiKey: computeApiKey,
+            requestTimeoutMs: input.budgetMs,
+            maxAttempts: 1,
+            signal,
+          }),
+          sandboxOf: async (agent: { workspaceId: string; enrollmentId: string }) =>
+            await computeSandboxOfEnrollment(input.db, agent, { deadlineAtMs, signal }),
+        }
+      : undefined);
+  return new NatsControlRpc(input.connect, {
+    recoveryMs: 0,
+    ...(compute ? { onNoResponders: wakeComputeSandboxOnNoResponders(compute) } : {}),
+  });
+}
+
+/**
+ * Deliver a stop to an adopted command at its frozen locator, at once, within
+ * `budgetMs` whatever the transport does. Best effort: the command is already
+ * `stopping`, and when this fails the reconciler delivers the cancellation on
+ * its next pass. The runner then pushes the exit, which settles the command.
  */
 export async function deliverConnectedCommandStop(
+  controlRpc: ControlRpc,
+  target: ConnectedCommandStopTarget,
+  budgetMs: number,
+): Promise<{ delivered: true } | { delivered: false; error: string }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<{ delivered: false; error: string }>((resolve) => {
+    timer = setTimeout(
+      () => resolve({ delivered: false, error: `not delivered within ${budgetMs} ms` }),
+      budgetMs,
+    );
+  });
+  try {
+    return await Promise.race([deliverStop(controlRpc, target, budgetMs), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function deliverStop(
   controlRpc: ControlRpc,
   target: ConnectedCommandStopTarget,
   controlTimeoutMs: number,

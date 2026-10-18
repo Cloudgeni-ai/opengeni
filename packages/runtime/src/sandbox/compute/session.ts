@@ -274,6 +274,58 @@ export class ComputeWakingControlRpc implements ControlRpc {
   }
 }
 
+const AGENT_RPC_SUBJECT = /^agent\.([^.]+)\.([^.]+)\.connection\.[^.]+\.rpc$/u;
+
+/**
+ * The no-responders handler of a transport that addresses an adopted
+ * operation at its exact locator (its stop, its query), which may be in a
+ * compute sandbox. A request no host received means no host serves the
+ * sandbox: ask the fabric to wake it (at most once per interval) and let the
+ * transport retry the same delivery at the same subject, never at a successor
+ * connection. An enrollment that is not a sandbox's (a Connected Machine)
+ * keeps its ordinary offline retry. A deleted sandbox ends the retries.
+ */
+export function wakeComputeSandboxOnNoResponders(input: {
+  fabric: Pick<ComputeFabricClient, "wake">;
+  /** The sandbox an enrollment runs in, or null for any other enrollment. */
+  sandboxOf: (agent: { workspaceId: string; enrollmentId: string }) => Promise<string | null>;
+  now?: () => number;
+}): (subject: string) => Promise<boolean> {
+  const now = input.now ?? Date.now;
+  const sandboxes = new Map<string, Promise<string | null>>();
+  const lastWakeAtMs = new Map<string, number>();
+  return async (subject) => {
+    const match = AGENT_RPC_SUBJECT.exec(subject);
+    if (!match) return true;
+    const agent = { workspaceId: match[1]!, enrollmentId: match[2]! };
+    const key = `${agent.workspaceId}.${agent.enrollmentId}`;
+    let lookup = sandboxes.get(key);
+    if (!lookup) {
+      lookup = input.sandboxOf(agent);
+      sandboxes.set(key, lookup);
+      // Only an answer is kept; a failed lookup is asked again next time.
+      const settled = lookup;
+      void settled.catch(() => {
+        if (sandboxes.get(key) === settled) sandboxes.delete(key);
+      });
+    }
+    const sandboxId = await lookup.catch(() => null);
+    if (!sandboxId) return true;
+    const atMs = now();
+    if (atMs - (lastWakeAtMs.get(sandboxId) ?? Number.NEGATIVE_INFINITY) < WAKE_INTERVAL_MS) {
+      return true;
+    }
+    lastWakeAtMs.set(sandboxId, atMs);
+    try {
+      await input.fabric.wake(sandboxId);
+    } catch (error) {
+      // Its operations went with it; anything else is retried until the deadline.
+      if (isComputeFabricGone(error)) return false;
+    }
+    return true;
+  };
+}
+
 export interface ComputeSessionDeps {
   state: ComputeLiveState;
   fabric: ComputeFabricClient;

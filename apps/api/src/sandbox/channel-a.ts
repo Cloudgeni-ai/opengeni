@@ -1091,7 +1091,7 @@ async function withChannelAOperation<T>(
     }).catch(() => undefined);
     const elapsedMs = performance.now() - operationStartedAt;
     if (elapsedMs >= nextSlowReportMs) {
-      nextSlowReportMs += DIRECT_OPERATION_SLOW_REPORT_MS;
+      nextSlowReportMs = elapsedMs + DIRECT_OPERATION_SLOW_REPORT_MS;
       services.observability?.warn("sandbox direct operation still running", {
         workspaceId,
         sessionId: session.id,

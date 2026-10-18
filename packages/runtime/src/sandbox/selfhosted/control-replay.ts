@@ -54,7 +54,12 @@ export class ControlReplyRecovery {
         if (this.supported.get(subject) === supported) this.supported.delete(subject);
       });
     }
-    if (!(await supported)) return conn.request(subject, payload, { timeout: timeoutMs });
+    if (!(await supported)) {
+      // Negotiation and the request share one absolute deadline.
+      return conn.request(subject, payload, {
+        timeout: Math.max(1, Math.min(timeoutMs, deadline - Date.now())),
+      });
+    }
     const delivery = `${subject}.replay.${deadline}.${randomUUID()}`;
     return this.retry(conn, subject, delivery, payload, timeoutMs, deadline);
   }

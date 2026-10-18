@@ -34,6 +34,7 @@ import {
   bindRetainedProcessProviderIdentity,
   claimWorkspaceArchiveCapture,
   computeSandboxNamed,
+  computeSandboxOfEnrollment,
   leaseMayHaveUntrackedWriters,
   releaseWorkspaceArchiveCapture,
   revokeSandboxEnrollment,
@@ -163,6 +164,7 @@ import {
   modalAppHasRunningSandboxes,
   sweepModalOrphanSandboxes,
   ComputeFabricClient,
+  wakeComputeSandboxOnNoResponders,
   createComputeOrphanSweepProgress,
   reconcileStaleComputeEnrollments,
   sweepComputeOrphans,
@@ -1597,6 +1599,28 @@ async function adoptLegacyModalCheckpointReceipts(
   return adopted;
 }
 
+/** A stop or query that no host receives wakes the compute sandbox it
+ * addresses, as any other request to that sandbox does, and is retried at the
+ * same locator; a Connected Machine keeps its ordinary offline retry. */
+function connectedCommandControlOptions(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  deadlineAtMs: number,
+): { onNoResponders?: (subject: string) => Promise<boolean> } {
+  if (!settings.computeApiUrl || !settings.computeApiKey) return {};
+  return {
+    onNoResponders: wakeComputeSandboxOnNoResponders({
+      fabric: new ComputeFabricClient({
+        baseUrl: settings.computeApiUrl,
+        apiKey: settings.computeApiKey,
+        requestTimeoutMs: 10_000,
+        maxAttempts: 2,
+      }),
+      sandboxOf: async (agent) => await computeSandboxOfEnrollment(db, agent, { deadlineAtMs }),
+    }),
+  };
+}
+
 /** Reconcile commands only against the immutable physical locator copied at
  * adoption. A successor enrollment connection is intentionally irrelevant: no
  * query or cancellation is ever rebound to it. */
@@ -1635,6 +1659,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
       controlRpcOverride ??
       new NatsControlRpc(
         async (): Promise<NatsRequestConnection | null> => bus.getRequestConnection(),
+        connectedCommandControlOptions(db, settings, deadline),
       );
     await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
       let proof = claim.proof;
