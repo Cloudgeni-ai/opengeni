@@ -10,8 +10,11 @@
 -- claim then retires the command as op_connection_replaced) and a deleted
 -- sandbox's enrollment is revoked (op_enrollment_revoked).
 --
--- So a command on a sandbox-kind enrollment is claimed only once it has a
--- pushed completion, a saved proof or a retirement reason. Commands on
+-- So a running command on a sandbox-kind enrollment is claimed only once it
+-- has a pushed completion, a saved proof or a retirement reason. A stopping
+-- command (Stop, Pause or Cancel) is claimed as before, since the claim is
+-- what delivers the cancellation, and stopping lasts only until the agent
+-- reports the exit. Commands on
 -- Connected Machines are claimed exactly as before. The due probe gets the
 -- same filter so it stays a superset of the claim without reporting idle
 -- compute commands as work on every tick.
@@ -29,6 +32,7 @@ DECLARE
     || ' OR enrollment.status = ''revoked'''
     || ' OR (enrollment.connection_instance_id IS NOT NULL'
     || ' AND enrollment.connection_instance_id <> command.connection_instance_id)'
+    || ' OR command.state = ''stopping'''
     || ' OR command.completion_notified_at IS NOT NULL'
     || ' OR command.reconcile_proof_outcome IS NOT NULL)'
     || E'\n        ' || claim_anchor;
@@ -46,6 +50,7 @@ DECLARE
       || ' AND enrollment.status <> ''revoked'''
       || ' AND (enrollment.connection_instance_id IS NULL'
       || ' OR enrollment.connection_instance_id = command.connection_instance_id)'
+      || ' AND command.state = ''running'''
       || ' AND command.completion_notified_at IS NULL'
       || ' AND command.reconcile_proof_outcome IS NULL)',
       pg_catalog.current_schema()

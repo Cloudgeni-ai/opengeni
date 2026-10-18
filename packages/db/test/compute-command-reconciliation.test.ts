@@ -10,13 +10,17 @@ import {
   type Database,
   type DbClient,
 } from "../src/index";
-import { claimConnectedMachineSessionBackgroundCommands } from "../src/session-background-commands";
+import {
+  claimConnectedMachineSessionBackgroundCommands,
+  requestSessionBackgroundCommandCancellation,
+} from "../src/session-background-commands";
 
 // 0841: a message to a compute sandbox's agent wakes the sandbox, so the
 // connected-command reconciler never polls a running command on a sandbox
 // enrollment. It claims one only after a pushed completion, with a saved
-// proof, or once the command is retired (connection replaced, enrollment
-// revoked). Connected Machine commands are claimed exactly as before. Runs as
+// proof, once the command is retired (connection replaced, enrollment
+// revoked), or while it is stopping (the claim delivers the cancellation).
+// Connected Machine commands are claimed exactly as before. Runs as
 // opengeni_app so FORCE RLS applies.
 
 let available = true;
@@ -51,7 +55,7 @@ type Kind = "sandbox" | "machine";
 
 async function runningCommand(
   kind: Kind,
-  options: { notified?: boolean; replaced?: boolean; revoked?: boolean } = {},
+  options: { notified?: boolean; replaced?: boolean; revoked?: boolean; stopping?: boolean } = {},
 ) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(db, {
@@ -103,6 +107,16 @@ async function runningCommand(
     values (${id}, ${accountId}, ${workspaceId!}, ${session.id}, 'connected_machine', 'running',
       ${workspaceId!}, ${enrollment.id}, 'launch', ${id}, now() - interval '1 minute',
       ${options.notified ? new Date() : null})`;
+  if (options.stopping) {
+    const { accepted } = await requestSessionBackgroundCommandCancellation(db, {
+      accountId,
+      workspaceId: workspaceId!,
+      sessionId: session.id,
+      commandId: id,
+      subjectId: `subject-${suffix}`,
+    });
+    expect(accepted).toBe(true);
+  }
   return id;
 }
 
@@ -146,6 +160,16 @@ describe("connected-command reconciliation on compute sandboxes", () => {
     expect(byId(revoked)?.proof?.reason).toBe("op_enrollment_revoked");
     expect(byId(machine)?.proof).toBeNull();
     // Every claimable row is now leased; only the idle compute command is left.
+    expect(await due()).toBe(false);
+  }, 60_000);
+
+  test("a cancellation is delivered to a compute command", async () => {
+    if (!available) return;
+    const stopping = await runningCommand("sandbox", { stopping: true });
+    expect(await due()).toBe(true);
+    const claimed = (await claim()).find((c) => c.commandId === stopping);
+    expect(claimed?.state).toBe("stopping");
+    expect(claimed?.proof).toBeNull();
     expect(await due()).toBe(false);
   }, 60_000);
 });

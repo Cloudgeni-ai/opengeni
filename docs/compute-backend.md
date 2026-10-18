@@ -33,6 +33,8 @@ wakes the sandbox. Liveness comes from the gateway's session and claim. A
 background command on a compute sandbox settles from the agent's pushed
 completion; the reconciler claims it only after that push or once it is
 retired (connection replaced, enrollment revoked), never to poll it (0841).
+A stopping command (Stop, Pause or Cancel) is still claimed, because that
+claim delivers the cancellation to the agent.
 
 ## Lifecycle
 
