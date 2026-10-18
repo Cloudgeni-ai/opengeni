@@ -2219,6 +2219,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             credential_renew: true,
             mac_permissions,
             browser_control_http: link.platform.browser_control_http_supported(),
+            // Linux agents running as root switch user per request.
+            run_as: link.platform.run_as_supported(),
         }
     }
 
@@ -5541,6 +5543,7 @@ mod tests {
         let request = ControlRequest {
             request_id: "move-once".into(),
             op: Some(v1::control_request::Op::FsMove(v1::FsMoveRequest {
+                run_as: String::new(),
                 from: source.to_string_lossy().into_owned(),
                 to: destination.to_string_lossy().into_owned(),
                 overwrite: false,

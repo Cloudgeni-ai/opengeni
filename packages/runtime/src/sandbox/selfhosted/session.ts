@@ -295,6 +295,8 @@ export interface SelfhostedOperationAdmission {
   transactionalFsWriteSupported?: boolean;
   /** The live runner serves in-process browser/computer controller requests. */
   browserControlHttpSupported?: boolean;
+  /** The live runner honors per-request `runAs` (Hello `capabilities.run_as`). */
+  runAsSupported?: boolean;
   /** Workspace segment of the physical agent/relay route. Personal machines may
    * originate in a different same-organization workspace than the session. */
   workspaceId?: string;
@@ -322,6 +324,9 @@ export interface SelfhostedSessionDeps {
   /** Exact live daemon capability; absent keeps controller requests on the
    * command transport. */
   browserControlHttpSupported?: boolean;
+  /** Exact live daemon capability; absent means a `runAs` is never sent (reads
+   * and commands run as the agent's account, writes refuse it). */
+  runAsSupported?: boolean;
   /** Authorization/session workspace. */
   workspaceId: string;
   /** Physical control-plane workspace. Defaults to workspaceId for legacy and
@@ -458,6 +463,38 @@ export interface SelfhostedExecResult {
   backgroundChildrenStopped?: boolean;
 }
 
+/** A request-reply op exactly as this runner may receive it: a runner that does
+ * not advertise run-as never receives a user (it would ignore the field and run
+ * as its own account), so the op keeps that runner's legacy behavior. */
+function runAsForRunner(
+  op: NonNullable<ControlRequest["op"]>,
+  runAsSupported: boolean,
+): NonNullable<ControlRequest["op"]> {
+  if (runAsSupported) return op;
+  switch (op.$case) {
+    case "fsRead":
+      return op.fsRead.runAs ? { ...op, fsRead: { ...op.fsRead, runAs: "" } } : op;
+    case "fsWrite":
+      return op.fsWrite.runAs ? { ...op, fsWrite: { ...op.fsWrite, runAs: "" } } : op;
+    case "fsList":
+      return op.fsList.runAs ? { ...op, fsList: { ...op.fsList, runAs: "" } } : op;
+    case "fsMkdir":
+      return op.fsMkdir.runAs ? { ...op, fsMkdir: { ...op.fsMkdir, runAs: "" } } : op;
+    case "fsMove":
+      return op.fsMove.runAs ? { ...op, fsMove: { ...op.fsMove, runAs: "" } } : op;
+    case "fsStat":
+      return op.fsStat.runAs ? { ...op, fsStat: { ...op.fsStat, runAs: "" } } : op;
+    case "fsRemove":
+      return op.fsRemove.runAs ? { ...op, fsRemove: { ...op.fsRemove, runAs: "" } } : op;
+    case "git":
+      return op.git.runAs ? { ...op, git: { ...op.git, runAs: "" } } : op;
+    case "ptyOpen":
+      return op.ptyOpen.runAs ? { ...op, ptyOpen: { ...op.ptyOpen, runAs: "" } } : op;
+    default:
+      return op;
+  }
+}
+
 /** The `exec` args the structural surface accepts (mirrors ChannelAExecArgs). */
 export interface SelfhostedExecArgs {
   cmd: string;
@@ -538,6 +575,7 @@ export class SelfhostedSession {
   private readonly operationCpuQuotaSupported: boolean;
   private readonly transactionalFsWriteSupported: boolean;
   private readonly browserControlHttpSupported: boolean;
+  private readonly runAsSupported: boolean;
   private readonly defaultOpStream: SelfhostedOpStreamDeps | undefined;
   private readonly connectionInstanceId: string;
   private readonly resolveOperationAdmission:
@@ -612,6 +650,7 @@ export class SelfhostedSession {
     this.operationCpuQuotaSupported = deps.operationCpuQuotaSupported === true;
     this.transactionalFsWriteSupported = deps.transactionalFsWriteSupported === true;
     this.browserControlHttpSupported = deps.browserControlHttpSupported === true;
+    this.runAsSupported = deps.runAsSupported === true;
     this.defaultOpStream = deps.opStream;
     this.connectionInstanceId = deps.connectionInstanceId;
     this.resolveOperationAdmission = deps.resolveOperationAdmission;
@@ -631,6 +670,7 @@ export class SelfhostedSession {
             opStream: deps.opStream,
             transactionalFsWriteSupported: this.transactionalFsWriteSupported,
             browserControlHttpSupported: this.browserControlHttpSupported,
+            runAsSupported: this.runAsSupported,
           })
         : undefined;
     // A valid Manifest whose root is the machine's actual effective root. There
@@ -700,6 +740,7 @@ export class SelfhostedSession {
   private async admitOperation(commandPolicy: boolean): Promise<{
     transactionalFsWriteSupported: boolean;
     browserControlHttpSupported: boolean;
+    runAsSupported: boolean;
     controlWorkspaceId: string;
     connectionInstanceId: string;
     subject: string;
@@ -722,6 +763,7 @@ export class SelfhostedSession {
         opStream: this.defaultOpStream,
         transactionalFsWriteSupported: this.transactionalFsWriteSupported,
         browserControlHttpSupported: this.browserControlHttpSupported,
+        runAsSupported: this.runAsSupported,
       };
     }
 
@@ -758,6 +800,7 @@ export class SelfhostedSession {
       opStream: resolved.opStream,
       transactionalFsWriteSupported: resolved.transactionalFsWriteSupported === true,
       browserControlHttpSupported: resolved.browserControlHttpSupported === true,
+      runAsSupported: resolved.runAsSupported === true,
     };
   }
 
@@ -877,7 +920,7 @@ export class SelfhostedSession {
         requestId: crypto.randomUUID(),
         epoch: this.epoch,
         resourcePolicy,
-        op,
+        op: runAsForRunner(op, operationAdmission.runAsSupported),
       };
       const res = await this.controlRpc.request(operationAdmission.subject, req, {
         timeoutMs,
@@ -1027,7 +1070,7 @@ export class SelfhostedSession {
       try {
         const result = await this.call({
           $case: "fsRemove",
-          fsRemove: { path, recursive: true },
+          fsRemove: { path, recursive: true, runAs: "" },
         });
         if (result.$case !== "fsRemove") {
           throw new Error(`selfhosted clearSecretFiles: unexpected result ${result.$case}`);
@@ -1102,6 +1145,9 @@ export class SelfhostedSession {
         env: { ...(this.transientExecEnvironment?.() ?? {}), ...(secret?.env ?? {}) },
         stdin,
         timeoutMs: executionTimeoutMs,
+        // Only a runner that advertises run-as receives a user; older runners
+        // keep running the command as their own account.
+        runAs: admission.runAsSupported ? (args.runAs ?? "") : "",
       };
       opStreamClient = this.opStreamClientFor(admission);
       if (!opStreamClient) throw execRequiresOpStream();
@@ -1564,8 +1610,8 @@ export class SelfhostedSession {
   }
 
   /** SDK skills/filesystem `pathExists`: whether a path exists on the machine. */
-  async pathExists(path: string, _runAs?: string): Promise<boolean> {
-    const { exists } = await this.statFile({ path });
+  async pathExists(path: string, runAs?: string): Promise<boolean> {
+    const { exists } = await this.statFile({ path, ...(runAs ? { runAs } : {}) });
     return exists;
   }
 
@@ -1574,7 +1620,10 @@ export class SelfhostedSession {
     path: string;
     runAs?: string;
   }): Promise<Array<{ name: string; path: string; type: "file" | "dir" | "other" }>> {
-    const result = await this.listFiles({ path: args.path });
+    const result = await this.listFiles({
+      path: args.path,
+      ...(args.runAs ? { runAs: args.runAs } : {}),
+    });
     return result.fsList.entries.map((entry) => ({
       name: entry.name,
       path: entry.path,
@@ -1617,6 +1666,10 @@ export class SelfhostedSession {
     const pathExists = (path: string): Promise<boolean> => this.pathExists(path, runAs);
     const readText = async (path: string): Promise<string> =>
       decoder.decode(await this.readFile({ path, ...(runAs ? { runAs } : {}) }));
+    // Direct writes carry the user only to a runner that honors it; older
+    // runners keep their existing behavior.
+    const directWriteUser = async (): Promise<{ runAs?: string }> =>
+      runAs && (await this.admitOperation(false)).runAsSupported ? { runAs } : {};
     const writeText = async (
       path: string,
       content: string,
@@ -1628,17 +1681,17 @@ export class SelfhostedSession {
       // Preserve legacy small moves into write-only destinations: their lazy
       // base reader would introduce a new destination-read requirement.
       if (bytes.byteLength <= SELFHOSTED_FILE_CHUNK_BYTES && typeof base === "function") {
-        await this.writeFile({ path, content, createParents: true });
+        await this.writeFile({ path, content, createParents: true, ...(await directWriteUser()) });
         return;
       }
       const initial = await this.admitOperation(false);
       if (!initial.transactionalFsWriteSupported) {
         // Older agents may have a larger negotiated message budget. Preserve
         // their existing writes; a real size rejection remains a typed fault.
-        await this.writeFile({ path, content, createParents: true });
+        await this.writeFile({ path, content, createParents: true, ...(await directWriteUser()) });
         return;
       }
-      if (runAs) {
+      if (runAs && !initial.runAsSupported) {
         throw new SelfhostedControlError({
           code: ErrorCode.ERROR_CODE_UNSUPPORTED,
           message:
@@ -1655,6 +1708,7 @@ export class SelfhostedSession {
           path: resolveConnectedMachinePath(this.workspaceRoot, path),
           content: bytes,
           ...(resolvedBase === undefined ? {} : { baseContent: encoder.encode(resolvedBase) }),
+          runAs: runAs ?? "",
           request: requestTransfer,
         });
         // Unlike physical request observations, this is a verified file outcome.
@@ -1693,6 +1747,7 @@ export class SelfhostedSession {
                 path: sourcePath,
                 offset: String(offset),
                 length: String(SELFHOSTED_FILE_CHUNK_BYTES),
+                runAs: runAs ?? "",
               },
             });
             if (reply.error) throw agentErrorToControlError(reply.error);
@@ -1715,7 +1770,7 @@ export class SelfhostedSession {
             throw new Error("Source changed before move cleanup");
           const reply = await requestTransfer(crypto.randomUUID(), {
             $case: "fsRemove",
-            fsRemove: { path: sourcePath, recursive: false },
+            fsRemove: { path: sourcePath, recursive: false, runAs: runAs ?? "" },
           });
           if (reply.error) throw agentErrorToControlError(reply.error);
           if (reply.result?.$case !== "fsRemove")
@@ -1734,6 +1789,7 @@ export class SelfhostedSession {
         fsRemove: {
           path: resolveConnectedMachinePath(this.workspaceRoot, path),
           recursive: true,
+          runAs: runAs ?? "",
         },
       });
       if (result.$case !== "fsRemove") {
@@ -1787,6 +1843,7 @@ export class SelfhostedSession {
           path,
           offset: String(offset),
           length: String(remaining),
+          runAs: args.runAs ?? "",
         },
       });
       if (result.$case !== "fsRead") {
@@ -1877,7 +1934,8 @@ export class SelfhostedSession {
     runAs?: string;
   }): Promise<number> {
     const content = typeof args.content === "string" ? encoder.encode(args.content) : args.content;
-    if (args.runAs) {
+    const runAs = args.runAs ?? "";
+    if (runAs && !(await this.admitOperation(false)).runAsSupported) {
       throw new SelfhostedControlError({
         code: ErrorCode.ERROR_CODE_UNSUPPORTED,
         message: "Native file writes do not support runAs impersonation; no file was written.",
@@ -1888,14 +1946,16 @@ export class SelfhostedSession {
     if (content.byteLength > SELFHOSTED_FILE_CHUNK_BYTES && !args.append) {
       const initial = await this.admitOperation(false);
       if (initial.transactionalFsWriteSupported) {
-        const baseContent = (await this.pathExists(args.path))
-          ? await this.readFile({ path: args.path })
+        const asUser = runAs ? { runAs } : {};
+        const baseContent = (await this.pathExists(args.path, runAs || undefined))
+          ? await this.readFile({ path: args.path, ...asUser })
           : undefined;
         await transferEditorFile({
           path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
           content,
           ...(baseContent === undefined ? {} : { baseContent }),
           createParents: args.createParents ?? true,
+          runAs,
           request: this.fileTransferRequest(initial),
         });
         return content.byteLength;
@@ -1909,6 +1969,7 @@ export class SelfhostedSession {
         createParents: args.createParents ?? true,
         append: args.append ?? false,
         mode: 0,
+        runAs,
       },
     });
     if (result.$case !== "fsWrite") {
@@ -1940,6 +2001,8 @@ export class SelfhostedSession {
         createParents: args.createParents ?? true,
         append: false,
         mode: 0o600,
+        // Controller-owned authority stays the agent's.
+        runAs: "",
       },
     });
     if (result.$case !== "fsWrite") {
@@ -1956,7 +2019,7 @@ export class SelfhostedSession {
     try {
       const result = await this.call({
         $case: "fsRemove",
-        fsRemove: { path: privatePath, recursive: false },
+        fsRemove: { path: privatePath, recursive: false, runAs: "" },
       });
       if (result.$case !== "fsRemove") {
         throw new Error(`selfhosted deletePlacementPrivate: unexpected result ${result.$case}`);
@@ -1971,12 +2034,14 @@ export class SelfhostedSession {
   async listFiles(args: {
     path: string;
     recursive?: boolean;
+    runAs?: string;
   }): Promise<NonNullable<ControlResponse["result"]> & { $case: "fsList" }> {
     const result = await this.call({
       $case: "fsList",
       fsList: {
         path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
         recursive: args.recursive ?? false,
+        runAs: args.runAs ?? "",
       },
     });
     if (result.$case !== "fsList") {
@@ -1986,10 +2051,13 @@ export class SelfhostedSession {
   }
 
   /** Stat a path on the machine. */
-  async statFile(args: { path: string }): Promise<{ exists: boolean }> {
+  async statFile(args: { path: string; runAs?: string }): Promise<{ exists: boolean }> {
     const result = await this.call({
       $case: "fsStat",
-      fsStat: { path: resolveConnectedMachinePath(this.workspaceRoot, args.path) },
+      fsStat: {
+        path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
+        runAs: args.runAs ?? "",
+      },
     });
     if (result.$case !== "fsStat") {
       throw new Error(`selfhosted statFile: unexpected result ${result.$case}`);
@@ -2209,6 +2277,7 @@ export class SelfhostedSession {
           rows: 0,
           term: "xterm-256color",
           scopeId: this.terminalScopeId,
+          runAs: "",
         },
       });
       if (result.$case !== "ptyOpen") {
@@ -2296,6 +2365,7 @@ export class SelfhostedSandboxClient {
   private readonly operationCpuQuotaSupported: boolean | undefined;
   private readonly transactionalFsWriteSupported: boolean | undefined;
   private readonly browserControlHttpSupported: boolean | undefined;
+  private readonly runAsSupported: boolean | undefined;
   private readonly resolveOperationAdmission:
     | (() => Promise<SelfhostedOperationAdmission | null>)
     | undefined;
@@ -2338,6 +2408,7 @@ export class SelfhostedSandboxClient {
     operationCpuQuotaSupported?: boolean;
     transactionalFsWriteSupported?: boolean;
     browserControlHttpSupported?: boolean;
+    runAsSupported?: boolean;
     resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
     adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
     settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
@@ -2371,6 +2442,7 @@ export class SelfhostedSandboxClient {
     this.operationCpuQuotaSupported = opts.operationCpuQuotaSupported;
     this.transactionalFsWriteSupported = opts.transactionalFsWriteSupported;
     this.browserControlHttpSupported = opts.browserControlHttpSupported;
+    this.runAsSupported = opts.runAsSupported;
     this.resolveOperationAdmission = opts.resolveOperationAdmission;
     this.adoptBackgroundCommand = opts.adoptBackgroundCommand;
     this.settleBackgroundCommand = opts.settleBackgroundCommand;
@@ -2416,6 +2488,7 @@ export class SelfhostedSandboxClient {
         : {}),
       transactionalFsWriteSupported: this.transactionalFsWriteSupported === true,
       browserControlHttpSupported: this.browserControlHttpSupported === true,
+      runAsSupported: this.runAsSupported === true,
       ...(this.resolveOperationAdmission !== undefined
         ? { resolveOperationAdmission: this.resolveOperationAdmission }
         : {}),
@@ -2538,6 +2611,8 @@ export interface SelfhostedSessionBuild {
   transactionalFsWriteSupported?: boolean;
   /** Exact live runner capability for in-process controller requests. */
   browserControlHttpSupported?: boolean;
+  /** Exact live runner capability for per-request run-as. */
+  runAsSupported?: boolean;
   /** Live last-boundary operation admission resolver; see SelfhostedSessionDeps. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
@@ -2595,6 +2670,7 @@ export async function buildSelfhostedBackendSession(
       : {}),
     transactionalFsWriteSupported: deps.transactionalFsWriteSupported === true,
     browserControlHttpSupported: deps.browserControlHttpSupported === true,
+    runAsSupported: deps.runAsSupported === true,
     ...(deps.resolveOperationAdmission !== undefined
       ? { resolveOperationAdmission: deps.resolveOperationAdmission }
       : {}),

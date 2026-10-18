@@ -36,6 +36,9 @@ export async function transferEditorFile(input: {
   content: Uint8Array;
   baseContent?: Uint8Array;
   createParents?: boolean;
+  /** Stage and publish as this local user ("" = the agent's account); only for
+   * a runner that advertises run-as. */
+  runAs?: string;
   request: (requestId: string, op: NonNullable<ControlRequest["op"]>) => Promise<ControlResponse>;
 }): Promise<{ recovered: boolean }> {
   const opId = `fsw-${crypto.randomUUID()}`;
@@ -106,6 +109,7 @@ export async function transferEditorFile(input: {
             expectedAbsent: input.baseContent === undefined,
             contentDigest: digest,
             contentSize: String(input.content.byteLength),
+            runAs: input.runAs ?? "",
           },
         },
         windowBytes: "0",

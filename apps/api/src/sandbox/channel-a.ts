@@ -618,6 +618,7 @@ export async function withFormerConnectedMachine<T>(
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
     transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
     browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+    runAsSupported: enrollment.agentCapabilities.runAs === true,
     ...(settings.agentOpStreamEnabled === true &&
     enrollment.opStream === true &&
     bus.getOpStreamConnection
@@ -864,6 +865,7 @@ async function withChannelAOperation<T>(
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
         browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+        runAsSupported: enrollment.agentCapabilities.runAs === true,
         ...(settings.agentOpStreamEnabled === true &&
         enrollment?.opStream === true &&
         bus.getOpStreamConnection

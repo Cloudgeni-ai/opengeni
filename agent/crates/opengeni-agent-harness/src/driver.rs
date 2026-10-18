@@ -104,16 +104,21 @@ impl Op {
                 deadline_after_ms: 0,
             },
             Op::FsStat { path } => {
-                PreparedOp::Control(Box::new(ReqOp::FsStat(v1::FsStatRequest { path })))
+                PreparedOp::Control(Box::new(ReqOp::FsStat(v1::FsStatRequest {
+                    run_as: String::new(),
+                    path,
+                })))
             }
             Op::FsList { path } => {
                 PreparedOp::Control(Box::new(ReqOp::FsList(v1::FsListRequest {
+                    run_as: String::new(),
                     path,
                     recursive: false,
                 })))
             }
             Op::FsRead { path } => {
                 PreparedOp::Control(Box::new(ReqOp::FsRead(v1::FsReadRequest {
+                    run_as: String::new(),
                     path,
                     offset: 0,
                     length: 0,
@@ -121,6 +126,7 @@ impl Op {
             }
             Op::FsWrite { path, bytes } => {
                 PreparedOp::Control(Box::new(ReqOp::FsWrite(v1::FsWriteRequest {
+                    run_as: String::new(),
                     path,
                     content: Bytes::from(vec![b'a'; usize::try_from(bytes).unwrap_or(usize::MAX)]),
                     create_parents: true,
@@ -448,6 +454,7 @@ fn error_code_label(code: i32) -> String {
         Ok(ErrorCode::AgentOffline) => "AGENT_OFFLINE",
         Ok(ErrorCode::Fenced) => "FENCED",
         Ok(ErrorCode::PayloadTooLarge) => "PAYLOAD_TOO_LARGE",
+        Ok(ErrorCode::RunAsUnknownUser) => "RUN_AS_UNKNOWN_USER",
         Ok(ErrorCode::Unspecified) => "UNSPECIFIED",
         Err(_) => "UNKNOWN",
     };

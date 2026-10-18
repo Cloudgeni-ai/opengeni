@@ -594,6 +594,56 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(res.stdout.trim()).toBe("the-vm");
   });
 
+  test("runAs reaches only a runner that advertises run-as", async () => {
+    const fsOps = (mock: MockAgentResponder) =>
+      mock.requests
+        .map((request) => request.req.op)
+        .filter(
+          (op) => op?.$case === "fsRead" || op?.$case === "fsWrite" || op?.$case === "fsStat",
+        );
+
+    const supported = new MockAgentResponder();
+    const runAsSession = sessionWith(supported, 0, undefined, { runAsSupported: true });
+    await runAsSession.exec({ cmd: "id -u", runAs: "dev" });
+    expect(streamedExecRequest(supported).runAs).toBe("dev");
+    await runAsSession.writeFile({ path: "/tmp/as-dev", content: "x", runAs: "dev" });
+    await runAsSession.readFile({ path: "/tmp/as-dev", runAs: "dev" });
+    await runAsSession.pathExists("/tmp/as-dev", "dev");
+    expect(
+      fsOps(supported).map((op) =>
+        op?.$case === "fsRead"
+          ? op.fsRead.runAs
+          : op?.$case === "fsWrite"
+            ? op.fsWrite.runAs
+            : op?.$case === "fsStat"
+              ? op.fsStat.runAs
+              : null,
+      ),
+    ).toEqual(["dev", "dev", "dev"]);
+
+    // An older runner would ignore the field and act as its own account, so it
+    // never receives one: commands and reads keep their legacy behavior and
+    // writes keep refusing.
+    const legacy = new MockAgentResponder();
+    const legacySession = sessionWith(legacy);
+    await legacySession.exec({ cmd: "id -u", runAs: "dev" });
+    expect(streamedExecRequest(legacy).runAs).toBe("");
+    await legacySession.writeFile({ path: "/tmp/plain", content: "x" });
+    await legacySession.readFile({ path: "/tmp/plain", runAs: "dev" });
+    expect(
+      fsOps(legacy).map((op) =>
+        op?.$case === "fsRead"
+          ? op.fsRead.runAs
+          : op?.$case === "fsWrite"
+            ? op.fsWrite.runAs
+            : null,
+      ),
+    ).toEqual(["", ""]);
+    await expect(
+      legacySession.writeFile({ path: "/tmp/refused", content: "x", runAs: "dev" }),
+    ).rejects.toThrow("Native file writes do not support runAs impersonation");
+  });
+
   test("writeFile then readFile round-trips through the mock (binary-safe)", async () => {
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
@@ -1510,7 +1560,7 @@ describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
     await session.clearSecretFilesForAttempt();
     const removes = mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove");
     expect(removes.map((entry) => entry.req.op)).toEqual([
-      { $case: "fsRemove", fsRemove: { path: scopeDir, recursive: true } },
+      { $case: "fsRemove", fsRemove: { path: scopeDir, recursive: true, runAs: "" } },
     ]);
     // Idempotent: the scope is forgotten once removed.
     await session.clearSecretFilesForAttempt();
