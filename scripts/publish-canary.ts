@@ -139,6 +139,9 @@ const registry = "https://registry.npmjs.org";
 // acknowledgement while the rest of the cohort is already visible.
 const CANARY_RECEIPT_TIMEOUT_MS = 600_000;
 const CANARY_RECEIPT_REQUEST_TIMEOUT_MS = 10_000;
+// npm tags a brand-new package `latest: 0.0.0-stage` while its first version
+// waits in the staged-publishing queue for a maintainer's 2FA approval.
+const NPM_STAGED_PLACEHOLDER_VERSION = "0.0.0-stage";
 const CANARY_RECEIPT_POLL_INTERVAL_MS = 1_000;
 // Each receipt costs two GETs. The default budget scales with the cohort so
 // the first pass and the final complete-cohort reserve never consume the whole
@@ -605,13 +608,17 @@ export async function publishPreparedCanaries(
 function receiptObservation(pkg: CanaryArchive, current: RegistryPackage): string {
   // npm always points `latest` at a package's first published version, whatever
   // tag the publish asked for. For a package with no stable release yet that is
-  // this canary, and nothing else may have moved the tag.
+  // this canary, or npm's staged-publishing placeholder when the registry holds
+  // the new package for maintainer approval. Nothing else may have moved the tag.
   const latest = current["dist-tags"].latest;
-  const firstPublication = pkg.previousLatest === undefined && latest === pkg.version;
+  const staged = pkg.previousLatest === undefined && latest === NPM_STAGED_PLACEHOLDER_VERSION;
+  const firstPublication = pkg.previousLatest === undefined && (latest === pkg.version || staged);
   if (latest !== pkg.previousLatest && !firstPublication) {
     throw new Error(`Stable tag changed during canary publication for ${pkg.name}`);
   }
-  if (!Object.hasOwn(current.versions, pkg.version)) return "version_pending";
+  if (!Object.hasOwn(current.versions, pkg.version)) {
+    return staged ? "staged_approval_pending" : "version_pending";
+  }
   if (current["dist-tags"].canary !== pkg.version) return "canary_tag_pending";
   const dist = current.versions[pkg.version]?.dist;
   if (dist?.integrity && dist.integrity !== pkg.integrity) {
@@ -711,15 +718,27 @@ export async function confirmCanaryCohort(
         }),
       );
       let failure: unknown;
+      const staged: string[] = [];
       for (const result of results) {
         if (result.status === "rejected") {
           failure ??= result.reason;
         } else {
           lastObservation = result.value.observation;
           if (lastObservation === "matched") pending.delete(result.value.pkg.name);
+          if (lastObservation === "staged_approval_pending") {
+            staged.push(`${result.value.pkg.name}@${result.value.pkg.version}`);
+          }
         }
       }
       if (failure) throw failure;
+      // Polling cannot clear a staged first publication; only a maintainer can.
+      if (staged.length) {
+        throw new Error(
+          `npm staged publishing holds the first publication of ${staged.join(", ")}. ` +
+            "A maintainer must approve it with 2FA (npm stage list, then npm stage approve <id>, " +
+            "or the Staged Packages tab on npmjs.com); then reconcile this publication run.",
+        );
+      }
       if (pending.size === 0) {
         if (packages.length > maxReads - reads || now() >= deadline) {
           throw new Error("Final canary cohort cannot fit the remaining read bounds");
