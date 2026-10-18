@@ -106,7 +106,12 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
   },
   e2b: {
     required: ["OPENGENI_E2B_API_KEY"],
-    optional: ["OPENGENI_E2B_TEMPLATE"],
+    optional: [
+      "OPENGENI_E2B_DOMAIN",
+      "OPENGENI_E2B_API_URL",
+      "OPENGENI_E2B_SANDBOX_URL",
+      "OPENGENI_E2B_TEMPLATE",
+    ],
   },
   blaxel: {
     required: ["OPENGENI_BLAXEL_API_KEY"],

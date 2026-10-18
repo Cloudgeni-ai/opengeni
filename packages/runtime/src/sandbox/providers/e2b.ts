@@ -18,9 +18,8 @@ export const e2bProvider: ProviderRegistration = {
       : REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.e2b,
   validateCredentials(settings) {
-    // The underlying e2b SDK reads E2B_API_KEY from process.env; we mirror it to
-    // settings so a misconfigured deployment fails fast here instead of deep in
-    // the SDK at create() time.
+    // build() hands the key to the SDK; checking it here makes a misconfigured
+    // deployment fail fast instead of deep in the SDK at create() time.
     if (!settings.e2bApiKey) {
       throw new SandboxConfigError("e2b", "OPENGENI_E2B_API_KEY is required");
     }
@@ -30,6 +29,14 @@ export const e2bProvider: ProviderRegistration = {
       env: environment,
       exposedPorts,
     };
+    // Where and as whom the SDK connects, for every create and resume. The
+    // client keeps it out of serialized session state.
+    const connection: NonNullable<typeof options.connection> = {};
+    if (settings.e2bApiKey) connection.apiKey = settings.e2bApiKey;
+    if (settings.e2bDomain) connection.domain = settings.e2bDomain;
+    if (settings.e2bApiUrl) connection.apiUrl = settings.e2bApiUrl;
+    if (settings.e2bSandboxUrl) connection.sandboxUrl = settings.e2bSandboxUrl;
+    options.connection = connection;
     if (settings.e2bTemplate) options.template = settings.e2bTemplate;
     // e2b's `timeout` is in SECONDS (the SDK multiplies by 1000 internally) —
     // a different unit from Modal's `timeoutMs`.
