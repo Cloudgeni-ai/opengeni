@@ -2057,7 +2057,16 @@ async function daemonPidRecords(directory: string): Promise<string[]> {
   const namespace = dirname(directory);
   const namespaces = dirname(namespace);
   for (const path of [dirname(namespaces), namespaces, namespace, directory]) {
-    const metadata = await lstat(path);
+    let metadata: Awaited<ReturnType<typeof lstat>>;
+    try {
+      metadata = await lstat(path);
+    } catch (error) {
+      // A removed record directory (a temp-directory cleanup, for example)
+      // holds no records, exactly like an empty one. Its daemon, if any, has
+      // also lost its socket and cannot be reached by another controller.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw daemonLineageUnavailable();
   }
   const entries = await readdir(directory, { withFileTypes: true });
