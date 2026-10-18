@@ -1,5 +1,43 @@
 # @opengeni/core
 
+## 4.1.1
+
+### Patch Changes
+
+- a254a76: Read execution-time provider catalog inputs in one scoped transaction instead of repeating serial catalog and connection-list queries. Turn startup and stateless model calls share the same settings-building path. Catalog ordering, retained-model handling, live workspace credential checks and selected model policy remain unchanged; no data is cached across executions.
+- c602300: Fix large Connected Machine writes for machine-addressed operations, including run_on. Negotiate epoch-zero transactional upload support without inventing session epochs or replaying mutations. Older transactional agents receive a preflight 256 KiB limit and update guidance; nonzero session transfers remain compatible. Large machine-addressed transfers require the corresponding native agent release.
+- 9be9a82: Steer reaches the agent within seconds and no longer kills work in progress. A model request still generating when a Steer arrives is cut short: assistant messages the provider had completed stay in history, unfinished text and unstarted tool calls are dropped, and the next request carries the Steer on the unchanged history. Short tool calls finish; long `exec_command`/`write_stdin`, `command_wait`/`command_read` and `session_wait` waits return early with their handle while the work keeps running (`session_wait` reports kind `steer`). The turn then hands over (`turn.superseded` with reason `steer`, `atModelStep: true` and, for a cut-off answer, `cutOffText`) and the Steer runs next. Several Steers are read together, in the order they were sent. Agent Steer (`session_steer`) behaves the same way. Queue (an ordinary Send) is unchanged and still runs after the whole turn. Custom model transports can honour preemption with the exported `isModelPreempted` and `preemptedResponseDone`.
+
+  The web and React Native session screens show a Steer only as the person's message: no status row, chip or "Send now". API callers can still stop the running attempt with `interrupt: true` on `steerQueueItem` on the turn that `steerMessage` returned. A new workspace setting `busySend` (`queue` by default, or `steer`) and a matching `busySend` option on `useComposer`, `SessionConversation` composer options and `useOpenGeniNativeSession` let a product make a normal Send act as Steer while the agent is busy; Cmd/Ctrl+Enter then does the other one.
+
+- 523d8f9: Release the workbench correction for permission-aware optional reads: keep published Knowledge available to readers without requesting management-only pending entries, and discover rigs and Connected Machines only with their existing workspace read permissions. Preserve authorized errors and invalidate stale results when authority changes. No API permission or runtime authorization changes.
+- Updated dependencies [a254a76]
+- Updated dependencies [373f408]
+- Updated dependencies [6156fab]
+- Updated dependencies [e6f56a1]
+- Updated dependencies [84688e2]
+- Updated dependencies [cf899f4]
+- Updated dependencies [cf899f4]
+- Updated dependencies [c602300]
+- Updated dependencies [e4e30b8]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [89ac8a8]
+- Updated dependencies [f20f60c]
+- Updated dependencies [9be9a82]
+- Updated dependencies [3b980e6]
+  - @opengeni/db@4.1.0
+  - @opengeni/runtime@4.1.0
+  - @opengeni/codex@4.1.0
+  - @opengeni/config@4.1.0
+  - @opengeni/contracts@4.1.0
+  - @opengeni/documents@4.1.0
+  - @opengeni/events@4.1.0
+  - @opengeni/storage@4.1.0
+  - @opengeni/capabilities@4.1.0
+  - @opengeni/observability@4.1.0
+  - @opengeni/vaults@4.1.0
+  - @opengeni/network@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes
