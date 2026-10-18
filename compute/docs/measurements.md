@@ -868,8 +868,24 @@ from that commit. Results carry the commits as `backend+agent`.
 | r2 13:46, r3 14:05, r4 14:25 | 087c9cb83, f973bd193 | 171ffa83a, 4dd28c3b3 | 3 | 1 | create: "creating a compute sandbox needs its lease identity". The deployment had sandbox ownership off (the chart's default), so the SDK created the sandbox without the lease; the e2e now sets the managed deployment's rollout controls |
 | r5 14:46 | f973bd193+057cd2c06 | fec5f6e4d | 3 | 1 | create: the sandbox was created (17.0 s from the provision start to `sandbox.box.created`, the gateway logged the host linked and the agent's session opened), then the first file write failed: the agent refuses a transfer whose session epoch is 0, which the backend sends |
 | r6 14:51 | the same, lazy provisioning off | fec5f6e4d | 3 | 1 | create: the same failure; eager provisioning does not change it |
+| r8 15:38 | 1f341facf+e5441d3e1 | 6423207a7 | 10 | 9 | none before create: create (first turn 25.1 s), commands, files, git, browser, move (26.6 s to another host, files kept) pass; see below |
 
-Checks after create (commands through host-loss and the UI pass) were
-skipped in every run so far because they need create. The run-as check
+Checks after create were skipped through r6 because they need create.
+In r8 (every request now carries a nonzero agent epoch) create and most
+checks ran. What failed, from the host journals and Opengeni's events:
+each sleep level (Paused, Saved, Archived, Remote) completed on the host
+within seconds, but the next terminal command through Opengeni did not
+wake the sandbox: the host resumed it only about 120 s later, when that
+command's timeout fired, so every sleep check and the host-loss check
+(which first archives) failed; the interactive terminal answered 409 (no
+durable process authority); the desktop's computer session failed to
+start (driver failed); a guest port relayed through the front door gave
+up after 60 s; and deleting the session stayed at 409 ("still shutting
+down") for 15 minutes. The background and desktop checks of r8 were
+also too lenient or too strict and were corrected after it (background
+commands are listed only while they run; the desktop needs a working
+computer session and a screenshot). After the move, the host logged
+repeated "more agent-link connections than a sandbox may hold" for the
+same sandbox (124 times in 10 minutes). The run-as check
 is not applicable: the backend and the agent support running as another
 user, but Opengeni has no way to request it for a sandbox.

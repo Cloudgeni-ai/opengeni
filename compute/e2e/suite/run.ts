@@ -421,7 +421,7 @@ check("desktop", "the agent opens the desktop and sees it", ["create"], async ()
   return `computer session ${working[0].lifecycle}; reply "${turn.text.trim().slice(0, 120)}"`;
 });
 
-check("ui", "the web UI: file browser, terminal and desktop (Playwright)", ["files", "terminal"], async () => {
+check("ui", "the web UI: file browser, terminal and desktop (Playwright)", ["files"], async () => {
   const run = spawnSync("bun", [`${import.meta.dir}/ui.ts`], {
     encoding: "utf8",
     env: { ...process.env, WORKSPACE: state.workspace!, SESSION: state.session!.id, MARKER: state.marker! },
