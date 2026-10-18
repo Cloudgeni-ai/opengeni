@@ -178,6 +178,9 @@ struct Map {
     /// latest take-up since it began waiting, on the sandbox's clock.
     sweeping: bool,
     next_sweep: Option<Duration>,
+    /// The sweep's task, which ends with the sandbox's streams: it may wait
+    /// on a clock that never runs again.
+    sweeper: Option<Tasks>,
 }
 
 struct Entry {
@@ -419,7 +422,8 @@ where
             return;
         }
         map.sweeping = true;
-        tokio::spawn(sweep(Arc::downgrade(&self.inner), now));
+        let task = tokio::spawn(sweep(Arc::downgrade(&self.inner), now));
+        map.sweeper = Some(Tasks(vec![task.abort_handle()]));
     }
 }
 
@@ -1069,5 +1073,26 @@ mod tests {
         rig.clock.set(true);
         let (_resumed, answer) = raw_hello(&rig, 2, 0, 0).await;
         assert_eq!(answer, "ok 0\n");
+    }
+
+    /// A sandbox's streams that go while its guest cannot run take their
+    /// sweep with them: it does not wait on a clock that may never run
+    /// again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_sweep_ends_with_the_sandboxs_streams() {
+        let rig = rig(4, Duration::from_millis(300));
+        let (connection, answer) = raw_hello(&rig, 1, 0, 0).await;
+        assert_eq!(answer, "ok 0\n");
+        rig.clock.set(false);
+        let clock = rig.clock.clone();
+        drop((rig, connection));
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while Arc::strong_count(&clock.inner) > 1 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "something still waits on the clock"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }

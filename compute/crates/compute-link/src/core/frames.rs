@@ -167,8 +167,7 @@ impl Core {
                 sandbox.refused = true;
                 // What waits goes, and is owed nothing; what its agent got
                 // it may still answer, once a new ticket opens a session.
-                let dropped = std::mem::take(&mut sandbox.waiting);
-                sandbox.dropped(&dropped.messages);
+                sandbox.waiting.clear();
             }
             Ending::Lost | Ending::Other => {
                 tracing::info!(
@@ -219,8 +218,7 @@ impl Core {
     }
 
     pub(super) fn message(&mut self, now: u64, id: &str, queued: Queued) {
-        let reply = queued.reply.clone();
-        if reply.is_some() {
+        if queued.reply.is_some() {
             self.asked(now, id);
         }
         let Some(sandbox) = self.sandboxes.get_mut(id) else {
@@ -230,30 +228,22 @@ impl Core {
             return;
         };
         let open = matches!(sandbox.session, Session::Open { .. });
-        let taken = if open && sub.guest.is_some() {
-            self.deliver(id, queued);
-            true
-        } else if sandbox.waiting.push(queued, &self.settings) {
-            true
-        } else {
-            if !sandbox.waiting.dropping {
-                sandbox.waiting.dropping = true;
-                tracing::warn!(
-                    sandbox = id,
-                    waiting = sandbox.waiting.messages.len(),
-                    bytes = sandbox.waiting.bytes,
-                    "messages for an agent that is not connected are dropped: as many wait as the host keeps"
-                );
-            }
-            false
-        };
-        if taken && let Some(reply) = reply {
-            self.owes(now, id, reply);
+        if open && sub.guest.is_some() {
+            self.deliver(now, id, queued);
+        } else if !sandbox.waiting.push(queued, &self.settings) && !sandbox.waiting.dropping {
+            sandbox.waiting.dropping = true;
+            tracing::warn!(
+                sandbox = id,
+                waiting = sandbox.waiting.messages.len(),
+                bytes = sandbox.waiting.bytes,
+                "messages for an agent that is not connected are dropped: as many wait as the host keeps"
+            );
         }
     }
 
-    /// Sends a message to the connection that holds its subscription.
-    pub(super) fn deliver(&mut self, id: &str, queued: Queued) {
+    /// Sends a message to the connection that holds its subscription: a
+    /// request delivered is owed an answer.
+    pub(super) fn deliver(&mut self, now: u64, id: &str, queued: Queued) {
         let Some(sandbox) = self.sandboxes.get_mut(id) else {
             return;
         };
@@ -265,6 +255,7 @@ impl Core {
         };
         sub.delivered += 1;
         let done = sub.max.is_some_and(|max| sub.delivered >= max);
+        let asked = queued.reply.clone().map(|reply| (reply, queued.at));
         self.send(
             conn,
             ServerOp::Msg(Delivery {
@@ -278,6 +269,9 @@ impl Core {
         if done {
             self.remove_sub(id, queued.sid, true);
             self.save(id);
+        }
+        if let Some((reply, at)) = asked {
+            self.owes(now, at, id, reply);
         }
     }
 

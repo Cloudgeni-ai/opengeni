@@ -554,12 +554,21 @@ fn another_agent_process_owes_nothing_the_one_before_was_asked() {
 }
 
 /// A session ended for good drops what waits for its agent, which is owed
-/// nothing; a request its agent already got it may still answer.
+/// nothing; a request its agent already got it may still answer. That holds
+/// as well when what its agent got fills every tracked answer, so the one
+/// that waits is past the bound.
 #[test]
 fn a_session_ended_for_good_owes_only_what_its_agent_got() {
+    for max_waiting in [Settings::default().max_waiting, 1] {
+        a_session_ended_for_good_owes_only_what_its_agent_got_with(max_waiting);
+    }
+}
+
+fn a_session_ended_for_good_owes_only_what_its_agent_got_with(max_waiting: usize) {
     let hold = 120_000;
     let mut core = core(Settings {
         hold_ms: hold,
+        max_waiting,
         ..Settings::default()
     });
     connect(&mut core, 0, 1);
@@ -596,12 +605,20 @@ fn a_session_ended_for_good_owes_only_what_its_agent_got() {
     );
     core.take();
     told(&mut core, 5, Running::Asleep);
-    assert_eq!(wakes(&core.take()), 1, "it still owes the one it got");
+    assert_eq!(
+        wakes(&core.take()),
+        1,
+        "it still owes the one it got (max_waiting {max_waiting})"
+    );
     // Once the one it got is old, the one dropped, younger, is owed
     // nothing either.
     told(&mut core, hold, Running::Awake);
     told(&mut core, hold + 1, Running::Asleep);
-    assert_eq!(wakes(&core.take()), 0, "and nothing for the one dropped");
+    assert_eq!(
+        wakes(&core.take()),
+        0,
+        "and nothing for the one dropped (max_waiting {max_waiting})"
+    );
 }
 
 fn errors(effects: &[Effect], to: ConnId) -> Vec<String> {
