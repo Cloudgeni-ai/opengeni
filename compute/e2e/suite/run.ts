@@ -24,7 +24,8 @@ const API_CONTRACT = env("API_CONTRACT");
 const MODEL = env("MODEL");
 const OUT = env("OUT");
 const COMPUTE_SERVICE = env("COMPUTE_SERVICE");
-const COMPUTE_PORT = Number(env("COMPUTE_PORT", "18080"));
+const COMPUTE_ADDRESS = env("COMPUTE_ADDRESS", "127.0.0.1");
+const COMPUTE_PORT = Number(env("COMPUTE_PORT", "8080"));
 const COMPUTE_CA = readFileSync(env("COMPUTE_CA"));
 const OPENGENI_KEY = readFileSync(env("COMPUTE_OPENGENI_KEY"), "utf8").trim();
 const OPERATOR_KEY = readFileSync(env("COMPUTE_OPERATOR_KEY"), "utf8").trim();
@@ -134,14 +135,14 @@ async function execOk(command: string, timeoutMs?: number): Promise<string> {
   return result.stdout;
 }
 
-// --- The fabric's API (through a port-forward, verified as its service name) --
+// --- The fabric's API (at its cluster address, verified as its service name) --
 
 function fabric<T = any>(method: string, path: string, body?: unknown, key = OPENGENI_KEY): Promise<T> {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : JSON.stringify(body);
     const request = httpsRequest(
       {
-        host: "127.0.0.1",
+        host: COMPUTE_ADDRESS,
         port: COMPUTE_PORT,
         servername: COMPUTE_SERVICE,
         ca: COMPUTE_CA,
@@ -179,7 +180,7 @@ const sandbox = () => fabric<Sandbox>("GET", `/v1/sandboxes/${state.sandbox}`);
 /** One HTTP GET to a port inside the sandbox, over the fabric's connect stream. */
 function connectGet(port: number, path: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const socket = tlsConnect({ host: "127.0.0.1", port: COMPUTE_PORT, servername: COMPUTE_SERVICE, ca: COMPUTE_CA });
+    const socket = tlsConnect({ host: COMPUTE_ADDRESS, port: COMPUTE_PORT, servername: COMPUTE_SERVICE, ca: COMPUTE_CA });
     let buffer = Buffer.alloc(0);
     let upgraded = false;
     const timer = setTimeout(() => socket.destroy(new Error("connect timed out")), 120_000);

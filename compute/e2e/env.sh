@@ -181,6 +181,16 @@ fleet() {
   g artifacts repositories add-iam-policy-binding "$PREFIX" --location "$REGION" \
     --member "serviceAccount:$(cat "$out/control_service_account")" --role roles/artifactregistry.writer \
     >/dev/null
+  # The group takes a new template only for hosts it makes (hosts outlive
+  # their agent, ADR 9). Between runs no sandbox here needs keeping, so the
+  # environment replaces hosts that run an older bundle at once.
+  local group=$PREFIX-hosts
+  if [ "$(g compute instance-groups managed describe "$group" --zone "$ZONE" \
+    --format='value(status.versionTarget.isReached)')" != True ]; then
+    log "replacing the hosts of $group with the new template"
+    g compute instance-groups managed rolling-action replace "$group" --zone "$ZONE" \
+      --max-surge "$HOSTS" --max-unavailable "$HOSTS" >/dev/null
+  fi
 }
 
 # --- stack: the VM Opengeni and the fleet service run on -----------------

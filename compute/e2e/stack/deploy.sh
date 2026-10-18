@@ -206,13 +206,12 @@ curl -fsS "https://$app/healthz" >/dev/null
 
 log "waiting for $HOSTS hosts"
 key=$(cat "$sec/compute-operator-key")
-k port-forward "svc/$full-compute-control" 18080:8080 >/dev/null 2>&1 &
-forward=$!
-trap 'kill $forward 2>/dev/null || true' EXIT
-sleep 3
+# The service's address on the cluster network, which the node reaches
+# directly (a port-forward would stay bound to one replica as it rolls).
+fabric=$(ip "$full-compute-control")
 for _ in $(seq 120); do
-  count=$(curl -fsS --cacert "$sec/api-ca.pem" --resolve "$full-compute-control.$ns.svc:18080:127.0.0.1" \
-    -H "X-API-Key: $key" "https://$full-compute-control.$ns.svc:18080/v1/hosts" 2>/dev/null |
+  count=$(curl -fsS --cacert "$sec/api-ca.pem" --resolve "$full-compute-control.$ns.svc:8080:$fabric" \
+    -H "X-API-Key: $key" "https://$full-compute-control.$ns.svc:8080/v1/hosts" 2>/dev/null |
     jq '[.[] | select(.state == "live")] | length' 2>/dev/null || echo 0)
   [ "${count:-0}" -ge "$HOSTS" ] && break
   sleep 10

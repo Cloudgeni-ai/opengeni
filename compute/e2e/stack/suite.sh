@@ -30,16 +30,14 @@ if [ ! -f "$HOME/.cache/ms-playwright/.e2e-chromium" ]; then
 fi
 contract=$(grep -o 'OPENGENI_API_CONTRACT_REVISION = "[^"]*"' "$og/packages/contracts/src/index.ts" | cut -d'"' -f2)
 
-kubectl -n opengeni port-forward "svc/${COMPUTE_SERVICE%%.*}" 18080:8080 >"$out/port-forward.log" 2>&1 &
-forward=$!
-trap 'kill $forward 2>/dev/null || true' EXIT
-sleep 3
+# The fleet service on the cluster network, which this node reaches directly.
+fabric=$(kubectl -n opengeni get svc "${COMPUTE_SERVICE%%.*}" -o jsonpath='{.spec.clusterIP}')
 
 log "run $RUN"
 started=$(date -u +%s)
 status=0
 OPENGENI_URL=$OPENGENI_URL API_CONTRACT=$contract MODEL=$MODEL_DEPLOYMENT OUT=$out \
-  COMPUTE_SERVICE=$COMPUTE_SERVICE COMPUTE_PORT=18080 COMPUTE_CA=$sec/api-ca.pem \
+  COMPUTE_SERVICE=$COMPUTE_SERVICE COMPUTE_ADDRESS=$fabric COMPUTE_PORT=8080 COMPUTE_CA=$sec/api-ca.pem \
   COMPUTE_OPENGENI_KEY=$sec/compute-opengeni-key COMPUTE_OPERATOR_KEY=$sec/compute-operator-key \
   PROJECT=$PROJECT ZONE=$ZONE HOSTS=${HOSTS:-3} ONLY=${ONLY:-} \
   PLAYWRIGHT_MODULE=$og/node_modules/playwright/index.js \
