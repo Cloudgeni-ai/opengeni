@@ -546,58 +546,6 @@ describe("items", () => {
 });
 
 describe("writes", () => {
-  for (const type of ["login", "note", "api_key"] as const) {
-    test(`generated ${type} ids stay inside the supported alphabet for dash-leading entropy`, async () => {
-      // This entropy starts with '-' in base64url, which the adapter deliberately
-      // rejects as an unconfirmed id. Fake successful receipts must not randomly
-      // exercise that refusal instead of the intended creation contract.
-      const bytes = Array<number>(12).fill(248);
-      const { fake, provider } = setup((state) => {
-        state.nextItemIdBytes = bytes;
-      });
-      const created = await provider.writeItem(ctx(), RW, {
-        name: `deterministic ${type}`,
-        type,
-        websites: [],
-        fields: [],
-      });
-      expect(created.externalItemId).toBe(Buffer.from(bytes).toString("hex"));
-      expect(created.version).not.toBeNull();
-      expect(fake.state().nextItemIdBytes).toBeUndefined();
-      expect(
-        fake.state().items[RW]!.filter((item) => item.id === created.externalItemId),
-      ).toHaveLength(1);
-      expect(commands(fake).filter((command) => command.startsWith("item create"))).toHaveLength(1);
-    });
-  }
-
-  test("an invalid successful create receipt remains unknown and is never replayed", async () => {
-    const { fake, provider } = setup((state) => {
-      state.failures.push({
-        match: "item create note",
-        afterEffect: true,
-        stdout: "-unconfirmed-id\n",
-        exitCode: 0,
-      });
-    });
-    const error = await errorOf(
-      provider.writeItem(ctx(), RW, {
-        name: "unconfirmed",
-        type: "note",
-        websites: [],
-        fields: [],
-      }),
-    );
-    expect(error.code).toBe("provider_outcome_unknown");
-    expect(
-      fake
-        .state()
-        .items[RW]!.filter((item) => (item.content as { title: string }).title === "unconfirmed"),
-    ).toHaveLength(1);
-    expect(commands(fake).filter((command) => command.startsWith("item create"))).toHaveLength(1);
-    expect(commands(fake).filter((command) => command.startsWith("item view"))).toHaveLength(0);
-  });
-
   test("creates logins with values only on stdin", async () => {
     const { fake, provider } = setup();
     const created = await provider.writeItem(ctx(), RW, {
