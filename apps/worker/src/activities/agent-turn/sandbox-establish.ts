@@ -553,6 +553,8 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               liveMachineEnrollment?.agentCapabilities.operationCpuQuota === true,
             transactionalFsWriteSupported:
               liveMachineEnrollment?.agentCapabilities.transactionalFsWrite === true,
+            transactionalFsWriteMachineSupported:
+              liveMachineEnrollment?.agentCapabilities.transactionalFsWriteMachine === true,
             browserControlHttpSupported:
               liveMachineEnrollment?.agentCapabilities.browserControlHttp === true,
             // Carried for shared machines too: the audience can narrow to Only me

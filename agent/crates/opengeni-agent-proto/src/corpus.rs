@@ -114,6 +114,7 @@ pub fn canonical_hello() -> v1::Hello {
             operation_resource_policy: false,
             operation_cpu_quota: false,
             transactional_fs_write: false,
+            transactional_fs_write_machine: false,
             credential_renew: false,
             mac_permissions: None,
             browser_control_http: false,

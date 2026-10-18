@@ -1118,6 +1118,12 @@ export interface Capabilities {
    * path (a shell + curl command per controller request).
    */
   browserControlHttp: boolean;
+  /**
+   * Transactional uploads also accept epoch 0 for machine-addressed operations.
+   * Requires transactional_fs_write. Older runners require a nonzero session
+   * epoch; callers MUST NOT invent one for a machine-addressed operation.
+   */
+  transactionalFsWriteMachine: boolean;
 }
 
 /** The three macOS Privacy & Security grants desktop capture and input need. */
@@ -3088,6 +3094,7 @@ function createBaseCapabilities(): Capabilities {
     credentialRenew: false,
     macPermissions: undefined,
     browserControlHttp: false,
+    transactionalFsWriteMachine: false,
   };
 }
 
@@ -3143,6 +3150,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.browserControlHttp !== false) {
       writer.uint32(136).bool(message.browserControlHttp);
+    }
+    if (message.transactionalFsWriteMachine !== false) {
+      writer.uint32(144).bool(message.transactionalFsWriteMachine);
     }
     return writer;
   },
@@ -3290,6 +3300,14 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.browserControlHttp = reader.bool();
           continue;
         }
+        case 18: {
+          if (tag !== 144) {
+            break;
+          }
+
+          message.transactionalFsWriteMachine = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3362,6 +3380,11 @@ export const Capabilities: MessageFns<Capabilities> = {
         : isSet(object.browser_control_http)
         ? globalThis.Boolean(object.browser_control_http)
         : false,
+      transactionalFsWriteMachine: isSet(object.transactionalFsWriteMachine)
+        ? globalThis.Boolean(object.transactionalFsWriteMachine)
+        : isSet(object.transactional_fs_write_machine)
+        ? globalThis.Boolean(object.transactional_fs_write_machine)
+        : false,
     };
   },
 
@@ -3418,6 +3441,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.browserControlHttp !== false) {
       obj.browserControlHttp = message.browserControlHttp;
     }
+    if (message.transactionalFsWriteMachine !== false) {
+      obj.transactionalFsWriteMachine = message.transactionalFsWriteMachine;
+    }
     return obj;
   },
 
@@ -3447,6 +3473,7 @@ export const Capabilities: MessageFns<Capabilities> = {
       ? MacDesktopPermissions.fromPartial(object.macPermissions)
       : undefined;
     message.browserControlHttp = object.browserControlHttp ?? false;
+    message.transactionalFsWriteMachine = object.transactionalFsWriteMachine ?? false;
     return message;
   },
 };

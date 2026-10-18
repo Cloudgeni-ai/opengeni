@@ -774,7 +774,8 @@ ambiguous and is not replayed. `run_on` uses the deployment's separate
 deadline by default), while preserving the active sandbox pointer and epoch.
 
 Large `write` operations use the existing bounded transactional file transfer
-when the live target advertises `transactional_fs_write`. Each transfer request
+when the live target advertises `transactional_fs_write` and
+`transactional_fs_write_machine`. Each transfer request
 rechecks authority, capability, and the pinned connection; it never falls back
 to a whole-file write after an uncertain result. Older agents keep their legacy
 small-write behavior and report oversized requests without marking the machine
@@ -1418,11 +1419,20 @@ Large Files-panel writes use provider byte transport instead of shell arguments.
 On capable Linux and macOS agents, raw replacements above 256 KiB use these same transfers,
 including binary files; an ambiguous write is never retried through a fallback.
 Every transfer request is reauthorized against the same physical connection.
-The runner pins each operation to its original nonzero session route epoch;
+The runner pins each operation to its original session route epoch;
 different sessions may have different epochs on the same machine. This is not
 the legacy machine hello epoch, which normal enrollment leaves unset. The
 connection-local registry rejects another epoch adopting an operation, and
 connection shutdown is checked again at publication.
+Machine-addressed operations such as `run_on` use epoch 0 and additionally
+require the live `transactional_fs_write_machine` capability. Zero is pinned
+exactly, never a wildcard or a fabricated session epoch. Older agents with only
+`transactional_fs_write` still support session-scoped transfers, but new servers
+refuse their machine-addressed replacements above 262144 bytes (256 KiB) before
+any file operation, with an instruction to update the agent. Small writes keep
+working. Deploy the updated server and release/update the native agent for
+large machine-addressed writes; either rollout order is safe. No mutation is
+retried through the legacy path after a transfer has begun.
 An ambiguous acknowledgment triggers one read-only query of the exact operation,
 never a replay of the edit. A lost operation after agent restart remains unknown;
 inspect the destination before submitting another edit.
