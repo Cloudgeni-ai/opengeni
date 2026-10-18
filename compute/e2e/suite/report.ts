@@ -6,12 +6,24 @@ export type Status = "pass" | "fail" | "skip" | "n/a";
 /** What a check claims that only a host's journal can show: that the
  * sandbox reached `level` (a completed step to it, the last one) between
  * `from` and `to`, when the next request woke it. */
-export type LevelProof = { kind: "level"; sandbox: string; level: string; from: string; to: string };
+export type LevelProof = {
+  kind: "level";
+  sandbox: string;
+  level: string;
+  from: string;
+  to: string;
+};
 
 /** That the host checkpointed the running sandbox (at least `min`, default
  * one, completed checkpoint steps) between `from` and `to`, while the
  * check's streams stayed open. */
-export type CheckpointProof = { kind: "checkpoint"; sandbox: string; from: string; to: string; min?: number };
+export type CheckpointProof = {
+  kind: "checkpoint";
+  sandbox: string;
+  from: string;
+  to: string;
+  min?: number;
+};
 
 export type Proof = LevelProof | CheckpointProof;
 
@@ -34,7 +46,8 @@ export type Meta = {
   notes?: string[];
 };
 
-export const counts = (results: Result[], status: Status) => results.filter((r) => r.status === status).length;
+export const counts = (results: Result[], status: Status) =>
+  results.filter((r) => r.status === status).length;
 
 export function render(meta: Meta, results: Result[], verified: boolean): string {
   const proofs = results.some((r) => r.proofs?.length);
@@ -44,13 +57,17 @@ export function render(meta: Meta, results: Result[], verified: boolean): string
     `${counts(results, "pass")} passed, ${counts(results, "fail")} failed, ${counts(results, "skip")} skipped, ` +
       `${counts(results, "n/a")} not applicable.`,
     ...(proofs && !verified
-      ? ["", "Not yet verified: the sleep and checkpoint checks pass only once the hosts' journals show each level or checkpoint (env.sh suite does that)."]
+      ? [
+          "",
+          "Not yet verified: the sleep and checkpoint checks pass only once the hosts' journals show each level or checkpoint (env.sh suite does that).",
+        ]
       : []),
     "",
     `| check | result | seconds | detail |`,
     `| --- | --- | ---: | --- |`,
     ...results.map(
-      (r) => `| ${r.id} | ${r.status} | ${r.seconds.toFixed(1)} | ${r.detail.replaceAll("|", "\\|").replaceAll("\n", " ")} |`,
+      (r) =>
+        `| ${r.id} | ${r.status} | ${r.seconds.toFixed(1)} | ${r.detail.replaceAll("|", "\\|").replaceAll("\n", " ")} |`,
     ),
     ...(meta.notes?.length ? ["", ...meta.notes.map((note) => `- ${note}`)] : []),
     "",

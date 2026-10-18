@@ -27,18 +27,28 @@ page.setDefaultTimeout(60_000);
 /** Opens the workspace dock if it is closed, then the tab `name` in it. */
 async function tab(name: string) {
   const open = page.getByRole("button", { name: "Open workspace", exact: true });
-  if (await open.first().isVisible().catch(() => false)) await open.first().click();
+  if (
+    await open
+      .first()
+      .isVisible()
+      .catch(() => false)
+  )
+    await open.first().click();
   const panels = page.getByRole("tablist", { name: "Workspace panels" });
   await panels.first().waitFor();
   // A tab's name may carry a count after its label.
-  await panels.getByRole("tab", { name: new RegExp(`^${name}\\b`) }).first().click();
+  await panels
+    .getByRole("tab", { name: new RegExp(`^${name}\\b`) })
+    .first()
+    .click();
 }
 
 async function step(name: string, run: () => Promise<string>) {
   try {
     results[name] = `pass: ${await run()}`;
   } catch (error) {
-    results[name] = `fail: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`;
+    results[name] =
+      `fail: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`;
   }
   await page.screenshot({ path: `${OUT}/ui-${name}.png` }).catch(() => undefined);
 }
@@ -62,11 +72,14 @@ await step("terminal", async () => {
   await page.keyboard.type(`echo ${typed} > e2e/ui-terminal.txt\n`, { delay: 20 });
   // The terminal may draw with WebGL, so read the effect back through the API.
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const response = await fetch(`${OPENGENI_URL}/v1/workspaces/${WORKSPACE}/sessions/${SESSION}/fs/read`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-opengeni-api-contract": API_CONTRACT },
-      body: JSON.stringify({ path: "e2e/ui-terminal.txt" }),
-    });
+    const response = await fetch(
+      `${OPENGENI_URL}/v1/workspaces/${WORKSPACE}/sessions/${SESSION}/fs/read`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-opengeni-api-contract": API_CONTRACT },
+        body: JSON.stringify({ path: "e2e/ui-terminal.txt" }),
+      },
+    );
     if (response.ok && String((await response.json()).content).includes(typed)) {
       return "a command typed into the terminal ran in the sandbox";
     }
@@ -80,7 +93,13 @@ await step("desktop", async () => {
   // The dock's own width leaves the desktop a thumbnail; maximized, it is
   // drawn at a size a person would use (the dock's "Maximize dock").
   const maximize = page.getByRole("button", { name: "Maximize dock", exact: true });
-  if (await maximize.first().isVisible().catch(() => false)) await maximize.first().click();
+  if (
+    await maximize
+      .first()
+      .isVisible()
+      .catch(() => false)
+  )
+    await maximize.first().click();
   // The desktop view's pixels as drawn (a capture of the element, so a WebGL
   // canvas counts too), decoded on a blank page: an empty canvas fails.
   const decoder = await browser.newPage();
@@ -94,7 +113,11 @@ await step("desktop", async () => {
       if (!shot) continue;
       const stats = await frameStats(decoder, shot, "image/png");
       // The view is drawn at the dock's size; judge its content, not its size.
-      const wrong = notAFrame({ ...stats, width: Math.max(stats.width, 640), height: Math.max(stats.height, 400) });
+      const wrong = notAFrame({
+        ...stats,
+        width: Math.max(stats.width, 640),
+        height: Math.max(stats.height, 400),
+      });
       if (!wrong) return `the desktop view draws a real frame (${describeFrame(stats)})`;
       last = `the ${Math.round(box.width)}x${Math.round(box.height)} desktop view is ${wrong}`;
     }

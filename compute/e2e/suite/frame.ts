@@ -5,11 +5,15 @@
 export type FrameStats = { width: number; height: number; colors: number; offMain: number };
 
 /** Decodes `bytes` in `page` (a blank page: the app's own may forbid data: URLs). */
-export async function frameStats(page: any, bytes: Uint8Array, mediaType: string): Promise<FrameStats> {
+export async function frameStats(
+  page: any,
+  bytes: Uint8Array,
+  mediaType: string,
+): Promise<FrameStats> {
   const base64 = Buffer.from(bytes).toString("base64");
   return page.evaluate(
-    async ({ base64, mediaType }: { base64: string; mediaType: string }) => {
-      const blob = await (await fetch(`data:${mediaType};base64,${base64}`)).blob();
+    async ({ encoded, type }: { encoded: string; type: string }) => {
+      const blob = await (await fetch(`data:${type};base64,${encoded}`)).blob();
       const bitmap = await createImageBitmap(blob);
       const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
       const context = canvas.getContext("2d")!;
@@ -26,9 +30,14 @@ export async function frameStats(page: any, bytes: Uint8Array, mediaType: string
       }
       let main = 0;
       for (const count of seen.values()) main = Math.max(main, count);
-      return { width: bitmap.width, height: bitmap.height, colors: seen.size, offMain: (samples - main) / samples };
+      return {
+        width: bitmap.width,
+        height: bitmap.height,
+        colors: seen.size,
+        offMain: (samples - main) / samples,
+      };
     },
-    { base64, mediaType },
+    { encoded: base64, type: mediaType },
   );
 }
 

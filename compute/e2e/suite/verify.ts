@@ -16,17 +16,37 @@
 // Rewrites results.json and results.md; exits 1 when a check failed or was
 // skipped, as run.ts does.
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { counts, render, type CheckpointProof, type LevelProof, type Meta, type Proof, type Result } from "./report.ts";
+import {
+  counts,
+  render,
+  type CheckpointProof,
+  type LevelProof,
+  type Meta,
+  type Proof,
+  type Result,
+} from "./report.ts";
 
 const dir = process.argv[2];
 if (!dir) {
   console.error("usage: bun verify.ts <run directory>");
   process.exit(2);
 }
-const saved = JSON.parse(readFileSync(`${dir}/results.json`, "utf8")) as Meta & { results: Result[] };
+const saved = JSON.parse(readFileSync(`${dir}/results.json`, "utf8")) as Meta & {
+  results: Result[];
+};
 
 /** A completed step: when it began and ended (ms), on which host. */
-type Step = { start: number; at: number; sandbox: string; step: string; cause: string; by: string; before: string; after: string; host: string };
+type Step = {
+  start: number;
+  at: number;
+  sandbox: string;
+  step: string;
+  cause: string;
+  by: string;
+  before: string;
+  after: string;
+  host: string;
+};
 const steps: Step[] = [];
 const journals = readdirSync(dir).filter((name) => /^host-.*\.log$/.test(name));
 for (const name of journals) {
@@ -80,7 +100,9 @@ function leveled(proof: LevelProof): { ok: boolean; how: string } {
       ok: false,
       how:
         `host journal: the sandbox was not at ${proof.level} when the next request came (` +
-        (last ? `its last completed step before it, ${last.step} at ${clock(last.at)}, left it ${last.after}` : "no step completed between the sleep and the request") +
+        (last
+          ? `its last completed step before it, ${last.step} at ${clock(last.at)}, left it ${last.after}`
+          : "no step completed between the sleep and the request") +
         `)${wakes}`,
     };
   }
@@ -95,7 +117,11 @@ function leveled(proof: LevelProof): { ok: boolean; how: string } {
       ok: false,
       how:
         `host journal: ${proof.level} at ${clock(last.at)}, but before the suite's request at ${clock(to)} ` +
-        early.map((s) => `${s.step} (${s.cause}${s.by ? `, by ${s.by}` : ""}) began at ${clock(s.start)}`).join(", ") +
+        early
+          .map(
+            (s) => `${s.step} (${s.cause}${s.by ? `, by ${s.by}` : ""}) began at ${clock(s.start)}`,
+          )
+          .join(", ") +
         wakes,
     };
   }
@@ -106,12 +132,17 @@ function leveled(proof: LevelProof): { ok: boolean; how: string } {
       ok: false,
       how:
         `host journal: ${proof.level} at ${clock(last.at)} on ${last.host}, and ` +
-        (woke ? `the next step, ${woke.step} at ${clock(woke.at)}, went ${woke.before} -> ${woke.after}` : "no step woke it from there") +
+        (woke
+          ? `the next step, ${woke.step} at ${clock(woke.at)}, went ${woke.before} -> ${woke.after}`
+          : "no step woke it from there") +
         wakes,
     };
   }
   if (woke.start < to) {
-    return { ok: false, how: `host journal: the wake ${wake(woke)} began ${((to - woke.start) / 1000).toFixed(3)} s before the suite's request${wakes}` };
+    return {
+      ok: false,
+      how: `host journal: the wake ${wake(woke)} began ${((to - woke.start) / 1000).toFixed(3)} s before the suite's request${wakes}`,
+    };
   }
   return {
     ok: true,
@@ -122,10 +153,13 @@ function leveled(proof: LevelProof): { ok: boolean; how: string } {
 }
 
 function checkpointed(proof: CheckpointProof): { ok: boolean; how: string } {
-  if (journals.length === 0) return { ok: false, how: "no host journals to verify the checkpoint with" };
+  if (journals.length === 0)
+    return { ok: false, how: "no host journals to verify the checkpoint with" };
   const from = Date.parse(proof.from);
   const to = Date.parse(proof.to);
-  const done = steps.filter((s) => s.sandbox === proof.sandbox && s.step === "checkpoint" && s.start >= from && s.at <= to);
+  const done = steps.filter(
+    (s) => s.sandbox === proof.sandbox && s.step === "checkpoint" && s.start >= from && s.at <= to,
+  );
   const min = proof.min ?? 1;
   if (done.length < min) {
     return {
@@ -133,7 +167,10 @@ function checkpointed(proof: CheckpointProof): { ok: boolean; how: string } {
       how: `host journal: ${done.length} checkpoint(s) of the sandbox completed while the streams were open, not at least ${min}`,
     };
   }
-  return { ok: true, how: `host journal: ${done.length} checkpoint(s) while streaming, at ${done.map((s) => `${clock(s.at)} on ${s.host}`).join(", ")}` };
+  return {
+    ok: true,
+    how: `host journal: ${done.length} checkpoint(s) while streaming, at ${done.map((s) => `${clock(s.at)} on ${s.host}`).join(", ")}`,
+  };
 }
 
 // The checks whose pass rests on the journals: a pass with no proof to
