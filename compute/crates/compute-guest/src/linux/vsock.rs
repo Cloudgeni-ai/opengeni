@@ -8,6 +8,9 @@ use std::time::Duration;
 /// Any context id: listen for the host.
 const ANY: u32 = u32::MAX;
 
+/// The host's context id.
+const HOST: u32 = 2;
+
 fn check(result: libc::c_int) -> io::Result<libc::c_int> {
     if result == -1 {
         Err(io::Error::last_os_error())
@@ -69,6 +72,27 @@ impl Listener {
 pub struct Stream(OwnedFd);
 
 impl Stream {
+    /// Connects to the host's vsock `port`.
+    pub fn connect_host(port: u32) -> io::Result<Self> {
+        // SAFETY: no pointers.
+        let fd = check(unsafe {
+            libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0)
+        })?;
+        // SAFETY: `fd` was just returned by socket(2) and nothing else owns it.
+        let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: sockaddr_vm is plain data, valid when zeroed.
+        let mut address: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
+        address.svm_family = libc::sa_family_t::try_from(libc::AF_VSOCK).unwrap_or_default();
+        address.svm_port = port;
+        address.svm_cid = HOST;
+        let length = libc::socklen_t::try_from(size_of::<libc::sockaddr_vm>()).unwrap_or_default();
+        // Every thread blocks the signals PID 1 takes, so no handler can
+        // interrupt the connect.
+        // SAFETY: the address and its length describe a valid sockaddr_vm.
+        check(unsafe { libc::connect(socket.as_raw_fd(), (&raw const address).cast(), length) })?;
+        Ok(Self(socket))
+    }
+
     /// Another handle on the same connection, for the other direction.
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self(self.0.try_clone()?))

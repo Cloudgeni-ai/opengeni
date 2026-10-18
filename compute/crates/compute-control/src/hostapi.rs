@@ -4,6 +4,7 @@
 //! Each connection carries the names its client certificate is valid for,
 //! and a host may act only under one of them.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,8 +15,9 @@ use axum::{Router, response::IntoResponse};
 use compute_fleet::LeaseTerms;
 use compute_protocol::fleet::{
     LINK_TOKENS_PATH, LinkTokens, LinkTokensAsked, REGISTER_PATH, RENEW_PATH, REPORT_PATH,
-    Register, Registered, Renew, Renewed, Report, Terms,
+    Register, Registered, Renew, Renewed, Report, Ruling, Terms, Verdict,
 };
+use compute_protocol::host::Id;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
@@ -99,6 +101,7 @@ async fn register<S: Store>(
                 listed = register.held.len(),
                 "a host registered"
             );
+            let rulings = with_links(&api, &register.info.name, rulings).await?;
             Registered::Registered {
                 host: host.0,
                 epoch: epoch.0,
@@ -111,6 +114,54 @@ async fn register<S: Store>(
         },
     };
     Ok(Json(answer))
+}
+
+/// Gives each ruling that keeps or refetches a sandbox running Opengeni's
+/// agent its link for `host` under the owner epoch the ruling names, so a
+/// sandbox kept under a new epoch opens its session again with that
+/// epoch's ticket. The store's rulings name no links; tickets hold no time,
+/// so every copy of one answer carries the same ones.
+async fn with_links<S: Store>(
+    api: &HostApi<S>,
+    host: &str,
+    mut rulings: Vec<Ruling>,
+) -> Result<Vec<Ruling>, (StatusCode, String)> {
+    let Some(links) = &api.0.links else {
+        return Ok(rulings);
+    };
+    let kept: Vec<Id> = rulings
+        .iter()
+        .filter(|ruling| ruling.verdict != Verdict::Drop)
+        .map(|ruling| ruling.id)
+        .collect();
+    if kept.is_empty() {
+        return Ok(rulings);
+    }
+    let agents: HashMap<Id, _> = api
+        .0
+        .store
+        .agents(&kept)
+        .await
+        .map_err(unavailable)?
+        .into_iter()
+        .map(|linked| (linked.id, linked))
+        .collect();
+    for ruling in &mut rulings {
+        let (Verdict::Keep { owner_epoch } | Verdict::Refetch { owner_epoch }) = ruling.verdict
+        else {
+            continue;
+        };
+        if let Some(linked) = agents.get(&ruling.id) {
+            ruling.link = links.ticket(
+                &linked.team,
+                &ruling.id.to_string(),
+                host,
+                owner_epoch,
+                &linked.agent,
+            );
+        }
+    }
+    Ok(rulings)
 }
 
 async fn renew<S: Store>(

@@ -159,6 +159,13 @@ pub fn kill(pid: i32, signal: libc::c_int) -> io::Result<()> {
     check(unsafe { libc::kill(pid, signal) })
 }
 
+/// Whether process `pid` exists.
+pub fn alive(pid: i32) -> bool {
+    // SAFETY: no pointers; signal 0 only checks.
+    let found = unsafe { libc::kill(pid, 0) } == 0;
+    found || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// Sends `signal` to every process but this one (`kill(-1, …)`).
 pub fn signal_all(signal: libc::c_int) {
     // SAFETY: no pointers.

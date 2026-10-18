@@ -32,6 +32,7 @@ mod checkpoint;
 mod disk_lengths;
 mod fleet;
 mod images;
+mod link;
 mod observe;
 mod pool;
 mod ready;
@@ -874,6 +875,7 @@ impl Lab {
             lease: None,
             observer: compute_host::observe::Observer::default(),
             summary_every: HostConfig::SUMMARY_EVERY,
+            agent_link: None,
         }
     }
 

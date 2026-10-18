@@ -9,6 +9,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use compute_control::link::Links;
 use compute_guest::GATEWAY_PORT;
+use compute_protocol::fleet::{Registered, Verdict};
 use compute_protocol::host::Request;
 use compute_protocol::link::AgentLink;
 use ring::rand::SystemRandom;
@@ -16,7 +17,7 @@ use ring::signature::{ED25519, Ed25519KeyPair, UnparsedPublicKey};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
-use super::support::{FakeHost, Fleet, OTHER_KEY, TEAM, id};
+use super::support::{FakeHost, Fleet, OTHER_KEY, TEAM, given_up, id};
 
 const GATEWAY: &str = "wss://og.example/agent-link";
 
@@ -276,4 +277,53 @@ async fn hosts_get_link_tokens_only_for_their_own_name_and_known_gateways() {
         .link_tokens("host-a.example", &["wss://attacker.example"])
         .await;
     assert_eq!(status, 403, "only gateways a team uses are signed for");
+}
+
+/// A host the service gave up on gets back, when it registers again, the
+/// agent sandbox nobody took meanwhile under a raised owner epoch, with the
+/// ticket for that epoch in the ruling; a sandbox with no agent gets none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_registering_again_is_given_its_kept_sandboxes_tickets_for_their_new_epochs() {
+    let fleet = linked_fleet().await;
+    let a = fleet.host("host-a.example").await;
+    let _inits = take_inits(&a);
+    let (status, created) = fleet.post("/v1/sandboxes", create_body("lease-1", 1)).await;
+    assert_eq!(status, 201, "{created}");
+    let agent_sandbox = created["id"].as_str().unwrap().to_owned();
+    let plain = fleet.create(json!({})).await;
+
+    a.renewing(false);
+    given_up(&fleet, &a).await;
+    let Registered::Registered { rulings, .. } = a.register().await else {
+        panic!("a host given up on registers afresh");
+    };
+    let ruled = |sandbox: &str| {
+        rulings
+            .iter()
+            .find(|ruling| ruling.id == id(sandbox))
+            .cloned()
+            .unwrap()
+    };
+    let kept = ruled(&agent_sandbox);
+    let Verdict::Keep { owner_epoch } = kept.verdict else {
+        panic!("nobody took it: {kept:?}");
+    };
+    assert!(owner_epoch > 1, "under a raised epoch");
+    let link = kept.link.expect("the kept agent sandbox's new ticket");
+    assert_eq!(link.gateway, GATEWAY);
+    let ticket = verify(&fleet, &link.ticket).await;
+    assert_eq!(ticket["host"], "host-a.example");
+    assert_eq!(ticket["epoch"], owner_epoch);
+    assert_eq!(ticket["sub"], agent_sandbox.as_str());
+    assert_eq!(ruled(&plain).link, None);
+
+    // The same attempt answered again carries the same ticket.
+    let Registered::Registered { rulings: again, .. } = a.register_again().await else {
+        panic!("the same attempt is answered again");
+    };
+    let again = again
+        .into_iter()
+        .find(|ruling| ruling.id == id(&agent_sandbox))
+        .unwrap();
+    assert_eq!(again.link.unwrap().ticket, link.ticket);
 }

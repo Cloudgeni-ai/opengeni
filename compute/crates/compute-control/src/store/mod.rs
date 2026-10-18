@@ -108,6 +108,14 @@ impl AgentRef {
     }
 }
 
+/// A sandbox that runs Opengeni's agent, as [`Store::agents`] finds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Linked {
+    pub id: Id,
+    pub team: String,
+    pub agent: AgentRef,
+}
+
 /// A create its caller named with a request id, which makes retrying it
 /// safe: the same id answers the sandbox it made.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -223,6 +231,7 @@ pub(crate) fn rule(host: HostId, held: Held, row: Option<Ownership>) -> (Ruling,
         Ruling {
             id: held.id,
             verdict,
+            link: None,
         },
         change,
     )
@@ -294,6 +303,10 @@ pub trait Store: Send + Sync + 'static {
 
     /// One sandbox.
     fn sandbox(&self, id: Id) -> impl Future<Output = Result<Option<SandboxRow>>> + Send;
+
+    /// The team and the agent of each sandbox of `ids` that runs
+    /// Opengeni's agent, in no particular order.
+    fn agents(&self, ids: &[Id]) -> impl Future<Output = Result<Vec<Linked>>> + Send;
 
     /// Replaces a sandbox's row with `row`, raising its version by one, on
     /// condition that it is still at `row.version` and does not name an

@@ -168,6 +168,7 @@ async fn restart_with<S: Store>(
         lease: None,
         observer: setup.observer,
         summary_every: HostConfig::SUMMARY_EVERY,
+        agent_link: None,
     };
     let socket = root.join("agent.sock");
     let _ = std::fs::remove_file(&socket);
@@ -854,6 +855,7 @@ async fn a_checkpoint_of_a_running_guest_brings_it_back_on_another_host() {
             ..SleepConfig::default()
         },
         image: None,
+        link: None,
     };
     let created = one
         .client

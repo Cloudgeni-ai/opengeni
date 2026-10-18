@@ -784,6 +784,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Some(mut slot) = self.slots.remove(&id.0) else {
             return;
         };
+        self.unlink(id);
         for waiter in slot.waiters.drain(..) {
             let _ = waiter.reply.send(Err(HostError::Removed(id)));
         }

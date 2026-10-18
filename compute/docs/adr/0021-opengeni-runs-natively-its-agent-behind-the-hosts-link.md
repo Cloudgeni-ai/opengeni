@@ -64,7 +64,7 @@ and 16.1).
 - **The guest runs the agent and gives it a local NATS address.**
   When the init has an `agent` section, `compute-guest` starts
   `opengeni-agent` in fabric mode as root, supervises it, and forwards
-  every connection to `127.0.0.1:4222` in the guest to the host over vsock
+  every connection to `127.0.0.1:3958` in the guest to the host over vsock
   (port 58). The agent dials that address with no credential. Fabric mode
   also turns off what does not belong in a sandbox: enrollment, credential
   renewal, self-update (the image pins the agent) and service

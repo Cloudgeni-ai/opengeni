@@ -1,6 +1,7 @@
 //! PID 1 on Linux: the order things start in, and the threads that keep
 //! them going.
 
+mod agent;
 mod guest;
 mod supervise;
 mod sys;
@@ -9,6 +10,7 @@ mod vsock;
 
 use std::fs;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -65,6 +67,7 @@ pub fn run() -> ! {
         log(&format!("ctrl-alt-del: {error}"));
     }
     system::mount_basics();
+    agent::clear_activity();
     let args = BootArgs::parse(&fs::read_to_string("/proc/cmdline").unwrap_or_default());
     system::network(args.network.as_ref());
     if let Some(sandbox) = &args.sandbox {
@@ -81,6 +84,7 @@ pub fn run() -> ! {
     }
     let children = Arc::new(Children::default());
     let (command, start_command) = channel();
+    let has_envd = Path::new(config::ENVD_PATH).exists();
     let guest = Arc::new(Guest::new(
         InitData {
             env_vars: image.env_map(),
@@ -90,6 +94,8 @@ pub fn run() -> ! {
             agent: None,
         },
         command,
+        has_envd,
+        Arc::clone(&children),
     ));
     listen(NOTICE_PORT, "notice", {
         let guest = Arc::clone(&guest);
@@ -102,10 +108,21 @@ pub fn run() -> ! {
             spawn("gateway", move || guest.gateway(stream));
         }
     });
-    spawn("envd", {
-        let (guest, children) = (Arc::clone(&guest), Arc::clone(&children));
-        move || supervise_envd(&guest, &children)
-    });
+    if has_envd {
+        spawn("envd", {
+            let (guest, children) = (Arc::clone(&guest), Arc::clone(&children));
+            move || supervise_envd(&guest, &children)
+        });
+    } else {
+        // Nothing to wait for: template builders may snapshot it now.
+        listen(READY_PORT, "ready", drop);
+    }
+    if Path::new(crate::agent::AGENT_PATH).exists() {
+        spawn("agent", {
+            let (guest, children) = (Arc::clone(&guest), Arc::clone(&children));
+            move || agent::supervise(&guest, &children)
+        });
+    }
     // The image's command starts once the sandbox has its own identity
     // and init: never in a template, whose clones would all copy what it
     // made, and on a restore it simply carries on.

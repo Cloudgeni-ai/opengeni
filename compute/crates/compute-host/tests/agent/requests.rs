@@ -232,6 +232,7 @@ async fn bad_requests_are_refused() {
             archive_after_ms: Some(90),
             ..SAVE_IN_PLACE
         },
+        link: None,
     };
     let reply = lab
         .client
@@ -259,6 +260,7 @@ async fn bad_requests_are_refused() {
                     save_after_ms: Some(10),
                     ..NEVER
                 },
+                link: None,
             },
         })
         .await

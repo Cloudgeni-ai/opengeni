@@ -327,6 +327,28 @@ impl SandboxConfig {
         self
     }
 
+    /// Whether `other` asks for the same sandbox: equal in everything but
+    /// its [`Self::link`], which the fleet service sets for each host and
+    /// owner epoch it gives the sandbox to, and may send again changed.
+    #[must_use]
+    pub fn same_sandbox(&self, other: &Self) -> bool {
+        let Self {
+            vcpus,
+            memory_mib,
+            memory_request_mib,
+            cpu_request_millis,
+            sleep,
+            image,
+            link: _,
+        } = self;
+        *vcpus == other.vcpus
+            && *memory_mib == other.memory_mib
+            && *memory_request_mib == other.memory_request_mib
+            && *cpu_request_millis == other.cpu_request_millis
+            && *sleep == other.sleep
+            && *image == other.image
+    }
+
     /// Guest memory in MiB it is guaranteed.
     #[must_use]
     pub fn memory_request(&self) -> u32 {

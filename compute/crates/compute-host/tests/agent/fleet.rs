@@ -18,7 +18,7 @@ use compute_host::{
     Archive, Claimed, Directory, FetchInto, FetchedMemory, HostError, Owned, OwnerEpoch, Receipt,
     SavedFiles, Stamp, Store,
 };
-use compute_protocol::fleet::{Answered, Verdict};
+use compute_protocol::fleet::{Answered, Ruling, Verdict};
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
 
@@ -49,6 +49,14 @@ fn code(reply: &Reply) -> Option<ErrorCode> {
     match reply {
         Reply::Error { code, .. } => Some(*code),
         _ => None,
+    }
+}
+
+fn ruling(id: Id, verdict: Verdict) -> Ruling {
+    Ruling {
+        id,
+        verdict,
+        link: None,
     }
 }
 
@@ -250,9 +258,9 @@ async fn a_registering_host_keeps_what_the_service_rules_and_drops_the_rest() {
     }
     one.handle
         .reconcile(vec![
-            (kept, Verdict::Keep { owner_epoch: 3 }),
-            (dropped, Verdict::Drop),
-            (refetched, Verdict::Refetch { owner_epoch: 4 }),
+            ruling(kept, Verdict::Keep { owner_epoch: 3 }),
+            ruling(dropped, Verdict::Drop),
+            ruling(refetched, Verdict::Refetch { owner_epoch: 4 }),
         ])
         .await
         .unwrap();
