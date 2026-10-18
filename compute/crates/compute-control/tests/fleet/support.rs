@@ -191,6 +191,28 @@ pub async fn until(within: Duration, what: &str, mut check: impl AsyncFnMut() ->
     }
 }
 
+/// Whether the service counts `host`'s renewals: it has not given up on
+/// the host.
+pub async fn counted(fleet: &Fleet, host: &FakeHost) -> bool {
+    fleet
+        .store
+        .renewals()
+        .await
+        .unwrap()
+        .iter()
+        .any(|(counted, _)| *counted == compute_fleet::HostId(host.id()))
+}
+
+/// Waits until the service gives up on `host`, and returns when it did.
+pub async fn given_up(fleet: &Fleet, host: &FakeHost) -> Instant {
+    let within = fleet.terms.term + fleet.terms.margin + Duration::from_secs(2);
+    until(within, "the host is given up on", async || {
+        !counted(fleet, host).await
+    })
+    .await;
+    Instant::now()
+}
+
 /// A fleet service and what it runs on.
 pub struct Fleet {
     pub pki: Pki,

@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep};
 
-use compute_protocol::fleet::Verdict;
+use compute_protocol::fleet::Ruling;
 
 use super::{Command, Handle, HostError, Lease, Origin, ReleaseOnDrop};
 use crate::fleet::{Admission, LeaseGate};
@@ -184,7 +184,7 @@ impl Handle {
     /// rulings do not keep is gone (see [`compute_protocol::fleet::Registered`]).
     /// The renewer sends these itself, under the registration they answer,
     /// so they carry no admission.
-    pub async fn reconcile(&self, rulings: Vec<(Id, Verdict)>) -> Result<(), HostError> {
+    pub async fn reconcile(&self, rulings: Vec<Ruling>) -> Result<(), HostError> {
         let (reply, answer) = oneshot::channel();
         self.send(Command::Reconcile { rulings, reply })?;
         answer.await.map_err(|_| HostError::Stopped)?

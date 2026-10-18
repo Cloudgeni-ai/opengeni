@@ -10,8 +10,8 @@ use std::future::Future;
 
 use compute_control::e2b::lifecycle::{OnTimeout, Record, State};
 use compute_control::store::{
-    Admission, AgentRef, LifecycleRow, MemoryStore, PostgresStore, RequestRow, SandboxRow, Spec,
-    Store, Write, replace_lifecycle,
+    Admission, AgentRef, LifecycleRow, Linked, MemoryStore, PostgresStore, RequestRow, SandboxRow,
+    Spec, Store, Write, replace_lifecycle,
 };
 use compute_fleet::{HostId, HostState, OwnerEpoch, Ownership, SandboxId, Sends};
 use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Verdict};
@@ -407,6 +407,32 @@ async fn requests<S: Store>(store: S) {
 #[tokio::test]
 async fn create_requests_answer_their_first_sandbox_until_it_is_gone() {
     each(requests, requests).await;
+}
+
+async fn agents<S: Store>(store: S) {
+    let (host, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let linked = sandbox(host);
+    let mut plain = sandbox(host);
+    plain.spec.agent = None;
+    for row in [&linked, &plain] {
+        assert_eq!(store.insert(row).await.unwrap(), Write::Done);
+    }
+    let missing = sandbox(host).id;
+    let found = store.agents(&[linked.id, plain.id, missing]).await.unwrap();
+    assert_eq!(
+        found,
+        vec![Linked {
+            id: linked.id,
+            team: linked.team.clone(),
+            agent: linked.spec.agent.clone().unwrap(),
+        }]
+    );
+    assert_eq!(store.agents(&[]).await.unwrap(), Vec::new());
+}
+
+#[tokio::test]
+async fn the_agents_of_listed_sandboxes_are_found_in_one_read() {
+    each(agents, agents).await;
 }
 
 fn lifecycle(team: &str, state: State, end_ms: u64) -> LifecycleRow {

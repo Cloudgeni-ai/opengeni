@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use compute_core::{Input, Level, SandboxId};
 use compute_engine::Engine;
-use compute_protocol::fleet::Verdict;
+use compute_protocol::fleet::{Ruling, Verdict};
 use tokio::sync::oneshot;
 
 use crate::layout::{Images, Paths, sync_parent};
@@ -599,11 +599,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Takes in the fleet service's rulings on the sandboxes this host
     /// listed when it registered: keeps each it is told to under the owner
-    /// epoch it names, drops the rest, keeping the store's copies, and
-    /// adopts again those whose copy here is behind the store's. Answers
-    /// once every drop is done, so the new lease lets only what the service
-    /// gave this host run.
-    pub(super) fn reconcile(&mut self, rulings: Vec<(Id, Verdict)>, reply: Reply<()>) {
+    /// epoch it names, with the agent link that epoch's ticket gives, drops
+    /// the rest, keeping the store's copies, and adopts again those whose
+    /// copy here is behind the store's. Answers once every drop is done, so
+    /// the new lease lets only what the service gave this host run.
+    pub(super) fn reconcile(&mut self, rulings: Vec<Ruling>, reply: Reply<()>) {
         if let Some((&id, _)) = self.blocked.first_key_value() {
             let _ = reply.send(Err(HostError::Blocked {
                 id: Id(id),
@@ -613,19 +613,31 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }));
             return;
         }
-        let rulings: HashMap<_, _> = rulings.into_iter().collect();
+        let mut rulings: HashMap<_, _> = rulings
+            .into_iter()
+            .map(|ruling| (ruling.id, (ruling.verdict, ruling.link)))
+            .collect();
         let mut waits = Vec::new();
         for record in self.records.all() {
             if record.ready {
                 continue;
             }
             let id = record.id;
-            let verdict = rulings.get(&id).copied().unwrap_or(Verdict::Drop);
+            let (verdict, link) = rulings.remove(&id).unwrap_or((Verdict::Drop, None));
             let (done, answer) = oneshot::channel();
             match verdict {
                 Verdict::Keep { owner_epoch } => {
                     let owner = OwnerEpoch(owner_epoch);
-                    if owner == record.owner() || record.removing {
+                    if record.removing {
+                        continue;
+                    }
+                    if owner == record.owner() {
+                        // Kept as it was, unless its link changed.
+                        if record.config.link == link {
+                            continue;
+                        }
+                        self.take_owner(id, Change::new().link(link), done);
+                        waits.push((id, answer));
                         continue;
                     }
                     // The service decides afresh whether it goes.
@@ -637,7 +649,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                             asked: record.owner().0,
                         },
                     );
-                    self.take_owner(id, Change::new().owner(owner), done);
+                    self.take_owner(id, Change::new().owner(owner).link(link), done);
                 }
                 Verdict::Drop => {
                     if let Some(removers) = self.destroying.get_mut(&id.0) {
@@ -650,8 +662,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     }
                 }
                 Verdict::Refetch { owner_epoch } => {
+                    let mut config = record.config.clone();
+                    config.link = link;
                     let then = Then {
-                        config: record.config.clone(),
+                        config,
                         owner: OwnerEpoch(owner_epoch),
                         reply: done,
                         under: None,

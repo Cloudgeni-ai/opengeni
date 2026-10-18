@@ -11,8 +11,8 @@ use compute_protocol::fleet::{Register, Renew, Report, Ruling};
 use compute_protocol::host::Id;
 
 use super::{
-    Admission, Admits, HostRow, LifecycleRow, RequestRow, Result, SandboxRow, Store, Write, admits,
-    rule,
+    Admission, Admits, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow, Store, Write,
+    admits, rule,
 };
 
 #[derive(Debug)]
@@ -498,6 +498,22 @@ impl Store for MemoryStore {
 
     fn sandbox(&self, id: Id) -> impl Future<Output = Result<Option<SandboxRow>>> + Send {
         ready(Ok(self.sandbox_now(id)))
+    }
+
+    fn agents(&self, ids: &[Id]) -> impl Future<Output = Result<Vec<Linked>>> + Send {
+        let inner = self.lock();
+        let found = ids
+            .iter()
+            .filter_map(|id| {
+                let row = inner.sandboxes.get(id)?;
+                Some(Linked {
+                    id: *id,
+                    team: row.team.clone(),
+                    agent: row.spec.agent.clone()?,
+                })
+            })
+            .collect();
+        ready(Ok(found))
     }
 
     fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send {

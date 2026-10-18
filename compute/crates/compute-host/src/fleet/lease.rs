@@ -249,10 +249,6 @@ impl Running {
             return Ok(());
         }
         let count = rulings.len();
-        let rulings = rulings
-            .into_iter()
-            .map(|ruling| (ruling.id, ruling.verdict))
-            .collect();
         // Everything not kept goes first: the deadline that lets the rest
         // run again is written only after.
         if let Err(error) = renewer.handle.reconcile(rulings).await {

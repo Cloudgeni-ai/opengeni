@@ -3,32 +3,10 @@
 
 use std::time::{Duration, Instant};
 
-use compute_control::store::Store as _;
-use compute_fleet::HostId;
 use compute_protocol::fleet::Registered;
 use serde_json::json;
 
-use super::support::{FakeHost, Fleet, id, until};
-
-async fn counted(fleet: &Fleet, host: &FakeHost) -> bool {
-    fleet
-        .store
-        .renewals()
-        .await
-        .unwrap()
-        .iter()
-        .any(|(counted, _)| *counted == HostId(host.id()))
-}
-
-/// Waits until the service gives up on `host`, and returns when it did.
-async fn given_up(fleet: &Fleet, host: &FakeHost) -> Instant {
-    let within = fleet.terms.term + fleet.terms.margin + Duration::from_secs(2);
-    until(within, "the host is given up on", async || {
-        !counted(fleet, host).await
-    })
-    .await;
-    Instant::now()
-}
+use super::support::{Fleet, counted, given_up, id, until};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_host_is_given_up_on_no_sooner_than_its_term_and_margin_after_it_stopped() {

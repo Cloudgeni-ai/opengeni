@@ -39,7 +39,7 @@ use crate::rootfs::{Cache, Missing};
 use crate::state::{Ownership, Record, Records, StateError, Stray, claim_host, unix_ms_now};
 use crate::step::{After, Live, Reading, Report};
 use crate::store::{OwnerEpoch, Store};
-use compute_protocol::fleet::Verdict;
+use compute_protocol::fleet::Ruling;
 
 mod disk;
 mod fetch;
@@ -453,7 +453,7 @@ enum Command {
     /// The fleet service's rulings on the sandboxes the host listed when
     /// it registered.
     Reconcile {
-        rulings: Vec<(Id, Verdict)>,
+        rulings: Vec<Ruling>,
         reply: Reply<()>,
     },
     /// `command`, sent for the ownership of its sandbox under `owner`, and

@@ -156,11 +156,17 @@ pub enum Verdict {
 
 /// The service's verdict on one listed sandbox. (Serde cannot refuse
 /// unknown fields next to a flattened one; [`Verdict`] refuses its own.)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ruling {
     pub id: Id,
     #[serde(flatten)]
     pub verdict: Verdict,
+    /// For a sandbox it keeps or refetches that runs Opengeni's agent, the
+    /// agent link for the owner epoch it names: a new epoch is a new
+    /// ticket ([ADR 21](../../docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)).
+    /// `None` for any other, whose copy then runs with no link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<crate::link::AgentLink>,
 }
 
 /// The answer to a [`Register`].

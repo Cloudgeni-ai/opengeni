@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use compute_core::HostPolicy;
 use compute_host::protocol::{Id, LevelName, Reply, Request, SandboxConfig};
 use compute_link::{HostToken, Hub, HubConfig, Timing, Tokens};
+use compute_protocol::fleet::{Ruling, Verdict};
 use compute_protocol::link::{
     AGENT_LINK_PORT, AgentLink, GatewayFrame, HostFrame, Relay, SUBPROTOCOL, VERSION, decode,
     encode,
@@ -476,5 +477,52 @@ async fn a_restarted_host_opens_its_sandboxes_sessions_again_before_their_agents
     };
     assert_eq!(kept, subject);
     assert_eq!(sid, 1);
+    lab.assert_clean();
+}
+
+/// The fleet service's rulings carry each kept sandbox's link: a new owner
+/// epoch's ticket opens the session again under it, and a ruling with no
+/// link ends the session even at the epoch the sandbox already had.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_ruling_gives_a_kept_sandbox_the_link_for_its_new_epoch() {
+    let mut gateway = Gateway::start().await;
+    let lab = linked_lab(Lab::root(), Arc::default()).await;
+    let sandbox = id(4);
+    create(&lab, sandbox, config(&gateway, "ticket-1")).await;
+    gateway.up().await;
+    let socket = link_socket(&lab.sandbox_dir(sandbox));
+    let (mut agent, first) = connect(&mut gateway, &socket, sandbox, "ticket-1").await;
+
+    let url = gateway.url.clone();
+    let link = |ticket: &str| AgentLink {
+        gateway: url.clone(),
+        ticket: ticket.into(),
+    };
+    let keep = |link: Option<AgentLink>| {
+        vec![Ruling {
+            id: sandbox,
+            verdict: Verdict::Keep { owner_epoch: 5 },
+            link,
+        }]
+    };
+    lab.handle
+        .reconcile(keep(Some(link("ticket-5"))))
+        .await
+        .unwrap();
+    assert_eq!(gateway.frame().await, HostFrame::Close { s: first });
+    assert!(agent.ended().await, "the old ticket's agent was let go");
+    let record = lab.record(sandbox);
+    assert_eq!(record["config"]["link"]["ticket"], "ticket-5");
+    let (_agent, second) = connect(&mut gateway, &socket, sandbox, "ticket-5").await;
+
+    // Kept again under the same epoch: nothing changes while the link is
+    // the same, and the session ends once the service names none.
+    lab.handle
+        .reconcile(keep(Some(link("ticket-5"))))
+        .await
+        .unwrap();
+    lab.handle.reconcile(keep(None)).await.unwrap();
+    assert_eq!(gateway.frame().await, HostFrame::Close { s: second });
+    assert!(lab.record(sandbox)["config"].get("link").is_none());
     lab.assert_clean();
 }

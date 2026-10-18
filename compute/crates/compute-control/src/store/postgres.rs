@@ -16,8 +16,8 @@ use tokio_postgres::Row;
 use tokio_postgres::types::Json;
 
 use super::{
-    Admission, Admits, HostRow, LifecycleRow, RequestRow, Result, SandboxRow, Spec, Store,
-    StoreError, Write, admits, rule,
+    Admission, Admits, AgentRef, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow,
+    Spec, Store, StoreError, Write, admits, rule,
 };
 use crate::e2b::lifecycle::Record;
 
@@ -672,6 +672,31 @@ impl Store for PostgresStore {
             .as_ref()
             .map(sandbox_row)
             .transpose()
+    }
+
+    async fn agents(&self, ids: &[Id]) -> Result<Vec<Linked>> {
+        let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "select id, team, spec->'agent' as agent from compute_sandboxes \
+                 where id = any($1) and spec ? 'agent'",
+                &[&ids],
+            )
+            .await
+            .map_err(database)?;
+        rows.iter()
+            .map(|row| {
+                let id: String = row.try_get("id").map_err(corrupt)?;
+                let Json(agent): Json<AgentRef> = row.try_get("agent").map_err(corrupt)?;
+                Ok(Linked {
+                    id: Id::from_str(&id).map_err(corrupt)?,
+                    team: row.try_get("team").map_err(corrupt)?,
+                    agent,
+                })
+            })
+            .collect()
     }
 
     async fn replace(&self, row: &SandboxRow) -> Result<Write> {
