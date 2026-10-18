@@ -10,7 +10,7 @@ decides the design; this is the contract between its three parts:
   sandbox's session to Opengeni's NATS as the agent itself would.
 
 ```text
- opengeni-agent ──NATS──▶ 127.0.0.1:4222 ─vsock 58─▶ compute-host ══ link (WSS) ══▶ gateway ──NATS──▶ worker, API
+ opengeni-agent ──NATS──▶ 127.0.0.1:3958 ─vsock 58─▶ compute-host ══ link (WSS) ══▶ gateway ──NATS──▶ worker, API
    (in the guest,           (compute-guest            one session per sandbox,        (Opengeni API)
     no credential)           forwards)                 one link per host
 ```
@@ -91,14 +91,18 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
 
   ```json
   {"workspace_id": "...", "agent_id": "...", "workspace_root": "/workspace",
-   "nats_url": "nats://127.0.0.1:4222"}
+   "nats_url": "nats://127.0.0.1:3958"}
   ```
 
   and starts `opengeni-agent run --fabric /run/compute/agent/link.json`
   (with `--virtual-desktop` when `desktop` is true). It restarts the agent
   after it exits, with back-off.
-- It listens on `127.0.0.1:4222` and forwards each connection to the host,
-  vsock CID 2, port 58, byte for byte.
+- It listens on `127.0.0.1:3958` and forwards each connection to the host,
+  vsock CID 2, port 58, byte for byte. The port is not NATS's own 4222, so
+  a NATS server the sandbox's user runs, as when developing Opengeni
+  itself, keeps that port. It listens only once the sandbox runs an agent.
+- An image without envd works too: the guest then answers notices and
+  inits itself, and is ready at boot.
 - The agent subscribes to `_compute.relay` and keeps the latest relay
   credential it receives there (section 3) in memory, for the streams it
   opens.

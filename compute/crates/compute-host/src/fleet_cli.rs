@@ -52,6 +52,11 @@ pub struct FleetArgs {
     /// The authority that signs the fleet service's certificates, PEM.
     #[arg(long = "fleet-ca", id = "fleet_ca")]
     pub ca: Option<PathBuf>,
+    /// The only authority to trust for Opengeni's agent-link gateways, PEM,
+    /// instead of the system's. For gateways with certificates of a
+    /// private authority, as in tests.
+    #[arg(long = "agent-link-ca", id = "agent_link_ca")]
+    pub agent_link_ca: Option<PathBuf>,
     /// The lease file the guard reads.
     #[arg(
         long = "fleet-lease-file",
@@ -116,6 +121,7 @@ impl FleetArgs {
             lease_file: self.lease_file.clone(),
             guard_lock: self.guard_lock.clone(),
             terms: LeaseTerms::RECOMMENDED,
+            agent_link_ca: self.agent_link_ca.clone(),
         }))
     }
 }

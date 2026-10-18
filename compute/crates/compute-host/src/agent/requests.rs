@@ -16,7 +16,7 @@ use crate::protocol::{
     SandboxConfig, SandboxStatus, SleepConfig, step_name,
 };
 use crate::rootfs::Missing;
-use crate::state::{Identity, Record, check_generation};
+use crate::state::{Change, Identity, Record, check_generation};
 use crate::step::images_of;
 use crate::store::{OwnerEpoch, Store};
 
@@ -430,7 +430,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // settings, or on its way out, is someone else's.
             let same = self.slots.get(&id.0).is_some_and(|slot| !slot.destroy)
                 && !self.destroying.contains_key(&id.0)
-                && record.is_some_and(|record| !record.removing && record.config == *config);
+                && record
+                    .is_some_and(|record| !record.removing && record.config.same_sandbox(config));
             return Some(if same {
                 Ok(())
             } else {
@@ -504,6 +505,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         ready: bool,
     ) {
         if let Some(answer) = self.create_answer(id, &config) {
+            // A repeat with the agent link sent changed takes it up.
+            if answer.is_ok()
+                && let Some(record) = self.records.get(id)
+                && record.config.link != config.link
+            {
+                self.take_owner(id, Change::new().owner(owner).link(config.link), reply);
+                return;
+            }
             let _ = reply.send(answer);
             return;
         }

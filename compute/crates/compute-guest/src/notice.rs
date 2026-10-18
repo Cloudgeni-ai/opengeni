@@ -7,9 +7,9 @@
 //!
 //! The guest applies notices one at a time and ignores one whose order is
 //! below the latest it applied ([`Orders`]); a retry of the same notice is
-//! applied again. Any other line (the host's `activity` question among
-//! them) is not answered, which the host reads as a guest that does not
-//! know it.
+//! applied again. The host's `activity` question is answered with the
+//! count Opengeni's agent registers (see [`crate::agent`]); any other line
+//! is not answered.
 
 use crate::cmdline::valid_sandbox;
 

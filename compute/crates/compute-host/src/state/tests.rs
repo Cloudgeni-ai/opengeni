@@ -100,7 +100,7 @@ fn writes_apply_only_against_the_current_fence() {
         for _ in 0..200 {
             let fence = random_fence(&mut rng, model.fence(), &seen);
             let change = random_change(&mut rng);
-            let result = apply(sandbox, Some(&model), fence, change);
+            let result = apply(sandbox, Some(&model), fence, change.clone());
             if fence != model.fence() {
                 assert!(
                     matches!(result, Err(StateError::Stale { found, .. }) if found == model.fence()),

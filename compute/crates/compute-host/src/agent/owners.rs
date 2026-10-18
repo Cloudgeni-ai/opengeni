@@ -188,29 +188,30 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         match command {
             // A create sent again under a later epoch after its try under
             // an earlier one landed here: the copy is as new as any, and is
-            // the later epoch's from now on.
+            // the later epoch's from now on, with that epoch's agent link.
             Command::Create { config, reply, .. }
                 if !record.removing
-                    && record.config == config
+                    && record.config.same_sandbox(&config)
                     && self.slots.get(&id.0).is_some_and(|slot| !slot.destroy) =>
             {
-                self.take_owner(id, owner, reply);
+                self.take_owner(id, Change::new().owner(owner).link(config.link), reply);
             }
             command => command.refuse(HostError::NotFound(id)),
         }
     }
 
-    /// Records `owner` as the ownership of sandbox `id` this host holds,
-    /// then answers `reply`. A step under way whose next write names the
-    /// record as it was fails and is tried again: no archive it began can
-    /// then take a save number of the ownership before.
-    fn take_owner(&mut self, id: Id, owner: OwnerEpoch, reply: Reply<()>) {
+    /// Records the ownership of sandbox `id` this host holds, and the agent
+    /// link that goes with it, as `change` says, then answers `reply`. A
+    /// step under way whose next write names the record as it was fails and
+    /// is tried again: no archive it began can then take a save number of
+    /// the ownership before.
+    pub(super) fn take_owner(&mut self, id: Id, change: Change, reply: Reply<()>) {
         let records = Arc::clone(&self.records);
         let events = self.events_tx.clone();
         *self.owning.entry(id.0).or_insert(0) += 1;
         tokio::spawn(async move {
             let result = records
-                .amend(id, Change::new().owner(owner))
+                .amend(id, change)
                 .await
                 .map(|_| ())
                 .map_err(HostError::from);
@@ -225,6 +226,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             if *count == 0 {
                 self.owning.remove(&id.0);
             }
+        }
+        if result.is_ok() {
+            self.link_as_recorded(id);
         }
         let _ = reply.send(result);
     }
@@ -288,14 +292,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     }));
                 }
                 // Adopting again: done, unless the copy is going or of
-                // other settings.
+                // other settings. An agent link sent changed is taken up.
                 Ordering::Equal => {
-                    let same = !record.removing && record.config == config;
-                    let _ = reply.send(if same {
-                        Ok(())
+                    if record.removing || !record.config.same_sandbox(&config) {
+                        let _ = reply.send(Err(HostError::Exists(id)));
+                    } else if record.config.link == config.link {
+                        let _ = reply.send(Ok(()));
                     } else {
-                        Err(HostError::Exists(id))
-                    });
+                        self.take_owner(id, Change::new().owner(owner).link(config.link), reply);
+                    }
                 }
                 // The copy of an earlier ownership goes first, leaving the
                 // store's; then the adopt goes on.
@@ -632,7 +637,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                             asked: record.owner().0,
                         },
                     );
-                    self.take_owner(id, owner, done);
+                    self.take_owner(id, Change::new().owner(owner), done);
                 }
                 Verdict::Drop => {
                     if let Some(removers) = self.destroying.get_mut(&id.0) {

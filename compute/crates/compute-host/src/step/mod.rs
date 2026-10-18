@@ -394,7 +394,11 @@ impl<E: Engine, S: Store> Job<E, S> {
     async fn commit(&mut self, change: Change) -> Result<(), StateError> {
         let change = change.last_used(self.last_used_ms);
         let before = self.record.clone();
-        let failed = match self.records.commit(self.id, before.fence(), change).await {
+        let failed = match self
+            .records
+            .commit(self.id, before.fence(), change.clone())
+            .await
+        {
             Ok(record) => {
                 self.record = record;
                 return Ok(());

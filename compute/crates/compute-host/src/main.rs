@@ -61,36 +61,7 @@ enum Command {
     /// Run the agent.
     Serve(Box<ServeArgs>),
     /// Create a sandbox.
-    Create {
-        id: Id,
-        #[arg(long, default_value_t = 2)]
-        vcpus: u8,
-        #[arg(long, default_value_t = 1024)]
-        memory_mib: u32,
-        /// Memory it is guaranteed while it runs; defaults to all of it.
-        #[arg(long)]
-        memory_request_mib: Option<u32>,
-        /// Processor time it is guaranteed under contention, in thousandths
-        /// of a processor; defaults to all its processors.
-        #[arg(long)]
-        cpu_request_millis: Option<u32>,
-        /// Start from the recommended sleep settings instead of never
-        /// sleeping.
-        #[arg(long)]
-        recommended: bool,
-        /// A sleep rule such as `pause=10s`, `save=30s`, `archive=2m`,
-        /// `drop=1h`, `evict=3d` or `forget=30d`, or `rule=never` to turn
-        /// one off. Repeatable; later rules override earlier ones.
-        #[arg(long = "sleep", value_parser = parse_rule)]
-        sleep: Vec<(SleepRuleName, Option<u64>)>,
-        /// Let memory pressure compress the sandbox's memory while paused.
-        #[arg(long)]
-        compress: Option<bool>,
-        /// The image its disk starts as (ADR 19), by the id `build-image`
-        /// printed; defaults to the host's base image.
-        #[arg(long)]
-        image: Option<ImageId>,
-    },
+    Create(Box<CreateArgs>),
     /// Delete a sandbox.
     Remove { id: Id },
     /// Put a sandbox at least as deep as a level now.
@@ -137,6 +108,65 @@ enum Command {
         #[arg(long)]
         delete: bool,
     },
+}
+
+/// The sandbox `create` asks for.
+#[derive(Args)]
+struct CreateArgs {
+    id: Id,
+    #[arg(long, default_value_t = 2)]
+    vcpus: u8,
+    #[arg(long, default_value_t = 1024)]
+    memory_mib: u32,
+    /// Memory it is guaranteed while it runs; defaults to all of it.
+    #[arg(long)]
+    memory_request_mib: Option<u32>,
+    /// Processor time it is guaranteed under contention, in thousandths
+    /// of a processor; defaults to all its processors.
+    #[arg(long)]
+    cpu_request_millis: Option<u32>,
+    /// Start from the recommended sleep settings instead of never
+    /// sleeping.
+    #[arg(long)]
+    recommended: bool,
+    /// A sleep rule such as `pause=10s`, `save=30s`, `archive=2m`,
+    /// `drop=1h`, `evict=3d` or `forget=30d`, or `rule=never` to turn
+    /// one off. Repeatable; later rules override earlier ones.
+    #[arg(long = "sleep", value_parser = parse_rule)]
+    sleep: Vec<(SleepRuleName, Option<u64>)>,
+    /// Let memory pressure compress the sandbox's memory while paused.
+    #[arg(long)]
+    compress: Option<bool>,
+    /// The image its disk starts as (ADR 19), by the id `build-image`
+    /// printed; defaults to the host's base image.
+    #[arg(long)]
+    image: Option<ImageId>,
+}
+
+impl CreateArgs {
+    /// The sandbox it asks for.
+    fn config(self) -> SandboxConfig {
+        let mut settings = if self.recommended {
+            SleepConfig::RECOMMENDED
+        } else {
+            SleepConfig::default()
+        };
+        for (rule, after_ms) in self.sleep {
+            rule.set(&mut settings, after_ms);
+        }
+        if let Some(compress) = self.compress {
+            settings.compress = compress;
+        }
+        SandboxConfig {
+            image: self.image,
+            vcpus: self.vcpus,
+            memory_mib: self.memory_mib,
+            memory_request_mib: self.memory_request_mib,
+            cpu_request_millis: self.cpu_request_millis,
+            sleep: settings,
+            link: None,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -466,37 +496,9 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
     let client = Client::new(&cli.socket);
     match cli.command {
         Command::Serve(args) => Box::pin(run_serve(*args, cli.socket)).await,
-        Command::Create {
-            id,
-            vcpus,
-            memory_mib,
-            memory_request_mib,
-            cpu_request_millis,
-            recommended,
-            sleep,
-            compress,
-            image,
-        } => {
-            let mut settings = if recommended {
-                SleepConfig::RECOMMENDED
-            } else {
-                SleepConfig::default()
-            };
-            for (rule, after_ms) in sleep {
-                rule.set(&mut settings, after_ms);
-            }
-            if let Some(compress) = compress {
-                settings.compress = compress;
-            }
-            let config = SandboxConfig {
-                image,
-                vcpus,
-                memory_mib,
-                memory_request_mib,
-                cpu_request_millis,
-                sleep: settings,
-                link: None,
-            };
+        Command::Create(args) => {
+            let id = args.id;
+            let config = args.config();
             expect_done(client.call(&Request::Create { id, config }).await?)
         }
         Command::Remove { id } => expect_done(
@@ -696,6 +698,9 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         memory_bytes: budget,
     })?;
     let prepared = fleet.as_ref().map(FleetConfig::prepare).transpose()?;
+    // A host in a fleet keeps agent links for the sandboxes that run
+    // Opengeni's agent; its tokens come from the fleet service.
+    let agent_link = fleet.as_ref().map(FleetConfig::agent_links).transpose()?;
     let observer = args.observe.observer(&about)?;
     let canary = args.observe.canary(&args.root, args.store.is_some())?;
     // The canary makes sandboxes of its own, which a fleet's service would
@@ -742,6 +747,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         observer: observer.clone(),
         summary_every: HostConfig::SUMMARY_EVERY,
         lease: prepared.as_ref().map(|prepared| prepared.gate.clone()),
+        agent_link,
     };
     // Boxed: the agent and everything it was given are large.
     Box::pin(run_with_store(

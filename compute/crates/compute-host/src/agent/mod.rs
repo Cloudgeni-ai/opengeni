@@ -45,6 +45,7 @@ mod disk;
 mod fetch;
 mod handle;
 mod holds;
+mod link;
 mod observe;
 mod owners;
 mod ready;
@@ -147,6 +148,9 @@ pub struct HostConfig {
     /// How long a sandbox stays awake before it reports what it went
     /// through since its last step or summary.
     pub summary_every: Duration,
+    /// The host's agent links, for sandboxes that run Opengeni's agent
+    /// (see [`link`]). `None` refuses their guests' connections.
+    pub agent_link: Option<compute_link::Hub>,
 }
 
 impl HostConfig {
@@ -676,6 +680,8 @@ struct Slot<V> {
     dead: Option<u64>,
     /// Listeners for connections the guest opens to the host.
     _ports: Option<Listeners>,
+    /// The listener for its agent's connections, on a host with links.
+    _link: Option<Listeners>,
     op: Option<Running>,
     destroy: bool,
     removers: Vec<Reply<()>>,
@@ -871,6 +877,7 @@ pub struct HostAgent<E: Engine, S: Store> {
     then_adopt: owners::Adopts,
     guest_ports: Arc<[GuestPort]>,
     restore_notice_port: Option<u32>,
+    link: Option<compute_link::Hub>,
     #[cfg(target_os = "linux")]
     fetcher: Option<Arc<crate::lazy::Fetcher>>,
     busy: Option<BusyRule>,
@@ -1039,6 +1046,13 @@ fn check_config(config: &HostConfig) -> Result<(), String> {
         // the restore notice; see `Identity::Pending`.
         return Err("warm templates need a restore notice port".into());
     }
+    let link_port = compute_protocol::link::AGENT_LINK_PORT;
+    if config.agent_link.is_some()
+        && (config.restore_notice_port == Some(link_port)
+            || config.guest_ports.iter().any(|port| port.port == link_port))
+    {
+        return Err(format!("guest port {link_port} is the agent link's"));
+    }
     Ok(())
 }
 
@@ -1126,6 +1140,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sample_every: config.sample_every,
             guest_ports: config.guest_ports.into(),
             restore_notice_port: config.restore_notice_port,
+            link: config.agent_link,
             busy: config.busy,
             can_compress,
             reserve_whole,
@@ -1215,6 +1230,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             };
         let holds = holds::Holds::new(paths.holds.clone(), self.records.ownership());
+        let link = self.listen_link(id, &spec);
         self.slots.insert(
             id.0,
             Slot {
@@ -1225,6 +1241,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 launches: 0,
                 dead: None,
                 _ports: ports,
+                _link: link,
                 op: None,
                 destroy: false,
                 removers: Vec::new(),
@@ -1242,6 +1259,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 holds,
             },
         );
+        self.link_as_recorded(id);
     }
 
     /// Validates a sandbox's settings and fits its sleep policy to this

@@ -5,13 +5,15 @@ use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::path::Path;
 use std::sync::mpsc::Sender;
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use super::supervise::Children;
 use super::vsock::Stream;
-use super::{log, spawn, sys, system};
+use super::{agent, log, spawn, sys, system};
 use crate::ENVD_PORT;
-use crate::envd::{self, InitData};
+use crate::config::DEFAULT_PATH;
+use crate::envd::{self, AgentInit, InitData};
 use crate::gateway::{self, Header};
 use crate::given::{self, GIVEN_FILE, Given};
 use crate::notice::{self, Notice, Orders};
@@ -42,6 +44,21 @@ pub struct Guest {
     envd_changed: Condvar,
     /// Starts the image's command, once.
     command: Mutex<Option<Sender<CommandEnv>>>,
+    /// Whether the image has envd. Without it the guest takes notices and
+    /// inits on its own.
+    has_envd: bool,
+    /// Opengeni's agent, when the sandbox runs one.
+    agent: Mutex<Agent>,
+    agent_changed: Condvar,
+    children: Arc<Children>,
+}
+
+#[derive(Debug, Default)]
+struct Agent {
+    /// What it is to run with, once the sandbox wants it.
+    wanted: Option<(AgentInit, CommandEnv)>,
+    /// The running agent's pid and what it started with.
+    running: Option<(i32, AgentInit)>,
 }
 
 #[derive(Debug)]
@@ -94,8 +111,13 @@ fn now_nanos() -> u64 {
 impl Guest {
     /// A guest whose image gives `image`, and which keeps what a create
     /// gave it before it was last booted. `command` starts the image's
-    /// command.
-    pub fn new(image: InitData, command: Sender<CommandEnv>) -> Self {
+    /// command; `has_envd` says whether the image has envd.
+    pub fn new(
+        image: InitData,
+        command: Sender<CommandEnv>,
+        has_envd: bool,
+        children: Arc<Children>,
+    ) -> Self {
         let given = given::load(Path::new(GIVEN_FILE));
         if let Given::Unreadable(reason) = &given {
             log(&format!(
@@ -112,18 +134,23 @@ impl Guest {
             envd: Mutex::new(Envd::default()),
             envd_changed: Condvar::new(),
             command: Mutex::new(Some(command)),
+            has_envd,
+            agent: Mutex::new(Agent::default()),
+            agent_changed: Condvar::new(),
+            children,
         }
     }
 
     /// Booted from the disk of a sandbox that a create already gave its
-    /// init: the image's command starts again, as after a restart.
-    /// Otherwise it waits for that init (see [`Self::init`]).
+    /// init: the image's command and the agent start again, as after a
+    /// restart. Otherwise they wait for that init (see [`Self::init`]).
     pub fn booted(&self, sandbox: Option<&str>) {
-        let env = match &self.state().given {
-            Given::Kept(given) if sandbox.is_some() => given.env_vars.clone(),
+        let given = match &self.state().given {
+            Given::Kept(given) if sandbox.is_some() => given.clone(),
             _ => return,
         };
-        self.start_command(env);
+        self.start_command(given.env_vars.clone());
+        self.want_agent(&given);
     }
 
     /// Starts the image's command with `env`, unless it started already.
@@ -135,6 +162,86 @@ impl Guest {
             .take();
         if let Some(sender) = sender {
             let _ = sender.send(env);
+        }
+    }
+
+    /// The sandbox runs the agent `given` names, if it names one: with the
+    /// image's environment and then `given`'s, as root. An agent running
+    /// with other settings is stopped, to start again with these.
+    fn want_agent(&self, given: &InitData) {
+        let Some(wanted) = &given.agent else {
+            return;
+        };
+        if !Path::new(crate::agent::AGENT_PATH).exists() {
+            log("the init names an agent, but the image has none");
+            return;
+        }
+        let mut env = self.state().image.env_vars.clone();
+        env.entry("PATH".into())
+            .or_insert_with(|| DEFAULT_PATH.into());
+        env.entry("HOME".into()).or_insert_with(|| "/root".into());
+        env.extend(given.env_vars.clone());
+        let mut agent = self.agent();
+        let stale = agent
+            .running
+            .as_ref()
+            .filter(|(_, running)| running != wanted)
+            .map(|(pid, _)| *pid);
+        agent.wanted = Some((wanted.clone(), env));
+        drop(agent);
+        self.agent_changed.notify_all();
+        if let Some(pid) = stale
+            && let Err(error) = self.children.signal(pid, libc::SIGTERM)
+        {
+            log(&format!("stopping the agent (pid {pid}): {error}"));
+        }
+    }
+
+    fn agent(&self) -> MutexGuard<'_, Agent> {
+        self.agent.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Waits until the sandbox wants the agent, and returns what it is to
+    /// run with.
+    pub fn wait_agent(&self) -> (AgentInit, CommandEnv) {
+        let agent = self.agent();
+        let agent = self
+            .agent_changed
+            .wait_while(agent, |agent| agent.wanted.is_none())
+            .unwrap_or_else(PoisonError::into_inner);
+        agent
+            .wanted
+            .clone()
+            .unwrap_or_else(|| unreachable!("waited for it"))
+    }
+
+    /// The agent runs as `pid`, with `init`.
+    pub fn agent_started(&self, pid: i32, init: AgentInit) {
+        self.agent().running = Some((pid, init));
+    }
+
+    /// The agent `pid` ended.
+    pub fn agent_stopped(&self, pid: i32) {
+        let mut agent = self.agent();
+        if agent
+            .running
+            .as_ref()
+            .is_some_and(|(running, _)| *running == pid)
+        {
+            agent.running = None;
+        }
+    }
+
+    /// After a restore its connections are gone: the agent dials again at
+    /// once rather than when its client notices.
+    fn agent_reconnect(&self) {
+        let pid = self.agent().running.as_ref().map(|(pid, _)| *pid);
+        if let Some(pid) = pid
+            && let Err(error) = self.children.signal(pid, libc::SIGUSR1)
+        {
+            log(&format!(
+                "telling the agent (pid {pid}) to reconnect: {error}"
+            ));
         }
     }
 
@@ -167,8 +274,12 @@ impl Guest {
         self.envd.lock().unwrap_or_else(PoisonError::into_inner).up = false;
     }
 
-    /// Waits until envd is up, at most `limit`.
+    /// Waits until envd is up, at most `limit`; at once in an image
+    /// without it.
     fn wait_envd(&self, limit: Duration) -> bool {
+        if !self.has_envd {
+            return true;
+        }
         let envd = self.envd.lock().unwrap_or_else(PoisonError::into_inner);
         let (envd, _) = self
             .envd_changed
@@ -178,12 +289,17 @@ impl Guest {
     }
 
     /// Handles one connection to the notice port. Notices are handled one
-    /// at a time, on the listener's thread.
+    /// at a time, on the listener's thread, and so is the host's
+    /// `activity` question.
     pub fn notice(&self, mut stream: Stream) {
         let _ = stream.set_read_timeout(Some(LINE_LIMIT));
         let Ok((line, _)) = read_line(&mut stream, notice::MAX_LINE) else {
             return;
         };
+        if line == "activity" {
+            let _ = stream.write_all(crate::agent::activity_answer(agent::activity()).as_bytes());
+            return;
+        }
         let Some(notice) = Notice::parse(&line) else {
             return;
         };
@@ -211,15 +327,17 @@ impl Guest {
             return;
         }
         let mut state = self.state();
-        if let Err(error) = state
-            .effective()
-            .and_then(|data| call_init(&data, now_nanos()))
+        if self.has_envd
+            && let Err(error) = state
+                .effective()
+                .and_then(|data| call_init(&data, now_nanos()))
         {
             log(&format!("restore notice: envd /init: {error}"));
             return;
         }
         state.orders.applied(notice.order);
         drop(state);
+        self.agent_reconnect();
         let _ = stream.write_all(notice::answer(seeded));
     }
 
@@ -253,7 +371,8 @@ impl Guest {
 
     /// A create gives the sandbox `given`. The guest keeps it on disk for
     /// good, then gives it to envd, then starts the image's command if it
-    /// has not yet; it answers `ok` only after all of that. On a failure
+    /// has not yet, and the agent it names; it answers `ok` only after all
+    /// of that. On a failure
     /// what it kept stays kept, so envd gets it with a retry or the next
     /// restore: the disk, the guest and the next `/init` always agree.
     fn init(&self, given: InitData) -> io::Result<()> {
@@ -263,6 +382,7 @@ impl Guest {
             return Err(io::Error::other("the guest is no sandbox yet"));
         }
         let env = given.env_vars.clone();
+        let kept = given.clone();
         {
             let mut state = self.state();
             given::keep(Path::new(GIVEN_FILE), &given)
@@ -274,10 +394,13 @@ impl Guest {
         if !self.wait_envd(ENVD_WAIT) {
             return Err(io::Error::other("envd is not up"));
         }
-        let state = self.state();
-        call_init(&state.effective()?, now_nanos())?;
-        drop(state);
+        if self.has_envd {
+            let state = self.state();
+            call_init(&state.effective()?, now_nanos())?;
+            drop(state);
+        }
         self.start_command(env);
+        self.want_agent(&kept);
         Ok(())
     }
 }

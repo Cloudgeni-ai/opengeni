@@ -17,6 +17,7 @@ mod gate;
 mod guard;
 mod lease;
 mod leased;
+mod link;
 mod listen;
 mod record;
 mod tls;
@@ -61,6 +62,9 @@ pub struct FleetConfig {
     /// The lease terms the guard and watchdog were set up for; the service
     /// must offer the same.
     pub terms: LeaseTerms,
+    /// The only authority trusted for agent-link gateways; `None` trusts
+    /// the system's.
+    pub agent_link_ca: Option<PathBuf>,
 }
 
 /// What the agent starts with in a fleet.

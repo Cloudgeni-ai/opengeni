@@ -262,7 +262,7 @@ impl std::fmt::Display for Fence {
 }
 
 /// What one write changes. Anything not set keeps its value.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "each flag is a separate change one write may make on its own"
@@ -279,6 +279,9 @@ pub(crate) struct Change {
     next_save: bool,
     handed_off: bool,
     owner: Option<OwnerEpoch>,
+    /// The agent link the fleet service sent last, `None` inside for none;
+    /// boxed, as most writes leave it.
+    link: Option<Box<Option<compute_protocol::link::AgentLink>>>,
     disk_bytes: Option<u64>,
 }
 
@@ -346,6 +349,13 @@ impl Change {
         self
     }
 
+    /// The sandbox's agent is reached through `link` from now on (see
+    /// [`compute_protocol::host::SandboxConfig::link`]).
+    pub fn link(mut self, link: Option<compute_protocol::link::AgentLink>) -> Self {
+        self.link = Some(Box::new(link));
+        self
+    }
+
     /// The sandbox is no longer this host's: its removal begins and leaves
     /// the store's copy.
     pub fn handed_off(mut self) -> Self {
@@ -390,6 +400,9 @@ impl Change {
         record.handed_off |= self.handed_off;
         if let Some(owner) = self.owner {
             record.owner_epoch = owner.0;
+        }
+        if let Some(link) = self.link {
+            record.config.link = *link;
         }
         if let Some(bytes) = self.disk_bytes {
             record.allocation.disk_bytes.get_or_insert(bytes);

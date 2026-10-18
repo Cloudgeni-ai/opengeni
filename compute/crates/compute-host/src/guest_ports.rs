@@ -170,21 +170,8 @@ pub(crate) fn listen<A: Activity>(
     if ports.is_empty() {
         return Ok(listeners);
     }
-    if let Some(dir) = vsock.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     for (index, guest_port) in ports.iter().enumerate() {
-        let socket = socket_path(vsock, guest_port.port);
-        match std::fs::remove_file(&socket) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        let listener = std::os::unix::net::UnixListener::bind(&socket)?;
-        give_to(&socket, owner)?;
-        listeners.sockets.push(socket);
-        listener.set_nonblocking(true)?;
-        let listener = UnixListener::from_std(listener)?;
+        let listener = bind(vsock, guest_port.port, owner, &mut listeners)?;
         listeners.tasks.push(tokio::spawn(accept(
             listener,
             Arc::clone(ports),
@@ -193,6 +180,119 @@ pub(crate) fn listen<A: Activity>(
         )));
     }
     Ok(listeners)
+}
+
+/// Starts listening for the guest's connections to its agent link on
+/// `port`, handing each to `serve`. At most [`MAX_CONNECTIONS`] are open
+/// at once; more are closed as they come. Must run inside a Tokio runtime.
+pub(crate) fn listen_link(
+    vsock: &Path,
+    port: u32,
+    owner: (u32, u32),
+    serve: impl Fn(Counted) + Send + 'static,
+) -> io::Result<Listeners> {
+    let mut listeners = Listeners {
+        tasks: Vec::with_capacity(1),
+        sockets: Vec::with_capacity(1),
+    };
+    let listener = bind(vsock, port, owner, &mut listeners)?;
+    let open = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    listeners.tasks.push(tokio::spawn(async move {
+        let mut over_limit = false;
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    if let Ok(permit) = Arc::clone(&open).try_acquire_owned() {
+                        over_limit = false;
+                        serve(Counted {
+                            stream,
+                            _permit: permit,
+                        });
+                    } else {
+                        drop(stream);
+                        if !over_limit {
+                            tracing::warn!(
+                                port,
+                                limit = MAX_CONNECTIONS,
+                                "a sandbox holds too many agent-link connections; closing new ones",
+                            );
+                            over_limit = true;
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(port, %error, "accepting an agent-link connection failed");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }));
+    Ok(listeners)
+}
+
+/// Binds the socket for guest connections to `port`, for the sandbox's own
+/// user, and records it in `listeners`.
+fn bind(
+    vsock: &Path,
+    port: u32,
+    owner: (u32, u32),
+    listeners: &mut Listeners,
+) -> io::Result<UnixListener> {
+    if let Some(dir) = vsock.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let socket = socket_path(vsock, port);
+    match std::fs::remove_file(&socket) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let listener = std::os::unix::net::UnixListener::bind(&socket)?;
+    give_to(&socket, owner)?;
+    listeners.sockets.push(socket);
+    listener.set_nonblocking(true)?;
+    UnixListener::from_std(listener)
+}
+
+/// A guest connection that counts against its port's limit until dropped.
+#[derive(Debug)]
+pub(crate) struct Counted {
+    stream: UnixStream,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl AsyncRead for Counted {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Counted {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        std::pin::Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
 }
 
 /// Hands a listener's socket to the sandbox's own user, the only one its

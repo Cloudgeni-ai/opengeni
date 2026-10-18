@@ -40,11 +40,11 @@ impl std::fmt::Debug for Tls {
     }
 }
 
-fn provider() -> Arc<CryptoProvider> {
+pub(super) fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-fn certificates(path: &Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
+pub(super) fn certificates(path: &Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
     let certificates = CertificateDer::pem_file_iter(path)
         .with_context(|| format!("reading {}", path.display()))?
         .collect::<Result<Vec<_>, _>>()
