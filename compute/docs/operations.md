@@ -495,6 +495,15 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   image. Replicas share the store; one leads at a time, and a new leader
   waits a whole lease term before giving up on any host, so a rollout
   never loses hosts.
+  Its schema has versions (table `compute_schema`): each replica, as it
+  starts, applies the versions it knows and the database lacks, in order,
+  in one transaction under an advisory lock, so two starting replicas
+  never both migrate. A released version is never changed; a schema change
+  is a new version that keeps what the previous release reads, so old
+  replicas keep working beside new ones during a rollout, and a rollback
+  to the previous image starts (it logs that the schema is newer than it
+  knows). Version 1 upgrades a database made before versions existed.
+  Back up the schema before an upgrade that adds a version.
 - **Firecracker**: a wake uses whichever configured Firecracker (the
   current one or one kept with `--retained-firecracker`) reads the image's
   snapshot format on the image's CPU, so a newer compatible release
