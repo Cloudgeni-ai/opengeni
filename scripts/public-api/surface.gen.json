@@ -19289,6 +19289,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.authenticationError": "const? null=[\"\\\"credentials_expired\\\"\"]",
         "$.duplicateRunnerDeniedAt": "string! null",
         "$.duplicateRunnerDeniedCount": "integer!",
         "$.generation": "integer!",
@@ -26062,7 +26063,8 @@
         "$": "object",
         "$.clientEventId": "string!",
         "$.controlEtag": "string?",
-        "$.expectedTurnVersion": "integer!"
+        "$.expectedTurnVersion": "integer!",
+        "$.interrupt": "boolean?"
       }
     },
     "StoredKnowledgeEntryContent": {
@@ -28044,6 +28046,7 @@
         "$": "object",
         "$.agentHumanInputEnabled": "boolean?",
         "$.allowCreditModels": "boolean?",
+        "$.busySend": "ref(WorkspaceBusySend)?",
         "$.codeSearchEnabled": "boolean? null",
         "$.codexCompactionDefault": "ref(CodexCompactionMode)?",
         "$.defaultSandboxImage": "string? null",
@@ -29095,6 +29098,14 @@
         "$.sourceSizeBytes": "integer! null",
         "$.sourceTurnId": "string! null",
         "$.workspaceId": "string!"
+      }
+    },
+    "WorkspaceBusySend": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"queue\\\"\",\"\\\"steer\\\"\"]"
       }
     },
     "WorkspaceCaptureDegradedReason": {
@@ -33394,6 +33405,7 @@
       "COMPOSER_MODEL_UNAVAILABLE_MESSAGE": "value",
       "COMPOSER_PAYMENT_REQUIRED_MESSAGE": "value",
       "COMPOSER_SESSION_USAGE_LIMIT_MESSAGE": "value",
+      "ComposerBusySend": "type",
       "ComposerControllerState": "type",
       "ComposerDraftMapContext": "type",
       "ComposerPolicy": "type",
@@ -33826,6 +33838,9 @@
       "SharedMachineDisclosureProps": "type",
       "shouldSteerOnKey": "value",
       "shouldSubmitOnKey": "value",
+      "SINGLE_SEND_WORDING": "value",
+      "singleSendText": "value",
+      "SingleSendWording": "value",
       "SlashArg": "type",
       "SlashCommand": "type",
       "SlashCommandContext": "type",
@@ -34332,6 +34347,7 @@
     },
     "@opengeni/react/composer": {
       "Actions": "value",
+      "AlternateSendButton": "value",
       "AttachButton": "value",
       "Attachments": "value",
       "BillingClassMark": "value",
@@ -34340,6 +34356,7 @@
       "ChatComposerMessages": "type",
       "CommandPalette": "value",
       "ComposerActionsProps": "type",
+      "ComposerAlternateSendButtonProps": "type",
       "ComposerAttachButtonProps": "type",
       "ComposerCommandPaletteProps": "type",
       "ComposerControlLinks": "type",
@@ -34664,6 +34681,9 @@
       "OpenGeniMessagesProviderProps": "type",
       "OpenGeniText": "type",
       "PluralCategory": "type",
+      "SINGLE_SEND_WORDING": "value",
+      "singleSendText": "value",
+      "SingleSendWording": "value",
       "useOpenGeniLocale": "value",
       "useOpenGeniText": "value"
     },
@@ -34825,6 +34845,7 @@
       "AuthNeededItem": "type",
       "buildTimeline": "value",
       "ClientOverride": "type",
+      "ComposerBusySend": "type",
       "ComposerControllerState": "type",
       "ComposerDraftMapContext": "type",
       "ComposerPolicy": "type",

@@ -134,6 +134,8 @@ describe("session-only entry", () => {
     // Host-localizable copy: the dependency-free text runtime and its English defaults.
     expect(reactSources.some((id) => id.endsWith("/src/messages/runtime.tsx"))).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/messages/en.ts"))).toBe(true);
+    // Pure single-Send wording overrides for embedders; types only from the runtime.
+    expect(reactSources.some((id) => id.endsWith("/src/messages/single-send.ts"))).toBe(true);
     // Shared reads: the model catalog store and the deployment config read.
     expect(reactSources.some((id) => id.endsWith("/src/hooks/shared-query.ts"))).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/lib/client-config-read.ts"))).toBe(true);
@@ -143,7 +145,7 @@ describe("session-only entry", () => {
     );
     // Retained conversation views for a reopen, on the shared-query store.
     expect(reactSources.some((id) => id.endsWith("/src/hooks/session-view-cache.ts"))).toBe(true);
-    expect(reactSources.length).toBe(38);
+    expect(reactSources.length).toBe(39);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

@@ -900,7 +900,16 @@ export async function resolveWaitingSteerInTransaction(
     sessionId: input.sessionId,
     resumePausedBranch: false,
   });
-  const session = await lockSession(db, input.workspaceId, input.sessionId);
+  // Canonical event-write prefix after admission: workspace, session, then the
+  // ownerless turn this Steer replaces (the supersession re-reads it locked).
+  const locks = await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    sessionIds: [input.sessionId],
+    turnIds: [input.turnId],
+  });
+  const session = locks.sessions[0];
+  if (!session) throw new Error(`Session not found: ${input.sessionId}`);
   if (session.activeTurnId !== input.turnId) return null;
   const control = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl: admission.control,
@@ -1047,9 +1056,8 @@ export async function resolveWaitingSteer(
   input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
 ): Promise<WaitingSteerResolution | null> {
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, (scoped) =>
-    scoped.transaction((tx) =>
-      resolveWaitingSteerInTransaction(tx as unknown as SessionActivityDatabase, input),
-    ),
+    // The scope already runs in its own transaction.
+    resolveWaitingSteerInTransaction(scoped, input),
   );
 }
 
