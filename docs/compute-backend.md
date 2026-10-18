@@ -64,6 +64,9 @@ message up to 120 s while a sandbox wakes from disk.
 display exists from its first Hello; nothing runs `ensureDisplayStack` over
 exec. The viewer mints relay PTY and relay desktop-frame cells against the
 group box, fenced by the lease epoch (`apps/api/src/sandbox/viewer.ts`).
+BrowserSessions and ComputerSessions on a compute home sandbox use the agent's
+native controller, as on a Connected Machine; no controller URL is cached on
+the lease (`controllerHasCacheableDataPlane`).
 
 ## Configuration
 

@@ -112,6 +112,7 @@ import { connectedMachineComputerAccessError } from "../connected-machine-comput
 import {
   controllerCacheAllowsHostFetch,
   controllerCachedUrlIsUsable,
+  controllerHasCacheableDataPlane,
   shouldPersistControllerDataPlaneUrl,
   withCachedController,
 } from "../controller-data-plane";
@@ -1467,7 +1468,7 @@ export function registerComputerSessionRoutes(
     if (
       placement.placement.kind !== "sandbox_group" ||
       !placement.lease?.instanceId ||
-      !placement.session.resolveExposedPort
+      !controllerHasCacheableDataPlane(placement.session)
     ) {
       return placement;
     }

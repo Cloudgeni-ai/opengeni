@@ -214,6 +214,7 @@ import {
 import {
   controllerCacheAllowsHostFetch,
   controllerCachedUrlIsUsable,
+  controllerHasCacheableDataPlane,
   shouldPersistControllerDataPlaneUrl,
   isRetryableControllerTransport,
   withCachedController,
@@ -3449,7 +3450,11 @@ export function registerBrowserSessionRoutes(
     placement: BrowserPlacement,
   ): Promise<BrowserPlacement> {
     const sandboxGroupId = placement.controllerHostSandboxGroupId;
-    if (!sandboxGroupId || !placement.lease?.instanceId || !placement.session.resolveExposedPort) {
+    if (
+      !sandboxGroupId ||
+      !placement.lease?.instanceId ||
+      !controllerHasCacheableDataPlane(placement.session)
+    ) {
       return placement;
     }
     if (placement.lease.backend === "opensandbox" && deps.settings.openSandboxSignedEndpoints) {
