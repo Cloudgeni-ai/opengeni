@@ -481,10 +481,13 @@ export class NatsControlRpc implements ControlRpc {
     options: {
       /** Transient-failure recovery allowance beyond the operation timeout (default two minutes). */
       recoveryMs?: number;
+      /** See ControlReplyRecovery: acts on each "no responders" of a replayable
+       * request before the same delivery is retried. */
+      onNoResponders?: (subject: string) => Promise<boolean>;
     } = {},
   ) {
     this.connect = connect;
-    this.recovery = new ControlReplyRecovery(options.recoveryMs);
+    this.recovery = new ControlReplyRecovery(options.recoveryMs, undefined, options.onNoResponders);
   }
 
   private async resolveConnection(): Promise<NatsRequestConnection | null> {

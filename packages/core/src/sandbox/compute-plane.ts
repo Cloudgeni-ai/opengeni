@@ -30,9 +30,10 @@ export function createComputeAgentPlane(deps: {
       ? new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null)
       : null;
   return {
-    controlRpc: () =>
+    controlRpc: (options) =>
       new NatsControlRpc(
         async (): Promise<NatsRequestConnection | null> => bus.getRequestConnection(),
+        options?.onNoResponders ? { onNoResponders: options.onNoResponders } : {},
       ),
     opStreamTransport: () => opStream,
     resolveConnection: async ({ workspaceId, enrollmentId }) => {

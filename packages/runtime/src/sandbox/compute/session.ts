@@ -334,9 +334,27 @@ export class ComputeSandboxSession extends SelfhostedSession {
 
   constructor(deps: ComputeSessionDeps) {
     const { state, plane, fabric } = deps;
-    const rawRpc = plane.controlRpc();
     const resolveConnection = () =>
       plane.resolveConnection({ workspaceId: state.workspaceId, enrollmentId: state.enrollmentId });
+    const rawRpc = plane.controlRpc({
+      // Nobody received the request: no host serves the sandbox. Wake it at
+      // once (the gate throttles the fabric calls) and let the transport retry
+      // the same delivery, keeping its replay identity, until the agent is
+      // back; stop early when it came back on another connection, so the
+      // operation is admitted again there.
+      onNoResponders: async (subject) => {
+        await gate.wake();
+        const connection = await resolveConnection();
+        return (
+          !connection ||
+          subjectFor(
+            connection.workspaceId,
+            state.enrollmentId,
+            connection.connectionInstanceId,
+          ) === subject
+        );
+      },
+    });
     const gate =
       deps.gate ??
       new ComputeWakeGate({

@@ -39,8 +39,10 @@ export interface ComputeAgentConnection {
 }
 
 export interface ComputeAgentPlane {
-  /** The request/reply transport. A missing connection answers agent_offline. */
-  controlRpc(): ControlRpc;
+  /** The request/reply transport. A missing connection answers agent_offline.
+   * `onNoResponders` runs on each "no responders" of a replayable request
+   * before the same delivery is retried; false stops retrying. */
+  controlRpc(options?: { onNoResponders?: (subject: string) => Promise<boolean> }): ControlRpc;
   /** The op-stream frame transport, or null when the deployment has none. */
   opStreamTransport(): OpStreamTransport | null;
   /** The enrollment's current live connection, or null when it has none (its

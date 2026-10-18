@@ -24,6 +24,10 @@ export class ControlReplyRecovery {
   constructor(
     private readonly recoveryMs = RECOVERY_MS,
     private readonly retryDelayMs = 250,
+    /** Called on each "no responders" with the request's own subject, before
+     * the same delivery is retried. It may act to bring the responder back (a
+     * sleeping sandbox is woken); false or a throw stops retrying at once. */
+    private readonly onNoResponders?: (subject: string) => Promise<boolean>,
   ) {}
 
   async request(
@@ -42,7 +46,7 @@ export class ControlReplyRecovery {
           op: { $case: "ping", ping: { nonce: "0" } },
         }),
       ).finish();
-      supported = this.retry(conn, subject, probe, timeoutMs, deadline).then(
+      supported = this.retry(conn, subject, subject, probe, timeoutMs, deadline).then(
         (reply) => reply.headers?.get(REPLAY_HEADER) === "1",
       );
       this.supported.set(subject, supported);
@@ -52,11 +56,12 @@ export class ControlReplyRecovery {
     }
     if (!(await supported)) return conn.request(subject, payload, { timeout: timeoutMs });
     const delivery = `${subject}.replay.${deadline}.${randomUUID()}`;
-    return this.retry(conn, delivery, payload, timeoutMs, deadline);
+    return this.retry(conn, subject, delivery, payload, timeoutMs, deadline);
   }
 
   private async retry(
     conn: NatsRequestConnection,
+    target: string,
     subject: string,
     payload: Uint8Array,
     timeoutMs: number,
@@ -76,6 +81,10 @@ export class ControlReplyRecovery {
         // ambiguity across retries so the caller cannot classify this as a
         // never-sent mutation and mint another delivery after the journal expires.
         if ((error as { code?: string }).code !== "503") uncertain ??= error;
+        else if (this.onNoResponders) {
+          const keepTrying = await this.onNoResponders(target).catch(() => false);
+          if (!keepTrying) throw uncertain ?? error;
+        }
         if (Date.now() + this.retryDelayMs >= deadline) throw uncertain ?? error;
         await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs));
       }

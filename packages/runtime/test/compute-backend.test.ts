@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { ErrorCode, type ControlRequest } from "@opengeni/agent-proto";
+import { ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import {
   ComputeFabricClient,
   ComputeFabricError,
   ComputeSandboxClient,
   ComputeSandboxSession,
   MockAgentResponder,
+  NatsControlRpc,
   SandboxConfigError,
   SandboxExactResumeInstanceUnavailableError,
   SelfhostedControlError,
@@ -17,6 +18,7 @@ import {
   type ComputeAgentConnection,
   type ComputeAgentPlane,
   type ControlRpc,
+  type NatsRequestConnection,
 } from "../src/sandbox";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
 
@@ -155,6 +157,11 @@ class FakeAgentPlane implements ComputeAgentPlane {
   runAs = false;
   /** Every exec the agent ran over its op-stream. */
   readonly execs: Array<{ cmd: string; runAs: string }> = [];
+  /** Serve control requests through the real NATS control transport (with
+   * its replay recovery) over this fake request connection. */
+  natsTransport = false;
+  /** Every subject a request was sent on over that connection. */
+  readonly natsSubjects: string[] = [];
   private readonly runners = new Map<string, FakeOpRunner>();
 
   private runner(agentId: string, instance: string): FakeOpRunner {
@@ -189,7 +196,33 @@ class FakeAgentPlane implements ComputeAgentPlane {
     return instance;
   }
 
-  controlRpc(): ControlRpc {
+  controlRpc(options?: { onNoResponders?: (subject: string) => Promise<boolean> }): ControlRpc {
+    const fake = this.fakeControlRpc();
+    if (!this.natsTransport) return fake;
+    const connection: NatsRequestConnection = {
+      supportsHeaders: true,
+      request: async (subject, payload, opts) => {
+        this.natsSubjects.push(subject);
+        const base = subject.split(".replay.")[0]!;
+        if (this.sessions.get(base.split(".")[2] ?? "") !== base.split(".")[4]) {
+          throw Object.assign(new Error("503 no responders"), { code: "503" });
+        }
+        const answer = await fake.request(base, ControlRequest.decode(payload), {
+          timeoutMs: opts.timeout,
+        });
+        return {
+          data: ControlResponse.encode(answer).finish(),
+          headers: { get: (name: string) => (name === "Opengeni-Control-Replay" ? "1" : "") },
+        };
+      },
+    };
+    return new NatsControlRpc(
+      async () => connection,
+      options?.onNoResponders ? { onNoResponders: options.onNoResponders } : {},
+    );
+  }
+
+  private fakeControlRpc(): ControlRpc {
     return {
       request: async (subject, req, opts) => {
         this.sent.push({ subject, req });
@@ -412,6 +445,63 @@ describe("compute sandbox client", () => {
     // The first read reached no responder; the resend carries the same request id.
     expect(reads.length).toBe(2);
     expect(reads[1]!.req.requestId).toBe(reads[0]!.req.requestId);
+  });
+
+  test("no responders on the real replay transport wakes the sandbox at once", async () => {
+    const { fabric, plane, client } = setup();
+    plane.natsTransport = true;
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    await session.writeFile({ path: "/workspace/e.txt", content: "e" });
+    const instance = plane.sessions.get(session.state.enrollmentId)!;
+    // The host was lost while the claim has not lapsed: the connection still
+    // resolves and every delivery finds no responder until the sandbox wakes.
+    plane.sessions.set(session.state.enrollmentId, "lost");
+    const lostResolve = plane.resolveConnection.bind(plane);
+    plane.resolveConnection = async (input) => {
+      const connection = await lostResolve(input);
+      return connection ? { ...connection, connectionInstanceId: instance } : null;
+    };
+    fabric.onWake = () => plane.open(session.state.enrollmentId, instance);
+    const before = plane.natsSubjects.length;
+    const started = Date.now();
+
+    const bytes = await session.readFile({ path: "/workspace/e.txt" });
+    expect(new TextDecoder().decode(bytes)).toBe("e");
+    expect(fabric.wakes).toBe(1);
+    // Woken on the first "no responders", not after the transport's recovery
+    // allowance (minutes).
+    expect(Date.now() - started).toBeLessThan(3_000);
+    // Every attempt was the same delivery: its replay identity was kept.
+    const deliveries = plane.natsSubjects.slice(before);
+    expect(deliveries.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(deliveries).size).toBe(1);
+    expect(deliveries[0]).toContain(".replay.");
+  });
+
+  test("no responders stops retrying at once when the agent is back on another connection", async () => {
+    const { fabric, plane, client } = setup();
+    plane.natsTransport = true;
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    await session.writeFile({ path: "/workspace/f.txt", content: "f" });
+    const old = plane.sessions.get(session.state.enrollmentId)!;
+    plane.sessions.set(session.state.enrollmentId, "lost");
+    const lostResolve = plane.resolveConnection.bind(plane);
+    let restarted = false;
+    plane.resolveConnection = async (input) => {
+      const connection = await lostResolve(input);
+      return connection && !restarted ? { ...connection, connectionInstanceId: old } : connection;
+    };
+    // The wake cold-boots it: the agent restarted with a new instance.
+    fabric.onWake = () => {
+      restarted = true;
+      plane.open(session.state.enrollmentId);
+    };
+    const started = Date.now();
+    expect(new TextDecoder().decode(await session.readFile({ path: "/workspace/f.txt" }))).toBe(
+      "f",
+    );
+    expect(fabric.wakes).toBe(1);
+    expect(Date.now() - started).toBeLessThan(3_000);
   });
 
   test("a sandbox with no open session is woken before the operation is sent", async () => {
