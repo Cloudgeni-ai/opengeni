@@ -6366,7 +6366,8 @@ mod tests {
         pub fn find_nats_server() -> Option<PathBuf> {
             if let Some(path) = std::env::var_os("PATH") {
                 for dir in std::env::split_paths(&path) {
-                    let candidate = dir.join("nats-server");
+                    let candidate =
+                        dir.join(format!("nats-server{}", std::env::consts::EXE_SUFFIX));
                     if candidate.is_file() {
                         return Some(candidate);
                     }

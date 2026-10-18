@@ -301,6 +301,10 @@ jobs:
 
       # The native macOS runner also executes the workspace tests before the
       # universal artifact is accepted.
+      - name: Install the native transport test broker
+        if: matrix.kind == 'macos'
+        uses: ./.github/actions/setup-agent-test-nats
+
       - name: Intel cargo test (macOS coverage)
         if: matrix.kind == 'macos'
         working-directory: agent
