@@ -102,7 +102,7 @@ async function drainingComputeLease(reason: "group_end" | "rotation") {
 
 /** The provider seam: records the disposition it was asked for and does what
  * production does with it (fence check only, or a verified capture). */
-function terminateSpy() {
+function terminateSpy(beforeDelete?: () => Promise<void>) {
   const dispositions: Array<DrainCaptureDisposition | undefined> = [];
   const fn: TerminateBoxFn = async (
     _settings,
@@ -114,6 +114,7 @@ function terminateSpy() {
   ) => {
     dispositions.push(captureDisposition);
     if (captureDisposition === "discard") {
+      await beforeDelete?.();
       const { wrote } = await persistArchive(null);
       return wrote;
     }
@@ -122,8 +123,11 @@ function terminateSpy() {
   return { fn, dispositions };
 }
 
-async function drain(fixture: Awaited<ReturnType<typeof drainingComputeLease>>) {
-  const spy = terminateSpy();
+async function drain(
+  fixture: Awaited<ReturnType<typeof drainingComputeLease>>,
+  beforeDelete?: () => Promise<void>,
+) {
+  const spy = terminateSpy(beforeDelete);
   const activities = createSandboxLeaseActivities(services(), {
     terminateBox: spy.fn,
     probeDrainableProvider: async () => "alive" as never,
@@ -159,5 +163,52 @@ describe("compute group end", () => {
     const fixture = await drainingComputeLease("rotation");
     const drained = await drain(fixture);
     expect(drained.dispositions).toEqual(["capture_required"]);
+  }, 60_000);
+
+  test("a rotation that commits just before the capture claim still gets its capture", async () => {
+    const fixture = await drainingComputeLease("group_end");
+    // An arrival with another image rotates the lease after the reaper read it
+    // and before its capture claim took the row lock. The trigger plays that
+    // arrival inside the claim's own row update, ahead of the claim's fence.
+    await admin.unsafe(`
+      create or replace function test_rotate_before_claim() returns trigger as $$
+      begin
+        if new.id = '${fixture.leaseId}'::uuid and old.archive_capture_id is null
+          and new.archive_capture_id is not null then
+          new.rotation_requested_at := now();
+          new.rotation_reason := 'operator';
+        end if;
+        return new;
+      end $$ language plpgsql`);
+    await admin.unsafe(`
+      create trigger a_test_rotate_before_claim before update on sandbox_leases
+      for each row execute function test_rotate_before_claim()`);
+    try {
+      const raced = await drain(fixture);
+      expect(raced.dispositions).toEqual(["capture_required"]);
+    } finally {
+      await admin.unsafe("drop trigger a_test_rotate_before_claim on sandbox_leases");
+      await admin.unsafe("drop function test_rotate_before_claim()");
+    }
+  }, 60_000);
+
+  test("the delete re-checks discard eligibility under the lease lock", async () => {
+    const fixture = await drainingComputeLease("group_end");
+    // Defence in depth: should a real rotation ever reach a claimed lease, the
+    // null-archive fence refuses the delete and gives the claim back.
+    const raced = await drain(fixture, async () => {
+      await admin`update sandbox_leases
+        set rotation_requested_at = now(), rotation_reason = 'operator'
+        where id = ${fixture.leaseId}`;
+    });
+    expect(raced.dispositions).toEqual(["discard"]);
+    expect(raced.result.status).not.toBe("terminated");
+    const [held] = await admin<{ liveness: string; archive_capture_id: string | null }[]>`
+      select liveness, archive_capture_id from sandbox_leases where id = ${fixture.leaseId}`;
+    expect(held).toEqual({ liveness: "draining", archive_capture_id: null });
+
+    // The next sweep captures instead of deleting.
+    const next = await drain(fixture);
+    expect(next.dispositions).toEqual(["capture_required"]);
   }, 60_000);
 });

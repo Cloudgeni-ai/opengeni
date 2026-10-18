@@ -26,6 +26,7 @@ import {
   type ComputeAgentPlane,
   type ControlRpc,
   type NatsRequestConnection,
+  sweepComputeOrphans,
 } from "../src/sandbox";
 import { Manifest } from "@openai/agents/sandbox";
 import { fileContentDigest } from "../src/sandbox/selfhosted/file-transfer";
@@ -35,10 +36,12 @@ const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const ACCOUNT = "22222222-2222-4222-8222-222222222222";
 const GROUP = "33333333-3333-4333-8333-333333333333";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
+const GATEWAY = "wss://gateway.test/v1/compute/agent-link";
 
 type FabricBox = {
   id: string;
   body: Record<string, unknown>;
+  createdMs?: number;
 };
 
 /** An in-process fake of the fabric HTTP API (the subset Opengeni uses). */
@@ -92,6 +95,19 @@ class FakeFabric {
             return Response.json({ code: "request_gone", message: "gone" }, { status: 410 });
           return Response.json(this.view(box));
         }
+        if (request.method === "GET" && url.pathname === "/v1/sandboxes") {
+          const wanted = [...url.searchParams];
+          return Response.json(
+            [...this.boxes.values()]
+              .filter((box) =>
+                wanted.every(
+                  ([key, value]) =>
+                    (box.body.metadata as Record<string, string> | undefined)?.[key] === value,
+                ),
+              )
+              .map((box) => this.view(box)),
+          );
+        }
         if (request.method === "POST" && url.pathname === "/v1/sandboxes") {
           const status = this.failCreates.shift();
           if (status) return Response.json({ code: "busy", message: "try again" }, { status });
@@ -107,7 +123,7 @@ class FakeFabric {
             );
           }
           if (!box) {
-            box = { id: `sbx-${this.requestIds.size + 1}`, body };
+            box = { id: `sbx-${this.requestIds.size + 1}`, body, createdMs: Date.now() };
             this.boxes.set(box.id, box);
             this.requestIds.set(body.request_id, box.id);
             this.onCreate(box);
@@ -151,7 +167,7 @@ class FakeFabric {
       agent: { workspace: agent.workspace_id, agent: agent.agent_id },
       host: "h1",
       owner_epoch: 1,
-      created_ms: 1,
+      created_ms: box.createdMs ?? 1,
     };
   }
 
@@ -382,12 +398,6 @@ class FakeAgentPlane implements ComputeAgentPlane {
   /** enrollment id -> when it was created (tests may backdate it). */
   readonly createdAtMs = new Map<string, number>();
 
-  async listGroupEnrollments(): Promise<Array<{ enrollmentId: string; createdAtMs: number }>> {
-    return [...this.createdAtMs]
-      .filter(([id]) => !this.revoked.includes(id))
-      .map(([enrollmentId, createdAtMs]) => ({ enrollmentId, createdAtMs }));
-  }
-
   /** Active enrollments (each one may still have a sandbox). */
   active(): string[] {
     return [...this.createdAtMs.keys()].filter((id) => !this.revoked.includes(id));
@@ -429,6 +439,7 @@ function setup(
     }),
     plane: () => plane,
     relay: RELAY,
+    gateway: GATEWAY,
     image: "registry.test/compute:1",
     desktop: options.desktop ?? false,
     vcpus: 2,
@@ -469,6 +480,7 @@ describe("compute sandbox client", () => {
       vcpus: 2,
       memory_mib: 4096,
       metadata: {
+        opengeni_gateway: GATEWAY,
         opengeni_workspace_id: WORKSPACE,
         opengeni_sandbox_group_id: GROUP,
         opengeni_enrollment_id: session.state.enrollmentId,
@@ -545,62 +557,122 @@ describe("compute sandbox client", () => {
     expect(session.state.requestId).toBe(session.state.enrollmentId);
   });
 
-  test("a lost create whose cleanup fails stays on record and the next create removes it", async () => {
+  test("a lost create whose cleanup fails is left to the orphan sweep, which removes it", async () => {
     const { fabric, plane, client } = setup();
     fabric.loseCreateAnswers = true;
     fabric.failCleanup = true;
     await expect(
       client.create(undefined, { opengeniCreateIdentity: identity }),
     ).rejects.toBeInstanceOf(ComputeFabricError);
-    // The fabric holds a sandbox and its enrollment is still active.
+    // The fabric holds a sandbox nothing names, and its enrollment is active.
     const orphan = plane.created[0]!.enrollmentId as string;
     expect(fabric.boxes.size).toBe(1);
-    expect(plane.revoked).toEqual([]);
     expect(plane.active()).toEqual([orphan]);
+    const [box] = fabric.boxes.values();
+    expect(box!.body.metadata).toEqual({
+      opengeni_gateway: GATEWAY,
+      opengeni_workspace_id: WORKSPACE,
+      opengeni_sandbox_group_id: GROUP,
+      opengeni_enrollment_id: orphan,
+    });
 
-    // A worker restart retries the group's create once the fabric is back.
     fabric.loseCreateAnswers = false;
     fabric.failCleanup = false;
-    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
-    expect(plane.revoked).toEqual([orphan]);
-    expect([...fabric.boxes.keys()]).toEqual([session.state.sandboxId]);
-    expect(plane.active()).toEqual([session.state.enrollmentId]);
-  });
-
-  test("a recent create the fabric has not seen stays on record; an old one is revoked", async () => {
-    const { fabric, plane, client } = setup();
-    // Two enrollments whose creates never reached the fabric.
-    await plane.createEnrollment({ enrollmentId: "in-flight" });
-    await plane.createEnrollment({ enrollmentId: "abandoned" });
-    plane.createdAtMs.set("abandoned", Date.now() - 11 * 60_000);
-    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
-    expect(plane.revoked).toEqual(["abandoned"]);
-    expect(plane.active().sort()).toEqual(["in-flight", session.state.enrollmentId].sort());
-    expect(fabric.boxes.size).toBe(1);
-  });
-
-  test("deleting a group's sandbox removes older unfinished creates, never newer boxes", async () => {
-    const { fabric, plane, client } = setup();
-    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
-    const ownCreatedAt = plane.createdAtMs.get(session.state.enrollmentId)!;
-    // An older create whose cleanup never finished, and a newer box (one that
-    // replaced this sandbox), both still held by the fabric.
-    for (const [id, createdAtMs] of [
-      ["older", ownCreatedAt - 60_000],
-      ["newer", ownCreatedAt + 60_000],
-    ] as const) {
-      await plane.createEnrollment({ enrollmentId: id });
-      plane.createdAtMs.set(id, createdAtMs);
-      fabric.boxes.set(`sbx-${id}`, {
-        id: `sbx-${id}`,
-        body: { request_id: id, init: { agent: { workspace_id: WORKSPACE, agent_id: id } } },
+    const sweep = (nowMs: number) =>
+      sweepComputeOrphans({
+        fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+        gateway: GATEWAY,
+        named: async () => false,
+        revokeEnrollment: (input) => plane.revokeEnrollment(input),
+        nowMs,
       });
-      fabric.requestIds.set(id, `sbx-${id}`);
-    }
+    // Too young: its create may still be committing.
+    expect((await sweep(Date.now())).deleted).toEqual([]);
+    expect(fabric.boxes.size).toBe(1);
+    const swept = await sweep(Date.now() + 11 * 60_000);
+    expect(swept.deleted).toEqual([
+      {
+        sandboxId: box!.id,
+        workspaceId: WORKSPACE,
+        sandboxGroupId: GROUP,
+        enrollmentId: orphan,
+      },
+    ]);
+    expect(fabric.boxes.size).toBe(0);
+    expect(plane.revoked).toEqual([orphan]);
+  });
 
+  test("the orphan sweep keeps named sandboxes and never touches another deployment's", async () => {
+    const { fabric, plane, client } = setup();
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    const other = crypto.randomUUID();
+    fabric.boxes.set("sbx-other", {
+      id: "sbx-other",
+      body: {
+        metadata: {
+          opengeni_gateway: "wss://another-deployment.test/v1/compute/agent-link",
+          opengeni_workspace_id: WORKSPACE,
+          opengeni_sandbox_group_id: GROUP,
+          opengeni_enrollment_id: other,
+        },
+        init: { agent: { workspace_id: WORKSPACE, agent_id: other } },
+      },
+    });
+    const asked: string[] = [];
+    const sentBefore = plane.sent.length;
+    const result = await sweepComputeOrphans({
+      fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+      gateway: GATEWAY,
+      named: async (sandbox) => {
+        asked.push(sandbox.sandboxId);
+        return sandbox.enrollmentId === session.state.enrollmentId;
+      },
+      revokeEnrollment: (input) => plane.revokeEnrollment(input),
+      nowMs: Date.now() + 11 * 60_000,
+    });
+    expect(asked).toEqual([session.state.sandboxId]);
+    expect(result).toEqual({ examined: 1, deleted: [], failed: 0 });
+    expect([...fabric.boxes.keys()].sort()).toEqual(["sbx-other", session.state.sandboxId].sort());
+    // The sweep never messages an agent.
+    expect(plane.sent).toHaveLength(sentBefore);
+  });
+
+  test("an orphan whose delete fails is counted and kept for the next sweep", async () => {
+    const { fabric, plane, client } = setup();
+    await client.create(undefined, { opengeniCreateIdentity: identity });
+    fabric.failCleanup = true;
+    const sweep = () =>
+      sweepComputeOrphans({
+        fabric: new ComputeFabricClient({
+          baseUrl: fabric.url,
+          apiKey: "fabric-key",
+          sleep: async () => {},
+        }),
+        gateway: GATEWAY,
+        named: async () => false,
+        revokeEnrollment: (input) => plane.revokeEnrollment(input),
+        nowMs: Date.now() + 11 * 60_000,
+      });
+    expect(await sweep()).toMatchObject({ examined: 1, deleted: [], failed: 1 });
+    expect(plane.revoked).toEqual([]);
+    fabric.failCleanup = false;
+    expect((await sweep()).deleted).toHaveLength(1);
+    expect(fabric.boxes.size).toBe(0);
+  });
+
+  test("deleting a sandbox revokes its enrollment only after the fabric delete", async () => {
+    const { fabric, plane, client } = setup();
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    fabric.failCleanup = true;
+    await expect(client.delete(session.state)).rejects.toBeInstanceOf(ComputeFabricError);
+    // Still on record: the drain's retry (or the orphan sweep) finishes it.
+    expect(plane.active()).toEqual([session.state.enrollmentId]);
+    fabric.failCleanup = false;
     await client.delete(session.state);
-    expect(plane.revoked.sort()).toEqual(["older", session.state.enrollmentId].sort());
-    expect([...fabric.boxes.keys()]).toEqual(["sbx-newer"]);
+    expect(plane.revoked).toEqual([session.state.enrollmentId]);
+    expect(fabric.boxes.size).toBe(0);
+    // A retry after success is still success.
+    await client.delete(session.state);
   });
 
   test("a sleeping sandbox is reached through its open session without a fabric wake", async () => {

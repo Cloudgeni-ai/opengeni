@@ -55,8 +55,12 @@ export type ComputeAgentLinkStore = {
   ): Promise<{ renewed: true } | { renewed: false; code: ClosedCode }>;
   release(input: ComputeAgentLinkClaim): Promise<void>;
   /** Record that the session's sandbox fell asleep or woke, for metering its
-   * awake time. Never decides delivery. */
-  power(input: ComputeAgentLinkClaim & { sandboxId: string; asleep: boolean }): Promise<void>;
+   * awake time. Never decides delivery. `accepted: false` means the claim is
+   * no longer the agent's current one, so it never speaks for the sandbox
+   * again. */
+  power(
+    input: ComputeAgentLinkClaim & { sandboxId: string; asleep: boolean },
+  ): Promise<{ accepted: boolean }>;
 };
 
 export type ComputeAgentLinkClaim = {
@@ -150,9 +154,12 @@ type Session = {
   /** The sandbox the ticket names. */
   sandboxId: string;
   /** The last state the host reported, null before its first `state`. */
-  asleep: boolean | null;
-  /** Power records of this session, applied in the order the host sent them. */
-  powerChain: Promise<void>;
+  reportedAsleep: boolean | null;
+  /** The last state the store committed for this session. A write that
+   * failed leaves it behind `reportedAsleep`, and the next renewal tick
+   * writes again, without any message to the agent. */
+  committedAsleep: boolean | null;
+  powerSyncing: boolean;
 };
 
 function agentKey(claim: ComputeAgentLinkClaim): string {
@@ -347,6 +354,7 @@ export class ComputeAgentGateway {
           const session = sessions[next++]!;
           await this.renew(session);
           await this.refreshRelay(session);
+          await this.syncPower(session);
         }
       };
       await Promise.all(
@@ -381,6 +389,40 @@ export class ComputeAgentGateway {
       this.authorized(session);
     } finally {
       session.renewing = false;
+    }
+  }
+
+  /** @internal Commit the host's latest reported power state for `session`,
+   * one write at a time. A failure is retried by the next tick. */
+  async syncPower(session: Session): Promise<void> {
+    if (session.powerSyncing) return;
+    session.powerSyncing = true;
+    try {
+      while (
+        session.reportedAsleep !== null &&
+        session.reportedAsleep !== session.committedAsleep &&
+        this.authorized(session)
+      ) {
+        const asleep = session.reportedAsleep;
+        const result = await this.options.store.power({
+          ...session.claim,
+          sandboxId: session.sandboxId,
+          asleep,
+        });
+        // A refused claim never speaks for the sandbox again; its renewal
+        // ends the session.
+        session.committedAsleep = asleep;
+        if (!result.accepted) return;
+      }
+    } catch (error) {
+      this.options.logger?.warn("compute gateway: power state not recorded", {
+        errorCode: "compute_link_power_failed",
+        workspaceId: session.claim.workspaceId,
+        agentId: session.claim.agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      session.powerSyncing = false;
     }
   }
 
@@ -639,8 +681,9 @@ class AgentLink implements ApiWebSocketConnection {
       leaseDeadlineMs: this.gateway.leaseDeadline(startedAtMs),
       renewing: false,
       sandboxId: ticket.sandbox,
-      asleep: null,
-      powerChain: Promise.resolve(),
+      reportedAsleep: null,
+      committedAsleep: null,
+      powerSyncing: false,
     };
     if (!this.gateway.adopt(session)) {
       // A later epoch opened the agent here while this open was in flight.
@@ -778,24 +821,8 @@ class AgentLink implements ApiWebSocketConnection {
         return;
       }
       case "state": {
-        const asleep = frame.state === "asleep";
-        if (session.asleep === asleep) return;
-        session.asleep = asleep;
-        const record = { ...session.claim, sandboxId: session.sandboxId, asleep };
-        session.powerChain = session.powerChain.then(async () => {
-          // Only a session that still holds the agent speaks for its sandbox.
-          if (!this.gateway.authorized(session)) return;
-          try {
-            await this.gateway.options.store.power(record);
-          } catch (error) {
-            this.gateway.options.logger?.warn("compute gateway: power state not recorded", {
-              workspaceId: record.workspaceId,
-              agentId: record.agentId,
-              asleep,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        });
+        session.reportedAsleep = frame.state === "asleep";
+        void this.gateway.syncPower(session);
         return;
       }
     }

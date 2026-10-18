@@ -642,6 +642,12 @@ export {
   type ComputeSessionState,
   type ComputeTurnDeps,
 } from "./compute/session";
+export {
+  COMPUTE_METADATA,
+  sweepComputeOrphans,
+  type ComputeOrphanSweepResult,
+  type ComputeSandboxIdentity,
+} from "./compute/orphans";
 // The op-stream exec transport (op-stream protocol v1.1 — streaming exec to a
 // Connected Machine runner). The worker injects `NatsOpStreamTransport` (over
 // the same bus connection as the control rpc) plus an `OpStreamJournal`

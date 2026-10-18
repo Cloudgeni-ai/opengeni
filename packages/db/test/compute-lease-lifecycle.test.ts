@@ -6,15 +6,18 @@ import {
   acquireLease,
   bootstrapWorkspace,
   commitWarmingToWarm,
+  computeSandboxNamed,
   createDb,
   createSandboxEnrollment,
   createSession,
   deleteSessionTreeIfQuiescent,
   forceDrainOverLimitViewerOnlyBoxes,
+  openSandboxAgentLink,
   releaseLeaseHolder,
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
   recordComputeSandboxPower,
+  revokeSandboxEnrollment,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -275,8 +278,18 @@ describe("compute warm time follows the sandbox's sleep", () => {
     const [lease] = await admin<{ lease_epoch: string }[]>`
       select lease_epoch from sandbox_leases
       where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
-    const power = (asleep: boolean, sandboxId = "compute-box") =>
-      recordComputeSandboxPower(db, { workspaceId: ids.workspaceId, agentId, sandboxId, asleep });
+    // The host's link session holds the agent under owner epoch 1.
+    const claim = {
+      workspaceId: ids.workspaceId,
+      agentId,
+      epoch: 1,
+      connectionInstanceId: crypto.randomUUID(),
+    };
+    expect(await openSandboxAgentLink(db, { ...claim, leaseMs: 20_000 })).toMatchObject({
+      opened: true,
+    });
+    const power = (asleep: boolean, sandboxId = "compute-box", from: typeof claim = claim) =>
+      recordComputeSandboxPower(db, { ...from, sandboxId, asleep });
     const accrue = () =>
       accrueWarmSeconds(db, {
         ...ids,
@@ -288,21 +301,21 @@ describe("compute warm time follows the sandbox's sleep", () => {
     const backdateSleep = (seconds: number) => admin`
       update sandbox_leases set compute_asleep_since = now() - make_interval(secs => ${seconds})
       where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
-    return { ids, power, accrue, backdateSleep };
+    return { ids, agentId, claim, power, accrue, backdateSleep };
   }
 
   test("no warm time accrues while asleep; the awake time before it still does", async () => {
     if (!available) return;
     const { power, accrue, backdateSleep } = await sleepingFixture();
-    expect(await power(true)).toEqual({ changed: true });
-    expect(await power(true)).toEqual({ changed: false });
+    expect(await power(true)).toEqual({ accepted: true, changed: true });
+    expect(await power(true)).toEqual({ accepted: true, changed: false });
     await backdateSleep(200);
     // Awake 100 s, then asleep 200 s: only the 100 s accrue.
     const first = await accrue();
     expect(first.seconds).toBeGreaterThanOrEqual(99);
     expect(first.seconds).toBeLessThanOrEqual(101);
     expect((await accrue()).accrued).toBe(false);
-    expect(await power(false)).toEqual({ changed: true });
+    expect(await power(false)).toEqual({ accepted: true, changed: true });
     expect((await accrue()).seconds).toBeLessThanOrEqual(1);
   }, 60_000);
 
@@ -320,6 +333,81 @@ describe("compute warm time follows the sandbox's sleep", () => {
   test("only the lease's current sandbox reports for it", async () => {
     if (!available) return;
     const { power } = await sleepingFixture();
-    expect(await power(true, "another-box")).toEqual({ changed: false });
+    expect(await power(true, "another-box")).toEqual({ accepted: true, changed: false });
+  }, 60_000);
+
+  test("only the agent's exact current claim reports: not an older epoch, not after revocation", async () => {
+    if (!available) return;
+    const { ids, agentId, claim, power } = await sleepingFixture();
+    const asleepSince = async () => {
+      const [row] = await admin<{ compute_asleep_since: Date | null }[]>`
+        select compute_asleep_since from sandbox_leases
+        where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+      return row?.compute_asleep_since ?? null;
+    };
+    // A later owner epoch opens the agent, then its sandbox reports awake.
+    const newer = { ...claim, epoch: 2, connectionInstanceId: crypto.randomUUID() };
+    expect(await openSandboxAgentLink(db, { ...newer, leaseMs: 20_000 })).toMatchObject({
+      opened: true,
+    });
+    // The older session's delayed `asleep` lands after: refused, nothing changes.
+    expect(await power(true)).toEqual({ accepted: false, changed: false });
+    expect(await asleepSince()).toBeNull();
+    expect(await power(true, "compute-box", newer)).toEqual({ accepted: true, changed: true });
+    // A claim whose lease ran out no longer reports.
+    await admin`update enrollments set connection_lease_expires_at = now() - interval '1 second'
+      where id = ${agentId}`;
+    expect(await power(false, "compute-box", newer)).toEqual({ accepted: false, changed: false });
+    await admin`update enrollments set connection_lease_expires_at = now() + interval '20 seconds'
+      where id = ${agentId}`;
+    expect(
+      await revokeSandboxEnrollment(db, { workspaceId: ids.workspaceId, enrollmentId: agentId }),
+    ).toEqual({ revoked: true });
+    expect(await power(false, "compute-box", newer)).toEqual({ accepted: false, changed: false });
+    expect(await asleepSince()).not.toBeNull();
+  }, 60_000);
+});
+
+describe("the compute orphan sweep's record check", () => {
+  test("names the lease's box, and a group a creator is warming; nothing else", async () => {
+    if (!available) return;
+    const { ids } = await fixture("compute");
+    const enroll = async () => {
+      const enrollmentId = crypto.randomUUID();
+      await createSandboxEnrollment(db, {
+        ...ids,
+        enrollmentId,
+        hasDisplay: false,
+        workspaceRoot: "/workspace",
+      });
+      return enrollmentId;
+    };
+    const live = await enroll();
+    const stray = await enroll();
+    const named = (enrollmentId: string, sandboxId: string, workspaceId = ids.workspaceId) =>
+      computeSandboxNamed(db, {
+        workspaceId,
+        sandboxGroupId: ids.sandboxGroupId,
+        enrollmentId,
+        sandboxId,
+      });
+    // The warm lease's box is "compute-box".
+    expect(await named(live, "compute-box")).toBe(true);
+    // A box the lease does not hold, under an active enrollment of the group.
+    expect(await named(stray, "lost-box")).toBe(false);
+    // The lease names its box by enrollment too.
+    await admin`update sandbox_leases
+      set resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb), '{sessionState}',
+        jsonb_build_object('enrollmentId', ${stray}::text))
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+    expect(await named(stray, "lost-box")).toBe(true);
+    // While a creator warms the group, its new box is not yet on the lease.
+    await admin`update sandbox_leases set liveness = 'warming', resume_state = null
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+    expect(await named(stray, "new-box")).toBe(true);
+    // A revoked enrollment and a workspace that no longer has it name nothing.
+    await revokeSandboxEnrollment(db, { workspaceId: ids.workspaceId, enrollmentId: stray });
+    expect(await named(stray, "new-box")).toBe(false);
+    expect(await named(live, "compute-box", crypto.randomUUID())).toBe(false);
   }, 60_000);
 });

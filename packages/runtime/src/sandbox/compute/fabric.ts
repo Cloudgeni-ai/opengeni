@@ -230,6 +230,15 @@ export class ComputeFabricClient {
     );
   }
 
+  /** The team's sandboxes whose metadata holds every given pair. */
+  async list(metadata: Record<string, string> = {}): Promise<ComputeSandboxView[]> {
+    const query = new URLSearchParams(metadata).toString();
+    return await this.request<ComputeSandboxView[]>(
+      "GET",
+      `/v1/sandboxes${query ? `?${query}` : ""}`,
+    );
+  }
+
   /** The sandbox a create request made, so a caller that lost a create's
    * answer can find it without creating one. */
   async lookupRequest(requestId: string): Promise<ComputeRequestLookup> {

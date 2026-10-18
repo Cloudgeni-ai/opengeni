@@ -67,12 +67,6 @@ export interface ComputeAgentPlane {
   /** Revoke the sandbox enrollment, which ends its session at the gateway
    * (idempotent; absent is success). */
   revokeEnrollment(input: { workspaceId: string; enrollmentId: string }): Promise<void>;
-  /** The active sandbox enrollments of one sandbox group with their creation
-   * times: each one may still have a sandbox at the fabric. */
-  listGroupEnrollments(input: {
-    workspaceId: string;
-    sandboxGroupId: string;
-  }): Promise<Array<{ enrollmentId: string; createdAtMs: number }>>;
 }
 
 let injectedPlane: ComputeAgentPlane | undefined;

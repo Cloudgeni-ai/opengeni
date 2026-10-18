@@ -61,6 +61,7 @@ import {
   type SelfhostedSessionDeps,
 } from "../selfhosted/session";
 import { ComputeFabricClient, isComputeFabricGone, type ComputeCreateRequest } from "./fabric";
+import { COMPUTE_METADATA, UNSEEN_CREATE_SETTLE_MS } from "./orphans";
 import type { ComputeAgentConnection, ComputeAgentPlane } from "./plane";
 
 export const COMPUTE_WORKSPACE_ROOT = "/workspace";
@@ -721,22 +722,14 @@ export async function deleteComputeBox(
 }
 
 /**
- * How long a create the fabric has never seen may still arrive there. An
- * enrollment younger than this whose request the fabric does not know stays
- * active, because its create may still be in flight.
- */
-export const UNSEEN_CREATE_SETTLE_MS = 10 * 60_000;
-
-/**
  * Undo a create whose sandbox nothing durable names: delete the sandbox its
  * request made, if any, then revoke the enrollment it would run under.
  *
  * The fabric request id of a compute create is its enrollment id, and the
- * enrollment is written before the create is sent. So an active sandbox
- * enrollment is the durable record that the fabric may hold a sandbox for it:
- * it is revoked only once the fabric proves no sandbox exists or can still
- * appear for that request. Returns whether the enrollment was revoked; false
- * (or a thrown error) keeps the obligation for the next reconcile.
+ * enrollment is written before the create is sent. It is revoked only once
+ * the fabric proves no sandbox exists or can still appear for that request.
+ * Returns whether the enrollment was revoked; false (or a thrown error) leaves
+ * the sandbox, if one appears, to the orphan sweep (./orphans.ts).
  */
 export async function discardComputeCreate(
   fabric: Pick<ComputeFabricClient, "lookupRequest" | "delete">,
@@ -757,48 +750,14 @@ export async function discardComputeCreate(
   return true;
 }
 
-/**
- * Discard every sandbox of a group that nothing durable names any more: an
- * active sandbox enrollment of the group that the lease does not hold is a
- * create whose cleanup has not finished (a lost answer, a failed delete, a
- * crashed worker). Only the group's unique creator (the cold->warming owner,
- * which holds no box) reconciles every enrollment; a delete reconciles only
- * enrollments older than the box it deletes (`createdBeforeMs`), because a
- * newer one may be the box that replaced it. Failures are left for the next
- * reconcile.
- */
-export async function reconcileComputeGroup(
-  fabric: Pick<ComputeFabricClient, "lookupRequest" | "delete">,
-  plane: Pick<ComputeAgentPlane, "revokeEnrollment" | "listGroupEnrollments">,
-  input: { workspaceId: string; sandboxGroupId: string; createdBeforeMs?: number },
-  nowMs: number = Date.now(),
-): Promise<void> {
-  const enrollments = await plane.listGroupEnrollments({
-    workspaceId: input.workspaceId,
-    sandboxGroupId: input.sandboxGroupId,
-  });
-  for (const enrollment of enrollments) {
-    if (input.createdBeforeMs !== undefined && enrollment.createdAtMs >= input.createdBeforeMs) {
-      continue;
-    }
-    await discardComputeCreate(
-      fabric,
-      plane,
-      {
-        workspaceId: input.workspaceId,
-        enrollmentId: enrollment.enrollmentId,
-        createdAtMs: enrollment.createdAtMs,
-      },
-      nowMs,
-    ).catch(() => false);
-  }
-}
-
 export interface ComputeSandboxClientOptions {
   fabric: ComputeFabricClient;
   /** Resolved lazily: the registry builds clients before the host installs it. */
   plane: () => ComputeAgentPlane;
   relay: SelfhostedRelayConfig;
+  /** This deployment's gateway URL. Every sandbox it creates is tagged with
+   * it, so the orphan sweep only ever considers this deployment's sandboxes. */
+  gateway: string;
   image: string | null;
   vcpus: number;
   memoryMib: number;
@@ -853,8 +812,9 @@ export class ComputeSandboxClient {
    * arrives as `opengeniCreateIdentity` in the second argument.
    *
    * The request id is the enrollment id, and the enrollment is written before
-   * the create is sent, so a create whose cleanup never finished stays on
-   * record and the next create of the group (or its deletion) removes it.
+   * the create is sent. The sandbox carries its deployment, workspace, group
+   * and enrollment in its metadata, so one whose cleanup never finished is
+   * found and removed by the orphan sweep from the fabric's own inventory.
    */
   async create(
     args?: SandboxClientCreateArgs,
@@ -881,12 +841,6 @@ export class ComputeSandboxClient {
       ...(await manifest.resolveEnvironment()),
     };
     const plane = this.options.plane();
-    // Only the group's unique creator gets here, holding no box: any active
-    // enrollment of the group is an unfinished earlier create.
-    await reconcileComputeGroup(this.options.fabric, plane, {
-      workspaceId: identity.workspaceId,
-      sandboxGroupId: identity.sandboxGroupId,
-    }).catch(() => undefined);
     const enrollmentId = randomUUID();
     const requestId = enrollmentId;
     await plane.createEnrollment({
@@ -909,9 +863,10 @@ export class ComputeSandboxClient {
         ? { cpu_request_millis: this.options.cpuRequestMillis }
         : {}),
       metadata: {
-        opengeni_workspace_id: identity.workspaceId,
-        opengeni_sandbox_group_id: identity.sandboxGroupId,
-        opengeni_enrollment_id: enrollmentId,
+        [COMPUTE_METADATA.gateway]: this.options.gateway,
+        [COMPUTE_METADATA.workspaceId]: identity.workspaceId,
+        [COMPUTE_METADATA.sandboxGroupId]: identity.sandboxGroupId,
+        [COMPUTE_METADATA.enrollmentId]: enrollmentId,
       },
       init: {
         env_vars: environment,
@@ -930,8 +885,8 @@ export class ComputeSandboxClient {
       view = await this.options.fabric.create(body);
     } catch (error) {
       // The create may have taken effect without its answer reaching us. If
-      // the fabric cannot yet prove there is no sandbox, the enrollment stays
-      // active and a later reconcile finishes the cleanup.
+      // the fabric cannot yet prove there is no sandbox, the orphan sweep
+      // finishes the cleanup.
       await discardComputeCreate(this.options.fabric, plane, {
         workspaceId: identity.workspaceId,
         enrollmentId,
@@ -965,7 +920,7 @@ export class ComputeSandboxClient {
       }
     } catch (error) {
       // Nothing durable names this sandbox yet: do not leave it behind. A
-      // failed delete leaves the enrollment active for a later reconcile.
+      // failed delete leaves it to the orphan sweep.
       await deleteComputeBox(this.options.fabric, plane, state).catch(() => undefined);
       throw error;
     }
@@ -1000,25 +955,11 @@ export class ComputeSandboxClient {
     return this.session(live, options.archiveLimits);
   }
 
+  /** Delete the sandbox, then revoke its enrollment. A failure throws with
+   * the enrollment still active, so the caller's retry (or the orphan sweep)
+   * finishes it. Any other sandbox of the group is the orphan sweep's. */
   async delete(state: ComputeSessionState): Promise<void> {
-    const plane = this.options.plane();
-    const enrollments = await plane
-      .listGroupEnrollments({
-        workspaceId: state.workspaceId,
-        sandboxGroupId: state.sandboxGroupId,
-      })
-      .catch(() => []);
-    await deleteComputeBox(this.options.fabric, plane, state);
-    // Older unfinished creates of the group go with it (newer ones may be the
-    // box that replaced this one).
-    const own = enrollments.find((e) => e.enrollmentId === state.enrollmentId);
-    if (own) {
-      await reconcileComputeGroup(this.options.fabric, plane, {
-        workspaceId: state.workspaceId,
-        sandboxGroupId: state.sandboxGroupId,
-        createdBeforeMs: own.createdAtMs,
-      }).catch(() => undefined);
-    }
+    await deleteComputeBox(this.options.fabric, this.options.plane(), state);
   }
 
   async canPersistOwnedSessionState(): Promise<boolean> {

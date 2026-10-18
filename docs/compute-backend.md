@@ -55,16 +55,25 @@ skips sandbox enrollments, and machine routes list machines only.
   (retried with the same id and body) and
   `init.agent = {workspace_id, agent_id, workspace_root, desktop}`, then waits
   for the agent to answer through its session.
-- **Unfinished creates**: because the enrollment is written before the create
-  is sent, an active sandbox enrollment is the durable record that the fabric
-  may hold a sandbox for it. It is revoked only after `GET /v1/requests/{id}`
-  proves no sandbox exists (deleting a live one first); a request the fabric
-  has never seen counts as proof only once the enrollment is ten minutes old,
-  since its create may still be in flight. A failed create cleans up at once
-  when it can; otherwise the group's next create (the unique cold-to-warming
-  owner, which holds no box) reconciles every active enrollment of the group,
-  and deleting the group's sandbox reconciles the older ones. So a lost answer,
-  a failed delete or a crashed worker never loses track of a sandbox.
+- **Unfinished creates and orphans**: the enrollment is written before the
+  create is sent, and every sandbox carries its deployment's gateway URL, its
+  workspace, sandbox group and enrollment in its metadata. A failed create
+  cleans up at once when it can: `GET /v1/requests/{id}` finds the sandbox its
+  request made, which is deleted before the enrollment is revoked (a request
+  the fabric has never seen counts as proof of no sandbox only once the
+  enrollment is ten minutes old). Whatever is left (a lost answer, a failed
+  delete, a worker that crashed between create and commit, a workspace deleted
+  with everything in it) is the orphan sweep's: every five minutes the worker's
+  reaper maintenance lists this deployment's sandboxes on the fabric
+  (`sweepComputeOrphans`, filtered by its gateway URL) and deletes each one
+  older than ten minutes that Opengeni's records no longer name, then revokes
+  its enrollment. A sandbox is named while its enrollment is active and its
+  group's lease holds it (by sandbox or enrollment id) or is warming, since a
+  creator may be about to commit it (`computeSandboxNamed`). The fabric's own
+  inventory is the record, so nothing is lost when Opengeni's rows go, and the
+  sweep never messages an agent, so it wakes nothing. One fabric team serves
+  one Opengeni deployment's gateway; the gateway tag keeps a misconfigured
+  second deployment's sandboxes out of the sweep.
 - **Resume**: re-address the same sandbox by id; no wake is needed. If a request
   finds no responder (no host serves the sandbox, for example mid-move),
   `ComputeWakingControlRpc` asks the fabric to wake it and resends under the
@@ -89,16 +98,29 @@ skips sandbox enrollments, and machine routes list machines only.
 - **Group end**: deleting the chat or workspace marks the lease
   (`group_end_requested_at`, migration 0845) and drains it at once. The reaper
   then deletes the sandbox on the fabric without a tar capture and revokes its
-  enrollment; the lease's capture fence still decides who may terminate it,
-  and a fence loss leaves the box for its new owner. The marker is cleared
-  when the lease re-arms or goes cold, and the deletion succeeds on retry.
+  enrollment (after the fabric delete, so a failure leaves it on record for
+  the retry). Whether to delete without a capture is read from the lease the
+  capture claim returns and checked again under the lease's row lock just
+  before the delete (`persistDrainSnapshot` with `groupEndDiscard`): a
+  rotation that committed after the reaper read the lease gets its capture,
+  and an ineligible delete gives its claim back for the next sweep. The
+  lease's capture fence still decides who may terminate the box, and a fence
+  loss leaves it for its new owner. The marker is cleared when the lease
+  re-arms or goes cold.
 - **Capture**: a portable tar only, to move a workspace to another backend
   (rotation and archive capture still drain with a capture).
 - **Metering**: warm seconds count only while the sandbox is awake. The
   gateway records each `state` change (`recordComputeSandboxPower`): asleep
   stamps `compute_asleep_since`, which caps accrual; awake moves the meter
-  cursor past the time asleep. A tick that accrued before the asleep frame
-  arrived may bill at most one tick of sleep.
+  cursor past the time asleep. Only the agent's exact current claim reports:
+  the enrollment must be active with the session's epoch, connection instance
+  and a live claim lease, so a report delayed past a newer epoch's open, or
+  one after a revocation, changes nothing. The gateway keeps the host's latest
+  reported state apart from the last committed one and writes again on the
+  next 5 s tick after a failure, without messaging the agent. A tick that
+  accrued before the asleep frame arrived may bill at most one tick of sleep,
+  and a write that waits on a failure bills (or skips) the time until it
+  lands.
 
 Request windows on compute are at least 130 s, because the host holds a
 message up to 120 s while a sandbox wakes from disk.

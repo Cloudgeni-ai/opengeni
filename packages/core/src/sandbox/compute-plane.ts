@@ -7,7 +7,6 @@ import type { Settings } from "@opengeni/config";
 import {
   createSandboxEnrollment,
   getLiveEnrollmentConnection,
-  listSandboxEnrollmentsForGroup,
   revokeSandboxEnrollment,
   type Database,
 } from "@opengeni/db";
@@ -60,11 +59,6 @@ export function createComputeAgentPlane(deps: {
     revokeEnrollment: async (input) => {
       await revokeSandboxEnrollment(db, input);
     },
-    listGroupEnrollments: async (input) =>
-      (await listSandboxEnrollmentsForGroup(db, input)).map((enrollment) => ({
-        enrollmentId: enrollment.id,
-        createdAtMs: Date.parse(enrollment.createdAt),
-      })),
   };
 }
 

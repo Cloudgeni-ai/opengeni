@@ -37,6 +37,7 @@ export const computeProvider: ProviderRegistration = {
       }),
       plane: getComputeAgentPlane,
       relay: resolveRelayConfig(settings),
+      gateway: settings.computeLinkUrl!,
       image: (desktop ? settings.computeDesktopImage : undefined) ?? settings.computeImage ?? null,
       desktop,
       vcpus: settings.computeVcpus,

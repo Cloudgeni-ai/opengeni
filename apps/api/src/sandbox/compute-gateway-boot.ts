@@ -47,8 +47,9 @@ export function databaseComputeAgentLinkStore(db: Database): ComputeAgentLinkSto
     release: async (claim) => {
       await releaseSandboxAgentLink(db, claim);
     },
-    power: async ({ workspaceId, agentId, sandboxId, asleep }) => {
-      await recordComputeSandboxPower(db, { workspaceId, agentId, sandboxId, asleep });
+    power: async (input) => {
+      const { accepted } = await recordComputeSandboxPower(db, input);
+      return { accepted };
     },
   };
 }

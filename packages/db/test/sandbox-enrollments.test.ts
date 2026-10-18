@@ -9,7 +9,6 @@ import {
   getEnrollment,
   getLiveEnrollmentConnection,
   listEnrollments,
-  listSandboxEnrollmentsForGroup,
   listSandboxes,
   openSandboxAgentLink,
   releaseSandboxAgentLink,
@@ -105,12 +104,6 @@ describe("sandbox enrollments", () => {
       createSandboxEnrollment(db, { ...input, sandboxGroupId: crypto.randomUUID() }),
     ).rejects.toBeInstanceOf(SandboxEnrollmentConflictError);
     expect((await getEnrollment(db, ws.workspaceId, input.enrollmentId))?.kind).toBe("sandbox");
-    expect(
-      await listSandboxEnrollmentsForGroup(db, {
-        workspaceId: ws.workspaceId,
-        sandboxGroupId: input.sandboxGroupId,
-      }),
-    ).toHaveLength(1);
   });
 
   test("a sandbox enrollment is never a machine", async () => {

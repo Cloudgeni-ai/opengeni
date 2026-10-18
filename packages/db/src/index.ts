@@ -58255,6 +58255,11 @@ export async function persistDrainSnapshot(
         workspaceArchive: null;
         workspaceArchiveMeta?: never;
         checkpointArtifactId?: never;
+        /** A group-end delete without a capture. The CAS additionally requires,
+         * under the same row lock, a compute lease whose group end is still
+         * requested and that no rotation has claimed since; otherwise the
+         * result carries `discardIneligible` and the caller must capture. */
+        groupEndDiscard?: true;
       }
     | {
         /** Base64 provider receipt or tar archive from the verified runtime capture.
@@ -58272,6 +58277,9 @@ export async function persistDrainSnapshot(
   wrote: boolean;
   archiveRevision: string | null;
   candidateDisposition?: WorkspaceArchiveCandidateDisposition;
+  /** Set only for `groupEndDiscard`: the exact capture still owns the lease,
+   * but it is no longer eligible for a delete without a capture. */
+  discardIneligible?: true;
 }> {
   const workspaceArchiveMeta =
     input.workspaceArchive === null ? null : parseArchiveRevision(input.workspaceArchiveMeta);
@@ -58419,6 +58427,22 @@ export async function persistDrainSnapshot(
       // claim intact: it is also the durable teardown claim and must fence new
       // holders until provider termination commits cold or recovery replaces it.
       if (input.workspaceArchive === null) {
+        // Discard eligibility is decided here, under the lock that also fences
+        // the capture: a rotation or re-arm that committed after the reaper read
+        // the lease turns a group-end delete back into a capture.
+        if (
+          input.groupEndDiscard &&
+          !(
+            activePublication &&
+            row.backend === "compute" &&
+            Boolean(row.group_end_requested_at) &&
+            // The capture claim stamps its own `teardown_claim` rotation; only
+            // an earlier, real rotation needs the capture.
+            (!row.rotation_requested_at || row.rotation_reason === "teardown_claim")
+          )
+        ) {
+          return { wrote: false, archiveRevision: null, discardIneligible: true };
+        }
         return {
           wrote: true,
           archiveRevision: null,
@@ -62714,16 +62738,37 @@ export async function renewSandboxAgentLink(
  * through the agent gateway. Warm time accrues only while the sandbox is awake:
  * asleep stamps `compute_asleep_since` (no tick accrues past it), and awake
  * moves the meter cursor forward by exactly the time asleep, so the awake time
- * before the sleep is still billed and the sleep is not. Only the lease whose
- * current box is this sandbox changes; anything else is a no-op.
+ * before the sleep is still billed and the sleep is not. Only the exact
+ * current claim speaks for the sandbox: the enrollment must be active with this
+ * epoch and connection instance and a live claim lease, so a report delayed
+ * past a newer epoch's open, or one sent after a revocation, is refused
+ * (`accepted: false`). Only the lease whose current box is this sandbox
+ * changes; anything else is a no-op.
  */
 export async function recordComputeSandboxPower(
   db: Database,
-  input: { workspaceId: string; agentId: string; sandboxId: string; asleep: boolean },
-): Promise<{ changed: boolean }> {
+  input: SandboxAgentLinkInput & { sandboxId: string; asleep: boolean },
+): Promise<{ accepted: boolean; changed: boolean }> {
+  assertSandboxAgentLinkInput(input);
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Database;
+      // The enrollment row first, as the link's open and renewal lock it: a
+      // newer epoch's open or a revocation commits wholly before or after.
+      const enrollment = await lockSandboxEnrollment(tx, input.workspaceId, input.agentId);
+      const now = await enrollmentConnectionClock(tx);
+      if (
+        !enrollment ||
+        enrollment.kind !== "sandbox" ||
+        enrollment.status !== "active" ||
+        enrollment.linkEpoch === null ||
+        Number(enrollment.linkEpoch) !== input.epoch ||
+        enrollment.connectionInstanceId !== input.connectionInstanceId ||
+        !enrollment.connectionLeaseExpiresAt ||
+        enrollment.connectionLeaseExpiresAt <= now
+      ) {
+        return { accepted: false, changed: false };
+      }
       const rows = await tx.execute<LeaseRow>(sql`
         select lease.* from sandbox_leases lease
         join enrollments e
@@ -62737,17 +62782,17 @@ export async function recordComputeSandboxPower(
         for update of lease
       `);
       const row = rows[0];
-      if (!row) return { changed: false };
+      if (!row) return { accepted: true, changed: false };
       const asleepSince = row.compute_asleep_since ? new Date(row.compute_asleep_since) : null;
       if (input.asleep) {
-        if (asleepSince) return { changed: false };
+        if (asleepSince) return { accepted: true, changed: false };
         await tx.execute(sql`
           update sandbox_leases set compute_asleep_since = clock_timestamp(), updated_at = now()
           where id = ${row.id}
         `);
-        return { changed: true };
+        return { accepted: true, changed: true };
       }
-      if (!asleepSince) return { changed: false };
+      if (!asleepSince) return { accepted: true, changed: false };
       // The cursor accrual starts from: the last tick, else the warm instant.
       const recovery = row.resume_state?.opengeniRecovery as
         | { restore?: { completedAt?: unknown } }
@@ -62776,7 +62821,7 @@ export async function recordComputeSandboxPower(
           where id = ${row.id}
         `);
       }
-      return { changed: true };
+      return { accepted: true, changed: true };
     }),
   );
 }
@@ -62837,25 +62882,51 @@ export async function revokeSandboxEnrollment(
   });
 }
 
-/** The live sandbox enrollments of one sandbox group, for orphan cleanup. */
-export async function listSandboxEnrollmentsForGroup(
+/**
+ * Whether Opengeni's records still name one compute sandbox, for the orphan
+ * sweep: its enrollment is active, and its group's lease either holds this box
+ * (by sandbox id or enrollment) or is warming, which means a creator still owns
+ * the group and may be about to commit it. A deleted workspace, a revoked
+ * enrollment or a lease that moved on all answer false.
+ */
+export async function computeSandboxNamed(
   db: Database,
-  input: { workspaceId: string; sandboxGroupId: string },
-): Promise<EnrollmentRecord[]> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.enrollments)
-      .where(
-        and(
-          eq(schema.enrollments.workspaceId, input.workspaceId),
-          eq(schema.enrollments.kind, "sandbox"),
-          eq(schema.enrollments.sandboxGroupId, input.sandboxGroupId),
-          eq(schema.enrollments.status, "active"),
-        ),
-      );
-    return rows.map(mapEnrollment);
+  input: { workspaceId: string; sandboxGroupId: string; enrollmentId: string; sandboxId: string },
+): Promise<boolean> {
+  const scoped = withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await rawRows<{ named: boolean }>(
+      scopedDb,
+      sql`
+        select exists (
+          select 1
+          from enrollments e
+          join sandbox_leases lease
+            on lease.workspace_id = e.workspace_id
+           and lease.sandbox_group_id = e.sandbox_group_id
+          where e.workspace_id = ${input.workspaceId}
+            and e.id = ${input.enrollmentId}
+            and e.kind = 'sandbox'
+            and e.status = 'active'
+            and e.sandbox_group_id = ${input.sandboxGroupId}
+            and (
+              lease.liveness = 'warming'
+              or lease.instance_id = ${input.sandboxId}
+              or lease.resume_state #>> '{sessionState,enrollmentId}' = ${input.enrollmentId}
+            )
+        ) as named
+      `,
+    );
+    return rows[0]?.named === true;
   });
+  try {
+    return await scoped;
+  } catch (error) {
+    // A deleted workspace took its enrollments and leases with it.
+    if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 // THE LOUD-CONSENT APPROVE (the user's POST /approve). In ONE transaction:

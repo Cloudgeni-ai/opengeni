@@ -294,9 +294,13 @@ class FakeStore implements ComputeAgentLinkStore {
   }
   /** Power records wait on this (to prove they apply in order). */
   powerGate: Promise<void> = Promise.resolve();
+  powerThrows = false;
+  powerAccepted = true;
   async power(input: ComputeAgentLinkClaim & { sandboxId: string; asleep: boolean }) {
     await this.powerGate;
     this.calls.push(`power:${input.sandboxId}:${input.asleep ? "asleep" : "awake"}`);
+    if (this.powerThrows) throw new Error("db down");
+    return { accepted: this.powerAccepted };
   }
 }
 
@@ -518,24 +522,66 @@ describe("agent gateway sessions", () => {
     expect(store.calls).not.toContain(`release:${newer}`);
   });
 
-  test("sleep and wake are recorded once per change, in order, for the ticket's sandbox", async () => {
+  test("sleep and wake are recorded once per change, one write at a time, for the ticket's sandbox", async () => {
     const { send, settle, store } = await gatewayWithLink();
+    const powerCalls = () => store.calls.filter((call) => call.startsWith("power:"));
     let openGate!: () => void;
     store.powerGate = new Promise((resolve) => (openGate = resolve));
     send({ t: "open", s: 1, sandbox: "sbx-1", ticket: "t", connection: INSTANCE });
     send({ t: "state", s: 1, state: "awake" });
+    await settle();
+    // The first write is in flight; later reports wait for it.
     send({ t: "state", s: 1, state: "asleep" });
+    send({ t: "state", s: 1, state: "asleep" });
+    await settle();
+    expect(powerCalls()).toEqual([]);
+    openGate();
+    await settle();
+    expect(powerCalls()).toEqual(["power:sbx-1:awake", "power:sbx-1:asleep"]);
     send({ t: "state", s: 1, state: "asleep" });
     send({ t: "state", s: 1, state: "awake" });
     await settle();
-    expect(store.calls.filter((call) => call.startsWith("power:"))).toEqual([]);
-    openGate();
+    expect(powerCalls()).toEqual(["power:sbx-1:awake", "power:sbx-1:asleep", "power:sbx-1:awake"]);
+  });
+
+  test("a power write that failed is written again on the next tick, without messaging the agent", async () => {
+    const { gateway, nats, send, settle, store } = await gatewayWithLink();
+    const powerCalls = () => store.calls.filter((call) => call.startsWith("power:"));
+    send({ t: "open", s: 1, sandbox: "sbx-1", ticket: "t", connection: INSTANCE });
+    store.powerThrows = true;
+    send({ t: "state", s: 1, state: "asleep" });
     await settle();
-    expect(store.calls.filter((call) => call.startsWith("power:"))).toEqual([
-      "power:sbx-1:awake",
+    expect(powerCalls()).toEqual(["power:sbx-1:asleep"]);
+    // A duplicate report retries too, but a failed store keeps failing.
+    send({ t: "state", s: 1, state: "asleep" });
+    await settle();
+    expect(powerCalls()).toEqual(["power:sbx-1:asleep", "power:sbx-1:asleep"]);
+    store.powerThrows = false;
+    const published = nats.published.length;
+    await gateway.tick();
+    await settle();
+    expect(powerCalls()).toEqual([
       "power:sbx-1:asleep",
-      "power:sbx-1:awake",
+      "power:sbx-1:asleep",
+      "power:sbx-1:asleep",
     ]);
+    // Committed now: later ticks write nothing, and nothing went to the agent.
+    await gateway.tick();
+    await settle();
+    expect(powerCalls()).toHaveLength(3);
+    expect(nats.published.length).toBe(published);
+  });
+
+  test("a claim the store no longer accepts stops writing power state", async () => {
+    const { gateway, send, settle, store } = await gatewayWithLink();
+    const powerCalls = () => store.calls.filter((call) => call.startsWith("power:"));
+    send({ t: "open", s: 1, sandbox: "sbx-1", ticket: "t", connection: INSTANCE });
+    store.powerAccepted = false;
+    send({ t: "state", s: 1, state: "asleep" });
+    await settle();
+    await gateway.tick();
+    await settle();
+    expect(powerCalls()).toEqual(["power:sbx-1:asleep"]);
   });
 
   test("a session past its lease deadline records no power state", async () => {

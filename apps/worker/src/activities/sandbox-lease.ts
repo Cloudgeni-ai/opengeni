@@ -33,8 +33,10 @@ import {
   appendSessionEventToSandboxGroup,
   bindRetainedProcessProviderIdentity,
   claimWorkspaceArchiveCapture,
+  computeSandboxNamed,
   leaseMayHaveUntrackedWriters,
   releaseWorkspaceArchiveCapture,
+  revokeSandboxEnrollment,
   listIdleCheckpointCandidates,
   recordIdleCheckpointAttempt,
   claimSandboxCheckpointArtifactsForGc,
@@ -158,6 +160,8 @@ import {
   SUPERVISED_STOP_KILL_AFTER_SECONDS,
   modalAppHasRunningSandboxes,
   sweepModalOrphanSandboxes,
+  ComputeFabricClient,
+  sweepComputeOrphans,
   terminateManagedSandboxSession,
   terminateModalSandboxById,
   verifySandboxExecReadiness,
@@ -327,6 +331,9 @@ export type SweepModalOrphansFn = (
   observability: ActivityServices["observability"],
 ) => Promise<number>;
 
+/** Returns how many compute sandboxes it deleted. */
+export type SweepComputeOrphansFn = SweepModalOrphansFn;
+
 export type InspectOpenSandboxKubernetesInventoryFn = (input: {
   namespace: string;
 }) => Promise<OpenSandboxKubernetesInventory>;
@@ -338,6 +345,9 @@ export type SandboxLeaseActivityOptions = {
   /** Override the provider-side Modal orphan sweep (tests spy this; defaults to
    *  Modal list+tag comparison when Modal is configured). */
   sweepModalOrphans?: SweepModalOrphansFn;
+  /** Override the compute orphan sweep (defaults to the fabric inventory
+   *  against Opengeni's records when compute is configured). */
+  sweepComputeOrphans?: SweepComputeOrphansFn;
   /** Only provider discovery is injected; durable recovery remains real. */
   findModalProviderCreateReceipt?: typeof findModalProviderCreateReceipt;
   /** Override the read-only bounded OpenSandbox Kubernetes projection. */
@@ -694,6 +704,8 @@ export function createSandboxLeaseActivities(
       ));
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
+  const sweepComputeOrphanSandboxes: SweepComputeOrphansFn =
+    options.sweepComputeOrphans ?? sweepComputeOrphansForConfiguredBackend;
   const inspectOpenSandboxInventory =
     options.inspectOpenSandboxKubernetesInventory ?? inspectOpenSandboxKubernetesInventory;
   const probeRetainedProcess = options.probeRetainedProcess ?? probeRetainedProcessAtProvider;
@@ -1141,6 +1153,17 @@ export function createSandboxLeaseActivities(
         recordSandboxOrphansTerminated(observability, modalOrphansTerminated);
       } catch (error) {
         observability.warn("sandbox reaper: Modal orphan sweep failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      try {
+        recordSandboxOrphansTerminated(
+          observability,
+          await sweepComputeOrphanSandboxes(settings, db, observability),
+        );
+      } catch (error) {
+        observability.warn("sandbox reaper: compute orphan sweep failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       }
@@ -3674,6 +3697,46 @@ export function modalOrphanCandidateStillUnowned(
   );
 }
 
+/** How often one worker lists the compute fabric for orphans. Orphans are
+ * rare (a lost create answer, a failed cleanup, a crash), so a few minutes'
+ * delay costs little and keeps the fabric list off every 30 s maintenance tick. */
+export const COMPUTE_ORPHAN_SWEEP_INTERVAL_MS = 5 * 60_000;
+let lastComputeOrphanSweepAtMs = Number.NEGATIVE_INFINITY;
+
+async function sweepComputeOrphansForConfiguredBackend(
+  settings: ActivityServices["settings"],
+  db: ActivityServices["db"],
+  observability: ActivityServices["observability"],
+): Promise<number> {
+  if (!settings.computeApiUrl || !settings.computeApiKey || !settings.computeLinkUrl) return 0;
+  const nowMs = Date.now();
+  if (nowMs - lastComputeOrphanSweepAtMs < COMPUTE_ORPHAN_SWEEP_INTERVAL_MS) return 0;
+  lastComputeOrphanSweepAtMs = nowMs;
+  const result = await sweepComputeOrphans({
+    fabric: new ComputeFabricClient({
+      baseUrl: settings.computeApiUrl,
+      apiKey: settings.computeApiKey,
+    }),
+    gateway: settings.computeLinkUrl,
+    named: async (identity) => await computeSandboxNamed(db, identity),
+    revokeEnrollment: async (input) => {
+      await revokeSandboxEnrollment(db, input);
+    },
+    nowMs,
+  });
+  for (const deleted of result.deleted) {
+    observability.warn("sandbox reaper: deleted compute orphan sandbox", { ...deleted });
+  }
+  if (result.examined > 0) {
+    observability.info("sandbox reaper: compute orphan sweep completed", {
+      examined: result.examined,
+      deleted: result.deleted.length,
+      failed: result.failed,
+    });
+  }
+  return result.deleted.length;
+}
+
 async function sweepModalOrphansForConfiguredBackend(
   settings: ActivityServices["settings"],
   db: ActivityServices["db"],
@@ -3920,6 +3983,8 @@ async function terminateDrainableBox(
         Extract<Awaited<ReturnType<typeof claimWorkspaceArchiveCapture>>, { status: "claimed" }>
       >["claim"]
     | null = null;
+  // The lease as the fresh capture claim wrote it, under its row lock.
+  let captureClaimLease: LeaseSnapshot | null = null;
   let providerMissingBeforeCapture = false;
   let captureDisposition: DrainCaptureDisposition = "capture_required";
   if (lease.instanceId && managedProvider) {
@@ -4089,6 +4154,7 @@ async function terminateDrainableBox(
       });
       if (claimed.status === "claimed") {
         captureClaim = claimed.claim;
+        captureClaimLease = claimed.lease;
       } else if (claimed.status === "mutation_in_progress") {
         // An admission is normally authoritative proof that a provider
         // operation may still be running. It cannot, however, pin a draining
@@ -4115,13 +4181,20 @@ async function terminateDrainableBox(
   // A compute sandbox whose group ended (its chat or workspace was deleted) is
   // deleted without a capture: nothing will restore it, and the fabric's own
   // memory and disk were its persistence. The capture claim above still fences
-  // new holders until the cold commit. A rotation always captures.
+  // new holders until the cold commit. A rotation always captures. The choice
+  // reads the lease the claim itself returned under its row lock (a rotation
+  // can commit between the read above and the claim, never after it, since the
+  // claim fences every arrival), and the persist CAS below re-checks it under
+  // the same lock before anything is deleted. The claim stamps its own
+  // `teardown_claim` rotation, which is not a rotation of the workspace.
+  const dispositionLease = captureClaimLease ?? lease;
   if (
     captureDisposition === "capture_required" &&
     captureClaim &&
     backend === "compute" &&
-    lease.groupEndRequestedAt !== null &&
-    lease.rotationRequestedAt === null
+    dispositionLease.groupEndRequestedAt !== null &&
+    (dispositionLease.rotationRequestedAt === null ||
+      dispositionLease.rotationReason === "teardown_claim")
   ) {
     captureDisposition = "discard";
   }
@@ -4193,10 +4266,28 @@ async function terminateDrainableBox(
     };
     let result: Awaited<ReturnType<typeof persistDrainSnapshot>>;
     if (archiveBase64 === null) {
+      const groupEndDiscard = captureDisposition === "discard";
       result = await persistDrainSnapshot(db, {
         ...baseInput,
         workspaceArchive: null,
+        ...(groupEndDiscard ? { groupEndDiscard: true as const } : {}),
       });
+      if (result.discardIneligible) {
+        // A rotation or re-arm landed after the discard was chosen. Give the
+        // claim back so the next sweep captures instead of deleting.
+        await releaseWorkspaceArchiveCapture(db, {
+          accountId,
+          workspaceId: row.workspaceId,
+          sandboxGroupId: row.sandboxGroupId,
+          captureId: captureClaim.id,
+          expectedEpoch: row.leaseEpoch,
+          expectedInstanceId: lease.instanceId,
+        });
+        observability.info("sandbox reaper: group-end discard no longer eligible", {
+          sandboxGroupId: row.sandboxGroupId,
+          leaseEpoch: row.leaseEpoch,
+        });
+      }
     } else {
       if (!archiveMetadata) {
         throw new Error("Sandbox snapshot publication requires a verified archive descriptor");
