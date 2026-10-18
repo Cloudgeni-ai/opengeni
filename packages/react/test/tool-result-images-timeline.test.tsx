@@ -30,13 +30,13 @@ const first = receipt("11111111-1111-4111-8111-111111111111");
 const second = receipt("44444444-4444-4444-8444-444444444444");
 const text = { type: "input_text", text: '{"width":1280,"height":720}' };
 
-function item(output: unknown): ToolCallItem {
+function item(output: unknown, name = "mcp_server__capture"): ToolCallItem {
   return {
     kind: "tool-call",
     id: "tool-1",
     turnId: "turn-1",
     callId: "call-1",
-    name: "mcp_server__capture",
+    name,
     arguments: {},
     output,
     raw: undefined,
@@ -95,6 +95,22 @@ describe("images returned by any tool", () => {
       else Reflect.deleteProperty(URL, "createObjectURL");
       if (revokeDescriptor) Object.defineProperty(URL, "revokeObjectURL", revokeDescriptor);
       else Reflect.deleteProperty(URL, "revokeObjectURL");
+    }
+  });
+
+  test("screen steps without their own renderer read as what happened on the screen", async () => {
+    for (const [name, title] of [
+      ["interaction__cua_get_desktop_state", "Looked at the screen"],
+      ["interaction__cua_click", "Clicked on the screen"],
+      ["interaction__interaction_discover", "Looked for a screen to use"],
+    ] as const) {
+      const tool = item([text], name);
+      const Renderer = defaultToolRegistry.resolve(tool);
+      const rendered = await renderComponent(<Renderer item={tool} />);
+      expect(rendered.container.textContent).toContain(title);
+      expect(rendered.container.textContent).not.toContain("Cua ");
+      expect(rendered.container.textContent).not.toContain("Interaction discover");
+      await rendered.unmount();
     }
   });
 });
