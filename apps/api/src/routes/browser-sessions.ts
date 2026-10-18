@@ -2243,6 +2243,7 @@ export function registerBrowserSessionRoutes(
             message: "browser state storage is not configured",
           });
         }
+        await recoverRestartedBrowserControllerBeforeSuspend(context, grant, workspaceId, before);
         const prepared = await prepareBrowserSessionSuspend(deps.db, {
           accountId: grant.accountId,
           workspaceId,
@@ -3906,6 +3907,50 @@ export function registerBrowserSessionRoutes(
       await attachedBrowserViewer(deps, grant, workspaceId),
       placement,
     );
+  }
+
+  /**
+   * A controller restart (an agent update, a crash) forgets its live browsers
+   * while their private profiles stay on disk. Every use relaunches such a
+   * browser from that working copy, but suspension captures through the
+   * controller and would otherwise record the browser as lost, discarding a
+   * profile that was intact. Reach the controller the way a use does first,
+   * so suspension saves what the browser actually had. A browser that cannot
+   * be recovered falls through to suspension, which records the loss as
+   * before.
+   */
+  async function recoverRestartedBrowserControllerBeforeSuspend(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    before: BrowserSessionControlRecord,
+  ): Promise<void> {
+    if (
+      before.session.lifecycle !== "active" ||
+      !before.session.controller ||
+      browserSessionStorageMode(before.session) !== "private_profile"
+    ) {
+      return;
+    }
+    try {
+      await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        before.session.id,
+        "session.control",
+        "browser.read",
+        async ({ sessionClient }) => {
+          await sessionClient.listTargets();
+        },
+      );
+    } catch (error) {
+      console.warn("browser.suspend_controller_recovery_failed", {
+        workspaceId,
+        browserSessionId: before.session.id,
+        failure: interactionFailure(error),
+      });
+    }
   }
 
   async function recoverActiveBrowserController(
