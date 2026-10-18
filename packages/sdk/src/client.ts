@@ -4,6 +4,7 @@ import {
   SESSION_SEQUENCE_HEADER,
 } from "./session-sequence";
 import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+import type { WorkspaceBackgroundCommandListResponse } from "./types";
 import type {
   InsightsSiteUsageQuery,
   InsightsSiteUsageResponse,
@@ -1888,6 +1889,25 @@ export class OpenGeniClient {
       {},
       options,
     );
+  }
+
+  /** @internal Console-only workspace projection; cancellation uses the ordinary session path. */
+  async listWorkspaceBackgroundCommands(
+    workspaceId: string,
+    options: OpenGeniRequestOptions & { cursor?: string } = {},
+  ): Promise<WorkspaceBackgroundCommandListResponse> {
+    const response = await this.requestJson<WorkspaceBackgroundCommandListResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
+      undefined,
+      { view: "running_commands", ...(options.cursor ? { cursor: options.cursor } : {}) },
+      options,
+    );
+    // An older server ignores the view and returns ordinary sessions. Never
+    // present that incompatible response as a plausible empty command list.
+    if (!response || !Array.isArray(response.commands) || !("nextCursor" in response))
+      throw new Error("This server does not support the workspace running commands view.");
+    return response;
   }
 
   async cancelSessionBackgroundCommand(

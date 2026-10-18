@@ -18,6 +18,30 @@ const diagnostics: SessionBackgroundCommandReconciliation = {
   terminalProof: { outcome: "exited", exitCode: 7, observedAt: "2030-01-01T00:00:00.000Z" },
 };
 
+test("workspace projection forwards pagination and refuses older session-array responses", async () => {
+  const seen: URL[] = [];
+  let legacy = false;
+  const client = new OpenGeniClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "test",
+    fetch: (async (input, init) => {
+      seen.push(new URL(new Request(input, init).url));
+      return Response.json(legacy ? [] : { commands: [], nextCursor: null });
+    }) as typeof fetch,
+  });
+  const cursor = crypto.randomUUID();
+  expect(await client.listWorkspaceBackgroundCommands("workspace", { cursor })).toEqual({
+    commands: [],
+    nextCursor: null,
+  });
+  expect(seen[0]?.searchParams.get("view")).toBe("running_commands");
+  expect(seen[0]?.searchParams.get("cursor")).toBe(cursor);
+  legacy = true;
+  await expect(client.listWorkspaceBackgroundCommands("workspace")).rejects.toThrow(
+    "does not support",
+  );
+});
+
 test("SDK reconciliation type matches the contract in both directions", () => {
   const contract: z.infer<typeof ContractReconciliation> = diagnostics;
   const sdk: SessionBackgroundCommandReconciliation = ContractReconciliation.parse(contract);

@@ -1,5 +1,6 @@
 import { ChevronRightIcon, Loader2Icon, SquareIcon } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+import type { SessionBackgroundCommand } from "@opengeni/sdk";
 import type { UseSessionBackgroundCommandsResult } from "../hooks/use-session-background-commands";
 import { formatClockTime } from "../lib/format";
 import { useErrorMessage } from "../lib/error-message";
@@ -9,9 +10,13 @@ import { useOpenGeniText } from "../messages/runtime";
 export function SessionCommandsPanel({
   commands: state,
   readOnly = false,
+  renderMetadata,
+  compact = true,
 }: {
   commands: UseSessionBackgroundCommandsResult;
   readOnly?: boolean;
+  renderMetadata?: (command: SessionBackgroundCommand) => ReactNode;
+  compact?: boolean;
 }) {
   const t = useOpenGeniText();
   const formatError = useErrorMessage();
@@ -32,7 +37,10 @@ export function SessionCommandsPanel({
     }
   };
   return (
-    <div className="space-y-2 text-og-xs" data-og-session-commands="">
+    <div
+      className={`space-y-2 ${compact ? "text-og-xs" : "text-og-sm"}`}
+      data-og-session-commands=""
+    >
       {state.loading && active.length === 0 ? (
         <p role="status" className="text-og-fg-muted">
           {t("sessionCommandsPanel.loadingCommands")}
@@ -56,10 +64,13 @@ export function SessionCommandsPanel({
         </p>
       ) : null}
       {active.length > 0 ? (
-        <ul className="max-h-64 overflow-y-auto overscroll-contain divide-y divide-og-border/40">
+        <ul
+          className={`${compact ? "max-h-64 overflow-y-auto overscroll-contain" : ""} divide-y divide-og-border/40`}
+        >
           {active.map((command) => (
             <li key={command.id} className="flex items-start gap-3 py-2 first:pt-0 last:pb-0">
               <div className="min-w-0 flex-1">
+                {renderMetadata?.(command)}
                 <details className="group/command">
                   <summary
                     className="flex cursor-pointer list-none items-center gap-1.5 rounded-og-sm font-mono text-og-fg outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"

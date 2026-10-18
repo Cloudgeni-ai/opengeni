@@ -1265,6 +1265,8 @@ export type {
   Session,
   SessionAdmissionBlock,
   SessionBackgroundCommand,
+  WorkspaceBackgroundCommand,
+  WorkspaceBackgroundCommandListResponse,
   SessionBackgroundCommandReconciliation,
   SessionBackgroundCommandActivity,
   SessionBackgroundCommandListResponse,

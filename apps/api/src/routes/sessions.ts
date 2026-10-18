@@ -14,6 +14,7 @@ import {
 } from "@opengeni/config";
 import { siteAgentDataToolNames, siteAgentSiteSqlOn } from "../site-publishing/agent-data-tools";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
+import { listWorkspaceBackgroundCommandsForSubject } from "@opengeni/db";
 import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
@@ -983,6 +984,31 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       authorizationScope = await requireSessionAuthorizationListScope(deps, grant, "http");
     } catch (error) {
       throw sessionAuthorizationHttpError(error);
+    }
+    // Console-only command projection shares chat discovery authorization; it
+    // neither adds a command lifecycle nor changes ordinary session responses.
+    if (c.req.query("view") === "running_commands") {
+      const cursor = c.req.query("cursor");
+      if (cursor !== undefined && !z.string().uuid().safeParse(cursor).success)
+        throw new HTTPException(400, { message: "Invalid running command cursor" });
+      try {
+        return c.json(
+          await listWorkspaceBackgroundCommandsForSubject(
+            db,
+            workspaceId,
+            {
+              subjectId: grant.subjectId,
+              ...(authorizationScope ? { authorizationScope } : {}),
+              personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
+            },
+            cursor,
+          ),
+        );
+      } catch (error) {
+        if (error instanceof SessionListAccessError)
+          throw new HTTPException(403, { message: error.message });
+        throw error;
+      }
     }
     const pageView = c.req.query("view") === "page";
     const query = sessionListQuery(c.req.query(), pageView);
