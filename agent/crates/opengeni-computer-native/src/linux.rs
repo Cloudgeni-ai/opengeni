@@ -642,17 +642,17 @@ impl AtspiComputerAdapter {
     /// Querying a top-level frame's attributes is the assistive-client
     /// signal that makes Chromium and Electron build their accessibility tree.
     async fn wake_application_tree(&self, items: &[CacheItem]) {
-        let frames = items
-            .iter()
-            .filter(|item| is_top_level_window_role(item.role));
-        stream::iter(frames.map(|item| async move {
-            if let Ok(proxy) = self.accessible_proxy(&item.object).await {
+        let mut frames = Vec::new();
+        for item in items {
+            if is_top_level_window_role(item.role) {
+                frames.push(item.object.clone());
+            }
+        }
+        for frame in frames {
+            if let Ok(proxy) = self.accessible_proxy(&frame).await {
                 let _ = timed(proxy.get_attributes()).await;
             }
-        }))
-        .buffer_unordered(MAX_ENRICH_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
+        }
     }
 
     fn invalidate_semantic_cache(&self) {
@@ -3664,7 +3664,7 @@ mod live_tests {
         assert!(!dormant_tree_shape([
             (Role::Application, 1),
             (Role::Frame, 1),
-            (Role::PushButton, 0),
+            (Role::Button, 0),
         ]));
     }
 
