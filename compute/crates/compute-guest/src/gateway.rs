@@ -4,9 +4,14 @@
 //! is for:
 //!
 //! - `tcp <port>`: the guest connects to that TCP port on its loopback,
-//!   answers `ok`, and from then on relays bytes both ways until either
-//!   side closes. A caller may send its first bytes right after the header
-//!   without waiting for the answer.
+//!   answers `ok`, and from then on relays bytes both ways. A caller that
+//!   ends its sending is passed on as a half-close, and the guest's side
+//!   still answers; once the guest's side has sent all it will, closing
+//!   or half-closing, the whole connection ends, since the VMM's vsock
+//!   device carries no half-close from the guest and the caller would
+//!   otherwise never see the end of what it sent ([`crate::relay`]). A
+//!   caller may send its first bytes right after the header without
+//!   waiting for the answer.
 //! - `init <json>`: the sandbox's own environment, access token, default
 //!   user and directory ([`crate::envd::InitData`]), as a create gives
 //!   them. The guest keeps them on its disk for good, passes them to

@@ -32,15 +32,15 @@ restarted service still knows it; a guest booted from its disk finds its id
 on the kernel command line instead, as `opengeni.sandbox=<id>`.
 
 Notices are applied one at a time, in the host's order: the `owner=<owner
-epoch>` field (0 if absent), then the `order=<generation>.<revision>` field,
+epoch>` field, then the `order=<generation>.<revision>` field,
 which the host raises before every new notice and never lowers. The second is
 the host's record's, which a sandbox that moves to another host starts
 afresh; its new owner's epoch is higher. One ordered below the latest applied
 (an attempt the host gave up on that arrived late) is refused with `stale`,
 whatever its time says, so it can never take back a newer identity, even
 after the host's clock stepped back; a retry of the same notice is applied
-again. The time only sets the clock. A notice without the `order` field is
-applied without being ordered.
+again. The time only sets the clock. A notice without both fields is applied
+without being ordered.
 
 A notice naming a sandbox other than the one the guest believes it is comes
 to a clone: before taking the id, the service gives the guest a machine id
@@ -1011,10 +1011,10 @@ def take_identity(sandbox: str | None) -> None:
 
 def notice_order(fields: dict[str, str]) -> tuple[int, int, int] | None:
     """A notice's owner epoch, then its `order=<generation>.<revision>`, or
-    None without a valid order or with an invalid owner epoch."""
+    None without a valid order and owner epoch."""
 
     generation, dot, revision = fields.get("order", "").partition(".")
-    owner = fields.get("owner", "0")
+    owner = fields.get("owner", "")
     if not (dot and generation.isdigit() and revision.isdigit() and owner.isdigit()):
         return None
     return int(owner), int(generation), int(revision)

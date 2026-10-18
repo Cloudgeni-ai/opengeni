@@ -128,7 +128,7 @@ while True:
             # by the clock: a sandbox that moves starts a new record on its
             # new host, under a higher epoch.
             fence = tuple(int(part) for part in fields.get("order", "").split("."))
-            order = (int(fields.get("owner", "0")),) + fence
+            order = (int(fields.get("owner", "")),) + fence
             if word != "restored" or len(order) != 3:
                 continue
             if latest and order < latest:

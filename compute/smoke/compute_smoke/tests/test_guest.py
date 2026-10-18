@@ -603,9 +603,13 @@ class GuestInternals(unittest.TestCase):
         self.assertEqual(self.guest.RESTORES.sandbox(), "7e3a")
 
     def notice(self, nanos: int, sandbox: str, order: str) -> bytes:
-        """Serves one seeded restore notice in-process; returns the answer."""
+        """Serves one seeded restore notice in-process; returns the answer.
+        `order` is the `order=` field's value, and the first owner's epoch
+        unless it names another."""
 
         host, guest = socket.socketpair()
+        if "owner=" not in order:
+            order += " owner=1"
         line = f"restored {nanos} sandbox={sandbox} seed=5eed order={order}\n"
         with host, mock.patch.object(self.guest, "reseed", return_value=True):
             host.sendall(line.encode())
@@ -648,12 +652,12 @@ class GuestInternals(unittest.TestCase):
 
     def test_a_notice_order_is_its_owner_epoch_then_two_numbers(self) -> None:
         order = self.guest.notice_order
-        self.assertEqual(order({"order": "12.345"}), (0, 12, 345))
         self.assertEqual(order({"order": "12.345", "owner": "3"}), (3, 12, 345))
         for bad in ("", "12", "12.", ".3", "1.2.3", "a.b", "-1.2"):
             with self.subTest(order=bad):
-                self.assertIsNone(order({"order": bad}))
+                self.assertIsNone(order({"order": bad, "owner": "1"}))
         self.assertIsNone(order({}))
+        self.assertIsNone(order({"order": "12.345"}))
         for bad in ("", "x", "-1"):
             with self.subTest(owner=bad):
                 self.assertIsNone(order({"order": "1.2", "owner": bad}))

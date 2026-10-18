@@ -9,6 +9,14 @@
 //! all it will send, the relay ends the whole connection, both streams both
 //! ways, which the host sees at once. A host that ends its sending is passed
 //! on as a half-close, and what the guest's side still answers reaches it.
+//!
+//! The one exchange this cannot carry is a guest service that half-closes
+//! and then goes on reading what the host still sends: what the host sends
+//! after the guest's side ended is not delivered. Keeping that direction
+//! open instead would leave the host waiting, with no end, for every
+//! answer that ends when its service closes (a close-delimited HTTP body,
+//! a service that answers and hangs up), and holding every connection the
+//! guest's side closed until the host closes it too.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -104,6 +112,23 @@ mod tests {
         let mut got = Vec::new();
         host.read_to_end(&mut got).unwrap();
         assert_eq!(got, b"PING\r\n");
+    }
+
+    #[test]
+    fn a_service_that_half_closes_ends_the_connection() {
+        let (mut service, mut host, finished) = relaying();
+        service.write_all(b"HTTP/1.0 200 OK\r\n\r\nbody").unwrap();
+        service.shutdown(Shutdown::Write).unwrap();
+        // The host sees the end of a close-delimited answer at once; what
+        // it sends after that is not delivered (see the module docs).
+        let mut answer = Vec::new();
+        host.read_to_end(&mut answer).unwrap();
+        assert_eq!(answer, b"HTTP/1.0 200 OK\r\n\r\nbody");
+        assert_eq!(finished.recv_timeout(Duration::from_secs(5)), Ok(true));
+        let _ = host.write_all(b"later");
+        let mut late = Vec::new();
+        service.read_to_end(&mut late).unwrap();
+        assert_eq!(late, b"");
     }
 
     #[test]

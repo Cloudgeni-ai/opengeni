@@ -11,10 +11,11 @@
 //! sandbox's owner epoch, then its record's generation and revision: the
 //! record is per host, so a sandbox that moves to another host (a new
 //! owner, at a higher epoch) starts there with a fence that may be lower
-//! than the one its memory last saw. A notice from a host that names no
-//! owner counts as epoch 0. The host's `activity` question is answered
-//! with the count Opengeni's agent registers (see [`crate::agent`]); any
-//! other line is not answered.
+//! than the one its memory last saw. Every notice names its owner epoch:
+//! one that does not is not acted on, rather than taken for an epoch that
+//! could order it below or above the notices before it. The host's
+//! `activity` question is answered with the count Opengeni's agent
+//! registers (see [`crate::agent`]); any other line is not answered.
 
 use crate::cmdline::valid_sandbox;
 
@@ -47,7 +48,7 @@ impl Notice {
             return None;
         }
         let nanos = words.next()?.parse().ok()?;
-        let (mut sandbox, mut seed_hex, mut fence, mut owner) = (None, None, None, Some(0));
+        let (mut sandbox, mut seed_hex, mut fence, mut owner) = (None, None, None, None);
         for field in words {
             let (key, value) = field.split_once('=').unwrap_or((field, ""));
             match key {
@@ -146,25 +147,19 @@ mod tests {
     }
 
     #[test]
-    fn a_notice_naming_no_owner_is_at_epoch_zero() {
-        assert_eq!(
-            Notice::parse("restored 1 order=3.17").unwrap().order,
-            (0, 3, 17)
-        );
-    }
-
-    #[test]
     fn refuses_lines_it_must_not_act_on() {
         for line in [
             "",
             "activity",
             "restore 1 order=1.1",
-            "restored order=1.1",
-            "restored x order=1.1",
+            "restored order=1.1 owner=1",
+            "restored x order=1.1 owner=1",
             "restored 1",
-            "restored 1 order=1",
-            "restored 1 order=1.x",
-            "restored -1 order=1.1",
+            "restored 1 owner=1",
+            "restored 1 order=1 owner=1",
+            "restored 1 order=1.x owner=1",
+            "restored -1 order=1.1 owner=1",
+            "restored 1 order=1.1",
             "restored 1 order=1.1 owner=",
             "restored 1 order=1.1 owner=x",
             "restored 1 order=1.1 owner=-1",
@@ -175,12 +170,13 @@ mod tests {
 
     #[test]
     fn drops_fields_it_cannot_use() {
-        let notice = Notice::parse("restored 5 sandbox=a/b seed=0g order=1.2 seed").unwrap();
+        let notice =
+            Notice::parse("restored 5 sandbox=a/b seed=0g order=1.2 owner=1 seed").unwrap();
         assert_eq!(notice.sandbox, None);
         assert_eq!(notice.seed_hex, None);
         assert_eq!(notice.seed(), None);
         assert_eq!(
-            Notice::parse("restored 5 seed=abc order=0.0")
+            Notice::parse("restored 5 seed=abc order=0.0 owner=1")
                 .unwrap()
                 .seed_hex,
             None
