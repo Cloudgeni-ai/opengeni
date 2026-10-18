@@ -44,6 +44,8 @@ class FakeFabric {
   failCreates: number[] = [];
   /** Make the sandbox but never answer a create (every attempt is a 504). */
   loseCreateAnswers = false;
+  /** Fail request lookups and deletes (the fabric is unreachable for cleanup). */
+  failCleanup = false;
   private readonly server: ReturnType<typeof Bun.serve>;
   /** Called when the fabric wakes a sandbox. */
   onWake: (box: FabricBox) => void = () => {};
@@ -71,6 +73,9 @@ class FakeFabric {
           return Response.json({ team: "opengeni", keys: [] });
         }
         if (request.method === "GET" && parts[1] === "requests") {
+          if (this.failCleanup) {
+            return Response.json({ code: "unavailable", message: "down" }, { status: 503 });
+          }
           const id = this.requestIds.get(parts[2] ?? "");
           if (!id) return Response.json({ code: "not_found", message: "none" }, { status: 404 });
           const box = this.boxes.get(id);
@@ -112,6 +117,9 @@ class FakeFabric {
         }
         if (request.method === "GET") return Response.json(this.view(box));
         if (request.method === "DELETE") {
+          if (this.failCleanup) {
+            return Response.json({ code: "unavailable", message: "down" }, { status: 503 });
+          }
           this.boxes.delete(box.id);
           return new Response(null, { status: 204 });
         }
@@ -263,11 +271,26 @@ class FakeAgentPlane implements ComputeAgentPlane {
 
   async createEnrollment(input: Record<string, unknown>): Promise<void> {
     this.created.push(input);
+    this.createdAtMs.set(input.enrollmentId as string, Date.now());
   }
 
   async revokeEnrollment(input: { workspaceId: string; enrollmentId: string }): Promise<void> {
     this.revoked.push(input.enrollmentId);
     this.sessions.delete(input.enrollmentId);
+  }
+
+  /** enrollment id -> when it was created (tests may backdate it). */
+  readonly createdAtMs = new Map<string, number>();
+
+  async listGroupEnrollments(): Promise<Array<{ enrollmentId: string; createdAtMs: number }>> {
+    return [...this.createdAtMs]
+      .filter(([id]) => !this.revoked.includes(id))
+      .map(([enrollmentId, createdAtMs]) => ({ enrollmentId, createdAtMs }));
+  }
+
+  /** Active enrollments (each one may still have a sandbox). */
+  active(): string[] {
+    return [...this.createdAtMs.keys()].filter((id) => !this.revoked.includes(id));
   }
 }
 
@@ -406,6 +429,70 @@ describe("compute sandbox client", () => {
     ).toBe(true);
     expect(fabric.boxes.size).toBe(0);
     expect(plane.revoked).toEqual([plane.created[0]!.enrollmentId as string]);
+  });
+
+  test("the create's request id is its enrollment id", async () => {
+    const { client } = setup();
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    expect(session.state.requestId).toBe(session.state.enrollmentId);
+  });
+
+  test("a lost create whose cleanup fails stays on record and the next create removes it", async () => {
+    const { fabric, plane, client } = setup();
+    fabric.loseCreateAnswers = true;
+    fabric.failCleanup = true;
+    await expect(
+      client.create(undefined, { opengeniCreateIdentity: identity }),
+    ).rejects.toBeInstanceOf(ComputeFabricError);
+    // The fabric holds a sandbox and its enrollment is still active.
+    const orphan = plane.created[0]!.enrollmentId as string;
+    expect(fabric.boxes.size).toBe(1);
+    expect(plane.revoked).toEqual([]);
+    expect(plane.active()).toEqual([orphan]);
+
+    // A worker restart retries the group's create once the fabric is back.
+    fabric.loseCreateAnswers = false;
+    fabric.failCleanup = false;
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    expect(plane.revoked).toEqual([orphan]);
+    expect([...fabric.boxes.keys()]).toEqual([session.state.sandboxId]);
+    expect(plane.active()).toEqual([session.state.enrollmentId]);
+  });
+
+  test("a recent create the fabric has not seen stays on record; an old one is revoked", async () => {
+    const { fabric, plane, client } = setup();
+    // Two enrollments whose creates never reached the fabric.
+    await plane.createEnrollment({ enrollmentId: "in-flight" });
+    await plane.createEnrollment({ enrollmentId: "abandoned" });
+    plane.createdAtMs.set("abandoned", Date.now() - 11 * 60_000);
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    expect(plane.revoked).toEqual(["abandoned"]);
+    expect(plane.active().sort()).toEqual(["in-flight", session.state.enrollmentId].sort());
+    expect(fabric.boxes.size).toBe(1);
+  });
+
+  test("deleting a group's sandbox removes older unfinished creates, never newer boxes", async () => {
+    const { fabric, plane, client } = setup();
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    const ownCreatedAt = plane.createdAtMs.get(session.state.enrollmentId)!;
+    // An older create whose cleanup never finished, and a newer box (one that
+    // replaced this sandbox), both still held by the fabric.
+    for (const [id, createdAtMs] of [
+      ["older", ownCreatedAt - 60_000],
+      ["newer", ownCreatedAt + 60_000],
+    ] as const) {
+      await plane.createEnrollment({ enrollmentId: id });
+      plane.createdAtMs.set(id, createdAtMs);
+      fabric.boxes.set(`sbx-${id}`, {
+        id: `sbx-${id}`,
+        body: { request_id: id, init: { agent: { workspace_id: WORKSPACE, agent_id: id } } },
+      });
+      fabric.requestIds.set(id, `sbx-${id}`);
+    }
+
+    await client.delete(session.state);
+    expect(plane.revoked.sort()).toEqual(["older", session.state.enrollmentId].sort());
+    expect([...fabric.boxes.keys()]).toEqual(["sbx-newer"]);
   });
 
   test("a sleeping sandbox is reached through its open session without a fabric wake", async () => {

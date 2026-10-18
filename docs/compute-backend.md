@@ -45,10 +45,20 @@ claim delivers the cancellation to the agent.
 
 - **Create** (`ComputeSandboxClient.create`): Opengeni creates the sandbox's
   enrollment itself (kind `sandbox`, keyless, bound to the sandbox group), then
-  calls `POST /v1/sandboxes` with a request id (retried with the same id and
-  body) and `init.agent = {workspace_id, agent_id, workspace_root, desktop}`,
-  then waits for the agent to answer through its session. A lost create answer
-  is resolved by `GET /v1/requests/{id}` and the sandbox deleted.
+  calls `POST /v1/sandboxes` with that enrollment's id as the request id
+  (retried with the same id and body) and
+  `init.agent = {workspace_id, agent_id, workspace_root, desktop}`, then waits
+  for the agent to answer through its session.
+- **Unfinished creates**: because the enrollment is written before the create
+  is sent, an active sandbox enrollment is the durable record that the fabric
+  may hold a sandbox for it. It is revoked only after `GET /v1/requests/{id}`
+  proves no sandbox exists (deleting a live one first); a request the fabric
+  has never seen counts as proof only once the enrollment is ten minutes old,
+  since its create may still be in flight. A failed create cleans up at once
+  when it can; otherwise the group's next create (the unique cold-to-warming
+  owner, which holds no box) reconciles every active enrollment of the group,
+  and deleting the group's sandbox reconciles the older ones. So a lost answer,
+  a failed delete or a crashed worker never loses track of a sandbox.
 - **Resume**: re-address the same sandbox by id; no wake is needed. If a request
   finds no responder (no host serves the sandbox, for example mid-move),
   `ComputeWakingControlRpc` asks the fabric to wake it and resends under the
