@@ -1395,6 +1395,15 @@ work fails closed. [Lifecycle](run-lifecycle.md).
 All model/Codemode calls share current authorized catalogs, execution fences and
 approvals across backends/loading paths.
 
+For turns using deferred MCP disclosure, the worker starts non-eager preparation
+at main provider dispatch or earlier real tool/recovery demand. The runtime also
+starts it on a substantive provider response when no dispatch hook is available.
+One completion fence owns tool readiness and cleanup; closing before start does
+not create unused connections. Embedded callers keep immediate background
+preparation by default. Factory-created attempt catalogs are detached immutable
+snapshots whose exact identity can reuse verification; deserialized catalogs
+still receive full checks. See [startup decisions and measurements](design/typing-turn-preparation.md).
+
 Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
 `request_human_input`, `list_models` (lists, never switches models), optional
