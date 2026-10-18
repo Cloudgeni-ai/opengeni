@@ -10,7 +10,6 @@ import {
   cancellableShellCommand,
   cancellableSynchronousShellCommand,
   createTurnToolCancellationController,
-  isBareInteractiveShellCommand,
 } from "../src/sandbox/turn-tool-cancellation";
 import {
   notifyDurableOpOwnershipTransferStarted,
@@ -456,53 +455,16 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(adoptions).toBe(0);
   });
 
-  test("detects only a bare stdin-driven shell as the command's final step", () => {
-    for (const command of [
-      "bash",
-      "bash --noprofile --norc",
-      "kill 205 2>/dev/null || true\nbash --noprofile --norc",
-      "cd /workspace && exec /bin/bash -l",
-      "sh -i",
-      "/usr/bin/zsh -f\n",
-    ])
-      expect(isBareInteractiveShellCommand(command)).toBe(true);
-    for (const command of [
-      "bash -c 'sleep 60'",
-      "bash -lc 'npm start'",
-      "bash ./start.sh",
-      "npm start",
-      "bash\nnpm start",
-      "echo hi | bash",
-      "bash <<'EOF'\necho hi\nEOF",
-      "python3",
-      "",
-    ])
-      expect(isBareInteractiveShellCommand(command)).toBe(false);
-  });
-
-  test("a bare interactive shell stays turn-scoped and finalization stops it", async () => {
+  test("a bare interactive shell is adopted like any other command and outlives the turn", async () => {
     const controller = createTurnToolCancellationController();
-    let processAlive = true;
     let adoptions = 0;
     const signals: string[] = [];
     const exec = functionTool("exec_command", async (_context, rawInput) => {
       const cmd = String((JSON.parse(rawInput) as Record<string, unknown>).cmd);
-      if (cmd.includes("command cat '/tmp/opengeni-turn-shell/")) return exited(0, "4400 4400\n");
-      if (cmd.includes("command kill -TERM")) {
-        signals.push("TERM");
-        return exited(0);
-      }
-      if (cmd.includes("command kill -KILL")) {
-        signals.push("KILL");
-        processAlive = false;
-        return exited(0);
-      }
-      if (cmd.includes("command kill -0")) return exited(processAlive ? 75 : 0);
+      if (cmd.includes("command kill")) signals.push(cmd);
       return running(120);
     });
-    const write = functionTool("write_stdin", async () =>
-      processAlive ? running(120, "ok\n") : exited(137),
-    );
+    const write = functionTool("write_stdin", async () => running(120, "ok\n"));
     const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write], {
       hasRetainedProcess: (id: number) => id === 120,
       canAdoptRetainedProcessAsBackgroundCommand: () => true,
@@ -513,25 +475,56 @@ describe("turn sandbox-tool physical cancellation fence", () => {
 
     const started = await wrappedExec!.invoke(
       runContext,
-      JSON.stringify({
-        cmd: "kill 205 2>/dev/null || true\nbash --noprofile --norc",
-        tty: false,
-        yield_time_ms: 0,
-      }),
+      JSON.stringify({ cmd: "bash --noprofile --norc", tty: false, yield_time_ms: 0 }),
     );
     expect(started).toContain("Process running with session ID 120");
-    expect(started).toContain("turn-scoped");
-    // Driving the shell through stdin never transfers it to the session.
+    expect(started).not.toContain("turn-scoped");
+    expect(adoptions).toBe(1);
     const driven = await wrappedWrite!.invoke(
       runContext,
       JSON.stringify({ session_id: 120, chars: "echo ok\n", yield_time_ms: 0 }),
     );
-    expect(driven).toContain("turn-scoped");
-    expect(adoptions).toBe(0);
+    expect(driven).toContain("ok");
+    expect(driven).not.toContain("turn-scoped");
 
     await controller.waitForQuiescence();
-    expect(signals).toEqual(["TERM", "KILL"]);
-    expect(processAlive).toBe(false);
+    expect(signals).toEqual([]);
+  });
+
+  test("a later turn's stdin attaches a session command before reading it and never stops it", async () => {
+    const controller = createTurnToolCancellationController();
+    const attached = new Set<number>();
+    const attachCalls: number[] = [];
+    const signals: string[] = [];
+    const exec = functionTool("exec_command", async (_context, rawInput) => {
+      const cmd = String((JSON.parse(rawInput) as Record<string, unknown>).cmd);
+      if (cmd.includes("command kill")) signals.push(cmd);
+      return exited(0);
+    });
+    const write = functionTool("write_stdin", async () => running(1_234_567, "hi\n"));
+    const [, wrappedWrite] = controller.wrapTools([exec, write], {
+      hasRetainedProcess: (id: number) => attached.has(id),
+      attachSessionProcess: async (id: number) => {
+        attachCalls.push(id);
+        if (id !== 1_234_567) return false;
+        attached.add(id);
+        return true;
+      },
+      canAdoptRetainedProcessAsBackgroundCommand: () => true,
+      adoptRetainedProcessAsBackgroundCommand: async () => {},
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+
+    const output = await wrappedWrite!.invoke(
+      runContext,
+      JSON.stringify({ session_id: 1_234_567, chars: "echo hi\n", yield_time_ms: 0 }),
+    );
+    expect(attachCalls).toEqual([1_234_567]);
+    expect(output).toContain("Process running with session ID 1234567");
+    expect(output).toContain("hi");
+    expect(output).not.toContain("turn-scoped");
+
+    await controller.waitForQuiescence();
+    expect(signals).toEqual([]);
   });
 
   test("failed background adoption never exposes a live process receipt", async () => {

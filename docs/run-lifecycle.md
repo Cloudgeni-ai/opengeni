@@ -3188,23 +3188,30 @@ during that wait returns inline and never becomes session background state.
 Only providers whose process locator is controllable from another worker may
 end that wait with a second, exact-attempt-fenced adoption transaction that
 inserts its session-owned command row immediately before the model receives the
-live locator. The SDK Local and Docker locators index an in-memory table on one
-worker session object. After the bounded foreground wait, those providers return
-an explicitly turn-scoped handle so the agent can test a running server. The
-shell remains registered with the exact turn cancellation fence: ordinary
-completion, Pause, Steer, and cancellation stop it and settle its process holder
-before workspace capture. It is not registered as a session background command,
-does not create terminal background notifications, and cannot be reused by a
-successor attempt. Never wait for an indefinitely running server to exit before
-returning control to its owning agent. On every managed backend, a yielded
-`exec_command` whose final step is a bare stdin-driven shell (`bash`,
-`sh -i`, `bash --noprofile --norc`; no `-c`, script, or other argument, as
-decided by `isBareInteractiveShellCommand` in
-`packages/runtime/src/sandbox/turn-tool-cancellation.ts`) takes the same
-turn-scoped path instead of adoption, also on later `write_stdin` reads: the
-agent drives it during the turn, and finalization stops it through the exact
-marker kill. Such a shell never exits on its own, so adopting it would keep the
-sandbox busy and block idle drain after the turn. A yielded
+live locator. On Docker and Unix-local boxes every command runs under a small
+POSIX `sh` supervisor inside the box
+(`packages/runtime/src/sandbox/durable-shell-process.ts`): stdin is a FIFO,
+output goes to a file with a committed read offset, and the exit status is
+written next to them, under `${TMPDIR:-/tmp}/opengeni-exec-<uid>/<namespace>/<id>`.
+Its handles are random numbers of at least 1,000,000, and any later session
+object for the same container or workspace (another turn, another worker, the
+reaper) reads, writes and stops the command with one short shell invocation, so
+these handles are adopted like Modal's. Interactive shells (`bash`, `sh -i`) are
+adopted too: a person who steers or whose turn ends expects what the agent
+started to keep running, and idle command containment (below) still drains a
+box nobody uses. A later turn reaches an adopted command by the handle the model
+was given: `write_stdin` and `command_input` first look up the session's running
+background command with that handle on the exact home lease epoch and provider
+instance (`findRunningSessionBackgroundProcess`) and bind it to the routing
+session; it stays session-owned and that turn neither adopts nor finalizes it.
+Only handles nothing outside one worker can reach stay turn-scoped: the SDK's
+own small in-memory Local and Docker handles (a `runAs` user, a terminal without
+util-linux `script`, or a box without `mkfifo` and fractional `sleep`) and
+OpenSandbox handles. After the bounded foreground wait those return an
+explicitly turn-scoped handle, stay registered with the exact turn cancellation
+fence, and are stopped and settled by ordinary completion, Pause, Steer and
+cancellation before workspace capture. Never wait for an indefinitely running
+server to exit before returning control to its owning agent. A yielded
 Connected Machine exec likewise creates its session-owned background-command
 row before returning; that row freezes the physical control workspace,
 enrollment, connection instance, and op ID. The exact parent admission,
@@ -3551,15 +3558,18 @@ counts inspections (`checkpointing` when browser saves were prepared,
 `inspection_failed`). A person returning exactly as the box is being released
 may see the browser `suspending`, then resume it.
 
-**Idle command containment.** A legacy retained command keeps its Modal box
-warm through a non-expiring process holder, so the zero-holder idle drain never
-runs for it and the box would stay up until the provider deadline kills it
-uncaptured. One rule contains such commands: running, stopping, unobservable,
+**Idle command containment.** An unsupervised retained command (a legacy Modal
+command, or any Docker or local background command) keeps its box warm through
+a non-expiring process holder, so the zero-holder idle drain never runs for it.
+A Modal box would stay up until the provider deadline kills it uncaptured;
+Docker and local boxes have no deadline at all, so a shell left open would keep
+them warm for ever. One rule contains such commands: running, stopping, unobservable,
 or repeatedly failing observation all qualify, as long as the command printed no
 output inside the window. The reaper reads a new inventory,
 `list_command_containment_candidates(limit, idle window)` from migrations
-0547/0599/0687,
-which lists enrolled drains, rotating leases, and warm or draining Modal leases
+0547/0599/0687/0839,
+which lists enrolled drains, rotating leases, and warm or draining Modal, Docker
+and local leases
 whose only holders are process holders of active non-supervised processes, with
 no capture or reaper hold and no open turn, turn finish, attempt close,
 holder-set change or admission in the group within the window. Exact

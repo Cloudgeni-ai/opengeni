@@ -309,4 +309,7 @@ export const embeddingMigrationTail = [
   // Empties the capability table from withheld 0642 and rewrites the reclaim
   // routine from 0807; replay after both.
   "0838_reclaim_exited_backend_runtime_capabilities.sql",
+  // Replaces the containment inventory from 0687, which uses the session
+  // tenancy fence helper from withheld 0345; replay after it.
+  "0839_docker_local_command_containment.sql",
 ];

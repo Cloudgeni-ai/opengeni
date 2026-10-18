@@ -51207,9 +51207,16 @@ async function deadlineOwnerQuiescencePending(
   return false;
 }
 
+/** Backends whose retained commands outlive their turn and can therefore be the
+ * only thing keeping a box warm. Docker and local commands run under an
+ * in-sandbox supervisor and have no provider deadline, so only this idle rule
+ * ever drains such a box. Matches `list_command_containment_candidates`. */
+const COMMAND_CONTAINMENT_BACKENDS: ReadonlySet<string> = new Set(["modal", "docker", "local"]);
+
 /**
- * Contain legacy retained commands that are the only thing keeping a Modal box
- * warm. One rule decides, independent of command health: the lease holds only
+ * Contain unsupervised retained commands that are the only thing keeping a
+ * Modal, Docker or local box warm (on Modal, the legacy ones without native
+ * supervision). One rule decides, independent of command health: the lease holds only
  * process holders and their parent admissions, no supervised process, capture
  * or reaper hold, and either the whole sandbox group has been idle for
  * `idleCommandContainmentMs`, or a provider-deadline rotation's bounded stop
@@ -51272,7 +51279,7 @@ export async function enrollRetainedCommandContainment(
     const initial = await readLease(tx, input.workspaceId, input.sandboxGroupId);
     if (
       !initial ||
-      initial.backend !== "modal" ||
+      !COMMAND_CONTAINMENT_BACKENDS.has(initial.backend) ||
       !initial.instanceId ||
       !["warm", "draining"].includes(initial.liveness)
     )
@@ -51316,7 +51323,8 @@ export async function enrollRetainedCommandContainment(
         (coalesce(process.provider_command, '{}'::jsonb) ? 'supervision') as supervised,
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
-          and process.provider_backend = 'modal' and process.route_target_id is null) as owned,
+          and process.provider_backend = ${initial.backend}
+          and process.route_target_id is null) as owned,
         coalesce(${deadlineRotation}
           and process.deadline_cancellation_requested_at < ${deadlineGrace}
           and process.reconcile_attempts >= 1
@@ -55156,6 +55164,65 @@ export async function getRetainedProcess(
       )
       .limit(1);
     return row ? mapRetainedProcess(row) : null;
+  });
+}
+
+/** The session background command a later turn of the same session reaches
+ * by the provider handle an earlier turn returned to the model. The handle is
+ * a lookup key here, not authority: the row must be an active process of this
+ * exact session, on the caller's exact home lease epoch and provider instance,
+ * whose lifecycle was transferred to a still-running background command.
+ * Anything else, or more than one match, is null. */
+export async function findRunningSessionBackgroundProcess(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    providerSessionId: number;
+    providerBackend: string;
+    /** Omit only when the caller binds the result to an exact live backend
+     * identity itself; more than one match is then null as well. */
+    providerInstanceId?: string | undefined;
+    leaseEpoch?: number | undefined;
+  },
+): Promise<SandboxRetainedProcess | null> {
+  if (!Number.isSafeInteger(input.providerSessionId) || input.providerSessionId <= 0) return null;
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const process = schema.sandboxRetainedProcesses;
+    const background = schema.sessionBackgroundCommands;
+    const rows = await scopedDb
+      .select()
+      .from(process)
+      .where(
+        and(
+          eq(process.workspaceId, input.workspaceId),
+          eq(process.sessionId, input.sessionId),
+          eq(process.providerSessionId, input.providerSessionId),
+          eq(process.state, "active"),
+          eq(process.providerBackend, input.providerBackend),
+          ...(input.providerInstanceId === undefined
+            ? []
+            : [eq(process.providerInstanceId, input.providerInstanceId)]),
+          ...(input.leaseEpoch === undefined ? [] : [eq(process.leaseEpoch, input.leaseEpoch)]),
+          eq(process.routeKind, "home"),
+          isNull(process.routeTargetId),
+          exists(
+            scopedDb
+              .select({ id: background.id })
+              .from(background)
+              .where(
+                and(
+                  eq(background.workspaceId, process.workspaceId),
+                  eq(background.sessionId, process.sessionId),
+                  eq(background.retainedProcessId, process.id),
+                  eq(background.state, "running"),
+                ),
+              ),
+          ),
+        ),
+      )
+      .limit(2);
+    return rows.length === 1 ? mapRetainedProcess(rows[0]!) : null;
   });
 }
 

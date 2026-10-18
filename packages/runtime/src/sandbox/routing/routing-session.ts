@@ -52,6 +52,7 @@ import {
 } from "../provider-command-session";
 import type { SandboxProviderCommand } from "@opengeni/contracts";
 import { hasTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
+import { durableProcessLostResult, hasDurableShellProcesses } from "../durable-shell-process";
 import {
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
@@ -361,6 +362,13 @@ export interface RoutingSandboxSessionDeps {
     process: RoutingRetainedProcess;
     command?: string | undefined;
   }) => Promise<void>;
+  /** Find the durable identity of a session background command this session
+   * owns, by the provider handle an earlier turn returned to the model. Only a
+   * running command on the exact home backend may be returned; anything else
+   * (unknown, settled, another backend or route) is null. */
+  findSessionProcess?: (
+    providerSessionId: number,
+  ) => Promise<RoutingRetainedProcessAdoption | null>;
   /** Called only when an operation against the default/home backend throws a
    * non-fence error. Wiring may classify definitive provider disappearance and
    * atomically retire the exact lease epoch. Returning a result makes dispatch
@@ -1238,8 +1246,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * callers must reject non-default routes until they can independently rebuild
    * that provider session from its copied durable identity. */
   adoptRetainedProcess(input: RoutingRetainedProcessAdoption): void {
+    this.bindDurableRetainedProcess(input, this.deps.defaultResolved);
+  }
+
+  private bindDurableRetainedProcess(
+    input: RoutingRetainedProcessAdoption,
+    seed: ResolvedActiveBackend | undefined,
+  ): void {
     const providerSessionId = positiveProviderSessionId(input.process.providerSessionId);
-    const seed = this.deps.defaultResolved;
     if (
       providerSessionId === null ||
       !canonicalUuid(input.process.id) ||
@@ -2771,6 +2785,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
 
   async writeStdin(args: unknown): Promise<string> {
     const providerSessionId = providerSessionIdFromArgs(args);
+    let unattached = false;
+    if (providerSessionId !== null && !this.retainedProcesses.has(providerSessionId))
+      unattached = !(await this.attachSessionProcess(providerSessionId));
     if (providerSessionId !== null && this.retainedProcesses.has(providerSessionId)) {
       try {
         return await this.dispatchProcessMutation(args);
@@ -2788,6 +2805,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       if (!s.writeStdin) {
         throw new RoutingUnsupportedError("writeStdin", this.cached?.kind ?? "unknown");
       }
+      // A supervised handle this session does not own as a running background
+      // command (settled, reaped, another route) must never be read around
+      // the durable capture path: report it lost, exactly as the SDK would.
+      if (
+        unattached &&
+        providerSessionId !== null &&
+        this.deps.findSessionProcess &&
+        hasDurableShellProcesses(s) &&
+        s.isDurableProcessHandle(providerSessionId)
+      )
+        return durableProcessLostResult(providerSessionId);
       return s.writeStdin(await withSecretStdin(args));
     });
   }
@@ -2823,19 +2851,59 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     return true;
   }
 
-  /** Local, Docker, and OpenSandbox process ids address an in-memory table on one worker
-   * session object. They are not valid durable locators for the independently
-   * scheduled reaper, so their yielded handles stay turn-owned until terminal
-   * or turn finalization, never session-owned background commands. */
+  /** Docker and local commands run under the in-sandbox supervisor, whose
+   * handles any later session object for the same container or workspace can
+   * reach, so they become session background commands like Modal's. The SDK's
+   * own in-memory handles (a `runAs` command, a sandbox without the
+   * supervisor's tools) and OpenSandbox process ids address one worker session
+   * object and stay turn-owned until terminal or turn finalization. */
   canAdoptRetainedProcessAsBackgroundCommand(providerSessionId: number): boolean {
     const record = this.retainedProcesses.get(providerSessionId);
-    return (
-      record !== undefined &&
-      !isNativeSynchronousCommandHandle(record.backend.session, providerSessionId) &&
-      record.backend.kind !== "local" &&
-      record.backend.kind !== "docker" &&
-      record.backend.kind !== "opensandbox"
-    );
+    if (
+      record === undefined ||
+      isNativeSynchronousCommandHandle(record.backend.session, providerSessionId) ||
+      record.backend.kind === "opensandbox"
+    )
+      return false;
+    if (record.backend.kind !== "local" && record.backend.kind !== "docker") return true;
+    const session = record.backend.session;
+    return hasDurableShellProcesses(session) && session.isDurableProcessHandle(providerSessionId);
+  }
+
+  /** Rebind a session background command started by an earlier turn, so this
+   * turn reads and writes it through the same process-aware path (durable
+   * output capture, process-scoped stdin admission) as the turn that started
+   * it. It stays session-owned: this turn neither adopts nor finalizes it.
+   * Returns false, changing nothing, when the handle is not such a command. */
+  async attachSessionProcess(providerSessionId: number): Promise<boolean> {
+    if (positiveProviderSessionId(providerSessionId) === null) return false;
+    if (this.retainedProcesses.has(providerSessionId)) return true;
+    if (!this.deps.findSessionProcess) return false;
+    const found = await this.deps.findSessionProcess(providerSessionId);
+    if (!found || found.process.providerSessionId !== providerSessionId) return false;
+    // A concurrent call may have attached it while the lookup was pending.
+    if (this.retainedProcesses.has(providerSessionId)) return true;
+    // A lazily provisioned turn starts on a placeholder backend; the exact
+    // home it resolves to is the only backend such a command may bind to.
+    let seed = this.deps.defaultResolved;
+    if (seed?.leaseEpoch === undefined || seed.providerInstanceId === undefined) {
+      try {
+        const resolved = await this.resolve();
+        if (resolved.sandboxId === null) seed = resolved;
+      } catch {
+        return false;
+      }
+      if (this.retainedProcesses.has(providerSessionId)) return true;
+    }
+    try {
+      this.bindDurableRetainedProcess(found, seed);
+    } catch {
+      return false;
+    }
+    const record = this.retainedProcesses.get(providerSessionId);
+    if (!record) return false;
+    record.backgroundAdoption = Promise.resolve();
+    return true;
   }
 
   /** Return only Opengeni's durable UUID + provider locator. Backend/session
@@ -2933,6 +3001,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     reason: "provider_deadline" | "explicit_stop",
   ): Promise<boolean> {
     const record = this.retainedProcesses.get(providerSessionId);
+    if (
+      record &&
+      hasDurableShellProcesses(record.backend.session) &&
+      record.backend.session.isDurableProcessHandle(providerSessionId)
+    ) {
+      await this.ensureParentPromotion(record);
+      return await record.backend.session.stopDurableProcess(providerSessionId);
+    }
     if (
       !record ||
       record.process.providerCommand?.kind !== "modal-router-v1" ||
