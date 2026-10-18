@@ -46,7 +46,8 @@ describe("browser network isolation", () => {
     // Never copy the host's own address into the namespace.
     expect(argumentsList).toContain("169.254.83.2");
     expect(argumentsList.join(" ")).toContain("--host-lo-to-ns-lo --tcp-ports 127.0.0.1/41234");
-    expect(argumentsList.join(" ")).toContain("--tcp-ns auto");
+    // Every port, including ephemeral ones a bare "auto" leaves out.
+    expect(argumentsList.join(" ")).toContain("--tcp-ns auto,1-65535");
   });
 
   test("the launch maps back to the person's UID and pins the DevTools port", () => {
@@ -74,6 +75,14 @@ describe("browser network isolation", () => {
     expect(script).toContain("'/usr/bin/unshare' --user --map-root-user --net --mount --");
     expect(script).toContain("--user --map-user=1000 --map-group=100 --");
     expect(script).toContain("/proc/sys/net/ipv6/conf/all/accept_dad");
+    // Loopback keeps IPv6, so servers listening only on ::1 stay reachable.
+    expect(script).not.toContain("disable_ipv6");
+    // Chrome starts only after each address's solicited-node group is joined,
+    // so the kernel's late address announcement cannot drop its connections.
+    const settle = script.indexOf("</proc/net/igmp6");
+    expect(settle).toBeGreaterThan(script.indexOf(".net-ready"));
+    expect(settle).toBeLessThan(script.indexOf("--map-user=1000"));
+    expect(script).toContain("group=ff0200000000000000000001ff${address#");
     expect(script).toContain(
       "'/usr/bin/mount' --bind '/state/chrome-launch/id.resolv.conf' /etc/resolv.conf",
     );

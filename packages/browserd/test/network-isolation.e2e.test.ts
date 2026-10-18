@@ -90,6 +90,57 @@ describe("managed browser network isolation", () => {
     },
     120_000,
   );
+
+  e2e(
+    "reaches every host loopback server the shared-network browser reaches",
+    async () => {
+      const isolation = await linuxBrowserNetworkIsolation();
+      if (isolation.kind !== "isolated") {
+        console.warn(`skipping: browser network isolation unavailable (${isolation.reason})`);
+        return;
+      }
+      const probe = join(import.meta.dir, "fixtures", "network-reachability-probe.ts");
+      const run = async (mode: "shared" | "isolated") => {
+        const child = Bun.spawn([process.execPath, probe, mode], {
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+          env: process.env,
+        });
+        const [stdout, stderr, exit] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        const line = stdout.split("\n").find((entry) => entry.startsWith("{"));
+        expect({ exit, parsed: line !== undefined }, stderr).toEqual({ exit: 0, parsed: true });
+        return JSON.parse(line!) as { notice: string | null; results: Record<string, string> };
+      };
+      const shared = await run("shared");
+      const isolated = await run("isolated");
+      // What localhost does on the host itself: a server answers on the
+      // families it listens on, and localhost falls back to the one that works.
+      const expected: Record<string, string> = {};
+      for (const when of ["before", "after"]) {
+        for (const [shape, ipv4, ipv6] of [
+          ["ipv4", "loads", "fails"],
+          ["ipv6", "fails", "loads"],
+          ["any4", "loads", "fails"],
+          ["dual", "loads", "loads"],
+        ] as const) {
+          expected[`${shape} ${when} via localhost`] = "loads";
+          expected[`${shape} ${when} via 127.0.0.1`] = ipv4;
+          expected[`${shape} ${when} via [::1]`] = ipv6;
+        }
+      }
+      expect(shared.results).toEqual(expected);
+      expect({ notice: isolated.notice, results: isolated.results }).toEqual({
+        notice: null,
+        results: expected,
+      });
+    },
+    120_000,
+  );
 });
 
 function shellQuote(value: string): string {

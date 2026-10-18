@@ -2083,9 +2083,14 @@ bridged to the host by pasta ([`browser-network-isolation.ts`](../packages/brows
 so host interface churn (container veths, bridges, VPNs) cannot fire Chromium's
 network-change handling and abort requests in flight. The browser keeps the
 person's UID and the spawned PID; host loopback servers, the DevTools port and
-DNS stay reachable. Where pasta or user namespaces are unavailable it launches
-on the shared network and `browser_open` says so in one line. Managed sandbox
-VMs turn it off (`OPENGENI_BROWSERD_NETWORK_ISOLATION=off`).
+DNS stay reachable. Loopback keeps both address families, so a server listening
+only on `127.0.0.1` or only on `::1` stays reachable through `localhost`, as on
+the shared network. A launch probe uses the namespace only when the pasta found
+forwards each host loopback listener on its own family and never on the other
+one; Chrome then starts once the namespace's IPv6 addresses have settled.
+Where pasta fails that probe, or pasta or user namespaces are unavailable, it
+launches on the shared network and `browser_open` says so in one line. Managed
+sandbox VMs turn it off (`OPENGENI_BROWSERD_NETWORK_ISOLATION=off`).
 
 Explicit managed Chromium working-directory recovery uses the internal
 [`working-runtime-journal.ts`](../packages/browserd/src/working-runtime-journal.ts)
