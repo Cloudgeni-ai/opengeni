@@ -871,6 +871,7 @@ from that commit. Results carry the commits as `backend+agent`.
 | r8 15:38 | 1f341facf+e5441d3e1 | 6423207a7 | 10 | 9 | none before create: create (first turn 25.1 s), commands, files, git, browser, move (26.6 s to another host, files kept) pass; see below |
 | r9 16:38 | 5ca485cef+734a3ba3a | ab08a672b | 8 | 12 | none before create: create (first turn 25.1 s), commands, files, git, browser pass; see below |
 | r10 18:28 | 746756d73+af0b4552f | a89c70f53 | 10 | 11 | none before create: create (first turn 28.2 s), commands, files, git, port, browser, sleep-paused pass; see below |
+| r11 20:23 | df78a13f3+af0b4552f | 53fe2cd59 | 13 | 10 | none before create: create (first turn 25.1 s), commands, egress, files, git, port, browser, sleep-paused (verified), move (32.3 s), connected-machine pass; see below |
 
 Checks after create were skipped through r6 because they need create.
 In r8 (every request now carries a nonzero agent epoch) create and most
@@ -965,3 +966,61 @@ computer session with "This interaction runtime does not contain the
 experimental CUA SDK". The sandbox images ask for an isolated Linux seat,
 for which browserd chooses its CUA backend, and the CUA SDK it loads from
 beside its binary is not installed in the images.
+
+Three more targeted runs on that deployment, with the suite as revised
+after an independent review (every check now asserts an effect only its
+feature produces, and `suite/verify.ts` checks each sleep's level in the
+host journals afterwards), changed the picture of the sleeps. In r10d
+(19:36) commands (with a failing command's status and output kept),
+egress, files and browser passed; browser now needed a browser tool result
+carrying the random title of a page served in the sandbox. The background
+command was read back by id after it finished, but stopping the long one
+left its record `stopping` with no reconcile attempt and its processes
+running in the guest, and the session then could not be deleted (409
+"Stop this chat's background commands before deleting it"). In r10e
+(19:45) paused, saved and archived failed in the verifier: each time the
+host resumed the sandbox 1 to 60 ms after it paused it, with cause
+`request`, while the suite had sent nothing yet, so the sandbox never
+reached the level and the earlier sleep passes (r10's paused among them)
+proved nothing. A scheduled checkpoint also dropped the agent's control
+connection again. In r10f (19:50, terminal only) the relay accepted the
+terminal and the typed input, but no output came back and the guest
+console shows no terminal activity; r10c's terminal had passed on the same
+deployment.
+
+r11 was the first full run of the revised suite, with the backend's fix
+for the stale-enrollment sweep (the sandbox lived through the whole
+45-minute run). One of the three freshly rolled hosts did not start:
+host setup asked for 13,637 huge pages right after the install had
+unpacked the base image and got 12,331, and failed; after reclaiming the
+page cache and compacting memory it reserved them all and the host joined.
+The journals verify Paused: the sandbox paused at once and stayed paused
+until the suite's command resumed it 2 s later. Saved, Archived and Remote
+did not happen: each time the host paused the sandbox and took the save
+(5.6 to 6.0 s, a diff snapshot), then cancelled it as it finished and
+resumed the guest, with cause `request`, while the suite had sent nothing.
+The suite's next command then found it running (its 32 MiB process was
+intact, but it had never slept). The move's save, a minute after the last
+command, did complete (Saved in 6.1 s, archived in 14.2 s, moved in 32.3 s).
+For host loss the suite stopped the move's target: the fleet service fenced
+it 2.3 minutes later and the sandbox came back on a third host (3.1 GB
+fetched in 8.2 s, running 2.5 s later, its agent reconnected to Opengeni at
+once, owner epoch 5). It came back from the copy the move had archived,
+because the check's own sleep to Remote had been cancelled like the others,
+so the file written after the move was missing and the check waited out its
+20 minutes; it now fails as soon as the sandbox answers without the file,
+and every sleep check waits for the host's own state (`GET
+/v1/sandboxes/{id}/state`) to report the level with no step under way, and
+holds it 3 s, before it sends the command that wakes it. Stopping the
+background command again did nothing: the command ran out its 900 s and
+exited on its own at 20:38:40. Deleting the session then stayed at 409
+because a browser-session holder of the lease, whose heartbeat had stopped
+at 20:25:59, still held it. The terminal failed for a reason in the e2e
+environment: the chart's autoscaler keeps two relay replicas, the relay
+pairs a stream's two dials in one replica's memory, and the e2e's Caddy
+has no channel affinity (which `docs/deployment.md` requires with more
+than one replica), so the viewer and the agent met only when both landed on
+the same replica; the web app's Terminal tab passed in the same run. From
+r12 the e2e runs one relay. The desktop failed as in r10c (the CUA SDK is
+not in the images). The Connected Machine passed again, listed online at
+every 5 s look through its 90 s idle with the same agent process.

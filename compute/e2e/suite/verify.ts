@@ -1,9 +1,11 @@
 // Checks what the suite's results claim against the hosts' journals (env.sh
 // suite runs it on the workstation once host-logs has copied them): each
 // sleep check passes only if the sandbox's last completed step before the
-// wake took it to the level asked for. The fabric's API does not report a
-// sandbox's level, and a host acknowledges a sleep before the sleep is done,
-// so without this a sleep that never happened would pass.
+// wake took it to the level asked for. The suite already waits for the
+// host's state to report the level; the journal is the record of it, made by
+// the host itself. It also counts, from the guests' consoles, how often each
+// sandbox's agent restored and reconnected at once (once per move or host
+// loss is expected, not once per restore).
 //
 //   bun verify.ts <run directory>   (results.json and host-*.log)
 //
@@ -79,6 +81,19 @@ for (const result of saved.results) {
   result.detail = `${result.detail}; ${checked.map((one) => one.how).join("; ")}`;
   if (checked.some((one) => !one.ok)) result.status = "fail";
 }
+
+// The agent's reconnects, per sandbox, from the guest consoles env.sh copied.
+const notes: string[] = [];
+for (const name of readdirSync(dir).filter((file) => /^consoles-.*\.log$/.test(file))) {
+  const text = readFileSync(`${dir}/${name}`, "utf8");
+  const tally = (pattern: RegExp) => (text.match(pattern) ?? []).length;
+  notes.push(
+    `${name.replace(/^consoles-|\.log$/g, "")}: "sandbox restored" ${tally(/sandbox restored/g)}, ` +
+      `"reconnecting at once" ${tally(/reconnecting at once/g)}, "connected to control plane" ${tally(/connected to control plane/g)}`,
+  );
+}
+saved.notes = notes;
+for (const note of notes) console.log(note);
 
 writeFileSync(`${dir}/results.json`, JSON.stringify(saved, null, 2));
 writeFileSync(`${dir}/results.md`, render(saved, saved.results, true));

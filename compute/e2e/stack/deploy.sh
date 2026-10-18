@@ -137,7 +137,10 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg nats "$na
     api: {image: img("opengeni-api")},
     worker: {image: img("opengeni-worker")},
     web: {image: img("opengeni-web")},
-    relay: {enabled: true, replicaCount: 1, image: img("opengeni-relay")},
+    # One relay: it pairs the two dials of a stream in the memory of one replica, and
+    # Caddy here has no channel affinity (docs/deployment.md, "Ingress channel
+    # affinity"); the autoscaler of the chart would otherwise keep two.
+    relay: {enabled: true, replicaCount: 1, autoscaling: {enabled: false}, image: img("opengeni-relay")},
     postgres: {enabled: true, auth: {existingSecret: "opengeni-postgres"},
       args: ["-c", "max_connections=500"],
       runtime: {existingSecret: "opengeni-runtime"}},

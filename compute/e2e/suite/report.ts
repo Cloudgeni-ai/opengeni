@@ -17,7 +17,15 @@ export type Result = {
   proofs?: LevelProof[];
 };
 
-export type Meta = { opengeni: string; compute: string; model: string; started: string; finished: string };
+export type Meta = {
+  opengeni: string;
+  compute: string;
+  model: string;
+  started: string;
+  finished: string;
+  /** What the guests' consoles show (verify.ts), for the record. */
+  notes?: string[];
+};
 
 export const counts = (results: Result[], status: Status) => results.filter((r) => r.status === status).length;
 
@@ -37,6 +45,7 @@ export function render(meta: Meta, results: Result[], verified: boolean): string
     ...results.map(
       (r) => `| ${r.id} | ${r.status} | ${r.seconds.toFixed(1)} | ${r.detail.replaceAll("|", "\\|").replaceAll("\n", " ")} |`,
     ),
+    ...(meta.notes?.length ? ["", ...meta.notes.map((note) => `- ${note}`)] : []),
     "",
   ].join("\n");
 }

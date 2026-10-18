@@ -82,9 +82,9 @@ frame), not only that a request was accepted.
 | browser | a page with a random title is served in the sandbox; the agent opens it with the browser tools, a tool result carries the title and the reply names it |
 | desktop | the agent's computer session becomes active, a computer tool call succeeds, and a screen frame fetched through the API decodes as a real desktop (at least 640x400, several colours) |
 | run-as | not applicable: Opengeni never asks any backend to run a sandbox's commands as another user (the runtime's `sandboxRunAs` gives none), so no public API reaches it; the compute agent advertises `run_as`, which the agent's Linux tests cover as root |
-| sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level; the next Opengeni request wakes it, with its files and a running process that holds 32 MiB of known memory (same pid, memory intact). After the run, `suite/verify.ts` checks the hosts' journals: the sandbox's last completed step before the wake must have reached that level, or the check fails |
+| sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level, and the host's state (`GET /v1/sandboxes/{id}/state`) must report the level with no step under way and keep it 3 s; the next Opengeni request wakes it, with its files, the same boot generation and a running process that holds 32 MiB of known memory (same pid, memory intact). After the run, `suite/verify.ts` checks the hosts' journals: the sandbox's last completed step before the wake must have reached that level, or the check fails |
 | move | the sandbox sleeps (Saved) and the fabric moves it to another host; its files come along |
-| host-loss | after a sleep to remote, the sandbox's host is stopped; the sandbox wakes, with its files, on a different live host under a higher owner epoch, and the lost host no longer owns it |
+| host-loss | after a sleep to remote that the host's state confirms, the sandbox's host is stopped; the sandbox wakes, with its files, on a different live host under a higher owner epoch, and the lost host no longer owns it |
 | delete | deleting the session deletes its sandbox on the fabric |
 | cleanup | every session delete, viewer close and machine revoke the run made succeeded (not applicable with `KEEP=1`) |
 | connected-machine | the agent build from the sandbox image connects the stack VM as a Connected Machine (an enroll token, `opengeni-agent connect`, then `run`); a session made to use it runs a command and a model turn there; through 90 s idle the machine is listed online at every 5 s poll and its agent process stays alive, then it answers at once; the machine is then revoked |
@@ -94,7 +94,7 @@ A check whose needs failed is skipped, so every run reports every check.
 
 After each run `suite` also copies every host's `compute-*` journal since
 the run began into the run's results (`host-<name>.log`), over OS Login
-through the stack VM, with the guest consoles of the run's sandboxes;
+through the stack VM, with the guest consoles of the run's sandboxes (copied every minute while the run goes on, since a console goes with its sandbox);
 `env.sh host-logs [run]` does it alone. `suite` then runs `suite/verify.ts`
 on those journals and exits nonzero if any check failed or was skipped, the
 remote run failed or no results came back. Each check has 30 minutes; one

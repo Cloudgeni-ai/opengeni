@@ -329,9 +329,16 @@ suite() {
   # The remote suite's status (nonzero when a check failed or was skipped,
   # or it could not run), then the results are copied and verified against
   # the hosts' journals; any of it failing fails the step.
-  local status=0 verified=0 dir=$STATE/runs/$run
+  local status=0 verified=0 dir=$STATE/runs/$run collector
+  # A sandbox's guest console goes with the sandbox, which the run deletes
+  # at its end, so it is copied while the run goes on.
+  mkdir -p "$dir"
+  consoles_loop "$dir" "$(date -u +%s)" &
+  collector=$!
   on "RUN=$run ONLY='${ONLY:-}' KEEP='${KEEP:-}' PROJECT=$PROJECT ZONE=$ZONE bash e2e/suite.sh" |
     tee "$STATE/suite-$run.log" || status=$?
+  kill "$collector" 2>/dev/null || true
+  wait "$collector" 2>/dev/null || true
   mkdir -p "$STATE/runs"
   copy_from "e2e/runs/$run" "$STATE/runs/" || log "could not copy the run's results"
   RUN=$run host_logs || log "could not collect the hosts' journals"
@@ -345,10 +352,49 @@ suite() {
   return "$verified"
 }
 
+# This account's OS Login user, with gcloud's own key registered for a day.
+os_login_user() {
+  local login=$HOME/.ssh/google_compute_engine
+  [ -f "$login" ] || ssh-keygen -q -t ed25519 -N '' -f "$login"
+  g compute os-login ssh-keys add --key-file "$login.pub" --ttl 1d >/dev/null
+  g compute os-login describe-profile --format='value(posixAccounts[0].username)'
+}
+
+# Runs a command on a host as root's caller, over the stack VM.
+on_host() {
+  local user=$1 ip=$2
+  shift 2
+  ssh -n -T -i "$HOME/.ssh/google_compute_engine" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+    -o "UserKnownHostsFile=$STATE/known_hosts" -o LogLevel=ERROR -o ConnectTimeout=20 \
+    -o "ProxyCommand=ssh ${SSH_OPTS[*]} -W %h:%p $USER_NAME@$(stack_ip)" "$user@$ip" "$@"
+}
+
+# Copies, every minute until killed, the guest console of every sandbox
+# that wrote to it since <epoch> into <dir>/consoles-<host>.log ("== <id>"
+# before each), keeping the last copy that had any.
+consoles_loop() {
+  local dir=$1 since=$2 user name ip
+  user=$(os_login_user) || return 0
+  for (( ; ; )); do
+    while read -r name ip; do
+      on_host "$user" "$ip" "for f in \$(sudo find /var/lib/compute/state/vm/firecracker -mindepth 2 -maxdepth 2 \
+        -name console.log -newermt @$since 2>/dev/null); do echo \"== \$(basename \$(dirname \$f))\"; sudo cat \$f; done" \
+        >"$dir/.consoles-$name.log" 2>/dev/null || true
+      if [ -s "$dir/.consoles-$name.log" ]; then
+        mv "$dir/.consoles-$name.log" "$dir/consoles-$name.log"
+      else
+        rm -f "$dir/.consoles-$name.log"
+      fi
+    done < <(g compute instances list --filter "name~^$PREFIX-host" --format 'value(name,networkInterfaces[0].networkIP)')
+    sleep 60
+  done
+}
+
 # Each host's journal since the run began (all of it without a run) into
 # $STATE/runs/$RUN, and the guest console of each sandbox the run's results
-# name that the host still has (a kept run's, KEEP=1): OS Login over the
-# stack VM, which the hosts allow SSH from.
+# name that the host still has (a kept run's, KEEP=1; suite copies them
+# while it runs too): OS Login over the stack VM, which the hosts allow SSH
+# from.
 host_logs() {
   local run=${RUN:-} dir since=() name
   dir=$STATE/runs/${run:-hosts-$(date -u +%Y%m%dT%H%M%SZ)}
@@ -357,26 +403,19 @@ host_logs() {
   local began
   began=$(jq -r '.started // empty | sub("[.][0-9]+Z$"; "Z") | fromdateiso8601 - 60' "$dir/results.json" 2>/dev/null || true)
   [ -n "$began" ] && since=(--since "@$began")
-  # This account's OS Login user and key (gcloud's own, registered once).
-  local login=$HOME/.ssh/google_compute_engine user ip
-  [ -f "$login" ] || ssh-keygen -q -t ed25519 -N '' -f "$login"
-  g compute os-login ssh-keys add --key-file "$login.pub" --ttl 1d >/dev/null
-  user=$(g compute os-login describe-profile --format='value(posixAccounts[0].username)')
-  local jump sandboxes
-  jump="ssh ${SSH_OPTS[*]} -W %h:%p $USER_NAME@$(stack_ip)"
+  local user ip sandboxes
+  user=$(os_login_user)
   sandboxes=$(grep -oE 'sandbox [0-9a-f]{32}' "$dir/results.json" 2>/dev/null | cut -d' ' -f2 | sort -u | tr '\n' ' ' || true)
   while read -r name ip; do
     log "journal of $name"
-    ssh -n -T -i "$login" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$STATE/known_hosts" \
-      -o LogLevel=ERROR -o ConnectTimeout=20 -o "ProxyCommand=$jump" "$user@$ip" \
-      "sudo journalctl --no-pager -o short-iso-precise ${since[*]} -u 'compute-*'" \
+    on_host "$user" "$ip" "sudo journalctl --no-pager -o short-iso-precise ${since[*]} -u 'compute-*'" \
       >"$dir/host-$name.log" 2>"$dir/host-$name.err" || log "no journal from $name (see host-$name.err)"
     [ -n "$sandboxes" ] || continue
-    ssh -n -T -i "$login" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$STATE/known_hosts" \
-      -o LogLevel=ERROR -o ConnectTimeout=20 -o "ProxyCommand=$jump" "$user@$ip" \
+    # Only if the host still has them: the copy made during the run stays.
+    on_host "$user" "$ip" \
       "for id in $sandboxes; do f=/var/lib/compute/state/vm/firecracker/\$id/console.log; if sudo test -f \$f; then echo \"== \$id\"; sudo cat \$f; fi; done" \
-      >"$dir/consoles-$name.log" 2>/dev/null || true
-    [ -s "$dir/consoles-$name.log" ] || rm -f "$dir/consoles-$name.log"
+      >"$dir/.consoles-$name.log" 2>/dev/null || true
+    if [ -s "$dir/.consoles-$name.log" ]; then mv "$dir/.consoles-$name.log" "$dir/consoles-$name.log"; else rm -f "$dir/.consoles-$name.log"; fi
   done < <(g compute instances list --filter "name~^$PREFIX-host" --format 'value(name,networkInterfaces[0].networkIP)')
 }
 

@@ -287,6 +287,60 @@ type Sandbox = { id: string; host: string | null; owner_epoch: number; metadata:
 const hosts = () => fabric<Host[]>("GET", "/v1/hosts", undefined, OPERATOR_KEY);
 const sandbox = () => fabric<Sandbox>("GET", `/v1/sandboxes/${state.sandbox}`);
 
+/** How the sandbox's host says it is now (GET .../state): its level, the
+ * step under way (the level stays the old one until a step ends), and its
+ * boot generation, which rises only on a reboot. No owner answers
+ * `{host: null, level: "remote"}`; a host mid-move answers 503. */
+type SandboxState = { host: string | null; level: string; step: string | null; generation: number | null };
+async function sandboxState(): Promise<SandboxState> {
+  for (let tries = 0; ; tries += 1) {
+    try {
+      return await fabric<SandboxState>("GET", `/v1/sandboxes/${state.sandbox}/state`);
+    } catch (error) {
+      if (!(error instanceof HttpError && error.status === 503) || tries >= 60) throw error;
+      await sleep(1_000);
+    }
+  }
+}
+const LEVELS = ["running", "paused", "compressed", "saved", "archived", "remote"];
+const depth = (level: string) => LEVELS.indexOf(level);
+const describeState = (now: SandboxState) =>
+  `${now.level}${now.step ? ` (${now.step} under way)` : ""} on ${now.host ?? "no host"}`;
+
+/**
+ * Waits until the host reports the sandbox at `level` or deeper with no step
+ * under way, then holds it there a moment to show nothing woke it. Fails if
+ * it wakes on its own or does not get there in time.
+ */
+async function reachLevel(level: string, limitMs: number): Promise<{ state: SandboxState; ms: number; seen: string[] }> {
+  const start = Date.now();
+  const seen: string[] = [];
+  let deepest = 0;
+  for (;;) {
+    const now = await sandboxState();
+    const label = describeState(now);
+    if (seen.at(-1) !== label) seen.push(label);
+    deepest = Math.max(deepest, depth(now.level));
+    if (depth(now.level) >= depth(level) && !now.step) {
+      const ms = Date.now() - start;
+      await sleep(3_000);
+      const held = await sandboxState();
+      if (depth(held.level) < depth(level)) {
+        throw new Error(`reached ${now.level}, then was ${describeState(held)} 3 s later with no request (${seen.join(" -> ")})`);
+      }
+      return { state: held, ms, seen };
+    }
+    if (deepest > 0 && now.level === "running" && !now.step) {
+      throw new Error(`woke before reaching ${level}, with no request: ${seen.join(" -> ")}`);
+    }
+    if (Date.now() - start > limitMs) {
+      throw new Error(`not ${level} within ${limitMs / 1000} s: ${seen.join(" -> ")}`);
+    }
+    await sleep(250);
+  }
+}
+const REACH_MS: Record<string, number> = { paused: 30_000, saved: 180_000, archived: 600_000, remote: 600_000 };
+
 /**
  * One HTTP GET to a TCP port inside the sandbox, over the fabric's connect
  * stream. connect/<n> reaches guest vsock port n; a guest TCP port is reached
@@ -736,14 +790,6 @@ async function step<T>(name: string, run: () => Promise<T>): Promise<T> {
 // (verify.ts checks it once env.sh has copied them).
 let proofs: LevelProof[] = [];
 
-// How long each level takes to reach after the request, so the next command
-// finds the sandbox asleep at that level rather than racing the sleep (a save
-// writes the memory locally, an archive also uploads it). The fabric's API
-// does not report a sandbox's level, and a host acknowledges a sleep before
-// it is done: the hosts' journals show whether the level was reached
-// (verify.ts).
-const SETTLE_MS: Record<string, number> = { paused: 2_000, saved: 15_000, archived: 45_000, remote: 60_000 };
-
 // A process that lives through the sleep: it holds 32 MiB derived from its
 // token and answers with its token, pid and whether that memory is intact.
 // (A restored guest's clock does not count the time it slept, so the guest
@@ -802,11 +848,13 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
       });
       if (witness.token !== token || witness.memory !== "intact") throw new Error(`witness answered ${JSON.stringify(witness)}`);
       const before = await sandbox();
+      const boot = (await sandboxState()).generation;
       const from = new Date().toISOString();
       let start = Date.now();
       await step("sleep", () => fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level }));
-      const slept = seconds(start);
-      await sleep(SETTLE_MS[level]!);
+      // A host acknowledges a sleep before it is done; its state says when
+      // the level is reached, and the hosts' journals confirm it (verify.ts).
+      const reached = await step(`reach ${level}`, () => reachLevel(level, REACH_MS[level]!));
       const to = new Date().toISOString();
       start = Date.now();
       const out = await step("first command after sleeping", () => execOk(`cat e2e/${level}.txt e2e/hello.txt`, 120_000));
@@ -817,11 +865,16 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
         throw new Error(`the process did not live through the sleep: before ${JSON.stringify(witness)}, after ${JSON.stringify(after)}`);
       }
       if (after.memory !== "intact") throw new Error(`the process's memory changed across the sleep`);
+      const awake = await sandboxState();
+      if (boot !== null && awake.generation !== null && awake.generation !== boot) {
+        throw new Error(`the sandbox rebooted across the sleep (generation ${boot} -> ${awake.generation})`);
+      }
       proofs.push({ kind: "level", sandbox: state.sandbox!, level, from, to });
       const moved = await sandbox();
       return (
-        `asked to sleep in ${slept}, left ${SETTLE_MS[level]! / 1000} s, then woke and answered in ${woke}; ` +
-        `process ${after.pid} and its 32 MiB intact; host ${before.host} -> ${moved.host}`
+        `${reached.state.level} in ${(reached.ms / 1000).toFixed(1)} s (${reached.seen.join(" -> ")}), held 3 s, ` +
+        `then woke and answered in ${woke}; process ${after.pid} and its 32 MiB intact, generation ${boot}; ` +
+        `host ${before.host} -> ${moved.host}`
       );
     },
   );
@@ -835,6 +888,7 @@ check("move", "a move to another host keeps the sandbox's files", ["files", "hos
   // moves the sleeping ones, so the check puts it to sleep first.
   const start = Date.now();
   await step("sleep", () => fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level: "saved" }));
+  await step("reach saved", () => reachLevel("saved", REACH_MS.saved!));
   await step("move", async () => {
     // A sleep the host is still finishing answers busy for a moment.
     for (let tries = 0; ; tries += 1) {
@@ -850,13 +904,17 @@ check("move", "a move to another host keeps the sandbox's files", ["files", "hos
   const after = await sandbox();
   if (!out.includes(state.marker!)) throw new Error(`after the move: ${out}`);
   if (after.host !== target.name) throw new Error(`on ${after.host}, not ${target.name}`);
-  return `${before.host} -> ${after.host} in ${seconds(start)}`;
+  const now = await sandboxState();
+  if (now.host !== target.name) throw new Error(`the fabric says ${target.name}, but ${now.host ?? "no host"} holds it`);
+  return `${before.host} -> ${after.host} in ${seconds(start)}; the first command after it answered; ${describeState(now)}`;
 });
 
 check("host-loss", "a lost host's sandbox comes back elsewhere from its last archived copy", ["files", "hosts"], async () => {
   const kept = `kept-${rand()}`;
   await og("POST", `${ses()}/fs/write`, { path: "e2e/kept.txt", content: kept, encoding: "utf8" });
   await fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level: "remote" });
+  // The copy the sandbox comes back from is the one this sleep archives.
+  await step("reach remote", () => reachLevel("remote", REACH_MS.remote!));
   await execOk("cat e2e/kept.txt", 120_000);
   const late = `late-${rand()}`;
   await og("POST", `${ses()}/fs/write`, { path: "e2e/late.txt", content: late, encoding: "utf8" });
@@ -882,6 +940,16 @@ check("host-loss", "a lost host's sandbox comes back elsewhere from its last arc
       out = result.stdout;
       break;
     }
+    // The sandbox answers, but from a copy older than the requested remote
+    // sleep: that sleep never reached the archive, and waiting longer cannot
+    // bring the file back.
+    if (result.exitCode !== -1 && /No such file/.test(`${result.stdout}\n${result.stderr}`)) {
+      const now = await sandbox();
+      throw new Error(
+        `back on ${now.host ?? "no host"} (owner epoch ${before.owner_epoch} -> ${now.owner_epoch}) in ${seconds(start)}, ` +
+          `but from a copy older than the sleep to remote: e2e/kept.txt is missing`,
+      );
+    }
     await sleep(10_000);
   }
   const after = await sandbox();
@@ -900,6 +968,8 @@ check("host-loss", "a lost host's sandbox comes back elsewhere from its last arc
     throw new Error(`${lost} is still live under its old epoch ${lostEpoch}, so it was never fenced`);
   }
   const fenced = old ? `${old.state} (host epoch ${lostEpoch} -> ${old.epoch})` : "gone from the fleet";
+  const now = await sandboxState();
+  if (now.host !== after.host) throw new Error(`the fabric says ${after.host}, but ${now.host ?? "no host"} holds it`);
   return `${lost} stopped; back on ${after.host} (owner epoch ${before.owner_epoch} -> ${after.owner_epoch}) in ${seconds(start)}; ` +
     `the archived copy's file kept, the late write ${out.includes(late) ? "kept too" : "lost (after the last save)"}; ${lost} is ${fenced}`;
 });
