@@ -183,13 +183,16 @@ pub(crate) fn listen<A: Activity>(
 }
 
 /// Starts listening for the guest's connections to its agent link on
-/// `port`, handing each to `serve`. At most [`MAX_CONNECTIONS`] are open
-/// at once; more are closed as they come. Must run inside a Tokio runtime.
+/// `port`, each carrying a resumable stream (see [`crate::resume`]), and
+/// hands each new stream's end to `serve`. The streams end with the
+/// listeners. At most [`MAX_CONNECTIONS`] connections are open at once,
+/// and as many streams; more connections are closed as they come. Must
+/// run inside a Tokio runtime.
 pub(crate) fn listen_link(
     vsock: &Path,
     port: u32,
     owner: (u32, u32),
-    serve: impl Fn(Counted) + Send + 'static,
+    serve: impl Fn(tokio::io::DuplexStream) + Send + Sync + 'static,
 ) -> io::Result<Listeners> {
     let mut listeners = Listeners {
         tasks: Vec::with_capacity(1),
@@ -197,17 +200,22 @@ pub(crate) fn listen_link(
     };
     let listener = bind(vsock, port, owner, &mut listeners)?;
     let open = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    let streams = crate::resume::Streams::new(serve, MAX_CONNECTIONS, crate::resume::TAKE_UP);
     listeners.tasks.push(tokio::spawn(async move {
+        // Hellos still being read; they end with the listener, and the
+        // streams with the last of them.
+        let mut hellos = JoinSet::new();
         let mut over_limit = false;
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
+                    while hellos.try_join_next().is_some() {}
                     if let Ok(permit) = Arc::clone(&open).try_acquire_owned() {
                         over_limit = false;
-                        serve(Counted {
+                        hellos.spawn(streams.clone().take(Counted {
                             stream,
                             _permit: permit,
-                        });
+                        }));
                     } else {
                         drop(stream);
                         if !over_limit {

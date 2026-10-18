@@ -165,25 +165,39 @@ impl Cgroup {
             return Ok(());
         };
         let _serial = PARENT_LOW.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut total = 0_u64;
-        for entry in fs::read_dir(parent)? {
+        claim_for_children(parent)
+    }
+
+    /// Removes the child groups no process is in, then sets the group's
+    /// `memory.low` to the sum of what the rest claim, as
+    /// [`Cgroup::protect_parent`] does. VMs that ended while nobody
+    /// managed them, such as when the host agent was killed, leave their
+    /// groups behind, and each would go on claiming its VM's protection.
+    /// Only for a parent whose children are all VMs of one engine, before
+    /// it starts any: a group being set up is empty for a moment too.
+    pub fn remove_empty_children(&self) -> io::Result<()> {
+        let _serial = PARENT_LOW.lock().unwrap_or_else(PoisonError::into_inner);
+        for entry in fs::read_dir(&self.path)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
                 continue;
             }
-            match fs::read_to_string(entry.path().join("memory.low")) {
-                Ok(low) => total = total.saturating_add(low.trim().parse().unwrap_or(0)),
-                // A child group removed meanwhile claims nothing: its
-                // directory is gone, or its files answer that it no
-                // longer exists while the kernel takes it down.
+            if Self::at(entry.path()).is_populated()? {
+                continue;
+            }
+            match fs::remove_dir(entry.path()) {
+                // Gone already, or a process joined it meanwhile: it stays
+                // and claims what it does.
                 Err(error)
-                    if error.kind() == io::ErrorKind::NotFound
-                        || error.raw_os_error()
-                            == Some(rustix::io::Errno::NODEV.raw_os_error()) => {}
-                Err(error) => return Err(error),
+                    if error.kind() != io::ErrorKind::NotFound
+                        && error.raw_os_error() != Some(rustix::io::Errno::BUSY.raw_os_error()) =>
+                {
+                    return Err(error);
+                }
+                _ => {}
             }
         }
-        fs::write(parent.join("memory.low"), total.to_string())
+        claim_for_children(&self.path)
     }
 
     /// The group's zswap traffic and memory pressure so far.
@@ -446,6 +460,29 @@ pub fn zswap_enabled() -> io::Result<bool> {
     }
 }
 
+/// Sets `parent`'s `memory.low` to the sum of its child groups'. The caller
+/// holds [`PARENT_LOW`].
+fn claim_for_children(parent: &Path) -> io::Result<()> {
+    let mut total = 0_u64;
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        match fs::read_to_string(entry.path().join("memory.low")) {
+            Ok(low) => total = total.saturating_add(low.trim().parse().unwrap_or(0)),
+            // A child group removed meanwhile claims nothing: its directory
+            // is gone, or its files answer that it no longer exists while
+            // the kernel takes it down.
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(rustix::io::Errno::NODEV.raw_os_error()) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    fs::write(parent.join("memory.low"), total.to_string())
+}
+
 fn read_u64(path: &Path) -> io::Result<u64> {
     fs::read_to_string(path)?
         .trim()
@@ -609,6 +646,28 @@ mod tests {
             Duration::from_micros(1_234_567)
         );
         assert!(parse_cpu_usage("user_usec 5\n").is_err());
+    }
+
+    /// Groups VMs left behind claim no protection once an engine starts:
+    /// empty ones go, and the parent claims what those with a process do.
+    #[test]
+    fn empty_groups_left_behind_are_removed_with_their_claims() {
+        let parent = tempfile::tempdir().unwrap();
+        let running = parent.path().join("running");
+        fs::create_dir(&running).unwrap();
+        fs::write(running.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        fs::write(running.join("memory.low"), "536870912\n").unwrap();
+        // A real group's control files go with it; here an empty directory
+        // stands for one left behind.
+        fs::create_dir(parent.path().join("left-behind")).unwrap();
+        fs::write(parent.path().join("memory.low"), "9663676416\n").unwrap();
+        Cgroup::at(parent.path()).remove_empty_children().unwrap();
+        assert!(running.exists());
+        assert!(!parent.path().join("left-behind").exists());
+        assert_eq!(
+            fs::read_to_string(parent.path().join("memory.low")).unwrap(),
+            "536870912"
+        );
     }
 
     #[test]

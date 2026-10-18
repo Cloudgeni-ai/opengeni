@@ -19,6 +19,7 @@ use crate::protocol::{Id, ImageId, SandboxConfig};
 use crate::rootfs::Missing;
 use crate::store::{OwnerEpoch, Store};
 
+use super::disk::AfterReading;
 use super::{Event, HostAgent, HostError, Reply};
 
 /// Inodes a fetch takes: the image's file and its staging name.
@@ -102,6 +103,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             inodes: FETCH_INODES,
         };
         if let Some((resource, needed, free)) = self.core.disk_shortage(disk) {
+            if self.core.disk_awaits_reading(disk) {
+                self.after_reading(AfterReading::Fetch(image, length));
+                return;
+            }
             return self.fetch_ended(
                 image,
                 &Err(HostError::HostFull {

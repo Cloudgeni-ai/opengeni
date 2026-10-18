@@ -49,6 +49,17 @@ impl Duplex for TcpStream {
     }
 }
 
+#[cfg(unix)]
+impl Duplex for std::os::unix::net::UnixStream {
+    fn try_clone(&self) -> io::Result<Self> {
+        std::os::unix::net::UnixStream::try_clone(self)
+    }
+
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        std::os::unix::net::UnixStream::shutdown(self, how)
+    }
+}
+
 /// Relays `guest`, a connection inside the guest, and `host`, a stream to
 /// the host, until both directions are done (see the module
 /// documentation). Returns `false`, having relayed nothing, if it could not

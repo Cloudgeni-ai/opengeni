@@ -148,6 +148,21 @@ impl DiskRoom {
         self.bytes += i128::from(need.bytes);
         self.inodes += i128::from(need.inodes);
     }
+
+    /// Books `need` whether it fits or not, for a wake that waits for the
+    /// next reading: later ones in the same decision are charged it.
+    pub(super) fn charge(&mut self, need: DiskSpace) {
+        self.bytes -= i128::from(need.bytes);
+        self.inodes -= i128::from(need.inodes);
+    }
+
+    /// Whether `need`, which does not fit, would fit if `unread`, what
+    /// bookings that ended since the last reading stood for, had written
+    /// nothing.
+    pub(super) fn may_take(&self, need: DiskSpace, unread: DiskSpace) -> bool {
+        i128::from(need.bytes) <= self.bytes + i128::from(unread.bytes)
+            && i128::from(need.inodes) <= self.inodes + i128::from(unread.inodes)
+    }
 }
 
 impl Sandbox {
@@ -348,6 +363,19 @@ impl Host {
         room.take(disk)
             .err()
             .map(|short| (short.resource, short.needed, short.free))
+    }
+
+    /// Whether work that may write `disk`, which does not fit now (see
+    /// [`Self::disk_shortage`]), may fit once the next reading is in: what
+    /// a booking that ended since the last reading stood for stays booked
+    /// until a reading shows what was written, and `disk` is short by no
+    /// more than that. Such work waits for the next reading, which
+    /// decides it, rather than being refused for room that is perhaps
+    /// there; work short by more is short whatever that reading shows.
+    #[must_use]
+    pub fn disk_awaits_reading(&self, disk: DiskSpace) -> bool {
+        self.disk_room()
+            .is_some_and(|room| room.may_take(disk, self.disk_spent))
     }
 
     /// What wakes may still book in one decision: nothing before the first

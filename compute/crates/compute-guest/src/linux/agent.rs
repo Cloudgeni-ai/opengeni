@@ -1,15 +1,18 @@
 //! Opengeni's agent in the guest (see [`crate::agent`]): it starts once the
 //! sandbox has its own identity and an init that names it, starts again
-//! when it ends, is told to reconnect after each restore (see
-//! [`Guest::notice`]), and reaches its host's agent link through the
-//! forwarder from its local NATS port.
+//! when it ends, and reaches its host's agent link through the forwarder
+//! from its local NATS port, each connection as a stream that outlives the
+//! vsock connections under it (see [`crate::resume`]). When the host has
+//! no stream to go on with, the agent is told to reconnect at once (see
+//! [`Guest::agent_link_gone`]).
 
 use std::fs;
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,16 +23,18 @@ use super::{log, spawn, sys};
 use crate::AGENT_LINK_PORT;
 use crate::agent::{self, ACTIVITY_DIR, AGENT_PATH, LINK_DIR, LINK_FILE, NATS_PORT};
 use crate::envd::AgentInit;
+use crate::resume::StreamId;
+use crate::resume::relay::{self as resume, Ended};
 
 /// Keeps the agent running from the moment the sandbox wants it, with
 /// back-off between starts. Never returns.
-pub fn supervise(guest: &Guest, children: &Children) {
+pub fn supervise(guest: &Arc<Guest>, children: &Children) {
     let mut forwarding = false;
     let mut pause = Duration::from_millis(200);
     loop {
         let (wanted, env) = guest.wait_agent();
         if !forwarding {
-            forwarding = forward();
+            forwarding = forward(guest);
         }
         if let Err(error) = write_link(&wanted) {
             log(&format!("the agent's link file: {error}"));
@@ -82,9 +87,8 @@ fn write_link(wanted: &AgentInit) -> io::Result<()> {
 }
 
 /// Forwards each connection to the agent's local NATS port to the host's
-/// agent link, byte for byte (see [`crate::relay`]: the host learns at once
-/// that the agent closed one). Whether it listens.
-fn forward() -> bool {
+/// agent link as a resumable stream. Whether it listens.
+fn forward(guest: &Arc<Guest>) -> bool {
     let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, NATS_PORT)) {
         Ok(listener) => listener,
         Err(error) => {
@@ -92,11 +96,14 @@ fn forward() -> bool {
             return false;
         }
     };
+    let guest = Arc::clone(guest);
     spawn("agent-link", move || {
         loop {
             match listener.accept() {
                 Ok((tcp, _)) => {
-                    spawn("agent-link", move || relay(tcp));
+                    let opened_in = guest.agent_link_epoch();
+                    let guest = Arc::clone(&guest);
+                    spawn("agent-link", move || relay(tcp, &guest, opened_in));
                 }
                 Err(error) => {
                     log(&format!("the agent link's port {NATS_PORT}: {error}"));
@@ -108,20 +115,40 @@ fn forward() -> bool {
     .is_some()
 }
 
-/// Relays `tcp` to a new connection to the host's agent link, both ways,
-/// until both sides are done. With no host to reach, `tcp` closes and the
-/// agent dials again.
-fn relay(tcp: TcpStream) {
-    let host = match Stream::connect_host(AGENT_LINK_PORT) {
-        Ok(host) => host,
-        Err(error) => {
-            log(&format!("the host's agent link: {error}"));
-            return;
-        }
-    };
+/// Relays `tcp` as a new stream to the host's agent link, both ways, until
+/// both sides are done or the host has no stream to go on with. With no
+/// host to reach, `tcp` closes and the agent dials again. `opened_in` is
+/// the agent's link epoch when it connected.
+fn relay(tcp: TcpStream, guest: &Guest, opened_in: u64) {
     let _ = tcp.set_nodelay(true);
-    if !crate::relay::relay(tcp, host) {
-        log("the agent link's relay did not start");
+    let mut bytes = [0; 16];
+    if let Err(error) =
+        fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(&mut bytes))
+    {
+        log(&format!("the agent link's stream id: {error}"));
+        return;
+    }
+    let id = StreamId::from_bytes(bytes);
+    let ended = resume::relay(
+        tcp,
+        id,
+        || Stream::connect_host(AGENT_LINK_PORT),
+        |ended| {
+            // Before the agent sees its connection end, so that it dials
+            // once, at once.
+            if *ended == Ended::Gone {
+                guest.agent_link_gone(opened_in);
+            }
+        },
+    );
+    match ended {
+        Ended::Finished => {}
+        Ended::Gone => log(&format!("the agent link's stream {id}: the host has none")),
+        Ended::Lost => log(&format!(
+            "the agent link's stream {id}: the host could not be reached again"
+        )),
+        Ended::Unreachable(error) => log(&format!("the host's agent link: {error}")),
+        Ended::Broken(error) => log(&format!("the agent link's stream {id}: {error}")),
     }
 }
 

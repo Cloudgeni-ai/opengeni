@@ -519,6 +519,7 @@ dependencies = [
  "compute-core",
  "compute-engine",
  "compute-fleet",
+ "compute-guest",
  "compute-image",
  "compute-link",
  "compute-pager",

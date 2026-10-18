@@ -74,6 +74,14 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
   places and adopts it; it answers `{"waited_us", "generation", "host"}`
   once it runs. `DELETE /v1/sandboxes/{id}` ends it; `404` means it is
   already gone.
+- `POST /v1/sandboxes/{id}/sleep` with `{"level": "paused" | "compressed" |
+  "saved" | "archived" | "remote"}` asks its host to put it at least that
+  deep; the host answers at once and sleeps it in the background.
+  `GET /v1/sandboxes/{id}/state` asks the host how it is now:
+  `{"host", "level", "step", "generation"}`, where `step` names a step
+  under way (`level` stays where it was until it finishes). A sandbox
+  with no owner answers `{"host": null, "level": "remote"}`; one its host
+  does not hold now, as during a move, answers `503 unavailable`.
 - `GET /v1/requests/{request_id}` answers the view of the sandbox that
   request made, `404 not_found` if no create named it, or `410 request_gone`
   once that sandbox was deleted, so a caller that crashed between a create
@@ -107,16 +115,26 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
   the agent keeps its state on the sandbox's disk, outside the workspace
   that an image's `HOME` often is.
 - It listens on `127.0.0.1:3958` and forwards each connection to the host,
-  vsock CID 2, port 58, byte for byte. The port is not NATS's own 4222, so
-  a NATS server the sandbox's user runs, as when developing Opengeni
-  itself, keeps that port. It listens only once the sandbox runs an agent.
+  vsock CID 2, port 58, as a resumable stream (section 3): Firecracker
+  resets every vsock connection when it takes a snapshot, a checkpoint of
+  a running VM included, and a restored VM has none, so the stream
+  outlives the vsock connections under it and the agent's connection
+  outlives sleep, wake and checkpoints on the same host. The port is not
+  NATS's own 4222, so a NATS server the sandbox's user runs, as when
+  developing Opengeni itself, keeps that port. It listens only once the
+  sandbox runs an agent.
 - An image without envd works too: the guest then answers notices and
   inits itself, and is ready at boot.
 - The agent subscribes to `_compute.relay` and keeps the latest relay
   credential it receives there (section 3) in memory, for the streams it
   opens.
-- After each restore notice it sends the agent `SIGUSR1`: the agent drops
-  its NATS connection and dials again at once.
+- When the host answers that it has no stream to go on with (the sandbox
+  moved, was recovered on another host, or outlived its host agent), the
+  guest sends the agent `SIGUSR1`, once for the connections it had, and
+  then ends the agent's connection: the agent dials again at once rather
+  than after its outage back-off. A restore alone sends nothing, since
+  dropping a connection the host carries on would drop what was sent to
+  it while the sandbox slept, the message that woke it among them.
 - The agent registers activity as files `/run/compute/activity/<label>.<pid>`
   holding a decimal count; the guest adds the counts of files whose pid is
   alive to its answer to the host's `activity` question. The guest empties
@@ -132,8 +150,34 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
 
 ## 3. Host and guest
 
-The host answers each connection on a sandbox's vsock port 58 as a NATS
-server would, for the subset the agent's client uses:
+Each connection on a sandbox's vsock port 58 carries one stream of one of
+the agent's connections (`compute-guest`'s `resume` module, the host's
+`resume`):
+
+- The guest opens it with one line, `resume <id> <received> <sent>\n`: a
+  random 128-bit stream id in hex, and how many positions of the stream
+  it has received and sent. The host answers `ok <received>\n`, what it
+  has received, or `gone\n`. A new stream starts at `0 0`.
+- Then both send frames, big-endian: `D` with an offset (u64), a length
+  (u32, 1 to 64 KiB) and the bytes; `A` acknowledging a count (u64) the
+  receiver handed on; `E` ending a direction at an offset (u64), which
+  takes one position, as TCP counts a FIN; and `X`, giving the whole
+  stream up.
+- Each side keeps what it sent until it is acknowledged, at most 1 MiB,
+  and stops reading its own side past that. When the connection under a
+  stream ends, the guest connects again with its counts and each side
+  sends what the other lacks.
+- The host answers `gone` to a stream it does not know, unless it is new,
+  and to counts it cannot put together with its own: a guest restored
+  from an older checkpoint, say. The guest then ends the agent's
+  connection. A stream ends once both directions ended and were
+  acknowledged, or when the guest gives up reconnecting (about 30 s of its
+  own running time). The host ends a stream no connection carried again
+  within 10 s after another stream of the sandbox was taken up, and every
+  stream when it stops listening for the sandbox; it holds at most 64.
+
+Inside the stream, the host answers as a NATS server would, for the subset
+the agent's client uses:
 
 - It sends `INFO` first, with `headers: true`, `auth_required: false`,
   `proto: 1` and the gateway's `max_payload`.
@@ -244,14 +288,17 @@ Until `opened`, the host keeps what the guest sends for the session.
   lease, every five seconds, whether or not the sandbox runs; a renewal that
   finds a later epoch or another instance ends the session with `closed`.
 - **Sleep.** The host keeps a session open while its sandbox sleeps. A
-  `msg` for a sandbox that is not running wakes it and waits, in order, until
-  the agent has subscribed again to the subject, for up to 120 s; if the
-  sandbox does not come back by then they are dropped, and Opengeni's
-  request times out. A guest that reconnects with the same instance takes up
-  the same session and subscriptions; with another instance, the host closes
-  the old session and opens a new one. When one of an agent's connections
-  ends while others stay, its subscriptions wait the same grace period for a
-  connection to take them up, then end.
+  `msg` for a sandbox that is not running wakes it. The agent's connection
+  outlives sleep (section 3), so a message for a subscription it holds is
+  sent on it at once and reaches the agent when the woken guest takes its
+  stream up again. A message for a subscription no connection holds waits,
+  in order, until the agent has subscribed again to the subject, for up to
+  120 s; if the sandbox does not come back by then they are dropped, and
+  Opengeni's request times out. A guest that reconnects with the same
+  instance takes up the same session and subscriptions; with another
+  instance, the host closes the old session and opens a new one. When one
+  of an agent's connections ends while others stay, its subscriptions wait
+  the same grace period for a connection to take them up, then end.
 - **Records.** The host keeps each sandbox's instance and subscriptions in
   its record, and opens those sessions again when it starts or its link comes
   back, before any guest runs. It writes the record after each change and
@@ -309,9 +356,10 @@ What the host does, exactly (`compute-link`, its `core` module):
   holds waits that long for the agent to subscribe again. Every message
   that arrives wakes its sandbox, at most once every 250 ms: one that comes
   sooner wakes it when the 250 ms are over, since the sandbox may have
-  gone to sleep in between (a request delivered to a connection whose VM
-  was just paused runs once that wake resumes it). Messages that arrive
-  count as activity; what the agent sends does not.
+  gone to sleep in between (a request sent on a connection whose VM was
+  just paused or saved reaches the agent once that wake resumes it, on the
+  same stream). Messages that arrive count as activity; what the agent
+  sends does not.
 - **Subscriptions not taken up within 10 s end.** After the agent
   reconnects, the host unsubscribes those it did not subscribe to again;
   after one of its connections ends while others stay, those it held end

@@ -812,6 +812,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     rootfs_retired: Instant,
     /// Images being fetched for the creates that wait for them.
     fetching: HashMap<ImageId, fetch::Fetch>,
+    /// Work waiting for the next disk reading to say whether it fits.
+    after_reading: Vec<disk::AfterReading>,
     images: Images,
     warm: Option<Warm>,
     core: Host,
@@ -1115,6 +1117,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             origin: Instant::now(),
             slots: HashMap::new(),
             preparing: HashSet::new(),
+            after_reading: Vec::new(),
             owning: HashMap::new(),
             ordinals: BTreeSet::new(),
             blocked: BTreeMap::new(),
@@ -1172,6 +1175,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Takes back what an earlier agent left, then takes a first reading
     /// and starts the templates.
     async fn begin(&mut self, held: Vec<Held>, strays: Vec<Stray>, shapes: Vec<Shape>) {
+        // Before any VM starts or is adopted, so no group being set up
+        // looks left behind.
+        if let Err(error) = self.engine.clean_up_left_behind() {
+            tracing::warn!(%error, "could not release what VMs that ended unmanaged left behind");
+        }
         self.hold_builds(held);
         self.recover(strays).await;
         // Admission refuses what needs disk until it has a reading, and

@@ -20,6 +20,7 @@ use crate::state::{Change, Identity, Record, check_generation};
 use crate::step::images_of;
 use crate::store::{OwnerEpoch, Store};
 
+use super::disk::AfterReading;
 use super::holds::{Write, hold_id};
 use super::observe::Why;
 use super::{Command, Event, HostAgent, HostError, Reply, Slot, Waiter, Woke, unix_ms_now};
@@ -551,7 +552,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // booked from before the copy until a reading shows them.
         let template_disk = template.as_ref().map(|t| t.disk());
         let disk = match self.first_files_fit(id, shape.image, template_disk.as_deref()) {
-            Ok(disk) => disk,
+            Ok(Some(disk)) => disk,
+            Ok(None) => {
+                self.after_reading(AfterReading::Create(id, Box::new(config), owner, reply));
+                return;
+            }
             Err(error) => {
                 let _ = reply.send(Err(error));
                 return;

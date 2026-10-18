@@ -253,10 +253,13 @@ impl Host {
 
     /// Starts the queued wakes of kind `step`, which needs memory, while
     /// its limit allows and they fit into what is `left`. A wake the disk
-    /// cannot book is refused at once. One whose memory does not fit waits
-    /// only if ending idle VM processes that are already saved frees enough
-    /// for it and every wake waiting before it; otherwise it is refused at
-    /// once. Returns whether anything must be reconciled again.
+    /// cannot book is refused at once, unless it is short by no more than
+    /// what bookings that ended since the last disk reading stood for (see
+    /// [`Host::disk_awaits_reading`]): it waits, queued, for the next
+    /// reading to decide it. One whose memory does not fit waits only if
+    /// ending idle VM processes that are already saved frees enough for it
+    /// and every wake waiting before it; otherwise it is refused at once.
+    /// Returns whether anything must be reconciled again.
     pub(super) fn admit_measured(
         &mut self,
         now: At,
@@ -267,6 +270,7 @@ impl Host {
         let index = step.index();
         let limit = self.policy.limits.get(step);
         let percent = self.compressed_percent();
+        let unread = self.disk_spent;
         let mut changed = false;
         let keys: Vec<QueueKey> = self.queues[index].iter().copied().collect();
         for key in keys {
@@ -288,6 +292,13 @@ impl Host {
             if let Some(disk) = left.disk.as_mut()
                 && let Err(short) = disk.take(save)
             {
+                if disk.may_take(save, unread) {
+                    // Perhaps there is room: the next reading shows. What
+                    // it needs is charged meanwhile, so a later wake does
+                    // not take room it may get.
+                    disk.charge(save);
+                    continue;
+                }
                 self.refuse(key, step, short.resource, short.needed, short.free, out);
                 changed = true;
                 continue;

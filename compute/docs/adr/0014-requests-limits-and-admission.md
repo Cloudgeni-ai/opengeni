@@ -222,7 +222,12 @@ pick a VM.
   measurement uses its own disk's length too. A boot also relinks the
   kernel (tens of MiB, replacing the previous copy), which the reserve
   covers. A wake that cannot book what it needs
-  gets `host_full` at once, naming disk or inodes and how much. In the
+  gets `host_full` at once, naming disk or inodes and how much. What a
+  booking that ended stood for, such as a ready sandbox's finished copy,
+  stays booked until the next reading (about a second) shows what was
+  written, so a wake or create short by no more than that waits for that
+  reading, which decides it, rather than being refused for room that may
+  be there. In the
   background, while refused held sandboxes cannot book, idle sandboxes
   that are already archived to object storage give up their local copies,
   least recently used first. A step that fails, such as a save the disk

@@ -482,9 +482,11 @@ pub struct Admission {
 /// disk its next save may need at most, as a memory request is booked. A
 /// wake that would book more than the disk has left beyond the reserve is
 /// refused at once with [`crate::Notice::HostFull`]; nothing on disk is
-/// freed inside a request. In the background, while the disk is short,
-/// idle sandboxes that may live in object storage give up their local
-/// copies, least recently used first.
+/// freed inside a request. What a booking that ended stood for stays booked
+/// until a disk reading shows what was written, so a wake short by no more
+/// than that waits for the next reading instead, which decides it. In the
+/// background, while the disk is short, idle sandboxes that may live in
+/// object storage give up their local copies, least recently used first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiskPolicy {
     /// Bytes of the disk never booked: room for records, logs and anything

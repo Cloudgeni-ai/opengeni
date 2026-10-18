@@ -7,6 +7,8 @@
 //! - `GET /v1/requests/{request_id}` answers the sandbox a create with that
 //!   request id made.
 //! - `GET` and `DELETE /v1/sandboxes/{id}`.
+//! - `GET /v1/sandboxes/{id}/state` asks its host how it is now: its level
+//!   and any step under way.
 //! - `POST /v1/sandboxes/{id}/wake`, `/sleep` and `/move`.
 //! - `GET /v1/sandboxes/{id}/connect/{port}` with `Upgrade: compute-stream`
 //!   turns the connection into a byte stream to the guest port.
@@ -276,6 +278,21 @@ pub struct WokenView {
     pub host: Option<String>,
 }
 
+/// How a sandbox is now, as its host says.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StateView {
+    /// The host that owns it; none when it is in the store alone.
+    pub host: Option<String>,
+    /// Where its state lives: `remote` with no host.
+    pub level: LevelName,
+    /// The step under way, such as a save or a restore, if any: `level`
+    /// stays where it was until the step finishes.
+    pub step: Option<String>,
+    /// Its execution: raised by every boot, kept by pausing, saving and
+    /// restoring. None with no host.
+    pub generation: Option<u64>,
+}
+
 /// A wake or connect.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -421,6 +438,29 @@ async fn one<S: Store>(
     let service = &api.0.service;
     let row = service.get(&team, parse_id(&id)?).await?;
     Ok(Json(SandboxView::of(service, row)))
+}
+
+async fn state<S: Store>(
+    State(api): State<Api<S>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<StateView>, ApiError> {
+    let team = api.team(&headers).await?;
+    let view = match api.0.service.state(&team, parse_id(&id)?).await? {
+        Some((host, status)) => StateView {
+            host: Some(host),
+            level: status.level,
+            step: status.step,
+            generation: Some(status.generation),
+        },
+        None => StateView {
+            host: None,
+            level: LevelName::Remote,
+            step: None,
+            generation: None,
+        },
+    };
+    Ok(Json(view))
 }
 
 async fn delete<S: Store>(
@@ -602,6 +642,7 @@ pub fn router<S: Store>(service: Arc<Service<S>>, operator: String) -> Router {
         .route("/v1/requests/{request_id}", get(requested::<S>))
         .route("/v1/link/keys", get(link_keys::<S>))
         .route("/v1/sandboxes/{id}", get(one::<S>).delete(delete::<S>))
+        .route("/v1/sandboxes/{id}/state", get(state::<S>))
         .route("/v1/sandboxes/{id}/wake", post(wake::<S>))
         .route("/v1/sandboxes/{id}/sleep", post(sleep::<S>))
         .route("/v1/sandboxes/{id}/move", post(move_to::<S>))

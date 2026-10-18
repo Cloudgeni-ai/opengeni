@@ -197,6 +197,51 @@ fn a_wake_the_disk_cannot_book_is_refused_at_once_and_retried_once_it_can() {
     assert_eq!(rig.booked(), 2 * GIB);
 }
 
+/// What a spare VM's copy booked stays booked until a reading shows what it
+/// wrote: a wake short by no more than that waits for that reading, which
+/// either lets it through or refuses it, and one short by more is refused
+/// at once. Its need is charged while it waits, so a later wake does not
+/// take the room it may get.
+#[test]
+fn a_wake_short_only_of_what_ended_since_the_last_reading_waits_for_the_next() {
+    let mut rig = Rig::new();
+    for id in 1..=3 {
+        rig.add(id, saved());
+    }
+    // 4 GiB available, 1 GiB of it reserved; a copy of 2 GiB just ended.
+    rig.disk(4 * GIB, 10_000);
+    let spare = SandboxId(9);
+    let copy = DiskSpace {
+        bytes: 2 * GIB,
+        inodes: 4,
+    };
+    for disk in [copy, DiskSpace::default()] {
+        rig.send(Input::Spare {
+            sandbox: spare,
+            bytes: GIB,
+            disk,
+            filling: disk == copy,
+        });
+    }
+    assert_eq!(rig.booked(), 2 * GIB);
+    assert!(rig.host.disk_awaits_reading(DiskSpace::save(GIB)));
+    assert!(!rig.host.disk_awaits_reading(DiskSpace::save(4 * GIB)));
+    // 1 GiB is free; the first wake gets it, the next two wait.
+    wake(&mut rig, 1);
+    for id in [2, 3] {
+        let actions = rig.hold(id);
+        assert_eq!(started(&actions), [], "{id}");
+        assert_eq!(host_full(&actions, id), None, "{id}");
+    }
+    // The copy took 1 GiB: room for one of them, the first to ask.
+    let actions = rig.disk(3 * GIB, 10_000);
+    assert!(
+        matches!(started(&actions)[..], [(2, Step::Restore, _)]),
+        "{actions:?}"
+    );
+    assert_eq!(host_full(&actions, 3), Some((Resource::Disk, GIB, 0)));
+}
+
 #[test]
 fn nothing_is_booked_before_the_first_reading() {
     let mut rig = Rig::new();
