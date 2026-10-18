@@ -49,8 +49,10 @@ fetch() {
 # The guest's side of the host agent's identity contract: a booted guest
 # finds its sandbox id on the kernel command line (`opengeni.sandbox=`), a
 # restored one in the restore notice on vsock port 53 (`restored <unix
-# nanoseconds> sandbox=<id> seed=<hex> order=<generation>.<revision>`),
-# whose time sets the clock.
+# nanoseconds> sandbox=<id> seed=<hex> order=<generation>.<revision>
+# owner=<epoch>`), whose time sets the clock. A notice ordered below one
+# already applied (by owner epoch, then the two numbers) is answered
+# `stale`.
 # Either way the id ends up in /run/sandbox-id. The notice's `seed` is
 # mixed into the guest's random number generator, which reseeds before the
 # guest answers `ok seeded` (`ok` if it could not), so no command of the new
@@ -122,9 +124,15 @@ while True:
                 line += chunk
             word, nanos, *rest = line.decode().split()
             fields = dict(field.partition("=")[::2] for field in rest)
-            # Ordered by the host's record fence, never by the clock.
-            order = tuple(int(part) for part in fields.get("order", "").split("."))
-            if word != "restored" or len(order) != 2 or (latest and order < latest):
+            # Ordered by the owner epoch, then the host's record fence, never
+            # by the clock: a sandbox that moves starts a new record on its
+            # new host, under a higher epoch.
+            fence = tuple(int(part) for part in fields.get("order", "").split("."))
+            order = (int(fields.get("owner", "0")),) + fence
+            if word != "restored" or len(order) != 3:
+                continue
+            if latest and order < latest:
+                connection.sendall(b"stale\n")
                 continue
             latest = order
             time.clock_settime_ns(time.CLOCK_REALTIME, int(nanos))
@@ -303,7 +311,7 @@ if [ -f base.ext4 ] && {
     ! sudo debugfs -R "cat /usr/local/bin/lab-identity" base.ext4 2>/dev/null | grep -q "opengeni-identity" ||
     ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep -q Inode ||
     ! sudo debugfs -R "cat /etc/systemd/system/lab-agent.service" base.ext4 2>/dev/null | grep -q OOMScoreAdjust ||
-    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q 'fields.get("order"'
+    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q 'fields.get("owner"'
 }; then
   log "guest services"
   sudo mkdir -p /mnt/lab-base

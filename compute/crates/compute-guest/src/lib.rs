@@ -14,8 +14,8 @@
 //!   builders wait on it.
 //! - [`GATEWAY_PORT`] takes one header line (see [`gateway`]): `tcp <port>`
 //!   relays the stream to that TCP port on the guest's loopback, envd's
-//!   [`ENVD_PORT`] included; `init <json>` gives the sandbox its own
-//!   environment and access token, as a create does.
+//!   [`ENVD_PORT`] included (see [`relay`]); `init <json>` gives the
+//!   sandbox its own environment and access token, as a create does.
 //!
 //! Inside, it mounts the basics, sets up the network from the kernel's
 //! `ip=` argument, starts and supervises envd when the image has it, runs
@@ -34,6 +34,7 @@ pub mod gateway;
 pub mod given;
 pub mod identity;
 pub mod notice;
+pub mod relay;
 pub mod users;
 
 #[cfg(target_os = "linux")]

@@ -1178,8 +1178,14 @@ impl<E: Engine, S: Store> Job<E, S> {
             NOTICE_DEADLINE
         };
         // Every way here wrote the record since the guest's last notice, so
-        // its fence is above that notice's.
-        let order = (self.record.generation, self.record.revision);
+        // its fence is above that notice's, if this owner sent it; one from
+        // an earlier owner (on another host, whose record this one does not
+        // continue) is at a lower epoch.
+        let order = (
+            self.record.owner_epoch,
+            self.record.generation,
+            self.record.revision,
+        );
         match tell_restored(&self.spec.vsock_path(), port, self.id, order, deadline).await {
             Ok(told) if must && !told.seeded => {
                 // It took its id but draws the numbers every other clone

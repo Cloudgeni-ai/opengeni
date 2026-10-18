@@ -173,3 +173,13 @@ impl Write for Stream {
         Ok(())
     }
 }
+
+impl crate::relay::Duplex for Stream {
+    fn try_clone(&self) -> io::Result<Self> {
+        Stream::try_clone(self)
+    }
+
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        Stream::shutdown(self, how)
+    }
+}

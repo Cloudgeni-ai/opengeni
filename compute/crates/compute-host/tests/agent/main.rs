@@ -46,6 +46,11 @@ mod sleep;
 /// as the sandbox's memory, so the rest of it is a hole.
 const FAKE_MEMORY: usize = 64 << 10;
 
+/// Where in a fake memory image the latest restore notice the guest applied
+/// starts, after its value: a real guest keeps it in its memory, so it moves
+/// with each image to whichever host restores it.
+const NOTICE_AT: usize = FAKE_MEMORY - 1024;
+
 /// How long each fake operation takes.
 #[derive(Clone, Copy, Debug)]
 struct Delays {
@@ -158,6 +163,9 @@ struct World {
 struct Process {
     vsock: PathBuf,
     memory: Arc<Mutex<String>>,
+    /// The latest restore notice the guest applied, which its memory images
+    /// carry.
+    applied: Arc<Mutex<Option<String>>>,
     /// The sandbox's memory size: the length of every image it writes.
     memory_len: u64,
     paused: Arc<Mutex<bool>>,
@@ -243,7 +251,7 @@ impl Meter {
 }
 
 impl Fake {
-    fn launch(&self, spec: &VmSpec, memory: String) -> FakeVm {
+    fn launch(&self, spec: &VmSpec, memory: String, applied: Option<String>) -> FakeVm {
         let name = spec.name.clone();
         self.world
             .started_limits
@@ -263,11 +271,13 @@ impl Fake {
         let _ = std::fs::remove_file(&vsock);
         let listener = UnixListener::bind(&vsock).unwrap();
         let memory = Arc::new(Mutex::new(memory));
+        let applied = Arc::new(Mutex::new(applied));
         let work = Arc::new(Mutex::new(Work::default()));
         let (exit, mut exited) = watch::channel(false);
         let guest = tokio::spawn(guest(
             listener,
             Arc::clone(&memory),
+            Arc::clone(&applied),
             spec.drives[0].path.clone(),
             Arc::default(),
             Arc::clone(&work),
@@ -286,6 +296,7 @@ impl Fake {
         let process = Process {
             vsock,
             memory,
+            applied,
             memory_len: spec.memory_bytes(),
             paused: Arc::default(),
             exit,
@@ -334,10 +345,12 @@ impl Fake {
 }
 
 /// A guest: answers shell-like lines on any port, and remembers the restore
-/// notice this VM process was given, if any.
+/// notice this VM process was given, if any, as well as the latest one its
+/// memory has applied (`applied`, which images carry).
 async fn guest(
     listener: UnixListener,
     memory: Arc<Mutex<String>>,
+    applied: Arc<Mutex<Option<String>>>,
     disk: PathBuf,
     notice: Arc<Mutex<Option<String>>>,
     work: Arc<Mutex<Work>>,
@@ -345,6 +358,7 @@ async fn guest(
 ) {
     while let Ok((stream, _)) = listener.accept().await {
         let memory = Arc::clone(&memory);
+        let applied = Arc::clone(&applied);
         let disk = disk.clone();
         let notice = Arc::clone(&notice);
         let work = Arc::clone(&work);
@@ -379,7 +393,7 @@ async fn guest(
                         "ok".into()
                     }
                     ("disk", _) => std::fs::read_to_string(&disk).unwrap_or_default(),
-                    ("restored", fields) => answer_notice(fields, &notice, &world),
+                    ("restored", fields) => answer_notice(fields, &notice, &applied, &world),
                     ("told-restored?", _) => notice.lock().unwrap().is_some().to_string(),
                     // The sandbox id the last restore notice named.
                     ("sandbox?", _) => notice
@@ -445,18 +459,29 @@ fn notice_field<'a>(fields: &'a str, key: &str) -> Option<&'a str> {
         .find_map(|field| field.strip_prefix(key)?.strip_prefix('='))
 }
 
-/// A notice's order: its record's generation, then its revision.
-fn notice_order(fields: &str) -> Option<(u64, u64)> {
+/// A notice's order: its owner epoch, then its record's generation and
+/// revision.
+fn notice_order(fields: &str) -> Option<(u64, u64, u64)> {
     let (generation, revision) = notice_field(fields, "order")?.split_once('.')?;
-    Some((generation.parse().ok()?, revision.parse().ok()?))
+    Some((
+        notice_field(fields, "owner")?.parse().ok()?,
+        generation.parse().ok()?,
+        revision.parse().ok()?,
+    ))
 }
 
 /// How a guest answers the restore notice `fields`, remembering it unless
 /// it refuses. Like a real guest it refuses a notice ordered below the one
-/// it applied last; it also refuses one for another sandbox that is not
-/// ordered above it, which the host must never send.
-fn answer_notice(fields: &str, notice: &Mutex<Option<String>>, world: &World) -> String {
-    let mut last = notice.lock().unwrap();
+/// its memory applied last, wherever that was; it also refuses one for
+/// another sandbox that is not ordered above it, which the host must never
+/// send.
+fn answer_notice(
+    fields: &str,
+    notice: &Mutex<Option<String>>,
+    applied: &Mutex<Option<String>>,
+    world: &World,
+) -> String {
+    let mut last = applied.lock().unwrap();
     let order = notice_order(fields).expect("every notice carries its order");
     let out_of_order = last.as_deref().is_some_and(|last| {
         let before = notice_order(last).unwrap();
@@ -472,6 +497,7 @@ fn answer_notice(fields: &str, notice: &Mutex<Option<String>>, world: &World) ->
     }
     *last = Some(fields.to_owned());
     drop(last);
+    *notice.lock().unwrap() = Some(fields.to_owned());
     if fields.contains(" seed=") && !world.unseeded_notices.load(Ordering::Relaxed) {
         "ok seeded".into()
     } else {
@@ -515,7 +541,7 @@ impl Engine for Fake {
                 "attaching failed; then what it started could not be cleaned up",
             ));
         }
-        Ok(self.launch(spec, String::new()))
+        Ok(self.launch(spec, String::new(), None))
     }
 
     fn memory_profile(&self) -> MemoryProfile {
@@ -556,11 +582,19 @@ impl Engine for Fake {
                 )
             })
             .map_err(|error| EngineError::caused_by(ErrorKind::MemoryLost, "restore", error))?;
-        let memory = String::from_utf8_lossy(&memory)
+        let (value, applied) = memory.split_at(memory.len().min(NOTICE_AT));
+        let applied = String::from_utf8_lossy(applied)
+            .trim_end_matches('\0')
+            .to_owned();
+        let memory = String::from_utf8_lossy(value)
             .trim_end_matches('\0')
             .to_owned();
         self.world.restores.fetch_add(1, Ordering::Relaxed);
-        let vm = self.launch(spec, memory);
+        let vm = self.launch(
+            spec,
+            memory,
+            Some(applied).filter(|notice| !notice.is_empty()),
+        );
         *vm.paused.lock().unwrap() = true;
         Ok(vm)
     }
@@ -638,7 +672,11 @@ impl Engine for Fake {
         // Like a real engine, the image is as long as guest memory, and
         // sparse. A diff holding every page is still a valid diff.
         let mut image = memory.into_bytes();
-        assert!(image.len() <= FAKE_MEMORY, "fake guest memory overflow");
+        assert!(image.len() <= NOTICE_AT, "fake guest memory overflow");
+        image.resize(NOTICE_AT, 0);
+        let applied = vm.applied.lock().unwrap().clone().unwrap_or_default();
+        image.extend_from_slice(applied.as_bytes());
+        assert!(image.len() <= FAKE_MEMORY, "fake guest notice overflow");
         image.resize(FAKE_MEMORY, 0);
         let file = std::fs::File::create(&files.memory).unwrap();
         std::io::Write::write_all(&mut &file, &image).unwrap();
@@ -893,7 +931,19 @@ impl Lab {
 
     /// A lab whose agent keeps sandboxes in `store`.
     async fn start_stored(root: PathBuf, world: Arc<World>, store: impl Store) -> Self {
-        let config = Self::config(&root, HostPolicy::default());
+        Self::start_stored_configured(root, world, store, |_| {}).await
+    }
+
+    /// A lab whose agent keeps sandboxes in `store`, configured by
+    /// `configure`.
+    async fn start_stored_configured(
+        root: PathBuf,
+        world: Arc<World>,
+        store: impl Store,
+        configure: impl FnOnce(&mut HostConfig),
+    ) -> Self {
+        let mut config = Self::config(&root, HostPolicy::default());
+        configure(&mut config);
         Self::launch(root, world, Delays::default(), config, store).await
     }
 

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::supervise::Children;
 use super::vsock::Stream;
-use super::{agent, log, spawn, sys, system};
+use super::{agent, log, sys, system};
 use crate::ENVD_PORT;
 use crate::envd::{self, AgentInit, InitData};
 use crate::gateway::{self, Header};
@@ -299,6 +299,8 @@ impl Guest {
             return;
         };
         if !self.state().orders.admits(notice.order) {
+            // Said, so that a host sending it learns at once.
+            let _ = stream.write_all(notice::STALE);
             return;
         }
         if let Err(error) = sys::set_clock(notice.nanos) {
@@ -496,16 +498,7 @@ fn relay(mut stream: Stream, first: &[u8], port: u16) {
     if stream.write_all(gateway::OK).is_err() || tcp.write_all(first).is_err() {
         return;
     }
-    let (Ok(mut inbound), Ok(mut tcp_in)) = (stream.try_clone(), tcp.try_clone()) else {
-        return;
-    };
-    let forward = spawn("relay", move || {
-        let _ = io::copy(&mut inbound, &mut tcp_in);
-        let _ = tcp_in.shutdown(Shutdown::Write);
-    });
-    let _ = io::copy(&mut tcp, &mut stream);
-    let _ = stream.shutdown(Shutdown::Write);
-    if let Some(forward) = forward {
-        let _ = forward.join();
+    if !crate::relay::relay(tcp, stream) {
+        log(&format!("port {port}: the relay did not start"));
     }
 }

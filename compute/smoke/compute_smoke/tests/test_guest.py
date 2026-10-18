@@ -621,34 +621,42 @@ class GuestInternals(unittest.TestCase):
         self.assertEqual(self.notice(100, "a", "3.4"), b"ok seeded\n")
         self.assertEqual(self.notice(200, "b", "3.5"), b"ok seeded\n")
         claimed = machine_id.read_text()
-        self.assertEqual(self.notice(300, "a", "3.4"), b"", "the late notice is refused")
+        self.assertEqual(self.notice(300, "a", "3.4"), b"stale\n", "the late notice is refused")
         self.assertEqual(self.guest.RESTORES.sandbox(), "b")
         self.assertEqual(machine_id.read_text(), claimed)
         self.assertEqual(hostname.read_text(), "b\n")
         # A later execution orders above any revision of an earlier one.
         self.assertEqual(self.notice(50, "b", "4.1"), b"ok seeded\n")
-        self.assertEqual(self.notice(400, "b", "3.9"), b"")
+        self.assertEqual(self.notice(400, "b", "3.9"), b"stale\n")
+        # A new owner (the sandbox moved to another host, whose record of
+        # it starts afresh) orders above any fence of an earlier one.
+        self.assertEqual(self.notice(500, "b", "1.2 owner=2"), b"ok seeded\n")
+        self.assertEqual(self.notice(600, "b", "9.9 owner=1"), b"stale\n")
 
     def test_notices_order_by_the_host_not_by_the_clock(self) -> None:
         # Equal times: the order decides, and a retry of the latest notice
         # is applied again.
         self.assertEqual(self.notice(100, "a", "1.2"), b"ok seeded\n")
         self.assertEqual(self.notice(100, "b", "1.3"), b"ok seeded\n")
-        self.assertEqual(self.notice(100, "a", "1.2"), b"")
+        self.assertEqual(self.notice(100, "a", "1.2"), b"stale\n")
         self.assertEqual(self.notice(100, "b", "1.3"), b"ok seeded\n")
         self.assertEqual(self.guest.RESTORES.sandbox(), "b")
         # Revisions compare as numbers, not as text.
         self.assertEqual(self.notice(100, "c", "1.10"), b"ok seeded\n")
-        self.assertEqual(self.notice(100, "b", "1.9"), b"")
+        self.assertEqual(self.notice(100, "b", "1.9"), b"stale\n")
         self.assertEqual(self.guest.RESTORES.sandbox(), "c")
 
-    def test_a_notice_order_is_two_numbers(self) -> None:
+    def test_a_notice_order_is_its_owner_epoch_then_two_numbers(self) -> None:
         order = self.guest.notice_order
-        self.assertEqual(order({"order": "12.345"}), (12, 345))
+        self.assertEqual(order({"order": "12.345"}), (0, 12, 345))
+        self.assertEqual(order({"order": "12.345", "owner": "3"}), (3, 12, 345))
         for bad in ("", "12", "12.", ".3", "1.2.3", "a.b", "-1.2"):
             with self.subTest(order=bad):
                 self.assertIsNone(order({"order": bad}))
         self.assertIsNone(order({}))
+        for bad in ("", "x", "-1"):
+            with self.subTest(owner=bad):
+                self.assertIsNone(order({"order": "1.2", "owner": bad}))
 
     def test_notices_are_applied_one_at_a_time(self) -> None:
         notices = self.guest.Notices()
@@ -676,7 +684,7 @@ class GuestInternals(unittest.TestCase):
         first.join(10)
         second.join(10)
         self.assertEqual(order, ["a", "b"])
-        self.assertIsNone(notices.apply((1, 1), later), "an older one is obsolete")
+        self.assertEqual(notices.apply((1, 1), later), b"stale\n", "an older one is obsolete")
         self.assertEqual(notices.apply(None, later), b"ok\n", "an unordered one is applied")
 
     def test_a_guest_booted_from_a_cloned_disk_makes_its_own_identity(self) -> None:
