@@ -372,6 +372,7 @@ async fn cycle(agent: &Agent, id: &str, deepest: LevelName, cycles: u32) {
         memory_request_mib: None,
         cpu_request_millis: None,
         sleep: ladder(deepest),
+        link: None,
     };
     let created = agent
         .client
@@ -487,6 +488,7 @@ async fn survive_restart(lab: &Path, name: &str, deepest: LevelName, store: Opti
         memory_request_mib: None,
         cpu_request_millis: None,
         sleep: ladder(deepest),
+        link: None,
     };
     let created = agent
         .client
@@ -698,6 +700,7 @@ async fn a_guest_whose_pager_died_boots_afresh() {
         memory_request_mib: None,
         cpu_request_millis: None,
         sleep: ladder(deepest),
+        link: None,
     };
     let created = agent
         .client

@@ -178,6 +178,7 @@ impl Sandbox {
             memory_request_mib: None,
             cpu_request_millis: None,
             sleep: SleepConfig::default(),
+            link: None,
         };
         let allocation = Allocation {
             uid: 1_000_000,

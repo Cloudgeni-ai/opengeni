@@ -281,6 +281,7 @@ async fn bad_requests_are_refused() {
                 memory_request_mib: None,
                 cpu_request_millis: None,
                 sleep: NEVER,
+                link: None,
             },
         })
         .await

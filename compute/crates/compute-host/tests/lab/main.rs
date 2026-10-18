@@ -277,6 +277,7 @@ async fn create(client: &Client, sandbox: Id, sleep: SleepConfig) {
         memory_request_mib: None,
         cpu_request_millis: None,
         sleep,
+        link: None,
     };
     let reply = client
         .call(&Request::Create {

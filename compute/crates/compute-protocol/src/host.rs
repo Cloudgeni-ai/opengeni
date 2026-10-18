@@ -296,6 +296,12 @@ pub struct SandboxConfig {
     /// host that does not have it yet fetches it from its store first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ImageId>,
+    /// How the host reaches its guest's Opengeni agent, when it runs one
+    /// ([ADR 21](../../docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)):
+    /// the fleet service sets it for the host and owner epoch it gives the
+    /// sandbox to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<crate::link::AgentLink>,
 }
 
 impl SandboxConfig {
@@ -310,6 +316,7 @@ impl SandboxConfig {
             cpu_request_millis: None,
             sleep,
             image: None,
+            link: None,
         }
     }
 
@@ -979,6 +986,7 @@ mod tests {
             memory_request_mib: None,
             cpu_request_millis: None,
             sleep: SleepConfig::RECOMMENDED,
+            link: None,
         };
         assert!(config.validate().is_ok());
         config.sleep.pause_after_ms = None;

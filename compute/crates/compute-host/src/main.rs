@@ -495,6 +495,7 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
                 memory_request_mib,
                 cpu_request_millis,
                 sleep: settings,
+                link: None,
             };
             expect_done(client.call(&Request::Create { id, config }).await?)
         }

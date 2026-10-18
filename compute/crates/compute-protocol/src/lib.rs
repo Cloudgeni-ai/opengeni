@@ -7,6 +7,9 @@
 //!   lease and reports what it can take on, and the envelope that bounds
 //!   every request the service sends a host
 //!   ([ADR 18](../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+//! - [`link`]: the frames between a host and an Opengeni agent gateway
+//!   ([ADR 21](../../docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)).
 
 pub mod fleet;
 pub mod host;
+pub mod link;

@@ -953,6 +953,7 @@ impl Lab {
             memory_request_mib: None,
             cpu_request_millis: None,
             sleep,
+            link: None,
         };
         let reply = self
             .client

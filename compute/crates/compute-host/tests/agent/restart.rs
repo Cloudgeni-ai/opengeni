@@ -342,6 +342,7 @@ async fn an_unreadable_record_blocks_its_id() {
                 memory_request_mib: None,
                 cpu_request_millis: None,
                 sleep: NEVER,
+                link: None,
             },
         },
         Request::Wake {
@@ -441,6 +442,7 @@ fn create_request(id: Id) -> Request {
             memory_request_mib: None,
             cpu_request_millis: None,
             sleep: NEVER,
+            link: None,
         },
     }
 }
@@ -787,6 +789,7 @@ async fn create_refuses_an_existing_directory() {
                 memory_request_mib: None,
                 cpu_request_millis: None,
                 sleep: NEVER,
+                link: None,
             },
         })
         .await
@@ -820,6 +823,7 @@ async fn a_repeated_create_succeeds_only_with_the_same_settings() {
         memory_request_mib: None,
         cpu_request_millis: None,
         sleep: NEVER,
+        link: None,
     };
     let create = |config: SandboxConfig| Request::Create {
         id: sandbox,

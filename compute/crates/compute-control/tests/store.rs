@@ -70,6 +70,7 @@ fn sandbox(owner: HostId) -> SandboxRow {
                 cpu_request_millis: None,
                 sleep: SleepConfig::RECOMMENDED,
                 image: None,
+                link: None,
             },
         },
         metadata: BTreeMap::from([("purpose".to_owned(), "conformance".to_owned())]),
