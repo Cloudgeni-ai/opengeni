@@ -237,7 +237,7 @@ export function projectHistoryForProvider(
   });
   const input = projected.every((item, index) => item === items[index]) ? items : projected;
   const wire = projectWireHistory(withWireValidFunctionCallArguments(input), providerApi);
-  return providerApi === "responses" ? wire : withContiguousToolResults(wire);
+  return providerApi === "responses" ? wire : withContiguousToolResults(wire, providerApi);
 }
 
 /**
@@ -247,57 +247,99 @@ export function projectHistoryForProvider(
  * after an entry tool's result when that call was not the step's last. Those
  * providers reject such a request before any model output, so the chat would
  * fail every turn on its own valid history. Request-locally, move each item
- * that would break the run (any model-side item, and the results of calls
- * made inside the run) to just after the run's last result, keeping their
- * order. Person and system messages keep their place, as they were already
- * valid there. Only histories these providers rejected change, so no prefix a
- * provider has already accepted is altered, and canonical history is never
- * rewritten. The Responses API accepts the interleaved order and is left as is.
+ * that would break the run to just after the run's last result, keeping their
+ * order; the moved items are then read the same way, so a run they open stays
+ * whole too. Results of calls made before the run keep their place, and so do
+ * person messages on Claude, which joins them into the same results message.
+ * Only histories these providers rejected change, so no prefix a provider has
+ * already accepted is altered, and canonical history is never rewritten. The
+ * Responses API accepts the interleaved order and is left as is.
  */
 export function withContiguousToolResults(
   items: Array<Record<string, unknown>>,
+  providerApi: "chat" | "anthropic-messages",
 ): Array<Record<string, unknown>> {
-  const resultIndex = new Map<string, number>();
-  for (const [index, item] of items.entries()) {
-    if (item.type !== "function_call_result") continue;
-    const id = callId(item);
-    if (id && !resultIndex.has(id)) resultIndex.set(id, index);
+  const answered = new Set<string>();
+  for (const item of items) {
+    const id = item.type === "function_call_result" ? callId(item) : null;
+    if (id) answered.add(id);
   }
+  if (answered.size === 0) return items;
+  const emittedResults = new Set<string>();
+  const deferredCalls = new Set<string>();
   const outstanding = new Set<string>();
   let answering = false;
   let deferred: Array<Record<string, unknown>> = [];
   let output: Array<Record<string, unknown>> | null = null;
-  for (const [index, item] of items.entries()) {
-    const id = item.type === "function_call_result" ? callId(item) : null;
-    if (id && outstanding.delete(id)) {
-      output?.push(item);
+  // Moved items replay before the next original item, innermost first.
+  const replays: Array<{ items: Array<Record<string, unknown>>; next: number }> = [];
+  let index = 0;
+  const emit = (item: Record<string, unknown>) => {
+    output?.push(item);
+  };
+  for (;;) {
+    const replay = replays.at(-1);
+    if (replay && replay.next >= replay.items.length) {
+      replays.pop();
+      continue;
+    }
+    if (!replay && index >= items.length) break;
+    const item = replay ? replay.items[replay.next++]! : items[index++]!;
+    const resultId = item.type === "function_call_result" ? callId(item) : null;
+    if (resultId && outstanding.delete(resultId)) {
+      emit(item);
+      emittedResults.add(resultId);
       answering = outstanding.size > 0;
-      if (!answering && output && deferred.length) {
-        output.push(...deferred);
+      if (!answering && deferred.length) {
+        replays.push({ items: deferred, next: 0 });
         deferred = [];
       }
       continue;
     }
-    if (answering && !isPersonOrSystemMessage(item)) {
-      output ??= items.slice(0, index);
+    const wireCall = wireCallId(item, providerApi);
+    const breaksRun =
+      answering &&
+      (resultId
+        ? deferredCalls.has(resultId)
+        : !(providerApi === "anthropic-messages" && isPersonMessage(item)));
+    if (breaksRun) {
+      output ??= items.slice(0, index - 1);
       deferred.push(item);
+      if (wireCall) deferredCalls.add(wireCall);
       continue;
     }
-    output?.push(item);
-    if (item.type !== "function_call") continue;
-    const callIdentity = callId(item);
-    const answeredAt = callIdentity ? resultIndex.get(callIdentity) : undefined;
-    if (callIdentity && answeredAt !== undefined && answeredAt > index) {
-      outstanding.add(callIdentity);
-    }
+    emit(item);
+    if (resultId) emittedResults.add(resultId);
+    if (!wireCall) continue;
+    deferredCalls.delete(wireCall);
+    if (answered.has(wireCall) && !emittedResults.has(wireCall)) outstanding.add(wireCall);
   }
   if (!output) return items;
-  output.push(...deferred);
+  for (const item of deferred) output.push(item);
   return output;
 }
 
-function isPersonOrSystemMessage(item: Record<string, unknown>): boolean {
-  return (item.type ?? "message") === "message" && item.role !== "assistant";
+/** The ID a provider's wire format pairs with a later function_call_result. */
+function wireCallId(
+  item: Record<string, unknown>,
+  providerApi: "chat" | "anthropic-messages",
+): string | null {
+  if (item.type === "function_call") return callId(item);
+  // The Chat converter sends a stored file search as an ordinary tool call.
+  if (
+    providerApi === "chat" &&
+    item.type === "hosted_tool_call" &&
+    item.name === "file_search_call" &&
+    typeof item.id === "string" &&
+    item.id.length > 0
+  ) {
+    return item.id;
+  }
+  return null;
+}
+
+function isPersonMessage(item: Record<string, unknown>): boolean {
+  return (item.type ?? "message") === "message" && item.role === "user";
 }
 
 /**

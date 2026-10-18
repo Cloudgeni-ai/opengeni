@@ -357,25 +357,6 @@ describe("interaction family disclosure", () => {
     }
   });
 
-  test("a step whose results are already contiguous projects as the same array", () => {
-    const history = [
-      { type: "message", role: "user", content: "go" },
-      { type: "function_call", callId: "toolu_01A", name: "exec_command", arguments: "{}" },
-      { type: "function_call", callId: "toolu_01B", name: "exec_command", arguments: "{}" },
-      { type: "function_call_result", callId: "toolu_01A", name: "exec_command", output: "a" },
-      { type: "message", role: "user", content: "a steer between results stays in place" },
-      { type: "function_call_result", callId: "toolu_01B", name: "exec_command", output: "b" },
-      { type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] },
-    ];
-    for (const api of ["chat", "anthropic-messages"] as const) {
-      const projected = projectHistoryForProvider(history, api);
-      expect(projected.map((item) => item.callId ?? item.content)).toEqual(
-        history.map((item) => item.callId ?? item.content),
-      );
-    }
-    expect(projectHistoryForProvider(history, "anthropic-messages")).toBe(history);
-  });
-
   test("a tagged union with two members for one tag shows one entry", () => {
     const schema = interactionToolInputJsonSchema(
       z.object({

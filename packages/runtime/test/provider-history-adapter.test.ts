@@ -1,9 +1,160 @@
 import { describe, expect, test } from "bun:test";
+import type { ModelRequest } from "@openai/agents";
 import { hostedSearchFixture } from "./fixtures/hosted-search";
+import { anthropicMessages } from "../src/anthropic-messages";
 import {
   projectHistoryForProvider,
   ProviderHistoryIncompatibleError,
 } from "../src/provider-history-adapter";
+
+type Item = Record<string, unknown>;
+const C = (id: string): Item => ({
+  type: "function_call",
+  callId: id,
+  name: "run",
+  arguments: "{}",
+});
+const R = (id: string): Item => ({ type: "function_call_result", callId: id, output: id });
+const ids = (items: Item[]) =>
+  items.map((item) =>
+    item.type === "function_call"
+      ? `C(${item.callId})`
+      : item.type === "function_call_result"
+        ? `R(${item.callId})`
+        : String(item.role ?? item.type),
+  );
+
+/** Chat Completions: a step's tool messages must directly answer all of its calls. */
+function expectChatResultsContiguous(items: Item[]): void {
+  const pending = new Set<string>();
+  let answering = false;
+  for (const item of items) {
+    const call =
+      item.type === "function_call"
+        ? String(item.callId)
+        : item.type === "hosted_tool_call"
+          ? String(item.id)
+          : null;
+    if (item.type === "function_call_result") {
+      expect(pending.delete(String(item.callId))).toBe(true);
+      answering = pending.size > 0;
+      continue;
+    }
+    expect(answering).toBe(false);
+    if (call) pending.add(call);
+  }
+  expect(pending.size).toBe(0);
+}
+
+describe("parallel tool results stay contiguous on Claude and Chat", () => {
+  test("an item between a step's results moves after them, Responses is untouched", () => {
+    const disclosure = [C("search"), R("search")];
+    const history = [C("a"), C("b"), C("c"), R("a"), R("b"), ...disclosure, R("c")];
+    expect(() => anthropicMessages(history as ModelRequest["input"])).toThrow(
+      "Claude tool results are incomplete",
+    );
+    for (const api of ["chat", "anthropic-messages"] as const) {
+      const projected = projectHistoryForProvider(history, api);
+      expect(ids(projected)).toEqual([
+        "C(a)",
+        "C(b)",
+        "C(c)",
+        "R(a)",
+        "R(b)",
+        "R(c)",
+        "C(search)",
+        "R(search)",
+      ]);
+      expect(projectHistoryForProvider(projected, api)).toBe(projected);
+    }
+    expect(projectHistoryForProvider(history, "responses")).toBe(history);
+  });
+
+  test("calls moved out of a run keep their own results together in one pass", () => {
+    const nested = [
+      ...[C("a"), C("b"), R("a"), C("c"), C("d"), R("c"), C("e"), R("e"), R("d"), R("b")],
+    ];
+    const late = [C("a"), C("b"), R("a"), C("c"), C("d"), R("c"), R("b"), R("d")];
+    for (const history of [nested, late]) {
+      for (const api of ["chat", "anthropic-messages"] as const) {
+        const projected = projectHistoryForProvider(history, api);
+        if (api === "chat") expectChatResultsContiguous(projected);
+        else expect(() => anthropicMessages(projected as ModelRequest["input"])).not.toThrow();
+        expect(projectHistoryForProvider(projected, api)).toBe(projected);
+      }
+    }
+    expect(ids(projectHistoryForProvider(nested, "anthropic-messages"))).toEqual([
+      "C(a)",
+      "C(b)",
+      "R(a)",
+      "R(b)",
+      "C(c)",
+      "C(d)",
+      "R(c)",
+      "R(d)",
+      "C(e)",
+      "R(e)",
+    ]);
+  });
+
+  test("a system notice inside a run moves on both; a person message stays on Claude only", () => {
+    const system: Item = { type: "message", role: "system", content: "notice" };
+    const person: Item = { type: "message", role: "user", content: "also check this" };
+    const history = [C("a"), C("b"), R("a"), system, person, C("s"), R("s"), R("b")];
+    const claude = projectHistoryForProvider(history, "anthropic-messages");
+    expect(ids(claude)).toEqual(["C(a)", "C(b)", "R(a)", "user", "R(b)", "system", "C(s)", "R(s)"]);
+    expect(() => anthropicMessages(claude as ModelRequest["input"])).not.toThrow();
+    const chat = projectHistoryForProvider(history, "chat");
+    expect(ids(chat)).toEqual(["C(a)", "C(b)", "R(a)", "R(b)", "system", "user", "C(s)", "R(s)"]);
+    expectChatResultsContiguous(chat);
+
+    // A person message Claude already accepted between results is left as it was.
+    const accepted = [C("a"), C("b"), R("a"), person, R("b")];
+    expect(projectHistoryForProvider(accepted, "anthropic-messages")).toBe(accepted);
+  });
+
+  test("an accepted Chat step with a stored file search call is unchanged", () => {
+    const fileSearch: Item = {
+      type: "hosted_tool_call",
+      id: "fs_1",
+      name: "file_search_call",
+      status: "completed",
+    };
+    const history = [C("a"), fileSearch, C("b"), R("a"), R("fs_1"), R("b")];
+    expect(projectHistoryForProvider(history, "chat")).toBe(history);
+    const moved = [C("a"), C("b"), R("a"), fileSearch, R("fs_1"), R("b")];
+    const projected = projectHistoryForProvider(moved, "chat");
+    expect(projected.map((item) => item.callId ?? item.id)).toEqual([
+      "a",
+      "b",
+      "a",
+      "b",
+      "fs_1",
+      "fs_1",
+    ]);
+    expectChatResultsContiguous(projected);
+  });
+
+  test("results without a call, and calls without a result, keep their place", () => {
+    const history = [C("a"), C("b"), R("a"), R("orphan"), R("b"), C("unanswered")];
+    for (const api of ["chat", "anthropic-messages"] as const) {
+      expect(projectHistoryForProvider(history, api)).toBe(history);
+    }
+  });
+
+  test("a very large interrupted run is projected without exhausting the stack", () => {
+    const inside = Array.from({ length: 300_000 }, (_, index) => ({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: String(index) }],
+    }));
+    const history = [C("a"), C("b"), R("a"), ...inside, R("b")];
+    const projected = projectHistoryForProvider(history, "anthropic-messages");
+    expect(projected).toHaveLength(history.length);
+    expect(ids(projected.slice(0, 4))).toEqual(["C(a)", "C(b)", "R(a)", "R(b)"]);
+    expect(projected.at(-1)).toBe(inside.at(-1)!);
+  });
+});
 
 describe("projectHistoryForProvider", () => {
   test("included search evidence stays inert and in order on every provider API", () => {
