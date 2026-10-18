@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { createDb, ensureManagedAccessForUser, type DbClient } from "../src";
@@ -15,6 +16,10 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 const key = Buffer.alloc(32, 61);
+const reclaimMigration = new URL(
+  "../drizzle/0838_reclaim_exited_backend_runtime_capabilities.sql",
+  import.meta.url,
+);
 
 beforeAll(async () => {
   if (!realDb) return;
@@ -192,7 +197,9 @@ describe.skipIf(!realDb)("subscription admin policies", () => {
 
   test("a grant reclaims rows of exited backends but never a running transaction's grant", async () => {
     const accountId = crypto.randomUUID();
-    const exitedPid = 2_000_000_000;
+    // The sweep walks the primary key from the lowest backend PID, and no
+    // backend ever has PID 1, so this row is the first finished one it meets.
+    const exitedPid = 1;
     const holder = await shared!.admin.reserve();
     const granter = await shared!.admin.reserve();
     try {
@@ -308,10 +315,55 @@ describe.skipIf(!realDb)("subscription admin policies", () => {
     }
   });
 
-  test("finished rows are found through the transaction index", async () => {
-    const [index] = await shared!.admin<{ definition: string }[]>`
-      select pg_get_indexdef(indexrelid) as definition from pg_index
-      where indexrelid = 'opengeni_private.subscription_runtime_capabilities_transaction_idx'::regclass`;
-    expect(index!.definition).toContain("(transaction_id)");
+  test("the one-time cleanup empties an idle table", async () => {
+    const accountId = crypto.randomUUID();
+    const migrator = await shared!.admin.reserve();
+    try {
+      await shared!.admin`insert into opengeni_private.subscription_runtime_capabilities
+        (backend_pid, transaction_id, capability_kind, account_id)
+        values (2, '3'::xid8, 'lifecycle', ${accountId}::uuid)`;
+      await migrator.unsafe(await readFile(reclaimMigration, "utf8"));
+      const [left] = await shared!.admin<{ count: number }[]>`
+        select count(*)::int as count from opengeni_private.subscription_runtime_capabilities`;
+      expect(left!.count).toBe(0);
+    } finally {
+      await shared!.admin`delete from opengeni_private.subscription_runtime_capabilities
+        where account_id = ${accountId}::uuid`;
+      migrator.release();
+    }
+  });
+
+  test("the one-time cleanup does not wait for or fail on a busy table", async () => {
+    const accountId = crypto.randomUUID();
+    const holder = await shared!.admin.reserve();
+    const migrator = await shared!.admin.reserve();
+    try {
+      await shared!.admin`insert into opengeni_private.subscription_runtime_capabilities
+        (backend_pid, transaction_id, capability_kind, account_id)
+        values (2, '3'::xid8, 'lifecycle', ${accountId}::uuid)`;
+      // A running transaction holds its grant, so TRUNCATE cannot take the lock.
+      await holder`begin`;
+      const [held] = await holder<{ pid: number }[]>`
+        insert into opengeni_private.subscription_runtime_capabilities
+          (backend_pid, transaction_id, capability_kind, account_id)
+        values (pg_backend_pid(), pg_current_xact_id(), 'lifecycle', ${accountId}::uuid)
+        returning backend_pid as pid`;
+
+      const started = performance.now();
+      await migrator.unsafe(await readFile(reclaimMigration, "utf8"));
+      expect(performance.now() - started).toBeLessThan(4_000);
+
+      const remaining = await holder<{ pid: number }[]>`
+        select backend_pid as pid from opengeni_private.subscription_runtime_capabilities
+        where account_id = ${accountId}::uuid order by backend_pid`;
+      expect(remaining.map((row) => row.pid)).toEqual([held!.pid]);
+      await holder`commit`;
+    } finally {
+      await holder`rollback`.catch(() => undefined);
+      await shared!.admin`delete from opengeni_private.subscription_runtime_capabilities
+        where account_id = ${accountId}::uuid`;
+      holder.release();
+      migrator.release();
+    }
   });
 });

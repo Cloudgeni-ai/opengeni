@@ -13,14 +13,18 @@
 --    only after every transaction that inserted or read a capability row has
 --    ended, so every row it removes belongs to a finished transaction and can
 --    never authorize anything again. It also releases the bloated heap and
---    index storage, which DELETE and VACUUM cannot shrink. The lock is held for
---    the remaining few statements of this migration only.
--- 2. Index transaction_id, so finished rows can be found without a scan.
--- 3. Every grant additionally removes a few rows of any backend whose
+--    index storage, which DELETE and VACUUM cannot shrink. A busy database
+--    must not fail the deploy, and a queued ACCESS EXCLUSIVE request stalls
+--    every new grant, so the lock is only tried briefly a few times. When it
+--    stays unavailable, the finished rows are deleted instead without waiting
+--    for any lock, and the bloat is left to a later VACUUM FULL.
+-- 2. Every grant additionally removes a few rows of any backend whose
 --    transaction ended before the oldest running transaction began
 --    (transaction_id below the snapshot xmin). A running transaction's own
 --    xid is never below xmin, and its uncommitted rows are invisible to
---    other backends, so live grants are untouched. Each grant removes up to
+--    other backends, so live grants are untouched. The sweep walks the
+--    primary key, where only the rows of running transactions precede the
+--    finished ones, so it needs no extra index. Each grant removes up to
 --    eight finished rows and each backend leaks at most one, so the sweep
 --    keeps up with any rate of connection churn.
 --
@@ -35,10 +39,34 @@
 -- the stale sweep of later READ COMMITTED grants removes.
 SET LOCAL lock_timeout = '5s';
 
-TRUNCATE opengeni_private.subscription_runtime_capabilities;
-
-CREATE INDEX subscription_runtime_capabilities_transaction_idx
-  ON opengeni_private.subscription_runtime_capabilities (transaction_id);
+DO $reclaim$
+BEGIN
+  FOR attempt IN 1..4 LOOP
+    BEGIN
+      PERFORM pg_catalog.set_config('lock_timeout', '200ms', true);
+      LOCK TABLE opengeni_private.subscription_runtime_capabilities
+        IN ACCESS EXCLUSIVE MODE;
+      TRUNCATE opengeni_private.subscription_runtime_capabilities;
+      PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
+      RETURN;
+    EXCEPTION WHEN lock_not_available THEN
+      -- The failed attempt's lock request and setting are rolled back.
+      IF attempt < 4 THEN
+        PERFORM pg_catalog.pg_sleep(0.5);
+      END IF;
+    END;
+  END LOOP;
+  DELETE FROM opengeni_private.subscription_runtime_capabilities finished
+  WHERE finished.ctid = ANY (ARRAY(
+    SELECT stale.ctid
+    FROM opengeni_private.subscription_runtime_capabilities stale
+    WHERE stale.transaction_id
+      < pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())
+    FOR UPDATE SKIP LOCKED
+  ));
+  RAISE NOTICE 'subscription_runtime_capabilities stayed busy; deleted finished rows instead of truncating';
+END
+$reclaim$;
 
 CREATE OR REPLACE FUNCTION opengeni_private.reclaim_finished_subscription_runtime_capabilities()
 RETURNS trigger
@@ -67,7 +95,7 @@ BEGIN
     FROM opengeni_private.subscription_runtime_capabilities stale
     WHERE stale.transaction_id
       < pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())
-    ORDER BY stale.transaction_id
+    ORDER BY stale.backend_pid, stale.transaction_id
     LIMIT 8
     FOR UPDATE SKIP LOCKED
   ));
