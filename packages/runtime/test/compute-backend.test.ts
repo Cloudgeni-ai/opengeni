@@ -11,7 +11,6 @@ import {
   ComputeFabricClient,
   ComputeFabricError,
   ComputeSandboxClient,
-  COMPUTE_AGENT_EPOCH,
   ComputeSandboxSession,
   MockAgentResponder,
   NatsControlRpc,
@@ -180,8 +179,10 @@ class FakeAgentPlane implements ComputeAgentPlane {
   natsTransport = false;
   /** Every subject a request was sent on over that connection. */
   readonly natsSubjects: string[] = [];
-  /** The agent's Hello advertised transactional file writes. */
+  /** The agent's Hello advertised transactional file writes, and whether
+   * they also accept machine-addressed (epoch 0) transactions. */
   transactional = false;
+  transactionalMachine = false;
   /** Transactional writes by op id, as the agent's upload engine keeps them. */
   readonly uploads = new Map<string, { epoch: number; path: string; bytes: number[] }>();
   private readonly runners = new Map<string, FakeOpRunner>();
@@ -253,11 +254,6 @@ class FakeAgentPlane implements ComputeAgentPlane {
         if (this.sessions.get(agentId) !== instance) {
           return offlineControlResponse(req.requestId, true);
         }
-        // The real agent refuses work under epoch 0 (its upload engine
-        // fences every transaction step on it); only a ping is unfenced.
-        if (req.epoch === 0 && req.op?.$case !== "ping") {
-          return fenced(req.requestId, "request carries epoch 0");
-        }
         const upload = await this.uploadStep(req);
         if (upload) return upload;
         const answer = await this.responder.request(subject, req, opts);
@@ -274,10 +270,14 @@ class FakeAgentPlane implements ComputeAgentPlane {
   }
 
   /** The agent's transactional write engine: a begin, chunks and queries
-   * must all repeat the begin's nonzero epoch. */
+   * must all repeat the begin's epoch exactly; epoch 0 (machine-addressed)
+   * only on an agent that advertises it. */
   private async uploadStep(req: ControlRequest): Promise<ControlResponse | null> {
     const op = req.op;
     if (op?.$case === "opStart" && op.opStart.op?.$case === "fsWrite") {
+      if (req.epoch === 0 && !this.transactionalMachine) {
+        return fenced(req.requestId, "transaction requires a nonzero session epoch");
+      }
       this.uploads.set(req.requestId, {
         epoch: req.epoch,
         path: op.opStart.op.fsWrite.path,
@@ -363,6 +363,7 @@ class FakeAgentPlane implements ComputeAgentPlane {
       workspaceRoot: "/workspace",
       opStream: true,
       transactionalFsWriteSupported: this.transactional,
+      transactionalFsWriteMachineSupported: this.transactionalMachine,
       browserControlHttpSupported: false,
       runAsSupported: this.runAs,
     };
@@ -800,9 +801,10 @@ describe("compute sandbox client", () => {
     expect(bound.backendId).toBe("compute");
   });
 
-  test("setup writes, turn writes and later writes pass the agent's epoch fence", async () => {
+  test("large writes are machine-addressed transactions under one exact epoch", async () => {
     const { client, plane } = setup();
     plane.transactional = true;
+    plane.transactionalMachine = true;
     // Larger than one chunk, so the agent's transactional upload engine runs.
     const big = "x".repeat(300 * 1024);
     const session = await client.create(
@@ -817,8 +819,6 @@ describe("compute sandbox client", () => {
     await session.bindTurn({}).writeFile({ path: "/workspace/turn.txt", content: big });
     const resumed = await client.resume(await client.serializeSessionState(session.state));
     await resumed.writeFile({ path: "/workspace/later.txt", content: big });
-    const output = await resumed.exec({ command: "true" });
-    expect(output.exitCode).toBe(0);
 
     for (const name of ["setup.txt", "turn.txt", "later.txt"]) {
       const read = await resumed.readFile({ path: `/workspace/${name}` });
@@ -826,9 +826,31 @@ describe("compute sandbox client", () => {
     }
     // The manifest writes in chunks; the two large writes were transactions.
     expect(plane.uploads.size).toBe(2);
-    const fencedSends = plane.sent.filter((s) => s.req.op?.$case !== "ping");
-    expect(fencedSends.length).toBeGreaterThan(0);
-    expect(fencedSends.every((s) => s.req.epoch === COMPUTE_AGENT_EPOCH)).toBe(true);
+    expect(plane.sent.every((s) => s.req.epoch === 0)).toBe(true);
+  });
+
+  test("an agent without machine-addressed transactions refuses large writes up front", async () => {
+    const { client, plane } = setup();
+    plane.transactional = true;
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    await session.writeFile({ path: "/workspace/small.txt", content: "fits" });
+    const error = await session
+      .writeFile({ path: "/workspace/big.txt", content: "x".repeat(300 * 1024) })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SelfhostedControlError);
+    expect(plane.uploads.size).toBe(0);
+  });
+
+  test("a session whose sandbox was deleted reaches no agent", async () => {
+    const { client, plane } = setup();
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    await client.delete(await client.serializeSessionState(session.state));
+    const sent = plane.sent.length;
+    const error = await session
+      .writeFile({ path: "/workspace/late.txt", content: "stale" })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(plane.sent.slice(sent).some((s) => s.req.op?.$case === "fsWrite")).toBe(false);
   });
 });
 

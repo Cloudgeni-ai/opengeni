@@ -33,6 +33,8 @@ export interface ComputeAgentConnection {
   /** The agent advertised the op-stream exec protocol. */
   opStream: boolean;
   transactionalFsWriteSupported: boolean;
+  /** Transactional writes also accept epoch 0, which compute requests carry. */
+  transactionalFsWriteMachineSupported: boolean;
   browserControlHttpSupported: boolean;
   /** The agent advertised per-request `run_as` (Hello `capabilities.run_as`). */
   runAsSupported: boolean;

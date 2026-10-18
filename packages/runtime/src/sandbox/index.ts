@@ -632,7 +632,6 @@ export {
   type ComputeAgentPlane,
 } from "./compute/plane";
 export {
-  COMPUTE_AGENT_EPOCH,
   COMPUTE_WORKSPACE_ROOT,
   ComputeSandboxClient,
   ComputeSandboxSession,

@@ -48,6 +48,8 @@ export function createComputeAgentPlane(deps: {
         workspaceRoot: enrollment.workspaceRoot,
         opStream: enrollment.opStream === true,
         transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+        transactionalFsWriteMachineSupported:
+          enrollment.agentCapabilities.transactionalFsWriteMachine === true,
         browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
         runAsSupported: enrollment.agentCapabilities.runAs === true,
       };

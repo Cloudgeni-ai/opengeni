@@ -70,16 +70,6 @@ const COMPUTE_PRIVATE_ROOT = "/tmp/opengeni-private";
  * keeps finding no responder. */
 const WAKE_INTERVAL_MS = 5_000;
 
-/**
- * The epoch every compute request carries. A sandbox's agent never adopts an
- * epoch (nothing acknowledges its hello with one), so it fences nothing; but
- * it refuses file-write transactions whose epoch is 0, and a transaction's
- * chunks must repeat its begin's epoch. A fixed nonzero value meets both for
- * every caller. Opengeni fences compute sandboxes by their lease and the
- * gateway's owner epoch instead.
- */
-export const COMPUTE_AGENT_EPOCH = 1;
-
 /** Who a compute sandbox belongs to. Required to create one: its agent's
  * enrollment is bound to this lease. */
 export interface ComputeCreateIdentity {
@@ -406,6 +396,7 @@ export class ComputeSandboxSession extends SelfhostedSession {
         operationResourcePolicySupported: false,
         operationCpuQuotaSupported: false,
         transactionalFsWriteSupported: connection.transactionalFsWriteSupported,
+        transactionalFsWriteMachineSupported: connection.transactionalFsWriteMachineSupported,
         browserControlHttpSupported: connection.browserControlHttpSupported,
         runAsSupported: connection.runAsSupported,
       };
@@ -423,7 +414,10 @@ export class ComputeSandboxSession extends SelfhostedSession {
       resolveOperationAdmission,
       ...(deps.controlTimeoutMs !== undefined ? { timeoutMs: deps.controlTimeoutMs } : {}),
       ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
-      epoch: COMPUTE_AGENT_EPOCH,
+      // Machine-addressed (epoch 0): the sandbox's agent holds no session
+      // route epoch, so a nonzero one would be invented and fence nothing.
+      // Ownership is checked before each request is sent (see
+      // docs/compute-backend.md, "Request epoch").
       ...(turn.terminalScopeId !== undefined ? { terminalScopeId: turn.terminalScopeId } : {}),
       ...(turn.adoptBackgroundCommand
         ? { adoptBackgroundCommand: turn.adoptBackgroundCommand }

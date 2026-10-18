@@ -70,10 +70,17 @@ skips sandbox enrollments, and machine routes list machines only.
   `ComputeWakingControlRpc` asks the fabric to wake it and resends under the
   same request id until the agent answers. Every operation re-resolves the
   agent's connection instance.
-- **Request epoch**: every compute request carries `COMPUTE_AGENT_EPOCH`
-  (1). The agent in a sandbox never adopts an epoch, so this fences nothing,
-  but its file-write transactions require a nonzero epoch repeated on every
-  step. Compute is fenced by its lease and the gateway's owner epoch.
+- **Request epoch**: compute requests are machine-addressed (epoch 0), like
+  `run_on`. The agent in a sandbox has no session route epoch: nothing
+  acknowledges its Hello with one, so it holds 0, and a nonzero epoch (the
+  lease's or an invented one) would fence nothing there. Ownership is checked
+  before each request is sent instead: every operation re-resolves the
+  sandbox's active enrollment and live connection, deleting the sandbox
+  revokes that enrollment (so a stale session reaches no agent), the gateway
+  closes a revoked or superseded session, and the lease's epoch and capture
+  fence decide which holder may use or end the box. On the agent, each
+  transactional write stays pinned to its exact connection and epoch. Writes
+  above 256 KiB need the agent's `transactional_fs_write_machine` capability.
 - **Idle**: when the last holder releases a compute lease, nothing is
   captured or deleted. The fabric sleeps the sandbox by its own rules and
   keeps memory and disk; Opengeni never drains a compute lease for being idle
@@ -105,6 +112,18 @@ group box, fenced by the lease epoch (`apps/api/src/sandbox/viewer.ts`).
 BrowserSessions and ComputerSessions on a compute home sandbox use the agent's
 native controller, as on a Connected Machine; no controller URL is cached on
 the lease (`controllerHasCacheableDataPlane`).
+
+## Ports
+
+Opengeni has no user-facing preview-port feature on any backend. On Modal,
+Daytona and Blaxel, tunnels serve only Opengeni's own controller ports (the
+browser controller and the desktop's noVNC on 6080; see
+`apps/api/src/controller-data-plane.ts` and `viewer.ts`). On compute, the
+terminal, desktop and in-sandbox browser reach the agent through relay
+streams, so no sandbox port is exposed. Opening one wakes the sandbox, and
+its traffic keeps it awake (the agent counts streams with recent traffic as
+in use). A future preview-port feature would add a gateway route, not a
+fabric change.
 
 ## Configuration
 
