@@ -139,7 +139,10 @@ type GenericSearchMarker = {
 type FamilyDisclosureMarker = {
   version: 1;
   tools: Record<string, unknown>[];
-  /** The turn's transport has tool_invoke, so the declaration may name it. */
+  /**
+   * The turn's transport has tool_invoke (generic dispatch). Otherwise a text
+   * declaration asks the model to load the tools with native tool_search.
+   */
   viaToolInvoke: boolean;
 };
 

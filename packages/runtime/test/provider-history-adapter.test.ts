@@ -77,14 +77,21 @@ describe("tool disclosure projection", () => {
     }
   });
 
-  test("the text names tool_invoke only when the transport has it", () => {
+  test("with tool_invoke the text carries the definitions; otherwise it asks for a tool_search load", () => {
     expect(String(disclosure.content)).toStartWith(
       "These tools are now available. Call one by its name, or through tool_invoke with its name and a nested arguments object. Definitions:\n",
     );
-    const byName = toolDisclosureItem([OBSERVE], { viaToolInvoke: false });
-    expect(String(byName.content)).toBe(
-      `These tools are now available. Call one by its name. Definitions:\n${JSON.stringify({ tools: [OBSERVE] })}`,
+    const native = toolDisclosureItem([OBSERVE], { viaToolInvoke: false });
+    expect(String(native.content)).toBe(
+      'These tools are now available: interaction__browser_observe. Load them with tool_search using names ["interaction__browser_observe"], then call them by name.',
     );
+    // The definitions still ride along for routes that declare them natively.
+    expect(
+      projectHistoryForProvider([native], "responses", { declaresAdditionalTools: true })[0],
+    ).toEqual({
+      type: "unknown",
+      providerData: { type: "additional_tools", role: "developer", tools: [OBSERVE] },
+    });
   });
 
   test("Claude gets a system message with the definitions after the step's results", () => {

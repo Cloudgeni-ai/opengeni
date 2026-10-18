@@ -27,8 +27,6 @@ const HISTORICAL_FACT_MAX_CHARS = 32_000;
 export const TOOL_DISCLOSURE_KEY = "opengeni.tool_disclosure.v1";
 const TOOL_DISCLOSURE_TEXT_WITH_INVOKE =
   "These tools are now available. Call one by its name, or through tool_invoke with its name and a nested arguments object. Definitions:";
-const TOOL_DISCLOSURE_TEXT_BY_NAME =
-  "These tools are now available. Call one by its name. Definitions:";
 const MACHINE_ORIGIN_PREFIX = "Opengeni tool update (machine-origin input; no new human message).";
 
 /**
@@ -50,20 +48,23 @@ export function responsesRouteDeclaresAdditionalTools(providerKind: string): boo
  * is a developer message carrying the frozen definitions; each provider
  * projection renders it in that API's own form: a Responses `additional_tools`
  * item where the route accepts it, otherwise a developer or system message
- * with the definitions as text. The text names tool_invoke only when the
- * turn's tool transport has that router.
+ * as text. With tool_invoke (generic dispatch) the text carries the
+ * definitions, and the model calls them by name or through tool_invoke. Native
+ * Responses transports have no tool_invoke, and GPT models do not call a
+ * function declared only in text, so there the text names the tools and asks
+ * the model to load them with its native tool_search.
  */
 export function toolDisclosureItem(
   tools: Record<string, unknown>[],
   options: { viaToolInvoke: boolean },
 ): Record<string, unknown> {
-  const text = options.viaToolInvoke
-    ? TOOL_DISCLOSURE_TEXT_WITH_INVOKE
-    : TOOL_DISCLOSURE_TEXT_BY_NAME;
+  const names = tools.map((tool) => String(tool.name));
   return {
     type: "message",
     role: "developer",
-    content: `${text}\n${JSON.stringify({ tools })}`,
+    content: options.viaToolInvoke
+      ? `${TOOL_DISCLOSURE_TEXT_WITH_INVOKE}\n${JSON.stringify({ tools })}`
+      : `These tools are now available: ${names.join(", ")}. Load them with tool_search using names ${JSON.stringify(names)}, then call them by name.`,
     providerData: { [TOOL_DISCLOSURE_KEY]: { tools } },
   };
 }

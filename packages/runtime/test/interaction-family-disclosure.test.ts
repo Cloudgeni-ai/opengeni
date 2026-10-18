@@ -165,9 +165,13 @@ describe("interaction family disclosure", () => {
       const declaration = second.at(-1)!;
       expect(declaration.role).toBe("developer");
       expect(disclosedNames(declaration)).toEqual([OBSERVE, ACT]);
-      expect(JSON.stringify(second)).not.toContain("tool_search");
-      // Native transports have no tool_invoke router, so the text names none.
-      expect(String(declaration.content)).not.toContain("tool_invoke");
+      // No search happened, so no search items appear.
+      expect(itemTypes(second).filter((type) => type.includes("tool_search"))).toEqual([]);
+      // Native transports have no tool_invoke router. Where a route needs the
+      // text form, it asks the model to load the tools with native tool_search.
+      expect(String(declaration.content)).toBe(
+        `These tools are now available: ${OBSERVE}, ${ACT}. Load them with tool_search using names ${JSON.stringify([OBSERVE, ACT])}, then call them by name.`,
+      );
 
       // A verified route sees the standard Responses form.
       const wire = projectHistoryForProvider(second, "responses", {
