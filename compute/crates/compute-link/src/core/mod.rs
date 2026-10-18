@@ -177,6 +177,9 @@ struct Sandbox {
     /// When the subscriptions no connection took up end.
     grace_until: Option<u64>,
     woke_at: Option<u64>,
+    /// Whether it runs, as the host last said; every session that opens is
+    /// told.
+    running: Option<Running>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -387,6 +390,7 @@ impl Core {
                 retry_delay: self.settings.retry_min_ms,
                 grace_until: None,
                 woke_at: None,
+                running: None,
             },
         );
         self.try_open(now, id);
@@ -603,9 +607,14 @@ impl Core {
     }
 
     fn running(&mut self, id: &str, running: Running) {
-        if let Some(Session::Open { link, s, .. }) =
-            self.sandboxes.get(id).map(|sandbox| &sandbox.session)
-        {
+        let Some(sandbox) = self.sandboxes.get_mut(id) else {
+            return;
+        };
+        if sandbox.running == Some(running) {
+            return;
+        }
+        sandbox.running = Some(running);
+        if let Session::Open { link, s, .. } = &sandbox.session {
             self.effects.push(Effect::Frame {
                 link: *link,
                 frame: HostFrame::State {

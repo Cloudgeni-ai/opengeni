@@ -12,7 +12,6 @@ use super::supervise::Children;
 use super::vsock::Stream;
 use super::{agent, log, spawn, sys, system};
 use crate::ENVD_PORT;
-use crate::config::DEFAULT_PATH;
 use crate::envd::{self, AgentInit, InitData};
 use crate::gateway::{self, Header};
 use crate::given::{self, GIVEN_FILE, Given};
@@ -176,11 +175,7 @@ impl Guest {
             log("the init names an agent, but the image has none");
             return;
         }
-        let mut env = self.state().image.env_vars.clone();
-        env.entry("PATH".into())
-            .or_insert_with(|| DEFAULT_PATH.into());
-        env.entry("HOME".into()).or_insert_with(|| "/root".into());
-        env.extend(given.env_vars.clone());
+        let env = crate::agent::env(&self.state().image.env_vars, &given.env_vars);
         let mut agent = self.agent();
         let stale = agent
             .running

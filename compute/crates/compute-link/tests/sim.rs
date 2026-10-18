@@ -20,7 +20,9 @@
 //! - a message for a sandbox wakes it, at most once per wake interval.
 //!
 //! And at the end, once everything is back, every message sent is
-//! delivered, and both connections of each agent are up.
+//! delivered, both connections of each agent are up, and each sandbox's
+//! open session was last told the state the host last gave for it (the
+//! host gives it again after each attach, as its agent does).
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -29,7 +31,7 @@ use compute_link::core::{ConnId, Core, Effect, Input, LinkId, Settings};
 use compute_link::nats::{ClientOp, Connect, Publish, ServerOp};
 use compute_link::saved::Saved;
 use compute_protocol::link::{
-    AgentLink, Ending, GatewayFrame, HostFrame, Refusal, Relay, may_publish, may_subscribe,
+    AgentLink, Ending, GatewayFrame, HostFrame, Refusal, Relay, Running, may_publish, may_subscribe,
 };
 
 const SANDBOXES: usize = 3;
@@ -122,6 +124,8 @@ struct Sandbox {
     shut_out: bool,
     agent: Agent,
     last_wake: Option<u64>,
+    /// The state the host last gave for it.
+    running: Option<Running>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,6 +149,8 @@ struct GwSession {
     state: GwState,
     was_opened: bool,
     subs: BTreeMap<u32, String>,
+    /// The state the last `state` frame for it said.
+    told: Option<Running>,
 }
 
 #[derive(Debug)]
@@ -236,6 +242,7 @@ impl Sim {
                         asleep: false,
                     },
                     last_wake: None,
+                    running: None,
                 })
                 .collect(),
             sessions: HashMap::new(),
@@ -289,6 +296,12 @@ impl Sim {
             link,
             saved,
         });
+        if let Some(running) = self.sandboxes[n].running {
+            self.input(Input::Running {
+                sandbox: self.sandboxes[n].id.clone(),
+                running,
+            });
+        }
     }
 
     /// Feeds the core, then queues what it asks.
@@ -508,63 +521,7 @@ impl Sim {
                 sandbox,
                 ticket: _,
                 connection,
-            } => {
-                let n = self.index(&sandbox);
-                let duplicate = self.sessions.iter().any(|((l, _), session)| {
-                    *l == link
-                        && session.sandbox == sandbox
-                        && session.instance != connection
-                        && matches!(session.state, GwState::Opened { .. })
-                });
-                self.sessions.insert(
-                    (link, s),
-                    GwSession {
-                        sandbox: sandbox.clone(),
-                        instance: connection.clone(),
-                        state: GwState::Asked,
-                        was_opened: false,
-                        subs: BTreeMap::new(),
-                    },
-                );
-                let answer = if duplicate || (self.chaos && self.rng.chance(10)) {
-                    let code = if duplicate {
-                        Refusal::Duplicate
-                    } else {
-                        Refusal::Unavailable
-                    };
-                    self.sessions.get_mut(&(link, s)).unwrap().state = GwState::Ended;
-                    GatewayFrame::Refused {
-                        s,
-                        code,
-                        message: String::new(),
-                    }
-                } else if self.chaos && self.rng.chance(2) {
-                    self.sessions.get_mut(&(link, s)).unwrap().state = GwState::Ended;
-                    self.sandboxes[n].shut_out = true;
-                    GatewayFrame::Refused {
-                        s,
-                        code: Refusal::StaleEpoch,
-                        message: String::new(),
-                    }
-                } else {
-                    let scope = scope(&sandbox, &connection);
-                    let session = self.sessions.get_mut(&(link, s)).unwrap();
-                    session.state = GwState::Opened {
-                        scope: scope.clone(),
-                    };
-                    session.was_opened = true;
-                    GatewayFrame::Opened {
-                        s,
-                        scope,
-                        relay: Relay {
-                            url: "wss://relay.example".into(),
-                            token: format!("relay-{s}"),
-                            expires_at_ms: self.now + 600_000,
-                        },
-                    }
-                };
-                self.send_host(link, answer, Bytes::new());
-            }
+            } => self.gateway_opens(link, s, &sandbox, &connection),
             HostFrame::Close { s } => {
                 let session = self
                     .sessions
@@ -598,10 +555,72 @@ impl Sim {
                 );
                 let _ = payload;
             }
-            HostFrame::State { s, .. } => {
+            HostFrame::State { s, state } => {
                 self.opened_scope(link, s, "state");
+                self.sessions.get_mut(&(link, s)).unwrap().told = Some(state);
             }
         }
+    }
+
+    /// The gateway answers an `open`: it opens the session, or refuses it
+    /// as a duplicate, as unavailable or, for good, as stale.
+    fn gateway_opens(&mut self, link: LinkId, s: u32, sandbox: &str, connection: &str) {
+        let n = self.index(sandbox);
+        let duplicate = self.sessions.iter().any(|((l, _), session)| {
+            *l == link
+                && session.sandbox == sandbox
+                && session.instance != connection
+                && matches!(session.state, GwState::Opened { .. })
+        });
+        self.sessions.insert(
+            (link, s),
+            GwSession {
+                sandbox: sandbox.to_owned(),
+                instance: connection.to_owned(),
+                state: GwState::Asked,
+                was_opened: false,
+                subs: BTreeMap::new(),
+                told: None,
+            },
+        );
+        let answer = if duplicate || (self.chaos && self.rng.chance(10)) {
+            let code = if duplicate {
+                Refusal::Duplicate
+            } else {
+                Refusal::Unavailable
+            };
+            self.sessions.get_mut(&(link, s)).unwrap().state = GwState::Ended;
+            GatewayFrame::Refused {
+                s,
+                code,
+                message: String::new(),
+            }
+        } else if self.chaos && self.rng.chance(2) {
+            self.sessions.get_mut(&(link, s)).unwrap().state = GwState::Ended;
+            self.sandboxes[n].shut_out = true;
+            GatewayFrame::Refused {
+                s,
+                code: Refusal::StaleEpoch,
+                message: String::new(),
+            }
+        } else {
+            let scope = scope(sandbox, connection);
+            let session = self.sessions.get_mut(&(link, s)).unwrap();
+            session.state = GwState::Opened {
+                scope: scope.clone(),
+            };
+            session.was_opened = true;
+            GatewayFrame::Opened {
+                s,
+                scope,
+                relay: Relay {
+                    url: "wss://relay.example".into(),
+                    token: format!("relay-{s}"),
+                    expires_at_ms: self.now + 600_000,
+                },
+            }
+        };
+        self.send_host(link, answer, Bytes::new());
     }
 
     /// The scope of a session the gateway opened, for a frame that needs
@@ -1312,12 +1331,13 @@ impl Sim {
             }
             _ => {
                 let running = if self.rng.chance(50) {
-                    compute_protocol::link::Running::Asleep
+                    Running::Asleep
                 } else {
-                    compute_protocol::link::Running::Awake
+                    Running::Awake
                 };
                 let n = self.rng.below(SANDBOXES);
                 let id = self.sandboxes[n].id.clone();
+                self.sandboxes[n].running = Some(running);
                 self.input(Input::Running {
                     sandbox: id,
                     running,
@@ -1471,6 +1491,7 @@ impl Sim {
                 "{id} has no open session with subscriptions once everything is back"
             );
         }
+        self.check_told();
         let ids: Vec<u64> = targets
             .into_iter()
             .map(|(link, s, sid, subject)| self.send_msg(link, s, sid, subject, true))
@@ -1498,6 +1519,29 @@ impl Sim {
                 .any(|(id, _)| self.delivered.contains(id)),
             "nothing was delivered at the end"
         );
+    }
+
+    /// Each sandbox's open sessions were last told the state the host last
+    /// gave for it.
+    fn check_told(&self) {
+        for sandbox in &self.sandboxes {
+            let Some(running) = sandbox.running else {
+                continue;
+            };
+            for ((link, s), session) in &self.sessions {
+                if session.sandbox == sandbox.id
+                    && matches!(session.state, GwState::Opened { .. })
+                    && self.gateways.iter().any(|g| g.live == Some(*link))
+                {
+                    assert_eq!(
+                        session.told,
+                        Some(running),
+                        "{}'s session {s} on link {link} was not told its state",
+                        sandbox.id
+                    );
+                }
+            }
+        }
     }
 }
 

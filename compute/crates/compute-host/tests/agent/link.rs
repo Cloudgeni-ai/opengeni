@@ -1,8 +1,9 @@
 //! Sandboxes that run Opengeni's agent, reached through the host's agent
 //! link (ADR 21): the guest's connection to its link port reaches a gateway
 //! over the host's one WebSocket, a sleeping sandbox wakes for a message,
-//! a new ticket opens the session again, and the session outlives the host
-//! agent's restart and ends when the sandbox goes.
+//! the gateway hears when it sleeps and wakes, a new ticket opens the
+//! session again, and the session outlives the host agent's restart and
+//! ends when the sandbox goes.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,8 +14,8 @@ use compute_host::protocol::{Id, LevelName, Reply, Request, SandboxConfig};
 use compute_link::{HostToken, Hub, HubConfig, Timing, Tokens};
 use compute_protocol::fleet::{Ruling, Verdict};
 use compute_protocol::link::{
-    AGENT_LINK_PORT, AgentLink, GatewayFrame, HostFrame, Relay, SUBPROTOCOL, VERSION, decode,
-    encode,
+    AGENT_LINK_PORT, AgentLink, GatewayFrame, HostFrame, Relay, Running, SUBPROTOCOL, VERSION,
+    decode, encode,
 };
 use futures::future::BoxFuture;
 use futures::{SinkExt as _, StreamExt as _};
@@ -138,12 +139,13 @@ enum Event {
 }
 
 /// A gateway on a local port: it says hello to each link, hands the test
-/// every frame a host sends but `state`, and sends what the test asks on
-/// the latest link.
+/// every frame a host sends but `state`, which it keeps in order, and sends
+/// what the test asks on the latest link.
 struct Gateway {
     url: String,
     events: mpsc::UnboundedReceiver<Event>,
     out: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<Message>>>>,
+    states: Arc<std::sync::Mutex<Vec<Running>>>,
 }
 
 impl Gateway {
@@ -152,12 +154,40 @@ impl Gateway {
         let url = format!("ws://{}/v1/agent-link", listener.local_addr().unwrap());
         let (events, receiver) = mpsc::unbounded_channel();
         let out = Arc::new(std::sync::Mutex::new(None));
-        tokio::spawn(accept(listener, events, Arc::clone(&out)));
+        let states = Arc::default();
+        tokio::spawn(accept(
+            listener,
+            events,
+            Arc::clone(&out),
+            Arc::clone(&states),
+        ));
         Self {
             url,
             events: receiver,
             out,
+            states,
         }
+    }
+
+    /// Waits until the latest `state` frame says `want`, and returns every
+    /// one heard so far.
+    async fn told(&self, want: Running) -> Vec<Running> {
+        timeout(WAIT, async {
+            loop {
+                let states = self.states.lock().unwrap().clone();
+                if states.last() == Some(&want) {
+                    return states;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the gateway was not told {want:?}: {:?}",
+                self.states.lock().unwrap()
+            )
+        })
     }
 
     async fn next(&mut self) -> Event {
@@ -227,6 +257,7 @@ async fn accept(
     listener: TcpListener,
     events: mpsc::UnboundedSender<Event>,
     out: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<Message>>>>,
+    states: Arc<std::sync::Mutex<Vec<Running>>>,
 ) {
     while let Ok((stream, _)) = listener.accept().await {
         let callback = |_: &Upgrade, mut response: Response| {
@@ -251,6 +282,7 @@ async fn accept(
         *out.lock().unwrap() = Some(sender);
         let _ = events.send(Event::Up);
         let events = events.clone();
+        let states = Arc::clone(&states);
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -265,8 +297,13 @@ async fn accept(
                     message = socket.next() => match message {
                         Some(Ok(Message::Binary(bytes))) => {
                             let (frame, _) = decode::<HostFrame>(&bytes).unwrap();
-                            if !matches!(frame, HostFrame::State { .. }) {
-                                let _ = events.send(Event::Frame(frame));
+                            match frame {
+                                HostFrame::State { state, .. } => {
+                                    states.lock().unwrap().push(state);
+                                }
+                                frame => {
+                                    let _ = events.send(Event::Frame(frame));
+                                }
                             }
                         }
                         Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
@@ -355,6 +392,8 @@ async fn a_sandbox_agent_reaches_its_gateway_and_a_message_wakes_its_sleeping_sa
     gateway.up().await;
     let socket = link_socket(&lab.sandbox_dir(sandbox));
     let (mut agent, s) = connect(&mut gateway, &socket, sandbox, "ticket-1").await;
+    // It runs, and its session is told so when it opens.
+    gateway.told(Running::Awake).await;
 
     let subject = format!("{SCOPE}.rpc");
     agent.send(&format!("SUB {subject} 1\r\n")).await;
@@ -369,6 +408,7 @@ async fn a_sandbox_agent_reaches_its_gateway_and_a_message_wakes_its_sleeping_sa
     // Saved, its VM is gone, and so is the guest's connection with it.
     lab.sleep_to(sandbox, LevelName::Saved).await;
     lab.wait_level(sandbox, LevelName::Saved).await;
+    gateway.told(Running::Asleep).await;
     drop(agent);
     gateway.send(&GatewayFrame::Msg {
         s,
@@ -389,6 +429,12 @@ async fn a_sandbox_agent_reaches_its_gateway_and_a_message_wakes_its_sleeping_sa
     assert!(
         message.starts_with(&format!("MSG {subject} 1 0")),
         "{message}"
+    );
+    // Told once of each change: going to sleep, through every level on
+    // the way down, is one change.
+    assert_eq!(
+        gateway.told(Running::Awake).await,
+        [Running::Awake, Running::Asleep, Running::Awake]
     );
     lab.assert_clean();
 }

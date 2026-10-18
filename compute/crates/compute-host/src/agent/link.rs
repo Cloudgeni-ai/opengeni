@@ -8,9 +8,9 @@
 use std::sync::Arc;
 
 use compute_engine::{Engine, VmSpec};
-use compute_protocol::link::AGENT_LINK_PORT;
+use compute_protocol::link::{AGENT_LINK_PORT, Running};
 
-use super::{HostAgent, Toucher};
+use super::{HostAgent, Level, Toucher};
 use crate::guest_ports::{self, Activity, Listeners};
 use crate::protocol::Id;
 use crate::store::Store;
@@ -65,9 +65,35 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     slot.paths.dir.join(SESSION_FILE),
                     Arc::new(wake),
                 );
+                self.tell_link(id);
             }
             None => hub.detach(&id.to_string()),
         }
+    }
+
+    /// Tells the hub whether sandbox `id` runs, for its gateway to show and
+    /// to count awake time by. The hub passes on only changes, and tells
+    /// each session that opens.
+    pub(super) fn tell_link(&self, id: Id) {
+        let Some(hub) = &self.link else {
+            return;
+        };
+        if self
+            .records
+            .get(id)
+            .is_none_or(|record| record.config.link.is_none())
+        {
+            return;
+        }
+        let Some(view) = self.core.sandbox(id.0) else {
+            return;
+        };
+        let running = if view.state.level == Level::Running {
+            Running::Awake
+        } else {
+            Running::Asleep
+        };
+        hub.running(&id.to_string(), running);
     }
 
     /// Sandbox `id` leaves the host: its agent's session ends.

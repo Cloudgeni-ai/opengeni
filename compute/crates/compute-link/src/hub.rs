@@ -186,7 +186,9 @@ impl Hub {
         });
     }
 
-    /// Tells the sandbox's gateway whether it runs.
+    /// Tells the sandbox's gateway whether it runs, when that changed, and
+    /// every session that opens for it later. An attached sandbox's state
+    /// is unknown until the first call.
     pub fn running(&self, sandbox: &str, running: Running) {
         let _ = self.commands.send(Command::Input(Input::Running {
             sandbox: sandbox.to_owned(),

@@ -96,7 +96,11 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
 
   and starts `opengeni-agent run --fabric /run/compute/agent/link.json`
   (with `--virtual-desktop` when `desktop` is true). It restarts the agent
-  after it exits, with back-off.
+  after it exits, with back-off. The agent runs as root with the image's
+  environment and then the sandbox's variables, plus
+  `OPENGENI_CONFIG_DIR=/var/lib/opengeni/agent` unless those name another:
+  the agent keeps its state on the sandbox's disk, outside the workspace
+  that an image's `HOME` often is.
 - It listens on `127.0.0.1:3958` and forwards each connection to the host,
   vsock CID 2, port 58, byte for byte. The port is not NATS's own 4222, so
   a NATS server the sandbox's user runs, as when developing Opengeni
@@ -199,7 +203,7 @@ own URL, allowing 60 seconds of clock skew.
 | `sub` | `s`, `sid`, `subject`, `queue`? | Subscribe; `sid` is the host's, stable for the session. |
 | `unsub` | `s`, `sid` | Unsubscribe. |
 | `pub` | `s`, `subject`, `reply`?, `headers`? | Publish the payload. `headers` is a list of `[name, value]`. |
-| `state` | `s`, `state` | `awake` or `asleep`, for display only. |
+| `state` | `s`, `state` | `awake` (its VM runs) or `asleep` (any sleep level). Sent when it changes, once per change however many levels a sleep passes through, and again when a session opens. For showing the sandbox's state and counting its awake time; it decides nothing about delivery. |
 | `close` | `s` | End the session: the sandbox left this host or its agent process changed. |
 
 ### Frames, gateway to host

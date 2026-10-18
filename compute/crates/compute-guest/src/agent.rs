@@ -6,8 +6,11 @@
 //! `127.0.0.1:`[`NATS_PORT`], which the guest forwards to its host's agent
 //! link on vsock port [`crate::AGENT_LINK_PORT`].
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
+use crate::config::DEFAULT_PATH;
 use crate::envd::AgentInit;
 
 /// Where the agent's program is in an image that runs it.
@@ -25,6 +28,15 @@ pub const ACTIVITY_DIR: &str = "/run/compute/activity";
 
 /// The loopback port the agent's NATS client dials.
 pub const NATS_PORT: u16 = 3958;
+
+/// Where the agent keeps its own state (its instance lock, command spool and
+/// browser controller state): on the sandbox's disk, so it lasts a cold
+/// restore, and outside the workspace, so the user's files do not show it
+/// (an image's `HOME` is often the workspace).
+pub const STATE_DIR: &str = "/var/lib/opengeni/agent";
+
+/// The variable naming the agent's state directory.
+const STATE_DIR_ENV: &str = "OPENGENI_CONFIG_DIR";
 
 #[derive(Serialize)]
 struct LinkFile<'a> {
@@ -54,6 +66,28 @@ pub fn args(agent: &AgentInit) -> Vec<&'static str> {
         args.push("--virtual-desktop");
     }
     args
+}
+
+/// The agent's environment: the image's, with a `PATH` and a `HOME` when it
+/// has none, then the sandbox's own variables, and [`STATE_DIR`] unless one
+/// of those names another.
+#[must_use]
+pub fn env(
+    image: &BTreeMap<String, String>,
+    sandbox: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut env = image.clone();
+    env.entry("PATH".into())
+        .or_insert_with(|| DEFAULT_PATH.into());
+    env.entry("HOME".into()).or_insert_with(|| "/root".into());
+    env.extend(
+        sandbox
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone())),
+    );
+    env.entry(STATE_DIR_ENV.into())
+        .or_insert_with(|| STATE_DIR.into());
+    env
 }
 
 /// The process an activity file `name` counts for: `<label>.<pid>`, where
@@ -113,6 +147,40 @@ mod tests {
             args(&agent(true)),
             ["run", "--fabric", LINK_FILE, "--virtual-desktop"]
         );
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn the_agent_keeps_its_state_outside_the_workspace() {
+        let image = vars(&[("HOME", "/workspace"), ("LANG", "C.UTF-8")]);
+        let env = env(&image, &vars(&[("TOKEN_NAME", "x")]));
+        assert_eq!(
+            env,
+            vars(&[
+                ("HOME", "/workspace"),
+                ("LANG", "C.UTF-8"),
+                ("OPENGENI_CONFIG_DIR", STATE_DIR),
+                ("PATH", DEFAULT_PATH),
+                ("TOKEN_NAME", "x"),
+            ])
+        );
+    }
+
+    #[test]
+    fn the_sandbox_s_variables_win_over_the_image_s() {
+        let image = vars(&[("PATH", "/opt/bin"), ("MODE", "image")]);
+        let sandbox = vars(&[("MODE", "sandbox"), ("OPENGENI_CONFIG_DIR", "/srv/agent")]);
+        let env = env(&image, &sandbox);
+        assert_eq!(env["PATH"], "/opt/bin");
+        assert_eq!(env["HOME"], "/root");
+        assert_eq!(env["MODE"], "sandbox");
+        assert_eq!(env["OPENGENI_CONFIG_DIR"], "/srv/agent");
     }
 
     #[test]
