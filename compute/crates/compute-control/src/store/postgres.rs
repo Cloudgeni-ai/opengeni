@@ -272,6 +272,22 @@ impl PostgresStore {
         connections: usize,
     ) -> Result<Self> {
         let config = tokio_postgres::Config::from_str(url).map_err(database)?;
+        Self::connect_with(config, tls, connections).await
+    }
+
+    /// [`PostgresStore::connect`] with settings already parsed, for a
+    /// caller that adds what a connection string cannot carry safely, such
+    /// as a password from a secret.
+    ///
+    /// # Errors
+    ///
+    /// When the database cannot be reached or its schema not brought up
+    /// to date.
+    pub async fn connect_with(
+        config: tokio_postgres::Config,
+        tls: Option<rustls::ClientConfig>,
+        connections: usize,
+    ) -> Result<Self> {
         let manager_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         };

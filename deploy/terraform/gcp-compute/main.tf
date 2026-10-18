@@ -226,10 +226,26 @@ resource "google_privateca_ca_pool_iam_member" "host_reads" {
   member  = "serviceAccount:${google_service_account.host.email}"
 }
 
+# The fleet service's host-endpoint certificate lasts 30 days. Each apply
+# from 20 days after it was issued makes a new key, so a new request and a
+# certificate of a new name: the authority keeps every name it issued, even
+# revoked, so a renewal never reuses one. The new certificate exists before
+# the old one is revoked; put it in the service's Secret and restart the
+# service (operations.md, Keys and certificates).
+resource "time_rotating" "control" {
+  count         = length(var.control_dns_names) > 0 ? 1 : 0
+  rotation_days = 20
+}
+
 resource "tls_private_key" "control" {
   count       = length(var.control_dns_names) > 0 ? 1 : 0
   algorithm   = "ECDSA"
   ecdsa_curve = "P256"
+
+  lifecycle {
+    create_before_destroy = true
+    replace_triggered_by  = [time_rotating.control[0].id]
+  }
 }
 
 resource "tls_cert_request" "control" {
@@ -239,11 +255,12 @@ resource "tls_cert_request" "control" {
   subject {
     common_name = var.control_dns_names[0]
   }
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
-# The fleet service's host-endpoint certificate, for 30 days: renew it
-# with `terraform apply -replace=google_privateca_certificate.control[0]`
-# and restart the service (operations.md, Rotating keys and certificates).
 resource "google_privateca_certificate" "control" {
   count                 = length(var.control_dns_names) > 0 ? 1 : 0
   pool                  = google_privateca_ca_pool.fleet.name
@@ -252,6 +269,10 @@ resource "google_privateca_certificate" "control" {
   name                  = "${var.name_prefix}-control-${substr(sha256(tls_cert_request.control[0].cert_request_pem), 0, 12)}"
   lifetime              = "2592000s"
   pem_csr               = tls_cert_request.control[0].cert_request_pem
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # --- Network ----------------------------------------------------------------

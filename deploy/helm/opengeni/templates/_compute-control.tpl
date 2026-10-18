@@ -34,13 +34,28 @@ by its Deployment, Services, hook Job and sweep.
 {{- end -}}
 {{- end -}}
 
-{{/* The database the service uses, as libpq key-value settings; the password
-comes from $(COMPUTE_DATABASE_PASSWORD) in the container's environment. */}}
+{{/* The database the service uses, as libpq key-value settings, each value
+quoted; the password is not among them: the service and its database wait
+read it from their own environment variable, so any password works. */}}
 {{- define "opengeni.computeControl.databaseSettings" -}}
 {{- $db := .Values.computeControl.database -}}
 {{- $host := $db.host | default (include "opengeni.postgresHost" .) -}}
 {{- $name := $db.name | default .Values.postgres.auth.database -}}
-{{- printf "host=%s port=%v dbname=%s user=%s sslmode=%s" $host $db.port $name $db.role ($db.sslmode | default "disable") -}}
+{{- $settings := list (list "host" $host) (list "port" (toString $db.port)) (list "dbname" $name) (list "user" $db.role) (list "sslmode" ($db.sslmode | default "disable")) -}}
+{{- $quoted := list -}}
+{{- range $settings -}}
+{{- $value := index . 1 | replace "\\" "\\\\" | replace "'" "\\'" -}}
+{{- $quoted = append $quoted (printf "%s='%s'" (index . 0) $value) -}}
+{{- end -}}
+{{- join " " $quoted -}}
+{{- end -}}
+
+{{/* Whether the service's database is the chart's own Postgres, the one
+the migration owner URL reaches: the chart runs Postgres and neither
+database.host nor database.name names another. */}}
+{{- define "opengeni.computeControl.ownDatabase" -}}
+{{- $db := .Values.computeControl.database -}}
+{{- if and .Values.postgres.enabled (not (or $db.host $db.name)) -}}true{{- end -}}
 {{- end -}}
 
 {{- define "opengeni.computeControl.assert" -}}
@@ -67,6 +82,15 @@ comes from $(COMPUTE_DATABASE_PASSWORD) in the container's environment. */}}
 {{- end -}}
 {{- if and $cc.database.provision $cc.database.urlKey -}}
 {{- fail "computeControl.database.provision makes the role and schema for the chart-built connection; leave urlKey empty, or set provision to false" -}}
+{{- end -}}
+{{- if and (not $cc.database.urlKey) (not .Values.postgres.enabled) (not $cc.database.host) -}}
+{{- fail "computeControl.database.host is required when the chart runs no Postgres (postgres.enabled is false), or give a whole connection string with database.urlKey" -}}
+{{- end -}}
+{{- if and $cc.database.provision (not (include "opengeni.computeControl.ownDatabase" .)) -}}
+{{- fail "computeControl.database.provision makes the role and schema in the chart's own Postgres, with the migration owner URL; for any other database set provision to false and make them there (compute/docs/operations.md, The fleet service)" -}}
+{{- end -}}
+{{- if and $cc.sweep.enabled (not (regexMatch "^gs://" ($cc.archive | default ""))) -}}
+{{- fail "computeControl.sweep deletes only from Google Cloud Storage archives (ADR 17); set sweep.enabled to false for az:// and s3:// archives" -}}
 {{- end -}}
 {{- if not (regexMatch "^[a-z_][a-z0-9_]*$" $cc.database.role) -}}
 {{- fail "computeControl.database.role must be a plain lowercase identifier" -}}

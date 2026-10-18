@@ -35,7 +35,8 @@ spec:
         {{- include "opengeni.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: compute-control
       annotations:
-        # Replicas reload keys and TLS material only at start.
+        # Replicas reload keys, TLS material and the database password only
+        # at start; a new database.passwordRevision rolls them.
         opengeni.ai/compute-control-settings: {{ toJson (dict "keys" $cc.keys "tls" $cc.hostsTls "apiTls" $cc.apiTls "link" $cc.link "db" $cc.database) | sha256sum | trunc 16 | quote }}
     spec:
       serviceAccountName: {{ include "opengeni.computeControl.serviceAccountName" . }}
@@ -58,6 +59,43 @@ spec:
         {{- with $cc.podSecurityContext }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      {{- if $cc.database.provision }}
+      initContainers:
+        # Waits until the role the database Job makes can log in, so that
+        # on an install, whose Job runs beside this Deployment, the service
+        # starts once its database is ready rather than failing until then.
+        - name: database
+          image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cc.database.existingSecret }}
+                  key: {{ $cc.database.passwordKey }}
+            - name: COMPUTE_CONTROL_DATABASE
+              value: {{ include "opengeni.computeControl.databaseSettings" . | quote }}
+          command:
+            - /bin/sh
+            - -c
+            # The schema is a plain identifier (see opengeni.computeControl.assert).
+            - |
+              until out=$(psql -X -d "$COMPUTE_CONTROL_DATABASE" -tAq -c "select 1 from pg_namespace where nspname = '{{ $cc.database.schema }}'" 2>&1) &&
+                printf '%s\n' "$out" | grep -qx 1; do
+                echo "waiting for the database: ${out:-no schema {{ $cc.database.schema }} yet}"
+                sleep 2
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+      {{- end }}
       containers:
         - name: compute-control
           image: {{ include "opengeni.computeControl.image" . | quote }}
@@ -120,13 +158,13 @@ spec:
                   name: {{ $cc.database.existingSecret }}
                   key: {{ $cc.database.urlKey }}
             {{- else }}
-            - name: COMPUTE_DATABASE_PASSWORD
+            - name: COMPUTE_CONTROL_DATABASE_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ $cc.database.existingSecret }}
                   key: {{ $cc.database.passwordKey }}
             - name: COMPUTE_CONTROL_DATABASE
-              value: {{ printf "%s password=$(COMPUTE_DATABASE_PASSWORD)" (include "opengeni.computeControl.databaseSettings" .) | quote }}
+              value: {{ include "opengeni.computeControl.databaseSettings" . | quote }}
             {{- end }}
             {{- with $cc.extraEnv }}
             {{- toYaml . | nindent 12 }}

@@ -48,6 +48,14 @@ struct StoreArgs {
     /// everything in memory (one replica, forgotten when it stops).
     #[arg(long, env = "COMPUTE_CONTROL_DATABASE")]
     database: String,
+    /// The database password, kept out of the connection string so that
+    /// any password works as it is, without quoting.
+    #[arg(
+        long,
+        env = "COMPUTE_CONTROL_DATABASE_PASSWORD",
+        hide_env_values = true
+    )]
+    database_password: Option<String>,
     /// Trust this authority for TLS to the database; without it the
     /// connection is unencrypted, for a database on the same machine.
     #[arg(long)]
@@ -368,7 +376,20 @@ async fn postgres(database: &StoreArgs) -> anyhow::Result<PostgresStore> {
         .as_deref()
         .map(database_client)
         .transpose()?;
-    Ok(PostgresStore::connect(&database.database, tls, database.connections).await?)
+    Ok(PostgresStore::connect_with(database_config(database)?, tls, database.connections).await?)
+}
+
+/// The store's connection settings: the connection string, and the
+/// password given apart from it, if any.
+fn database_config(database: &StoreArgs) -> anyhow::Result<tokio_postgres::Config> {
+    let mut config: tokio_postgres::Config = database
+        .database
+        .parse()
+        .context("the database connection string")?;
+    if let Some(password) = &database.database_password {
+        config.password(password);
+    }
+    Ok(config)
 }
 
 #[tokio::main]
@@ -403,5 +424,30 @@ async fn main() -> anyhow::Result<()> {
             println!("{key}");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_password_given_apart_needs_no_quoting_in_quoted_settings() {
+        // As the chart writes them: every value quoted, the password apart.
+        let database = StoreArgs {
+            database:
+                r"host='db.example.com' port='5432' dbname='it\'s' user='compute' sslmode='disable'"
+                    .into(),
+            database_password: Some(r"two words \ and ' quote".into()),
+            database_ca: None,
+            connections: 1,
+        };
+        let config = database_config(&database).unwrap();
+        assert_eq!(config.get_dbname(), Some("it's"));
+        assert_eq!(config.get_user(), Some("compute"));
+        assert_eq!(
+            config.get_password(),
+            Some(&b"two words \\ and ' quote"[..])
+        );
     }
 }

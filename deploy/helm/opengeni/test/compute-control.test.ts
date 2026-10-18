@@ -14,7 +14,7 @@ type Manifest = {
   data?: any;
 };
 
-async function helmTemplate(values: Record<string, unknown>) {
+async function helmTemplate(values: Record<string, unknown>, flags: string[] = []) {
   const helm = Bun.which("helm");
   if (!helm) throw new Error("helm is required for chart render tests");
   const root = await mkdtemp(join(tmpdir(), "opengeni-compute-control-"));
@@ -22,7 +22,7 @@ async function helmTemplate(values: Record<string, unknown>) {
   await Bun.write(valuesPath, JSON.stringify(values));
   try {
     const process = Bun.spawn(
-      [helm, "template", "cc", resolve(import.meta.dir, ".."), "-f", valuesPath],
+      [helm, "template", "cc", resolve(import.meta.dir, ".."), "-f", valuesPath, ...flags],
       { stdout: "pipe", stderr: "pipe" },
     );
     const [stdout, stderr, exitCode] = await Promise.all([
@@ -36,8 +36,8 @@ async function helmTemplate(values: Record<string, unknown>) {
   }
 }
 
-async function render(values: Record<string, unknown>): Promise<Manifest[]> {
-  const { stdout, stderr, exitCode } = await helmTemplate(values);
+async function render(values: Record<string, unknown>, flags: string[] = []): Promise<Manifest[]> {
+  const { stdout, stderr, exitCode } = await helmTemplate(values, flags);
   if (exitCode !== 0) throw new Error(`helm template failed: ${stderr}`);
   return stdout
     .split(/^---\s*$/mu)
@@ -86,13 +86,24 @@ describe("computeControl", () => {
     expect(container.args).toContain("--host-ca=/etc/compute/tls/ca.crt");
     const database = container.env.find((e: any) => e.name === "COMPUTE_CONTROL_DATABASE");
     expect(database.value).toBe(
-      "host=cc-opengeni-postgres port=5432 dbname=opengeni user=compute sslmode=disable password=$(COMPUTE_DATABASE_PASSWORD)",
+      "host='cc-opengeni-postgres' port='5432' dbname='opengeni' user='compute' sslmode='disable'",
     );
-    // The password variable precedes the one that refers to it.
-    const names = container.env.map((e: any) => e.name);
-    expect(names.indexOf("COMPUTE_DATABASE_PASSWORD")).toBeLessThan(
-      names.indexOf("COMPUTE_CONTROL_DATABASE"),
+    // The password is a variable of its own, never part of the string.
+    const password = container.env.find((e: any) => e.name === "COMPUTE_CONTROL_DATABASE_PASSWORD");
+    expect(password.valueFrom.secretKeyRef).toEqual({
+      name: "compute-db",
+      key: "COMPUTE_DATABASE_PASSWORD",
+    });
+    // Its pods wait for the role and schema the database Job makes.
+    const [wait] = deployment.spec.template.spec.initContainers;
+    expect(wait.name).toBe("database");
+    expect(wait.env.find((e: any) => e.name === "COMPUTE_CONTROL_DATABASE").value).toBe(
+      database.value,
     );
+    expect(wait.env.find((e: any) => e.name === "PGPASSWORD").valueFrom).toEqual(
+      password.valueFrom,
+    );
+    expect(wait.command[2]).toContain("nspname = 'compute'");
     expect(deployment.spec.template.spec.serviceAccountName).toBe("cc-opengeni-compute-control");
     // Its secrets are mounted 0440, readable through the pod's group.
     expect(deployment.spec.template.spec.securityContext.fsGroup).toBe(
@@ -101,7 +112,10 @@ describe("computeControl", () => {
 
     find(manifests, "Service", "cc-opengeni-compute-control");
     find(manifests, "Service", "cc-opengeni-compute-control-hosts");
-    const job = find(manifests, "Job", "cc-opengeni-compute-control-database");
+    // On an install the database Job is part of the release, never a hook
+    // that Helm's --wait would hold back behind the pods that need it.
+    const job = find(manifests, "Job", "cc-opengeni-compute-control-database-install");
+    expect(job.metadata.annotations?.["helm.sh/hook"]).toBeUndefined();
     const script = job.spec.template.spec.containers[0].command[2];
     expect(script).toContain("set search_path = %I");
     expect(script).toContain("create schema if not exists %I authorization %I");
@@ -116,6 +130,109 @@ describe("computeControl", () => {
     const config = find(manifests, "ConfigMap", "cc-opengeni-config");
     expect(config.data.OPENGENI_COMPUTE_API_URL).toBe("http://cc-opengeni-compute-control:8080");
     expect(config.data.OPENGENI_SANDBOX_BACKEND).toBe("modal");
+  });
+
+  test("sets the role's password before an upgrade replaces any pod", async () => {
+    const manifests = await render(enabled, ["--is-upgrade"]);
+    const job = find(manifests, "Job", "cc-opengeni-compute-control-database");
+    expect(job.metadata.annotations["helm.sh/hook"]).toBe("pre-upgrade");
+    expect(manifests.some((m) => m.metadata.name.endsWith("-database-install"))).toBe(false);
+  });
+
+  test("quotes connection settings and rolls its pods for a new password revision", async () => {
+    const settings = (manifests: Manifest[]) => {
+      const pod = find(manifests, "Deployment", "cc-opengeni-compute-control").spec.template;
+      return {
+        database: pod.spec.containers[0].env.find((e: any) => e.name === "COMPUTE_CONTROL_DATABASE")
+          .value,
+        revision: pod.metadata.annotations["opengeni.ai/compute-control-settings"],
+      };
+    };
+    const before = settings(await render(enabled));
+    const after = settings(
+      await render({
+        ...enabled,
+        computeControl: {
+          ...enabled.computeControl,
+          database: { ...enabled.computeControl.database, passwordRevision: "2026-10-18" },
+        },
+      }),
+    );
+    expect(after.revision).not.toBe(before.revision);
+    const external = settings(
+      await render({
+        ...enabled,
+        postgres: { enabled: false },
+        computeControl: {
+          ...enabled.computeControl,
+          database: {
+            existingSecret: "compute-db",
+            provision: false,
+            host: "db.example.com",
+            name: "it's",
+            sslmode: "verify-full",
+          },
+        },
+      }),
+    );
+    expect(external.database).toBe(
+      "host='db.example.com' port='5432' dbname='it\\'s' user='compute' sslmode='verify-full'",
+    );
+  });
+
+  test("provisions only the chart's own Postgres", async () => {
+    const other = await helmTemplate({
+      ...enabled,
+      computeControl: {
+        ...enabled.computeControl,
+        database: { existingSecret: "compute-db", host: "db.example.com" },
+      },
+    });
+    expect(other.exitCode).not.toBe(0);
+    expect(other.stderr).toContain(
+      "computeControl.database.provision makes the role and schema in the chart's own Postgres",
+    );
+    const nowhere = await helmTemplate({
+      ...enabled,
+      postgres: { enabled: false },
+      computeControl: {
+        ...enabled.computeControl,
+        database: { existingSecret: "compute-db", provision: false },
+      },
+    });
+    expect(nowhere.exitCode).not.toBe(0);
+    expect(nowhere.stderr).toContain("computeControl.database.host is required");
+    const manifests = await render({
+      ...enabled,
+      postgres: { enabled: false },
+      computeControl: {
+        ...enabled.computeControl,
+        database: { existingSecret: "compute-db", provision: false, host: "db.example.com" },
+      },
+    });
+    expect(manifests.some((m) => m.metadata.name.includes("compute-control-database"))).toBe(false);
+    const pod = find(manifests, "Deployment", "cc-opengeni-compute-control").spec.template.spec;
+    expect(pod.initContainers).toBeUndefined();
+  });
+
+  test("sweeps only archives it can delete from", async () => {
+    const azure = await helmTemplate({
+      ...enabled,
+      computeControl: { ...enabled.computeControl, archive: "az://account/container" },
+    });
+    expect(azure.exitCode).not.toBe(0);
+    expect(azure.stderr).toContain("computeControl.sweep deletes only from Google Cloud Storage");
+    const manifests = await render({
+      ...enabled,
+      computeControl: {
+        ...enabled.computeControl,
+        archive: "s3://bucket/archive",
+        sweep: { enabled: false },
+      },
+    });
+    expect(manifests.some((m) => m.kind === "CronJob" && m.metadata.name.includes("sweep"))).toBe(
+      false,
+    );
   });
 
   test("lets Postgres take the service's connections under network policy", async () => {
