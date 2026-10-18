@@ -195,6 +195,63 @@ describe("projection lifecycle audit regressions", () => {
       "Looking through the",
       "What is the status?",
     ]);
+    // Archived, and nothing else from this turn is in view.
+    expect(order([started, steer, handover])).toEqual([
+      "Looking through the",
+      "What is the status?",
+    ]);
+  });
+
+  test("a finished message completing after the Steer bubble still stays above it", () => {
+    // Claude settles completions only when the cut request ends, which is
+    // after the Steer bubble was drawn.
+    const timeline = buildTimeline(englishText, [
+      event(1, "turn.started"),
+      event(2, "agent.message.delta", { messageId: "a", text: "Checking" }),
+      event(3, "agent.message.delta", { messageId: "b", text: "Next I wi" }),
+      event(
+        4,
+        "user.message",
+        { text: "What is the status?", delivery: "steer", routing: "accepted_for_steering" },
+        "turn-2",
+      ),
+      event(5, "agent.message.completed", {
+        messageId: "a",
+        text: "Checking",
+        phase: "commentary",
+      }),
+      event(6, "turn.superseded", { reason: "steer", atModelStep: true, cutOffText: "Next I wi" }),
+    ]);
+    expect(
+      timeline.flatMap((item) =>
+        item.kind === "agent-message" || item.kind === "user-message" ? [item.text] : [],
+      ),
+    ).toEqual(["Checking", "Next I wi", "What is the status?"]);
+  });
+
+  test("a Steer bubble from an earlier, finished turn does not reorder a later handover", () => {
+    const order = buildTimeline(englishText, [
+      event(1, "turn.started"),
+      event(
+        2,
+        "user.message",
+        { text: "Also check prices", delivery: "steer", routing: "accepted_for_steering" },
+        "turn-2",
+      ),
+      event(3, "agent.message.completed", { messageId: "a", text: "Done" }),
+      event(4, "turn.completed"),
+      event(5, "turn.started", {}, "turn-2"),
+      event(6, "agent.message.completed", { messageId: "b", text: "Prices look fine" }, "turn-2"),
+      event(
+        7,
+        "turn.superseded",
+        { reason: "steer", atModelStep: true, cutOffText: "Then I" },
+        "turn-2",
+      ),
+    ]).flatMap((item) =>
+      item.kind === "agent-message" || item.kind === "user-message" ? [item.text] : [],
+    );
+    expect(order).toEqual(["Also check prices", "Done", "Prices look fine", "Then I"]);
   });
 
   test("a Steer that replaces an approval wait closes the turn quietly; the hard interrupt does not", () => {

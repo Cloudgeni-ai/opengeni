@@ -54,6 +54,7 @@ import type {
   TurnEndItem,
   ToolCallItem,
   ToolCallTruncation,
+  UserMessageItem,
   WorkerItem,
 } from "./types";
 import { type OpenGeniText } from "../messages/runtime";
@@ -210,6 +211,9 @@ export function buildTimeline(
   // Messages drawn from streamed text that no completion has settled yet. A
   // Steer that cuts the answer short leaves its unfinished text here.
   const unsettledStreamedMessages = new Set<AgentMessageItem>();
+  // Steer bubbles drawn while the current turn still ran. The turn's answer
+  // was written before them, so a handover keeps that answer above them.
+  let steerBubblesAwaitingHandover: UserMessageItem[] = [];
   const humanInputRequests = humanInputRequestsById(events);
   const humanInputToolCallIds = new Set(
     [...humanInputRequests.values()]
@@ -544,7 +548,7 @@ export function buildTimeline(
         }
         const voiceMessage = realtimeVoiceMessage(payload);
         const sender = messageSender(payload.initiator);
-        items.push({
+        const userMessage: UserMessageItem = {
           kind: "user-message",
           id: event.id,
           ...(event.clientEventId
@@ -565,7 +569,11 @@ export function buildTimeline(
           tools: toolRefs(payload.tools),
           ...(sender ? { sender } : {}),
           occurredAt: event.occurredAt,
-        });
+        };
+        items.push(userMessage);
+        if (payload.delivery === "steer" || payload.routing === "accepted_for_steering") {
+          steerBubblesAwaitingHandover.push(userMessage);
+        }
         break;
       }
 
@@ -1424,6 +1432,7 @@ export function buildTimeline(
           takePendingWaitOutcome(turnId);
           break;
         }
+        steerBubblesAwaitingHandover = [];
         // Credit exhaustion arrives as a NOMINALLY completed turn (`detail:
         // "insufficient Opengeni credits"`, `segmentLimit: "budget_exhausted"`)
         // — the engine ended the segment early, it did not finish the work.
@@ -1553,6 +1562,7 @@ export function buildTimeline(
       }
 
       case "turn.failed": {
+        steerBubblesAwaitingHandover = [];
         takeAgentResponse(turnId);
         takePendingWaitOutcome(turnId);
         const hadActivity = hasTurnActivity(items, turnId);
@@ -1646,56 +1656,78 @@ export function buildTimeline(
           // completions arrive only when the cut request ends). When those
           // deltas are absent (an archived history) the recorded cut-off text
           // stands in, as a plain progress note rather than an error. Either
-          // way it stays with this turn's work, before the Steer's own
-          // message, which was recorded while this request still streamed.
+          // way the answer stays above the Steer's own bubble, which was drawn
+          // while this request still streamed: a late completion must not
+          // carry finished text below it either.
           const cutOffText = stringValue(payload.cutOffText);
-          const unsettled = items.filter(
-            (item): item is AgentMessageItem =>
-              item.kind === "agent-message" &&
-              item.turnId === turnId &&
-              unsettledStreamedMessages.has(item),
+          const steerBoundary = Math.min(
+            ...steerBubblesAwaitingHandover
+              .map((bubble) => items.indexOf(bubble))
+              .filter((index) => index >= 0),
+            items.length,
           );
-          const insertAfterTurnWork = (moved: TimelineItem[], fallbackIndex: number): void => {
-            let anchor = fallbackIndex - 1;
-            for (let index = items.length - 1; index >= 0; index -= 1) {
-              const item = items[index]!;
-              if ("turnId" in item && item.turnId === turnId) {
-                anchor = index;
-                break;
-              }
-            }
-            items.splice(anchor + 1, 0, ...moved);
-          };
-          if (cutOffText && unsettled.length > 0) {
-            const firstIndex = items.indexOf(unsettled[0]!);
-            for (const item of unsettled) {
-              items.splice(items.indexOf(item), 1);
-              unsettledStreamedMessages.delete(item);
-            }
-            insertAfterTurnWork(unsettled, firstIndex);
-          }
+          const isTurnMessage = (item: TimelineItem): item is AgentMessageItem =>
+            item.kind === "agent-message" && item.turnId === turnId;
+          // Finished messages a late completion moved below the Steer go
+          // back above it, in their order; unfinished ones follow them.
+          const settledBelow = items
+            .slice(steerBoundary)
+            .filter(
+              (item): item is AgentMessageItem =>
+                isTurnMessage(item) && !unsettledStreamedMessages.has(item),
+            );
+          const unsettled = cutOffText
+            ? items.filter(
+                (item): item is AgentMessageItem =>
+                  isTurnMessage(item) && unsettledStreamedMessages.has(item),
+              )
+            : [];
+          const moved: AgentMessageItem[] = [...settledBelow, ...unsettled];
           if (cutOffText && unsettled.length === 0) {
             closeStreamingTail();
-            insertAfterTurnWork(
-              [
-                {
-                  kind: "agent-message",
-                  id: `${event.id}:cut-off`,
-                  turnId,
-                  text: cutOffText,
-                  phase: "commentary",
-                  streaming: false,
-                  occurredAt: event.occurredAt,
-                },
-              ],
-              items.length,
-            );
+            moved.push({
+              kind: "agent-message",
+              id: `${event.id}:cut-off`,
+              turnId,
+              text: cutOffText,
+              phase: "commentary",
+              streaming: false,
+              occurredAt: event.occurredAt,
+            });
           }
+          if (moved.length > 0) {
+            let insertAt = items.length;
+            for (const item of moved) {
+              const index = items.indexOf(item);
+              if (index < 0) continue;
+              items.splice(index, 1);
+              unsettledStreamedMessages.delete(item);
+            }
+            if (steerBubblesAwaitingHandover.length > 0) {
+              const bubbleIndexes = steerBubblesAwaitingHandover
+                .map((bubble) => items.indexOf(bubble))
+                .filter((index) => index >= 0);
+              if (bubbleIndexes.length > 0) insertAt = Math.min(...bubbleIndexes);
+            } else {
+              // No Steer bubble in view (an API-only history): keep the text
+              // right after this turn's other work.
+              for (let index = items.length - 1; index >= 0; index -= 1) {
+                const item = items[index]!;
+                if ("turnId" in item && item.turnId === turnId) {
+                  insertAt = index + 1;
+                  break;
+                }
+              }
+            }
+            items.splice(insertAt, 0, ...moved);
+          }
+          steerBubblesAwaitingHandover = [];
           // A call still waiting for approval or an answer never ran.
           finalizeOpen(turnId, steerReplacedWait ? "cancelled" : "complete", event.occurredAt);
           items.push(turnEndItem(event, "complete", null));
           break;
         }
+        steerBubblesAwaitingHandover = [];
         takeAgentResponse(turnId);
         takePendingWaitOutcome(turnId);
         const hadActivity = hasTurnActivity(items, turnId);
