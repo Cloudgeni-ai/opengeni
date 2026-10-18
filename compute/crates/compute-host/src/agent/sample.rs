@@ -50,7 +50,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // being filled, then the disk reading that shows what they took.
         // The core ignores them without a disk policy.
         batch.extend(self.disk_readings());
-        if let Some(available) = read_disk(&self.root) {
+        let disk = read_disk(&self.root);
+        if let Some(available) = disk {
             batch.push(Input::Disk { available });
         }
         let resident: Vec<(Level, u64)> = batch
@@ -63,6 +64,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             })
             .collect();
         self.inputs(batch);
+        if disk.is_some() {
+            self.resume_after_reading();
+        }
         let gauges = self.gauges(resident.into_iter());
         self.observer.metrics().set_gauges(&gauges);
         self.summarize();

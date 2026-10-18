@@ -812,6 +812,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     rootfs_retired: Instant,
     /// Images being fetched for the creates that wait for them.
     fetching: HashMap<ImageId, fetch::Fetch>,
+    /// Work waiting for the next disk reading to say whether it fits.
+    after_reading: Vec<disk::AfterReading>,
     images: Images,
     warm: Option<Warm>,
     core: Host,
@@ -1115,6 +1117,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             origin: Instant::now(),
             slots: HashMap::new(),
             preparing: HashSet::new(),
+            after_reading: Vec::new(),
             owning: HashMap::new(),
             ordinals: BTreeSet::new(),
             blocked: BTreeMap::new(),
