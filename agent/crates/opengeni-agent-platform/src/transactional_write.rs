@@ -345,6 +345,24 @@ mod unix {
         }
     }
 
+    fn private_stage_dir(parent: &File) -> PlatformResult<(String, File)> {
+        let name = format!(".opengeni-write-{}", uuid::Uuid::new_v4());
+        fs::mkdirat(parent, name.as_str(), Mode::from_raw_mode(0o700)).map_err(io)?;
+        let opened = open_dir(parent, std::ffi::OsStr::new(&name), false).and_then(|dir| {
+            // A directory-only inherited ACL can expose staging even when content
+            // inherits no ACL. Verify privacy before creating or accepting bytes.
+            no_xattrs(&dir)?;
+            Ok(dir)
+        });
+        match opened {
+            Ok(dir) => Ok((name, dir)),
+            Err(error) => {
+                let _ = fs::unlinkat(parent, name.as_str(), AtFlags::REMOVEDIR);
+                Err(error)
+            }
+        }
+    }
+
     pub(super) fn begin(
         path: &Path,
         request: &v1::FsWriteBegin,
@@ -399,15 +417,7 @@ mod unix {
                 ))
             }
         };
-        let stage_name = format!(".opengeni-write-{}", uuid::Uuid::new_v4());
-        fs::mkdirat(&parent, stage_name.as_str(), Mode::from_raw_mode(0o700)).map_err(io)?;
-        let stage_dir = match open_dir(&parent, std::ffi::OsStr::new(&stage_name), false) {
-            Ok(dir) => dir,
-            Err(error) => {
-                let _ = fs::unlinkat(&parent, stage_name.as_str(), AtFlags::REMOVEDIR);
-                return Err(error);
-            }
-        };
+        let (stage_name, stage_dir) = private_stage_dir(&parent)?;
         let mode = if request.mode == 0 {
             0o666
         } else {
@@ -903,6 +913,26 @@ mod tests {
         assert!(String::from_utf8(acl.stdout)
             .unwrap()
             .contains("group:everyone deny delete"));
+        assert!(std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn inherited_directory_acl_cannot_expose_private_staging() {
+        let dir = tempdir();
+        assert!(std::process::Command::new("/bin/chmod")
+            .args(["+a", "group:everyone allow list,search,directory_inherit"])
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(begin(&dir.path().join("document"), &request(b"private", None)).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
         assert!(std::process::Command::new("/bin/chmod")
             .arg("-N")
             .arg(dir.path())
