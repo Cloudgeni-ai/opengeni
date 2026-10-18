@@ -69,6 +69,7 @@ import {
   assertAgentBrowserSocketPath,
   browserProfileCryptoPolicy,
   reapManagedBrowserProcesses,
+  reapOrphanedAgentBrowserDaemons,
   inspectOwnedManagedBrowserProcess,
   stopEndedManagedBrowserProcess,
   assertManagedBrowserProfileUnused,
@@ -574,6 +575,9 @@ export class BrowserSupervisor {
           throw error;
         }
       });
+      // Daemons whose browser is gone serve nothing and never exit on their
+      // own. Startup must not fail because one of them could not be stopped.
+      await reapOrphanedAgentBrowserDaemons(supervisor.rootDirectory).catch(() => 0);
     }
     return supervisor;
   }
@@ -2929,6 +2933,17 @@ async function createBrowserDriver(
       : {}),
     ...(context.launchEnvironment ? { environment: context.launchEnvironment } : {}),
     ...(binary ? { binary } : {}),
+  }).catch((error: unknown) => {
+    // Recovery proves the previous browser's state before reattaching or
+    // relaunching. A proof that cannot be completed is a definite refusal
+    // with the browser's state preserved, not an internal failure.
+    if (
+      context.recoverOwnedProcess &&
+      error instanceof AgentBrowserCommandError &&
+      error.code === "process_failed"
+    )
+      throw workingRuntimeUnavailable("process_state_unknown");
+    throw error;
   });
   return new AgentBrowserDriver({
     browserSessionId: context.browserSessionId,
