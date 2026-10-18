@@ -654,8 +654,12 @@ reservation boundary. Platform scopes pass existing guards to blocking actions,
 PTY child cleanup, job descendants and relay pumps; generation tasks own only
 waiters. Reply bytes and their receipt enter the transport as one command;
 blocked writes retain the receipt, and losing that connection fails it before
-reconnect. Replies settle on their original transport, and unproved cleanup or
-publication keeps updates unavailable. The attached-browser bridge reserves
+reconnect. Replies settle on their original transport; expired or failed delivery
+does not itself mean native work remains. Each physical producer retains its own
+reservation until completion. Failed setup, cancellation and panic transfer owned
+process handles to cleanup; its handover exemption is revoked. Cleanup faults are
+producer-scoped and redeemable only by positive completion, never by a global
+reset or a dropped guard. The attached-browser bridge reserves
 before spawn and retains timed-out commands until matching physical results.
 The private controller update transaction fences new HTTP requests, including
 queued JSON, before the host atomically seals final admission. Operation-result

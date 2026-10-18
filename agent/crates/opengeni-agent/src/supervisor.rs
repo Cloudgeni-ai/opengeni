@@ -204,6 +204,7 @@ fn adopt_ops<P: Platform>(
     engine: &Arc<Engine>,
     platform: &P,
     lanes: &std::sync::Mutex<FrameLanes>,
+    update_drain: &Arc<UpdateDrain>,
     ops: Vec<crate::engine::HandedOverOp>,
 ) {
     for op in ops {
@@ -224,21 +225,32 @@ fn adopt_ops<P: Platform>(
             crate::ops::completion_publisher(Some(completion_sink), op.tag.request_id.clone());
         let sink = bulk_frame_sink(lane, op.tag.subject.clone(), engine.clone());
         let emit = crate::ops::frame_publisher(sink, op.tag.request_id.clone());
-        let child = match op.job.exec.as_ref() {
-            None => Ok(None),
-            Some(exec) => platform
-                .adopt_exec(exec)
-                .map(Some)
-                .map_err(|error| format!("could not adopt the command's process: {error}")),
-        };
-        info!(op = %op.tag.request_id, running = op.job.exec.is_some(), "continuing a handed-over command");
-        engine.adopt_job(
-            op,
-            child,
-            emit,
-            |exit| crate::ops::wire_exit(exit).encode_to_vec(),
-            on_exit,
-        );
+        let reservation = update_drain.reserve_adopted_work();
+        if let Some(reservation) = &reservation {
+            reservation.describe(format!("adopted exec request {}", op.tag.request_id));
+        }
+        opengeni_agent_platform::with_work_reservation_sync(reservation, || {
+            let child = match op.job.exec.as_ref() {
+                None => Ok(None),
+                Some(exec) => platform.adopt_exec(exec).map(Some).map_err(|error| {
+                    // A failed native-handle claim is not physical exit proof.
+                    // Do not erase that uncertainty when the typed job fails.
+                    if let Some(reservation) = opengeni_agent_platform::current_work_reservation() {
+                        reservation
+                            .mark_unsettled(format!("native process adoption failed: {error}"));
+                    }
+                    format!("could not adopt the command's process: {error}")
+                }),
+            };
+            info!(op = %op.tag.request_id, running = op.job.exec.is_some(), "continuing a handed-over command");
+            engine.adopt_job(
+                op,
+                child,
+                emit,
+                |exit| crate::ops::wire_exit(exit).encode_to_vec(),
+                on_exit,
+            );
+        });
     }
 }
 
@@ -784,7 +796,13 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// running: their frames flow once their links connect.
     #[cfg(unix)]
     pub fn adopt_handed_over(&self, platform: &P, ops: Vec<crate::engine::HandedOverOp>) {
-        adopt_ops(&self.engine, platform, &self.frame_lanes, ops);
+        adopt_ops(
+            &self.engine,
+            platform,
+            &self.frame_lanes,
+            &self.update_drain,
+            ops,
+        );
     }
 
     /// A handle that, when [`request`](ShutdownSignal::request)ed, drives a clean
@@ -1415,6 +1433,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 .await;
                 return;
             };
+            reservation.describe(format!("{label} request {request_id}"));
             Some(reservation)
         } else {
             None
@@ -1624,7 +1643,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 publish_response(
                     client,
                     reply,
-                    update_error_response(request_id, "update_state_unavailable", true),
+                    update_unavailable_response(request_id, &self.update_drain),
                     "agent_update_apply",
                     max_payload,
                 )
@@ -1724,7 +1743,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         return;
                     }
                     UpdateReservation::Busy => Some("update_busy_work"),
-                    UpdateReservation::Unavailable => Some("update_state_unavailable"),
+                    UpdateReservation::Unavailable => Some(update_drain.unavailable_code()),
                 };
                 if busy_code.is_none() {
                     if let Some(backend) = browser_control.as_ref() {
@@ -1758,8 +1777,9 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // retains its exact owner for ordinary scoped recovery.
                 update_drain.release_update(&update.operation_id);
                 if update_drain.snapshot().is_none() {
-                    // Lost physical settlement never becomes provable again in
-                    // this process; waiting would only hide the failure.
+                    // Retain the exact cleanup fault; its owner may recover it.
+                    // Report it now rather than hiding it behind indefinite idle.
+                    warn!(reason = ?update_drain.unavailable_reason(), "self-update could not confirm producer cleanup");
                     update_drain.finish_update(&update.operation_id);
                     publish_agent_update_progress(
                         &client,
@@ -1768,7 +1788,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         &update,
                         v1::AgentUpdateStage::Failed,
                         "",
-                        "update_state_unavailable",
+                        update_drain.unavailable_code(),
                         true,
                         false,
                     )
@@ -1834,6 +1854,8 @@ impl<P: Platform + 'static> Supervisor<P> {
                         adoption_platform.as_ref(),
                         &frame_lanes,
                         &from_version,
+                        &update_drain,
+                        &update.operation_id,
                     )
                     .await
                     {
@@ -2451,6 +2473,17 @@ fn credential_renew_response(
     }
 }
 
+fn update_unavailable_response(request_id: String, drain: &UpdateDrain) -> v1::ControlResponse {
+    let mut response = update_error_response(request_id, drain.unavailable_code(), true);
+    if let Some(reason) = drain.unavailable_reason() {
+        warn!(%reason, "self-update admission unavailable");
+        let error = response.error.as_mut().expect("update error response");
+        error.message.clone_from(&reason);
+        error.detail.insert("cleanup_reason".into(), reason);
+    }
+    response
+}
+
 fn update_error_response(
     request_id: String,
     failure_code: &str,
@@ -2621,12 +2654,11 @@ async fn publish_response(
     if let Some(receipt) = crate::rpc_replay::current() {
         receipt.complete(payload, reservation);
         receipt.deliver(client, reply).await;
-    } else if let Some(reservation) = reservation {
+    } else if let Some(_reservation) = reservation {
         // Attach the reply's receipt to its actual publication command. A
         // reconnect must fail that receipt rather than redeem it on a socket
         // that never wrote the old reply. This is not a consumer storage ACK.
         if let Err(flush_error) = client.publish_with_flush(reply, payload.into()).await {
-            reservation.mark_unsettled();
             warn!(error = %flush_error, op = label, "control rpc reply transport did not settle");
         }
     } else {
@@ -2748,13 +2780,15 @@ async fn hand_over_for_update<P: Platform>(
     platform: &P,
     lanes: &std::sync::Mutex<FrameLanes>,
     from_version: &str,
+    update_drain: &Arc<UpdateDrain>,
+    operation_id: &str,
 ) -> Result<(), &'static str> {
     let deadline = Instant::now() + HANDOVER_ATTEMPTS;
     let ops = loop {
         match engine.handover_all().await {
             Ok(ops) => break ops,
             Err(partial) => {
-                adopt_ops(engine, platform, lanes, partial);
+                adopt_ops(engine, platform, lanes, update_drain, partial);
                 if Instant::now() >= deadline {
                     warn!(
                         "running commands could not be handed to the updated agent; not restarting"
@@ -2765,6 +2799,24 @@ async fn hand_over_for_update<P: Platform>(
             }
         }
     };
+    // A carried job may have ended or failed while the binary downloaded.
+    // Its cleanup is not transferable. After every job surrendered its native
+    // handles, prove the remaining producers settled before committing to exec.
+    while !update_drain.seal_update_with_handover(operation_id) {
+        let code = if update_drain.snapshot().is_none() {
+            Some(update_drain.unavailable_code())
+        } else if Instant::now() >= deadline {
+            Some("update_handover_failed")
+        } else {
+            None
+        };
+        if let Some(code) = code {
+            warn!(reason = ?update_drain.unavailable_reason(), "producer cleanup prevented final update handover");
+            adopt_ops(engine, platform, lanes, update_drain, ops);
+            return Err(code);
+        }
+        tokio::time::sleep(HANDOVER_RETRY).await;
+    }
     let manifest = crate::handover::HandoverManifest {
         nonce: uuid::Uuid::new_v4().to_string(),
         from_version: from_version.to_string(),
@@ -2773,7 +2825,7 @@ async fn hand_over_for_update<P: Platform>(
     };
     if let Err(error) = crate::handover::write_manifest(&handover.manifest, &manifest) {
         warn!(%error, "could not record the update handover; commands keep running here");
-        adopt_ops(engine, platform, lanes, manifest.ops);
+        adopt_ops(engine, platform, lanes, update_drain, manifest.ops);
         return Err("update_handover_failed");
     }
     info!(
@@ -2807,7 +2859,7 @@ fn update_busy_code(
         (0, 0)
     };
     match pending {
-        None => Some("update_state_unavailable"),
+        None => Some(update_drain.unavailable_code()),
         Some(pending) if pending.uploads > 0 => Some("update_busy_uploads"),
         Some(pending)
             if pending.routed > if handover { pending.handover } else { 0 }
@@ -2826,6 +2878,23 @@ fn update_busy_code(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn update_cleanup_failure_names_the_producer_and_recovery() {
+        let drain = std::sync::Arc::new(UpdateDrain::default());
+        let work = drain.reserve_work(None).unwrap();
+        work.describe("exec request synthetic-request".into());
+        let failure = work.mark_unsettled("process group 42: wait failed");
+        let response = update_unavailable_response("update-request".into(), &drain);
+        let error = response.error.unwrap();
+        assert_eq!(error.detail["failure_code"], "update_cleanup_unconfirmed");
+        assert!(error.message.contains("synthetic-request"));
+        assert!(error.message.contains("process group 42"));
+        assert!(error.message.contains("restart the agent service"));
+        assert_eq!(error.detail["cleanup_reason"], error.message);
+        failure.resolve();
+        assert!(drain.unavailable_reason().is_none());
+    }
+
     #[tokio::test]
     async fn either_rpc_subscription_ending_ends_the_generation() {
         let mut messages = rpc_messages(futures::stream::empty(), futures::stream::pending());
@@ -5693,6 +5762,63 @@ mod tests {
         (Arc::new(supervisor), platform)
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_handover_rechecks_cleanup_after_the_initial_seal() {
+        let directory = tempfile::tempdir().unwrap();
+        let (supervisor, platform) = handover_test_supervisor(
+            directory.path(),
+            "nats://127.0.0.1:1",
+            TEST_CONNECTION_INSTANCE_ID,
+        );
+        let work = supervisor.update_drain.reserve_work(None).unwrap();
+        work.mark_handover();
+        assert_eq!(
+            supervisor.update_drain.reserve_update("update"),
+            UpdateReservation::Started
+        );
+        assert!(supervisor.update_drain.seal_update_with_handover("update"));
+        work.require_settlement();
+        let failure = work.mark_unsettled("synthetic cleanup during download");
+        let handover = supervisor.handover.as_ref().unwrap();
+        assert_eq!(
+            hand_over_for_update(
+                &supervisor.engine,
+                handover,
+                platform.as_ref(),
+                &supervisor.frame_lanes,
+                "test-0.0.0",
+                &supervisor.update_drain,
+                "update",
+            )
+            .await,
+            Err("update_cleanup_unconfirmed")
+        );
+        assert!(!directory.path().join("handover.json").exists());
+        assert!(!handover.is_pending());
+        failure.resolve();
+        let retry = hand_over_for_update(
+            &supervisor.engine,
+            handover,
+            platform.as_ref(),
+            &supervisor.frame_lanes,
+            "test-0.0.0",
+            &supervisor.update_drain,
+            "update",
+        );
+        tokio::pin!(retry);
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut retry)
+            .await
+            .is_err());
+        assert!(!handover.is_pending());
+        drop(work);
+        tokio::time::timeout(Duration::from_secs(5), retry)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(handover.is_pending());
+    }
+
     /// The agent side of [`a_running_command_continues_across_an_in_place_exec`]:
     /// the predecessor serves, hands its running command over, and `exec`s
     /// this same test binary as its successor, which continues it. A no-op in
@@ -5729,6 +5855,15 @@ mod tests {
             if let Some(manifest) = inherited {
                 assert_eq!(manifest.ops.len(), 1, "one running command handed over");
                 supervisor.adopt_handed_over(&platform, manifest.ops);
+                let owned = supervisor.update_drain.snapshot().unwrap();
+                assert_eq!(
+                    owned.routed, 1,
+                    "the adopted command owns a drain reservation"
+                );
+                assert_eq!(
+                    owned.handover, 1,
+                    "the adopted running command remains transferable"
+                );
                 std::fs::write(
                     directory.join("successor-online"),
                     std::process::id().to_string(),
@@ -5741,12 +5876,18 @@ mod tests {
                 while !directory.join("hand-over-now").exists() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
+                assert_eq!(
+                    supervisor.update_drain.reserve_update("fixture-update"),
+                    UpdateReservation::Started
+                );
                 hand_over_for_update(
                     &supervisor.engine,
                     supervisor.handover.as_ref().unwrap(),
                     platform.as_ref(),
                     &supervisor.frame_lanes,
                     "test-0.0.0",
+                    &supervisor.update_drain,
+                    "fixture-update",
                 )
                 .await
                 .expect("running command handed over");

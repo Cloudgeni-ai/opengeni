@@ -926,7 +926,7 @@ impl OpCgroupHandle {
                 tracing::warn!(
                     dir = %dir.display(),
                     %error,
-                    "failed to remove a runner-owned operation cgroup; scheduling one cancellation-safe retry"
+                    "failed to remove a runner-owned operation cgroup; retaining cancellation-safe cleanup"
                 );
                 // Keep ownership in `self`: Drop hands it to a runtime task so a
                 // transient post-reap kernel race does not permanently leak the
@@ -954,10 +954,11 @@ impl Drop for OpCgroupHandle {
         }
         let cpu_lease = self.cpu_lease.take();
         let reservation = self.reservation.take();
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("operation cgroup {}", dir.display()),
+        );
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            if let Some(reservation) = &reservation {
-                reservation.mark_unsettled();
-            }
             tracing::warn!(
                 dir = %dir.display(),
                 "cannot schedule operation-cgroup cleanup outside the agent runtime"
@@ -972,21 +973,20 @@ impl Drop for OpCgroupHandle {
         runtime.spawn(crate::with_work_reservation(
             reservation.clone(),
             async move {
-                if let Err(error) = remove_op_cgroup(&dir).await {
-                    if let Some(reservation) = &reservation {
-                        reservation.mark_unsettled();
+                let mut witness = witness;
+                loop {
+                    match remove_op_cgroup(&dir).await {
+                        Ok(()) => {
+                            witness.settle();
+                            break;
+                        }
+                        Err(error) => witness.failed(&error),
                     }
-                    tracing::warn!(
-                        dir = %dir.display(),
-                        %error,
-                        "failed to remove a runner-owned operation cgroup after task cancellation"
-                    );
-                    if let Some(lease) = cpu_lease {
-                        std::mem::forget(lease);
-                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
                 // On success, dropping `cpu_lease` after removal may disable +cpu
                 // when this was the final limited operation.
+                drop(cpu_lease);
             },
         ));
     }

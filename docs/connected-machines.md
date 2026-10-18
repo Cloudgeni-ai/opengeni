@@ -558,9 +558,15 @@ Every failure is fail-closed: a command that cannot be continued ends as a
 typed failure, and if the successor never starts, the command's anchor ends it
 as for a crashed runner. Other admitted work, such as a request still being
 answered, a git operation or a pending upload, still makes the update wait,
-and Windows keeps waiting for every command. Only lost physical settlement, which can never
-become provable in that process, ends the update with retryable
-`update_state_unavailable`. A browser controller that crashed, was killed or
+and Windows keeps waiting for every command. Command spawn failures, cancellation
+and panicking waiters retain their actual cleanup owner until exit is proved;
+they do not permanently disable self-update. A transient cleanup error is scoped
+to its exact producer and clears only when that producer obtains completion
+evidence. While that evidence is unavailable, the update reports retryable
+`update_cleanup_unconfirmed`; the response and agent log identify the producer
+and explain recovery. If the cleanup owner itself was lost, finish active commands
+and restart the agent service before retrying. An unreadable admission boundary
+still reports `update_state_unavailable`. A browser controller that crashed, was killed or
 stopped uncleanly is not lost settlement on Linux and macOS: it runs as the
 leader of its own process group, so the update waits (busy) only until nothing
 remains in that group. The browsers it launched run in their own sessions and
@@ -1016,8 +1022,19 @@ command. Success requires empty internal buffers and a flush of that stream;
 losing the stream fails its attached receipt before reconnect. A replacement
 socket cannot prove that the previous reply was sent.
 Controller admission is fenced atomically during its idle proof; failed or
-deferred updates release only their own fence. Missing settlement makes updates
-unavailable for the running process while ordinary work remains usable. Older
+deferred updates release only their own fence. Missing physical settlement makes
+updates unavailable while ordinary work remains usable. Failures are retained per
+producer, never cleared globally or merely by dropping a reservation. Native exec
+and PTY cleanup keep owned handles and retry failed exit observations; a positive
+exit clears only that cleanup's failure. Cleanup cannot inherit a running job's
+handover exemption. Successor startup and rollback restore each adopted command's
+reservation as well as its native handles. After handing over running jobs, the updater rechecks cleanup
+before recording its restart manifest, including failures during the download.
+A panicking worker releases its own reservation only after
+unwinding; independently owned native resources still retain theirs. Lost reply
+delivery is logged, not mistaken for still-running native work. Retained RPC
+replies hold their reservation through delivery or expiry; expiry still rejects
+the original request and does not permit replay or release a live producer. Older
 controller builds without the update-admission transaction cannot authorize
 replacement from an unfenced idle snapshot. A lost fence-release reply retains
 its exact operation owner; ordinary scoped recovery retries only that release
@@ -1025,10 +1042,8 @@ after host update admission has reopened. Failed helper/factory cleanup and
 forced or nonzero helper termination remain unsettled even after the original
 owner leaves active inventory. Helper EOF joins persistent capture producers;
 missing ScreenCaptureKit stop completion cannot become a successful shutdown.
-The current Windows command-group dependency cannot prove full-job
-exit; commands keep their ordinary results, but accepting a command fences
-subsequent self-update for that process. A positive same-job exit proof is
-required before normal Windows update eligibility can be restored. Unexpected
+Windows cleanup retains the same Job Object until its active process count is
+zero; signaling it alone is not completion. Unexpected
 controller exit and forced controller termination likewise preserve uncertainty
 after the old controller is removed from the active inventory. They cannot be
 made update-eligible by reconnecting or replacing the controller.
