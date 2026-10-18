@@ -98,7 +98,7 @@ pub struct RelayHub {
     /// Idempotent terminal scopes → their live PTY/channel. The value is removed
     /// when the PTY pump exits. A scope is supplied by the control plane's durable
     /// Opengeni session identity; explicit unscoped `pty_open` remains create-new.
-    pty_scopes: Arc<Mutex<HashMap<String, PtyOpenResponse>>>,
+    pty_scopes: Arc<Mutex<HashMap<String, ScopedPty>>>,
     /// Per-scope singleflight locks. Weak values make the lock table self-pruning:
     /// it does not retain one allocation for every historical session forever.
     pty_scope_locks: Arc<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
@@ -107,6 +107,28 @@ pub struct RelayHub {
     browser_ports: Arc<Mutex<HashSet<u32>>>,
     /// When each open channel last carried traffic.
     activity: StreamActivity,
+}
+
+#[derive(Clone)]
+struct ScopedPty {
+    response: PtyOpenResponse,
+    descriptor: tokio::sync::watch::Receiver<Option<StreamChannel>>,
+}
+
+impl ScopedPty {
+    async fn response(mut self) -> PlatformResult<PtyOpenResponse> {
+        let descriptor = tokio::time::timeout(
+            PUMP_READY_TIMEOUT,
+            self.descriptor.wait_for(Option::is_some),
+        )
+        .await
+        .map_err(|_| PlatformError::stream("terminal relay is reconnecting", true))?
+        .map_err(|_| PlatformError::stream("terminal relay ended during reconnect", true))?;
+        Ok(PtyOpenResponse {
+            pty_id: self.response.pty_id.clone(),
+            channel: descriptor.clone(),
+        })
+    }
 }
 
 impl std::fmt::Debug for RelayHub {
@@ -149,6 +171,7 @@ impl RelayHub {
             agent_id: self.config.agent_id.clone(),
             kind: kind as i32,
             port,
+            relay_route: None,
         }
     }
 
@@ -178,7 +201,7 @@ impl RelayHub {
 
     /// Returns the scoped PTY only while its pump/control sender is still live.
     /// A stale scope entry is removed eagerly so the next ensure can recreate it.
-    fn live_scoped_pty(&self, scope_id: &str) -> Option<PtyOpenResponse> {
+    fn live_scoped_pty(&self, scope_id: &str) -> Option<ScopedPty> {
         let response = self
             .pty_scopes
             .lock()
@@ -188,7 +211,7 @@ impl RelayHub {
             .ptys
             .lock()
             .ok()
-            .and_then(|ptys| ptys.get(&response.pty_id).cloned())
+            .and_then(|ptys| ptys.get(&response.response.pty_id).cloned())
             .is_some_and(|sender| !sender.is_closed());
         if live {
             return Some(response);
@@ -196,7 +219,7 @@ impl RelayHub {
         if let Ok(mut scopes) = self.pty_scopes.lock() {
             if scopes
                 .get(scope_id)
-                .is_some_and(|candidate| candidate.pty_id == response.pty_id)
+                .is_some_and(|candidate| candidate.response.pty_id == response.response.pty_id)
             {
                 scopes.remove(scope_id);
             }
@@ -217,7 +240,7 @@ impl RelayHub {
         let pty_id = descriptor.channel_id.clone();
         let response = PtyOpenResponse {
             pty_id: pty_id.clone(),
-            channel: Some(descriptor),
+            channel: Some(channel.channel().clone()),
         };
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<PtyCommand>(PTY_COMMAND_BUFFER);
@@ -226,7 +249,13 @@ impl RelayHub {
         }
         if let Some(scope_id) = scope_id.as_ref() {
             if let Ok(mut scopes) = self.pty_scopes.lock() {
-                scopes.insert(scope_id.clone(), response.clone());
+                scopes.insert(
+                    scope_id.clone(),
+                    ScopedPty {
+                        response: response.clone(),
+                        descriptor: channel.descriptor_updates(),
+                    },
+                );
             }
         }
 
@@ -249,7 +278,7 @@ impl RelayHub {
             if let (Some(scope_id), Ok(mut scopes)) = (scope_id.as_ref(), self.pty_scopes.lock()) {
                 if scopes
                     .get(scope_id)
-                    .is_some_and(|candidate| candidate.pty_id == pty_id)
+                    .is_some_and(|candidate| candidate.response.pty_id == pty_id)
                 {
                     scopes.remove(scope_id);
                 }
@@ -277,7 +306,7 @@ impl StreamRegistry for RelayHub {
         let lock = self.scope_lock(&req.scope_id);
         let _guard = lock.lock().await;
         if let Some(response) = self.live_scoped_pty(&req.scope_id) {
-            return Ok(response);
+            return response.response().await;
         }
         let process = spawn_pty(req, default_shell)?;
         self.register_pty_scoped(process, Some(req.scope_id.clone()))
@@ -299,6 +328,8 @@ impl StreamRegistry for RelayHub {
         let channel = RelayChannel::register(config)
             .await
             .map_err(stream_to_platform)?;
+
+        let descriptor = channel.channel().clone();
 
         let policy = InputPolicy {
             allow_input: self.config.allow_screen_control,
@@ -341,6 +372,7 @@ impl StreamRegistry for RelayHub {
                 return Err(stream_to_platform(error));
             }
         };
+        let descriptor = channel.channel().clone();
         let (ready_tx, ready_rx) = oneshot::channel();
         let browser_ports = self.browser_ports.clone();
         opengeni_agent_platform::spawn_reserved(async move {
@@ -397,6 +429,7 @@ impl StreamRegistry for RelayHub {
                 return Err(stream_to_platform(error));
             }
         };
+        let descriptor = channel.channel().clone();
         let (ready_tx, ready_rx) = oneshot::channel();
         let browser_ports = self.browser_ports.clone();
         opengeni_agent_platform::spawn_reserved(async move {
@@ -476,7 +509,7 @@ fn spawn_pty_pump(
     pty_id: String,
     scope_id: Option<String>,
     ptys: Arc<Mutex<HashMap<String, PtyControlTx>>>,
-    pty_scopes: Arc<Mutex<HashMap<String, PtyOpenResponse>>>,
+    pty_scopes: Arc<Mutex<HashMap<String, ScopedPty>>>,
     ready: oneshot::Sender<()>,
 ) {
     opengeni_agent_platform::spawn_reserved(async move {
@@ -497,7 +530,7 @@ fn spawn_pty_pump(
         if let (Some(scope_id), Ok(mut scopes)) = (scope_id.as_ref(), pty_scopes.lock()) {
             if scopes
                 .get(scope_id)
-                .is_some_and(|candidate| candidate.pty_id == pty_id)
+                .is_some_and(|candidate| candidate.response.pty_id == pty_id)
             {
                 scopes.remove(scope_id);
             }
@@ -710,14 +743,19 @@ mod tests {
             channel: Some(descriptor),
         };
         let (control, _commands) = mpsc::channel(1);
+        let (current_descriptor, descriptor_updates) =
+            tokio::sync::watch::channel(response.channel.clone());
         hub.ptys
             .lock()
             .expect("ptys")
             .insert(response.pty_id.clone(), control);
-        hub.pty_scopes
-            .lock()
-            .expect("scopes")
-            .insert("session-1".to_string(), response.clone());
+        hub.pty_scopes.lock().expect("scopes").insert(
+            "session-1".to_string(),
+            ScopedPty {
+                response: response.clone(),
+                descriptor: descriptor_updates,
+            },
+        );
 
         // An impossible command proves reuse occurs before spawn/dial. Concurrent
         // capability refreshes must both receive the exact existing descriptor.
@@ -737,5 +775,22 @@ mod tests {
         assert_eq!(first.expect("first reuse"), response);
         assert_eq!(second.expect("second reuse"), response);
         assert_eq!(hub.ptys.lock().expect("ptys").len(), 1);
+        let mut migrated = response.channel.clone().unwrap();
+        migrated.relay_route = Some("new-owner-route".into());
+        current_descriptor.send_replace(Some(migrated.clone()));
+        let refreshed = hub.open_pty(&request, &[]).await.unwrap();
+        assert_eq!(refreshed.pty_id, response.pty_id);
+        assert_eq!(refreshed.channel, Some(migrated));
+        current_descriptor.send_replace(None);
+        let pending_refresh = hub.open_pty(&request, &[]);
+        tokio::pin!(pending_refresh);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut pending_refresh)
+                .await
+                .is_err(),
+            "a refresh must not return the known-dead owner during backoff"
+        );
+        current_descriptor.send_replace(response.channel.clone());
+        assert_eq!(pending_refresh.await.unwrap(), response);
     }
 }

@@ -47,6 +47,8 @@ export type FakeState = {
   /** Number of upcoming commands that report an invalidated session. */
   invalidate?: number;
   logins?: number;
+  /** Ids handed out to upcoming item creates, in order, before random ones. */
+  nextItemIds?: string[];
 };
 
 const statePath = process.env.FAKE_PASS_STATE!;
@@ -286,7 +288,6 @@ if (command === "item" && sub === "create") {
     fail("Error parsing JSON from stdin", "expected value at line 1 column 1");
   }
   if (role === "Viewer") fail(context, "Could not perform operation. Reason: PermissionDenied");
-  const id = randomBytes(12).toString("base64url");
   const now = civilNow();
   let content: unknown;
   let note = "";
@@ -337,6 +338,7 @@ if (command === "item" && sub === "create") {
   } else {
     fail(`unsupported fake create ${kind}`);
   }
+  const id = state.nextItemIds?.shift() ?? randomBytes(12).toString("base64url");
   (state.items[shareId] ??= []).push({
     id,
     share_id: shareId,

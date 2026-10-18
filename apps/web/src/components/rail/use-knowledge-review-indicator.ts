@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 
 const REVIEW_UPDATED = "opengeni:knowledge-review-updated";
 export function notifyKnowledgeReviewUpdated() {
@@ -8,10 +9,16 @@ export function notifyKnowledgeReviewUpdated() {
 
 /** Bounded existence query: no knowledge text or exhaustive count in navigation. */
 export function useKnowledgeReviewIndicator(workspaceId: string, enabled = true) {
-  const { client } = useAppContext();
-  const [result, setResult] = useState<{ workspaceId: string; pending: boolean } | null>(null);
+  const { client, accessContext } = useAppContext();
+  const canReview =
+    enabled &&
+    hasWorkspacePermission(accessContext, workspaceId, "documents:search") &&
+    hasWorkspacePermission(accessContext, workspaceId, "documents:manage");
+  const identity = `${accessContext?.subjectId}:${workspaceId}`;
+  const [result, setResult] = useState<{ identity: string; pending: boolean } | null>(null);
   useEffect(() => {
-    if (!enabled) return;
+    setResult(null);
+    if (!canReview) return;
     let current = true;
     let generation = 0;
     const refresh = () => {
@@ -21,7 +28,7 @@ export function useKnowledgeReviewIndicator(workspaceId: string, enabled = true)
         .listKnowledgeEntries(workspaceId, { view: "needs_review", limit: 1 })
         .then((page) => {
           if (current && request === generation) {
-            setResult({ workspaceId, pending: page.entries.length > 0 });
+            setResult({ identity, pending: page.entries.length > 0 });
           }
         })
         .catch(() => {
@@ -40,6 +47,6 @@ export function useKnowledgeReviewIndicator(workspaceId: string, enabled = true)
       window.removeEventListener(REVIEW_UPDATED, refresh);
       document.removeEventListener("visibilitychange", refresh);
     };
-  }, [client, workspaceId, enabled]);
-  return result?.workspaceId === workspaceId && result.pending;
+  }, [client, workspaceId, canReview, identity]);
+  return canReview && result?.identity === identity && result.pending;
 }

@@ -21,6 +21,12 @@ pub struct RelayConfig {
     #[arg(long, env = "OPENGENI_RELAY_BIND", default_value = "0.0.0.0:8443")]
     pub bind: String,
 
+    /// This replica's private IP, reachable by the other relays. The public
+    /// listener's bound port is used. The chart sets this from the pod IP.
+    /// Unset keeps standalone operation without routing hints.
+    #[arg(long, env = "OPENGENI_RELAY_ADVERTISE_IP")]
+    pub advertise_ip: Option<std::net::IpAddr>,
+
     /// An optional dedicated internal `host:port` for the Prometheus exposition.
     /// When set, `GET /metrics` is served ONLY on this listener and never on
     /// [`bind`](Self::bind), so an ingress that forwards every path of the public
@@ -101,6 +107,7 @@ impl RelayConfig {
     pub fn for_test(secret: &str) -> Self {
         Self {
             bind: "127.0.0.1:0".to_string(),
+            advertise_ip: None,
             metrics_bind: None,
             stream_token_secret: secret.to_string(),
             relay_token_secret: secret.to_string(),

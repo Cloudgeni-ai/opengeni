@@ -25,6 +25,13 @@ const PREEMPTED = "opengeniPreempted";
 const CUT_OFF_TEXT = "opengeniCutOffText";
 /** Bound on the cut-off text a preempted response reports for display. */
 const CUT_OFF_TEXT_MAX_CHARS = 16_000;
+/**
+ * How long a preempted request may take to end on its own. A transport that
+ * honours the abort ends at once with its completed messages; one that does
+ * not (or is stalled between events) is cut when this runs out.
+ */
+export const PREEMPTION_GRACE_MS = 200;
+const PREEMPTION_DEADLINE = Symbol("preemption deadline");
 
 type ResponseDone = Extract<StreamEvent, { type: "response_done" }>;
 type OutputItem = ResponseDone["response"]["output"][number];
@@ -180,8 +187,34 @@ export async function* streamWithPreemption(
     if (text) done.response.providerData = { ...done.response.providerData, [CUT_OFF_TEXT]: text };
     return done;
   };
+  // A preemption ends the request within the grace period even when the
+  // transport ignores its abort signal: each read is raced against a deadline
+  // that starts when the Steer arrives.
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<typeof PREEMPTION_DEADLINE>((resolve) => {
+    const arm = () => {
+      deadlineTimer = setTimeout(() => resolve(PREEMPTION_DEADLINE), PREEMPTION_GRACE_MS);
+    };
+    controller.signal.addEventListener("abort", arm, { once: true });
+  });
+  const iterator = open({ ...request, signal })[Symbol.asyncIterator]();
+  let exhausted = false;
   try {
-    for await (const event of open({ ...request, signal })) {
+    for (;;) {
+      const pending = iterator.next();
+      const next = terminal ? await pending : await Promise.race([pending, deadline]);
+      if (next === PREEMPTION_DEADLINE) {
+        // The abandoned read may still settle; it must not surface later.
+        pending.catch(() => undefined);
+        if (request.signal?.aborted) throw request.signal.reason;
+        yield finish(preemptedResponseDone({}));
+        return;
+      }
+      if (next.done) {
+        exhausted = true;
+        break;
+      }
+      const event = next.value;
       if (event.type === "output_text_delta") {
         if (event.itemId)
           streamed.set(event.itemId, (streamed.get(event.itemId) ?? "") + event.delta);
@@ -201,6 +234,10 @@ export async function* streamWithPreemption(
     if (terminal || !controller.signal.aborted || request.signal?.aborted) throw error;
     yield finish(preemptedResponseDone({}));
   } finally {
+    clearTimeout(deadlineTimer);
     preemption.removeEventListener("abort", cut);
+    // Close the transport stream when this ends early (a cut, a failure, or a
+    // consumer that stops reading); never wait on a transport that hangs.
+    if (!exhausted) void iterator.return?.()?.catch(() => undefined);
   }
 }

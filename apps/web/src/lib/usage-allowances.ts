@@ -20,6 +20,7 @@ export function formatBudget(micros: number): string {
     return new Intl.NumberFormat(undefined, {
       style: "currency",
       currency: "USD",
+      currencyDisplay: "narrowSymbol",
       maximumFractionDigits: 0,
     }).format(micros / MICROS_PER_DOLLAR);
   }

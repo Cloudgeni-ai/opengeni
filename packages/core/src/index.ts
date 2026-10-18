@@ -54,6 +54,7 @@ export * from "./product-usage-metrics";
 // structural TYPES live here.
 export * from "./sandbox-types";
 export * from "./managed-auth-type";
+export { siteMayAccessSession, withConsoleSiteSessionAccess } from "./site-session-access";
 export {
   getManagedAuthRequestActorAbortSignal,
   getManagedAuthRequestActorAdmissionStamp,

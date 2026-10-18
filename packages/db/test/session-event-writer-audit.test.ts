@@ -343,6 +343,13 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // A Steer that waited for the next model step replaces an ownerless wait
+  // (approval, question or capacity) right after the worker settles it.
+  "packages/db/src/session-queue-commands.ts#resolveWaitingSteerInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/session-queue-commands.ts#submitHumanPromptInTransaction": {
     inserts: 1,
     contract: "canonical",
@@ -402,6 +409,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
     "recoverSessionOwner",
   ],
   supersedeSessionCurrentDirectionInTransaction: [
+    "resolveWaitingSteerInTransaction",
     "steerAgentSessionInTransaction",
     "steerQueuedTurnInTransaction",
     "submitHumanPromptInTransaction",

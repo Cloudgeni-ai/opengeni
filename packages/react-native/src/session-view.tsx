@@ -1,4 +1,4 @@
-import { useOpenGeniText } from "@opengeni/react/messages";
+import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -149,7 +149,16 @@ export interface OpenGeniNativeSessionViewProps {
   testID?: string | undefined;
 }
 
-export function OpenGeniNativeSessionView({
+/** One Send (`busySend: "steer"` without `offerQueue`) reads as waiting messages, with no Steer. */
+export function OpenGeniNativeSessionView(props: OpenGeniNativeSessionViewProps) {
+  return (
+    <SingleSendWording enabled={props.controller.composer.singleSend === true}>
+      <NativeSessionViewBody {...props} />
+    </SingleSendWording>
+  );
+}
+
+function NativeSessionViewBody({
   controller,
   theme = DEFAULT_OPENGENI_NATIVE_THEME,
   labels: labelOverrides,
@@ -1331,14 +1340,16 @@ function QueueSurface({
                   variant="quiet"
                   disabled={controller.composer.hasDraftContent() || controller.queue.mutating}
                 />
-                <ActionButton
-                  compact
-                  label={labels.runNext}
-                  onPress={() => void controller.queue.steerTurn(turn.id)}
-                  theme={theme}
-                  variant="quiet"
-                  disabled={controller.queue.mutating}
-                />
+                {controller.composer.singleSend ? null : (
+                  <ActionButton
+                    compact
+                    label={labels.runNext}
+                    onPress={() => void controller.queue.steerTurn(turn.id)}
+                    theme={theme}
+                    variant="quiet"
+                    disabled={controller.queue.mutating}
+                  />
+                )}
                 <ActionButton
                   compact
                   label={labels.remove}

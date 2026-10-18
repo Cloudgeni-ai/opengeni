@@ -1366,6 +1366,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "DELETE /v1/workspaces/:workspaceId/vault-providers/connections/:connectionId",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/vault-providers/connections/:connectionId",
@@ -4831,6 +4838,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "listSiteSessionAccess",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "listSlackInstallationBindings",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/slack-bot/bindings",
@@ -6116,6 +6130,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "UpsertSitePublicationRequest"
     ],
+    "response": []
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
+    "request": [],
     "response": []
   },
   {

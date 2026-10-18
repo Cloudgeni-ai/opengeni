@@ -389,7 +389,6 @@ function ActiveAgentCall(
           <CallScreen
             call={call}
             title={title}
-            subtitle={voice.label}
             labels={messages.call}
             onMinimize={call.error ? onFinished : props.onMinimize}
           />,
@@ -419,7 +418,6 @@ function ActiveAgentCall(
 function CallScreen(props: {
   call: ReturnType<typeof useNativeRealtimeCall>;
   title: string;
-  subtitle: string;
   labels: Partial<OpenGeniNativeCallLabels>;
   onMinimize(): void;
 }) {
@@ -437,7 +435,6 @@ function CallScreen(props: {
       <OpenGeniNativeCallView
         call={props.call}
         title={props.title}
-        subtitle={props.subtitle}
         labels={props.labels}
         onMinimize={props.onMinimize}
       />

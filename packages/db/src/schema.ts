@@ -289,6 +289,33 @@ export const workspaceArtifacts = pgTable(
   }),
 );
 
+export const siteSessionAccess = pgTable(
+  "site_session_access",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    ownerSubjectId: text("owner_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.siteId, table.sessionId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+  ],
+);
+
 export const workspaceArtifactUploads = pgTable(
   "workspace_artifact_uploads",
   {
@@ -10370,10 +10397,10 @@ export const sandboxLeases = pgTable(
       enum: ["provider_deadline", "operator", "teardown_claim"],
     }),
     // A chat or workspace deletion ended this compute lease's group: its
-    // sandbox is deleted without a workspace capture (0845).
+    // sandbox is deleted without a workspace capture (0847).
     groupEndRequestedAt: timestamp("group_end_requested_at", { withTimezone: true }),
     // The agent gateway reported the current compute sandbox asleep since then;
-    // warm time does not accrue while it sleeps (0845).
+    // warm time does not accrue while it sleeps (0847).
     computeAsleepSince: timestamp("compute_asleep_since", { withTimezone: true }),
     // The SQL migration owns the two DEFERRABLE foreign keys and deferred
     // scope/state constraint triggers. Drizzle does not model deferrability, so
@@ -11630,7 +11657,7 @@ export const enrollments = pgTable(
     originWorkspaceId: uuid("origin_workspace_id"),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
     // 'machine' is a Connected Machine. 'sandbox' is the agent inside one
-    // Opengeni compute sandbox (migration 0842): bound to its sandbox group,
+    // Opengeni compute sandbox (migration 0844): bound to its sandbox group,
     // reached through the agent gateway, with no key or bearer, and never
     // listed, offered, attached or granted as a machine.
     kind: text("kind", { enum: enrollmentKindValues }).notNull().default("machine"),

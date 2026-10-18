@@ -4,6 +4,7 @@ import {
   SESSION_SEQUENCE_HEADER,
 } from "./session-sequence";
 import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+import type { WorkspaceBackgroundCommandListResponse } from "./types";
 import type {
   InsightsSiteUsageQuery,
   InsightsSiteUsageResponse,
@@ -780,6 +781,7 @@ import {
 } from "./types";
 
 function sessionListQuery(options: {
+  siteAccessId?: string;
   originSiteId?: string;
   limit?: number;
   parentSessionId?: string | null;
@@ -788,6 +790,7 @@ function sessionListQuery(options: {
   const { limit, parentSessionId, scopeSubjectId } = options;
   const query: Record<string, string> = {};
   if (options.originSiteId) query.originSiteId = options.originSiteId;
+  if (options.siteAccessId) query.siteAccessId = options.siteAccessId;
   if (limit !== undefined) query.limit = String(limit);
   if (parentSessionId !== undefined) query.parentSessionId = parentSessionId ?? "null";
   if (scopeSubjectId !== undefined) query.scopeSubjectId = scopeSubjectId;
@@ -795,6 +798,8 @@ function sessionListQuery(options: {
 }
 
 export type SessionListPageOptions = {
+  /** Chats available to this viewer in a private console Site; "current" inside its frame. */
+  siteAccessId?: string;
   /** Complete content-free totals for an authorized root page. */
   includeTotals?: boolean;
   /** Filter attention rows before pagination. */
@@ -839,6 +844,7 @@ export type SessionListPageOptions = {
 };
 
 const SESSION_PAGE_FILTER_KEYS = [
+  "siteAccessId",
   "originSiteId",
   "channelId",
   "createdBy",
@@ -1890,6 +1896,25 @@ export class OpenGeniClient {
     );
   }
 
+  /** @internal Console-only workspace projection; cancellation uses the ordinary session path. */
+  async listWorkspaceBackgroundCommands(
+    workspaceId: string,
+    options: OpenGeniRequestOptions & { cursor?: string } = {},
+  ): Promise<WorkspaceBackgroundCommandListResponse> {
+    const response = await this.requestJson<WorkspaceBackgroundCommandListResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
+      undefined,
+      { view: "running_commands", ...(options.cursor ? { cursor: options.cursor } : {}) },
+      options,
+    );
+    // An older server ignores the view and returns ordinary sessions. Never
+    // present that incompatible response as a plausible empty command list.
+    if (!response || !Array.isArray(response.commands) || !("nextCursor" in response))
+      throw new Error("This server does not support the workspace running commands view.");
+    return response;
+  }
+
   async cancelSessionBackgroundCommand(
     workspaceId: string,
     sessionId: string,
@@ -2033,7 +2058,36 @@ export class OpenGeniClient {
     ) {
       throw unsupportedSessionPage("Site-filtered session lists");
     }
+    if (
+      options.siteAccessId &&
+      (!response.siteAccessId ||
+        (options.siteAccessId !== "current" && options.siteAccessId !== response.siteAccessId))
+    )
+      throw unsupportedSessionPage("Site access-filtered session lists");
     return response;
+  }
+
+  /** Console/owner-authorized agent only. Never available through the Site frame bridge. */
+  async listSiteSessionAccess(
+    workspaceId: string,
+    siteId: string,
+  ): Promise<{ sessionIds: string[] }> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/session-access`,
+    );
+  }
+
+  async setSiteSessionAccess(
+    workspaceId: string,
+    siteId: string,
+    sessionId: string,
+    allowed: boolean,
+  ): Promise<{ siteId: string; sessionId: string; allowed: boolean }> {
+    return this.requestJson(
+      allowed ? "PUT" : "DELETE",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/session-access/${encodeURIComponent(sessionId)}`,
+    );
   }
 
   /** Compact, bounded workspace agent hierarchy page. */

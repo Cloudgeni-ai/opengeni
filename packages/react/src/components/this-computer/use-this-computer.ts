@@ -43,6 +43,7 @@ export function useThisComputer(
   const [actionError, setActionError] = useState<string | null>(null);
   const live = useRef(true);
   const generation = useRef(0);
+  const actionInFlight = useRef(false);
   /** The read in flight, and whether another was asked for meanwhile. */
   const reading = useRef<{ generation: number; again: boolean } | null>(null);
 
@@ -80,6 +81,7 @@ export function useThisComputer(
     // Results for an earlier host or workspace no longer apply.
     generation.current += 1;
     setStatus(null);
+    setActionError(null);
     refresh();
     if (!host) return;
     const unsubscribe = host.onChange(refresh);
@@ -99,22 +101,24 @@ export function useThisComputer(
     return () => window.clearInterval(timer);
   }, [host, pollMs, refresh]);
 
-  const act = useCallback(
-    async <T>(action: () => Promise<T>): Promise<T | null> => {
-      setActing(true);
-      setActionError(null);
-      try {
-        return await action();
-      } catch (caught) {
-        setActionError(hostErrorText(caught) ?? "");
-        return null;
-      } finally {
-        if (live.current) setActing(false);
-        refresh();
-      }
-    },
-    [refresh],
-  );
+  const act = useCallback(async <T>(action: () => Promise<T>): Promise<T | null> => {
+    if (actionInFlight.current) return null;
+    actionInFlight.current = true;
+    const mine = generation.current;
+    setActing(true);
+    setActionError(null);
+    try {
+      const result = await action();
+      return live.current && mine === generation.current ? result : null;
+    } catch (caught) {
+      if (live.current && mine === generation.current) setActionError(hostErrorText(caught) ?? "");
+      return null;
+    } finally {
+      actionInFlight.current = false;
+      if (live.current) setActing(false);
+      refreshRef.current();
+    }
+  }, []);
 
   const connect = useCallback(
     async (connectOptions: { screenControl: boolean }) => {

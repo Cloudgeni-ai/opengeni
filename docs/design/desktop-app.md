@@ -142,6 +142,23 @@ The app registers `opengeni://` and handles links to sessions and workspaces of
 signed-in accounts in the app, picking the right account by server and
 workspace, exactly like mobile. Back and forward work inside the window.
 
+Computer offers use `<product-scheme>://connect?url=<workspace-or-chat-url>&subject=<subject>`
+from `computerConnectUrl` in `@opengeni/sdk/app-links`. This is a destination hint,
+not a credential or grant. The desktop kit matches both origin and subject, never
+the last active account; if necessary it starts its existing PKCE sign-in and
+rejects a different signed-in subject. It checks the requested workspace through
+that account, shows a local Connect/Cancel confirmation naming the workspace,
+account and server, then uses the normal `ThisComputer.connect` path and opens
+the destination. Required OS permissions retain their own guide. Product schemes
+are parsed against the desktop kit's configured scheme.
+
+An ordinary app download cannot preserve a browser's pending deep link through
+installation. The browser therefore keeps **Open app and connect** beside the
+download: install, return to that link, sign in if needed, and confirm. Publish a
+desktop build containing this handler before deploying the new browser offer;
+an older desktop build does not handle `://connect` links. No standalone agent
+release is required for this presentation and desktop-host change.
+
 ## This computer
 
 Revised 2026-10-15. The first release installed the standalone agent as a
@@ -237,6 +254,13 @@ published, so the workflow fills a draft and then publishes it, and installed
 apps look up the newest stable `desktop-v` tag and read that release's update
 files. Products configure their own feed (a fixed URL or a repository and tag
 prefix). The signing identity is a release-time setting.
+
+The browser cannot detect the installed desktop version or whether a custom
+protocol handler completed its work. After `Open app and connect`, the card
+shows update/download recovery guidance without claiming a failure or success.
+Apps before the computer-connect handoff support reveal their window and ignore
+that unknown link; the person installs the latest app and retries. Readiness
+still comes from the actual machine inventory, not a timer or browser focus.
 
 ### Distribution
 

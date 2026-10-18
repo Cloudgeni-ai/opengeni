@@ -37,7 +37,8 @@ export function OrganizationCreditBalance({
       </p>
     );
   }
-  const plan = showPlanCredit ? balance.plan : null;
+  // A period without a monthly grant shows no "$0.00 monthly plan credit" row.
+  const plan = showPlanCredit && (balance.plan?.creditGrantedMicros ?? 0) > 0 ? balance.plan : null;
   if (balance.promotionalCredits?.length || plan) {
     const general =
       (balance.generalBalanceMicros ?? balance.balanceMicros) - (plan?.creditRemainingMicros ?? 0);

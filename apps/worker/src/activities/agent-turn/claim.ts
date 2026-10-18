@@ -1,7 +1,6 @@
-import { withDirectModelProviders, assertTurnServingPolicyMatchesConfigV1 } from "@opengeni/config";
+import { assertTurnServingPolicyMatchesConfigV1 } from "@opengeni/config";
 import { claimServingAttempt, type ServingAttempt } from "./subscription-serving-claim";
 import { servingTurnProviders } from "./subscription-serving-providers";
-import { loadDirectModelProviderConnection } from "@opengeni/db";
 import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import {
   claimCodexActiveFromCutover,
@@ -34,15 +33,7 @@ import {
   resolveTurnExecutionPolicyV1,
   type Settings,
 } from "@opengeni/config";
-import {
-  settingsWithCodexCredential,
-  settingsWithEnabledCapabilityMcpServers,
-  settingsWithWorkspaceGatewayCredential,
-  settingsWithWorkspaceOpenRouterCredential,
-  settingsWithWorkspaceOpperCredential,
-  settingsWithOrganizationProviderCredentials,
-  withXaiSubscriptionProvider,
-} from "../capabilities";
+import { settingsWithEnabledCapabilityMcpServers } from "../capabilities";
 import { validateIncidentTelemetrySystemUpdateAuthority } from "../incident-telemetry-authority";
 import {
   assertSessionAllowsProductModel,
@@ -50,6 +41,7 @@ import {
   resolveCodexAppsDesignationForRun,
   resolveContinuedConnectionAccounts,
   recordSessionUsageLimitEvent,
+  settingsWithModelProviderCredentials,
 } from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext, startActivityHeartbeat } from "../streaming";
@@ -359,54 +351,19 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const codexSubscriptionActive = mcpSettings.codexSubscriptionEnabled
     ? claimCodexActiveFromCutover(await codexCutoverState())
     : false;
-  const codexSettings = await settingsWithCodexCredential(
-    db,
-    input.workspaceId,
-    mcpSettings,
-    codexSubscriptionActive,
+  let capabilitySettings = await measureTurnStartupPhase(
+    observability,
+    { phase: "claim_provider_settings", provider: "unresolved", backend: turn.sandboxBackend },
+    () =>
+      settingsWithModelProviderCredentials(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        settings: mcpSettings,
+        productModelId:
+          claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
+        codexSubscriptionActive,
+      }),
   );
-  const xaiSettings = codexSettings.supergrokSubscriptionEnabled
-    ? withXaiSubscriptionProvider(codexSettings)
-    : codexSettings;
-  const gatewaySettings = await settingsWithWorkspaceGatewayCredential(
-    db,
-    input.accountId,
-    input.workspaceId,
-    xaiSettings,
-    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
-  );
-  const openRouterSettings = await settingsWithWorkspaceOpenRouterCredential(
-    db,
-    input.accountId,
-    input.workspaceId,
-    gatewaySettings,
-    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
-  );
-  const workspaceProviderSettings = await settingsWithWorkspaceOpperCredential(
-    db,
-    input.accountId,
-    input.workspaceId,
-    openRouterSettings,
-    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
-  );
-  let capabilitySettings = await settingsWithOrganizationProviderCredentials(
-    db,
-    input.accountId,
-    input.workspaceId,
-    workspaceProviderSettings,
-    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
-  );
-  const selectedDirectConnection = await loadDirectModelProviderConnection(
-    db,
-    capabilitySettings,
-    input.workspaceId,
-    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : (turn.model ?? ""),
-  );
-  // Execution only needs the selected customer connection. Ordinary turns
-  // must not load or install unrelated workspace provider configurations.
-  if (selectedDirectConnection) {
-    capabilitySettings = withDirectModelProviders(capabilitySettings, [selectedDirectConnection]);
-  }
   // Reuse the exact core designation already resolved above.
   const codexAppsDesignation = capabilitySettings.codexConnectedAppsEnabled
     ? await codexAppsDesignationRead

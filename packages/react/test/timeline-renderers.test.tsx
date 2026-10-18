@@ -1998,6 +1998,30 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
 }
 
 describe("TimelineRow — connection recovery", () => {
+  test("unconfigured computer offers never turn event URLs or variables into a terminal setup fallback", async () => {
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          authoritySource: "host",
+          authorizationUrl: "https://example.test/install?command=curl",
+          capability: {
+            id: "api:connected-machine",
+            name: "Connected Machine",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Use my computer",
+            requiredVariables: ["OPENGENI_ENROLL_TOKEN"],
+          },
+        })}
+      />,
+    );
+    expect(r.container.textContent).toContain("This app hasn't enabled computer setup here");
+    expect(r.container.querySelector("a")).toBeNull();
+    expect(r.container.textContent).not.toContain("OPENGENI_ENROLL_TOKEN");
+    await r.unmount();
+  });
+
   test("lets the authenticated host render setup inline and preserves the fallback", async () => {
     const row = authNeededItem();
     const custom = await renderComponent(

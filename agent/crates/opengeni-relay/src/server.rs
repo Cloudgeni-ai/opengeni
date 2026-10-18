@@ -42,13 +42,26 @@ use crate::registry::ChannelRegistry;
 pub struct RelayState {
     pub(crate) registry: Arc<ChannelRegistry>,
     pub(crate) config: Arc<RelayConfig>,
+    pub(crate) routing: Option<Arc<crate::routing::Routing>>,
 }
 
 /// Build the public (wss) relay router over a registry + config. It routes
 /// `GET /metrics` only when no dedicated metrics listener is configured.
 pub fn router(registry: Arc<ChannelRegistry>, config: Arc<RelayConfig>) -> Router {
+    routed_router(registry, config, None)
+}
+
+fn routed_router(
+    registry: Arc<ChannelRegistry>,
+    config: Arc<RelayConfig>,
+    routing: Option<Arc<crate::routing::Routing>>,
+) -> Router {
     let serves_metrics = config.metrics_listener_bind().is_none();
-    let state = RelayState { registry, config };
+    let state = RelayState {
+        registry,
+        config,
+        routing,
+    };
     let router = Router::new()
         .route("/stream", get(stream_upgrade))
         .route("/healthz", get(healthz));
@@ -65,7 +78,11 @@ pub fn router(registry: Arc<ChannelRegistry>, config: Arc<RelayConfig>) -> Route
 pub fn metrics_router(registry: Arc<ChannelRegistry>, config: Arc<RelayConfig>) -> Router {
     Router::new()
         .route("/metrics", get(metrics_handler))
-        .with_state(RelayState { registry, config })
+        .with_state(RelayState {
+            registry,
+            config,
+            routing: None,
+        })
 }
 
 /// Serve the relay on `config.bind` until `shutdown` resolves. Spawns a background
@@ -121,7 +138,13 @@ pub async fn serve(
         }
     });
 
-    let app = router(registry, config);
+    let routing = config.advertise_ip.map(|ip| {
+        Arc::new(crate::routing::Routing::new(SocketAddr::new(
+            ip,
+            addr.port(),
+        )))
+    });
+    let app = routed_router(registry, config, routing);
     let server = axum::serve(listener, app).with_graceful_shutdown(shutdown);
     let result = server
         .await
@@ -176,12 +199,15 @@ async fn metrics_handler(State(state): State<RelayState>) -> impl IntoResponse {
 /// The dial query (`?ws=&agent=&port=&channel=`). All four coordinates form the
 /// routing key. `channel` distinguishes concurrent stream instances on the same
 /// machine and logical port.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct DialQuery {
     pub ws: String,
     pub agent: String,
     pub port: u32,
     pub channel: String,
+    pub route: Option<String>,
+    #[serde(default)]
+    pub forwarded: bool,
 }
 
 /// `GET /stream` — upgrade to a WebSocket then run the per-connection handshake +
@@ -270,6 +296,35 @@ pub(crate) mod conn {
         };
 
         // 3. Attach (the epoch fences are applied for a client), ack, replay.
+        // Authenticate before opening ANY private connection. A route is not a
+        // stream credential and cannot be used as an unauthenticated proxy.
+        if let Some(route) = query.route.as_deref() {
+            let Ok(owner) =
+                crate::routing::verify(route, &key, state.config.effective_relay_token_secret())
+            else {
+                let _ = send_ack(ws_tx, false, 0, "invalid relay owner route").await;
+                return None;
+            };
+            if !state
+                .routing
+                .as_ref()
+                .is_some_and(|routing| routing.owns(&owner))
+            {
+                // Exactly one hop. A recycled pod address must reject an old
+                // incarnation, not recursively forward back to itself.
+                if query.forwarded
+                    || state
+                        .routing
+                        .as_ref()
+                        .is_some_and(|routing| routing.addr == owner.addr)
+                {
+                    owner_unavailable(ws_tx).await;
+                } else {
+                    proxy(ws_tx, ws_rx, &open, query, &owner).await;
+                }
+                return None;
+            }
+        }
         let now = Instant::now();
         let (peer_tx, peer_rx) = tokio::sync::mpsc::channel::<RelayMessage>(OUTBOUND_QUEUE);
         let attached =
@@ -289,9 +344,22 @@ pub(crate) mod conn {
             channel = %query.channel, role = ?role,
             resume_from_seq, "relay channel attached"
         );
-        if send_ack(ws_tx, true, attached.resume_from_seq, "")
-            .await
-            .is_err()
+        let relay_route = state.routing.as_ref().and_then(|routing| {
+            routing
+                .mint(&key, state.config.effective_relay_token_secret())
+                .ok()
+        });
+        if write_msg(
+            ws_tx,
+            &RelayMessage::OpenAck(v1::StreamOpenAck {
+                accepted: true,
+                error: None,
+                resume_from_seq: attached.resume_from_seq,
+                relay_route,
+            }),
+        )
+        .await
+        .is_err()
         {
             state.registry.detach(&key, role, conn_gen);
             return None;
@@ -508,8 +576,109 @@ pub(crate) mod conn {
                 })
             },
             resume_from_seq,
+            relay_route: None,
         });
         write_msg(ws_tx, &ack).await
+    }
+
+    async fn owner_unavailable(ws_tx: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>) {
+        let _ = write_msg(
+            ws_tx,
+            &RelayMessage::OpenAck(v1::StreamOpenAck {
+                accepted: false,
+                error: Some(v1::AgentError {
+                    code: v1::ErrorCode::Stream as i32,
+                    message: "relay owner unavailable".into(),
+                    retryable: true,
+                    detail: [("relay_owner_unavailable".into(), "true".into())].into(),
+                }),
+                resume_from_seq: 0,
+                relay_route: None,
+            }),
+        )
+        .await;
+    }
+
+    /// A transparent, backpressured WebSocket hop. The owner still performs the
+    /// original authorization, epoch checks, replay and rate accounting. Bytes
+    /// never traverse the database or control-plane broker.
+    #[allow(clippy::collapsible_match)] // Move owned frame buffers into send; guards cannot move them.
+    async fn proxy(
+        ws_tx: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>,
+        ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
+        open: &v1::StreamOpen,
+        query: &DialQuery,
+        owner: &crate::routing::Owner,
+    ) {
+        use tokio_tungstenite::tungstenite::Message;
+        let Ok(query) = serde_urlencoded::to_string(DialQuery {
+            forwarded: true,
+            ..query.clone()
+        }) else {
+            return;
+        };
+        let url = format!("ws://{}/stream?{query}", owner.addr);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let socket = tokio::time::timeout_at(deadline, tokio_tungstenite::connect_async(url)).await;
+        let Ok(Ok((socket, _))) = socket else {
+            owner_unavailable(ws_tx).await;
+            return;
+        };
+        let (mut peer_tx, mut peer_rx) = socket.split();
+        if !matches!(
+            tokio::time::timeout_at(
+                deadline,
+                peer_tx.send(Message::Binary(RelayMessage::Open(open.clone()).encode()))
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            owner_unavailable(ws_tx).await;
+            return;
+        }
+        // Reachability includes the authenticated stream handshake, not merely
+        // a TCP/HTTP upgrade. A stalled/replaced endpoint cannot pin a producer
+        // forever to a dead owner route.
+        let first = tokio::time::timeout_at(deadline, async {
+            loop {
+                match peer_rx.next().await {
+                    Some(Ok(Message::Binary(bytes))) => return Some(bytes),
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => return None,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        let Ok(Some(bytes)) = first else {
+            owner_unavailable(ws_tx).await;
+            return;
+        };
+        let Ok(RelayMessage::OpenAck(ack)) = RelayMessage::decode(&bytes) else {
+            owner_unavailable(ws_tx).await;
+            return;
+        };
+        if ws_tx.send(WsMessage::Binary(bytes)).await.is_err() || !ack.accepted {
+            return;
+        }
+        loop {
+            tokio::select! {
+                inbound = ws_rx.next() => match inbound {
+                    Some(Ok(WsMessage::Binary(bytes))) => {
+                        if peer_tx.send(Message::Binary(bytes)).await.is_err() { break; }
+                    }
+                    Some(Ok(WsMessage::Close(_)) | Err(_)) | None => break,
+                    _ => {}
+                },
+                outbound = peer_rx.next() => match outbound {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        if ws_tx.send(WsMessage::Binary(bytes)).await.is_err() { break; }
+                    }
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    _ => {}
+                },
+            }
+        }
+        let _ = peer_tx.close().await;
     }
 
     /// Encode + write one relay message as a binary WebSocket frame.

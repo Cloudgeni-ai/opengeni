@@ -569,6 +569,9 @@ ENV OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux
 # CUA runtime, so it selects that driver explicitly: an isolated Linux seat
 # otherwise defaults to CUA.
 ENV OPENGENI_BROWSERD_COMPUTER_BACKEND=native
+# The sandbox VM's network belongs to its browsers already; the per-browser
+# network namespace used on people's own machines is not needed here.
+ENV OPENGENI_BROWSERD_NETWORK_ISOLATION=off
 ENV NODE_PATH=/opt/opengeni/codemode-runtime/node_modules
 
 COPY --from=browserd-build /out/opengeni-browserd /usr/local/bin/opengeni-browserd

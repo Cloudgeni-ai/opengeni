@@ -1629,6 +1629,16 @@ export type SessionBackgroundCommandListResponse = {
   commands: SessionBackgroundCommand[];
 };
 
+export type WorkspaceBackgroundCommand = SessionBackgroundCommand & {
+  sessionTitle: string | null;
+  machineName: string | null;
+};
+
+export type WorkspaceBackgroundCommandListResponse = {
+  commands: WorkspaceBackgroundCommand[];
+  nextCursor: string | null;
+};
+
 export type CancelSessionBackgroundCommandResult = {
   command: SessionBackgroundCommand;
   accepted: boolean;
@@ -1938,6 +1948,8 @@ export type SessionListResponse = {
   archiveStatus?: "active" | "archived" | "all";
   /** Server-resolved Site origin filter, when requested. */
   originSiteId?: string;
+  /** Server-resolved Site access filter, when requested. */
+  siteAccessId?: string;
   sessions: Session[];
   nextCursor: string | null;
 };

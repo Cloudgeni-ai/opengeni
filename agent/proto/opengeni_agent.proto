@@ -1538,6 +1538,9 @@ message StreamChannel {
   StreamKind kind = 4;
   // The logical port the channel maps to (so resolveExposedPort can address it).
   uint32 port = 5;
+  // Opaque, channel-bound relay owner route. Not an authorization credential.
+  // Returned by producer registration and carried in the viewer dial query.
+  optional string relay_route = 6;
 }
 
 // Open a stream channel on the relay. Sent by both ends (agent registers; client
@@ -1568,6 +1571,8 @@ message StreamOpenAck {
   AgentError error = 2;
   // The sequence the peer will resume sending from.
   uint64 resume_from_seq = 3;
+  // The relay that owns this channel; clients continue dialing the public edge.
+  optional string relay_route = 4;
 }
 
 // A data frame carrying raw stream bytes in either direction. `seq` is a

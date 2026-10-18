@@ -23,7 +23,7 @@ import { useNativeTimelineMessages } from "./messages";
    chip, then each waiting prompt on one line with Move up/down, Steer, Edit
    (back into the composer, confirming before it replaces a draft) and Remove.
    Which turns count, their text and the move anchors are the shared queue
-   model.
+   model. Under one Send (`singleSend`) waiting messages offer no Steer.
    -------------------------------------------------------------------------- */
 
 type TurnQueue = ReturnType<typeof useTurnQueue>;
@@ -41,12 +41,15 @@ export function QueueDock({
   composer,
   onComposerFocus,
   leading,
+  singleSend = false,
 }: {
   queue: TurnQueue;
   composer?: QueueDockComposer | undefined;
   onComposerFocus?: (() => void) | undefined;
   /** Chips sharing the queue chip's row (goal, agents, commands). */
   leading?: ReactNode;
+  /** One Send and nothing to choose: no Steer on waiting messages. */
+  singleSend?: boolean | undefined;
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
@@ -127,27 +130,33 @@ export function QueueDock({
             }}
           >
             <Icon name="list-ordered" size={13} color={c["fg-muted"]} />
-            <Text style={small}>{`${turns.length} queued`}</Text>
+            <Text style={small}>{t("sessionChrome.queuedCount", { count: turns.length })}</Text>
           </Pressable>
-          <View style={{ width: 1, height: 14, backgroundColor: c.border }} />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={m.steerFirstQueued}
-            disabled={queue.mutating || queue.mutationFor(first.id) !== null}
-            onPress={() => void queue.steerTurn(first.id)}
-            hitSlop={{ top: 7, bottom: 7 }}
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 4,
-              height: 30,
-              paddingLeft: 6,
-              paddingRight: 10,
-            }}
-          >
-            <Icon name="corner-down-right" size={13} color={c["fg-muted"]} />
-            <Text style={small}>{m.steer}</Text>
-          </Pressable>
+          {singleSend ? (
+            <View style={{ width: 4 }} />
+          ) : (
+            <>
+              <View style={{ width: 1, height: 14, backgroundColor: c.border }} />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={m.steerFirstQueued}
+                disabled={queue.mutating || queue.mutationFor(first.id) !== null}
+                onPress={() => void queue.steerTurn(first.id)}
+                hitSlop={{ top: 7, bottom: 7 }}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 4,
+                  height: 30,
+                  paddingLeft: 6,
+                  paddingRight: 10,
+                }}
+              >
+                <Icon name="corner-down-right" size={13} color={c["fg-muted"]} />
+                <Text style={small}>{m.steer}</Text>
+              </Pressable>
+            </>
+          )}
         </View>
       </View>
       {open ? (
@@ -222,13 +231,15 @@ export function QueueDock({
                       />
                     </>
                   ) : null}
-                  <RowAction
-                    icon="corner-down-right"
-                    label={t("sessionChrome.steerQueuedPromptIndex", { index: index + 1 })}
-                    disabled={busy}
-                    busy={pending === "steer"}
-                    onPress={() => void queue.steerTurn(turn.id)}
-                  />
+                  {singleSend ? null : (
+                    <RowAction
+                      icon="corner-down-right"
+                      label={t("sessionChrome.steerQueuedPromptIndex", { index: index + 1 })}
+                      disabled={busy}
+                      busy={pending === "steer"}
+                      onPress={() => void queue.steerTurn(turn.id)}
+                    />
+                  )}
                   {canEdit ? (
                     <RowAction
                       icon="pencil"

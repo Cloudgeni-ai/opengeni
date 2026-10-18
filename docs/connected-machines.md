@@ -1153,9 +1153,21 @@ The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
   chat.` (the name quoted, on one line, at most 60 characters) so the agent
   continues there. A chat that cannot take a Send is not moved; a chat waiting
   on a question is moved and keeps the question;
-- opens the shared **Connect a machine** dialog
+- inside the desktop app, **Use this computer** calls the existing desktop host
+  connection directly, with personal ownership and screen-control consent. There
+  is no second setup confirmation; required operating-system permission prompts
+  still use the shared permission guide. Connecting does not move an existing
+  chat's compute route: **Use in this chat** remains a separate optional action;
+- in a browser, opens the shared **Use your computer** dialog
   (`apps/web/src/components/machines/connect-machine-dialog.tsx`, also used by
-  the Machines page). The person chooses **Who can use it?** (**Only me** by
+  the Machines page). It offers the current platform's desktop app download and
+  **Open app and connect**. After installation the person returns to that link;
+  the app selects the exact account or starts its existing PKCE sign-in, checks
+  workspace access and confirms locally before connecting. The link carries only
+  the origin, workspace/chat destination and subject, never an enrollment token.
+  Mobile browsers direct the person to the computer they want to connect;
+- **Connect a server instead** explicitly reveals the advanced terminal flow.
+  Only then is a token minted. The person chooses **Who can use it?** (**Only me** by
   default, or **This workspace**) and screen control (off by default); both are
   baked into a single-use token minted in their browser for exactly that choice.
   Mac, Linux and Windows tabs (the detected OS selected) show the matching
@@ -1177,6 +1189,13 @@ The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
 Reading the list needs `enrollments:read`; connecting needs `enrollments:manage`;
 moving the chat needs `sessions:control`. The card says who can act otherwise.
 Like GitHub, the card is posted even when machines are already connected.
+
+Embedded products supply `SessionConversation.computerConnection` (also through
+`OpenGeniChat.conversationProps`) with their own desktop host, downloads and
+account-bound handoff, or a product-owned connect callback. The shared
+`ThisComputerCard` never chooses an Opengeni download or terminal command for a
+host. Without host configuration the default card explains that setup is not
+enabled there. See [embedding](embedding.md#computer-connection-offers).
 
 ### Turn on screen control for a connected machine
 

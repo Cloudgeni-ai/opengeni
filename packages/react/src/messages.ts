@@ -17,3 +17,5 @@ export type {
   PluralCategory,
 } from "./messages/runtime";
 export { englishMessages } from "./messages/en";
+export { SINGLE_SEND_WORDING, singleSendText } from "./messages/single-send";
+export { SingleSendWording } from "./messages/runtime";

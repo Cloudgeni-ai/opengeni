@@ -773,6 +773,23 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(request.ptyOpen.scopeId).toBe(terminalScopeId);
   });
 
+  test("relay endpoint carries the producer-selected owner route through the public edge", async () => {
+    const mock = new MockAgentResponder();
+    const rpc: ControlRpc = {
+      request: async (subject, request, options) => {
+        const response = await mock.request(subject, request, options);
+        if (response.result?.$case === "ptyOpen" && response.result.ptyOpen.channel) {
+          response.result.ptyOpen.channel.relayRoute = "signed.owner-route";
+        }
+        return response;
+      },
+    };
+    const endpoint = await sessionWith(rpc).resolveExposedPort(7681);
+    expect(endpoint.host).toBe("relay.test");
+    expect(new URLSearchParams(endpoint.query).get("route")).toBe("signed.owner-route");
+    expect(new URLSearchParams(endpoint.query).get("channel")).toBe("mock-pty");
+  });
+
   test("resolveExposedPort(6080) still routes to desktopEnsure (the desktop plane)", async () => {
     const mock = new MockAgentResponder();
     await sessionWith(mock).resolveExposedPort(6080);
