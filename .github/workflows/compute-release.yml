@@ -217,11 +217,13 @@ jobs:
           set -euo pipefail
           # A tag names a commit whose push to main ran Compute CI; a push
           # to main runs it alongside this workflow. Any successful run on
-          # the commit counts; with none, a finished failed run ends this.
-          query="repos/$GITHUB_REPOSITORY/actions/workflows/compute-ci.yml/runs?head_sha=$GITHUB_SHA&per_page=50"
+          # the commit counts, on any page; with none, a finished failed
+          # run ends this.
+          query="repos/$GITHUB_REPOSITORY/actions/workflows/compute-ci.yml/runs?head_sha=$GITHUB_SHA&per_page=100"
           deadline=$(( $(date +%s) + 110 * 60 ))
           while :; do
-            runs="$(gh api "$query" --jq '[.workflow_runs[] | {status, conclusion, url: .html_url}]')"
+            runs="$(gh api --paginate "$query" \
+              --jq '.workflow_runs[] | {status, conclusion, url: .html_url}' | jq -s .)"
             if jq -e 'any(.[]; .conclusion == "success")' <<<"$runs" >/dev/null; then
               jq -r 'map(select(.conclusion == "success"))[0].url' <<<"$runs"
               break
