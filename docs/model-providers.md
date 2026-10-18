@@ -730,6 +730,40 @@ reasoning details and leaves stored history unchanged. This also handles older
 non-streamed replies whose reasoning was nested inside text metadata. Other
 Chat targets retain their native reasoning fields.
 
+These explicit Anthropic Chat targets also default to request-level
+`cache_control: { "type": "ephemeral" }` on all three OpenRouter rails. OpenRouter
+requires this opt-in; merely repeating a long prefix does not enable Claude
+caching. Automatic caching advances upstream over the growing history without
+rewriting earlier messages, instructions, tools, or their cache markers locally.
+An explicit request-level control (including `null`) or message/content/tool
+breakpoint remains authoritative; the adapter does not add another breakpoint
+or override its TTL. Other model families and APIs keep their existing cache
+behavior. Session cache keys and provider routing are unchanged.
+
+The default TTL is five minutes; repeated prefixes can be read on later steps
+and later turns while warm, not indefinitely. The first write costs more than
+ordinary input, so one-off or frequently changing prompts can cost more. A cache
+hit still depends on the upstream provider, minimum prompt length, expiry, and
+an identical prefix. The shared Chat adapter preserves the raw provider's
+`prompt_tokens_details` through streamed and non-streamed SDK conversion, including
+`cached_tokens` and `cache_write_tokens`; absent write counts stay unknown. The
+shared usage normalizer still validates counts before telemetry/billing.
+
+A synthetic streamed probe on October 18, 2026 (`anthropic/claude-sonnet-5.5`)
+confirmed two identical 5,179-token requests without the opt-in each read/wrote
+zero cache tokens. With automatic caching, the first request wrote 5,175 tokens;
+two appended-history requests then read 5,175 and 5,192 tokens and wrote 17 each.
+Total request costs were $0.010398 uncached, $0.0129855 for the initial write,
+then $0.000608 and $0.0006097 for the appended requests. This is a small protocol
+probe, not a production performance guarantee.
+The patched SDK adapter was separately exercised with fresh clients and
+JSON-round-tripped assistant history: its three requests reported write/read
+counts of 5,258/0, 17/5,258, and 17/5,275. Normalized telemetry matched the raw
+provider counts exactly, and every earlier message and tool prefix was unchanged.
+
+Sources: [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching)
+and [usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting).
+
 The reviewed code catalog currently ships one v1 starter:
 
 ```text
