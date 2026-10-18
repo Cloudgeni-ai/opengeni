@@ -102,7 +102,8 @@ frame), not only that a request was accepted.
 A check whose needs failed is skipped, so every run reports every check.
 
 The link-stream, stale-restore and saved-sleep pager checks reach the hosts from the stack VM
-with `gcloud compute ssh --internal-ip` as the stack VM's own identity:
+over OS Login as the stack VM's own identity (a key the suite registers
+for a day, then ssh to the host's internal address):
 `env.sh fleet` grants it `roles/compute.osAdminLogin` on this
 environment's host instances only (an IAM condition on their names), and
 `env.sh down` removes the grant (`status` lists it while it exists).

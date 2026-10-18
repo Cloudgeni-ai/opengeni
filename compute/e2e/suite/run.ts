@@ -293,12 +293,42 @@ const sandbox = () => fabric<Sandbox>("GET", `/v1/sandboxes/${state.sandbox}`);
 // --- A host, as root's caller (OS Login as the stack VM's identity, which
 // env.sh lets log in to this environment's hosts only) ----------------------
 
+/** A gcloud command's stdout (as the stack VM's identity). */
+function gcloud(args: string[]): string {
+  const run = spawnSync("gcloud", [...args, "--quiet"], { encoding: "utf8", timeout: 120_000 });
+  if (run.status !== 0) throw new Error(`gcloud ${args.slice(0, 4).join(" ")}: ${`${run.error ?? ""} ${run.stderr ?? ""}`.trim().slice(-300)}`);
+  return run.stdout.trim();
+}
+// OS Login as this VM's identity: a key of the suite's, registered for a
+// day, and the login name OS Login gives the identity. (gcloud compute ssh
+// would also need to read the project, which the identity may not.)
+let hostLogin: { key: string; user: string } | undefined;
+const hostAddresses = new Map<string, string>();
+function login(): { key: string; user: string } {
+  if (hostLogin) return hostLogin;
+  const key = `${process.env.HOME}/.ssh/e2e_hosts`;
+  if (spawnSync("test", ["-f", key]).status !== 0) {
+    const made = spawnSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key], { encoding: "utf8" });
+    if (made.status !== 0) throw new Error(`ssh-keygen: ${made.stderr}`);
+  }
+  gcloud(["compute", "os-login", "ssh-keys", "add", "--key-file", `${key}.pub`, "--ttl", "1d"]);
+  const user = gcloud(["compute", "os-login", "describe-profile", "--format", "value(posixAccounts[0].username)"]);
+  if (!user) throw new Error("OS Login gave this VM's identity no login name");
+  hostLogin = { key, user };
+  return hostLogin;
+}
 /** Runs `command` on `host` and returns its stdout; fails on a nonzero exit. */
 function onHost(host: string, command: string, timeoutMs = 120_000): string {
+  const { key, user } = login();
+  let address = hostAddresses.get(host);
+  if (!address) {
+    address = gcloud(["compute", "instances", "describe", host, "--zone", ZONE, "--project", PROJECT, "--format", "value(networkInterfaces[0].networkIP)"]);
+    hostAddresses.set(host, address);
+  }
   const run = spawnSync(
-    "gcloud",
-    ["compute", "ssh", host, "--zone", ZONE, "--project", PROJECT, "--internal-ip", "--quiet",
-      "--strict-host-key-checking=no", "--command", command],
+    "ssh",
+    ["-n", "-T", "-i", key, "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+      "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=20", `${user}@${address}`, command],
     { encoding: "utf8", timeout: timeoutMs },
   );
   if (run.status !== 0) {
