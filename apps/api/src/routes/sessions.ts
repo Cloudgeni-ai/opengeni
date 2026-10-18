@@ -304,6 +304,7 @@ import {
   type ChannelAHandle,
   type ChannelAOperation,
 } from "../sandbox/channel-a";
+import { deliverConnectedCommandStop } from "../sandbox/command-completion";
 import {
   NatsControlRpc,
   negotiateCapabilities,
@@ -418,6 +419,8 @@ import { measureSessionCreatePhase } from "../session-create-observability";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
+/** One immediate stop attempt; a sleeping compute sandbox wakes within it. */
+const BACKGROUND_COMMAND_STOP_DELIVERY_TIMEOUT_MS = 5_000;
 const VIEWER_LIFECYCLE_PERMISSIONS = ["stream:view", "terminal:attach", "files:write"] as const;
 
 /**
@@ -1419,7 +1422,27 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (!result.command) {
         throw new HTTPException(404, { message: "background command not found" });
       }
-      return c.json(result);
+      const { stopTarget, ...body } = result;
+      if (stopTarget) {
+        // Deliver the cancellation now rather than on the next reconciliation
+        // pass. The runner's pushed exit settles the command; when this
+        // delivery fails, the reconciler delivers it on its next pass.
+        const delivery = await deliverConnectedCommandStop(
+          new NatsControlRpc(async () => bus.getRequestConnection()),
+          stopTarget,
+          Math.min(
+            settings.sandboxSelfhostedControlTimeoutMs,
+            BACKGROUND_COMMAND_STOP_DELIVERY_TIMEOUT_MS,
+          ),
+        );
+        if (!delivery.delivered) {
+          deps.observability?.warn("background command stop delivery deferred", {
+            commandId,
+            error: delivery.error,
+          });
+        }
+      }
+      return c.json(body);
     },
   );
 

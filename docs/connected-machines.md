@@ -726,7 +726,11 @@ freezes the physical control workspace, enrollment, connection instance, and op
 ID. Normal turn completion and Steer detach from that adopted command; they do
 not cancel or retarget it. Session/workspace Pause and terminal Cancel atomically
 move adopted commands to `stopping`, after which the global reconciler issues
-`OpCancel` only to that frozen subject. Switching the session's selected machine
+`OpCancel` only to that frozen subject. Stopping one command through
+`DELETE .../background-commands/:commandId` also sends that `OpCancel` from
+the API at once, best effort, so the process ends without waiting for the next
+maintenance pass; the reconciler still delivers it when that attempt fails,
+and the pushed exit settles the command. Switching the session's selected machine
 affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.

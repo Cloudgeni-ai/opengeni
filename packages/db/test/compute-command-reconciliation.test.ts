@@ -108,7 +108,7 @@ async function runningCommand(
       ${workspaceId!}, ${enrollment.id}, 'launch', ${id}, now() - interval '1 minute',
       ${options.notified ? new Date() : null})`;
   if (options.stopping) {
-    const { accepted } = await requestSessionBackgroundCommandCancellation(db, {
+    const { accepted, stopTarget } = await requestSessionBackgroundCommandCancellation(db, {
       accountId,
       workspaceId: workspaceId!,
       sessionId: session.id,
@@ -116,6 +116,13 @@ async function runningCommand(
       subjectId: `subject-${suffix}`,
     });
     expect(accepted).toBe(true);
+    // The caller delivers the stop at once to the command's frozen locator.
+    expect(stopTarget).toEqual({
+      controlWorkspaceId: workspaceId!,
+      enrollmentId: enrollment.id,
+      connectionInstanceId: "launch",
+      opId: id,
+    });
   }
   return id;
 }

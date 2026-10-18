@@ -39,7 +39,10 @@ background command on a compute sandbox settles from the agent's pushed
 completion; the reconciler claims it only after that push or once it is
 retired (connection replaced, enrollment revoked), never to poll it (0844).
 A stopping command (Stop, Pause or Cancel) is still claimed, because that
-claim delivers the cancellation to the agent.
+claim delivers the cancellation to the agent. A Stop of one command also
+sends the cancellation from the API at once, so the process ends without
+waiting for the next maintenance pass; the claim delivers it when that
+attempt fails.
 
 The only timers that message an agent are the op stream's credit acks and
 silence probes, and they run only while a call is attached to a running

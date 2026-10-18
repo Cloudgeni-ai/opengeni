@@ -5,10 +5,13 @@ import {
   claimPushedConnectedCommandCompletion,
   deferConnectedMachineBackgroundCommandReconciliation,
   connectedCommandReconciliationRetryMs,
+  type ConnectedCommandStopTarget,
 } from "@opengeni/db/session-background-commands";
 import { createConnectedCommandOutputCapture } from "@opengeni/db/session-command-output";
 import type { EventBus } from "@opengeni/events";
 import {
+  cancelSelfhostedOp,
+  type ControlRpc,
   NatsControlRpc,
   NatsOpStreamTransport,
   OpStreamExecClient,
@@ -17,6 +20,34 @@ import {
   replayConnectedCommandOutput,
   connectedCommandExitProof,
 } from "@opengeni/runtime/sandbox";
+
+/**
+ * Deliver a stop to an adopted command at its frozen locator, at once. Best
+ * effort: the command is already `stopping`, and when this fails the
+ * reconciler delivers the cancellation on its next pass. The runner then pushes
+ * the exit, which settles the command.
+ */
+export async function deliverConnectedCommandStop(
+  controlRpc: ControlRpc,
+  target: ConnectedCommandStopTarget,
+  controlTimeoutMs: number,
+): Promise<{ delivered: true } | { delivered: false; error: string }> {
+  try {
+    await cancelSelfhostedOp({
+      controlRpc,
+      rpcSubject: subjectFor(
+        target.controlWorkspaceId,
+        target.enrollmentId,
+        target.connectionInstanceId,
+      ),
+      opId: target.opId,
+      controlTimeoutMs,
+    });
+    return { delivered: true };
+  } catch (error) {
+    return { delivered: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
 
 /** The authenticated process subject, never the payload, supplies machine
  * identity. Historical routes are intentional: changing a session's current

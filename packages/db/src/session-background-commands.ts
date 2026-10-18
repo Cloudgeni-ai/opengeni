@@ -956,6 +956,20 @@ export async function settleClaimedConnectedMachineBackgroundCommandWithMutation
   );
 }
 
+/** The frozen physical locator of an adopted command on a machine runner (a
+ * Connected Machine or a compute sandbox). Cancellation goes only here. */
+export type ConnectedCommandStopTarget = {
+  controlWorkspaceId: string;
+  enrollmentId: string;
+  connectionInstanceId: string;
+  opId: string;
+};
+
+/**
+ * Move one running command to `stopping`. The reconciler owns delivery and
+ * settlement; `stopTarget` lets the caller deliver the cancellation at once,
+ * best effort, so a stop does not wait for the next reconciliation pass.
+ */
 export async function requestSessionBackgroundCommandCancellation(
   db: Database,
   input: {
@@ -965,7 +979,11 @@ export async function requestSessionBackgroundCommandCancellation(
     commandId: string;
     subjectId: string;
   },
-): Promise<{ command: SessionBackgroundCommand | null; accepted: boolean }> {
+): Promise<{
+  command: SessionBackgroundCommand | null;
+  accepted: boolean;
+  stopTarget?: ConnectedCommandStopTarget;
+}> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -1012,7 +1030,24 @@ export async function requestSessionBackgroundCommandCancellation(
               ),
             );
         }
-        return { command: mapCommand(updated!), accepted: true };
+        const stopTarget =
+          updated!.provider === "connected_machine" &&
+          updated!.controlWorkspaceId &&
+          updated!.enrollmentId &&
+          updated!.connectionInstanceId &&
+          updated!.opId
+            ? {
+                controlWorkspaceId: updated!.controlWorkspaceId,
+                enrollmentId: updated!.enrollmentId,
+                connectionInstanceId: updated!.connectionInstanceId,
+                opId: updated!.opId,
+              }
+            : undefined;
+        return {
+          command: mapCommand(updated!),
+          accepted: true,
+          ...(stopTarget ? { stopTarget } : {}),
+        };
       }),
   );
 }
