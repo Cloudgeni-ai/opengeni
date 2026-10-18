@@ -325,11 +325,16 @@ authority alone for agent links.
   renewal), give the service both authorities in `ca.crt`, then retire
   the old one.
 - **The database password.** Change it in the Secret, set a new
-  `computeControl.database.passwordRevision` (any string) and upgrade the
-  release: the revision runs a new database Job, which gives the role the
-  new password, and rolls the pods, which read it only at start; each new
-  pod waits at its database init container until it can log in with the
-  new password, so the old pods keep serving until then. Once the role
+  `computeControl.database.passwordRevision`, a whole number above the
+  last, and upgrade the release: the revision runs a new database Job,
+  which gives the role the new password, and rolls the pods, which read it
+  only at start; each new pod waits at its database init container until
+  it can log in with the new password, so the old pods keep serving until
+  then. Each Job records its revision on the role (as the role's comment)
+  and changes nothing once a Job of a higher revision has run, so a Job
+  left running by an earlier, failed upgrade cannot give the role the
+  earlier password back. So never lower the revision, and on a new
+  installation over an existing database keep the last one. Once the role
   has the new password, the old pods' open connections keep working but
   new ones fail until each is replaced, so do it outside busy hours.
   Without `provision`, change the role's password yourself before the

@@ -173,13 +173,42 @@ describe("computeControl", () => {
       ...enabled,
       computeControl: {
         ...enabled.computeControl,
-        database: { ...enabled.computeControl.database, passwordRevision: "2026-10-18" },
+        database: { ...enabled.computeControl.database, passwordRevision: 2 },
       },
     });
     expect(rotated).not.toBe(installed);
     // A changed pod template cannot be applied to a Job in place.
     const image = await name({ ...enabled, postgres: { enabled: true, image: { tag: "17.9" } } });
     expect(image).not.toBe(installed);
+  });
+
+  test("orders its database Jobs by password revision", async () => {
+    const withRevision = (passwordRevision: unknown) => ({
+      ...enabled,
+      computeControl: {
+        ...enabled.computeControl,
+        database: { ...enabled.computeControl.database, passwordRevision },
+      },
+    });
+    const revision = async (passwordRevision: unknown) =>
+      databaseJob(await render(withRevision(passwordRevision))).spec.template.spec.containers[0].env.find(
+        (e: any) => e.name === "PASSWORD_REVISION",
+      ).value;
+    expect(await revision(0)).toBe("0");
+    expect(await revision(20261018)).toBe("20261018");
+    expect(await revision("7")).toBe("7");
+    // A Job of a lower revision, left running by a failed upgrade, must not
+    // give the role its earlier password after a higher one's has run: each
+    // records its revision on the role and, under a lock, checks it first.
+    const script = databaseJob(await render(enabled)).spec.template.spec.containers[0].command[2];
+    expect(script).toContain("pg_advisory_xact_lock");
+    expect(script).toContain("as superseded");
+    expect(script).toContain("'opengeni compute provisioning, password revision ' || :'revision'");
+    for (const bad of ["2026-10-18", "-1", "next"]) {
+      const rendered = await helmTemplate(withRevision(bad));
+      expect(rendered.exitCode).not.toBe(0);
+      expect(rendered.stderr).toContain("passwordRevision must be a whole number");
+    }
   });
 
   test("quotes connection settings and rolls its pods for a new password revision", async () => {
@@ -197,7 +226,7 @@ describe("computeControl", () => {
         ...enabled,
         computeControl: {
           ...enabled.computeControl,
-          database: { ...enabled.computeControl.database, passwordRevision: "2026-10-18" },
+          database: { ...enabled.computeControl.database, passwordRevision: 2 },
         },
       }),
     );

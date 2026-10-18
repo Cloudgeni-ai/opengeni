@@ -58,11 +58,29 @@ database.host nor database.name names another. */}}
 {{- if and .Values.postgres.enabled (not (or $db.host $db.name)) -}}true{{- end -}}
 {{- end -}}
 
+{{/*
+The database password's revision, a whole number that each change of the
+password raises: it rolls the service's pods, and orders the database Jobs
+that give the role a password, so that an earlier one cannot undo a later.
+*/}}
+{{- define "opengeni.computeControl.passwordRevision" -}}
+{{- $revision := .Values.computeControl.database.passwordRevision | default 0 -}}
+{{- if kindIs "float64" $revision -}}
+{{- $revision = int64 $revision -}}
+{{- end -}}
+{{- $revision = toString $revision -}}
+{{- if not (regexMatch "^[0-9]{1,15}$" $revision) -}}
+{{- fail "computeControl.database.passwordRevision must be a whole number, raised at each change of the password" -}}
+{{- end -}}
+{{- $revision -}}
+{{- end -}}
+
 {{- define "opengeni.computeControl.assert" -}}
 {{- $cc := .Values.computeControl -}}
 {{- if not $cc.database.existingSecret -}}
 {{- fail "computeControl.database.existingSecret is required" -}}
 {{- end -}}
+{{- $_ := include "opengeni.computeControl.passwordRevision" . -}}
 {{- if not $cc.keys.existingSecret -}}
 {{- fail "computeControl.keys.existingSecret is required" -}}
 {{- end -}}

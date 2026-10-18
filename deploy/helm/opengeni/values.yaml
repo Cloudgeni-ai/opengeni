@@ -1307,10 +1307,11 @@ computeControl:
     passwordKey: COMPUTE_DATABASE_PASSWORD
     urlKey: ""
     # Pods read the password only at start: after changing it in the
-    # Secret, set a new revision (any string) so the upgrade rolls them,
-    # and runs a new database Job that gives the role the new password;
-    # the new pods wait for it before they start.
-    passwordRevision: ""
+    # Secret, raise the revision (a whole number) so the upgrade rolls them
+    # and runs a new database Job, which gives the role the new password;
+    # the new pods wait for it before they start. A Job of a lower revision
+    # never sets the role's password after a higher one's has.
+    passwordRevision: 0
     role: compute
     schema: compute
     # Defaults: the chart's Postgres, its database, and sslmode disable.
@@ -1321,11 +1322,11 @@ computeControl:
     sslmode: ""
     # A Job creates the role (login, password from the Secret, search path
     # the schema) and the schema it owns, with the migration owner URL
-    # (OPENGENI_MIGRATIONS_DATABASE_URL in the migration Secret): beside
-    # the release on an install, the service's pods waiting for it, and as
-    # a hook before any pod is replaced on an upgrade. Only for the chart's
-    # own Postgres; turn it off for any other database, or where a DBA
-    # provisions them.
+    # (OPENGENI_MIGRATIONS_DATABASE_URL in the migration Secret), as an
+    # ordinary resource of the release, never a hook: the service's pods
+    # wait until the role can log in with their password. Only for the
+    # chart's own Postgres; turn it off for any other database, or where a
+    # DBA provisions them.
     provision: true
     connections: 16
   # Keys of the API, one `team key` per line, from a Secret's `keys` entry.
