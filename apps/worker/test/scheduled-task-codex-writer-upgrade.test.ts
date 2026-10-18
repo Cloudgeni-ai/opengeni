@@ -48,6 +48,8 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   const compat = "0716_subscription_authority_compat.sql";
   // 0717 requires 0716's routines; it follows 0716.
   const fences = "0717_subscription_authority_fences.sql";
+  // 0843 patches routines 0716 creates; withheld with it and replayed after it.
+  const indexedLineage = "0843_indexed_inbox_lineage.sql";
   // 0726 patches the acceptance writers 0688 and 0707 define; it follows them.
   const acceptanceReads = "0726_subscription_personal_acceptance_reads.sql";
   // Built from the owner reader withheld 0715 rewrites; it follows 0715.
@@ -71,7 +73,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     await database.admin`insert into schema_migrations(name) values (${writer}),
       (${cutover}), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral}), (${completion}), (${precursor}),
       (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}),
-      (${acceptanceReads}), (${personalConnectionVersions}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), (${pendingUpdateTenancy}), (${workspaceAdminConnections})`;
+      (${acceptanceReads}), (${personalConnectionVersions}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), (${pendingUpdateTenancy}), (${workspaceAdminConnections}), (${indexedLineage})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);
@@ -125,7 +127,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
       await database.admin`select execution_digest, authority_revision from scheduled_tasks where id = ${taskId}::uuid`;
     await client.close();
     client = undefined;
-    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences}, ${acceptanceReads}, ${personalConnectionVersions}, ${pendingUpdateTenancy}, ${workspaceAdminConnections})`;
+    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences}, ${acceptanceReads}, ${personalConnectionVersions}, ${pendingUpdateTenancy}, ${workspaceAdminConnections}, ${indexedLineage})`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     client = createDb(appUrl.toString());
