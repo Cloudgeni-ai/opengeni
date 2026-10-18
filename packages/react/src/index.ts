@@ -47,6 +47,23 @@ export type {
 } from "./client";
 export { OpenGeniProvider } from "./provider";
 export type { OpenGeniProviderProps, ErrorMessageFormatter } from "./provider";
+export {
+  createOpenGeniText,
+  OpenGeniMessagesProvider,
+  useOpenGeniLocale,
+  useOpenGeniText,
+} from "./messages/runtime";
+export type {
+  MessageParamValue,
+  OpenGeniMessageCatalog,
+  OpenGeniMessageKey,
+  OpenGeniMessageParams,
+  OpenGeniMessages,
+  OpenGeniMessagesProviderProps,
+  OpenGeniText,
+  PluralCategory,
+} from "./messages/runtime";
+export { englishMessages } from "./messages/en";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
@@ -65,6 +82,8 @@ export type {
 
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
+export { useRetainedReads } from "./hooks/shared-query";
+export { readClientConfig } from "./lib/client-config-read";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export {
   SESSION_EVENT_BROWSER_MAX_BYTES,
@@ -839,6 +858,11 @@ export { SessionCommandsPanel } from "./components/session-commands-panel";
 export { SessionCommands } from "./components/session-commands";
 
 export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
+export {
+  LearningRefusalActionsProvider,
+  type LearningRefusalActions,
+} from "./timeline/learning-refusal-row";
+export type { LearningRefusalPlace } from "./timeline/learning-refusal-copy";
 export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
 
 export { StartupTimings } from "./timeline/startup-timings";

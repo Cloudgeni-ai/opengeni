@@ -858,6 +858,14 @@ function usageFromResponse(response: unknown): ModelResponseUsage["usage"] | nul
     return null;
   }
   const record = raw as Record<string, unknown>;
+  // Chat's SDK-facing usage is numeric-only. Its original provider detail
+  // snapshot also carries unknown/invalid counts for the shared normalizer;
+  // never replace those with a sanitized omission or SDK-defaulted zero.
+  const chatDetails = (
+    response as {
+      providerData?: { usage?: { prompt_tokens_details?: unknown } };
+    }
+  )?.providerData?.usage?.prompt_tokens_details;
   const usage = {
     ...numberProp(
       record,
@@ -876,7 +884,9 @@ function usageFromResponse(response: unknown): ModelResponseUsage["usage"] | nul
       "completion_tokens",
     ),
     ...numberProp(record, "totalTokens", "totalTokens", "total_tokens"),
-    ...inputTokenDetailsProp(record),
+    ...inputTokenDetailsProp(
+      chatDetails === undefined ? record : { prompt_tokens_details: chatDetails },
+    ),
     ...outputTokenDetailsProp(record),
     ...requestUsageEntriesProp(record),
   };

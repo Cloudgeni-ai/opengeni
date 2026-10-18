@@ -58,6 +58,7 @@ describe("session-only entry", () => {
     expect([...thirdParty].sort()).toEqual([
       "@opengeni/sdk",
       "@opengeni/sdk/allowance-refusal",
+      "@opengeni/sdk/learning-refusal",
       "@opengeni/sdk/model-display",
       "@opengeni/sdk/model-picker-order",
       // The new-conversation controller imports only the voice model type.
@@ -94,6 +95,7 @@ describe("session-only entry", () => {
             "react/jsx-runtime",
             "@opengeni/sdk",
             "@opengeni/sdk/allowance-refusal",
+            "@opengeni/sdk/learning-refusal",
           ],
         },
       },
@@ -129,7 +131,19 @@ describe("session-only entry", () => {
       true,
     );
     expect(reactSources.some((id) => id.endsWith("/src/hooks/use-new-conversation.ts"))).toBe(true);
-    expect(reactSources.length).toBe(32);
+    // Host-localizable copy: the dependency-free text runtime and its English defaults.
+    expect(reactSources.some((id) => id.endsWith("/src/messages/runtime.tsx"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/messages/en.ts"))).toBe(true);
+    // Shared reads: the model catalog store and the deployment config read.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/shared-query.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/lib/client-config-read.ts"))).toBe(true);
+    // Pure refused-save copy shared by the projection; no React graph.
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/learning-refusal-copy.ts"))).toBe(
+      true,
+    );
+    // Retained conversation views for a reopen, on the shared-query store.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/session-view-cache.ts"))).toBe(true);
+    expect(reactSources.length).toBe(38);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

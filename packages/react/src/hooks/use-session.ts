@@ -1,6 +1,7 @@
 import type { Session, SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSessionRead, type EmbeddedSessionReadClientOverride } from "../session-context";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
   useMutationRunner,
   usePolledValue,
@@ -96,6 +97,16 @@ export function useSession(
     return registerSessionReconciler(sessionId, "session", refresh);
   }, [enabled, refresh, registerSessionReconciler, sessionId]);
 
+  // Until this conversation's first read lands, show what was left when the
+  // person last had it open (only when the host retains reads for `client`).
+  const retained = useRetainedSessionView(
+    client,
+    workspaceId,
+    sessionId,
+    "detail",
+    data?.session ?? null,
+    { enabled, discard: deniesRetainedView(error) },
+  );
   const base = data?.session ?? null;
   const readRevision = data?.revision ?? 0;
   const readGeneration = data?.readGeneration ?? 0;
@@ -105,11 +116,12 @@ export function useSession(
     () =>
       base && override && override.id === base.id
         ? { ...base, title: override.title, titleSource: override.titleSource }
-        : base,
-    [base, override],
+        : (base ?? retained),
+    [base, override, retained],
   );
 
   const sharedEvents = options.events;
+  const refreshDetail = useCallback(() => void refresh(), [refresh]);
 
   // Live-patch the title on auto (agent) + cross-client (user/agent) renames so
   // the UI reflects the new title without polling or a full re-fetch.
@@ -155,6 +167,10 @@ export function useSession(
   useSessionEventTrigger(client, workspaceId, sessionId, isSessionDetailEvent, onTitleEvent, {
     enabled,
     ...(options.events !== undefined ? { events: options.events } : {}),
+    // The detail row is authoritative through its lastSequence: only a later
+    // event can make it stale, and one that arrives first waits for the read.
+    readThrough: base ? base.lastSequence : loading ? "reading" : null,
+    refresh: refreshDetail,
   });
 
   const updateTitle = useCallback(
@@ -173,7 +189,7 @@ export function useSession(
 
   return {
     session,
-    loading,
+    loading: loading && retained === null,
     error,
     readRevision,
     readGeneration,

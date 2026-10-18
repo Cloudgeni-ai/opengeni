@@ -152,7 +152,12 @@ drop-ins and ancestor constraints remain authoritative. The
 generated unit uses systemd's `DelegateSubgroup=supervisor`, so the first and every
 replacement control process starts in the same supervisor leaf while the delegated
 root remains empty and restart-safe. Startup verifies this topology and stamps that
-leaf with systemd-oomd's avoid marker. A custom/older unit that cannot provide the
+leaf with systemd-oomd's avoid marker. In-place updates preserve infrastructure
+children in the supervisor leaf and adopt handed-over commands in their existing
+operation leaves; the supervisor need not be its leaf's only process. Commands
+already running without an operation leaf remain on process-group containment
+until they finish; new commands use the restored operation-cgroup manager.
+A custom/older unit that cannot provide the
 subgroup is reported as incapable and stays on unrestricted ambient execution;
 an explicit resource policy then fails closed. Optional per-enrollment memory and
 exact integer-millicore CPU limits arrive on each newly admitted exec/Git request;

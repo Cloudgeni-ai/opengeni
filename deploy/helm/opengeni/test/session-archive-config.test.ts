@@ -32,10 +32,22 @@ async function configMap(values: Record<string, unknown>): Promise<Record<string
 }
 
 describe("idle-session archive configuration", () => {
-  test("is off by default with a thirty day idle period", async () => {
+  test("is on by default with a thirty day idle period", async () => {
     const data = await configMap({});
+    expect(data["OPENGENI_SESSION_ARCHIVE_ENABLED"]).toBe("true");
+    expect(data["OPENGENI_SESSION_ARCHIVE_IDLE_DAYS"]).toBe("30");
+  });
+
+  test("an explicit false turns it off", async () => {
+    const data = await configMap({ sessionArchive: { enabled: false } });
     expect(data["OPENGENI_SESSION_ARCHIVE_ENABLED"]).toBe("false");
     expect(data["OPENGENI_SESSION_ARCHIVE_IDLE_DAYS"]).toBe("30");
+  });
+
+  test("a values file without the enabled key keeps the default on", async () => {
+    const data = await configMap({ sessionArchive: { idleDays: 7 } });
+    expect(data["OPENGENI_SESSION_ARCHIVE_ENABLED"]).toBe("true");
+    expect(data["OPENGENI_SESSION_ARCHIVE_IDLE_DAYS"]).toBe("7");
   });
 
   test("follows sessionArchive values", async () => {
@@ -50,5 +62,7 @@ describe("idle-session archive configuration", () => {
       config: { OPENGENI_SESSION_ARCHIVE_ENABLED: "true" },
     });
     expect(data["OPENGENI_SESSION_ARCHIVE_ENABLED"]).toBe("true");
+    const off = await configMap({ config: { OPENGENI_SESSION_ARCHIVE_ENABLED: "false" } });
+    expect(off["OPENGENI_SESSION_ARCHIVE_ENABLED"]).toBe("false");
   });
 });

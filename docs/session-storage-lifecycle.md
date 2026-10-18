@@ -69,14 +69,15 @@ works but holds an exclusive lock for the duration.
 
 ## Idle-session archive
 
-Off by default. Enable it per deployment:
+On by default. Turn it off per deployment to keep every session in PostgreSQL:
 
 | Setting | Helm value | Default |
 | --- | --- | --- |
-| `OPENGENI_SESSION_ARCHIVE_ENABLED` | `sessionArchive.enabled` | `false` |
+| `OPENGENI_SESSION_ARCHIVE_ENABLED` | `sessionArchive.enabled` | `true` |
 | `OPENGENI_SESSION_ARCHIVE_IDLE_DAYS` | `sessionArchive.idleDays` | `30` |
 
-The archive requires the deployment's object storage. The same maintenance
+The archive requires the deployment's object storage; a deployment without it
+never archives (the worker logs a warning each pass). The same maintenance
 Schedule runs it after content compaction; each pass keeps archiving batches
 of eligible sessions until its ten-minute budget ends or none remain, so a
 backlog drains steadily after the archive is first enabled.
@@ -122,6 +123,17 @@ all of these hold for the idle period:
      catalogs, model-request snapshots, content blobs, pending tool calls and
      preference snapshots, each as `{"table": ..., "row": <exact row JSON>}`,
      then a footer with row counts. Full fidelity, for analysis and audit.
+     Rows are read in pages of 200 under the workspace's row-level security,
+     and each page is an indexed read, so a session with hundreds of thousands
+     of rows exports in linear time. Under a policy PostgreSQL only uses
+     leakproof comparisons as index conditions; numeric and row comparisons
+     are not leakproof and become a filter after the policy, which re-reads
+     every earlier row, and a multi-column cursor only bounds its first column.
+     So tables ordered by several keys or by a numeric key (turns, attempts,
+     model history, code-mode calls and the like) read their ordered row ids
+     once and then fetch each page by primary key. Events, machine inputs and
+     content blobs page by one integer or text key that leads a unique
+     `(workspace_id, session_id, key)` index.
    - `transcript.jsonl.zst`: a header, then the readable timeline as public
      `SessionEvent` objects (`{"event": ...}`), then a footer. This is the
      stable, documented readable section and does not require Opengeni's

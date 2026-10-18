@@ -26,6 +26,7 @@ import {
   type LayoutStorage,
 } from "react-resizable-panels";
 import { cn } from "../lib/cn";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type WorkspaceTab = {
   id: string;
@@ -149,6 +150,7 @@ export function WorkspaceDock({
   maxSize = 70,
   className,
 }: WorkspaceDockProps) {
+  const msg = useOpenGeniText();
   const narrow = useIsNarrow(DOCK_OVERLAY_BREAKPOINT);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const reopenRef = useRef<HTMLButtonElement | null>(null);
@@ -393,7 +395,7 @@ export function WorkspaceDock({
           data-workspace-surface
           role="dialog"
           aria-modal="true"
-          aria-label="Workspace"
+          aria-label={msg("workspaceDock.workspace")}
           className="fixed inset-0 z-40 flex flex-col bg-og-bg"
           hidden={collapsed}
           style={{
@@ -413,7 +415,11 @@ export function WorkspaceDock({
             leading={mobileLeadingControl}
             accessory={headerAccessory}
             controls={
-              <ChromeButton onClick={collapse} title="Hide workspace" label="Hide workspace">
+              <ChromeButton
+                onClick={collapse}
+                title={msg("workspaceDock.hideWorkspace")}
+                label={msg("workspaceDock.hideWorkspace")}
+              >
                 <XIcon className="size-4" />
               </ChromeButton>
             }
@@ -424,8 +430,8 @@ export function WorkspaceDock({
             ref={reopenRef}
             type="button"
             onClick={expand}
-            title="Open workspace"
-            aria-label="Open workspace"
+            title={msg("workspaceDock.openWorkspace")}
+            aria-label={msg("workspaceDock.openWorkspace")}
             className="absolute right-3 top-3 z-30 inline-flex size-11 items-center justify-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted shadow-lg transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
             style={{ marginTop: "env(safe-area-inset-top)" }}
           >
@@ -446,8 +452,8 @@ export function WorkspaceDock({
         <>
           <ChromeButton
             onClick={() => setMaximized((m) => !m)}
-            title={maximized ? "Restore (Esc)" : "Maximize"}
-            label={maximized ? "Restore dock" : "Maximize dock"}
+            title={maximized ? msg("workspaceDock.restoreEsc") : msg("workspaceDock.maximize")}
+            label={maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock")}
           >
             {maximized ? (
               <Minimize2Icon className="size-3.5" />
@@ -456,7 +462,11 @@ export function WorkspaceDock({
             )}
           </ChromeButton>
           {hostControlled && !showCollapseControl ? null : (
-            <ChromeButton onClick={collapse} title="Hide workspace" label="Hide workspace">
+            <ChromeButton
+              onClick={collapse}
+              title={msg("workspaceDock.hideWorkspace")}
+              label={msg("workspaceDock.hideWorkspace")}
+            >
               <PanelRightCloseIcon className="size-3.5" />
             </ChromeButton>
           )}
@@ -514,7 +524,7 @@ export function WorkspaceDock({
             data-workspace-surface
             role={maximized ? "dialog" : undefined}
             aria-modal={maximized ? true : undefined}
-            aria-label={maximized ? "Workspace" : undefined}
+            aria-label={maximized ? msg("workspaceDock.workspace") : undefined}
             aria-hidden={collapsed ? true : undefined}
             className={cn(
               "flex h-full min-h-0 min-w-0 flex-col bg-og-bg",
@@ -534,7 +544,7 @@ export function WorkspaceDock({
           ref={reopenRef}
           type="button"
           onClick={expand}
-          title="Open workspace"
+          title={msg("workspaceDock.openWorkspace")}
           className="absolute inset-y-0 right-0 flex w-6 shrink-0 items-center justify-center border-l border-og-border bg-og-surface-1 text-og-fg-subtle hover:text-og-fg"
         >
           <ChevronsLeftRightIcon className="size-3.5" />
@@ -587,6 +597,7 @@ function DockChrome({
   /** Right-aligned chrome controls (maximize / collapse, or the overlay close). */
   controls: ReactNode;
 }) {
+  const msg = useOpenGeniText();
   const chromeRef = useRef<HTMLDivElement | null>(null);
   const [compact, setCompact] = useState(false);
   const active = tabs.find((t) => t.id === current) ?? tabs[0];
@@ -659,7 +670,7 @@ function DockChrome({
         <div className="flex min-w-0 flex-1 items-center gap-2">
           {leading ?? (
             <span className="hidden truncate text-og-sm font-semibold text-og-fg max-[1023px]:inline">
-              Workspace
+              {msg("workspaceDock.workspace")}
             </span>
           )}
         </div>
@@ -673,7 +684,7 @@ function DockChrome({
             compact ? "w-12" : "w-32 max-[1023px]:w-36",
           )}
           role="tablist"
-          aria-label="Workspace panels"
+          aria-label={msg("workspaceDock.workspacePanels")}
           aria-orientation="vertical"
         >
           {tabs.map((tab, index) => {
@@ -745,7 +756,11 @@ function DockChrome({
               );
             })
           ) : (
-            <div className="h-full min-h-0 min-w-0" aria-label="Workspace" role="tabpanel" />
+            <div
+              className="h-full min-h-0 min-w-0"
+              aria-label={msg("workspaceDock.workspace")}
+              role="tabpanel"
+            />
           )}
         </div>
       </div>

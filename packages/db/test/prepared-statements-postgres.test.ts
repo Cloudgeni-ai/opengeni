@@ -103,17 +103,27 @@ async function probeStatement(db: Database) {
 }
 
 describe("prepared statements under row-level security", () => {
-  test("a prepared pool still plans each execution with its bound values", async () => {
-    const [preparedMode] = await rawRows<{ mode: string }>(
-      prepared.db,
-      sql`select current_setting('plan_cache_mode') as mode`,
-    );
-    const [unpreparedMode] = await rawRows<{ mode: string }>(
-      unprepared.db,
-      sql`select current_setting('plan_cache_mode') as mode`,
-    );
-    expect(preparedMode?.mode).toBe("force_custom_plan");
-    expect(unpreparedMode?.mode).toBe("auto");
+  test("a prepared pool reuses a generic plan under the server's default plan cache mode", async () => {
+    for (const pool of [prepared, unprepared]) {
+      const [mode] = await rawRows<{ mode: string }>(
+        pool.db,
+        sql`select current_setting('plan_cache_mode') as mode`,
+      );
+      expect(mode?.mode).toBe("auto");
+    }
+    // Planning under row-level security is the expensive part of a short
+    // statement; after its first custom plans Postgres reuses one generic plan.
+    for (let round = 0; round < 8; round += 1) {
+      for (const current of [tenantA, tenantB]) {
+        const rows = await withWorkspaceRls(prepared.db, current.workspaceId, (scoped) =>
+          visibleWorkspaces(scoped, "probe"),
+        );
+        expect(rows.map((row) => row.id)).toEqual([current.workspaceId]);
+      }
+    }
+    const statement = await probeStatement(prepared.db);
+    expect(statement.prepared).toBe(1);
+    expect(statement.generic).toBeGreaterThan(0);
   });
 
   test("a reused generic plan still filters by each transaction's own scope", async () => {
@@ -140,5 +150,41 @@ describe("prepared statements under row-level security", () => {
       expect(rows.map((row) => row.id)).toEqual([current.workspaceId]);
     }
     expect(await probeStatement(unprepared.db)).toEqual({ prepared: 0, generic: 0 });
+  });
+});
+
+describe("connection reuse", () => {
+  // Each backend keeps its own catalog cache and prepared plans, so work spread
+  // over every pooled connection pays that warmup once per connection. After a
+  // burst opened the whole pool, sequential work must stay on the connection
+  // that was idle most recently, leaving the rest idle until idle_timeout.
+  test("sequential work after a burst stays on the most recently idle connection", async () => {
+    const pool = createDb(shared.appUrl, { max: 4 });
+    try {
+      const burst = await Promise.all(
+        Array.from({ length: 4 }, () =>
+          rawRows<{ pid: number }>(pool.db, sql`select pg_backend_pid() as pid from pg_sleep(0.2)`),
+        ),
+      );
+      expect(new Set(burst.map(([row]) => row!.pid)).size).toBe(4);
+
+      const sequential = new Set<number>();
+      for (let round = 0; round < 12; round += 1) {
+        const [row] = await rawRows<{ pid: number }>(pool.db, sql`select pg_backend_pid() as pid`);
+        sequential.add(row!.pid);
+      }
+      expect(sequential.size).toBe(1);
+
+      const transactional = new Set<number>();
+      for (let round = 0; round < 4; round += 1) {
+        await withWorkspaceRls(pool.db, tenantA.workspaceId, async (scoped) => {
+          const [row] = await rawRows<{ pid: number }>(scoped, sql`select pg_backend_pid() as pid`);
+          transactional.add(row!.pid);
+        });
+      }
+      expect(transactional).toEqual(sequential);
+    } finally {
+      await pool.close();
+    }
   });
 });

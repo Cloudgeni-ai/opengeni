@@ -622,6 +622,8 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
   "materialize_scoped_rig_version_for_attempt(uuid, uuid, uuid, uuid, uuid, integer)",
   "authorize_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
   "assert_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean)",
+  "consent_session_turn_personal_machine(uuid, uuid, uuid, uuid)",
+  "get_session_attempt_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, boolean, boolean)",
   "list_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
   "detach_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
   "preview_connected_machine_audience_change(uuid, uuid, uuid, text, text, boolean)",
@@ -689,6 +691,7 @@ const ORGANIZATION_RECOVERY_AUTHORITY_TABLES = [
 ] as const;
 const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
   "session_private_actor_visible(uuid, uuid, uuid, text)";
+const SESSION_PRIVATE_ACTOR_VISIBLE_KEYS_ROUTINE = "session_private_actor_visible_keys()";
 const SESSION_REFERENCE_VISIBLE_ROUTINE = "session_reference_visible(uuid, uuid, uuid)";
 const TASK_NOTE_CAPABILITY_ROUTINES = [
   "create_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer)",
@@ -834,6 +837,7 @@ const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   ...CONNECTION_AUTHORITY_ROUTINES,
   ...SCHEDULED_PERSONAL_RESOURCE_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
+  SESSION_PRIVATE_ACTOR_VISIBLE_KEYS_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE,
   ...PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES,
@@ -1458,6 +1462,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...TASK_NOTE_CAPABILITY_ROUTINES,
   ...WORK_CLAIM_CAPABILITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
+  SESSION_PRIVATE_ACTOR_VISIBLE_KEYS_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
@@ -1482,6 +1487,9 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  "live_session_turn_machine_consent(uuid)",
+  "bind_session_attempt_machine_consent(uuid, uuid, uuid)",
+  "assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean)",
   "enable_organization_private_sessions_from_activation(uuid, text[])",
   "usage_allowance_members(uuid, uuid)",
   "usage_allowance_effective_period(uuid, jsonb, timestamp with time zone)",
@@ -1556,6 +1564,7 @@ export const FORCE_RLS_TABLES = [
   "browser_revision_components",
   "browser_revisions",
   "browser_session_associations",
+  "browser_session_retained_downloads",
   "browser_sessions",
   "browser_state_artifacts",
   "browser_state_uploads",
@@ -1824,6 +1833,7 @@ export const FORCE_RLS_TABLES = [
   "session_attempt_codemode_calls",
   "session_attempt_connected_machine_authorizations",
   "session_attempt_interruptions",
+  "session_attempt_machine_consents",
   "session_attempt_model_context_snapshots",
   "session_attempt_personal_document_admissions",
   "session_attempt_personal_document_snapshots",
@@ -1856,6 +1866,7 @@ export const FORCE_RLS_TABLES = [
   "session_tenancy_additional_organization_activation_evidence",
   "session_tenancy_greenfield_activation_evidence",
   "session_turn_attempts",
+  "session_turn_machine_consents",
   "session_turn_startup_milestones",
   "session_turns",
   "session_variable_set_attachments",
@@ -2315,6 +2326,9 @@ export const RUNTIME_READ_ONLY_TABLES = [
 ] as const;
 
 /** Existing runtime authorities that may be observed and advanced, never created or deleted. */
+// Rolling compatibility only: old replicas and legacy SQL lifecycle routines
+// still finalize this counter. New writers use sessions.activity_xid. Keep its
+// exact FORCE-RLS/grant posture until a later contract release retires it.
 export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions"] as const;
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
@@ -2380,6 +2394,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "attached_browser_inventories",
   "auth_runs",
   "browser_identities",
+  "browser_session_retained_downloads",
   "browser_sessions",
   "browser_state_artifacts",
   "browser_state_uploads",
@@ -2519,12 +2534,14 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "scheduled_task_run_personal_resource_snapshots",
   "self_service_organization_setup_receipts",
   "session_attempt_connected_machine_authorizations",
+  "session_attempt_machine_consents",
   "session_attempt_personal_document_admissions",
   "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
   "session_attempt_personal_resource_snapshots",
   "session_tenancy_additional_organization_activation_evidence",
   "session_tenancy_greenfield_activation_evidence",
+  "session_turn_machine_consents",
   "session_variable_set_attachments",
   "session_visibility_write_capabilities",
   "session_work_claim_revisions",

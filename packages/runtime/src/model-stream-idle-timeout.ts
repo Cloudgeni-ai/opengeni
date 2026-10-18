@@ -1,5 +1,11 @@
 import { isModelCallFetch } from "./model-provider-transport";
 
+import {
+  MODEL_TRANSPORT_HEADER,
+  parseModelRequestTransport,
+  markModelSocketFailure,
+} from "@opengeni/network/responses-websocket";
+
 export const MODEL_STREAM_IDLE_TIMEOUT_ERROR_CODE = "opengeni_model_stream_idle_timeout";
 
 /**
@@ -179,6 +185,11 @@ function withBodyIdleTimeout(
         } catch (error) {
           settled = true;
           if (error instanceof ModelStreamIdleTimeoutError) {
+            if (
+              parseModelRequestTransport(response.headers.get(MODEL_TRANSPORT_HEADER))?.kind ===
+              "websocket"
+            )
+              markModelSocketFailure(error);
             // Close the wedged upstream connection; the provider cannot resume
             // this response, and recovery issues a fresh request.
             void reader.cancel(error).catch(() => undefined);

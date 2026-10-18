@@ -543,10 +543,8 @@ export const workspaceInferenceControls = pgTable(
   }),
 );
 
-// One transactionally allocated activity clock per workspace. Updated-order
-// discovery reads the committed value through plain MVCC. Semantic writers
-// advance it once at their explicit commit gate, after every other deferred
-// constraint and row lock has settled.
+// Legacy rolling-compatibility shape, not the activity clock for new readers or
+// writers. Retain until old binaries and SQL lifecycle finalizers are retired.
 export const workspaceSessionActivityRevisions = pgTable(
   "workspace_session_activity_revisions",
   {
@@ -5243,15 +5241,13 @@ export const sessions = pgTable(
     agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-    // Assigned once by the explicit transaction commit gate whenever canonical
-    // updated_at activity advances. Raw delta-only writers intentionally omit
-    // updated_at and therefore do not allocate revisions.
-    activityRevision: bigint("activity_revision", { mode: "number" }).notNull().default(0),
-    // Transaction ownership marker between the cheap row trigger and the
-    // once-per-transaction commit gate. Committed rows must always be null.
-    activityRevisionPendingXid: bigint("activity_revision_pending_xid", {
-      mode: "bigint",
-    }),
+    // Top-level xid, assigned by a BEFORE trigger in the original row write.
+    // Strings preserve all 64 bits; raw event-only writes do not stamp activity.
+    activityXid: customType<{ data: string; driverData: string }>({
+      dataType: () => "xid8",
+    })("activity_xid")
+      .notNull()
+      .default(sql`'0'::xid8`),
   },
   (table) => ({
     reasoningEffortValid: check(
@@ -5328,15 +5324,12 @@ export const sessions = pgTable(
       table.updatedAt.desc(),
       table.id.desc(),
     ),
-    workspaceActivityRevision: index("sessions_workspace_activity_revision_idx").on(
+    workspaceActivityXid: index("sessions_workspace_activity_xid_idx").on(
       table.workspaceId,
-      table.activityRevision.desc(),
+      table.activityXid.desc(),
       table.updatedAt.desc(),
       table.id.desc(),
     ),
-    workspaceActivityPending: index("sessions_workspace_activity_pending_idx")
-      .on(table.workspaceId, table.activityRevisionPendingXid, table.id)
-      .where(sql`${table.activityRevisionPendingXid} is not null`),
     ownerOrganizationMembership: foreignKey({
       name: "sessions_owner_organization_membership_fk",
       columns: [table.ownerOrganizationMembershipId, table.accountId],
@@ -8885,6 +8878,9 @@ export const sessionAttemptInterruptions = pgTable(
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
     settledAt: timestamp("settled_at", { withTimezone: true }),
+    // Monotonic hint maintained by triggers from the attempt's quiesced_at.
+    // Indexes the open settlement set only; readers still check the attempt.
+    attemptQuiesced: boolean("attempt_quiesced").notNull().default(false),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -8914,6 +8910,11 @@ export const sessionAttemptInterruptions = pgTable(
     unsettled: index("session_attempt_interruptions_unsettled_idx")
       .on(table.workspaceId, table.sessionId, table.requestedAt)
       .where(sql`${table.state} in ('pending', 'delivered', 'acknowledged')`),
+    openSettlement: index("session_attempt_interruptions_open_settlement_idx")
+      .on(table.workspaceId, table.sessionId)
+      .where(
+        sql`${table.state} in ('pending', 'delivered', 'acknowledged') or not ${table.attemptQuiesced}`,
+      ),
     kindValid: check(
       "session_attempt_interruptions_kind_check",
       sql`${table.kind} in ('session_pause', 'workspace_pause', 'steer', 'maintenance', 'authority_change', 'organization_membership_revoked')`,
@@ -9643,6 +9644,11 @@ export const sessionEvents = pgTable(
     producerSeq: integer("producer_seq"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Filled by a BEFORE INSERT trigger from payload ->> 'sourceKey' for
+    // agent.model.usage rows (migration 0810). Never written by application
+    // code; a plain column keeps the usage idempotency lookup indexable under
+    // row-level security, where the payload expression index cannot be used.
+    usageSourceKey: text("usage_source_key"),
   },
   (table) => ({
     workspaceAttempt: foreignKey({
@@ -9689,6 +9695,9 @@ export const sessionEvents = pgTable(
     workspaceTurnType: index("session_events_workspace_turn_type_idx")
       .on(table.workspaceId, table.turnId, table.type)
       .where(sql`${table.turnId} is not null`),
+    usageSourceKey: index("session_events_usage_source_key_idx")
+      .on(table.workspaceId, table.turnId, table.usageSourceKey)
+      .where(sql`${table.usageSourceKey} is not null`),
     commandOutputPage: index("session_events_command_output_page_idx")
       .on(
         table.workspaceId,
@@ -11152,9 +11161,11 @@ export const sessionBackgroundCommands = pgTable(
     settlementReason: text("settlement_reason"),
     runnerFailure:
       jsonb("runner_failure").$type<import("@opengeni/contracts").SessionCommandFailure>(),
+    backgroundChildrenStopped: boolean("background_children_stopped").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     settledAt: timestamp("settled_at", { withTimezone: true }),
     completionObservedAt: timestamp("completion_observed_at", { withTimezone: true }),
+    completionNotifiedAt: timestamp("completion_notified_at", { withTimezone: true }),
     reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).notNull().defaultNow(),
     reconcileClaimId: uuid("reconcile_claim_id"),
     reconcileClaimedAt: timestamp("reconcile_claimed_at", {
@@ -12922,6 +12933,12 @@ export const modelCallFacts = pgTable(
     listCostIsApprox: boolean("list_cost_is_approx"),
     contextContributions:
       jsonb("context_contributions").$type<readonly ModelContextContributionSummary[]>(),
+    // Worker-measured call timing in milliseconds (see ModelCallTiming); null
+    // for calls before 0802 and calls the worker did not stream.
+    preDispatchMs: integer("pre_dispatch_ms"),
+    timeToFirstTokenMs: integer("time_to_first_token_ms"),
+    timeToFirstTextMs: integer("time_to_first_text_ms"),
+    durationMs: integer("duration_ms"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },

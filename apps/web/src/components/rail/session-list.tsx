@@ -3,6 +3,7 @@
 // Supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
 // dot + single-line truncated title + relative time (visible at rest). The
 // active session (from the URL) is highlighted with an accent bar.
+import { t } from "@/lib/console-text";
 import { useChannels, useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
 import { SiteOriginLink } from "@/components/session/site-origin-link";
 import { SiteSessionGroupHeading } from "./site-session-group-heading";
@@ -2786,7 +2787,7 @@ export function SessionList() {
                     : group === "previous7"
                       ? "Created in previous 7 days"
                       : "Created earlier"
-                : SESSION_GROUP_LABELS[group],
+                : SESSION_GROUP_LABELS(t)[group],
             sessions: [],
           };
           return showEmptyGroups ? [bucket] : [];
@@ -4276,7 +4277,7 @@ function SessionRow(props: {
   const descendantLabel = sessionDescendantLabel(props.session);
   const childCountAria = sessionDescendantCountAria(props.childCount, props.childCountTruncated);
   const depthLabel = props.depth > MAX_VISUAL_TREE_DEPTH ? `Level ${props.depth + 1}` : null;
-  const relativeTime = relativeTimeLabel(props.session.updatedAt);
+  const relativeTime = relativeTimeLabel(t, props.session.updatedAt);
   // Indent nested rows without changing the root title column. Parents and
   // leaves reserve the same compact disclosure slot, so the chevron does not
   // push a parent title away from the leaf titles beside it.
@@ -4867,7 +4868,7 @@ export function CollapsedSessionsButton() {
     limit: 50,
     pollIntervalMs: 15_000,
   });
-  const runningCount = useMemo(() => groupSessionsForRail(sessions).running.length, [sessions]);
+  const runningCount = useMemo(() => groupSessionsForRail(t, sessions).running.length, [sessions]);
   // The collapsed rail can't render the expanded list's loading/error copy, so
   // it mirrors those states: a failed load shows a failed-tone marker + tooltip
   // (expanding reveals the retry), a first load shows a gentle pulse.

@@ -10,6 +10,9 @@ import {
 import type { MemoryItem } from "../src/timeline";
 import { formatElapsed } from "../src/timeline/turn-summary";
 import { flush, registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -281,11 +284,11 @@ describe("TurnSummary facets", () => {
 
 describe("TurnSummary status line", () => {
   test("formats elapsed wall time with seconds below an hour", () => {
-    expect(formatElapsed(900)).toBe("0s");
-    expect(formatElapsed(14_000)).toBe("14s");
-    expect(formatElapsed(120_000)).toBe("2m");
-    expect(formatElapsed(134_000)).toBe("2m 14s");
-    expect(formatElapsed(3_900_000)).toBe("1h 05m");
+    expect(formatElapsed(englishText, 900)).toBe("0s");
+    expect(formatElapsed(englishText, 14_000)).toBe("14s");
+    expect(formatElapsed(englishText, 120_000)).toBe("2m");
+    expect(formatElapsed(englishText, 134_000)).toBe("2m 14s");
+    expect(formatElapsed(englishText, 3_900_000)).toBe("1h 05m");
   });
 
   test("a settled exchange states its span once and reads as a separator", async () => {

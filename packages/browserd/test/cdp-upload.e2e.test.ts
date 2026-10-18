@@ -169,7 +169,7 @@ for (const mode of [
         expect(await controller.run(command)).toEqual(receipt);
         if (mode === "covered") {
           // The wrapped receipt must still say why the action failed.
-          expect(receipt.error?.message).toContain("covered or not pointer-actionable");
+          expect(receipt.error?.message).toContain("covered by div at its center");
         }
         if (mode === "dialog") {
           expect(receipt.error?.message).toContain("JavaScript dialog");

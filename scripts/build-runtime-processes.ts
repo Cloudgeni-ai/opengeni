@@ -92,7 +92,12 @@ async function buildApi(): Promise<void> {
   await rm(outdir, { recursive: true, force: true });
   await checkedBuild({
     ...sharedBuild,
-    entrypoints: [join(repositoryRoot, "apps/api/src/index.ts")],
+    // The native artifact kernel runs on worker threads loaded from a sibling
+    // entrypoint (see apps/api/src/editable-artifact-kernel-pool.ts).
+    entrypoints: [
+      join(repositoryRoot, "apps/api/src/index.ts"),
+      join(repositoryRoot, "apps/api/src/editable-artifact-kernel-thread-entry.ts"),
+    ],
     outdir,
     external: [
       ...nativeRuntimeExternals,

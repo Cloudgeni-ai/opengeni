@@ -15,6 +15,8 @@ export interface TraySummary {
   installed: boolean;
   connected: boolean;
   running: boolean;
+  /** On, but its agent is starting again. Absent means no. */
+  reconnecting?: boolean;
   /** Screen-control permissions still to allow, in order. */
   missingPermissions?: readonly ThisComputerPermissionId[];
 }
@@ -23,6 +25,7 @@ const PERMISSION_LABELS: Record<ThisComputerPermissionId, string> = {
   screenRecording: "Allow Screen Recording…",
   accessibility: "Allow Accessibility…",
   inputMonitoring: "Allow Input Monitoring…",
+  files: "Allow Desktop, Documents and Downloads…",
 };
 
 /**
@@ -49,13 +52,19 @@ export class AppTray {
     this.tray.setToolTip(
       !summary.connected
         ? this.config.productName
-        : `${this.config.productName}: ${summary.running ? "this computer is available to agents" : "this computer is paused"}`,
+        : `${this.config.productName}: ${
+            !summary.running
+              ? "this computer is paused"
+              : summary.reconnecting
+                ? "connecting this computer…"
+                : "this computer is available to agents"
+          }`,
     );
     const computer = !summary.connected
       ? []
       : [
           {
-            label: statusText(summary.running, missing.length > 0),
+            label: statusText(summary.running, summary.reconnecting === true, missing.length > 0),
             enabled: false,
           },
           ...missing.map((permission) => ({
@@ -82,9 +91,8 @@ export class AppTray {
   }
 }
 
-function statusText(running: boolean, needsPermissions: boolean): string {
+function statusText(running: boolean, reconnecting: boolean, needsPermissions: boolean): string {
   if (!running) return "This computer: paused";
-  return needsPermissions
-    ? "This computer: screen control needs permission"
-    : "This computer: available to agents";
+  if (needsPermissions) return "This computer: screen control needs permission";
+  return reconnecting ? "This computer: connecting…" : "This computer: available to agents";
 }

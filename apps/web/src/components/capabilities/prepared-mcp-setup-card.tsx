@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { useEffect, useRef, useState } from "react";
 import { ConnectController } from "@opengeni/connect";
 import { ConnectSetup, useConnect } from "@opengeni/react/connect";
@@ -154,7 +155,7 @@ function PreparedSetup({
       if (!item?.enabled) throw new Error("Connection not yet visible");
       // Existing CAS-fenced selection preserves all other choices and cannot
       // widen a parent's ceiling or the currently accepted attempt's tools.
-      await attachSessionCapability(client, workspaceId, sessionId, item, () => active);
+      await attachSessionCapability(t, client, workspaceId, sessionId, item, () => active);
       if (!active) return;
       setAccess("ready");
       // A host refresh failure cannot undo a verified connection or turn it

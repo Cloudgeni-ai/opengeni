@@ -34,6 +34,7 @@ import { createRuntimeBatcher } from "../src/activities/streaming";
 import { TurnAttemptFencedError } from "../src/activities/turn-attempt-fenced";
 import { streamSessionEvents, type SessionEvent } from "@opengeni/sdk";
 import { buildTimeline } from "../../../packages/react/src/timeline/projection";
+import { createOpenGeniText } from "../../../packages/react/src/messages/runtime";
 
 function builtinSettings(overrides: Parameters<typeof testSettings>[0] = {}): Settings {
   return testSettings({
@@ -296,7 +297,7 @@ async function sseTimeline(events: SessionEvent[]) {
     { reconnect: false },
   ))
     delivered.push(event);
-  return buildTimeline(delivered);
+  return buildTimeline(createOpenGeniText(), delivered);
 }
 
 test("only provider summary text maps to visible reasoning, not private or encrypted reasoning", () => {

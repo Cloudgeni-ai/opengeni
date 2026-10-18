@@ -3,6 +3,7 @@ import {
   type EmbeddedComputerInteractionClientOverride,
   useEmbeddedComputerInteraction,
 } from "../session-context";
+import { useOpenGeniText } from "../messages/runtime";
 
 type PostureSource = {
   client: ReturnType<typeof useEmbeddedComputerInteraction>["client"];
@@ -26,6 +27,7 @@ export function useComputerInputPosture(
     enabled: boolean;
   },
 ) {
+  const t = useOpenGeniText();
   const { client, workspaceId } = useEmbeddedComputerInteraction(options);
   const { computerSessionId, controllerGeneration, enabled } = options;
   const [nonce, setNonce] = useState(0);
@@ -47,7 +49,7 @@ export function useComputerInputPosture(
     void (async () => {
       try {
         if (!client.getComputerInputPosture) {
-          throw new Error("Desktop input availability could not be verified.");
+          throw new Error(t("hooks.useComputerInputPosture.desktopInputAvailabilityCouldNot"));
         }
         const posture = await client.getComputerInputPosture(workspaceId, computerSessionId, {
           signal: controller.signal,
@@ -83,7 +85,7 @@ export function useComputerInputPosture(
       disposed = true;
       controller.abort();
     };
-  }, [client, computerSessionId, controllerGeneration, enabled, nonce, source, workspaceId]);
+  }, [client, computerSessionId, controllerGeneration, enabled, nonce, source, workspaceId, t]);
 
   return {
     inputAllowed: visible?.inputAllowed ?? null,

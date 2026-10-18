@@ -1,8 +1,44 @@
-import { CUA_DESKTOP_TOOLS } from "@opengeni/contracts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createCuaRuntime } from "../src/cua/sdk";
+
+// The desktop workflow tools agents may call. Lifecycle, escalation,
+// configuration, update, recording and browser tools stay outside.
+const ADMITTED = [
+  "list_apps",
+  "list_windows",
+  "get_window_state",
+  "verify_state",
+  "launch_app",
+  "kill_app",
+  "bring_to_front",
+  "set_window_frame",
+  "invoke_menu",
+  "click",
+  "double_click",
+  "right_click",
+  "drag",
+  "type_text",
+  "press_key",
+  "hotkey",
+  "set_value",
+  "scroll",
+  "clipboard_read",
+  "clipboard_write",
+  "get_screen_size",
+  "get_desktop_state",
+  "get_cursor_position",
+  "move_cursor",
+  "set_agent_cursor_enabled",
+  "set_agent_cursor_motion",
+  "set_agent_cursor_theme",
+  "get_agent_cursor_state",
+  "zoom",
+  "run_steps",
+  "run_script",
+  "parse_visual_regions",
+];
 
 // Release generation reads only the bundled driver's static tool inventory.
 // No app discovery, screenshots, native input, or permission prompts.
@@ -17,7 +53,7 @@ const runtime = await createCuaRuntime(
 );
 try {
   const catalog = JSON.parse(await runtime.listToolsJson());
-  const admitted = new Set(CUA_DESKTOP_TOOLS.map((tool) => tool.name));
+  const admitted = new Set(ADMITTED);
   const tools = catalog.tools.filter((tool: { name: string }) => admitted.has(tool.name));
   const missing = [...admitted].filter(
     (name) => !tools.some((tool: { name: string }) => tool.name === name),

@@ -16,6 +16,7 @@ import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config"
 import {
   agentCapabilityEnabled,
   type SandboxBackend,
+  CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
   type SecretResolver,
 } from "@opengeni/contracts";
 import {
@@ -32,6 +33,7 @@ import {
   resolvePersonalMachineConnectionForAttempt,
   requireSession,
   setActiveSandbox,
+  type ActiveSandboxSwapRefusal,
   type Database,
   type EnrollmentRecord,
   type SandboxRecord,
@@ -80,6 +82,8 @@ export type FleetContext = {
   accountId: string;
   workspaceId: string;
   subjectId?: string;
+  /** Only an explicit human move request may consent for the running turn. */
+  consentToCurrentTurn?: boolean;
   attemptAuthority?: {
     turnId: string;
     attemptId: string;
@@ -210,6 +214,32 @@ export type FleetSwapResult = {
     | "recovery_degraded"
     | "recovery_unrecoverable";
 };
+
+/** The typed code and plain reason for a swap the pointer write refused. */
+function swapRefusal(refusal: ActiveSandboxSwapRefusal): {
+  code: NonNullable<FleetSwapResult["code"]>;
+  reason: string;
+} {
+  switch (refusal) {
+    case "not_permitted":
+      return {
+        code: "personal_machine_not_permitted",
+        reason: "This machine is not available to this chat.",
+      };
+    case "target_unavailable":
+      return {
+        code: "stale_pointer",
+        reason: "This machine is no longer connected to the workspace.",
+      };
+    case "chat_unavailable":
+      return { code: "stale_pointer", reason: "This chat no longer exists." };
+    case "epoch_changed":
+      return {
+        code: "concurrent_swap",
+        reason: "The chat was moved by another request at the same time. Try again.",
+      };
+  }
+}
 
 export type PersonalMachineRefusalCode =
   | "personal_machine_permission_required"
@@ -820,6 +850,7 @@ export async function swapActiveSandbox(
           sessionId: ctx.sessionId,
           targetSandboxId: resolved.targetSandboxId,
           expectedEpoch: pointer.activeEpoch,
+          consentToCurrentTurn: ctx.consentToCurrentTurn === true,
           ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
           ...(ctx.attemptAuthority ? { personalMachineAttempt: ctx.attemptAuthority } : {}),
           ...(resolved.workspaceRoot !== undefined
@@ -847,7 +878,16 @@ export async function swapActiveSandbox(
           activeEpoch: result.pointer.activeEpoch,
         };
       }
-      // CAS lost (a concurrent swap won) — re-read + retry once.
+      // Only a lost epoch race is worth re-reading and retrying; every other
+      // refusal is a decision about the chat or the target and is final.
+      if (result.refusal !== undefined && result.refusal !== "epoch_changed") {
+        return {
+          swapped: false,
+          activeSandboxId: pointer.activeSandboxId,
+          activeEpoch: pointer.activeEpoch,
+          ...swapRefusal(result.refusal),
+        };
+      }
     }
     const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
       activeSandboxId: null,
@@ -857,8 +897,7 @@ export async function swapActiveSandbox(
       swapped: false,
       activeSandboxId: pointer.activeSandboxId,
       activeEpoch: pointer.activeEpoch,
-      reason: "a concurrent swap won the epoch fence; re-read and retry",
-      code: "concurrent_swap",
+      ...swapRefusal("epoch_changed"),
     };
   } finally {
     // Do not let a cleanup failure turn an already-committed route CAS into a
@@ -889,6 +928,7 @@ export type RunOnResult = {
   content?: string;
   bytesWritten?: number;
   reason?: string;
+  notice?: string;
 };
 
 export type RunOnSelfhostedMachine = {
@@ -1085,6 +1125,9 @@ export async function executeRunOnSelfhostedMachine(
           : !hasTerminalExit
             ? { reason: "machine returned no terminal exit code" }
             : {}),
+        ...(res.backgroundChildrenStopped
+          ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
+          : {}),
       };
     }
     if (op.kind === "read") {

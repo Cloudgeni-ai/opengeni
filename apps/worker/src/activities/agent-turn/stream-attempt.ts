@@ -55,7 +55,11 @@ import {
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
 } from "@opengeni/runtime";
-import { serviceTierForLatencyMode, type Settings } from "@opengeni/config";
+import {
+  retainedImageWorkspaceQuotaBytes,
+  serviceTierForLatencyMode,
+  type Settings,
+} from "@opengeni/config";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
 import {
   isContextCompactionInterruption,
@@ -77,6 +81,7 @@ import {
   recordBatchFlush,
   recordContextCompaction,
   recordModelInputTokens,
+  recordModelStepPhase,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
   recordSandboxSharedPreparation,
@@ -718,6 +723,12 @@ export async function runTurnStreamAttempt(
     const modelCallAdmission = createModelCallAdmission({
       signal: runtimeCancellationSignal,
       admit: revalidateModelCallAdmission,
+      observe: (phase, durationSeconds) =>
+        recordModelStepPhase(observability, {
+          provider: resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai",
+          phase,
+          durationSeconds,
+        }),
     });
     const responseCreditPolicyRevisions = new Set<number | undefined>();
     const responseCountBeforeStream = modelResponseState.responseCount;
@@ -1208,6 +1219,7 @@ export async function runTurnStreamAttempt(
         const generatedImageReceipt = generatedImage
           ? await media.retainNativeGeneratedImage(generatedImage)
           : null;
+        const responseSettlementStartedAt = performance.now();
         const responseResult = await processModelResponseTerminalEvent({
           creditPolicyRevision,
           event: next.value,
@@ -1239,6 +1251,7 @@ export async function runTurnStreamAttempt(
           leaseLostMessage: "Provider credential lease expired during the active turn",
           setLastInputTokens: setLastInputTokensFenced,
           contextContributions: eventing.companyBrainContextContributions,
+          responseTiming: () => streamTiming.completeResponse(),
         });
         assertModelResponseLatencyMode({
           event: next.value,
@@ -1247,6 +1260,12 @@ export async function runTurnStreamAttempt(
           ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
         });
         if (responseResult.status === "processed") {
+          const responseUsageSettledAt = performance.now();
+          recordModelStepPhase(observability, {
+            provider: streamProvider,
+            phase: "response_usage",
+            durationSeconds: (responseUsageSettledAt - responseSettlementStartedAt) / 1_000,
+          });
           if (
             !providerPublishesNativeRequestEvents &&
             fallbackProviderRequestLifecycleStartedAt !== null
@@ -1305,6 +1324,17 @@ export async function runTurnStreamAttempt(
           currentToolBatchCallIds = new Set<string>();
           currentToolBatchCompletedCallIds = new Set<string>();
           await historySink.reconcileConversationTruth();
+          const responseSettledAt = performance.now();
+          recordModelStepPhase(observability, {
+            provider: streamProvider,
+            phase: "response_history",
+            durationSeconds: (responseSettledAt - responseUsageSettledAt) / 1_000,
+          });
+          recordModelStepPhase(observability, {
+            provider: streamProvider,
+            phase: "response_settlement",
+            durationSeconds: (responseSettledAt - responseSettlementStartedAt) / 1_000,
+          });
           turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
           modelCheckpointMemoryCollector.schedule(observability);
         }
@@ -1413,6 +1443,7 @@ export async function runTurnStreamAttempt(
               attemptId: input.attemptId,
               output: typedScreenshot,
               kind: media.retainedSessionImageKindsByCallId.get(completedToolCall.callId),
+              workspaceQuotaBytes: retainedImageWorkspaceQuotaBytes(settings, input.workspaceId),
             });
             media.retainedScreenshotReceiptsByCallId.set(
               completedToolCall.callId,
@@ -1444,6 +1475,10 @@ export async function runTurnStreamAttempt(
                       turnId: activeTurnId,
                       attemptId: input.attemptId,
                       output: image,
+                      workspaceQuotaBytes: retainedImageWorkspaceQuotaBytes(
+                        settings,
+                        input.workspaceId,
+                      ),
                     }).catch(() => null)
                   : null;
                 receipts.push(receipt?.available ? receipt : null);

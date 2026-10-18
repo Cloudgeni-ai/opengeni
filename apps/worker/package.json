@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/worker-bundle",
-  "version": "3.4.0",
+  "version": "4.0.4",
   "description": "Opengeni worker entry and reusable embedded lifecycle, shipped with a release-coherent pre-bundled Temporal workflow artifact.",
   "license": "Apache-2.0",
   "repository": {
@@ -85,7 +85,8 @@
     "@temporalio/client": "^1.17.0",
     "@temporalio/worker": "^1.17.0",
     "@temporalio/workflow": "^1.17.0",
-    "sharp": "^0.34.5"
+    "sharp": "^0.34.5",
+    "ws": "8.21.1"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

@@ -182,6 +182,8 @@ export type CodemodeBrowserAgentView = Readonly<{
   nodes: readonly CodemodeBrowserAgentNode[];
   /** Nodes left out by the output budget; absent when nothing was left out. */
   omittedNodeCount?: number;
+  /** The largest regions holding the left-out nodes. */
+  omittedRegions?: readonly Readonly<{ role: string; name?: string; count: number }>[];
   removedRefCount?: number;
   clippedFieldCount?: number;
 }>;

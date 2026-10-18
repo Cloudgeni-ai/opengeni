@@ -3,6 +3,7 @@
 // They render inside the settings shell's Organization section
 // (components/settings/workspace-settings-shell.tsx); pages this person can't
 // use are hidden from the rail (lib/organization-settings-access.ts).
+import { t } from "@/lib/console-text";
 import { useNavigate } from "@tanstack/react-router";
 import { PlusIcon, UserPlusIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
@@ -157,7 +158,7 @@ export function OrgSettingsRoute({
     context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const accountId = activeWorkspace?.accountId ?? "";
   const fallbackLabel = accountId
-    ? orgLabel(accountId, context.accessContext.accountGrants)
+    ? orgLabel(t, accountId, context.accessContext.accountGrants)
     : "Organization";
   // The same rule decides which pages the settings rail lists.
   const {

@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { useClaudeSubscriptions } from "./use-claude-subscriptions";
 import {
   ClaudeAccountRows,
@@ -1457,7 +1458,7 @@ export function payerPhrase(
     case "organization_byok":
       return `billed to ${organization} ${model.providerLabel} key`;
     default:
-      return `paid by ${payerSummaryForModel(model).toLocaleLowerCase()}`;
+      return `paid by ${payerSummaryForModel(t, model).toLocaleLowerCase()}`;
   }
 }
 

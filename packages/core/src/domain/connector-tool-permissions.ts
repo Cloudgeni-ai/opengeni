@@ -1,14 +1,16 @@
 import { slackRestMcpToolsForScopes } from "@opengeni/contracts/slack-rest-mcp";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { mcpAccountBindingsFromVisibleConnections } from "./mcp-account-bindings";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   boundMcpResponseBody,
   MCP_MAX_RESPONSE_BYTES,
   assertMcpToolListWithinBounds,
 } from "@opengeni/runtime/mcp-network";
+import {
+  connectMcpStreamableHttpClient,
+  legacyMcpClientError,
+  type McpStreamableHttpClient,
+} from "./mcp-streamable-http-client";
 import { createPinnedIntegrationTransport } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import type {
@@ -316,12 +318,13 @@ async function listTools(
   }
   const pinned = createPinnedIntegrationTransport({ network: input.settings });
   const deadline = AbortSignal.timeout(15_000);
-  const client = new Client(
-    { name: "opengeni-tool-permissions", version: "0.1.0" },
-    { capabilities: {} },
-  );
+  let client: McpStreamableHttpClient | undefined;
   try {
-    const transport = new StreamableHTTPClientTransport(new URL(target.server.url), {
+    client = await connectMcpStreamableHttpClient({
+      url: target.server.url,
+      clientName: "opengeni-tool-permissions",
+      clientVersion: "0.1.0",
+      timeoutMs: 15_000,
       requestInit: { headers },
       fetch: async (url, init) =>
         boundMcpResponseBody(
@@ -332,22 +335,20 @@ async function listTools(
           MCP_MAX_RESPONSE_BYTES,
         ),
     });
-    await client.connect(transport as unknown as Transport, {
-      timeout: 15_000,
-      maxTotalTimeout: 15_000,
+    const tools = await collectConnectorToolPages(client, deadline).catch((error: unknown) => {
+      throw legacyMcpClientError(error);
     });
-    const tools = await collectConnectorToolPages(client, deadline);
     return tools.filter(
       (tool) => !target.server.allowedTools || target.server.allowedTools.includes(tool.name),
     );
   } finally {
-    await client.close().catch(() => undefined);
+    await client?.close().catch(() => undefined);
   }
 }
 
 /** Collect discovery pages without changing the caller's connection or authority. */
 export async function collectConnectorToolPages(
-  client: Pick<Client, "listTools">,
+  client: Pick<McpStreamableHttpClient, "listTools">,
   deadline: AbortSignal,
 ): Promise<ListedTool[]> {
   const tools: ListedTool[] = [];

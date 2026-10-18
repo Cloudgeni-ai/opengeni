@@ -37,6 +37,10 @@ spec:
             matchLabels:
               {{- include "opengeni.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: temporal
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: postgres-upgrade-preflight
       ports:
         - protocol: TCP
           port: {{ .Values.postgres.service.port }}

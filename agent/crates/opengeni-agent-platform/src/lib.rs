@@ -36,6 +36,8 @@ mod error;
 #[cfg(unix)]
 mod exec_handover;
 mod native;
+#[cfg(unix)]
+mod process_cleanup;
 mod pty;
 pub mod service;
 pub mod transactional_write;

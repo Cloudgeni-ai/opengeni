@@ -30,7 +30,7 @@ import {
   type OperationResourcePolicy,
   type StreamChannel,
 } from "@opengeni/agent-proto";
-import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
+import { DESKTOP_STREAM_PORT, CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
 import {
   SELFHOSTED_FILE_CHUNK_BYTES,
   fileContentDigest,
@@ -392,6 +392,7 @@ export interface SelfhostedSessionDeps {
     exitCode: number | null;
     reason: string;
     failure?: import("@opengeni/contracts").SessionCommandFailure;
+    backgroundChildrenStopped?: boolean;
     outputReceipt?: OpStreamOutputReceipt;
   }) => void | Promise<void>;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
@@ -453,6 +454,8 @@ export interface SelfhostedExecResult {
   /** Present only for a model-facing command durably transferred to its session. */
   backgroundCommandId?: string;
   backgroundOpId?: string;
+  /** Native cleanup evidence; never injected into structured stdout/stderr. */
+  backgroundChildrenStopped?: boolean;
 }
 
 /** The `exec` args the structural surface accepts (mirrors ChannelAExecArgs). */
@@ -1219,6 +1222,8 @@ export class SelfhostedSession {
                         ? { outputReceipt }
                         : {}),
                       exitCode: terminal.outcome.response.exitCode,
+                      backgroundChildrenStopped:
+                        terminal.outcome.response.backgroundChildrenStopped,
                       reason: terminal.outcome.failure
                         ? `op_failure_${terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
                         : "op_exit",
@@ -1262,6 +1267,7 @@ export class SelfhostedSession {
                 ? { outputReceipt: result.terminal.outputReceipt }
                 : {}),
               exitCode: result.terminal.outcome.response.exitCode,
+              backgroundChildrenStopped: result.terminal.outcome.response.backgroundChildrenStopped,
               reason: result.terminal.outcome.failure
                 ? `op_failure_${result.terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
                 : "op_exit",
@@ -1314,6 +1320,7 @@ export class SelfhostedSession {
             opId,
             outcome: "exited",
             exitCode: outcome.response.exitCode,
+            backgroundChildrenStopped: outcome.response.backgroundChildrenStopped,
             reason: outcome.failure
               ? `op_failure_${outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
               : "op_exit",
@@ -1458,11 +1465,14 @@ export class SelfhostedSession {
       typeof result.exitCode === "number" && Number.isSafeInteger(result.exitCode)
         ? result.exitCode
         : 1;
-    return formatExecResponse({
+    const formatted = formatExecResponse({
       output: joinExecCommandOutput(result.stdout, result.stderr),
       wallTimeSeconds: Math.max(0, Date.now() - startedAt) / 1000,
       exitCode,
     });
+    return result.backgroundChildrenStopped
+      ? `${formatted}\n\n${CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE}`
+      : formatted;
   }
 
   /**
@@ -2663,6 +2673,7 @@ function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): Selfho
     stderr,
     exitCode: res.exitCode,
     timedOut: res.timedOut,
+    ...(res.backgroundChildrenStopped ? { backgroundChildrenStopped: true } : {}),
   };
 }
 

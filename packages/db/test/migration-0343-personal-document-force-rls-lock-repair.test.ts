@@ -10,6 +10,7 @@ import postgres from "postgres";
 import { claimSessionWorkForAttempt, createDb, createSession } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { withLegacySessionActivityRlsContext } from "./fixtures/legacy-session-activity";
 import {
   stageVaultPolicyColumns,
   stageConnectionAccountIntentColumns,
@@ -61,6 +62,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     if (!owned) return;
     const { admin, adminUrl, ownerUrl, ownerRole, appPassword } = owned;
     await applyBelow(ownerUrl, REPAIR);
+    await admin`alter table session_events add column usage_source_key text`;
     // Current session adapters select the complete current sessions row while
     // this fixture intentionally holds the database below 0343. Supply only
     // the later columns they need, then remove them before the real deferred
@@ -68,6 +70,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     // the production shapes.
     await admin`
       alter table sessions
+      add column activity_xid xid8 not null default '0'::xid8,
       add column imported_archive_import_id text,
       add column imported_archive_imported_at timestamptz,
       add column imported_archive_request_hash text,
@@ -214,22 +217,27 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
         choice text not null
       )`;
     await admin`grant select on subscription_leases, subscription_session_bindings to public`;
-    const session = await createSession(db.db, {
-      requestedSessionId: crypto.randomUUID(),
-      accountId,
-      workspaceId: sharedWorkspaceId,
-      initialMessage: "read portable personal document",
-      resources: [],
-      metadata: {},
-      createdBy: { kind: "subject", subjectId },
-      subjectId,
-      model: "test-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "modal",
-      firstPartyMcpTools: [],
-      initialClaudeProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
-    });
+    const session = await withLegacySessionActivityRlsContext(
+      db.db,
+      { accountId, workspaceId: sharedWorkspaceId },
+      async (legacy) =>
+        createSession(legacy, {
+          requestedSessionId: crypto.randomUUID(),
+          accountId,
+          workspaceId: sharedWorkspaceId,
+          initialMessage: "read portable personal document",
+          resources: [],
+          metadata: {},
+          createdBy: { kind: "subject", subjectId },
+          subjectId,
+          model: "test-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "modal",
+          firstPartyMcpTools: [],
+          initialClaudeProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+        }),
+    );
     // The current claim adapter locks the durable cursor while this fixture
     // intentionally holds the database below 0343. Supply only the later row
     // shape it needs, then remove it before the deferred chain runs so 0374
@@ -275,14 +283,19 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
         ) returning id`;
     });
     const attemptId = crypto.randomUUID();
-    const claimed = await claimSessionWorkForAttempt(db.db, sharedWorkspaceId, {
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-      workflowRunId: crypto.randomUUID(),
-      attemptId,
-      dispatchId: `dispatch-${crypto.randomUUID()}`,
-      trigger: { kind: "next" },
-    });
+    const claimed = await withLegacySessionActivityRlsContext(
+      db.db,
+      { accountId, workspaceId: sharedWorkspaceId },
+      async (legacy) =>
+        claimSessionWorkForAttempt(legacy, sharedWorkspaceId, {
+          sessionId: session.id,
+          workflowId: `session-${session.id}`,
+          workflowRunId: crypto.randomUUID(),
+          attemptId,
+          dispatchId: `dispatch-${crypto.randomUUID()}`,
+          trigger: { kind: "next" },
+        }),
+    );
     expect(claimed.action).toBe("claimed");
     if (claimed.action === "claimed") expect(claimed.turn.id).toBe(turn!.id);
     const prepare = async () =>
@@ -354,6 +367,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       drop column timer_pause_revision`;
     await admin`
       alter table sessions
+      drop column activity_xid,
       drop column imported_archive_import_id,
       drop column imported_archive_imported_at,
       drop column imported_archive_request_hash,
@@ -408,6 +422,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await admin`alter table session_realtime_modes
       drop column personal_connection_delegations,
       drop column mcp_account_bindings`;
+    await admin`alter table session_events drop column usage_source_key`;
     await migrate(ownerUrl);
     // 0494 must recreate the real receipt columns after the temporary bridge
     // is gone, retaining historical NULL rather than accepting an empty list.

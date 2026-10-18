@@ -757,8 +757,19 @@ exactly idempotent transaction on these SQLSTATEs; connector-ledger
 transactions take the canonical event-write prefix and retry the same way.
 
 Versioned control observers distinguish unavailable session reads from idle
-business state. Missing and RLS-hidden rows are indistinguishable; neither is
-evidence of deletion, completion, or permission to resume. An unavailable
+business state. An absent observer read alone is not deletion evidence. Behind
+`session-close-deleted-v1`, a separate control lookup verifies the workspace's
+account and a subject-free worker RLS scope before proving session absence;
+an absent workspace also proves deletion. Wrong-account or actor-filtered reads
+stay unavailable, and database failures retry. A proven deletion closes the
+workflow without idle settlement, goal continuation, or parent notification.
+Old histories retain the unavailable result and timer command order until a live
+cycle records the patch. Idle/failure, dispatch recovery, input-wait settlement,
+interruption/quiescence and goal-continuation retries also re-prove deletion
+after a failed lookup and return harmlessly if deletion won the race. Session
+tree deletion is quiescence-gated database deletion, not Temporal termination;
+the control observer provides closure without a cross-system delete transaction.
+An unavailable
 observer retains a signal-interruptible 30-second control wait because restoring
 visibility is not guaranteed to produce a wake. The wake outbox retains its
 revision with `session_unavailable` and its existing bounded retry schedule.
@@ -4437,45 +4448,37 @@ advances a cursor over an event it did not return.
 Session discovery is a separate compact monitoring projection, not a list of
 full session rows. `sessions_list` defaults to deterministic descending
 `(created_at, id)` order and can instead use the durable descending
-`(activity_revision, updated_at, id)` activity order. `updated_at` is the
-display/keyset suffix, not the snapshot clock. Revision zero is the untouched
-legacy bucket and still traverses by exact PostgreSQL timestamp/UUID suffix.
-Both paths use opaque, versioned, snapshot-bound keyset cursors and matching
-workspace-prefixed indexes. The workspace activity counter is created with the
-workspace, so an updated-order page reads its complete multi-query projection
-through one short read-only repeatable-read MVCC snapshot and never takes a
-counter or workspace-control lock. The page returns that decimal snapshot as
-`updatedThrough`; the next incremental scan passes it as
-`updatedAfter`, so application-clock timestamps, equal timestamps, inserts,
-and repeated updates cannot create a handoff gap. Semantic writers acquire only
-their domain locks while doing work. Their outermost database wrapper opens one
-workspace-scoped activity gate, lets row triggers tag the changed session set
-with the current full transaction id, settles every deferred constraint, and
-then finalizes exactly once: one counter increment and one shared revision
-stamped onto exactly that transaction's pending sessions. Low-level session
-writers accept only the branded gate handle, while the SQL trigger catches raw
-or stale callers at runtime. The finalizer clears the pending set in the same
-transaction. A zero-change
-transaction leaves the counter untouched; a semantic writer outside a matching
-gate, a conflicting nested workspace, a manual revision write, or an open gate
-without its finalizer fails closed and rolls back. A new gate must begin at the
-outer transaction boundary; same-workspace nested scopes reuse that owner, while
-an unrelated outer transaction is rejected. The counter therefore enters
-the lock graph only after other transaction work is complete, while discovery
-never enters that graph at all. Raw deltas do not mark a session pending. Known
-targets should be read with exact-ID `session_get`, whose model-facing
+`(activity_xid, updated_at, id)` activity order. `updated_at` is the
+display/keyset suffix, not the monitoring clock. Xid zero is the untouched
+pre-expansion bucket and traverses by exact PostgreSQL timestamp/UUID suffix.
+Updated ordering uses a live keyset, not a retained row snapshot; relevance
+alone freezes a numeric snapshot-xmax ceiling. Writers stamp the top-level
+transaction ID in a BEFORE trigger, in the original row write. Scoped writer
+handles retain tenant/actor proofs and domain fences but never advance a shared
+workspace counter or perform a second activity-finalization write.
+
+An incremental page captures snapshot xmin in the same statement as its rows
+and returns its tagged decimal token as `updatedThrough`. The next scan passes
+that value as `updatedAfter` and includes visible xids at or above it, with no
+upper bound. Continuation pages retain the first page's watermark. Lower xids
+that commit late remain eligible on the next scan: delivery is gap-free and
+at least once, not exact once or an event log. Finish every continuation before
+advancing the token. Legacy revision tokens restart conservatively on new
+readers; old readers and new tokens have an explicitly limited mixed-rollout
+compatibility window. See [session activity transaction IDs](session-activity-xid.md)
+for token encoding, cache invalidation, rolling safety and the subsequent
+contract cleanup. Known targets should be read with exact-ID `session_get`, whose model-facing
 projection independently bounds every aggregate and the complete pretty-printed
 response to 64 KiB; the REST session detail contract remains unchanged.
 
 `sessions.updated_at` records semantic monitoring activity time, while
-`sessions.activity_revision` is its transactional monotonic ordering fact; raw
+`sessions.activity_xid` records the writing transaction's allocation order; raw
 stream volume advances neither. A batch containing only raw message, reasoning,
 sandbox-command-output, or PTY
 deltas advances `last_sequence` but does not advance `updated_at` or
-`activity_revision`. A semantic event or explicit session mutation advances
-the timestamp, marks that session pending inside the activity gate, and shares
-the transaction's single finalized workspace revision with every other changed
-session. This keeps
+`activity_xid`. A semantic event or explicit session mutation advances
+the timestamp and stamps the same top-level xid on every session changed by
+that transaction. This keeps
 updated-order discovery useful even while a productive session emits a large
 raw token or terminal stream; `session_events` remains the exact sequenced
 audit path for those retained previews.

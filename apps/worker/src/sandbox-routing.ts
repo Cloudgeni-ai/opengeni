@@ -34,6 +34,7 @@ import {
   verifyRetainedProcessMutationSettlement,
   verifyWorkspaceMutationSettlement,
   getSandbox,
+  getSandboxForAttempt,
   getLiveEnrollmentConnection,
   markWarmLeaseInstanceLost,
   readLease,
@@ -50,8 +51,10 @@ import {
   observeSessionBackgroundCommandCompletion,
   recordConnectedCommandOutputConsumption,
 } from "@opengeni/db/session-background-commands";
-import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
-import type { OpStreamOutputFrame } from "@opengeni/runtime/sandbox";
+import {
+  appendSessionCommandOutput,
+  createConnectedCommandOutputCapture,
+} from "@opengeni/db/session-command-output";
 import type { EventBus } from "@opengeni/events";
 import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
@@ -157,12 +160,12 @@ export type RoutingWiringIds = {
   sessionId: string;
   resourceAccountId?: string;
   resourceSubjectId?: string;
-  /** Frozen initiating-human authority for personal Connected Machine use.
+  /** Exact accepted attempt, including turns without an initiating human.
    * Every routed operation reasserts this exact accepted attempt before the
    * control-plane connection is resolved. */
   personalMachineAttempt?: {
     accountId: string;
-    subjectId: string;
+    subjectId: string | null;
     turnId: string;
     attemptId: string;
     executionGeneration: number;
@@ -724,19 +727,15 @@ export function captureConnectedCommandOutput(
   ids: { accountId: string; workspaceId: string; sessionId: string },
   bus?: EventBus,
 ) {
-  return async (commandId: string, frames: OpStreamOutputFrame[]) => {
-    for (const frame of frames) {
-      const events = await appendSessionCommandOutput(db, {
-        ...ids,
-        commandId,
-        chunkId: `op-frame:${frame.sequence}`,
-        stream: frame.stream,
-        chunk: frame.chunk,
-      });
-      if (events.length && bus)
-        await bus.publish(ids.workspaceId, ids.sessionId, events).catch(() => undefined);
-    }
-  };
+  return createConnectedCommandOutputCapture(
+    db,
+    ids,
+    bus
+      ? async (events) => {
+          await bus.publish(ids.workspaceId, ids.sessionId, events);
+        }
+      : undefined,
+  );
 }
 
 function captureRetainedProcessOutputForTurn(
@@ -989,17 +988,27 @@ export function wrapTurnBoxWithRouting(
     defaultBackend: established.session as RoutableBackendSession,
     defaultKind: established.backendId,
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
-      const sandbox = await getSandbox(
-        db,
-        ids.resourceAccountId && ids.resourceSubjectId
-          ? {
-              accountId: ids.resourceAccountId,
+      const sandbox = ids.personalMachineAttempt
+        ? await getSandboxForAttempt(
+            db,
+            {
+              ...ids.personalMachineAttempt,
               workspaceId: ids.workspaceId,
-              subjectId: ids.resourceSubjectId,
-            }
-          : ids.workspaceId,
-        sandboxId,
-      );
+              sessionId: ids.sessionId,
+            },
+            sandboxId,
+          )
+        : await getSandbox(
+            db,
+            ids.resourceAccountId && ids.resourceSubjectId
+              ? {
+                  accountId: ids.resourceAccountId,
+                  workspaceId: ids.workspaceId,
+                  subjectId: ids.resourceSubjectId,
+                }
+              : ids.workspaceId,
+            sandboxId,
+          );
       return sandbox
         ? {
             id: sandbox.id,
@@ -1055,6 +1064,7 @@ export function wrapTurnBoxWithRouting(
               outcome: command.outcome,
               exitCode: command.exitCode,
               reason: command.reason,
+              backgroundChildrenStopped: command.backgroundChildrenStopped,
               ...(command.failure ? { failure: command.failure } : {}),
             });
             if (settlement && bus) {
@@ -1291,17 +1301,27 @@ export function wrapLazyTurnBoxWithRouting(
     defaultBackend: syntheticSession,
     defaultKind: "unprovisioned",
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
-      const sandbox = await getSandbox(
-        db,
-        ids.resourceAccountId && ids.resourceSubjectId
-          ? {
-              accountId: ids.resourceAccountId,
+      const sandbox = ids.personalMachineAttempt
+        ? await getSandboxForAttempt(
+            db,
+            {
+              ...ids.personalMachineAttempt,
               workspaceId: ids.workspaceId,
-              subjectId: ids.resourceSubjectId,
-            }
-          : ids.workspaceId,
-        sandboxId,
-      );
+              sessionId: ids.sessionId,
+            },
+            sandboxId,
+          )
+        : await getSandbox(
+            db,
+            ids.resourceAccountId && ids.resourceSubjectId
+              ? {
+                  accountId: ids.resourceAccountId,
+                  workspaceId: ids.workspaceId,
+                  subjectId: ids.resourceSubjectId,
+                }
+              : ids.workspaceId,
+            sandboxId,
+          );
       return sandbox
         ? {
             id: sandbox.id,
@@ -1355,6 +1375,7 @@ export function wrapLazyTurnBoxWithRouting(
               outcome: command.outcome,
               exitCode: command.exitCode,
               reason: command.reason,
+              backgroundChildrenStopped: command.backgroundChildrenStopped,
               ...(command.failure ? { failure: command.failure } : {}),
             });
             if (settlement && bus) {
@@ -1780,6 +1801,7 @@ export async function establishSelfhostedTurnSession(
         outcome: command.outcome,
         exitCode: command.exitCode,
         reason: command.reason,
+        backgroundChildrenStopped: command.backgroundChildrenStopped,
         ...(command.failure ? { failure: command.failure } : {}),
       });
       if (command.outputReceipt && command.outcome === "exited" && command.exitCode !== null) {

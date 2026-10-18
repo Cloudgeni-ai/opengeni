@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline, type TimelineGroup } from "../src/timeline";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 let sequence = 0;
 
@@ -68,7 +71,7 @@ function kinds(groups: TimelineGroup[]): string[] {
 }
 
 function fold(events: SessionEvent[]): TimelineGroup[] {
-  return groupTimeline(buildTimeline(events), { foldExchanges: true });
+  return groupTimeline(englishText, buildTimeline(englishText, events), { foldExchanges: true });
 }
 
 /**
@@ -425,7 +428,8 @@ describe("readable per-turn grouping", () => {
     expect(
       kinds(
         groupTimeline(
-          buildTimeline([
+          englishText,
+          buildTimeline(englishText, [
             x.prompt,
             ...x.first,
             x.result,

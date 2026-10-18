@@ -149,7 +149,7 @@ async function readSessionActivityRevision(
   sessionId: string,
 ): Promise<string> {
   const [row] = await shared.admin<Array<{ revision: string }>>`
-    select activity_revision::text as revision
+    select activity_xid::text as revision
     from sessions
     where workspace_id = ${workspaceId} and id = ${sessionId}`;
   if (!row) throw new Error(`Session activity revision missing: ${sessionId}`);
@@ -1762,7 +1762,8 @@ describe("clean session control plane", () => {
       }
       changedCursor = page.nextCursor ?? undefined;
     } while (changedCursor);
-    expect(changedIds).toEqual([newcomer.id, movedId]);
+    expect(changedIds).toContain(newcomer.id);
+    expect(changedIds).toContain(movedId);
     expect(new Set([...oldTraversalIds, ...changedIds])).toEqual(
       new Set([...expectedEqualOrder, newcomer.id]),
     );
@@ -1902,8 +1903,8 @@ describe("clean session control plane", () => {
     expect(new Set(allSeen)).toEqual(
       new Set([newest.id, second.id, third.id, moved.id, inserted.id]),
     );
-    expect(allSeen).toHaveLength(new Set(allSeen).size);
-    expect(new Set(changedIds)).toEqual(new Set([third.id, moved.id, inserted.id]));
+    // xmin polling is at least once; earlier visible sessions may replay.
+    for (const id of [third.id, moved.id, inserted.id]) expect(changedIds).toContain(id);
   });
 
   test("the first-page revision fence is a nonblocking MVCC snapshot", async () => {
@@ -1913,9 +1914,7 @@ describe("clean session control plane", () => {
     await reader.unsafe("begin");
     try {
       const [fence] = await reader<Array<{ revision: string }>>`
-        select revision::text as revision
-        from workspace_session_activity_revisions
-        where workspace_id = ${grant.workspaceId!}`;
+        select pg_snapshot_xmin(pg_current_snapshot())::text as revision`;
       expect(fence).toBeDefined();
 
       // Keeping the reader transaction open must not delay either raw progress
@@ -1928,10 +1927,8 @@ describe("clean session control plane", () => {
       ]);
 
       const [advanced] = await reader<Array<{ revision: string }>>`
-        select revision::text as revision
-        from workspace_session_activity_revisions
-        where workspace_id = ${grant.workspaceId!}`;
-      expect(BigInt(advanced!.revision)).toBeGreaterThan(BigInt(fence!.revision));
+        select pg_snapshot_xmin(pg_current_snapshot())::text as revision`;
+      expect(BigInt(advanced!.revision)).toBeGreaterThanOrEqual(BigInt(fence!.revision));
 
       await reader.unsafe("commit");
       readerTransactionOpen = false;
@@ -1985,7 +1982,7 @@ describe("clean session control plane", () => {
       Array<{ id: string; createdAt: Date; updatedAt: Date; activityRevision: string }>
     >`
       select id, created_at as "createdAt", updated_at as "updatedAt",
-        activity_revision::text as "activityRevision"
+        activity_xid::text as "activityRevision"
       from sessions where workspace_id = ${grant.workspaceId!}
       order by created_at desc, id desc offset 2500 limit 1`;
     expect(cursor).toBeDefined();
@@ -2006,23 +2003,22 @@ describe("clean session control plane", () => {
         explain (format json, costs off)
         select id from sessions
         where workspace_id = ${grant.workspaceId!}
-          and activity_revision > 0
-          and activity_revision <= 1000000
+          and activity_xid > '0'::xid8
           and (
-            activity_revision < ${cursor!.activityRevision}::text::bigint
+            activity_xid < ${cursor!.activityRevision}::text::xid8
             or (
-              activity_revision = ${cursor!.activityRevision}::text::bigint
+              activity_xid = ${cursor!.activityRevision}::text::xid8
               and (
                 updated_at < ${cursor!.updatedAt}
                 or (updated_at = ${cursor!.updatedAt} and id < ${cursor!.id})
               )
             )
           )
-        order by activity_revision desc, updated_at desc, id desc limit 20`;
+        order by activity_xid desc, updated_at desc, id desc limit 20`;
       return { created, updated };
     });
     expect(JSON.stringify(plans.created)).toContain("sessions_workspace_created_id_idx");
-    expect(JSON.stringify(plans.updated)).toContain("sessions_workspace_activity_revision_idx");
+    expect(JSON.stringify(plans.updated)).toContain("sessions_workspace_activity_xid_idx");
     // Seeding and analyzing the planner fixture takes about 25s on a 4-core CI
     // runner, so the 30s default leaves no headroom.
   }, 90_000);
@@ -2050,7 +2046,7 @@ describe("clean session control plane", () => {
       >`
         select last_sequence as "lastSequence",
           to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt",
-          activity_revision::text as "activityRevision"
+          activity_xid::text as "activityRevision"
         from sessions where workspace_id = ${workspaceId} and id = ${sessionId}`;
       return row!;
     };
@@ -3549,6 +3545,93 @@ describe("clean session control plane", () => {
           .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id)),
       ),
     ).toEqual([{ callId: "old-unresolved" }]);
+  });
+
+  test("clearing proves call/result pairs across many history pages and ignores out-of-order results", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run many tools");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    const identity = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+    };
+    const callItem = (callId: string) => ({
+      type: "function_call",
+      name: "exec_command",
+      callId,
+      arguments: "{}",
+    });
+    const resultItem = (callId: string) => ({
+      type: "function_call_result",
+      callId,
+      output: { type: "text", text: `done ${callId}` },
+    });
+    const calls = ["early", "late", "unanswered", "reversed"];
+    for (const callId of calls) {
+      await registerPendingSessionToolCall(client.db, {
+        ...identity,
+        callId,
+        callType: "function_call",
+        callItem: callItem(callId),
+      });
+      expect(
+        await recordPendingSessionToolCallResult(client.db, {
+          ...identity,
+          callId,
+          resultItem: resultItem(callId),
+        }),
+      ).toEqual({ accepted: true, recorded: true });
+    }
+    const filler = Array.from({ length: 90 }, (_, index) => [
+      { position: 102 + index * 2, item: callItem(`filler-${index}`) },
+      { position: 103 + index * 2, item: resultItem(`filler-${index}`) },
+    ]).flat();
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [
+          { position: 100, item: callItem("early") },
+          { position: 101, item: resultItem("early") },
+          ...filler,
+          { position: 400, item: callItem("unanswered") },
+          { position: 401, item: resultItem("reversed") },
+          { position: 402, item: callItem("reversed") },
+          { position: 403, item: callItem("late") },
+          { position: 404, item: resultItem("late") },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      await clearDurablePendingSessionToolCalls(client.db, { ...identity, callIds: calls }),
+    ).toEqual({ accepted: true, cleared: 2 });
+    expect(
+      (
+        await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+          db
+            .select({ callId: schema.sessionPendingToolCalls.callId })
+            .from(schema.sessionPendingToolCalls)
+            .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id)),
+        )
+      )
+        .map(({ callId }) => callId)
+        .sort(),
+    ).toEqual(["reversed", "unanswered"]);
   });
 
   test("recovery consumes compacted completed pairs without reactivating or re-emitting them", async () => {
@@ -7511,6 +7594,21 @@ describe("clean session control plane", () => {
         },
       ],
     });
+
+    // The idempotency key is a trigger-filled plain column, so the lookup is
+    // index-served under row-level security instead of reading the whole turn.
+    const keyed = await shared.admin<Array<{ id: string; usageSourceKey: string | null }>>`
+      select id, usage_source_key as "usageSourceKey" from session_events
+      where workspace_id = ${grant.workspaceId!} and turn_id = ${turn.id}
+        and type = 'agent.model.usage'
+      order by sequence`;
+    expect(keyed.map((row) => row.usageSourceKey)).toEqual([sourceKey, sourceKey, sourceKey]);
+    const [unrelated] = await shared.admin<Array<{ keyed: number; total: number }>>`
+      select count(usage_source_key)::int as keyed, count(*)::int as total from session_events
+      where workspace_id = ${grant.workspaceId!} and session_id = ${session.id}
+        and type <> 'agent.model.usage'`;
+    expect(unrelated!.total).toBeGreaterThan(0);
+    expect(unrelated!.keyed).toBe(0);
   });
 
   test("a completed model call keeps usage truth when its attempt is replaced before signals", async () => {

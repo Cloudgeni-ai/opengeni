@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import {
   acceptOrganizationInvitation,
   changeMachineAudience,
@@ -11,11 +15,15 @@ import {
   createSession,
   ensureManagedAccessForUser,
   getLiveEnrollmentConnection,
+  getSandbox,
+  getSandboxForAttempt,
   initializeSessionStartAtomically,
   previewMachineAudienceChange,
   resolvePersonalMachineConnectionForAttempt,
+  recoverSessionDispatch,
   setActiveSandbox,
   settleSessionAttemptInterruptions,
+  withRlsContext,
   type DbClient,
   type MachineAudienceItem,
   type MachineAudiencePreviewRecord,
@@ -24,18 +32,23 @@ import {
 // Who can use a Connected Machine (Workspace or Only me) changes in place: the
 // same enrollment, sandbox, credentials and live connection stay, so chats,
 // schedules and the installed agent are never re-registered. These tests run
-// the real migrated schema under the FORCE-RLS app role.
-let shared: SharedTestDatabase;
+// the real migrated schema with both a non-BYPASSRLS schema owner and runtime.
+let shared: RestrictedRuntimeTestDatabase;
 let client: DbClient;
 let app: postgres.Sql;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("connected-machine-audience");
+  const acquired = await acquireRestrictedRuntimeTestDatabase("connected-machine-audience");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
-  client = createDb(shared.appUrl, { max: 4 });
-  app = postgres(shared.appUrl, { max: 2, prepare: false, onnotice: () => undefined });
-}, 180_000);
+  client = createDb(shared.appUrl, { max: 4, searchPath: shared.schema });
+  app = postgres(shared.appUrl, {
+    max: 2,
+    prepare: false,
+    connection: { search_path: shared.schema },
+    onnotice: () => undefined,
+  });
+}, 900_000);
 
 afterAll(async () => {
   await app?.end({ timeout: 1 }).catch(() => undefined);
@@ -369,6 +382,38 @@ async function turnRow(turnId: string) {
 }
 
 describe("changing who can use a Connected Machine in place", () => {
+  test("private preview is redacted and releases its read capabilities before returning", async () => {
+    const org = await organization();
+    const machine = await workspaceMachine(org);
+    const privateChat = await chatOnMachine(
+      org,
+      machine,
+      org.member,
+      "user_private",
+      "Private build notes",
+    );
+    await withRlsContext(client.db, org, async (tx) => {
+      await tx.execute(sql`select set_config('opengeni.subject_id', ${org.owner}, true)`);
+      const [row] = await tx.execute<{ value: MachineAudiencePreviewRecord }>(sql`
+        select preview_connected_machine_audience_change(
+          ${org.accountId}::uuid, ${org.workspaceId}::uuid, ${machine.enrollmentId}::uuid,
+          'user', ${org.owner}, true
+        ) as value`);
+      expect(itemFor(row!.value.items, privateChat.id)).toMatchObject({
+        action: "move_off",
+        title: null,
+        ownerSubjectId: null,
+      });
+      const [capabilities] = await tx.execute(sql`
+        select scoped_compute_policy_capability_active(current_user, current_user, null) as compute,
+          session_tenancy_fence_owner_policy_active(current_user, current_user,
+            ${shared.schema}::regnamespace::oid, ${org.workspaceId}::uuid, true) as inventory`);
+      expect(capabilities).toMatchObject({ compute: false, inventory: false });
+      const hidden = await tx.execute(sql`select id from sessions where id = ${privateChat.id}`);
+      expect(hidden).toHaveLength(0);
+    });
+  });
+
   test("one confirmation narrows to Only me and applies every default", async () => {
     const org = await organization();
     const machine = await workspaceMachine(org);
@@ -921,4 +966,218 @@ describe("changing who can use a Connected Machine in place", () => {
     });
     expect(await preview(org, machine, { target: "workspace" })).toBe("already_target");
   }, 120_000);
+
+  test("a move onto an Only me machine says why it was refused", async () => {
+    const org = await organization();
+    const machine = await workspaceMachine(org);
+    const narrowed = await change(org, machine, { target: "only_me", expectedGeneration: 1 });
+    expect(narrowed.outcome).toBe("changed");
+    const session = await createSession(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      initialMessage: "Busy chat",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: org.owner },
+      subjectId: org.owner,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      visibility: "workspace_shared",
+    } as never);
+    await initializeSessionStartAtomically(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    } as never);
+    const move = (subjectId: string, expectedEpoch: number) =>
+      setActiveSandbox(client.db, {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        sessionId: session.id,
+        targetSandboxId: machine.sandboxId,
+        expectedEpoch,
+        consentToCurrentTurn: true,
+        subjectId,
+      });
+    const [before] = await shared.admin<Array<{ epoch: number }>>`
+      select active_epoch::int as epoch from sessions where id = ${session.id}`;
+
+    // Someone other than the owner is turned down for the machine itself.
+    expect(await move(org.member, before!.epoch)).toEqual({
+      swapped: false,
+      pointer: null,
+      refusal: "not_permitted",
+    });
+
+    // A stale epoch is the only refusal that is a lost race.
+    const attempt = await runTurn(org, session.id);
+    expect(await move(org.owner, before!.epoch + 7)).toEqual({
+      swapped: false,
+      pointer: null,
+      refusal: "epoch_changed",
+    });
+    const moved = await move(org.owner, before!.epoch);
+    expect(moved.swapped).toBe(true);
+    expect(moved.pointer?.activeSandboxId).toBe(machine.sandboxId);
+    expect(
+      await resolvePersonalMachineConnectionForAttempt(client.db, {
+        ...org,
+        subjectId: org.owner,
+        sessionId: session.id,
+        ...attempt,
+        enrollmentId: machine.enrollmentId,
+      }),
+    ).toMatchObject({ id: machine.enrollmentId, connectionInstanceId: "connection-1" });
+  }, 120_000);
+
+  for (const starter of ["owner", "member", "service"] as const) {
+    test(`owner click authorizes a ${starter}-initiated running turn and its recovery only`, async () => {
+      const org = await organization();
+      const machine = await workspaceMachine(org);
+      expect(
+        (await change(org, machine, { target: "only_me", expectedGeneration: 1 })).outcome,
+      ).toBe("changed");
+      const subjectId = starter === "service" ? null : org[starter];
+      const session = await createSession(client.db, {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        initialMessage: "Continue on the selected machine",
+        resources: [],
+        metadata: {},
+        createdBy: subjectId
+          ? { kind: "subject", subjectId }
+          : { kind: "service", subjectId: "service:machine-consent-test" },
+        subjectId: subjectId ?? org.owner,
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        visibility: "workspace_shared",
+      } as never);
+      await initializeSessionStartAtomically(client.db, {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        sessionId: session.id,
+        reasoningEffortFallback: "medium",
+        createdEventPayload: {},
+      } as never);
+      const first = await runTurn(org, session.id);
+      const move = (clicker: string, expectedEpoch = session.activeEpoch) =>
+        setActiveSandbox(client.db, {
+          accountId: org.accountId,
+          workspaceId: org.workspaceId,
+          sessionId: session.id,
+          subjectId: clicker,
+          targetSandboxId: machine.sandboxId,
+          expectedEpoch,
+          consentToCurrentTurn: true,
+        });
+      expect(await move(org.member)).toMatchObject({ swapped: false, refusal: "not_permitted" });
+      expect(await move(org.owner, session.activeEpoch + 5)).toMatchObject({
+        swapped: false,
+        refusal: "epoch_changed",
+      });
+      expect(
+        await shared.admin`select id from session_turn_machine_consents where turn_id = ${first.turnId}`,
+      ).toHaveLength(0);
+      expect(await move(org.owner)).toMatchObject({
+        swapped: true,
+        pointer: { activeSandboxId: machine.sandboxId },
+      });
+      const access = {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        subjectId,
+        sessionId: session.id,
+        ...first,
+      };
+      expect(await getSandboxForAttempt(client.db, access, machine.sandboxId)).toMatchObject({
+        id: machine.sandboxId,
+        scope: "user",
+      });
+      expect(
+        await resolvePersonalMachineConnectionForAttempt(client.db, {
+          ...access,
+          enrollmentId: machine.enrollmentId,
+        }),
+      ).toMatchObject({ id: machine.enrollmentId });
+      await expect(
+        resolvePersonalMachineConnectionForAttempt(client.db, {
+          ...access,
+          subjectId: subjectId === org.owner ? org.member : org.owner,
+          enrollmentId: machine.enrollmentId,
+        }),
+      ).rejects.toThrow();
+      // Runtime projection must not widen the member's ordinary discovery.
+      expect(
+        await getSandbox(client.db, { ...org, subjectId: org.member }, machine.sandboxId),
+      ).toBeNull();
+      const [consent] =
+        await shared.admin`select consenting_subject_id, turn_id from session_turn_machine_consents where turn_id = ${first.turnId}`;
+      expect(consent).toMatchObject({ consenting_subject_id: org.owner, turn_id: first.turnId });
+      const [identity] =
+        await shared.admin`select initiating_human_subject_id from session_turns where id = ${first.turnId}`;
+      expect(identity?.initiating_human_subject_id).toBe(subjectId);
+
+      const recovery = await recoverSessionDispatch(client.db, org.workspaceId, {
+        sessionId: session.id,
+        attemptId: first.attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      });
+      expect(recovery.action).toBe("recovering");
+      const second = await runTurn(org, session.id);
+      expect(second.turnId).toBe(first.turnId);
+      expect(second.attemptId).not.toBe(first.attemptId);
+      const bindings =
+        await shared.admin`select binding.attempt_id from session_attempt_machine_consents binding
+        join session_turn_machine_consents consent on consent.id = binding.consent_id
+        where consent.turn_id = ${first.turnId}`;
+      expect(bindings.map((binding) => binding.attempt_id).sort()).toEqual(
+        [first.attemptId, second.attemptId].sort(),
+      );
+      expect(
+        await resolvePersonalMachineConnectionForAttempt(client.db, {
+          ...access,
+          ...second,
+          enrollmentId: machine.enrollmentId,
+        }),
+      ).toMatchObject({ id: machine.enrollmentId });
+      await expect(
+        resolvePersonalMachineConnectionForAttempt(client.db, {
+          ...access,
+          enrollmentId: machine.enrollmentId,
+        }),
+      ).rejects.toThrow();
+
+      // A still-connected machine does not override revoked owner authority.
+      await shared.admin`update organization_memberships set authorization_revision = authorization_revision + 1
+        where account_id = ${org.accountId} and subject_id = ${org.owner}`;
+      expect(
+        await resolvePersonalMachineConnectionForAttempt(client.db, {
+          ...access,
+          ...second,
+          enrollmentId: machine.enrollmentId,
+        }),
+      ).toBeNull();
+    }, 120_000);
+  }
+
+  test("consent receipts and internal admission helpers are not app-role writable", async () => {
+    const [privileges] = await app`select
+      has_table_privilege(current_user, 'session_turn_machine_consents', 'INSERT') as turn_insert,
+      has_table_privilege(current_user, 'session_attempt_machine_consents', 'INSERT') as attempt_insert,
+      has_function_privilege(current_user, 'bind_session_attempt_machine_consent(uuid,uuid,uuid)', 'EXECUTE') as bind,
+      has_function_privilege(current_user, 'live_session_turn_machine_consent(uuid)', 'EXECUTE') as validate`;
+    expect(privileges).toEqual({
+      turn_insert: false,
+      attempt_insert: false,
+      bind: false,
+      validate: false,
+    });
+  });
 });

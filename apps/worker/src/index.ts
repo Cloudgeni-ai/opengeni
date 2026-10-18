@@ -24,6 +24,7 @@ import {
 } from "@opengeni/events";
 import {
   createObservability,
+  installCpuSamplingSignal,
   logStartupDependencyRetry,
   type Observability,
 } from "@opengeni/observability";
@@ -1069,6 +1070,11 @@ export async function startWorker() {
   const observability = createObservability(settings, { component: `worker-${role}` });
   // Before any NativeConnection: SDK and core logs become structured lines.
   installTemporalRuntimeLogging(observability);
+  // `kill -USR2 <pid>` samples this process for 30 s and logs where the event
+  // loop was busy, so stalls can be attributed on a live worker.
+  installCpuSamplingSignal({
+    log: (message, attributes) => observability.info(message, attributes),
+  });
   // The Agents SDK also listens for unhandled rejections and exits the process.
   // Keep detached SDK/transport promises observational here: durable turn
   // activity boundaries own failures, while process exit causes cross-session

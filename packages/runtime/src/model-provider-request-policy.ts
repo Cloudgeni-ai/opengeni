@@ -238,6 +238,22 @@ export function isOpperClaudeUpstreamModel(model: unknown): boolean {
   return typeof model === "string" && /(?:^|[/.])claude-/iu.test(model);
 }
 
+function hasExplicitChatCacheControl(body: Record<string, unknown>): boolean {
+  const marked = (value: unknown): boolean =>
+    value !== null &&
+    typeof value === "object" &&
+    (Object.hasOwn(value, "cache_control") || Object.hasOwn(value, "prompt_cache_breakpoint"));
+  if (Object.hasOwn(body, "cache_control")) return true;
+  if (Array.isArray(body.tools) && body.tools.some(marked)) return true;
+  return (
+    Array.isArray(body.messages) &&
+    body.messages.some(
+      (message) =>
+        marked(message) || (Array.isArray(message?.content) && message.content.some(marked)),
+    )
+  );
+}
+
 /**
  * One object-stage request policy for both Responses and Chat Completions.
  * Transport wrappers only authenticate, route, observe, and translate errors;
@@ -260,7 +276,20 @@ export function modelRequestPolicyForProvider(
       Array.isArray(body.messages)
     ) {
       const messages = projectUnsignedClaudeChatReasoning(body.messages);
-      return messages === body.messages ? undefined : { body: { ...body, messages } };
+      // OpenRouter's Anthropic routes require opt-in even for repeated prefixes.
+      // Request-level automatic caching leaves every earlier message/tool intact;
+      // do not move client-side breakpoints as new history arrives. Caller-owned
+      // cache controls win (including explicit breakpoints and their TTL/limit).
+      const automaticCache = !hasExplicitChatCacheControl(body);
+      return messages === body.messages && !automaticCache
+        ? undefined
+        : {
+            body: {
+              ...body,
+              messages,
+              ...(automaticCache ? { cache_control: { type: "ephemeral" } } : {}),
+            },
+          };
     }
     if (
       (provider.kind === "opper-managed" ||

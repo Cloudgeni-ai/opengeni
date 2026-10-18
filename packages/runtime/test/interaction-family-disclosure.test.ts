@@ -19,8 +19,10 @@ import {
   installLazyToolRuntime,
   restoreGenericDispatchHistoryItems,
 } from "../src/lazy-tool-transport";
+import { anthropicMessages } from "../src/anthropic-messages";
 import { baseModelInputFilterForSettings } from "../src/model-input";
 import { interactionToolInputJsonSchema } from "../src/interaction-tool-json-schema";
+import { projectHistoryForProvider, TOOL_DISCLOSURE_KEY } from "../src/provider-history-adapter";
 
 const OPEN = "interaction__browser_open";
 const OBSERVE = "interaction__browser_observe";
@@ -81,7 +83,10 @@ const done: ModelResponse["output"][number] = {
   content: [{ type: "output_text", text: "done" }],
 };
 
-async function runBrowserTask(transport: "codex_native" | "openai_native" | "generic_dispatch") {
+async function runBrowserTask(
+  transport: "codex_native" | "openai_native" | "generic_dispatch",
+  directGenericCall = false,
+) {
   const executions: string[] = [];
   const agent = new Agent({
     name: "family-test",
@@ -96,7 +101,7 @@ async function runBrowserTask(transport: "codex_native" | "openai_native" | "gen
   });
   const runtime = installLazyToolRuntime(agent, transport, new Set());
   const act =
-    transport === "generic_dispatch"
+    transport === "generic_dispatch" && !directGenericCall
       ? {
           type: "function_call" as const,
           callId: "act-1",
@@ -133,9 +138,16 @@ function itemTypes(input: ModelRequest["input"]): string[] {
   );
 }
 
+function disclosedNames(item: Record<string, unknown>): string[] {
+  const disclosure = (item.providerData as Record<string, { tools: { name: string }[] }>)[
+    TOOL_DISCLOSURE_KEY
+  ]!;
+  return disclosure.tools.map((entry) => entry.name);
+}
+
 describe("interaction family disclosure", () => {
   test.each(["codex_native", "openai_native"] as const)(
-    "%s: browser_open is visible and its result discloses the family without a search",
+    "%s: browser_open's step is followed by one tool declaration, and the tools bind by name",
     async (transport) => {
       const { model, executions } = await runBrowserTask(transport);
       const firstTools = model.requests[0]!.tools.map((candidate) => candidate.name);
@@ -145,19 +157,35 @@ describe("interaction family disclosure", () => {
 
       expect(executions).toEqual([OPEN, ACT]);
       const second = model.requests[1]!.input as Array<Record<string, unknown>>;
-      expect(itemTypes(second).slice(-4)).toEqual([
+      expect(itemTypes(second).slice(-3)).toEqual([
         `function_call:${OPEN}`,
         `function_call_result:${OPEN}`,
-        "tool_search_call",
-        "tool_search_output",
+        "message",
       ]);
-      const output = second.at(-1)!;
-      expect((output.tools as Array<{ name: string }>).map((entry) => entry.name)).toEqual([
-        OBSERVE,
-        ACT,
-      ]);
-      expect(output.execution).toBe("client");
-      expect(second.at(-2)!.call_id).toBe(output.call_id);
+      const declaration = second.at(-1)!;
+      expect(declaration.role).toBe("developer");
+      expect(disclosedNames(declaration)).toEqual([OBSERVE, ACT]);
+      // No search happened, so no search items appear.
+      expect(itemTypes(second).filter((type) => type.includes("tool_search"))).toEqual([]);
+      // Native transports have no tool_invoke router. Where a route needs the
+      // text form, it asks the model to load the tools with native tool_search.
+      expect(String(declaration.content)).toBe(
+        `These tools are now available: ${OBSERVE}, ${ACT}. Load them with tool_search using names ${JSON.stringify([OBSERVE, ACT])}, then call them by name.`,
+      );
+
+      // A verified route sees the standard Responses form.
+      const wire = projectHistoryForProvider(second, "responses", {
+        declaresAdditionalTools: true,
+      }).at(-1)!;
+      expect(wire.type).toBe("unknown");
+      expect((wire.providerData as Record<string, unknown>).type).toBe("additional_tools");
+      // Any other Responses route gets the developer-message form.
+      const fallback = projectHistoryForProvider(second, "responses").at(-1)!;
+      expect(fallback.providerData).toEqual({
+        type: "message",
+        role: "developer",
+        content: declaration.content,
+      });
 
       // Later requests reproduce the identical prefix, and the marker never
       // reaches the provider.
@@ -171,29 +199,28 @@ describe("interaction family disclosure", () => {
     },
   );
 
-  test("generic dispatch: the disclosure is a tool_search call the model can invoke from", async () => {
-    const { model, executions } = await runBrowserTask("generic_dispatch");
-    const firstTools = model.requests[0]!.tools.map((candidate) => candidate.name);
-    expect(firstTools).toContain(OPEN);
-    expect(firstTools).not.toContain(ACT);
-    expect(executions).toEqual([OPEN, ACT]);
-    const second = model.requests[1]!.input as Array<Record<string, unknown>>;
-    expect(itemTypes(second).slice(-3)).toEqual([
-      `function_call_result:${OPEN}`,
-      "function_call:tool_search",
-      "function_call_result:tool_search",
-    ]);
-    const disclosed = JSON.parse(String(second.at(-1)!.output)) as { tools: { name: string }[] };
-    expect(disclosed.tools.map((entry) => entry.name)).toEqual([OBSERVE, ACT]);
-    for (const request of model.requests) {
-      expect(JSON.stringify(request.input)).not.toContain(MARKER);
-    }
-  });
+  test.each([false, true])(
+    "generic dispatch: the declaration is not a search, and tools run via tool_invoke or by name (direct %p)",
+    async (direct) => {
+      const { model, executions } = await runBrowserTask("generic_dispatch", direct);
+      const firstTools = model.requests[0]!.tools.map((candidate) => candidate.name);
+      expect(firstTools).toContain(OPEN);
+      expect(firstTools).not.toContain(ACT);
+      expect(executions).toEqual([OPEN, ACT]);
+      const second = model.requests[1]!.input as Array<Record<string, unknown>>;
+      expect(itemTypes(second).slice(-2)).toEqual([`function_call_result:${OPEN}`, "message"]);
+      expect(disclosedNames(second.at(-1)!)).toEqual([OBSERVE, ACT]);
+      expect(String(second.at(-1)!.content)).toContain("through tool_invoke");
+      expect(JSON.stringify(second)).not.toContain("tool_search");
+      for (const request of model.requests) {
+        expect(JSON.stringify(request.input)).not.toContain(MARKER);
+      }
+    },
+  );
 
   test("does not repeat tools the history already disclosed", () => {
     const marker = {
       version: 1,
-      format: "native",
       tools: [
         { type: "function", name: OBSERVE, description: "", parameters: {} },
         { type: "function", name: ACT, description: "", parameters: {} },
@@ -209,22 +236,87 @@ describe("interaction family disclosure", () => {
       },
       { type: "function_call", callId: "o1", name: OPEN, providerData: { [MARKER]: marker } },
       { type: "function_call_result", callId: "o1", name: OPEN, output: "{}" },
+      { type: "message", role: "assistant", content: "opened" },
       { type: "function_call", callId: "o2", name: OPEN, providerData: { [MARKER]: marker } },
       { type: "function_call_result", callId: "o2", name: OPEN, output: "{}" },
     ];
     const expanded = expandInteractionFamilyDisclosures(history) as Array<Record<string, unknown>>;
-    const outputs = expanded.filter((item) => item.type === "tool_search_output");
-    expect(outputs.length).toBe(2);
-    expect((outputs[1]!.tools as Array<{ name: string }>).map((entry) => entry.name)).toEqual([
-      OBSERVE,
-    ]);
-    // A second open of the same family discloses nothing new.
-    expect(expanded.length).toBe(history.length + 2);
-    // Expanding is pure and the marker is removed by the provider projection.
-    expect(JSON.stringify(expandInteractionFamilyDisclosures(history))).toBe(
-      JSON.stringify(expanded),
-    );
+    // One declaration, after the first open's step; the second open adds nothing new.
+    expect(expanded.length).toBe(history.length + 1);
+    expect(expanded[4]!.role).toBe("developer");
+    expect(disclosedNames(expanded[4]!)).toEqual([OBSERVE]);
+    // Expanding is pure and identity-stable, and the marker is removed by the projection.
+    expect(expandInteractionFamilyDisclosures(history)[4]).toBe(expanded[4]);
     expect(JSON.stringify(restoreGenericDispatchHistoryItems(expanded))).not.toContain(MARKER);
+  });
+
+  test("an entry call inside a parallel step declares its tools after all of that step's results", () => {
+    const marker = (name: string) => ({
+      version: 1,
+      tools: [{ type: "function", name, description: "", parameters: {} }],
+    });
+    const exec = (callId: string) => ({
+      type: "function_call",
+      callId,
+      name: "exec_command",
+      arguments: "{}",
+      status: "completed",
+    });
+    const entry = (callId: string, name: string, disclosed: string) => ({
+      type: "function_call",
+      callId,
+      name,
+      arguments: "{}",
+      status: "completed",
+      providerData: { [MARKER]: marker(disclosed) },
+    });
+    const result = (callId: string, name: string) => ({
+      type: "function_call_result",
+      callId,
+      name,
+      status: "completed",
+      output: { type: "text", text: callId },
+    });
+    const history = [
+      { type: "message", role: "user", content: "check the page, the screen and the logs" },
+      exec("toolu_01First"),
+      entry("toolu_01Open", OPEN, OBSERVE),
+      entry("toolu_01Computer", "interaction__computer_open", "interaction__computer_observe"),
+      exec("toolu_01Fourth"),
+      result("toolu_01First", "exec_command"),
+      result("toolu_01Open", OPEN),
+      result("toolu_01Computer", "interaction__computer_open"),
+      result("toolu_01Fourth", "exec_command"),
+    ];
+    const expanded = restoreGenericDispatchHistoryItems(
+      expandInteractionFamilyDisclosures(history),
+    ) as Array<Record<string, unknown>>;
+    // One declaration for both families, after the step's last result.
+    expect(expanded).toHaveLength(history.length + 1);
+    expect(expanded.slice(0, history.length)).toEqual(
+      restoreGenericDispatchHistoryItems(history) as Array<Record<string, unknown>>,
+    );
+    expect(disclosedNames(expanded.at(-1)!)).toEqual([OBSERVE, "interaction__computer_observe"]);
+
+    // Claude receives one uninterrupted results message, then the system declaration.
+    const claude = anthropicMessages(
+      projectHistoryForProvider(expanded, "anthropic-messages") as ModelRequest["input"],
+    );
+    expect(claude.map((message) => message.role)).toEqual(["user", "assistant", "user", "system"]);
+    expect(
+      claude[2]!.content.map((block) => (block as { tool_use_id?: string }).tool_use_id),
+    ).toEqual(["toolu_01First", "toolu_01Open", "toolu_01Computer", "toolu_01Fourth"]);
+
+    // Chat answers every call before the system declaration.
+    const chat = projectHistoryForProvider(expanded, "chat");
+    expect(chat.slice(0, -1)).toEqual(expanded.slice(0, -1));
+    expect(chat.at(-1)!.role).toBe("system");
+
+    // A later step leaves the declaration where it was.
+    const next = [...history, { type: "message", role: "assistant", content: "done" }];
+    const later = expandInteractionFamilyDisclosures(next) as Array<Record<string, unknown>>;
+    expect(later.length).toBe(next.length + 1);
+    expect(later[history.length]).toBe(expandInteractionFamilyDisclosures(history).at(-1));
   });
 
   test("a tagged union with two members for one tag shows one entry", () => {

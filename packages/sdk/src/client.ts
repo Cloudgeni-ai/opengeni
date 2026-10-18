@@ -1,3 +1,8 @@
+import {
+  copyObservedSessionSequence,
+  recordObservedSessionSequence,
+  SESSION_SEQUENCE_HEADER,
+} from "./session-sequence";
 import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
 import type {
   InsightsSiteUsageQuery,
@@ -2981,6 +2986,7 @@ export class OpenGeniClient {
       undefined,
       options.status ? { status: options.status } : undefined,
     );
+    copyObservedSessionSequence(result, result.requests);
     return result.requests;
   }
 
@@ -11191,7 +11197,9 @@ export class OpenGeniClient {
           return undefined as T;
         }
         await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), abort.signal);
-        return (await awaitWithAbort(response.json(), abort.signal)) as T;
+        const value = await awaitWithAbort(response.json(), abort.signal);
+        recordObservedSessionSequence(value, response.headers.get(SESSION_SEQUENCE_HEADER));
+        return value as T;
       } catch (error) {
         if (options.signal?.aborted) throw error;
         if (error instanceof OpenGeniApiError) throw error;

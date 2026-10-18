@@ -25,6 +25,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { createOpenGeniText, useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { Button } from "./controls";
 import { Icon } from "./icon";
@@ -73,9 +74,11 @@ export interface HumanInputCardProps {
 }
 
 const HumanInputMessagesContext = createContext<HumanInputFormMessages>(
-  defaultHumanInputFormMessages,
+  defaultHumanInputFormMessages(createOpenGeniText()),
 );
-const SecretFieldMessagesContext = createContext<SecretFieldMessages>(defaultSecretFieldMessages);
+const SecretFieldMessagesContext = createContext<SecretFieldMessages>(
+  defaultSecretFieldMessages(createOpenGeniText()),
+);
 
 /** One decision shell for pending requests, oldest first, "N of M" when stepping. */
 export function HumanInputCard({
@@ -86,10 +89,14 @@ export function HumanInputCard({
   messages,
   secretMessages,
 }: HumanInputCardProps) {
-  const merged = useMemo(() => ({ ...defaultHumanInputFormMessages, ...messages }), [messages]);
+  const t = useOpenGeniText();
+  const merged = useMemo(
+    () => ({ ...defaultHumanInputFormMessages(t), ...messages }),
+    [t, messages],
+  );
   const mergedSecret = useMemo(
-    () => ({ ...defaultSecretFieldMessages, ...secretMessages }),
-    [secretMessages],
+    () => ({ ...defaultSecretFieldMessages(t), ...secretMessages }),
+    [secretMessages, t],
   );
   const batchTotal = useRef(0);
   const ordered = useMemo(() => {
@@ -115,7 +122,14 @@ export function HumanInputCard({
         <HumanInputForm
           key={active.id}
           request={active}
-          progressLabel={batchTotal.current > 1 ? `${position} of ${batchTotal.current}` : null}
+          progressLabel={
+            batchTotal.current > 1
+              ? t("native.timeline.decisions.positionOfCurrent", {
+                  position,
+                  current: batchTotal.current,
+                })
+              : null
+          }
           submitting={respondingRequestId !== null}
           error={error ?? null}
           onSubmit={(response) => onSubmit(active.id, response)}
@@ -141,6 +155,7 @@ function HumanInputForm({
   const tone = useWaitingTone();
   const { theme } = tone;
   const c = theme.colors;
+  const t = useOpenGeniText();
   const messages = useContext(HumanInputMessagesContext);
   const secretMessages = useContext(SecretFieldMessagesContext);
   const heading = humanInputHeading(request.questions, messages);
@@ -202,6 +217,7 @@ function HumanInputForm({
   };
   const send = () => {
     const result = answersFromDrafts(
+      t,
       request.questions.filter((question) => !isSecretQuestion(question)),
       drafts,
       messages,
@@ -435,6 +451,7 @@ function QuestionControls({
   /** A control that replaces the built-in ones (the secret field). */
   children?: ReactNode;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const c = theme.colors;
@@ -580,7 +597,9 @@ function QuestionControls({
               <View style={{ flex: 1, gap: 6 }}>
                 <Text style={label}>{messages.other}</Text>
                 <TextInput
-                  accessibilityLabel={`Other answer for ${question.label ?? question.prompt}`}
+                  accessibilityLabel={t("native.timeline.decisions.otherAnswerForLabel", {
+                    label: question.label ?? question.prompt,
+                  })}
                   editable={!disabled}
                   value={draft.other}
                   onFocus={() =>
@@ -621,13 +640,13 @@ export interface ApprovalStripMessages {
   formatToolName: (name: string) => string;
 }
 
-export const defaultApprovalStripMessages: ApprovalStripMessages = {
-  approve: "Approve",
-  reject: "Reject",
-  approved: "Approved",
-  rejected: "Rejected",
+export const defaultApprovalStripMessages = (t: OpenGeniText): ApprovalStripMessages => ({
+  approve: t("native.timeline.decisions.approve"),
+  reject: t("native.timeline.decisions.reject"),
+  approved: t("native.timeline.decisions.approved"),
+  rejected: t("native.timeline.decisions.rejected"),
   formatToolName: (name) => name,
-};
+});
 
 export interface ApprovalStripProps {
   approvals: PendingApproval[];
@@ -637,7 +656,8 @@ export interface ApprovalStripProps {
 
 /** The web live decision strip: one waiting Notice per pending tool approval. */
 export function ApprovalStrip({ approvals, onDecide, messages: overrides }: ApprovalStripProps) {
-  const messages = { ...defaultApprovalStripMessages, ...overrides };
+  const t = useOpenGeniText();
+  const messages = { ...defaultApprovalStripMessages(t), ...overrides };
   const tone = useWaitingTone();
   const { theme } = tone;
   const c = theme.colors;

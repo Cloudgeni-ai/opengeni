@@ -100,9 +100,10 @@ import {
 import {
   describeInvalidToolArguments,
   interactionToolInputJsonSchema,
-  withRefShorthandLocators,
+  browserActModelInputSchema,
 } from "./interaction-tool-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
+import { compactComputerImage, compactComputerImageContent } from "./computer-image-encoding";
 import {
   browserActionText,
   browserObservationText,
@@ -110,6 +111,12 @@ import {
   browserReadText,
   browserTabsText,
 } from "./browser-model-text";
+import {
+  computerActionText,
+  computerObservationText,
+  computerOpenText,
+  computerTargetsText,
+} from "./computer-model-text";
 
 export const INTERACTION_ATTEMPT_TOOL_NAMES = FIRST_PARTY_IN_PROCESS_TOOL_NAMES;
 
@@ -125,6 +132,10 @@ class InteractionExecutionResult<T> {
 const BROWSER_AGENT_MAX_NODES = 60;
 const BROWSER_AGENT_MAX_NODE_BYTES = 12_000;
 const BROWSER_AGENT_MAX_FIELD_LENGTH = 180;
+const BROWSER_AGENT_MAX_OMITTED_REGIONS = 4;
+/** The focused or acted-on element is shown with its nearest enclosing group
+ * (a toolbar, form section, row or card) up to this many elements. */
+const BROWSER_AGENT_FOCUS_GROUP_MAX_NODES = 24;
 const BROWSER_READ_MAX_NODES = 80;
 // A base64 image is journaled inside a 16 MiB Code Mode result. Leave room
 // for JSON framing, metadata, and other content instead of failing after capture.
@@ -157,6 +168,21 @@ const BrowserAgentView = z
     sourceKind: z.enum(["snapshot", "diff", "none"]),
     nodes: z.array(BrowserAgentNode).max(BROWSER_AGENT_MAX_NODES),
     omittedNodeCount: z.number().int().positive().optional(),
+    /** Where the left-out elements are, largest first, so the model knows
+     * which part of the page a fuller read would add. */
+    omittedRegions: z
+      .array(
+        z
+          .object({
+            role: z.string().max(256),
+            name: z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH).optional(),
+            count: z.number().int().positive(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(BROWSER_AGENT_MAX_OMITTED_REGIONS)
+      .optional(),
     removedRefCount: z.number().int().positive().optional(),
     clippedFieldCount: z.number().int().positive().optional(),
   })
@@ -732,7 +758,8 @@ const ComputerObserveInput = z
 const ComputerObserveOutput = ComputerObservation.extend({
   capturedFrame: z
     .object({ width: z.number().int().positive(), height: z.number().int().positive() })
-    .strict(),
+    .strict()
+    .optional(),
 }).strict();
 const ComputerClipboardInput = z.object({ computerSessionId: z.string().uuid() }).strict();
 const ComputerActInput = z
@@ -1218,7 +1245,7 @@ export function createInteractionAttemptToolDefinitions(
     description:
       "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; set view=full for every element, or view=none when no post-action outline is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
-    modelInputSchema: withRefShorthandLocators,
+    modelInputSchema: browserActModelInputSchema,
     output: BrowserAgentActionReceipt,
     readOnly: false,
     idempotent: true,
@@ -1316,13 +1343,11 @@ export function createInteractionAttemptToolDefinitions(
         input.workspaceId,
         value.browserSessionId,
       );
+      // Downloads kept from before a suspension keep the controller generation
+      // that fetched them, so only the browser binding must match.
       if (
         response.browserSessionId !== value.browserSessionId ||
-        response.downloads.some(
-          (download) =>
-            download.browserSessionId !== value.browserSessionId ||
-            download.controllerGeneration !== response.controllerGeneration,
-        )
+        response.downloads.some((download) => download.browserSessionId !== value.browserSessionId)
       ) {
         throw new Error("Browser downloads belong to another session binding");
       }
@@ -1623,6 +1648,7 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerOpenOutput,
     readOnly: false,
     idempotent: true,
+    modelText: computerOpenText,
     execute: async (value, context) =>
       await openComputer(input.transport, input.workspaceId, input.sessionId, value, context),
   });
@@ -1637,6 +1663,7 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerTargetListResponse,
     readOnly: true,
     idempotent: true,
+    modelText: (output) => computerTargetsText(output.targets),
     execute: async (value) =>
       await input.transport.listComputerTargets(input.workspaceId, value.computerSessionId),
   });
@@ -1646,22 +1673,36 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "observe"],
     title: "Observe app or window",
     description:
-      "Read one ComputerSession app/window/screen target, causal generation, semantic accessibility tree, focus, frame identity, and a bounded current screenshot without taking control. capturedFrame gives the screenshot's exact pixel dimensions; use those pixels for pointer coordinates, not the target's native bounds or an image-preview size.",
+      "Read one ComputerSession app/window/screen target, causal generation, semantic accessibility tree, focus, frame identity, and a bounded current screenshot without taking control. capturedFrame gives the screenshot's exact pixel dimensions; use those pixels for pointer coordinates, not the target's native bounds or an image-preview size. An app target may return only its accessibility tree; observe one of its windows or the screen for pixels.",
     input: ComputerObserveInput,
     output: ComputerObserveOutput,
     readOnly: true,
     idempotent: true,
+    modelText: (output) =>
+      output.capturedFrame
+        ? computerObservationText(output)
+        : `${computerObservationText(output)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`,
     execute: async (value) => {
+      // The tree and the pixels are independent reads of the same target;
+      // a generation mismatch below re-reads the tree once. An app target
+      // spans several windows, so most adapters cannot photograph it; its
+      // tree is then the whole observation instead of a failed read.
+      const capture = input.transport
+        .captureComputerTarget(input.workspaceId, value.computerSessionId, value.targetId)
+        .then(
+          (frame) => ({ frame, error: null as unknown }),
+          (error: unknown) => ({ frame: null, error }),
+        );
       let observation = await input.transport.observeComputerTarget(
         input.workspaceId,
         value.computerSessionId,
         value.targetId,
       );
-      const frame = await input.transport.captureComputerTarget(
-        input.workspaceId,
-        value.computerSessionId,
-        value.targetId,
-      );
+      const { frame, error } = await capture;
+      if (frame === null) {
+        if (observation.target.kind === "app") return observation;
+        throw error;
+      }
       if (observation.target.targetGeneration !== frame.targetGeneration) {
         observation = await input.transport.observeComputerTarget(
           input.workspaceId,
@@ -1672,6 +1713,7 @@ export function createInteractionAttemptToolDefinitions(
       if (observation.target.targetGeneration !== frame.targetGeneration) {
         throw new Error("computer target changed while its visual observation was captured");
       }
+      const image = await compactComputerImage(frame.data, frame.mediaType);
       return new InteractionExecutionResult(
         {
           ...observation,
@@ -1681,8 +1723,8 @@ export function createInteractionAttemptToolDefinitions(
         [
           {
             type: "image",
-            data: Buffer.from(frame.data).toString("base64"),
-            mimeType: frame.mediaType,
+            data: Buffer.from(image.data).toString("base64"),
+            mimeType: image.mimeType,
           },
         ],
       );
@@ -1713,6 +1755,7 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerActionReceipt,
     readOnly: false,
     idempotent: true,
+    modelText: computerActionText,
     execute: async (value, context) => {
       const current =
         value.expectedTargetGeneration !== undefined &&
@@ -1811,15 +1854,23 @@ export function createInteractionAttemptToolDefinitions(
         execute: async (raw, context) => {
           const { computerSessionId, ...args } = raw;
           const id = z.string().uuid().parse(computerSessionId);
-          const receipt = boundComputerNativeReceipt(
-            ComputerNativeReceipt.parse(
-              await input.transport.callNativeComputerTool!(input.workspaceId, id, {
-                operationId: context.operationId,
-                tool: tool.name,
-                arguments: args,
-              }),
-            ),
-          );
+          let response: unknown;
+          try {
+            response = await input.transport.callNativeComputerTool!(input.workspaceId, id, {
+              operationId: context.operationId,
+              tool: tool.name,
+              arguments: args,
+            });
+          } catch (error) {
+            // The API refused the call before dispatching it (a retired or
+            // ended ComputerSession, a missing permission, invalid
+            // arguments): a definite failure the model can act on, not an
+            // operation of unknown outcome or a failure worth retrying.
+            const refused = refusedNativeCallResult(error);
+            if (refused) return refused;
+            throw error;
+          }
+          const receipt = boundComputerNativeReceipt(ComputerNativeReceipt.parse(response));
           const evidence = {
             operationId: receipt.operationId,
             state: receipt.state,
@@ -1831,6 +1882,7 @@ export function createInteractionAttemptToolDefinitions(
                 receipt.error?.code ?? "driver_failed",
                 receipt.error?.message ?? "Native CUA result is unavailable",
               );
+          result.content = await compactComputerImageContent(result.content);
           if (receipt.state !== "completed") {
             result.isError = true;
             result.content.push({
@@ -2089,6 +2141,16 @@ async function openBrowser(
       });
       session = createdResponse.session;
       initialView = createdResponse.initialView;
+      // A browser that failed to start is not a result to act on: report why,
+      // so the caller fixes the cause instead of retrying an opaque failure.
+      const launchError = createdResponse.operation?.error;
+      if (launchError && session.lifecycle === "failed") {
+        throw new OpenGeniApiError(
+          launchError.code === "unsupported" ? 422 : 502,
+          `BrowserSession ${session.id} did not start: ${launchError.message}`,
+          { code: launchError.code, retryable: launchError.retryable },
+        );
+      }
     }
   }
   if (session.lifecycle === "suspended") {
@@ -2451,19 +2513,13 @@ function selectAgentNodes(
   flattened: readonly FlatBrowserNode[],
   maxNodes: number,
   maxBytes: number,
-  prioritize = true,
+  rank: ((flat: FlatBrowserNode) => readonly number[]) | null = browserNodeRank,
 ): { nodes: z.infer<typeof BrowserAgentNode>[]; clippedFieldCount: number } {
-  const priority = (flat: FlatBrowserNode): number => {
-    const { node } = flat;
-    if (node.actions.length > 0) return 0;
-    if (["heading", "dialog", "alert", "status", "navigation", "main"].includes(node.role))
-      return 1;
-    if (["text", "paragraph", "listitem"].includes(node.role) && node.name) return 2;
-    if (node.name || node.value || node.description) return 3;
-    return 4;
-  };
-  const candidates = prioritize
-    ? [...flattened].sort((a, b) => priority(a) - priority(b) || a.index - b.index)
+  const candidates = rank
+    ? flattened
+        .map((flat) => ({ flat, key: [...rank(flat), flat.index] }))
+        .sort((a, b) => compareRank(a.key, b.key))
+        .map((entry) => entry.flat)
     : flattened;
   const selected: Array<{ index: number; node: z.infer<typeof BrowserAgentNode> }> = [];
   let usedBytes = 0;
@@ -2483,17 +2539,219 @@ function selectAgentNodes(
   };
 }
 
+function compareRank(a: readonly number[], b: readonly number[]): number {
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+/** Without page context: controls first, then orientation, then content. */
+function browserNodeRank(flat: FlatBrowserNode): readonly number[] {
+  const { node } = flat;
+  if (node.actions.length > 0) return [0];
+  if (["heading", "dialog", "alert", "status", "navigation", "main"].includes(node.role))
+    return [1];
+  if (["text", "paragraph", "listitem"].includes(node.role) && node.name) return [2];
+  if (node.name || node.value || node.description) return [3];
+  return [4];
+}
+
+/** Open popups and modal surfaces: where a person's attention is after they
+ * open a menu, dialog, listbox or tooltip. */
+const BROWSER_ATTENTION_SURFACE_ROLES = new Set([
+  "dialog",
+  "alertdialog",
+  "menu",
+  "listbox",
+  "tooltip",
+]);
+/** Live regions announce results such as toasts, errors and status text. */
+const BROWSER_LIVE_REGION_ROLES = new Set(["alert", "status", "log", "marquee", "timer"]);
+/** Site-wide chrome that rarely holds what a task is about. */
+const BROWSER_PAGE_CHROME_ROLES = new Set(["navigation", "banner", "contentinfo"]);
+/** A focus group never grows past a landmark or the document. */
+const BROWSER_FOCUS_GROUP_STOP_ROLES = new Set([
+  "main",
+  "navigation",
+  "banner",
+  "contentinfo",
+  "complementary",
+  "region",
+  "document",
+  "RootWebArea",
+  "WebArea",
+]);
+/** Regions named in the omitted-element summary. */
+const BROWSER_SUMMARY_REGION_ROLES = new Set([
+  "main",
+  "navigation",
+  "banner",
+  "complementary",
+  "contentinfo",
+  "region",
+  "search",
+  "form",
+  "dialog",
+  "alertdialog",
+  "menu",
+]);
+
+type RankedBrowserView = {
+  /** Non-redundant nodes in document order. */
+  visible: FlatBrowserNode[];
+  rank: (flat: FlatBrowserNode) => readonly number[];
+  regionOf: (flat: FlatBrowserNode) => { role: string; name?: string } | null;
+};
+
+/**
+ * A dense application page has far more elements than one compact view can
+ * hold. Document order puts site navigation and the top of a long grid first,
+ * while the menu, dialog or popover a click just opened is usually rendered at
+ * the end of the document, and result text (a total, a toast, an error) is not
+ * a control at all. Rank by where attention is instead: open surfaces and live
+ * messages, then the focused or acted-on element with its small enclosing
+ * group, then the page's own content, and site chrome last.
+ */
+function rankBrowserView(
+  flattened: readonly FlatBrowserNode[],
+  anchorRefs: readonly string[],
+): RankedBrowserView {
+  const count = flattened.length;
+  const parent = new Int32Array(count).fill(-1);
+  const end = new Int32Array(count);
+  const ancestors: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const depth = flattened[index]!.depth;
+    while (ancestors.length > 0 && flattened[ancestors.at(-1)!]!.depth >= depth) {
+      end[ancestors.pop()!] = index;
+    }
+    parent[index] = ancestors.at(-1) ?? -1;
+    ancestors.push(index);
+  }
+  for (const index of ancestors) end[index] = count;
+
+  const redundant = flattened.map(redundantAgentNode);
+  const keptBefore = new Int32Array(count + 1);
+  for (let index = 0; index < count; index += 1)
+    keptBefore[index + 1] = keptBefore[index]! + (redundant[index] ? 0 : 1);
+  const keptDescendants = (index: number): number =>
+    keptBefore[end[index]!]! - keptBefore[index + 1]!;
+  // An empty live region is page plumbing, not a message.
+  for (let index = 0; index < count; index += 1) {
+    const { node } = flattened[index]!;
+    if (
+      BROWSER_LIVE_REGION_ROLES.has(node.role) &&
+      !node.name &&
+      (node.value === undefined || node.value === null || node.value === "") &&
+      keptDescendants(index) === 0
+    )
+      redundant[index] = true;
+  }
+  const subtreeSize = (index: number): number =>
+    (redundant[index] ? 0 : 1) + keptDescendants(index);
+
+  const attention = new Uint8Array(count);
+  const markSubtree = (index: number) => attention.fill(1, index, end[index]!);
+  for (let index = 0; index < count; index += 1) {
+    const { node } = flattened[index]!;
+    if (
+      BROWSER_ATTENTION_SURFACE_ROLES.has(node.role) ||
+      node.states.includes("modal") ||
+      (BROWSER_LIVE_REGION_ROLES.has(node.role) && !redundant[index])
+    )
+      markSubtree(index);
+  }
+  const indexByRef = new Map<string, number>();
+  for (let index = 0; index < count; index += 1) {
+    const ref = flattened[index]!.node.ref;
+    if (ref && !indexByRef.has(ref)) indexByRef.set(ref, index);
+  }
+  for (const ref of anchorRefs) {
+    const anchor = indexByRef.get(ref);
+    if (anchor === undefined) continue;
+    if (subtreeSize(anchor) > BROWSER_AGENT_FOCUS_GROUP_MAX_NODES) {
+      attention[anchor] = 1;
+      continue;
+    }
+    let group = anchor;
+    for (
+      let next = parent[group]!;
+      next >= 0 &&
+      !BROWSER_FOCUS_GROUP_STOP_ROLES.has(flattened[next]!.node.role) &&
+      subtreeSize(next) <= BROWSER_AGENT_FOCUS_GROUP_MAX_NODES;
+      next = parent[next]!
+    )
+      group = next;
+    markSubtree(group);
+  }
+
+  const chrome = new Uint8Array(count);
+  const region = new Int32Array(count).fill(-1);
+  for (let index = 0; index < count; index += 1) {
+    const { node } = flattened[index]!;
+    const up = parent[index]!;
+    chrome[index] =
+      BROWSER_PAGE_CHROME_ROLES.has(node.role) || (up >= 0 && chrome[up] === 1) ? 1 : 0;
+    region[index] =
+      BROWSER_SUMMARY_REGION_ROLES.has(node.role) && (node.role !== "region" || node.name)
+        ? index
+        : up >= 0
+          ? region[up]!
+          : -1;
+  }
+
+  return {
+    visible: flattened.filter((_, index) => !redundant[index]),
+    rank: (flat) => {
+      if (attention[flat.index] === 1) return [0];
+      return [chrome[flat.index] === 1 ? 2 : 1, ...browserNodeRank(flat)];
+    },
+    regionOf: (flat) => {
+      const owner = region[flat.index]!;
+      if (owner < 0) return null;
+      const { node } = flattened[owner]!;
+      return {
+        role: node.role,
+        ...(node.name ? { name: boundedAgentField(node.name, () => {}) } : {}),
+      };
+    },
+  };
+}
+
+function omittedBrowserRegions(
+  ranked: RankedBrowserView,
+  shownRefs: ReadonlySet<string>,
+): Array<{ role: string; name?: string; count: number }> {
+  const regions = new Map<string, { role: string; name?: string; count: number }>();
+  for (const flat of ranked.visible) {
+    if (shownRefs.has(flat.node.ref)) continue;
+    const owner = ranked.regionOf(flat) ?? { role: "page" };
+    const key = `${owner.role}\0${owner.name ?? ""}`;
+    const entry = regions.get(key) ?? { ...owner, count: 0 };
+    entry.count += 1;
+    regions.set(key, entry);
+  }
+  return [...regions.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, BROWSER_AGENT_MAX_OMITTED_REGIONS);
+}
+
 function projectBrowserObservation(
   observation: z.infer<typeof BrowserObservation>,
   view: "compact",
+  anchorRefs?: readonly string[],
 ): z.infer<typeof CompactBrowserObservation>;
 function projectBrowserObservation(
   observation: z.infer<typeof BrowserObservation>,
   view: "compact" | "full",
+  anchorRefs?: readonly string[],
 ): z.infer<typeof BrowserAgentObservation>;
 function projectBrowserObservation(
   observation: z.infer<typeof BrowserObservation>,
   view: "compact" | "full",
+  anchorRefs: readonly string[] = [],
 ): z.infer<typeof BrowserAgentObservation> {
   if (view === "full") return observation;
   const semantic = observation.semantic;
@@ -2503,13 +2761,21 @@ function projectBrowserObservation(
       : semantic?.kind === "diff"
         ? semantic.changed
         : [];
-  const flattened = flattenBrowserNodes(roots).filter((flat) => !redundantAgentNode(flat));
+  const ranked = rankBrowserView(flattenBrowserNodes(roots), [
+    ...(observation.focusedRef ? [observation.focusedRef] : []),
+    ...anchorRefs,
+  ]);
   const projected = selectAgentNodes(
-    flattened,
+    ranked.visible,
     BROWSER_AGENT_MAX_NODES,
     BROWSER_AGENT_MAX_NODE_BYTES,
+    ranked.rank,
   );
-  const omittedNodeCount = flattened.length - projected.nodes.length;
+  const omittedNodeCount = ranked.visible.length - projected.nodes.length;
+  const omittedRegions =
+    omittedNodeCount > 0
+      ? omittedBrowserRegions(ranked, new Set(projected.nodes.map((node) => node.ref)))
+      : [];
   const removedRefCount = semantic?.kind === "diff" ? semantic.removedRefs.length : 0;
   const viewport = observation.viewport;
   const diagnostics = observation.diagnostics;
@@ -2544,6 +2810,7 @@ function projectBrowserObservation(
       sourceKind: semantic?.kind ?? "none",
       nodes: projected.nodes,
       ...(omittedNodeCount > 0 ? { omittedNodeCount } : {}),
+      ...(omittedRegions.length > 0 ? { omittedRegions } : {}),
       ...(removedRefCount > 0 ? { removedRefCount } : {}),
       ...(projected.clippedFieldCount > 0
         ? { clippedFieldCount: projected.clippedFieldCount }
@@ -2618,7 +2885,13 @@ function compactActionReceipt(
     ...(receipt.error ? { error: receipt.error } : {}),
     ...(receipt.targets && receipt.targets.length > 0 ? { targets: receipt.targets } : {}),
     ...(receipt.observation
-      ? { observation: projectBrowserObservation(receipt.observation, "compact") }
+      ? {
+          observation: projectBrowserObservation(
+            receipt.observation,
+            "compact",
+            (receipt.targets ?? []).flatMap((target) => (target.ref ? [target.ref] : [])),
+          ),
+        }
       : {}),
   };
 }
@@ -2663,7 +2936,7 @@ function readBrowserObservation(
   const projected =
     mode === "count"
       ? { nodes: [] as z.infer<typeof BrowserAgentNode>[], clippedFieldCount: 0 }
-      : selectAgentNodes(matches, input.limit ?? 40, BROWSER_AGENT_MAX_NODE_BYTES, false);
+      : selectAgentNodes(matches, input.limit ?? 40, BROWSER_AGENT_MAX_NODE_BYTES, null);
   return {
     browserSessionId: observation.browserSessionId,
     targetId: observation.target.id,
@@ -2911,6 +3184,24 @@ function interactionErrorResult(
     content: [{ type: "text" as const, text: JSON.stringify({ error }) }],
     structuredContent: { error },
   };
+}
+
+/** A native computer call the API rejected with a definite client error. */
+function refusedNativeCallResult(error: unknown): AttemptToolResultValue | null {
+  const secretReferenceFailure = secretReferenceToolResult(error);
+  if (secretReferenceFailure) return secretReferenceFailure;
+  if (!(error instanceof OpenGeniApiError) || error.outcomeUnknown || error.status >= 500) {
+    return null;
+  }
+  return (
+    interactionToolErrorOutput(error) ??
+    interactionErrorResult(
+      error.code ?? `http_${error.status}`,
+      boundedErrorMessage(error.message),
+      error.retryable,
+      error.correlationId,
+    )
+  );
 }
 
 /** The API refused a Browser or Computer action before dispatch because a

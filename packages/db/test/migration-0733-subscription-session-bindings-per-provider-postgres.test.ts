@@ -249,9 +249,13 @@ beforeAll(async () => {
   database = await acquireOwnerMigratedTestDatabase("subscription-session-bindings-per-provider");
   if (!database) throw new Error("Real PostgreSQL is required");
   // A provisioned database before 0733: 0733 and every later migration are
-  // held back, and only 0733 is applied below.
+  // held back, and only 0733 is applied below. The additive 0834 activity
+  // writer is the exception: today's session adapter speaks its protocol.
   const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
-    .filter((file) => file.endsWith(".sql") && file >= MIGRATION)
+    .filter(
+      (file) =>
+        file.endsWith(".sql") && file >= MIGRATION && file !== "0834_session_activity_xid.sql",
+    )
     .sort();
   const staging = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -399,6 +403,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
     const SITE_DATA_TABLES = [
       // 0796 and 0797 (billing operations and subscription plans).
       "billing_subscription_operations",
+      // 0820 (retained browser downloads).
+      "browser_session_retained_downloads",
       "organization_plans",
       "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
@@ -431,6 +437,13 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "site_sql_usage",
       "site_viewer_sessions",
     ];
+    // 0823 (personal machine consent) adds protected tables the runtime role
+    // never reads directly; insert them in the sorted protected list.
+    const PROTECTED_TABLES = [
+      ...SITE_DATA_TABLES,
+      "session_attempt_machine_consents",
+      "session_turn_machine_consents",
+    ].sort();
     const missing0735Routines = [
       "subscription M3 precursor private routine read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid) is missing or unsafe",
       "subscription M3 precursor private routine begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid) is missing or unsafe",
@@ -450,7 +463,11 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       // Nor Site Data (0776), published Sites (0782) or Site SQL (0783), whose
       // tables the runtime and protected contracts list.
       `runtime privilege tables are missing: ${SITE_DATA_TABLES.join(", ")}`,
-      `protected tables are missing: ${SITE_DATA_TABLES.join(", ")}`,
+      `protected tables are missing: ${PROTECTED_TABLES.join(", ")}`,
+      // Nor the personal machine consent helpers (0823).
+      "owner-internal target-schema helper live_session_turn_machine_consent(uuid) is missing or ambiguous",
+      "owner-internal target-schema helper bind_session_attempt_machine_consent(uuid, uuid, uuid) is missing or ambiguous",
+      "owner-internal target-schema helper assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean) is missing or ambiguous",
       // Nor per-task usage limits (0773).
       ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES.map(
         (routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`,
@@ -462,6 +479,11 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       ...SESSION_USAGE_LIMIT_RUNTIME_ROUTINES.map(
         (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
       ),
+      // Nor personal machine consent (0823) or the private-actor visibility
+      // helper the inlined session visibility probe calls (0805).
+      "target-schema runtime capability consent_session_turn_personal_machine(uuid, uuid, uuid, uuid) is missing or ambiguous",
+      "target-schema runtime capability get_session_attempt_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, boolean, boolean) is missing or ambiguous",
+      "target-schema runtime capability session_private_actor_visible_keys() is missing or ambiguous",
       "runtime role cannot read the subscription plan catalog",
       ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
         (table) => `session usage limit private table ${table} is missing or unsafe`,

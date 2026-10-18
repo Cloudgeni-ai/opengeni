@@ -14,6 +14,7 @@ COPY examples/northstar-support/package.json examples/northstar-support/package.
 COPY examples/embedded-product/package.json examples/embedded-product/package.json
 COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY examples/tool-server/package.json examples/tool-server/package.json
+COPY packages/agent-host/package.json packages/agent-host/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
@@ -302,4 +303,6 @@ COPY --from=web-build --chown=bun:bun /app/web-server/server.ts ./apps/web/src/s
 COPY --from=web-build --chown=bun:bun /workspace /workspace
 USER bun
 EXPOSE 3000
-CMD ["bun", "run", "--cwd", "apps/web", "start"]
+# Run the server as PID 1 directly, like the API and worker images. A
+# `bun run` wrapper as PID 1 crashed with SIGSEGV on every SIGTERM at rollout.
+CMD ["bun", "apps/web/src/server.ts"]

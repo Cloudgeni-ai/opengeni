@@ -2,6 +2,7 @@ import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge"
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
+import { mcpStreamableHttpClientOptions } from "./mcp-client";
 import {
   withPreparedCompactionRequest,
   deferCompactionToModelBoundary,
@@ -14,7 +15,7 @@ export {
   fitCompactionPrefix,
   compactionPrefixCuts,
 } from "./anthropic-compaction";
-export { AnthropicProviderRejection } from "./anthropic-messages";
+export { AnthropicProviderRejection, AnthropicStreamInterruptedError } from "./anthropic-messages";
 export {
   createModelImageSizer,
   type ModelImageSizerOptions,
@@ -623,6 +624,7 @@ export {
   normalizeVercelGatewayRequestBody,
   resolveTurnModel,
   vercelGatewayRoutingFetch,
+  warmCodexResponsesWebSocket,
 } from "./model-provider";
 export {
   appendWorkspaceGovernance,
@@ -5297,6 +5299,7 @@ export async function prepareAgentTools(
             // sanitize the response on the wire before validation. The namespace Set
             // also captures each tool's original connector namespace (P4 Part B.1).
             fetch: fetchImpl,
+            ...mcpStreamableHttpClientOptions({ firstParty }),
             ...(await mcpServerRequestInit(settings, config)),
             ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
             ...mcpSessionTimeoutOptions(config),
@@ -7473,6 +7476,18 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
     typeof error === "object" &&
     mcpTransportFailureKind(error) === "connectivity_unavailable"
   );
+}
+
+/**
+ * An MCP connectivity failure whose server answered HTTP 503 Service
+ * Unavailable: it is reachable but refusing work for now, as a server does
+ * while it is being deployed or maintained. Callers wait such a server out
+ * for longer than a server that cannot be reached at all.
+ */
+export function isMcpServiceUnavailableError(error: unknown): boolean {
+  if (!isMcpTransportConnectivityError(error)) return false;
+  const inspection = inspectMcpTransportError(error as object);
+  return inspection.statuses.includes(503);
 }
 
 /**

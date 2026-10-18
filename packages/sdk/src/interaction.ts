@@ -739,6 +739,7 @@ export type InteractionSemanticSnapshot = {
   kind: "snapshot";
   roots: InteractionSemanticNode[];
   nodeCount: number;
+  incomplete?: { reason: "time_budget" | "node_budget"; unreadCount: number } | undefined;
 };
 
 export type InteractionSemanticDiff = {
@@ -934,6 +935,7 @@ export type InteractionError = {
     | "unsupported"
     | "permission_denied"
     | "machine_locked"
+    | "capacity_exhausted"
     | "attempt_stale"
     | "operation_conflict"
     | "outcome_unknown"

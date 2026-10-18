@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import type { WorkspaceModelAccessPolicy, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { PlusIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -990,7 +991,9 @@ function ModelChecklist({
             creditsOff && modelUsesCredits(model);
           const changeable = providerModels.filter((model) => !lockedByCredits(model));
           const changeableSelected = changeable.filter((model) => selected.has(model.id)).length;
-          const payers = [...new Set(providerModels.map((model) => payerSummaryForModel(model)))];
+          const payers = [
+            ...new Set(providerModels.map((model) => payerSummaryForModel(t, model))),
+          ];
           return (
             <ModelGroup
               key={providerLabel}

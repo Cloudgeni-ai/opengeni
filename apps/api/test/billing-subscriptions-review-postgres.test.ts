@@ -313,6 +313,56 @@ test("real org-fenced DB adapter accepts paid invoices, upgrade and duplicate de
   expect((await getBillingBalance(client.db, f.accountId)).balanceMicros).toBe(2_000_000_000);
 }, 180_000);
 
+test("renewal on a legacy Stripe price uses the new catalog credit without rewriting old receipts", async () => {
+  const originalCatalog = await readSubscriptionPlanCatalog(client.db);
+  const f = await fixture({ initialPeriodAgeSeconds: 2_592_060 });
+  await f.paid(f.original); // Historical paid period is already ended.
+  const item = f.original.items.data[0];
+  const oldInvoice = structuredClone(f.invoices.get(f.original.latest_invoice));
+  const changed = originalCatalog.plans.map((plan) =>
+    plan.key === "pro"
+      ? {
+          ...plan,
+          stripePriceId: "price_pro_v2",
+          legacyStripePriceIds: ["price_pro"],
+          monthlyPriceMicros: 30_000_000,
+          monthlyCreditMicros: 300_000_000,
+        }
+      : plan,
+  );
+  try {
+    await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(changed)}, 'legacy-price-test', 'Replace Pro price and future credit while preserving existing subscriptions')`;
+    const newCatalog = await readSubscriptionPlanCatalog(client.db);
+    await f.paid(f.original); // Replaying the old period does not change its grant.
+    item.current_period_start = item.current_period_end;
+    item.current_period_end += 2_592_000;
+    f.invoiceFor(f.original, `in_renewal_${f.accountId}`);
+    await f.paid(f.original);
+    await f.paid(f.original);
+    await f.service.handleEvent({
+      id: `evt_old_${crypto.randomUUID()}`,
+      type: "invoice.paid",
+      livemode: false,
+      data: { object: oldInvoice },
+    } as Stripe.Event);
+    expect(item.price.id).toBe("price_pro");
+    expect(item.price.unit_amount).toBe(2000); // Existing customer still pays $20, not $30.
+    expect((await getBillingBalance(client.db, f.accountId)).plan).toMatchObject({
+      key: "pro",
+      creditGrantedMicros: 300_000_000,
+      creditRemainingMicros: 300_000_000,
+    });
+    const periods =
+      await shared.admin`select granted_micros::int, catalog_revision::int from plan_credit_periods where account_id=${f.accountId} order by period_start`;
+    expect(periods).toEqual([
+      { granted_micros: 200_000_000, catalog_revision: originalCatalog.revision },
+      { granted_micros: 300_000_000, catalog_revision: newCatalog.revision },
+    ]);
+  } finally {
+    await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(originalCatalog.plans)}, 'legacy-price-test', 'Restore fixture catalog after legacy renewal')`;
+  }
+}, 180_000);
+
 test("a paid same-second upgrade replaces plan credit exactly once through the real DB adapter", async () => {
   const f = await fixture({ upgradePeriodShiftSeconds: 0 });
   await f.paid(f.original);

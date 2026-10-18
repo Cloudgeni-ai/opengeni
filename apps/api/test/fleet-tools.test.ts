@@ -23,7 +23,8 @@ import {
   acquireSharedTestDatabase,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
+import { ControlRequest, ControlResponse, ExecResponse } from "@opengeni/agent-proto";
+import { CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
 import type { OpStreamConnection } from "@opengeni/events";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
@@ -82,12 +83,25 @@ function busWithAgent(opts: {
   agentId: string;
   online: boolean;
   hostname?: string;
+  backgroundChildrenStopped?: boolean;
 }): MemoryEventBus {
   const bus = new MemoryEventBus();
   if (!opts.online) {
     return bus;
   }
-  const responder = new MockAgentResponder({ hostname: opts.hostname });
+  const responder = new MockAgentResponder({
+    hostname: opts.hostname,
+    ...(opts.backgroundChildrenStopped
+      ? {
+          exec: () =>
+            ExecResponse.fromPartial({
+              exitCode: 0,
+              stdout: new TextEncoder().encode("done\n"),
+              backgroundChildrenStopped: true,
+            }),
+        }
+      : {}),
+  });
   const stream = createMockSelfhostedOpStream({
     responder,
     workspaceId: opts.workspaceId,
@@ -190,6 +204,7 @@ async function seedFleet(
     online?: boolean;
     hostname?: string;
     sandboxBackend?: "modal" | "none" | "selfhosted";
+    backgroundChildrenStopped?: boolean;
   } = {},
 ) {
   const { accountId, workspaceId } = await freshWorkspace();
@@ -262,6 +277,7 @@ async function seedFleet(
       agentId: enrollment.id,
       online: opts.online ?? true,
       hostname: opts.hostname,
+      backgroundChildrenStopped: opts.backgroundChildrenStopped,
     }) as never,
   };
   return {
@@ -558,9 +574,20 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
         })
       ).ok,
     ).toBe(false);
+    // The owner's human move needs no agent attempt in the request: the click
+    // consents to the running logical turn, while direct execution still does.
     expect((await swapActiveSandbox(services, withoutAttempt, machine.sandboxId)).swapped).toBe(
       false,
     );
+    expect(
+      (
+        await swapActiveSandbox(
+          services,
+          { ...withoutAttempt, consentToCurrentTurn: true },
+          machine.sandboxId,
+        )
+      ).swapped,
+    ).toBe(true);
 
     expect(
       (
@@ -647,6 +674,66 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     // Without the chat's permission the same request is refused.
     await revokeThisChat();
     await expect(agentRequest()).rejects.toThrow();
+  }, 60_000);
+
+  test("an agent can end a browser or computer on its owner's personal machine without the chat's permission", async () => {
+    if (!available) return;
+    const {
+      accountId,
+      targetWorkspaceId,
+      machine,
+      session,
+      ctx,
+      services,
+      allowThisChat,
+      revokeThisChat,
+    } = await seedPersonalMachineChat("selfhosted");
+    await allowThisChat();
+    expect((await swapActiveSandbox(services, ctx, machine.sandboxId)).swapped).toBe(true);
+    // The chat that opened the browser has lost its per-chat permission (it
+    // went idle, or another chat is cleaning up after it).
+    await revokeThisChat();
+    const agentGrant: AccessGrant = {
+      accountId,
+      workspaceId: targetWorkspaceId,
+      subjectId: `agent:${crypto.randomUUID()}`,
+      permissions: ["sessions:read", "sessions:write"],
+      principalKind: "agent_attempt",
+      metadata: {
+        sessionId: session.id,
+        turnId: ctx.attemptAuthority!.turnId,
+        attemptId: ctx.attemptAuthority!.attemptId,
+        executionGeneration: ctx.attemptAuthority!.executionGeneration,
+      },
+    };
+    const agentRequest = async (operation: "browser.end" | "computer.end" | "browser.action") =>
+      await withChannelA(
+        { db, settings, bus: services.bus as never },
+        {
+          accountId,
+          workspaceId: targetWorkspaceId,
+          session: (await getSession(db, targetWorkspaceId, session.id))!,
+          subjectId: agentGrant.subjectId,
+          grant: agentGrant,
+          operation,
+        },
+        async ({ service }) =>
+          await service.terminalExec({
+            command: "hostname",
+            cwd: "",
+            timeoutMs: 5_000,
+            emitStream: false,
+          }),
+      );
+
+    // Ending only stops what Opengeni already started there, so it still
+    // reaches the owner's machine.
+    expect(JSON.stringify(await agentRequest("browser.end"))).toContain("personal-cross-workspace");
+    expect(JSON.stringify(await agentRequest("computer.end"))).toContain(
+      "personal-cross-workspace",
+    );
+    // Anything else still needs the chat's permission.
+    await expect(agentRequest("browser.action")).rejects.toThrow();
   }, 60_000);
 
   test("a backend:none session lists and attaches an owned Connected Machine without inventing a home box", async () => {
@@ -945,7 +1032,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       "session",
     );
     expect(failed.swapped).toBe(false);
-    expect(failed.code).toBe("concurrent_swap");
+    expect(failed.code).toBe("stale_pointer");
     expect(failedRelease).toBe(1);
   }, 60_000);
 
@@ -1003,6 +1090,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(exec.stdout?.trim()).toBe("runon-vm");
     expect(exec.exitCode).toBe(0);
     expect(exec.timedOut).toBe(false);
+    expect(exec.notice).toBeUndefined();
     expect(exec.deadlineMs).toBe(settings.sandboxSelfhostedExecTimeoutMs);
 
     // The active pointer is UNCHANGED (run_on is a side-channel, not a swap).
@@ -1033,7 +1121,20 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       kind: "exec",
       cmd: "true",
     });
+
     expect(r.ok).toBe(false);
+  }, 60_000);
+
+  test("run_on appends positive cleanup evidence without contaminating command output", async () => {
+    if (!available) return;
+    const { ctx, services, sandbox } = await seedFleet({ backgroundChildrenStopped: true });
+    const result = await runOnSandbox(services, ctx, sandbox.id, {
+      kind: "exec",
+      cmd: "sleep 60 & printf done",
+    });
+    expect(result.stdout).toBe("done\n");
+    expect(result.stderr).toBe("");
+    expect(result.notice).toBe(CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE);
   }, 60_000);
 
   test("provision: selfhosted -> enrollment instructions; modal -> a named record", async () => {

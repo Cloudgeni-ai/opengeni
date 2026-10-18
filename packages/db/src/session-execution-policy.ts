@@ -1,5 +1,6 @@
-import { and, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./database";
+import { anyOf } from "./sql-arrays";
 import * as schema from "./schema";
 
 /** Actual execution evidence, independent of later default-setting commands. */
@@ -24,6 +25,12 @@ export function latestStartedSessionTurnQuery(
  * settings boundary the walk also stops at the boundary, because an eligible
  * turn was queued after it and so started after it. Joining all start events
  * to all turns instead would hash the whole session per read.
+ *
+ * The turn check is a scalar subquery, not EXISTS, so the planner cannot
+ * flatten it into a join. A generic plan for a prepared statement does not
+ * know how long the session is; given a join it may drive from every turn of
+ * the session and sort, which costs tens of milliseconds to seconds on a long
+ * session instead of one backward index probe.
  */
 function startedSessionTurnQuery(
   db: Database,
@@ -46,8 +53,8 @@ function startedSessionTurnQuery(
       and started.session_id = ${sessionId}
       and started.type = 'turn.started'
       ${respectSettingsBoundary ? sql`and started.sequence > ${settingsBoundary}` : sql``}
-      and exists (
-        select 1 from ${schema.sessionTurns} candidate
+      and (
+        select true from ${schema.sessionTurns} candidate
         where candidate.workspace_id = started.workspace_id
           and candidate.session_id = started.session_id
           and candidate.id = started.turn_id
@@ -62,6 +69,7 @@ function startedSessionTurnQuery(
                 ) end, 0) > ${settingsBoundary}`
               : sql``
           }
+        limit 1
       )
     order by started.sequence desc
     limit 1
@@ -138,10 +146,7 @@ export function effectiveSessionPolicyQuery(
     .from(schema.sessions)
     .leftJoinLateral(latest, sql`true`)
     .where(
-      and(
-        eq(schema.sessions.workspaceId, workspaceId),
-        inArray(schema.sessions.id, [...sessionIds]),
-      ),
+      and(eq(schema.sessions.workspaceId, workspaceId), anyOf(schema.sessions.id, [...sessionIds])),
     );
 }
 
@@ -217,7 +222,7 @@ export async function withSessionListModelPolicy<T extends PolicyRow>(
     .where(
       and(
         eq(schema.sessions.workspaceId, workspaceId),
-        inArray(schema.sessions.id, [...new Set(rows.map((row) => row.id))]),
+        anyOf(schema.sessions.id, [...new Set(rows.map((row) => row.id))]),
       ),
     );
   const byId = new Map(policies.map((policy) => [policy.id, policy]));

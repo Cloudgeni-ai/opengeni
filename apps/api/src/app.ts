@@ -130,7 +130,7 @@ import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
 import { cors } from "hono/cors";
@@ -824,6 +824,7 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Page-Max-Bytes",
       "X-OpenGeni-Page-Truncated",
       "X-OpenGeni-Payload-Mode",
+      "X-OpenGeni-Session-Sequence",
       "X-OpenGeni-Truncated-By",
     ],
   };
@@ -1691,35 +1692,41 @@ export function createAppComposition(deps: AppDependencies): {
     }
   });
 
-  app.use("/v1/workspaces/:workspaceId/*", async (c, next) => {
-    const workspaceId = c.req.param("workspaceId");
-    if (workspaceRequestRequiresCodexAccountPrevalidation(c.req.raw)) {
-      const grant = await requireAccessGrant(c, routeDeps, workspaceId);
-      await validateCodexAccountTarget(c.req.raw);
+  app.use(
+    "/v1/workspaces/:workspaceId/*",
+    nativeWorkspaceMiddleware(async (c, next) => {
+      const workspaceId = c.req.param("workspaceId")!;
+      if (workspaceRequestRequiresCodexAccountPrevalidation(c.req.raw)) {
+        const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+        await validateCodexAccountTarget(c.req.raw);
+        await withAccessGrantSessionRlsContext(routeDeps, grant, next);
+        return;
+      }
+      if (workspaceActorContextExempt(c.req.method, new URL(c.req.url).pathname)) {
+        await next();
+        return;
+      }
+      // Match Hono's decoded routing path before first-use membership and RLS.
+      const permission =
+        c.req.method === "PUT" &&
+        /^\/v1\/workspaces\/[^/]+\/artifact-catalog\/[^/]+\/[^/]+\/pin$/.test(c.req.path)
+          ? "artifacts:publish"
+          : undefined;
+      const grant = await requireAccessGrant(c, routeDeps, workspaceId, permission);
       await withAccessGrantSessionRlsContext(routeDeps, grant, next);
-      return;
-    }
-    if (workspaceActorContextExempt(c.req.method, new URL(c.req.url).pathname)) {
-      await next();
-      return;
-    }
-    // Match Hono's decoded routing path before first-use membership and RLS.
-    const permission =
-      c.req.method === "PUT" &&
-      /^\/v1\/workspaces\/[^/]+\/artifact-catalog\/[^/]+\/[^/]+\/pin$/.test(c.req.path)
-        ? "artifacts:publish"
-        : undefined;
-    const grant = await requireAccessGrant(c, routeDeps, workspaceId, permission);
-    await withAccessGrantSessionRlsContext(routeDeps, grant, next);
-  });
+    }),
+  );
 
   // Requests a host forwarded from a Site frame: SITE_OPERATIONS only, only
   // the frame's own sessions, and the validated Site origin as provenance.
-  app.use("/v1/workspaces/:workspaceId/*", siteFrameGuard(routeDeps));
+  app.use("/v1/workspaces/:workspaceId/*", nativeWorkspaceMiddleware(siteFrameGuard(routeDeps)));
   // Agents started from a Site page do not learn or widen access: their
   // workspace writes are held to an allowlist (their tools, conversations,
   // files and content); everything else is refused.
-  app.use("/v1/workspaces/:workspaceId/*", siteClampedAgentGuard(routeDeps));
+  app.use(
+    "/v1/workspaces/:workspaceId/*",
+    nativeWorkspaceMiddleware(siteClampedAgentGuard(routeDeps)),
+  );
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -2479,14 +2486,30 @@ const publicWorkspaceBrowserRoutePatterns = [
   /^\/v1\/workspaces\/[^/]+\/github\/installations\/select$/,
 ] as const;
 
+/** All native-workspace middleware shares one namespace boundary, not route exemption lists. */
+function nativeWorkspaceMiddleware(middleware: MiddlewareHandler): MiddlewareHandler {
+  return async (c, next) => {
+    // Hono's wildcard also captures the external namespace. Only an actual
+    // registered external handler may resolve that organization-local identity.
+    // Unknown paths/methods must not fall through to a native workspace handler.
+    const route = registeredHandlerRoutePath(c);
+    if (route && /^\/v1\/workspaces\/external(?:\/|$)/.test(route)) {
+      await next();
+      return;
+    }
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        c.req.param("workspaceId") ?? "",
+      )
+    ) {
+      throw new HTTPException(404, { message: "workspace not found" });
+    }
+    return await middleware(c, next);
+  };
+}
+
 export function workspaceActorContextExempt(method: string, pathname: string): boolean {
-  // The account-scoped provisioning route shares the workspace collection prefix.
-  // Hono's trailing wildcard also matches it, but "external" is not a workspace UUID;
-  // the route performs its own organization API-key authorization.
-  if (method === "PUT" && pathname === "/v1/workspaces/external") return true;
-  // Import adapters apply their own exact create/control gates and request-local
-  // RLS in core. Tenant mirrors first resolve the organization-local mapping;
-  // "external" itself is not a native workspace id.
+  // Import adapters apply their own exact create/control gates and request-local RLS in core.
   if (isSessionHistoryImportRequest(method, pathname)) return true;
   // Organization budget authority is independent of ordinary workspace
   // membership; these routes apply their own exact account/workspace gate.
@@ -2495,23 +2518,6 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
       /^\/v1\/workspaces\/[^/]+\/allowance$/.test(pathname)) ||
     (method === "GET" && /^\/v1\/workspaces\/[^/]+\/allowance\/state$/.test(pathname)) ||
     (method === "POST" && /^\/v1\/workspaces\/[^/]+\/allowance\/grants$/.test(pathname))
-  )
-    return true;
-  // Allowance tenant mirrors resolve the workspace by exact organization-local
-  // external identity before applying the ordinary workspace authorization.
-  if (
-    (["GET", "PUT", "DELETE"].includes(method) &&
-      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance$/.test(pathname)) ||
-    (method === "GET" &&
-      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/state$/.test(pathname)) ||
-    (method === "POST" &&
-      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/grants$/.test(pathname)) ||
-    (method === "GET" &&
-      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/usage(?:\/me)?$/.test(pathname)) ||
-    (method === "PUT" &&
-      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/members\/(?:[^/]+|external\/[^/]+\/[^/]+)\/allowance$/.test(
-        pathname,
-      ))
   )
     return true;
   if (/^\/v1\/workspaces\/[^/]+\/mcp(?:\/(?:docs|files))?$/.test(pathname)) return true;

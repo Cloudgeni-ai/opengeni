@@ -27,6 +27,7 @@ import {
   createInteractionAttemptToolDefinitions,
   nativeCuaSchema,
 } from "../src/interaction-tools";
+import { computerObservationText } from "../src/computer-model-text";
 
 const accountId = randomUUID();
 const workspaceId = randomUUID();
@@ -234,6 +235,48 @@ describe("interaction attempt tools", () => {
     ).rejects.toThrow();
     expect(calls).toBe(1);
   });
+
+  test("a native call the API refuses is a definite tool error, not an unknown outcome", async () => {
+    let failure: Error = new OpenGeniApiError(
+      409,
+      "This Desktop belonged to a previous task placement and was retired. Open a new Desktop.",
+      { code: "conflict", retryable: false },
+    );
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        callNativeComputerTool: async () => {
+          throw failure;
+        },
+      }),
+    });
+    const listWindows = definitions.find(
+      (definition) => definition.modelName === "interaction__cua_list_windows",
+    )!;
+    const context = {
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    };
+    const refused = await listWindows.execute({ computerSessionId }, context);
+    expect(refused).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "conflict",
+          retryable: false,
+          message: expect.stringContaining("was retired. Open a new Desktop."),
+        },
+      },
+    });
+    // A server failure or an uncertain dispatch keeps its failure path.
+    failure = new OpenGeniApiError(503, "Unavailable", { code: "unavailable", retryable: true });
+    await expect(listWindows.execute({ computerSessionId }, context)).rejects.toThrow(
+      "Unavailable",
+    );
+  });
   test("oversized native output retains completed operation evidence through the prepared gateway", async () => {
     const definitions = createInteractionAttemptToolDefinitions({
       workspaceId,
@@ -299,7 +342,7 @@ describe("interaction attempt tools", () => {
         expect(computer).toBe(computerSessionId);
         expect(request.arguments).toEqual({
           steps: [{ tool: "click", args: { pid: 42, window_id: 1, element_token: "snapshot:0" } }],
-          observe: true,
+          observe: {},
         });
         calls++;
         return {
@@ -332,8 +375,8 @@ describe("interaction attempt tools", () => {
       permissions: ["sessions:control"],
     });
     expect(calls).toBe(0);
-    const batch = definitions.find((tool) => tool.modelName === "interaction__cua_run_actions")!;
-    const upstream = CUA_DESKTOP_TOOLS.find((tool) => tool.name === "run_actions")!;
+    const batch = definitions.find((tool) => tool.modelName === "interaction__cua_run_steps")!;
+    const upstream = CUA_DESKTOP_TOOLS.find((tool) => tool.name === "run_steps")!;
     expect((batch.inputSchema.properties as any).steps).toEqual(
       (upstream.inputSchema.properties as any).steps,
     );
@@ -342,7 +385,7 @@ describe("interaction attempt tools", () => {
       {
         computerSessionId,
         steps: [{ tool: "click", args: { pid: 42, window_id: 1, element_token: "snapshot:0" } }],
-        observe: true,
+        observe: {},
       },
       { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:fixture" } },
     );
@@ -890,6 +933,42 @@ describe("interaction attempt tools", () => {
       headless: false,
       initialUrl: "https://accounts.google.com/",
     });
+  });
+
+  test("a browser that failed to start reports why instead of a failed session", async () => {
+    const failedId = randomUUID();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: "0", sessions: [] }) as never,
+        createBrowserSession: async () =>
+          ({
+            session: { id: failedId, lifecycle: "failed", failureCode: "unsupported" },
+            operation: {
+              state: "failed",
+              error: {
+                code: "unsupported",
+                message: "No Google Chrome or Chromium is installed on this machine.",
+                retryable: false,
+              },
+            },
+          }) as never,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:control"],
+    });
+
+    const result = await definitions[0]!.execute(
+      { mode: "new", initialUrl: "https://example.com/" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(result.isError).toBe(true);
+    const text = JSON.stringify(result.structuredContent);
+    expect(text).toContain(
+      `BrowserSession ${failedId} did not start: No Google Chrome or Chromium is installed`,
+    );
+    expect(text).toContain("unsupported");
   });
 
   test("opens attached browsers headed and forwards the selected network route", async () => {
@@ -1905,10 +1984,62 @@ describe("interaction attempt tools", () => {
     expect(result.content).toEqual([
       {
         type: "text",
-        text: JSON.stringify({ ...observation, frameId: "captured-frame", capturedFrame }),
+        text: computerObservationText({ ...observation, frameId: "captured-frame", capturedFrame }),
       },
       { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
     ]);
+  });
+
+  test("observes an app target from its tree when it has no screenshot", async () => {
+    const target: ComputerTarget = { ...computerTarget(), id: "app-1", kind: "app" };
+    const observation = { ...computerObservation(target), frameId: null };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => observation,
+        captureComputerTarget: async () => {
+          throw new Error("window capture is not available");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_observe"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { computerSessionId, targetId: target.id },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).not.toHaveProperty("capturedFrame");
+    expect(result.content).toEqual([
+      {
+        type: "text",
+        text: `${computerObservationText(observation)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`,
+      },
+    ]);
+  });
+
+  test("still fails a window observation whose screenshot cannot be captured", async () => {
+    const target = computerTarget();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => computerObservation(target),
+        captureComputerTarget: async () => {
+          throw new Error("window capture is not available");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_observe"],
+      permissions: ["sessions:read"],
+    });
+    await expect(
+      definitions[0]!.execute(
+        { computerSessionId, targetId: target.id },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      ),
+    ).rejects.toThrow("window capture is not available");
   });
 
   test("returns browser pixels only when a still image is requested", async () => {
@@ -2233,6 +2364,96 @@ describe("interaction attempt tools", () => {
         ],
       },
     });
+  });
+
+  test("compact view leads with an opened menu, live messages and the focus group on a dense page", async () => {
+    const target = browserTarget();
+    const observation = browserObservation(target);
+    const node = (
+      ref: string,
+      role: string,
+      extra: { name?: string; actions?: string[]; states?: string[]; children?: unknown[] } = {},
+    ) => ({ ref, role, states: [], actions: [], ...extra });
+    const navigation = node("nav", "navigation", {
+      name: "Site",
+      children: Array.from({ length: 30 }, (_, index) =>
+        node(`nav-${index}`, "link", { name: `Section ${index}`, actions: ["click"] }),
+      ),
+    });
+    const rows = Array.from({ length: 400 }, (_, index) =>
+      node(`row-${index}`, "row", {
+        children: [
+          node(`row-${index}-edit`, "button", { name: `Edit row ${index}`, actions: ["click"] }),
+          node(`row-${index}-qty`, "button", { name: `${index} m`, actions: ["click"] }),
+        ],
+      }),
+    );
+    const inspector = node("inspector", "group", {
+      name: "Row",
+      children: [
+        node("total", "text", { name: "Total 2 091 kr" }),
+        node("more", "button", {
+          name: "More",
+          actions: ["click"],
+          states: ["focused", "expanded", "hasPopup=menu"],
+        }),
+      ],
+    });
+    const roots = [
+      node("document", "document", {
+        name: "Calculation",
+        children: [
+          navigation,
+          node("main", "main", { children: [node("grid", "grid", { children: rows }), inspector] }),
+          node("empty-status", "status", { states: ["live=polite"] }),
+          node("toast", "status", {
+            states: ["live=polite"],
+            children: [node("toast-text", "text", { name: "Row added" })],
+          }),
+          node("menu", "menu", {
+            name: "More",
+            children: [
+              node("menu-open", "menuitem", { name: "Open tariff choices", actions: ["click"] }),
+              node("menu-delete", "menuitem", { name: "Delete", actions: ["click"] }),
+            ],
+          }),
+        ],
+      }),
+    ];
+    observation.semantic = { kind: "snapshot", roots: roots as never, nodeCount: 900 };
+    observation.focusedRef = "more";
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({ observeBrowserTarget: async () => observation }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    const view = (
+      result.structuredContent as {
+        agentView: {
+          nodes: Array<{ ref: string }>;
+          omittedNodeCount: number;
+          omittedRegions: Array<{ role: string; name?: string; count: number }>;
+        };
+      }
+    ).agentView;
+    const shown = new Set(view.nodes.map((entry) => entry.ref));
+    for (const ref of ["menu", "menu-open", "menu-delete", "toast", "toast-text", "total", "more"])
+      expect(shown.has(ref)).toBe(true);
+    expect(shown.has("empty-status")).toBe(false);
+    expect(shown.has("nav-0")).toBe(false);
+    expect(shown.has("row-0-edit")).toBe(true);
+    expect(view.omittedRegions[0]).toMatchObject({ role: "main" });
+    expect(view.omittedRegions).toContainEqual({ role: "navigation", name: "Site", count: 31 });
+    const text = result.content.find((entry) => entry.type === "text");
+    expect(text && "text" in text ? text.text : "").toContain(
+      `elements not shown: ${view.omittedRegions[0]!.count} in main, 31 in navigation "Site"`,
+    );
   });
 
   test("keeps a dense ten-thousand-node page within the compact output budget", async () => {

@@ -146,7 +146,15 @@ export function normalizeCdpAccessibilityTree(options: {
   for (const [nodeId, entry] of entriesByNodeId) {
     if (!isEditableControlRole(entry.role)) continue;
     const raw = rawById.get(nodeId);
-    if (raw) for (const childId of childIds(raw)) suppressSubtree(childId);
+    if (!raw) continue;
+    // A native select's options are what an agent chooses from, so a short
+    // option list stays visible under its non-editable combobox. Long lists
+    // (countries, time zones) stay collapsed; select takes the label anyway.
+    if (entry.role === "combobox" && !entry.states.some((state) => state.startsWith("editable"))) {
+      const optionCount = countOptions(rawById, nodeId, VISIBLE_SELECT_OPTIONS_MAX + 1);
+      if (optionCount > 0 && optionCount <= VISIBLE_SELECT_OPTIONS_MAX) continue;
+    }
+    for (const childId of childIds(raw)) suppressSubtree(childId);
   }
 
   const visit = (nodeId: string): InteractionSemanticNodeValue[] => {
@@ -175,7 +183,7 @@ export function normalizeCdpAccessibilityTree(options: {
       role: entry.role,
       ...(entry.name !== null ? { name: entry.name.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
       ...(description ? { description: description.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
-      ...safeValue(raw, entry.role),
+      ...safeValue(raw, entry.role, entry.states),
       states: entry.states,
       actions: entry.actions,
       ...(children.length > 0 ? { children } : {}),
@@ -245,9 +253,17 @@ export function accessibilityContainer(
 function safeValue(
   node: CdpAxNode,
   role: string,
+  states: readonly string[],
 ): { value?: string | { redacted: true; reason: "password" } } {
   const value = stringValue(node.value);
   if (!value) return {};
+  // Text typed into a field may hold a secret, so editable values stay out of
+  // observations. A non-editable combobox (a native select or a custom
+  // picker) only shows the option chosen on the page, which the agent needs
+  // to confirm a selection.
+  if (role === "combobox" && !states.some((state) => state.startsWith("editable"))) {
+    return { value: value.slice(0, SEMANTIC_VALUE_MAX_CHARS) };
+  }
   if (["textbox", "searchbox", "combobox", "spinbutton"].includes(role)) return {};
   return { value: value.slice(0, SEMANTIC_VALUE_MAX_CHARS) };
 }
@@ -258,6 +274,30 @@ const SEMANTIC_VALUE_MAX_CHARS = 32_768;
 
 function isEditableControlRole(role: string): boolean {
   return ["textbox", "searchbox", "combobox", "spinbutton"].includes(role);
+}
+
+/** Most options a collapsed select may show in an observation. */
+const VISIBLE_SELECT_OPTIONS_MAX = 25;
+
+/** Counts option descendants of a node, stopping once `limit` is reached. */
+function countOptions(
+  rawById: ReadonlyMap<string, CdpAxNode>,
+  nodeId: string,
+  limit: number,
+): number {
+  let count = 0;
+  const pending = [...childIds(rawById.get(nodeId) ?? {})];
+  const seen = new Set<string>();
+  while (pending.length > 0 && count < limit) {
+    const id = pending.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const node = rawById.get(id);
+    if (!node) continue;
+    if (roleValue(node) === "option" || roleValue(node) === "MenuListOption") count += 1;
+    pending.push(...childIds(node));
+  }
+  return count;
 }
 
 /** Chromium's roles for native date, time, month, week and datetime-local inputs. */

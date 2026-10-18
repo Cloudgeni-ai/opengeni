@@ -21,6 +21,14 @@ are not rerun. Release-schema contracts hash the original files, not adapted
 execution text. A new forward migration cannot repair an earlier fresh-install
 failure, and changing the historical files would invalidate deployed hashes.
 
+The same closed adapter stabilizes 0807's policy deparsing on all supported
+servers. Dedicated-schema deployments put `opengeni_private` on `search_path`,
+which causes `pg_get_expr` to omit the schema that 0807's exact helper matcher
+requires. Only that hash-pinned source temporarily uses the quoted data schema
+and `pg_catalog` while deparsing and rewriting policies, then restores the
+caller's path. The strict matcher, row-account fence, administrator check and
+transaction boundaries remain unchanged; failure rolls back the local setting.
+
 ## Why rolling is the default
 
 The deploy applies every pending migration in the pre-upgrade hook, before it

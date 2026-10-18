@@ -41,6 +41,7 @@ import {
   type PickerBillingClass,
   type PickerModelRow,
 } from "../model-policy";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 const LazyModelPolicyPickerMenu = lazy(() =>
   import("./model-policy-picker-menu").then(({ ModelPolicyPickerPopover }) => ({
@@ -123,14 +124,15 @@ export function BillingClassMark(props: {
   className?: string | undefined;
   "aria-label"?: string | undefined;
 }) {
+  const t = useOpenGeniText();
   const labels: Record<PickerBillingClass, string> = {
-    opengeni_credits: "Models",
-    external: "External provider",
-    codex_subscription: "Codex",
+    opengeni_credits: t("modelPolicyPicker.models"),
+    external: t("modelPolicyPicker.externalProvider"),
+    codex_subscription: t("modelPolicyPicker.codex"),
     supergrok_subscription: "SuperGrok",
-    claude_subscription: "Claude",
-    byok: "API key",
-    organization_byok: "API key",
+    claude_subscription: t("modelPolicyPicker.claude"),
+    byok: t("modelPolicyPicker.apiKey"),
+    organization_byok: t("modelPolicyPicker.apiKey"),
   };
   if (props.presentation?.icon === null) return null;
   const label = props["aria-label"] ?? props.presentation?.label ?? labels[props.billingClass];
@@ -178,6 +180,7 @@ function SelectedModelMark(input: {
   props: ModelPolicyPickerProps;
   selected: ClientPickerModelRow | null;
 }) {
+  const t = useOpenGeniText();
   const billingClass =
     input.selected?.billingClass ?? billingClassForMissingSelection(input.props.model);
   const presentation = groupPresentationFor(input.props, billingClass);
@@ -187,7 +190,7 @@ function SelectedModelMark(input: {
       <BillingClassMark
         billingClass={billingClass}
         presentation={presentation}
-        aria-label={presentation?.label ?? SCOPED_MARK_LABELS[billingClass]}
+        aria-label={presentation?.label ?? SCOPED_MARK_LABELS(t)[billingClass]}
         className="text-og-fg"
       />
     );
@@ -211,10 +214,10 @@ function SelectedModelMark(input: {
   return <ModelMark model={model} className="text-og-fg" />;
 }
 
-const SCOPED_MARK_LABELS: Partial<Record<PickerBillingClass, string>> = {
-  byok: "Workspace provider account",
-  organization_byok: "Organization provider account",
-};
+const SCOPED_MARK_LABELS = (t: OpenGeniText): Partial<Record<PickerBillingClass, string>> => ({
+  byok: t("modelPolicyPicker.workspaceProviderAccount"),
+  organization_byok: t("modelPolicyPicker.organizationProviderAccount"),
+});
 
 /** A selection the catalog no longer lists: its clean name (settings keep the id). */
 function fallbackName(props: ModelPolicyPickerProps): string {
@@ -227,8 +230,11 @@ const BRANDED_BILLING_CLASSES: ReadonlySet<PickerBillingClass> = new Set([
   "supergrok_subscription",
 ]);
 
-export function effectiveRows(props: ModelPolicyPickerProps): ClientPickerModelRow[] {
-  return sharedEffectiveRows(props);
+export function effectiveRows(
+  t: OpenGeniText,
+  props: ModelPolicyPickerProps,
+): ClientPickerModelRow[] {
+  return sharedEffectiveRows(t, props);
 }
 
 export function PickerNavRow(props: {
@@ -317,22 +323,24 @@ export function PickerAnimatedPage(props: {
 
 /** @internal Shared controlled/uncontrolled state seam. */
 export function useModelPolicyPickerState(props: ModelPolicyPickerProps) {
+  const t = useOpenGeniText();
   const [uncontrolledOpen, setUncontrolledOpen] = useState(props.defaultOpen ?? false);
   const open = props.open ?? uncontrolledOpen;
   const setOpen = (next: boolean) => {
     if (props.open === undefined) setUncontrolledOpen(next);
     props.onOpenChange?.(next);
   };
-  return { open, setOpen, rows: effectiveRows(props) };
+  return { open, setOpen, rows: effectiveRows(t, props) };
 }
 
 export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
+  const t = useOpenGeniText();
   const contentId = useId();
   const trigger = usePortalTokenSource<HTMLButtonElement>();
   const portalStyle = usePortalTokenStyle(trigger.source);
   const messages = useMemo(
-    () => ({ ...defaultModelPolicyPickerMessages, ...props.messages }),
-    [props.messages],
+    () => ({ ...defaultModelPolicyPickerMessages(t), ...props.messages }),
+    [props.messages, t],
   );
   const { open, setOpen, rows } = useModelPolicyPickerState(props);
   const selected = findPickerRow(rows, props.model);
@@ -340,7 +348,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
     !rows.some((row) => row.selectable) && (rows.length > 0 || Boolean(props.connectModelsHref));
   const selectedDescription = needsModel
     ? messages.connectTitle
-    : [selected?.label ?? fallbackName(props), labelReasoningEffort(props.effort)].join(" · ");
+    : [selected?.label ?? fallbackName(props), labelReasoningEffort(t, props.effort)].join(" · ");
 
   if (props.loading) {
     return (
@@ -446,9 +454,9 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         {selected && !needsModel && modelOffersEffortChoice(selected.catalog) ? (
           <span
             className="og-model-policy-effort min-w-0 shrink-[9999] truncate"
-            title={labelReasoningEffort(props.effort)}
+            title={labelReasoningEffort(t, props.effort)}
           >
-            {labelReasoningEffort(props.effort)}
+            {labelReasoningEffort(t, props.effort)}
           </span>
         ) : null}
         {props.latencyMode === "fast" && !needsModel ? (

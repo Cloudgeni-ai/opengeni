@@ -1,6 +1,3 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
 import {
@@ -10,6 +7,11 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
+import {
+  connectMcpStreamableHttpClient,
+  legacyMcpClientError,
+  type McpStreamableHttpClient,
+} from "./mcp-streamable-http-client";
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
@@ -868,12 +870,13 @@ async function probeStreamableHttpMcpServer(
   if (!settings) throw new Error("Network policy is unavailable for MCP validation");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
-  const client = new Client(
-    { name: "opengeni-capability-probe", version: "0.1.0" },
-    { capabilities: {} },
-  );
+  let client: McpStreamableHttpClient | undefined;
   try {
-    const transport = new StreamableHTTPClientTransport(new URL(input.url), {
+    client = await connectMcpStreamableHttpClient({
+      url: input.url,
+      clientName: "opengeni-capability-probe",
+      clientVersion: "0.1.0",
+      timeoutMs: input.timeoutMs,
       requestInit: {
         signal: controller.signal,
         ...(input.headers ? { headers: input.headers } : {}),
@@ -884,18 +887,18 @@ async function probeStreamableHttpMcpServer(
           requireHttpsOutsideLocalTest: true,
         }),
     });
-    await client.connect(transport as unknown as Transport, {
-      timeout: input.timeoutMs,
-      maxTotalTimeout: input.timeoutMs,
-    });
-    const tools = await client.listTools(undefined, {
-      timeout: input.timeoutMs,
-      maxTotalTimeout: input.timeoutMs,
-    });
+    const tools = await client
+      .listTools(undefined, {
+        timeout: input.timeoutMs,
+        maxTotalTimeout: input.timeoutMs,
+      })
+      .catch((error: unknown) => {
+        throw legacyMcpClientError(error);
+      });
     return { toolCount: tools.tools.length };
   } finally {
     clearTimeout(timeout);
-    await client.close().catch(() => undefined);
+    await client?.close().catch(() => undefined);
   }
 }
 

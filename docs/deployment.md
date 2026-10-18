@@ -2622,6 +2622,12 @@ chart that defaulted to PostgreSQL 17) does not start until you choose:
   the old directory as `pgdata.pre-upgrade-from-<major>` and then starts
   PostgreSQL 18. Until the new server has started once, rolling back is
   restoring that directory and the old image; after that, restore from backup.
+  Before Helm touches the StatefulSet, a pre-upgrade hook Job rehearses the
+  upgrade: it copies the running server's schema (no rows) into a scratch
+  cluster of the old major and runs PostgreSQL 18's `pg_upgrade --check`
+  against it. If the check fails, the release fails while the old server keeps
+  serving, and the Job's log names the objects to change. Allow its time in the
+  Helm timeout (`postgres.majorUpgrade.preflight.activeDeadlineSeconds`).
   Every extension library the old databases use must exist in the new image
   (drop unused extensions whose library is missing first). Afterwards run
   `vacuumdb --all --analyze-in-stages --missing-stats-only`, then

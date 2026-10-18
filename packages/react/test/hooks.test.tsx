@@ -40,6 +40,9 @@ import { useSessionMcpApprovalPolicy } from "../src/hooks/use-session-mcp-approv
 import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
 import { createEmbeddedSessionClient } from "../src/embedded-session-client";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -4528,8 +4531,8 @@ describe("useComposer durable draft and control binding", () => {
     await flush();
     await flushing(async () => hook.result.current.setValue(" \n"));
     await flushing(async () => expect(await hook.result.current.send()).toBe(true));
-    expect(savedTexts.at(-1)).toBe(FILE_ONLY_MESSAGE_TEXT);
-    expect(submittedTexts).toEqual([FILE_ONLY_MESSAGE_TEXT]);
+    expect(savedTexts.at(-1)).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
+    expect(submittedTexts).toEqual([FILE_ONLY_MESSAGE_TEXT(englishText)]);
     await hook.unmount();
   });
 
@@ -5802,8 +5805,8 @@ describe("useComposer file-only send", () => {
 
     expect(saved).toHaveLength(1);
     expect(sent).toHaveLength(1);
-    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
-    expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
+    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
+    expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
     await hook.unmount();
   });
 });
@@ -5889,6 +5892,53 @@ describe("useAvailableModels", () => {
     expect(hook.result.current.defaultModel).toBe("workspace-default");
     await hook.unmount();
   });
+  test("readers of one workspace catalog share one catalog and config read", async () => {
+    const calls: string[] = [];
+    const client = fakeClient({
+      getWorkspaceModelCatalog: async (workspaceId) => {
+        calls.push(`catalog:${workspaceId}`);
+        return { models: [] } as never;
+      },
+      getClientConfig: async (options) => {
+        calls.push(`config:${options?.workspaceId}`);
+        return { models: [], defaultModel: "workspace-default" } as never;
+      },
+    });
+    const hook = await renderHook(
+      () => [
+        useWorkspaceModelCatalog({ client, workspaceId: WORKSPACE_ID }),
+        useWorkspaceModelCatalog({ client, workspaceId: WORKSPACE_ID }),
+      ],
+      undefined,
+    );
+    await flush();
+    expect(calls).toEqual([`catalog:${WORKSPACE_ID}`, `config:${WORKSPACE_ID}`]);
+    expect(hook.result.current.map((catalog) => catalog.defaultModel)).toEqual([
+      "workspace-default",
+      "workspace-default",
+    ]);
+    await hook.unmount();
+  });
+  test("readers of the deployment model list share one config read", async () => {
+    let calls = 0;
+    const client = fakeClient({
+      getClientConfig: async () => {
+        calls += 1;
+        return { models: [], defaultModel: "deployment-default" } as never;
+      },
+    });
+    const hook = await renderHook(
+      () => [useAvailableModels({ client }), useAvailableModels({ client })],
+      undefined,
+    );
+    await flush();
+    expect(calls).toBe(1);
+    expect(hook.result.current.map((models) => models.defaultModel)).toEqual([
+      "deployment-default",
+      "deployment-default",
+    ]);
+    await hook.unmount();
+  });
   test("returns the host-exposed models and the default model from getClientConfig", async () => {
     let calls = 0;
     const client = fakeClient({
@@ -5958,6 +6008,8 @@ describe("useAvailableModels", () => {
     expect(hook.result.current.models).toEqual([]);
     expect(hook.result.current.defaultModel).toBeNull();
     await hook.unmount();
+    // The shared read is released one task after its last reader leaves.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(nativeSignal?.aborted).toBe(true);
   });
 });

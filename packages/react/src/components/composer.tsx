@@ -60,6 +60,7 @@ import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
 import { TooltipProvider } from "./tooltip";
+import { useOpenGeniText } from "../messages/runtime";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 export type { ResponsiveBasis } from "../lib/composer-responsive-context";
@@ -252,7 +253,7 @@ export function useChatComposerController({
   controlLinks,
   disabled = false,
   attachments,
-  commands = defaultCommands,
+  commands: commandsProp,
   commandContext,
   onClearView,
   onPaste,
@@ -260,10 +261,12 @@ export function useChatComposerController({
   runControl = "pause",
   running = false,
 }: UseChatComposerControllerOptions) {
+  const t = useOpenGeniText();
+  const commands = useMemo(() => commandsProp ?? defaultCommands(t), [commandsProp, t]);
   const formatError = useErrorMessage();
   const messages = useMemo(
-    () => ({ ...defaultChatComposerMessages, ...messageOverrides }),
-    [messageOverrides],
+    () => ({ ...defaultChatComposerMessages(t), ...messageOverrides }),
+    [messageOverrides, t],
   );
   const id = useId();
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -570,7 +573,7 @@ export function useChatComposerController({
             ? messages.controlChangedError
             : formatError(
                 delivery.error,
-                composerSubmissionErrorMessage(delivery.error) || messages.sendFailedError,
+                composerSubmissionErrorMessage(t, delivery.error) || messages.sendFailedError,
               ),
         }
       : null);
@@ -1275,6 +1278,7 @@ export const StopButton = forwardRef<HTMLButtonElement, ComposerStopButtonProps>
     { className, "aria-label": ariaLabel, title, children, ...props },
     ref,
   ) {
+    const t = useOpenGeniText();
     const controller = useComposerController();
     if (
       controller.runControl !== "stop" ||
@@ -1284,7 +1288,7 @@ export const StopButton = forwardRef<HTMLButtonElement, ComposerStopButtonProps>
     )
       return null;
     const busy = controller.pausing;
-    const label = ariaLabel ?? controller.messages.stopAriaLabel ?? "Stop";
+    const label = ariaLabel ?? controller.messages.stopAriaLabel ?? t("composer.stop");
     const tip = title ?? controller.messages.stopTitle ?? label;
     return (
       <ComposerTip tip={tip}>
@@ -1726,6 +1730,7 @@ function AttachmentChips({
   onRetainPreview: UseFileAttachmentsResult["retainPreview"];
   onLoadPreview: UseFileAttachmentsResult["loadPreview"];
 }) {
+  const t = useOpenGeniText();
   const lightbox = useLightboxOptional();
   const previewRequest = useRef<AbortController | null>(null);
   const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
@@ -1847,7 +1852,7 @@ function AttachmentChips({
           attachment.contentType.startsWith("image/"),
         );
         const statusText = previewFailed
-          ? (messages.previewUnavailable ?? "Preview unavailable")
+          ? (messages.previewUnavailable ?? t("composer.previewUnavailable"))
           : attachment.status === "uploading"
             ? messages.uploading
             : failed

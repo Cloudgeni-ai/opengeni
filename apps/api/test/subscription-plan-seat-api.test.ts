@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { BillingBalance } from "@opengeni/contracts";
+import { BillingBalance, ErrorEnvelope, OPENGENI_CORRELATION_HEADER } from "@opengeni/contracts";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   completeSelfServiceOrganizationSetup,
   createDb,
@@ -14,9 +15,8 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { Hono } from "hono";
-import { registerBillingRoutes } from "../src/routes/billing";
-import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
+import type { Hono } from "hono";
+import { createApp } from "../src/app";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -83,9 +83,9 @@ beforeAll(async () => {
       send: async () => ({ status: "sent", providerMessageId: "unexpected" }),
     },
   } as ApiRouteDeps;
-  app = new Hono();
-  registerOrganizationMembershipRoutes(app, deps);
-  registerBillingRoutes(app, deps);
+  // Use the production composition: bare Hono honors HTTPException.res, but
+  // the real app's onError normalizes every refusal into ErrorEnvelope.
+  app = createApp({ ...deps, bus: {} as never, workflowClient: {} as never });
 }, 180_000);
 afterAll(async () => {
   await client?.close();
@@ -105,11 +105,20 @@ test("seat-limit errors are actionable HTTP 402 responses", async () => {
     }),
   });
   expect(response.status).toBe(402);
-  expect(await response.json()).toEqual({
-    error: "seat_limit_reached",
+  const body = await response.text();
+  const envelope = ErrorEnvelope.parse(JSON.parse(body));
+  expect(envelope.error).toMatchObject({
+    status: 402,
+    code: "seat_limit_reached",
     message: "Organization seat limit reached. Upgrade your plan to add people.",
-    action: { type: "upgrade", href: "/billing" },
+    retryable: false,
+    details: { action: { type: "upgrade", href: "/billing" } },
   });
+  expect(envelope.error.requestId).toBe(response.headers.get(OPENGENI_CORRELATION_HEADER));
+  const sdkError = new OpenGeniApiError(response.status, body, { mutation: true });
+  expect(sdkError.code).toBe("seat_limit_reached");
+  expect(sdkError.details?.action).toEqual({ type: "upgrade", href: "/billing" });
+  expect(sdkError.outcomeUnknown).toBe(false);
 }, 180_000);
 
 test("billing routes expose the shared optional plan projection without changing legacy fields", async () => {

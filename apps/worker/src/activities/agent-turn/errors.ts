@@ -13,6 +13,7 @@ import {
   isSessionEventPersistenceError,
   DatabaseTransactionError,
   SandboxLeaseTransitionError,
+  KnowledgeLearningScopeChangedError,
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
@@ -23,6 +24,7 @@ import {
   describeCompactionProviderRejection,
   type CompactionProviderRejection,
   isMcpRequestTimeoutError,
+  isMcpServiceUnavailableError,
   isMcpTransportConnectivityError,
   isModalTaskExecStartPreDispatchUnavailableError,
   isModalCommandStartOutcomeUnknownError,
@@ -79,7 +81,6 @@ import {
 import { SubscriptionCoreCodexTurnError } from "./codex-core-errors";
 import {
   CodexIncludedUsageExhaustedError,
-  CodexIncludedUsageUnknownError,
   findCodexCreditPolicyError,
 } from "./codex-credit-policy";
 import {
@@ -117,12 +118,16 @@ import {
   PROVIDER_OVERLOAD_RECOVERY_CODE,
   MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
   PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
+  MCP_SERVICE_UNAVAILABLE_BACKOFF_MS,
+  MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
   validProviderOverloadRecoveryDelay,
+  windowedRecoveryPolicy,
 } from "./provider-recovery-policy";
 export {
   PROVIDER_OVERLOAD_RECOVERY_CODE,
   MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
   PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
+  MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
 } from "./provider-recovery-policy";
 
 // Retryable provider connectivity/5xx failures start quickly and back off to
@@ -131,9 +136,7 @@ export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
 export function providerRecoveryLimit(failureCode: unknown): number {
-  return failureCode === PROVIDER_OVERLOAD_RECOVERY_CODE
-    ? MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES
-    : MAX_AUTOMATIC_PROVIDER_RECOVERIES;
+  return windowedRecoveryPolicy(failureCode)?.maxRecoveries ?? MAX_AUTOMATIC_PROVIDER_RECOVERIES;
 }
 /**
  * Minimum wait per rate-limited recovery. Providers such as Azure OpenAI often
@@ -195,6 +198,7 @@ export function providerRecoveryResult(input: {
   now?: number;
 }): ProviderRecoveryResult {
   const overload = input.failureCode === PROVIDER_OVERLOAD_RECOVERY_CODE;
+  const window = windowedRecoveryPolicy(input.failureCode);
   const limit = providerRecoveryLimit(input.failureCode);
   const exhausted = (
     reason: "deadline" | "retry_limit" | "invalid_clock",
@@ -205,7 +209,7 @@ export function providerRecoveryResult(input: {
     providerRecoveryExhaustedReason: reason,
   });
   if (input.attemptNumber > limit) {
-    if (overload) return exhausted("retry_limit");
+    if (window) return exhausted("retry_limit");
     return {
       status: "exhausted",
       providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
@@ -214,7 +218,7 @@ export function providerRecoveryResult(input: {
   }
   const now = input.now ?? Date.now();
   const startedAt = input.recoveryStartedAt ?? (input.attemptNumber === 1 ? now : NaN);
-  if (overload && (!Number.isFinite(startedAt) || !Number.isFinite(now) || startedAt > now)) {
+  if (window && (!Number.isFinite(startedAt) || !Number.isFinite(now) || startedAt > now)) {
     return exhausted("invalid_clock");
   }
   const providerDelay =
@@ -235,25 +239,35 @@ export function providerRecoveryResult(input: {
             )
           ]!,
         )
-      : overload ||
-          input.failureCode === "provider_unavailable" ||
-          input.failureCode === "upstream_connectivity_unavailable" ||
-          input.failureCode === "sandbox_command_start_unavailable" ||
-          input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
-          input.failureCode === "mcp_transport_timeout" ||
-          input.failureCode === "mcp_transport_unavailable" ||
-          input.failureCode === "turn_execution_policy_definition_mismatch" ||
-          input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
+      : input.failureCode === MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE
         ? Math.max(
             providerDelay ?? 0,
-            PROVIDER_CONNECTIVITY_BACKOFF_MS[
+            MCP_SERVICE_UNAVAILABLE_BACKOFF_MS[
               Math.min(
                 Math.max(Math.trunc(input.attemptNumber) - 1, 0),
-                PROVIDER_CONNECTIVITY_BACKOFF_MS.length - 1,
+                MCP_SERVICE_UNAVAILABLE_BACKOFF_MS.length - 1,
               )
             ]!,
           )
-        : PROVIDER_BACKPRESSURE_DELAY_MS;
+        : overload ||
+            input.failureCode === "provider_unavailable" ||
+            input.failureCode === "upstream_connectivity_unavailable" ||
+            input.failureCode === "sandbox_command_start_unavailable" ||
+            input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
+            input.failureCode === "mcp_transport_timeout" ||
+            input.failureCode === "mcp_transport_unavailable" ||
+            input.failureCode === "turn_execution_policy_definition_mismatch" ||
+            input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
+          ? Math.max(
+              providerDelay ?? 0,
+              PROVIDER_CONNECTIVITY_BACKOFF_MS[
+                Math.min(
+                  Math.max(Math.trunc(input.attemptNumber) - 1, 0),
+                  PROVIDER_CONNECTIVITY_BACKOFF_MS.length - 1,
+                )
+              ]!,
+            )
+          : PROVIDER_BACKPRESSURE_DELAY_MS;
   const delayMs =
     continueDelayMs +
     (overload ||
@@ -263,7 +277,7 @@ export function providerRecoveryResult(input: {
       ? providerRecoveryJitterMs(continueDelayMs, input.jitterSample ?? 0)
       : 0);
   // Do not shorten Retry-After, or schedule a replacement outside the window.
-  if (overload && now + delayMs >= startedAt + PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS) {
+  if (window && now + delayMs >= startedAt + window.windowMs) {
     return exhausted("deadline");
   }
   return {
@@ -1688,6 +1702,13 @@ export function providerRecoveryCode(
   error: unknown,
   failure: { code?: string; retryable?: boolean },
 ): string | undefined {
+  if (
+    failure.code === "mcp_transport_unavailable" &&
+    failure.retryable &&
+    isMcpServiceUnavailableError(error)
+  ) {
+    return MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE;
+  }
   if (failure.code !== "provider_unavailable" || !failure.retryable) return failure.code;
   const status = providerHttpStatus(error);
   let current = error;
@@ -1817,6 +1838,9 @@ function baseAgentRunFailurePayload(
   maxProviderRecoveryCount?: number;
   providerRecoveryExhaustedReason?: "deadline" | "retry_limit" | "invalid_clock";
 } {
+  if (error instanceof KnowledgeLearningScopeChangedError) {
+    return { error: error.message, code: error.code, retryable: false };
+  }
   if (error instanceof SandboxMaterializationVerificationError) {
     return {
       error: error.message,
@@ -1997,7 +2021,7 @@ function baseAgentRunFailurePayload(
   if (isXaiSubscriptionHostedToolContinuationError(error)) {
     return {
       error:
-        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved.",
       code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
     };
@@ -2015,8 +2039,7 @@ function baseAgentRunFailurePayload(
   const xaiStreamTimeout = classifyXaiSubscriptionStreamIdleTimeoutError(error);
   if (xaiStreamTimeout) {
     return {
-      error:
-        "SuperGrok stopped sending valid response events. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      error: "SuperGrok stopped sending valid response events. Partial output was preserved.",
       code: "xai_response_stream_idle_timeout",
       retryable: false,
       responseObserved: xaiStreamTimeout.responseObserved,
@@ -2097,8 +2120,8 @@ function baseAgentRunFailurePayload(
   if (codexTimeout) {
     return {
       error: codexTimeout.responseObserved
-        ? "The Codex response timed out after streaming began. Observed output was checkpointed; automatic replay is disabled because the upstream operation may still be active."
-        : "The Codex response timed out before any response was observed. Upstream acceptance is unknown, so automatic replay is disabled.",
+        ? "The Codex response timed out after streaming began. Observed output was checkpointed."
+        : "The Codex response timed out before any response was observed.",
       code: "codex_response_timeout",
       retryable: false,
       timeoutClass: codexTimeout.timeoutClass,
@@ -2233,7 +2256,7 @@ export type CodexCredentialFailure = {
    */
   kind: "auth" | "forbidden" | "rate_limit" | "quota" | "plan_entitlement";
   cooldownSeconds: number | null;
-  origin?: "included_usage_policy" | "usage_verification_policy";
+  origin?: "included_usage_policy";
 };
 
 export const CODEX_ALLOWANCE_FALLBACK_MS = 5 * 60 * 60_000;
@@ -2299,11 +2322,6 @@ export function codexCredentialCooldownUntil(
  */
 export function classifyCodexCredentialFailure(error: unknown): CodexCredentialFailure | null {
   const creditPolicy = findCodexCreditPolicyError(error);
-  if (creditPolicy instanceof CodexIncludedUsageUnknownError) {
-    // Verified pre-dispatch refusal. A short hard hold cannot authorize credit
-    // fallback and does not claim that the provider exhausted its allowance.
-    return { kind: "rate_limit", cooldownSeconds: 60, origin: "usage_verification_policy" };
-  }
   if (creditPolicy instanceof CodexIncludedUsageExhaustedError) {
     return {
       kind: "quota",

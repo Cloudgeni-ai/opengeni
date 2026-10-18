@@ -5,8 +5,9 @@
  * paused at the limit keeps its Resume action, and a chat without a goal
  * continues on the next message.
  */
+import { useOpenGeniText } from "@opengeni/react";
 import {
-  DEFAULT_SESSION_USAGE_LIMIT_LABELS as LABELS,
+  DEFAULT_SESSION_USAGE_LIMIT_LABELS,
   summarizeSessionUsageLimit,
 } from "@opengeni/react/usage";
 import {
@@ -62,6 +63,8 @@ export function SessionUsageLimitSection(props: {
   goalPausedAtLimit?: boolean;
 }) {
   const { session } = props;
+  const t = useOpenGeniText();
+  const LABELS = DEFAULT_SESSION_USAGE_LIMIT_LABELS(t);
   const context = useAppContext();
   const capability = sessionUsageLimitCapability(context.clientConfig);
   const canControl = hasWorkspacePermission(
@@ -89,7 +92,7 @@ export function SessionUsageLimitSection(props: {
   // A refresh failed after a good read: keep the last known amount (and any
   // reached state), labelled as possibly out of date. Never $0.
   const stale = usage !== null && limit.error !== null;
-  const summary = summarizeSessionUsageLimit(usage, undefined, { stale });
+  const summary = summarizeSessionUsageLimit(t, usage, undefined, { stale });
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<SessionUsageLimitDraft>({ kind: "none" });

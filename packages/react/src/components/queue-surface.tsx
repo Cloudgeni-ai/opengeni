@@ -4,6 +4,7 @@ import { lazy, Suspense, type ComponentType } from "react";
 import type { QueueSurfaceProps } from "./queue-surface-implementation";
 export { requestQueueDraftEdit } from "./queue-draft-policy";
 import { EmptyQueueStateSurface } from "./queue-surface-state";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type { QueueSurfaceProps } from "./queue-surface-implementation";
 
@@ -40,6 +41,7 @@ function createQueueSurface(loadImplementation: QueueSurfaceLoader) {
 }
 
 function QueueSurfaceFallback() {
+  const t = useOpenGeniText();
   return (
     <div
       aria-live="polite"
@@ -53,7 +55,7 @@ function QueueSurfaceFallback() {
             aria-hidden="true"
             className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none"
           />
-          Loading inputs…
+          {t("queueSurface.loadingInputs")}
         </div>
       </div>
     </div>

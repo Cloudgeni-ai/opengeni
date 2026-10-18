@@ -7,10 +7,14 @@ import { createObservability } from "@opengeni/observability";
 import { BrowserControlRequestError } from "@opengeni/runtime/sandbox";
 import { observeChannelAOperationFailure, type ChannelAServices } from "../src/sandbox/channel-a";
 
-function observedWarnings(error: unknown, operation = "browser.resume"): Record<string, unknown>[] {
+function observedLines(
+  error: unknown,
+  operation = "browser.resume",
+): { warnings: Record<string, unknown>[]; metrics: () => Promise<string> } {
   const observed: string[] = [];
   const warn = console.warn;
   console.warn = (message?: unknown) => observed.push(String(message));
+  let metrics: () => Promise<string> = async () => "";
   try {
     const obs = createObservability(
       {
@@ -31,13 +35,39 @@ function observedWarnings(error: unknown, operation = "browser.resume"): Record<
       durationMs: 498,
       error,
     });
+    metrics = () => obs.prometheusMetrics();
   } finally {
     console.warn = warn;
   }
-  return observed.map((line) => JSON.parse(line) as Record<string, unknown>);
+  return {
+    warnings: observed.map((line) => JSON.parse(line) as Record<string, unknown>),
+    metrics,
+  };
+}
+
+function observedWarnings(error: unknown, operation = "browser.resume"): Record<string, unknown>[] {
+  return observedLines(error, operation).warnings;
 }
 
 describe("Channel-A failure cause telemetry", () => {
+  test("a controller's own 4xx refusal is counted as rejected, not as an unexpected 500", async () => {
+    const stale = new BrowserControlRequestError(409, {
+      code: "target_stale",
+      message: "computer target changed",
+      retryable: false,
+    });
+    const { warnings, metrics: render } = observedLines(stale, "computer.read");
+    expect(warnings).toEqual([]);
+    const failures = (await render())
+      .split("\n")
+      .filter((line) => line.startsWith("opengeni_channel_a_operation_failures_total{"));
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain(
+      'backend="selfhosted",op="computer.read",reason="request_rejected",status="409"',
+    );
+    expect(failures[0]).toEndWith(" 1");
+  });
+
   test("an unexpected browser resume failure names the controller refusal", () => {
     const refusal = new BrowserControlRequestError(500, {
       code: "driver_failed",

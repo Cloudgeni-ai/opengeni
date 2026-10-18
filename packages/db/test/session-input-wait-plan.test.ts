@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
+import { sqlParameterLiteral } from "./helpers/sql-literal";
 import {
   bootstrapWorkspace,
   createDb,
@@ -89,8 +90,6 @@ test("a held wait on a long session reads its deciding turn without walking hist
   const query = currentSessionInputWaitTurnsQuery(client.db, grant.workspaceId, [
     session.id,
   ]).toSQL();
-  const literal = (value: unknown) =>
-    typeof value === "number" ? String(value) : `'${String(value).replaceAll("'", "''")}'`;
   for (const mode of ["force_generic_plan", "force_custom_plan"] as const) {
     await withWorkspaceSubjectRls(client.db, grant.workspaceId, grant.subjectId, async (tx) => {
       const rows = await currentSessionInputWaitTurnsQuery(tx, grant.workspaceId, [session.id]);
@@ -103,7 +102,7 @@ test("a held wait on a long session reads its deciding turn without walking hist
         const explained = await tx.execute(
           sql.raw(
             `explain (analyze, buffers, format json) execute input_wait_plan(${query.params
-              .map(literal)
+              .map(sqlParameterLiteral)
               .join(", ")})`,
           ),
         );

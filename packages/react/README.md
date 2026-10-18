@@ -237,10 +237,28 @@ they are older than 10 seconds. Failed reads are never kept, and a
 401/403/404 drops what was kept. Retained reads are dropped when `client`
 changes or the provider unmounts.
 
-> **Host action item:** only set `retainReadsAcrossMounts` when every signed-in
-> person gets their own `client` object (create a new client on sign-in,
-> sign-out and account switch), as the stock Opengeni console does. With a
-> shared client, leave it off.
+The same opt-in keeps the last view of each conversation a person leaves: its
+event tail, detail, prompt queue, pending questions, goal and lineage. Reopening
+it within 10 minutes draws that view in the first render, with no loading
+state, while every hook still reads its resource once in the background and the
+fresh tail replaces the kept one when it lands. It is held in memory only (never
+written to the device), and the kept event tails together stay within one open
+conversation's window budget, dropping the least recently left first. Hosts
+without `OpenGeniProvider` (for example a React Native app passing `client` to
+each hook) opt in with `useRetainedReads(client)` in a component that stays
+mounted while that person is signed in.
+
+> **Host action item:** only set `retainReadsAcrossMounts` (or call
+> `useRetainedReads`) when every signed-in person gets their own `client`
+> object (create a new client on sign-in, sign-out and account switch), as the
+> stock Opengeni console does. With a shared client, leave it off.
+
+Read hooks watching a shared event feed (`events` from `useSessionEvents`)
+re-read their projection only for an event after what their own read reflects.
+Current servers report that in the `X-OpenGeni-Session-Sequence` response header
+of the queue, pending questions, goal and lineage reads
+(`observedSessionSequence` in `@opengeni/sdk`); behind a server or proxy that
+does not report it, every matching event in the loaded tail re-reads as before.
 
 ### Exact conversation search navigation
 
@@ -627,6 +645,49 @@ export function App() {
   );
 }
 ```
+
+## Your own labels and languages
+
+Every piece of text the components show, including user-facing error messages,
+comes from one message catalog. The built-in catalog is English; pass `locale`
+and `messages` to `OpenGeniProvider` to show your own words or a full translation.
+
+```tsx
+import { OpenGeniProvider, type OpenGeniMessages } from "@opengeni/react";
+
+const norwegian: OpenGeniMessages = {
+  "composer.stop": "Stopp",
+  "counts.items_one": "{count} element",
+  "counts.items_other": "{count} elementer",
+};
+
+<OpenGeniProvider client={client} workspaceId={workspaceId} locale="nb" messages={norwegian}>
+  {children}
+</OpenGeniProvider>;
+```
+
+- Keys are stable, typed identifiers. `englishMessages` is the complete default
+  catalog: export it to your translation tooling as is.
+- Templates use single-brace parameters (`"Start voice with {model}"`); a
+  translation must keep the same parameters.
+- Counted text uses plural suffixes (`_zero`, `_one`, `_two`, `_few`, `_many`,
+  `_other`) chosen with `Intl.PluralRules` for `locale`, so each language
+  supplies the forms it needs. `_other` is always required.
+- `locale` also sets the language of the dates, times and numbers the
+  components format.
+- Missing keys fall back to an outer provider, then English, never to a raw key.
+  Declare a full translation as `OpenGeniMessageCatalog` and TypeScript reports
+  every key you have not translated yet, including keys added in later releases.
+- `OpenGeniMessagesProvider` scopes overrides to part of a tree (for example a
+  different label in one panel); `useOpenGeniText()` gives your own components
+  the same translator.
+- `@opengeni/react/messages` exports the catalog and runtime without any DOM
+  code, for React Native and server rendering.
+
+Component props that accept labels (for example `ChatComposer`'s `messages`)
+still win over the catalog; their defaults, such as `defaultChatComposerMessages(t)`,
+are functions of the translator. Internal diagnostics (developer invariants and
+protocol errors never meant for end users) stay in English.
 
 ## Realtime composer controls (`@opengeni/react/realtime`)
 

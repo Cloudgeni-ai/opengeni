@@ -516,7 +516,6 @@
   --tw-drop-shadow-alpha: 100%;
   --tw-drop-shadow-size: initial;
 }
-/*! tailwindcss v4.2.4 | MIT License | https://tailwindcss.com */
 :where(.og-root) {
     --color-black: #000;
     --color-white: #fff;
@@ -566,449 +565,6 @@
     --animate-og-markdown-settle: og-markdown-settle var(--_og-duration-markdown-crystallize)
     var(--og-ease-stream) both;
   }
-:where(.og-root) {
-  color-scheme: var(--_og-color-scheme, dark);
-}
-@supports (color: color-mix(in lab, red, red)) {
-  :where(.og-root) {
-    --_og-color-accent-soft: var(--og-color-accent-soft, color-mix(in oklch, var(--og-color-accent) 16%, transparent));
-    --og-color-hover: color-mix(in srgb, var(--og-color-fg) 8%, transparent);
-    --_og-color-primary-hover: var(--og-color-primary-hover, color-mix(in srgb, var(--og-color-primary) 85%, var(--og-color-primary-fg)));
-    --_og-color-diff-add-bg: var(--og-color-diff-add-bg, color-mix(in oklch, var(--og-color-status-idle) 14%, transparent));
-    --_og-color-diff-del-bg: var(--og-color-diff-del-bg, color-mix(in oklch, var(--og-color-status-failed) 14%, transparent));
-    --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px color-mix(in oklch, var(--og-color-accent) 10%, transparent));
-    --_og-session-chrome-surface: var(--og-session-chrome-surface, color-mix(in oklch, var(--og-color-surface-2) 82%, transparent));
-    --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, color-mix(in oklch, var(--og-color-surface-2) 92%, transparent));
-    --_og-session-chrome-border: var(--og-session-chrome-border, color-mix(in oklch, var(--og-color-border) 85%, transparent));
-    --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring, color-mix(in oklch, var(--og-color-fg) 16%, transparent));
-    --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover, color-mix(in oklch, var(--og-color-surface-3) 55%, transparent));
-  }
-}
-:where([data-og-density="compact"]):where(.og-root),:where([data-og-density="compact"]):has(:where(.og-root)),:where(.og-root) :where([data-og-density="compact"]),:where( .og-density-compact):where(.og-root),:where( .og-density-compact):has(:where(.og-root)),:where(.og-root) :where( .og-density-compact) {
-  --og-font-size-xs: 10px;
-  --og-line-height-xs: 1.5;
-  --og-font-size-sm: 11px;
-  --og-line-height-sm: 1.5;
-  --og-font-size-base: 12px;
-  --og-line-height-base: 1.55;
-  --og-font-size-md: 13px;
-  --og-line-height-md: 1.6;
-  --og-font-size-control: 11px;
-  --og-line-height-control: 16px;
-  --og-font-size-menu: 12px;
-  --og-line-height-menu: 18px;
-  --og-font-size-composer: 13px;
-  --og-line-height-composer: 20px;
-  --og-font-size-composer-wide: 13px;
-  --og-line-height-composer-wide: 20px;
-  --og-model-picker-trigger-height: 1.75rem;
-  --og-model-picker-trigger-height-mobile: 1.75rem;
-  --og-model-picker-menu-width: 20rem;
-  --og-model-picker-menu-padding: 0.25rem;
-  --og-model-picker-row-padding-x: 0.5rem;
-  --og-model-picker-row-padding-y: 0.375rem;
-  --og-model-picker-effort-height: 1.75rem;
-  --og-realtime-menu-width: 15rem;
-}
-:where([data-og-theme="light"]):where(.og-root),:where([data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where([data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
-  --og-color-bg: #f6f6f6;
-  --og-color-canvas: #ffffff;
-  --og-color-surface-1: #ffffff;
-  --og-color-surface-2: #eeeeee;
-  --og-color-surface-3: #e5e5e5;
-  --og-color-selection: #e2e2e2;
-  --og-color-hover: rgb(36 36 36 / 0.06);
-  --og-color-border: #dedede;
-  --og-color-border-strong: #bdbdbd;
-  --og-color-fg: #242424;
-  --og-color-fg-label: #3a3a3a;
-  --og-color-fg-muted: #5f5f5f;
-  --og-color-fg-subtle: #696969;
-  --og-color-accent: #545454;
-  --og-color-accent-strong: #383838;
-  --og-color-accent-deep: #383838;
-  --og-color-accent-fg: #ffffff;
-  --og-color-accent-soft: var(--og-color-accent);
-  --og-color-primary: #ebf2f0;
-  --og-color-primary-fg: #292929;
-  --og-color-primary-border: #c4d5d0;
-  --og-color-primary-hover: var(--og-color-primary);
-  --og-color-switch-track: #bdbdbd;
-  --og-color-switch-thumb: #ffffff;
-  --og-glow-teal: #9fe3d359;
-  --og-glow-peach: #ffb78752;
-  --og-glow-teal-quiet: #9fe3d32b;
-  --og-glow-peach-quiet: #ffb78729;
-  --og-color-status-queued: #696969;
-  --og-color-status-running: #716122;
-  --og-color-status-idle: #237058;
-  --og-color-status-waiting: #8c5524;
-  --og-color-status-failed: oklch(0.5 0.19 22);
-  --og-color-status-cancelled: #696969;
-  --og-color-danger: oklch(0.52 0.2 22);
-  --og-color-danger-fill: oklch(0.5 0.19 22);
-  --og-color-danger-fg: #ffffff;
-  --og-color-diff-add-bg: var(--og-color-status-idle);
-  --og-color-diff-del-bg: var(--og-color-status-failed);
-  --og-shadow-sm: 0 1px 2px oklch(0 0 0 / 0.07);
-  --og-shadow-md: 0 2px 8px oklch(0 0 0 / 0.09), 0 1px 2px oklch(0 0 0 / 0.06);
-  --og-shadow-lg: 0 8px 28px oklch(0 0 0 / 0.13), 0 2px 8px oklch(0 0 0 / 0.07);
-  --og-shadow-glow: 0 0 20px var(--og-color-accent);
-  --og-session-chrome-surface: var(--og-color-surface-2);
-  --og-session-chrome-surface-open: var(--og-color-surface-2);
-  --og-session-chrome-border: var(--og-color-border);
-  --og-session-chrome-border-open: var(--og-color-border);
-  --og-session-chrome-highlight: var(--og-color-surface-3);
-  --og-session-chrome-highlight-ring: var(--og-color-fg);
-  --og-session-chrome-shadow: 0 4px 16px -10px oklch(0 0 0 / 0.14);
-  --og-session-chrome-shadow-open: 0 8px 22px -12px oklch(0 0 0 / 0.18);
-  --og-session-chrome-row-hover: var(--og-color-surface-3);
-  color-scheme: light;
-  --_og-color-scheme: light;
-}
-@supports (color: color-mix(in lab, red, red)) {
-  :where([data-og-theme="light"]):where(.og-root),:where([data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where([data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
-    --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 11%, transparent);
-    --og-color-hover: color-mix(in srgb, var(--og-color-fg) 6%, transparent);
-    --og-color-primary-hover: color-mix(in srgb, var(--og-color-primary) 85%, var(--og-color-primary-fg));
-    --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 12%, transparent);
-    --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 12%, transparent);
-    --og-shadow-glow: 0 0 20px color-mix(in oklch, var(--og-color-accent) 12%, transparent);
-    --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 88%, transparent);
-    --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 90%, transparent);
-    --og-session-chrome-highlight-ring: color-mix(in oklch, var(--og-color-fg) 12%, transparent);
-    --og-session-chrome-row-hover: color-mix(in oklch, var(--og-color-surface-3) 70%, transparent);
-  }
-}
-:where(.og-root),:where( [data-og-density="compact"]):where(.og-root),:where( [data-og-density="compact"]):has(:where(.og-root)),:where(.og-root) :where( [data-og-density="compact"]),:where( .og-density-compact):where(.og-root),:where( .og-density-compact):has(:where(.og-root)),:where(.og-root) :where( .og-density-compact),:where( [data-og-theme="light"]):where(.og-root),:where( [data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where( [data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
-  --_og-duration-fast: var(--og-duration-fast, calc(120ms * var(--og-motion-inspect-scale)));
-  --_og-duration-base: var(--og-duration-base, calc(180ms * var(--og-motion-inspect-scale)));
-  --_og-duration-slow: var(--og-duration-slow, calc(320ms * var(--og-motion-inspect-scale)));
-  --_og-duration-disclose: var(--og-duration-disclose, calc(120ms * var(--og-motion-inspect-scale)));
-  --_og-duration-disclose-settle: var(--og-duration-disclose-settle, calc(820ms * var(--og-motion-inspect-scale)));
-  --_og-duration-stream: var(--og-duration-stream, calc(420ms * var(--og-motion-inspect-scale)));
-  --_og-duration-markdown-crystallize: var(--og-duration-markdown-crystallize, calc(480ms * var(--og-motion-inspect-scale)));
-  --_og-color-accent-soft: var(--og-color-accent-soft, var(--og-color-accent));
-  --_og-color-primary-hover: var(--og-color-primary-hover, var(--og-color-primary));
-  --_og-color-diff-add-bg: var(--og-color-diff-add-bg, var(--og-color-status-idle));
-  --_og-color-diff-del-bg: var(--og-color-diff-del-bg, var(--og-color-status-failed));
-  --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px color-mix(in oklch, var(--og-color-accent) 10%, transparent));
-  --_og-session-chrome-surface: var(--og-session-chrome-surface, var(--og-color-surface-2));
-  --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, var(--og-color-surface-2));
-  --_og-session-chrome-border: var(--og-session-chrome-border, var(--og-color-border));
-  --_og-session-chrome-border-open: var(--og-session-chrome-border-open, var(--og-color-border));
-  --_og-session-chrome-highlight: var(--og-session-chrome-highlight, var(--og-color-surface-3));
-  --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring, var(--og-color-fg));
-  --_og-session-chrome-radius: var(--og-session-chrome-radius, var(--og-radius-lg));
-  --_og-session-chrome-ease: var(--og-session-chrome-ease, var(--og-ease-out));
-  --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover, var(--og-color-surface-3));
-}
-:where(.og-root).og-session-capability,:where(.og-root) .og-session-capability {
-  width: 100%;
-  max-width: 540px;
-  color: var(--og-color-fg);
-  font-family: var(--og-font-sans,inherit);
-}
-:where(.og-root).og-session-capability-shell,:where(.og-root) .og-session-capability-shell {
-  border: 1px solid var(--og-color-border);
-  border-radius: 12px;
-  background: var(--og-color-surface-1);
-  overflow: hidden;
-}
-:where(.og-root).og-session-capability-header,:where(.og-root) .og-session-capability-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 18px 19px 12px;
-}
-:where(.og-root).og-session-capability-logo,:where(.og-root) .og-session-capability-logo {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 41px;
-  height: 41px;
-  flex-shrink: 0;
-  border: 1px solid var(--og-color-border);
-  border-radius: 10px;
-  background: var(--og-color-surface-2);
-  font-size: 13px;
-  font-weight: 600;
-  overflow: hidden;
-}
-:where(.og-root).og-session-capability-logo img,:where(.og-root) .og-session-capability-logo img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  padding: 6px;
-  box-sizing: border-box;
-}
-:where(.og-root).og-session-capability-identity,:where(.og-root) .og-session-capability-identity {
-  flex: 1;
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-  overflow-wrap: anywhere;
-}
-:where(.og-root).og-session-capability-identity h3,:where(.og-root) .og-session-capability-identity h3 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-}
-:where(.og-root).og-session-capability-identity span,:where(.og-root) .og-session-capability-identity span {
-  font-size: 11px;
-  color: var(--og-color-fg-muted);
-}
-:where(.og-root).og-session-capability-type,:where(.og-root) .og-session-capability-type {
-  flex-shrink: 0;
-  padding: 4px 7px;
-  border-radius: 5px;
-  background: var(--og-color-surface-2);
-  font-size: 10px;
-}
-:where(.og-root).og-session-capability-copy,:where(.og-root) .og-session-capability-copy {
-  margin: 0;
-  padding: 0 19px 12px;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--og-color-fg-muted);
-  overflow-wrap: anywhere;
-}
-:where(.og-root).og-session-capability-actions,:where(.og-root) .og-session-capability-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 19px 14px;
-}
-:where(.og-root).og-session-capability-actions > span,:where(.og-root) .og-session-capability-actions > span {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--og-color-fg-muted);
-}
-:where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button {
-  margin-left: auto;
-  min-height: 35px;
-  padding: 8px 13px;
-  border-radius: 7px;
-  border: 1px solid var(--og-color-primary-border);
-  color: var(--og-color-primary-fg);
-  background: var(--og-color-primary);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-:where(.og-root).og-session-capability-note,:where(.og-root) .og-session-capability-note {
-  margin: 10px 0 0;
-  font-size: 10px;
-  line-height: 1.6;
-  color: var(--og-color-fg-muted);
-}
-:where(.og-root).og-session-capability :focus-visible,:where(.og-root) .og-session-capability :focus-visible,:where(.og-root) .og-session-capability-dialog :focus-visible,:where(.og-root)  .og-session-capability-dialog :focus-visible {
-  outline: 2px solid var(--og-color-accent);
-  outline-offset: 3px;
-}
-:where(.og-root).og-session-capability-overlay,:where(.og-root) .og-session-capability-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  background: rgb(0 0 0 / .4);
-}
-:where(.og-root).og-session-capability-dialog,:where(.og-root) .og-session-capability-dialog {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%,-50%);
-  z-index: 1001;
-  width: min(42rem,calc(100vw - 32px));
-  max-height: calc(100dvh - 32px);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border: 1px solid var(--og-color-border);
-  border-radius: 16px;
-  background: var(--og-color-surface-1);
-  color: var(--og-color-fg);
-  font-family: var(--og-font-sans,inherit);
-  box-shadow: 0 16px 48px rgb(0 0 0 / .2);
-}
-:where(.og-root).og-session-capability-dialog-header,:where(.og-root) .og-session-capability-dialog-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 24px;
-  border-bottom: 1px solid var(--og-color-border);
-}
-:where(.og-root).og-session-capability-dialog-header > div,:where(.og-root) .og-session-capability-dialog-header > div {
-  flex: 1;
-  min-width: 0;
-}
-:where(.og-root).og-session-capability-dialog-header h2,:where(.og-root) .og-session-capability-dialog-header h2 {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-:where(.og-root).og-session-capability-dialog-header p,:where(.og-root) .og-session-capability-dialog-header p {
-  margin: 4px 0 0;
-  color: var(--og-color-fg-muted);
-  font-size: 12px;
-}
-:where(.og-root).og-session-capability-dialog-header > button,:where(.og-root) .og-session-capability-dialog-header > button {
-  border: 0;
-  background: transparent;
-  color: inherit;
-  padding: 8px;
-  cursor: pointer;
-}
-:where(.og-root).og-session-capability-dialog-body,:where(.og-root) .og-session-capability-dialog-body {
-  min-height: 0;
-  overflow-y: auto;
-}
-:where(.og-root).og-session-capability-dialog:has(.og-session-capability-setup),:where(.og-root) .og-session-capability-dialog:has(.og-session-capability-setup) {
-  width: min(32rem,calc(100vw - 32px));
-}
-:where(.og-root).og-session-capability-setup,:where(.og-root) .og-session-capability-setup {
-  padding: 24px;
-  display: grid;
-  gap: 16px;
-  font-size: 13px;
-}
-:where(.og-root).og-session-capability-setup > p,:where(.og-root) .og-session-capability-setup > p {
-  margin: 0;
-  line-height: 1.6;
-}
-:where(.og-root).og-session-capability-setup label,:where(.og-root) .og-session-capability-setup label {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  line-height: 1.6;
-}
-:where(.og-root).og-session-capability-setup button,:where(.og-root) .og-session-capability-setup button {
-  font: inherit;
-  padding: 9px 12px;
-  border-radius: 7px;
-  border: 1px solid var(--og-color-border);
-  background: var(--og-color-surface-2);
-  color: inherit;
-  cursor: pointer;
-}
-:where(.og-root).og-session-capability-setup button:disabled,:where(.og-root) .og-session-capability-setup button:disabled {
-  opacity: .55;
-  cursor: not-allowed;
-}
-:where(.og-root).og-session-capability-setup [role=alert],:where(.og-root) .og-session-capability-setup [role=alert] {
-  color: var(--og-color-danger);
-}
-:where(.og-root).og-session-capability-setup .og-session-capability-notice,:where(.og-root) .og-session-capability-setup .og-session-capability-notice {
-  color: var(--og-color-fg-muted);
-}
-:where(.og-root).og-session-capability-shell[data-state="complete"],:where(.og-root) .og-session-capability-shell[data-state="complete"] {
-  border-color: var(--og-color-status-idle);
-  @supports (color: color-mix(in lab, red, red)) {
-    border-color: color-mix(in srgb,var(--og-color-status-idle) 35%,var(--og-color-border));
-  }
-}
-:where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-header > svg,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-header > svg,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy,:where(.og-root)  .og-session-capability-shell[data-state="complete"] .og-session-capability-copy {
-  color: var(--og-color-status-idle);
-}
-:where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-copy,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy {
-  font-weight: 500;
-}
-:where(.og-root).og-session-capability-setup fieldset,:where(.og-root) .og-session-capability-setup fieldset {
-  display: grid;
-  gap: 10px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  min-width: 0;
-}
-:where(.og-root).og-session-capability-setup legend,:where(.og-root) .og-session-capability-setup legend {
-  padding: 0 0 10px;
-  font-weight: 600;
-}
-:where(.og-root).og-session-capability-setup input,:where(.og-root) .og-session-capability-setup input {
-  margin-top: 4px;
-  accent-color: var(--og-color-accent-deep);
-}
-:where(.og-root).og-session-capability-setup .og-session-capability-scope,:where(.og-root) .og-session-capability-setup .og-session-capability-scope {
-  color: var(--og-color-fg-muted);
-  font-size: 12px;
-}
-:where(.og-root).og-session-capability-setup .og-session-capability-primary,:where(.og-root) .og-session-capability-setup .og-session-capability-primary {
-  justify-self: end;
-  min-height: 40px;
-  padding: 10px 16px;
-  border: 1px solid var(--og-color-primary-border);
-  background: var(--og-color-primary);
-  color: var(--og-color-primary-fg);
-  font-weight: 500;
-}
-:where(.og-root).og-session-capability-setup .og-session-capability-primary:hover:not(:disabled),:where(.og-root) .og-session-capability-setup .og-session-capability-primary:hover:not(:disabled) {
-  filter: brightness(.94);
-}
-:where(.og-root).og-session-capability-progress,:where(.og-root) .og-session-capability-progress {
-  color: var(--og-color-fg-muted);
-  padding-block: 8px;
-}
-:where(.og-root).og-session-capability-setup .og-session-capability-stop,:where(.og-root) .og-session-capability-setup .og-session-capability-stop {
-  justify-self: end;
-}
-@media (pointer:coarse) {
-  :where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button,:where(.og-root).og-session-capability-setup button,:where(.og-root) .og-session-capability-setup button {
-    min-height: 44px;
-  }
-}
-:where(.og-root).og-preview-loading,:where(.og-root) .og-preview-loading {
-  --_og-preview-ink: #9fdccd;
-  --_og-preview-glow: #5fb8a3;
-  position: relative;
-  width: 100%;
-  overflow: hidden;
-  border-radius: 10px;
-  background: #1b1b1b;
-  container: og-preview / inline-size;
-}
-:where(.og-root):is([data-og-theme="light"], .og-light) .og-preview-loading, :is([data-og-theme="light"], .og-light) :where(.og-root) .og-preview-loading,:where(.og-root) :is([data-og-theme="light"], .og-light) .og-preview-loading {
-  --_og-preview-ink: #5f8f84;
-  --_og-preview-glow: #9fe3d3;
-  background: #f9f9f9;
-}
-:where(.og-root).og-preview-loading canvas,:where(.og-root) .og-preview-loading canvas {
-  display: block;
-  width: 100%;
-  height: 320px;
-  background-image: radial-gradient(circle, var(--_og-preview-ink) 1px, transparent 1px);
-  @supports (color: color-mix(in lab, red, red)) {
-    background-image: radial-gradient(circle, color-mix(in srgb, var(--_og-preview-ink) 30%, transparent) 1px, transparent 1px);
-  }
-  background-size: 18px 18px;
-}
-:where(.og-root).og-preview-loading canvas[data-painted="true"],:where(.og-root) .og-preview-loading canvas[data-painted="true"] {
-  background-image: none;
-}
-:where(.og-root).og-preview-loading-label,:where(.og-root) .og-preview-loading-label {
-  position: absolute;
-  left: 16px;
-  bottom: 14px;
-  color: var(--og-color-fg-muted);
-  font-family: var(--og-font-sans);
-  font-size: var(--og-font-size-xs);
-  line-height: var(--og-line-height-xs);
-  font-weight: 400;
-}
-@container og-preview (max-width: 500px) {
-  :where(.og-root).og-preview-loading canvas,:where(.og-root) .og-preview-loading canvas {
-    height: 260px;
-  }
-}
-@media (max-width: 500px) {
-  :where(.og-root).og-preview-loading canvas,:where(.og-root) .og-preview-loading canvas {
-    height: 260px;
-  }
-}
 .og-root :where([hidden]:not([hidden="until-found"])) {
     display: none !important;
   }
@@ -1043,497 +599,6 @@
 .og-root, .og-root :where(*, ::before, ::after) {
     box-sizing: border-box;
   }
-@keyframes og-expand {
-  from {
-    height: 0;
-    opacity: 0;
-  }
-  40% {
-    opacity: 0.25;
-  }
-  85% {
-    opacity: 1;
-  }
-  to {
-    height: var(--radix-collapsible-content-height);
-    opacity: 1;
-  }
-}
-@keyframes og-collapse {
-  from {
-    height: var(--radix-collapsible-content-height);
-    opacity: 1;
-  }
-  35% {
-    opacity: 0.7;
-  }
-  70% {
-    opacity: 0;
-  }
-  to {
-    height: 0;
-    opacity: 0;
-  }
-}
-@keyframes og-settle-chip {
-  from {
-    background-color: color-mix(in oklch, var(--color-og-surface-1, transparent) 55%, transparent);
-  }
-  to {
-    background-color: transparent;
-  }
-}
-@keyframes og-stream-ink {
-  from {
-    opacity: 0.3;
-  }
-  to {
-    opacity: 1;
-  }
-}
-:where(.og-root).og-stream-ink,:where(.og-root) .og-stream-ink {
-  display: inline;
-  animation: og-stream-ink var(--_og-duration-stream) var(--og-ease-out) both;
-}
-@keyframes og-markdown-settle {
-  from {
-    opacity: 0.92;
-  }
-  to {
-    opacity: 1;
-  }
-}
-:where(.og-root).og-markdown-settle,:where(.og-root) .og-markdown-settle {
-  animation: var(--animate-og-markdown-settle);
-}
-@keyframes og-enter {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-@keyframes og-row-enter {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-:where(.og-root).animate-og-row-enter,:where(.og-root) .animate-og-row-enter {
-  animation: var(--animate-og-row-enter);
-}
-@keyframes og-pulse {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
-}
-@keyframes og-blink {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0;
-  }
-}
-@keyframes og-shimmer {
-  from {
-    background-position: 200% center;
-  }
-  to {
-    background-position: -200% center;
-  }
-}
-@keyframes og-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-@keyframes og-waveform {
-  0%, 100% {
-    transform: scaleY(0.28);
-    opacity: 0.45;
-  }
-  50% {
-    transform: scaleY(1);
-    opacity: 0.95;
-  }
-}
-@keyframes og-mh-draw {
-  from {
-    stroke-dashoffset: 1;
-  }
-  to {
-    stroke-dashoffset: 0;
-  }
-}
-:where(.og-root).og-mh-draw,:where(.og-root) .og-mh-draw {
-  stroke-dasharray: 1;
-  animation: og-mh-draw 900ms var(--og-ease-out) forwards;
-}
-@media (prefers-reduced-motion: reduce) {
-  :where(.og-root).og-mh-draw,:where(.og-root) .og-mh-draw {
-    animation: none;
-    stroke-dasharray: none;
-  }
-}
-:where(.og-root).og-shimmer-text,:where(.og-root) .og-shimmer-text {
-  background: linear-gradient( 90deg, var(--og-color-fg-subtle) 0%, var(--og-color-fg) 50%, var(--og-color-fg-subtle) 100% );
-  background-size: 200% auto;
-  background-clip: text;
-  -webkit-background-clip: text;
-  color: transparent;
-  animation: og-shimmer 2.2s linear infinite;
-}
-:where(.og-root) {
-  font-family: var(--og-font-sans);
-  font-feature-settings: var(--og-font-features);
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-  color: var(--og-color-fg);
-}
-:is(.og-root.og-root, .og-root .og-root) :where( .text-og-xs, .text-og-sm, .text-og-base, .text-og-md, .text-og-control, .text-og-menu, .text-og-composer, .text-og-composer-wide ), :is( .og-root.text-og-xs, .og-root.text-og-sm, .og-root.text-og-base, .og-root.text-og-md, .og-root.text-og-control, .og-root.text-og-menu, .og-root.text-og-composer, .og-root.text-og-composer-wide ) {
-  font-size: var(--og-component-font-size);
-  line-height: var(--tw-leading, var(--og-component-line-height));
-}
-:where(.og-root) :where(*) {
-  scrollbar-width: thin;
-  scrollbar-color: var(--og-color-border-strong) transparent;
-}
-@supports selector(::-webkit-scrollbar) {
-  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*) {
-    scrollbar-width: auto;
-    scrollbar-color: auto;
-  }
-  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-    background: transparent;
-  }
-  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar-thumb {
-    border: 3px solid transparent;
-    border-radius: 999px;
-    background: var(--og-color-border-strong) padding-box;
-  }
-  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar-thumb:hover {
-    border-width: 2px;
-    background-color: var(--og-color-fg-subtle);
-  }
-  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar-corner {
-    background: transparent;
-  }
-}
-:where(.og-root)[data-radix-popper-content-wrapper]:has( > [data-machine-state-popover][data-state="closed"] ),:where(.og-root) [data-radix-popper-content-wrapper]:has( > [data-machine-state-popover][data-state="closed"] ) {
-  visibility: hidden;
-  pointer-events: none;
-}
-@media (prefers-reduced-motion: reduce) {
-  :where(.og-root) *,:where(.og-root) *::before,:where(.og-root) *::after,:where(.og-root) .og-shimmer-text,:where(.og-root)  .og-shimmer-text {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
-    scroll-behavior: auto !important;
-  }
-  :where(.og-root) .og-stream-ink {
-    animation-delay: 0ms !important;
-  }
-}
-@media (max-width: 39.999rem) {
-  :where(.og-root).og-composer-footer:has([data-transcription-capturing]) .og-composer-controls > :not([data-transcription-capturing]),:where(.og-root) .og-composer-footer:has([data-transcription-capturing]) .og-composer-controls > :not([data-transcription-capturing]) {
-    display: none;
-  }
-  :where(.og-root).og-composer-footer:has([data-transcription-capturing]) .og-composer-actions,:where(.og-root) .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions {
-    display: none;
-  }
-  :where(.og-root).og-composer-footer:has([data-transcription-attention]) .og-composer-controls > :not([data-transcription-attention]),:where(.og-root) .og-composer-footer:has([data-transcription-attention]) .og-composer-controls > :not([data-transcription-attention]) {
-    display: none;
-  }
-  :where(.og-root).og-composer-footer:has([data-transcription-attention]) .og-composer-actions > :not(:is([data-analytics-action], :has([data-analytics-action]))),:where(.og-root) .og-composer-footer:has([data-transcription-attention]) .og-composer-actions > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
-    display: none;
-  }
-  :where(.og-root).og-composer-footer [data-transcription-attention] :is(.og-transcription-recovered-label, .og-transcription-error-label),:where(.og-root) .og-composer-footer [data-transcription-attention] :is(.og-transcription-recovered-label, .og-transcription-error-label) {
-    max-width: min(15rem, 52vw);
-    white-space: normal;
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    line-height: 1.2;
-  }
-  :where(.og-root).og-composer-footer:has([data-realtime-attention]) .og-composer-controls,:where(.og-root) .og-composer-footer:has([data-realtime-attention]) .og-composer-controls {
-    display: none;
-  }
-  :where(.og-root).og-composer-footer:has([data-realtime-attention]) .og-composer-actions,:where(.og-root) .og-composer-footer:has([data-realtime-attention]) .og-composer-actions,:where(.og-root) .og-composer-footer .og-realtime-control:has([data-realtime-attention]),:where(.og-root)  .og-composer-footer .og-realtime-control:has([data-realtime-attention]),:where(.og-root) .og-composer-footer [data-realtime-attention],:where(.og-root)  .og-composer-footer [data-realtime-attention] {
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-  :where(.og-root).og-composer-footer:has([data-realtime-attention]) .og-composer-actions > :not(:has([data-realtime-attention])),:where(.og-root) .og-composer-footer:has([data-realtime-attention]) .og-composer-actions > :not(:has([data-realtime-attention])) {
-    flex-shrink: 0;
-  }
-  :where(.og-root).og-composer-footer [data-realtime-attention] .og-realtime-failure-label,:where(.og-root) .og-composer-footer [data-realtime-attention] .og-realtime-failure-label {
-    max-width: none;
-    -webkit-line-clamp: 3;
-  }
-}
-@media (forced-colors: active) {
-  :where(.og-root) {
-    --og-color-bg: Canvas;
-    --og-color-surface-1: Canvas;
-    --og-color-surface-2: Canvas;
-    --og-color-surface-3: Canvas;
-    --og-color-border: CanvasText;
-    --og-color-border-strong: CanvasText;
-    --og-color-fg: CanvasText;
-    --og-color-fg-muted: CanvasText;
-    --og-color-fg-subtle: CanvasText;
-    --og-color-accent: CanvasText;
-    --og-color-accent-strong: CanvasText;
-    --og-color-accent-deep: CanvasText;
-    --og-color-accent-fg: CanvasText;
-    --og-color-accent-soft: Canvas;
-    --og-color-status-queued: CanvasText;
-    --og-color-status-running: CanvasText;
-    --og-color-status-idle: CanvasText;
-    --og-color-status-waiting: CanvasText;
-    --og-color-status-failed: CanvasText;
-    --og-color-status-cancelled: CanvasText;
-    --og-color-danger: CanvasText;
-    --og-color-diff-add-bg: Canvas;
-    --og-color-diff-del-bg: Canvas;
-    --og-shadow-sm: none;
-    --og-shadow-md: none;
-    --og-shadow-lg: none;
-    --og-shadow-glow: none;
-  }
-  :where(.og-root) [role="tab"][aria-selected="true"] {
-    outline: 2px solid Highlight;
-    outline-offset: -2px;
-  }
-}
-:where(.og-root).xterm .xterm-width-cache-measure-container,:where(.og-root) .xterm .xterm-width-cache-measure-container,:where(.og-root) .xterm-width-cache-measure-container,:where(.og-root)  .xterm-width-cache-measure-container,:where(.og-root) .xterm .xterm-char-measure-element,:where(.og-root)  .xterm .xterm-char-measure-element {
-  position: absolute !important;
-  top: 0;
-  left: 0;
-  visibility: hidden !important;
-  pointer-events: none !important;
-  z-index: -1 !important;
-}
-:where(.og-root).og-cm-editor .cm-editor,:where(.og-root) .og-cm-editor .cm-editor {
-  background-color: var(--og-cm-bg, var(--og-color-bg));
-  color: var(--og-color-fg);
-}
-:where(.og-root).og-cm-editor .cm-editor .cm-gutters,:where(.og-root) .og-cm-editor .cm-editor .cm-gutters {
-  background-color: var(--og-cm-bg, var(--og-color-bg));
-  border-right-color: var(--og-color-border);
-  color: var(--og-color-fg-subtle);
-}
-:where(.og-root).og-cm-editor .cm-editor .cm-activeLine,:where(.og-root) .og-cm-editor .cm-editor .cm-activeLine {
-  background-color: var(--og-color-fg);
-  @supports (color: color-mix(in lab, red, red)) {
-    background-color: color-mix(in srgb, var(--og-color-fg) 4%, transparent);
-  }
-}
-:where(.og-root).og-cm-editor .cm-editor .cm-activeLineGutter,:where(.og-root) .og-cm-editor .cm-editor .cm-activeLineGutter {
-  background-color: var(--og-color-fg);
-  @supports (color: color-mix(in lab, red, red)) {
-    background-color: color-mix(in srgb, var(--og-color-fg) 6%, transparent);
-  }
-  color: var(--og-color-fg-muted);
-}
-:where(.og-root).og-cm-editor .cm-editor .cm-cursor,:where(.og-root) .og-cm-editor .cm-editor .cm-cursor,:where(.og-root) .og-cm-editor .cm-editor .cm-dropCursor,:where(.og-root)  .og-cm-editor .cm-editor .cm-dropCursor {
-  border-left-color: var(--og-color-fg);
-}
-:where(.og-root).og-cm-editor .cm-editor .cm-selectionLayer .cm-selectionBackground,:where(.og-root) .og-cm-editor .cm-editor .cm-selectionLayer .cm-selectionBackground,:where(.og-root) .og-cm-editor .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground,:where(.og-root)  .og-cm-editor .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground {
-  background-color: var(--og-color-accent);
-  @supports (color: color-mix(in lab, red, red)) {
-    background-color: color-mix(in srgb, var(--og-color-accent) 30%, transparent);
-  }
-}
-:where(.og-root).og-cm-editor .cm-editor .cm-selectionMatch,:where(.og-root) .og-cm-editor .cm-editor .cm-selectionMatch {
-  background-color: var(--og-color-accent);
-  @supports (color: color-mix(in lab, red, red)) {
-    background-color: color-mix(in srgb, var(--og-color-accent) 18%, transparent);
-  }
-}
-:where(.og-root).og-cm-editor .cm-editor .cm-panels,:where(.og-root) .og-cm-editor .cm-editor .cm-panels {
-  background-color: var(--og-color-surface-2);
-  color: var(--og-color-fg);
-}
-:where(.og-root).og-genie-loading,:where(.og-root) .og-genie-loading {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-height: 88px;
-  padding: 12px 0;
-}
-:where(.og-root).og-genie-orb,:where(.og-root) .og-genie-orb {
-  width: 64px;
-  height: 64px;
-  flex: 0 0 64px;
-}
-:where(.og-root).og-genie-orb canvas,:where(.og-root) .og-genie-orb canvas {
-  display: block;
-}
-:where(.og-root).og-genie-copy,:where(.og-root) .og-genie-copy {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 5px;
-}
-:where(.og-root).og-genie-phrase,:where(.og-root) .og-genie-phrase {
-  color: var(--og-color-fg-muted);
-  font-size: var(--og-font-size-sm);
-  line-height: 1.5;
-  animation: og-genie-phrase-in .65s ease-out both;
-}
-:where(.og-root).og-genie-details,:where(.og-root) .og-genie-details {
-  color: var(--og-color-fg-subtle);
-  font-size: var(--og-font-size-xs);
-  min-height: 28px;
-  cursor: pointer;
-  border-radius: 4px;
-  text-align: left;
-  transition: color .2s;
-}
-:where(.og-root).og-genie-details:hover,:where(.og-root) .og-genie-details:hover {
-  color: var(--og-color-fg);
-}
-:where(.og-root).og-genie-details:focus-visible,:where(.og-root) .og-genie-details:focus-visible {
-  outline: 2px solid var(--og-color-accent);
-  @supports (color: color-mix(in lab, red, red)) {
-    outline: 2px solid color-mix(in srgb, var(--og-color-accent) 55%, transparent);
-  }
-  outline-offset: 4px;
-}
-@keyframes og-genie-phrase-in {
-  from {
-    opacity: 0;
-    transform: translateY(3px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-@media (pointer: coarse) {
-  :where(.og-root).og-genie-details,:where(.og-root) .og-genie-details {
-    min-height: 44px;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  :where(.og-root).og-genie-phrase,:where(.og-root) .og-genie-phrase {
-    animation: none;
-  }
-}
-:where(.og-root).og-rolling-status,:where(.og-root) .og-rolling-status {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-  width: 100%;
-}
-:where(.og-root).og-rolling-window,:where(.og-root) .og-rolling-window {
-  position: relative;
-  display: block;
-  flex: 1;
-  min-width: 0;
-  height: 24px;
-  overflow: hidden;
-}
-:where(.og-root).og-rolling-face,:where(.og-root) .og-rolling-face {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-}
-:where(.og-root).og-rolling-label,:where(.og-root) .og-rolling-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  width: 100%;
-  font-size: 13px;
-  font-weight: 450;
-  line-height: 20px;
-  color: var(--og-color-fg-muted);
-}
-:where(.og-root).og-rolling-label > svg,:where(.og-root) .og-rolling-label > svg {
-  flex-shrink: 0;
-}
-:where(.og-root).og-rolling-count,:where(.og-root) .og-rolling-count {
-  flex-shrink: 0;
-  font-size: 11px;
-  color: var(--og-color-fg-subtle);
-  font-variant-numeric: tabular-nums;
-}
-:where(.og-root).og-command-reel,:where(.og-root) .og-command-reel {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  transform-origin: 50% 50%;
-}
-:where(.og-root).og-reasoning-preview,:where(.og-root) .og-reasoning-preview,:where(.og-root) .og-reasoning-preview :is(div,p,h1,h2,h3,h4,h5,h6,ul,ol,li,blockquote,pre),:where(.og-root)  .og-reasoning-preview :is(div,p,h1,h2,h3,h4,h5,h6,ul,ol,li,blockquote,pre) {
-  display: inline;
-  margin: 0;
-  padding: 0;
-  font-size: inherit;
-  line-height: inherit;
-}
-:where(.og-root).og-reasoning-preview br,:where(.og-root) .og-reasoning-preview br {
-  display: none;
-}
-:where(.og-root).og-reasoning-preview :is(p,li,h1,h2,h3,h4)::after,:where(.og-root) .og-reasoning-preview :is(p,li,h1,h2,h3,h4)::after {
-  content: " ";
-}
-:where(.og-root).og-reel-title,:where(.og-root) .og-reel-title {
-  flex: 0 0 auto;
-  min-width: 0;
-  max-width: 75%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-:where(.og-root).og-reel-title:only-child,:where(.og-root) .og-reel-title:only-child {
-  max-width: 100%;
-}
-:where(.og-root).og-reel-preview,:where(.og-root) .og-reel-preview {
-  flex: 1 1 0%;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-:where(.og-root).og-command-reel-running,:where(.og-root) .og-command-reel-running,:where(.og-root) .og-rolling-status[data-running="true"] .og-command-reel,:where(.og-root)  .og-rolling-status[data-running="true"] .og-command-reel {
-  background-image: linear-gradient(90deg, light-dark(#8a8a8a,#6b6b6b) 42%, light-dark(#f2f2f2,#fff) 50%, light-dark(#8a8a8a,#6b6b6b) 58%);
-  background-size: 300% 100%;
-  background-position: 100% 0;
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: og-activity-sweep 3.6s linear infinite;
-}
-@keyframes og-activity-sweep {
-  from {
-    background-position: 100% 0;
-  }
-  to {
-    background-position: 0% 0;
-  }
-}
-@media (prefers-reduced-motion:reduce), (forced-colors:active) {
-  :where(.og-root).og-command-reel-running,:where(.og-root) .og-command-reel-running,:where(.og-root) .og-rolling-status[data-running="true"] .og-command-reel,:where(.og-root)  .og-rolling-status[data-running="true"] .og-command-reel {
-    animation: none;
-    background: none;
-    -webkit-text-fill-color: currentColor;
-  }
-}
 :where(.og-root).\@container\/computer-viewer,:where(.og-root) .\@container\/computer-viewer {
     container-type: inline-size;
     container-name: computer-viewer;
@@ -1878,6 +943,9 @@
   }
 :where(.og-root).mb-4,:where(.og-root) .mb-4 {
     margin-bottom: calc(var(--spacing) * 4);
+  }
+:where(.og-root).-ml-1,:where(.og-root) .-ml-1 {
+    margin-left: calc(var(--spacing) * -1);
   }
 :where(.og-root).ml-0\.5,:where(.og-root) .ml-0\.5 {
     margin-left: calc(var(--spacing) * 0.5);
@@ -6749,6 +5817,941 @@
       min-width: calc(var(--spacing) * 11);
     }
   }
+/*! tailwindcss v4.2.4 | MIT License | https://tailwindcss.com */
+:where(.og-root) {
+  color-scheme: var(--_og-color-scheme, dark);
+}
+@supports (color: color-mix(in lab, red, red)) {
+  :where(.og-root) {
+    --_og-color-accent-soft: var(--og-color-accent-soft, color-mix(in oklch, var(--og-color-accent) 16%, transparent));
+    --og-color-hover: color-mix(in srgb, var(--og-color-fg) 8%, transparent);
+    --_og-color-primary-hover: var(--og-color-primary-hover, color-mix(in srgb, var(--og-color-primary) 85%, var(--og-color-primary-fg)));
+    --_og-color-diff-add-bg: var(--og-color-diff-add-bg, color-mix(in oklch, var(--og-color-status-idle) 14%, transparent));
+    --_og-color-diff-del-bg: var(--og-color-diff-del-bg, color-mix(in oklch, var(--og-color-status-failed) 14%, transparent));
+    --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px color-mix(in oklch, var(--og-color-accent) 10%, transparent));
+    --_og-session-chrome-surface: var(--og-session-chrome-surface, color-mix(in oklch, var(--og-color-surface-2) 82%, transparent));
+    --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, color-mix(in oklch, var(--og-color-surface-2) 92%, transparent));
+    --_og-session-chrome-border: var(--og-session-chrome-border, color-mix(in oklch, var(--og-color-border) 85%, transparent));
+    --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring, color-mix(in oklch, var(--og-color-fg) 16%, transparent));
+    --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover, color-mix(in oklch, var(--og-color-surface-3) 55%, transparent));
+  }
+}
+:where([data-og-density="compact"]):where(.og-root),:where([data-og-density="compact"]):has(:where(.og-root)),:where(.og-root) :where([data-og-density="compact"]),:where( .og-density-compact):where(.og-root),:where( .og-density-compact):has(:where(.og-root)),:where(.og-root) :where( .og-density-compact) {
+  --og-font-size-xs: 10px;
+  --og-line-height-xs: 1.5;
+  --og-font-size-sm: 11px;
+  --og-line-height-sm: 1.5;
+  --og-font-size-base: 12px;
+  --og-line-height-base: 1.55;
+  --og-font-size-md: 13px;
+  --og-line-height-md: 1.6;
+  --og-font-size-control: 11px;
+  --og-line-height-control: 16px;
+  --og-font-size-menu: 12px;
+  --og-line-height-menu: 18px;
+  --og-font-size-composer: 13px;
+  --og-line-height-composer: 20px;
+  --og-font-size-composer-wide: 13px;
+  --og-line-height-composer-wide: 20px;
+  --og-model-picker-trigger-height: 1.75rem;
+  --og-model-picker-trigger-height-mobile: 1.75rem;
+  --og-model-picker-menu-width: 20rem;
+  --og-model-picker-menu-padding: 0.25rem;
+  --og-model-picker-row-padding-x: 0.5rem;
+  --og-model-picker-row-padding-y: 0.375rem;
+  --og-model-picker-effort-height: 1.75rem;
+  --og-realtime-menu-width: 15rem;
+}
+:where([data-og-theme="light"]):where(.og-root),:where([data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where([data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
+  --og-color-bg: #f6f6f6;
+  --og-color-canvas: #ffffff;
+  --og-color-surface-1: #ffffff;
+  --og-color-surface-2: #eeeeee;
+  --og-color-surface-3: #e5e5e5;
+  --og-color-selection: #e2e2e2;
+  --og-color-hover: rgb(36 36 36 / 0.06);
+  --og-color-border: #dedede;
+  --og-color-border-strong: #bdbdbd;
+  --og-color-fg: #242424;
+  --og-color-fg-label: #3a3a3a;
+  --og-color-fg-muted: #5f5f5f;
+  --og-color-fg-subtle: #696969;
+  --og-color-accent: #545454;
+  --og-color-accent-strong: #383838;
+  --og-color-accent-deep: #383838;
+  --og-color-accent-fg: #ffffff;
+  --og-color-accent-soft: var(--og-color-accent);
+  --og-color-primary: #ebf2f0;
+  --og-color-primary-fg: #292929;
+  --og-color-primary-border: #c4d5d0;
+  --og-color-primary-hover: var(--og-color-primary);
+  --og-color-switch-track: #bdbdbd;
+  --og-color-switch-thumb: #ffffff;
+  --og-glow-teal: #9fe3d359;
+  --og-glow-peach: #ffb78752;
+  --og-glow-teal-quiet: #9fe3d32b;
+  --og-glow-peach-quiet: #ffb78729;
+  --og-color-status-queued: #696969;
+  --og-color-status-running: #716122;
+  --og-color-status-idle: #237058;
+  --og-color-status-waiting: #8c5524;
+  --og-color-status-failed: oklch(0.5 0.19 22);
+  --og-color-status-cancelled: #696969;
+  --og-color-danger: oklch(0.52 0.2 22);
+  --og-color-danger-fill: oklch(0.5 0.19 22);
+  --og-color-danger-fg: #ffffff;
+  --og-color-diff-add-bg: var(--og-color-status-idle);
+  --og-color-diff-del-bg: var(--og-color-status-failed);
+  --og-shadow-sm: 0 1px 2px oklch(0 0 0 / 0.07);
+  --og-shadow-md: 0 2px 8px oklch(0 0 0 / 0.09), 0 1px 2px oklch(0 0 0 / 0.06);
+  --og-shadow-lg: 0 8px 28px oklch(0 0 0 / 0.13), 0 2px 8px oklch(0 0 0 / 0.07);
+  --og-shadow-glow: 0 0 20px var(--og-color-accent);
+  --og-session-chrome-surface: var(--og-color-surface-2);
+  --og-session-chrome-surface-open: var(--og-color-surface-2);
+  --og-session-chrome-border: var(--og-color-border);
+  --og-session-chrome-border-open: var(--og-color-border);
+  --og-session-chrome-highlight: var(--og-color-surface-3);
+  --og-session-chrome-highlight-ring: var(--og-color-fg);
+  --og-session-chrome-shadow: 0 4px 16px -10px oklch(0 0 0 / 0.14);
+  --og-session-chrome-shadow-open: 0 8px 22px -12px oklch(0 0 0 / 0.18);
+  --og-session-chrome-row-hover: var(--og-color-surface-3);
+  color-scheme: light;
+  --_og-color-scheme: light;
+}
+@supports (color: color-mix(in lab, red, red)) {
+  :where([data-og-theme="light"]):where(.og-root),:where([data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where([data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
+    --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 11%, transparent);
+    --og-color-hover: color-mix(in srgb, var(--og-color-fg) 6%, transparent);
+    --og-color-primary-hover: color-mix(in srgb, var(--og-color-primary) 85%, var(--og-color-primary-fg));
+    --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 12%, transparent);
+    --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 12%, transparent);
+    --og-shadow-glow: 0 0 20px color-mix(in oklch, var(--og-color-accent) 12%, transparent);
+    --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 88%, transparent);
+    --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 90%, transparent);
+    --og-session-chrome-highlight-ring: color-mix(in oklch, var(--og-color-fg) 12%, transparent);
+    --og-session-chrome-row-hover: color-mix(in oklch, var(--og-color-surface-3) 70%, transparent);
+  }
+}
+:where(.og-root),:where( [data-og-density="compact"]):where(.og-root),:where( [data-og-density="compact"]):has(:where(.og-root)),:where(.og-root) :where( [data-og-density="compact"]),:where( .og-density-compact):where(.og-root),:where( .og-density-compact):has(:where(.og-root)),:where(.og-root) :where( .og-density-compact),:where( [data-og-theme="light"]):where(.og-root),:where( [data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where( [data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
+  --_og-duration-fast: var(--og-duration-fast, calc(120ms * var(--og-motion-inspect-scale)));
+  --_og-duration-base: var(--og-duration-base, calc(180ms * var(--og-motion-inspect-scale)));
+  --_og-duration-slow: var(--og-duration-slow, calc(320ms * var(--og-motion-inspect-scale)));
+  --_og-duration-disclose: var(--og-duration-disclose, calc(120ms * var(--og-motion-inspect-scale)));
+  --_og-duration-disclose-settle: var(--og-duration-disclose-settle, calc(820ms * var(--og-motion-inspect-scale)));
+  --_og-duration-stream: var(--og-duration-stream, calc(420ms * var(--og-motion-inspect-scale)));
+  --_og-duration-markdown-crystallize: var(--og-duration-markdown-crystallize, calc(480ms * var(--og-motion-inspect-scale)));
+  --_og-color-accent-soft: var(--og-color-accent-soft, var(--og-color-accent));
+  --_og-color-primary-hover: var(--og-color-primary-hover, var(--og-color-primary));
+  --_og-color-diff-add-bg: var(--og-color-diff-add-bg, var(--og-color-status-idle));
+  --_og-color-diff-del-bg: var(--og-color-diff-del-bg, var(--og-color-status-failed));
+  --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px color-mix(in oklch, var(--og-color-accent) 10%, transparent));
+  --_og-session-chrome-surface: var(--og-session-chrome-surface, var(--og-color-surface-2));
+  --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, var(--og-color-surface-2));
+  --_og-session-chrome-border: var(--og-session-chrome-border, var(--og-color-border));
+  --_og-session-chrome-border-open: var(--og-session-chrome-border-open, var(--og-color-border));
+  --_og-session-chrome-highlight: var(--og-session-chrome-highlight, var(--og-color-surface-3));
+  --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring, var(--og-color-fg));
+  --_og-session-chrome-radius: var(--og-session-chrome-radius, var(--og-radius-lg));
+  --_og-session-chrome-ease: var(--og-session-chrome-ease, var(--og-ease-out));
+  --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover, var(--og-color-surface-3));
+}
+:where(.og-root).og-session-capability,:where(.og-root) .og-session-capability {
+  width: 100%;
+  max-width: 540px;
+  color: var(--og-color-fg);
+  font-family: var(--og-font-sans,inherit);
+}
+:where(.og-root).og-session-capability-shell,:where(.og-root) .og-session-capability-shell {
+  border: 1px solid var(--og-color-border);
+  border-radius: 12px;
+  background: var(--og-color-surface-1);
+  overflow: hidden;
+}
+:where(.og-root).og-session-capability-header,:where(.og-root) .og-session-capability-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 19px 12px;
+}
+:where(.og-root).og-session-capability-logo,:where(.og-root) .og-session-capability-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 41px;
+  height: 41px;
+  flex-shrink: 0;
+  border: 1px solid var(--og-color-border);
+  border-radius: 10px;
+  background: var(--og-color-surface-2);
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+}
+:where(.og-root).og-session-capability-logo img,:where(.og-root) .og-session-capability-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  padding: 6px;
+  box-sizing: border-box;
+}
+:where(.og-root).og-session-capability-identity,:where(.og-root) .og-session-capability-identity {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+:where(.og-root).og-session-capability-identity h3,:where(.og-root) .og-session-capability-identity h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+:where(.og-root).og-session-capability-identity span,:where(.og-root) .og-session-capability-identity span {
+  font-size: 11px;
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-session-capability-type,:where(.og-root) .og-session-capability-type {
+  flex-shrink: 0;
+  padding: 4px 7px;
+  border-radius: 5px;
+  background: var(--og-color-surface-2);
+  font-size: 10px;
+}
+:where(.og-root).og-session-capability-copy,:where(.og-root) .og-session-capability-copy {
+  margin: 0;
+  padding: 0 19px 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--og-color-fg-muted);
+  overflow-wrap: anywhere;
+}
+:where(.og-root).og-session-capability-actions,:where(.og-root) .og-session-capability-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 19px 14px;
+}
+:where(.og-root).og-session-capability-actions > span,:where(.og-root) .og-session-capability-actions > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button {
+  margin-left: auto;
+  min-height: 35px;
+  padding: 8px 13px;
+  border-radius: 7px;
+  border: 1px solid var(--og-color-primary-border);
+  color: var(--og-color-primary-fg);
+  background: var(--og-color-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+:where(.og-root).og-session-capability-note,:where(.og-root) .og-session-capability-note {
+  margin: 10px 0 0;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-session-capability :focus-visible,:where(.og-root) .og-session-capability :focus-visible,:where(.og-root) .og-session-capability-dialog :focus-visible,:where(.og-root)  .og-session-capability-dialog :focus-visible {
+  outline: 2px solid var(--og-color-accent);
+  outline-offset: 3px;
+}
+:where(.og-root).og-session-capability-overlay,:where(.og-root) .og-session-capability-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgb(0 0 0 / .4);
+}
+:where(.og-root).og-session-capability-dialog,:where(.og-root) .og-session-capability-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%,-50%);
+  z-index: 1001;
+  width: min(42rem,calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--og-color-border);
+  border-radius: 16px;
+  background: var(--og-color-surface-1);
+  color: var(--og-color-fg);
+  font-family: var(--og-font-sans,inherit);
+  box-shadow: 0 16px 48px rgb(0 0 0 / .2);
+}
+:where(.og-root).og-session-capability-dialog-header,:where(.og-root) .og-session-capability-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 24px;
+  border-bottom: 1px solid var(--og-color-border);
+}
+:where(.og-root).og-session-capability-dialog-header > div,:where(.og-root) .og-session-capability-dialog-header > div {
+  flex: 1;
+  min-width: 0;
+}
+:where(.og-root).og-session-capability-dialog-header h2,:where(.og-root) .og-session-capability-dialog-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+:where(.og-root).og-session-capability-dialog-header p,:where(.og-root) .og-session-capability-dialog-header p {
+  margin: 4px 0 0;
+  color: var(--og-color-fg-muted);
+  font-size: 12px;
+}
+:where(.og-root).og-session-capability-dialog-header > button,:where(.og-root) .og-session-capability-dialog-header > button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 8px;
+  cursor: pointer;
+}
+:where(.og-root).og-session-capability-dialog-body,:where(.og-root) .og-session-capability-dialog-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+:where(.og-root).og-session-capability-dialog:has(.og-session-capability-setup),:where(.og-root) .og-session-capability-dialog:has(.og-session-capability-setup) {
+  width: min(32rem,calc(100vw - 32px));
+}
+:where(.og-root).og-session-capability-setup,:where(.og-root) .og-session-capability-setup {
+  padding: 24px;
+  display: grid;
+  gap: 16px;
+  font-size: 13px;
+}
+:where(.og-root).og-session-capability-setup > p,:where(.og-root) .og-session-capability-setup > p {
+  margin: 0;
+  line-height: 1.6;
+}
+:where(.og-root).og-session-capability-setup label,:where(.og-root) .og-session-capability-setup label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.6;
+}
+:where(.og-root).og-session-capability-setup button,:where(.og-root) .og-session-capability-setup button {
+  font: inherit;
+  padding: 9px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--og-color-border);
+  background: var(--og-color-surface-2);
+  color: inherit;
+  cursor: pointer;
+}
+:where(.og-root).og-session-capability-setup button:disabled,:where(.og-root) .og-session-capability-setup button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+:where(.og-root).og-session-capability-setup [role=alert],:where(.og-root) .og-session-capability-setup [role=alert] {
+  color: var(--og-color-danger);
+}
+:where(.og-root).og-session-capability-setup .og-session-capability-notice,:where(.og-root) .og-session-capability-setup .og-session-capability-notice {
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-session-capability-shell[data-state="complete"],:where(.og-root) .og-session-capability-shell[data-state="complete"] {
+  border-color: var(--og-color-status-idle);
+  @supports (color: color-mix(in lab, red, red)) {
+    border-color: color-mix(in srgb,var(--og-color-status-idle) 35%,var(--og-color-border));
+  }
+}
+:where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-header > svg,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-header > svg,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy,:where(.og-root)  .og-session-capability-shell[data-state="complete"] .og-session-capability-copy {
+  color: var(--og-color-status-idle);
+}
+:where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-copy,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy {
+  font-weight: 500;
+}
+:where(.og-root).og-session-capability-setup fieldset,:where(.og-root) .og-session-capability-setup fieldset {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+:where(.og-root).og-session-capability-setup legend,:where(.og-root) .og-session-capability-setup legend {
+  padding: 0 0 10px;
+  font-weight: 600;
+}
+:where(.og-root).og-session-capability-setup input,:where(.og-root) .og-session-capability-setup input {
+  margin-top: 4px;
+  accent-color: var(--og-color-accent-deep);
+}
+:where(.og-root).og-session-capability-setup .og-session-capability-scope,:where(.og-root) .og-session-capability-setup .og-session-capability-scope {
+  color: var(--og-color-fg-muted);
+  font-size: 12px;
+}
+:where(.og-root).og-session-capability-setup .og-session-capability-primary,:where(.og-root) .og-session-capability-setup .og-session-capability-primary {
+  justify-self: end;
+  min-height: 40px;
+  padding: 10px 16px;
+  border: 1px solid var(--og-color-primary-border);
+  background: var(--og-color-primary);
+  color: var(--og-color-primary-fg);
+  font-weight: 500;
+}
+:where(.og-root).og-session-capability-setup .og-session-capability-primary:hover:not(:disabled),:where(.og-root) .og-session-capability-setup .og-session-capability-primary:hover:not(:disabled) {
+  filter: brightness(.94);
+}
+:where(.og-root).og-session-capability-progress,:where(.og-root) .og-session-capability-progress {
+  color: var(--og-color-fg-muted);
+  padding-block: 8px;
+}
+:where(.og-root).og-session-capability-setup .og-session-capability-stop,:where(.og-root) .og-session-capability-setup .og-session-capability-stop {
+  justify-self: end;
+}
+@media (pointer:coarse) {
+  :where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button,:where(.og-root).og-session-capability-setup button,:where(.og-root) .og-session-capability-setup button {
+    min-height: 44px;
+  }
+}
+:where(.og-root).og-preview-loading,:where(.og-root) .og-preview-loading {
+  --_og-preview-ink: #9fdccd;
+  --_og-preview-glow: #5fb8a3;
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #1b1b1b;
+  container: og-preview / inline-size;
+}
+:where(.og-root):is([data-og-theme="light"], .og-light) .og-preview-loading, :is([data-og-theme="light"], .og-light) :where(.og-root) .og-preview-loading,:where(.og-root) :is([data-og-theme="light"], .og-light) .og-preview-loading {
+  --_og-preview-ink: #5f8f84;
+  --_og-preview-glow: #9fe3d3;
+  background: #f9f9f9;
+}
+:where(.og-root).og-preview-loading canvas,:where(.og-root) .og-preview-loading canvas {
+  display: block;
+  width: 100%;
+  height: 320px;
+  background-image: radial-gradient(circle, var(--_og-preview-ink) 1px, transparent 1px);
+  @supports (color: color-mix(in lab, red, red)) {
+    background-image: radial-gradient(circle, color-mix(in srgb, var(--_og-preview-ink) 30%, transparent) 1px, transparent 1px);
+  }
+  background-size: 18px 18px;
+}
+:where(.og-root).og-preview-loading canvas[data-painted="true"],:where(.og-root) .og-preview-loading canvas[data-painted="true"] {
+  background-image: none;
+}
+:where(.og-root).og-preview-loading-label,:where(.og-root) .og-preview-loading-label {
+  position: absolute;
+  left: 16px;
+  bottom: 14px;
+  color: var(--og-color-fg-muted);
+  font-family: var(--og-font-sans);
+  font-size: var(--og-font-size-xs);
+  line-height: var(--og-line-height-xs);
+  font-weight: 400;
+}
+@container og-preview (max-width: 500px) {
+  :where(.og-root).og-preview-loading canvas,:where(.og-root) .og-preview-loading canvas {
+    height: 260px;
+  }
+}
+@media (max-width: 500px) {
+  :where(.og-root).og-preview-loading canvas,:where(.og-root) .og-preview-loading canvas {
+    height: 260px;
+  }
+}
+@keyframes og-expand {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+  40% {
+    opacity: 0.25;
+  }
+  85% {
+    opacity: 1;
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+}
+@keyframes og-collapse {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+  35% {
+    opacity: 0.7;
+  }
+  70% {
+    opacity: 0;
+  }
+  to {
+    height: 0;
+    opacity: 0;
+  }
+}
+@keyframes og-settle-chip {
+  from {
+    background-color: color-mix(in oklch, var(--color-og-surface-1, transparent) 55%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+@keyframes og-stream-ink {
+  from {
+    opacity: 0.3;
+  }
+  to {
+    opacity: 1;
+  }
+}
+:where(.og-root).og-stream-ink,:where(.og-root) .og-stream-ink {
+  display: inline;
+  animation: og-stream-ink var(--_og-duration-stream) var(--og-ease-out) both;
+}
+@keyframes og-markdown-settle {
+  from {
+    opacity: 0.92;
+  }
+  to {
+    opacity: 1;
+  }
+}
+:where(.og-root).og-markdown-settle,:where(.og-root) .og-markdown-settle {
+  animation: var(--animate-og-markdown-settle);
+}
+@keyframes og-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes og-row-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+:where(.og-root).animate-og-row-enter,:where(.og-root) .animate-og-row-enter {
+  animation: var(--animate-og-row-enter);
+}
+@keyframes og-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@keyframes og-blink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+@keyframes og-shimmer {
+  from {
+    background-position: 200% center;
+  }
+  to {
+    background-position: -200% center;
+  }
+}
+@keyframes og-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes og-waveform {
+  0%, 100% {
+    transform: scaleY(0.28);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 0.95;
+  }
+}
+@keyframes og-mh-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+:where(.og-root).og-mh-draw,:where(.og-root) .og-mh-draw {
+  stroke-dasharray: 1;
+  animation: og-mh-draw 900ms var(--og-ease-out) forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  :where(.og-root).og-mh-draw,:where(.og-root) .og-mh-draw {
+    animation: none;
+    stroke-dasharray: none;
+  }
+}
+:where(.og-root).og-shimmer-text,:where(.og-root) .og-shimmer-text {
+  background: linear-gradient( 90deg, var(--og-color-fg-subtle) 0%, var(--og-color-fg) 50%, var(--og-color-fg-subtle) 100% );
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: og-shimmer 2.2s linear infinite;
+}
+:where(.og-root) {
+  font-family: var(--og-font-sans);
+  font-feature-settings: var(--og-font-features);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  color: var(--og-color-fg);
+}
+:is(.og-root.og-root, .og-root .og-root) :where( .text-og-xs, .text-og-sm, .text-og-base, .text-og-md, .text-og-control, .text-og-menu, .text-og-composer, .text-og-composer-wide ), :is( .og-root.text-og-xs, .og-root.text-og-sm, .og-root.text-og-base, .og-root.text-og-md, .og-root.text-og-control, .og-root.text-og-menu, .og-root.text-og-composer, .og-root.text-og-composer-wide ) {
+  font-size: var(--og-component-font-size);
+  line-height: var(--tw-leading, var(--og-component-line-height));
+}
+:where(.og-root) :where(*) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--og-color-border-strong) transparent;
+}
+@supports selector(::-webkit-scrollbar) {
+  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*) {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
+  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    background: transparent;
+  }
+  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: var(--og-color-border-strong) padding-box;
+  }
+  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar-thumb:hover {
+    border-width: 2px;
+    background-color: var(--og-color-fg-subtle);
+  }
+  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+:where(.og-root)[data-radix-popper-content-wrapper]:has( > [data-machine-state-popover][data-state="closed"] ),:where(.og-root) [data-radix-popper-content-wrapper]:has( > [data-machine-state-popover][data-state="closed"] ) {
+  visibility: hidden;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  :where(.og-root) *,:where(.og-root) *::before,:where(.og-root) *::after,:where(.og-root) .og-shimmer-text,:where(.og-root)  .og-shimmer-text {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  :where(.og-root) .og-stream-ink {
+    animation-delay: 0ms !important;
+  }
+}
+@media (max-width: 39.999rem) {
+  :where(.og-root).og-composer-footer:has([data-transcription-capturing]) .og-composer-controls > :not([data-transcription-capturing]),:where(.og-root) .og-composer-footer:has([data-transcription-capturing]) .og-composer-controls > :not([data-transcription-capturing]) {
+    display: none;
+  }
+  :where(.og-root).og-composer-footer:has([data-transcription-capturing]) .og-composer-actions,:where(.og-root) .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions {
+    display: none;
+  }
+  :where(.og-root).og-composer-footer:has([data-transcription-attention]) .og-composer-controls > :not([data-transcription-attention]),:where(.og-root) .og-composer-footer:has([data-transcription-attention]) .og-composer-controls > :not([data-transcription-attention]) {
+    display: none;
+  }
+  :where(.og-root).og-composer-footer:has([data-transcription-attention]) .og-composer-actions > :not(:is([data-analytics-action], :has([data-analytics-action]))),:where(.og-root) .og-composer-footer:has([data-transcription-attention]) .og-composer-actions > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
+    display: none;
+  }
+  :where(.og-root).og-composer-footer [data-transcription-attention] :is(.og-transcription-recovered-label, .og-transcription-error-label),:where(.og-root) .og-composer-footer [data-transcription-attention] :is(.og-transcription-recovered-label, .og-transcription-error-label) {
+    max-width: min(15rem, 52vw);
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-height: 1.2;
+  }
+  :where(.og-root).og-composer-footer:has([data-realtime-attention]) .og-composer-controls,:where(.og-root) .og-composer-footer:has([data-realtime-attention]) .og-composer-controls {
+    display: none;
+  }
+  :where(.og-root).og-composer-footer:has([data-realtime-attention]) .og-composer-actions,:where(.og-root) .og-composer-footer:has([data-realtime-attention]) .og-composer-actions,:where(.og-root) .og-composer-footer .og-realtime-control:has([data-realtime-attention]),:where(.og-root)  .og-composer-footer .og-realtime-control:has([data-realtime-attention]),:where(.og-root) .og-composer-footer [data-realtime-attention],:where(.og-root)  .og-composer-footer [data-realtime-attention] {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  :where(.og-root).og-composer-footer:has([data-realtime-attention]) .og-composer-actions > :not(:has([data-realtime-attention])),:where(.og-root) .og-composer-footer:has([data-realtime-attention]) .og-composer-actions > :not(:has([data-realtime-attention])) {
+    flex-shrink: 0;
+  }
+  :where(.og-root).og-composer-footer [data-realtime-attention] .og-realtime-failure-label,:where(.og-root) .og-composer-footer [data-realtime-attention] .og-realtime-failure-label {
+    max-width: none;
+    -webkit-line-clamp: 3;
+  }
+}
+@media (forced-colors: active) {
+  :where(.og-root) {
+    --og-color-bg: Canvas;
+    --og-color-surface-1: Canvas;
+    --og-color-surface-2: Canvas;
+    --og-color-surface-3: Canvas;
+    --og-color-border: CanvasText;
+    --og-color-border-strong: CanvasText;
+    --og-color-fg: CanvasText;
+    --og-color-fg-muted: CanvasText;
+    --og-color-fg-subtle: CanvasText;
+    --og-color-accent: CanvasText;
+    --og-color-accent-strong: CanvasText;
+    --og-color-accent-deep: CanvasText;
+    --og-color-accent-fg: CanvasText;
+    --og-color-accent-soft: Canvas;
+    --og-color-status-queued: CanvasText;
+    --og-color-status-running: CanvasText;
+    --og-color-status-idle: CanvasText;
+    --og-color-status-waiting: CanvasText;
+    --og-color-status-failed: CanvasText;
+    --og-color-status-cancelled: CanvasText;
+    --og-color-danger: CanvasText;
+    --og-color-diff-add-bg: Canvas;
+    --og-color-diff-del-bg: Canvas;
+    --og-shadow-sm: none;
+    --og-shadow-md: none;
+    --og-shadow-lg: none;
+    --og-shadow-glow: none;
+  }
+  :where(.og-root) [role="tab"][aria-selected="true"] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
+:where(.og-root).xterm .xterm-width-cache-measure-container,:where(.og-root) .xterm .xterm-width-cache-measure-container,:where(.og-root) .xterm-width-cache-measure-container,:where(.og-root)  .xterm-width-cache-measure-container,:where(.og-root) .xterm .xterm-char-measure-element,:where(.og-root)  .xterm .xterm-char-measure-element {
+  position: absolute !important;
+  top: 0;
+  left: 0;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  z-index: -1 !important;
+}
+:where(.og-root).og-cm-editor .cm-editor,:where(.og-root) .og-cm-editor .cm-editor {
+  background-color: var(--og-cm-bg, var(--og-color-bg));
+  color: var(--og-color-fg);
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-gutters,:where(.og-root) .og-cm-editor .cm-editor .cm-gutters {
+  background-color: var(--og-cm-bg, var(--og-color-bg));
+  border-right-color: var(--og-color-border);
+  color: var(--og-color-fg-subtle);
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-activeLine,:where(.og-root) .og-cm-editor .cm-editor .cm-activeLine {
+  background-color: var(--og-color-fg);
+  @supports (color: color-mix(in lab, red, red)) {
+    background-color: color-mix(in srgb, var(--og-color-fg) 4%, transparent);
+  }
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-activeLineGutter,:where(.og-root) .og-cm-editor .cm-editor .cm-activeLineGutter {
+  background-color: var(--og-color-fg);
+  @supports (color: color-mix(in lab, red, red)) {
+    background-color: color-mix(in srgb, var(--og-color-fg) 6%, transparent);
+  }
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-cursor,:where(.og-root) .og-cm-editor .cm-editor .cm-cursor,:where(.og-root) .og-cm-editor .cm-editor .cm-dropCursor,:where(.og-root)  .og-cm-editor .cm-editor .cm-dropCursor {
+  border-left-color: var(--og-color-fg);
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-selectionLayer .cm-selectionBackground,:where(.og-root) .og-cm-editor .cm-editor .cm-selectionLayer .cm-selectionBackground,:where(.og-root) .og-cm-editor .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground,:where(.og-root)  .og-cm-editor .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground {
+  background-color: var(--og-color-accent);
+  @supports (color: color-mix(in lab, red, red)) {
+    background-color: color-mix(in srgb, var(--og-color-accent) 30%, transparent);
+  }
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-selectionMatch,:where(.og-root) .og-cm-editor .cm-editor .cm-selectionMatch {
+  background-color: var(--og-color-accent);
+  @supports (color: color-mix(in lab, red, red)) {
+    background-color: color-mix(in srgb, var(--og-color-accent) 18%, transparent);
+  }
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-panels,:where(.og-root) .og-cm-editor .cm-editor .cm-panels {
+  background-color: var(--og-color-surface-2);
+  color: var(--og-color-fg);
+}
+:where(.og-root).og-genie-loading,:where(.og-root) .og-genie-loading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 88px;
+  padding: 12px 0;
+}
+:where(.og-root).og-genie-orb,:where(.og-root) .og-genie-orb {
+  width: 64px;
+  height: 64px;
+  flex: 0 0 64px;
+}
+:where(.og-root).og-genie-orb canvas,:where(.og-root) .og-genie-orb canvas {
+  display: block;
+}
+:where(.og-root).og-genie-copy,:where(.og-root) .og-genie-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+:where(.og-root).og-genie-phrase,:where(.og-root) .og-genie-phrase {
+  color: var(--og-color-fg-muted);
+  font-size: var(--og-font-size-sm);
+  line-height: 1.5;
+  animation: og-genie-phrase-in .65s ease-out both;
+}
+:where(.og-root).og-genie-details,:where(.og-root) .og-genie-details {
+  color: var(--og-color-fg-subtle);
+  font-size: var(--og-font-size-xs);
+  min-height: 28px;
+  cursor: pointer;
+  border-radius: 4px;
+  text-align: left;
+  transition: color .2s;
+}
+:where(.og-root).og-genie-details:hover,:where(.og-root) .og-genie-details:hover {
+  color: var(--og-color-fg);
+}
+:where(.og-root).og-genie-details:focus-visible,:where(.og-root) .og-genie-details:focus-visible {
+  outline: 2px solid var(--og-color-accent);
+  @supports (color: color-mix(in lab, red, red)) {
+    outline: 2px solid color-mix(in srgb, var(--og-color-accent) 55%, transparent);
+  }
+  outline-offset: 4px;
+}
+@keyframes og-genie-phrase-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (pointer: coarse) {
+  :where(.og-root).og-genie-details,:where(.og-root) .og-genie-details {
+    min-height: 44px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  :where(.og-root).og-genie-phrase,:where(.og-root) .og-genie-phrase {
+    animation: none;
+  }
+}
+:where(.og-root).og-rolling-status,:where(.og-root) .og-rolling-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  width: 100%;
+}
+:where(.og-root).og-rolling-window,:where(.og-root) .og-rolling-window {
+  position: relative;
+  display: block;
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  overflow: hidden;
+}
+:where(.og-root).og-rolling-face,:where(.og-root) .og-rolling-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+}
+:where(.og-root).og-rolling-label,:where(.og-root) .og-rolling-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+  font-size: 13px;
+  font-weight: 450;
+  line-height: 20px;
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-rolling-label > svg,:where(.og-root) .og-rolling-label > svg {
+  flex-shrink: 0;
+}
+:where(.og-root).og-rolling-count,:where(.og-root) .og-rolling-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--og-color-fg-subtle);
+  font-variant-numeric: tabular-nums;
+}
+:where(.og-root).og-command-reel,:where(.og-root) .og-command-reel {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  transform-origin: 50% 50%;
+}
+:where(.og-root).og-reasoning-preview,:where(.og-root) .og-reasoning-preview,:where(.og-root) .og-reasoning-preview :is(div,p,h1,h2,h3,h4,h5,h6,ul,ol,li,blockquote,pre),:where(.og-root)  .og-reasoning-preview :is(div,p,h1,h2,h3,h4,h5,h6,ul,ol,li,blockquote,pre) {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  font-size: inherit;
+  line-height: inherit;
+}
+:where(.og-root).og-reasoning-preview br,:where(.og-root) .og-reasoning-preview br {
+  display: none;
+}
+:where(.og-root).og-reasoning-preview :is(p,li,h1,h2,h3,h4)::after,:where(.og-root) .og-reasoning-preview :is(p,li,h1,h2,h3,h4)::after {
+  content: " ";
+}
+:where(.og-root).og-reel-title,:where(.og-root) .og-reel-title {
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 75%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:where(.og-root).og-reel-title:only-child,:where(.og-root) .og-reel-title:only-child {
+  max-width: 100%;
+}
+:where(.og-root).og-reel-preview,:where(.og-root) .og-reel-preview {
+  flex: 1 1 0%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:where(.og-root).og-command-reel-running,:where(.og-root) .og-command-reel-running,:where(.og-root) .og-rolling-status[data-running="true"] .og-command-reel,:where(.og-root)  .og-rolling-status[data-running="true"] .og-command-reel {
+  background-image: linear-gradient(90deg, light-dark(#8a8a8a,#6b6b6b) 42%, light-dark(#f2f2f2,#fff) 50%, light-dark(#8a8a8a,#6b6b6b) 58%);
+  background-size: 300% 100%;
+  background-position: 100% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: og-activity-sweep 3.6s linear infinite;
+}
+@keyframes og-activity-sweep {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0% 0;
+  }
+}
+@media (prefers-reduced-motion:reduce), (forced-colors:active) {
+  :where(.og-root).og-command-reel-running,:where(.og-root) .og-command-reel-running,:where(.og-root) .og-rolling-status[data-running="true"] .og-command-reel,:where(.og-root)  .og-rolling-status[data-running="true"] .og-command-reel {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}
 :where(.og-root).og-composer[data-og-responsive-basis="container"],:where(.og-root) .og-composer[data-og-responsive-basis="container"] {
   container: og-composer / inline-size;
   --_og-c-input-x: 1rem;

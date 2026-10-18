@@ -52,14 +52,12 @@ test("Windows native admission uses the Windows release schema", async () => {
   await expect(new CuaNativeTools(runtime, "owned", "macos").validate(click)).rejects.toThrow(
     "schema differs",
   );
-  // The Windows driver has no batch tool, so it is never admitted there.
-  await expect(
-    new CuaNativeTools(runtime, "owned", "windows").validate({
-      operationId: randomUUID(),
-      tool: "run_actions",
-      arguments: { steps: [] },
-    }),
-  ).rejects.toThrow("unavailable");
+  // CUA 0.36 gives Windows the batch tool too; it validates against its own schema.
+  await new CuaNativeTools(runtime, "owned", "windows").validate({
+    operationId: randomUUID(),
+    tool: "run_steps",
+    arguments: { steps: [{ tool: "press_key", args: { key: "return" } }] },
+  });
 });
 const command = (): ComputerNativeCommand => ({
   protocolVersion: 1,
@@ -68,10 +66,10 @@ const command = (): ComputerNativeCommand => ({
   controllerGeneration: "controller-fixture",
   targetId: null,
   actor: { kind: "agent", subjectId: "agent:fixture" },
-  tool: "run_actions",
+  tool: "run_steps",
   arguments: {
     steps: [{ tool: "click", args: { pid: 42, window_id: 1, element_token: "s1:0" } }],
-    observe: true,
+    observe: {},
   },
 });
 
@@ -153,7 +151,7 @@ test("native calls retain raw partial results and share one journal with legacy 
   expect(oversized.observation!.result.content).toHaveLength(3);
   expect(calls).toHaveLength(1);
   expect(calls[0]).toMatchObject({
-    args: { session: "private-controller-session", observe: true },
+    args: { session: "private-controller-session", observe: {} },
   });
   const restored = new ComputerInteractionController({
     ...options,
@@ -200,10 +198,58 @@ test("native admission refuses session escape, unselected host tools and schema 
   ])
     await expect(new CuaNativeTools(runtime, "owned").validate(request)).rejects.toThrow();
   tools = tools.map((tool) =>
-    tool.name === "run_actions" ? { ...tool, inputSchema: { type: "object" } } : tool,
+    tool.name === "run_steps" ? { ...tool, inputSchema: { type: "object" } } : tool,
   );
   await expect(new CuaNativeTools(runtime, "owned").validate(command())).rejects.toThrow(
     "schema differs",
   );
   expect(calls).toBe(0);
+});
+
+test("a run_steps batch that provably ran nothing fails; any possible delivery stays unknown", async () => {
+  const batch = (structuredContent: Record<string, unknown>) => {
+    const runtime: CuaDesktopRuntime = {
+      listToolsJson: async () => JSON.stringify({ tools: CUA_DESKTOP_TOOLS }),
+      callTool: async () => {
+        const raw = { content: [{ type: "text", text: "run_steps report" }], structuredContent };
+        return {
+          text: "",
+          images: [],
+          isError: true,
+          degraded: false,
+          structuredJson: JSON.stringify(structuredContent),
+          rawJson: JSON.stringify({ ...raw, isError: true }),
+        };
+      },
+      shutdown: async () => {},
+    };
+    return new CuaNativeTools(runtime, "owned").call(command());
+  };
+  const stopped = (failed: number, phase: string) => ({
+    ok: false,
+    total: 2,
+    executed: failed + 1,
+    failed_step: failed,
+    steps: [
+      ...Array.from({ length: failed }, () => ({ ok: true, phase: "action" })),
+      { ok: false, phase, code: "not_found", message: "no button" },
+    ],
+  });
+
+  const notFound = await batch(stopped(0, "find"));
+  expect(notFound.outcome).toBe("failed");
+  expect(notFound.error).toMatchObject({ code: "locator_not_found" });
+  for (const phase of ["wait_for", "time_budget"])
+    expect(await batch(stopped(0, phase))).toMatchObject({
+      outcome: "failed",
+      error: { code: "invalid_action" },
+    });
+  expect(
+    await batch({ ok: false, code: "invalid_batch", executed: 0, failed_step: 3, detail: "bad" }),
+  ).toMatchObject({ outcome: "failed", error: { code: "invalid_action" } });
+
+  // An earlier step ran, or the first step reached its action: the app may have changed.
+  expect((await batch(stopped(1, "find"))).outcome).toBe("outcome_unknown");
+  expect((await batch(stopped(0, "action"))).outcome).toBe("outcome_unknown");
+  expect((await batch(stopped(0, "expect"))).outcome).toBe("outcome_unknown");
 });

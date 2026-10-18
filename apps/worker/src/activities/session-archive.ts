@@ -20,7 +20,7 @@ import {
   listSessionArchiveCandidates,
   listUnfinishedSessionArchives,
   purgeArchivedSessionContent,
-  readSessionArchiveRows,
+  readSessionArchiveTablePages,
   readSessionArchiveSessionRow,
   readSessionArchiveTranscriptEvents,
   type Database,
@@ -131,19 +131,14 @@ async function writeBundle(db: Database, scope: SessionArchiveScope, path: strin
         `"session":${sessionRow}}`,
     );
     for (const spec of SESSION_ARCHIVE_EXPORT_TABLES) {
-      let after: string[] | null = null;
       let count = 0;
-      for (;;) {
-        const page = await readSessionArchiveRows(db, scope, spec, {
-          after,
-          limit: SESSION_ARCHIVE_EXPORT_PAGE_ROWS,
-        });
-        for (const row of page.rows) {
+      for await (const rows of readSessionArchiveTablePages(db, scope, spec, {
+        pageRows: SESSION_ARCHIVE_EXPORT_PAGE_ROWS,
+      })) {
+        for (const row of rows) {
           await write(`{"table":${JSON.stringify(spec.table)},"row":${row}}`);
         }
-        count += page.rows.length;
-        if (page.rows.length < SESSION_ARCHIVE_EXPORT_PAGE_ROWS) break;
-        after = page.last;
+        count += rows.length;
       }
       rowCounts[spec.table] = count;
     }

@@ -20,6 +20,7 @@ export const UNIT_TEST_PATTERN = /(?:^|\/)\S+\.test\.tsx?$/;
 export const INTEGRATION_TEST_PATTERN = /(?:^|\/)\S+\.integration\.ts$/;
 export const E2E_TEST_PATTERN = /(?:^|\/)\S+\.e2e\.ts$/;
 export const INTEGRATION_SHARD_PROFILE = "scripts/ci/integration-shard-profile.json";
+export const E2E_SHARD_PROFILE = "scripts/ci/e2e-shard-profile.json";
 const TEST_SOURCE_DIRECTORIES = ["apps", "examples", "packages", "scripts", "test"];
 
 export type ShardWeightResolution = {
@@ -293,6 +294,21 @@ export function integrationShardWeights(
   root = process.cwd(),
   profilePath = join(root, INTEGRATION_SHARD_PROFILE),
 ): ShardWeightResolution {
+  return testShardWeights(root, "integration", profilePath);
+}
+
+export function e2eShardWeights(
+  root = process.cwd(),
+  profilePath = join(root, E2E_SHARD_PROFILE),
+): ShardWeightResolution {
+  return testShardWeights(root, "e2e", profilePath);
+}
+
+function testShardWeights(
+  root: string,
+  tier: "integration" | "e2e",
+  profilePath: string,
+): ShardWeightResolution {
   try {
     const bytes = readFileSync(profilePath);
     const parsed = JSON.parse(bytes.toString("utf8")) as {
@@ -306,14 +322,12 @@ export function integrationShardWeights(
         bunVersionFileSha256?: unknown;
         serviceImagesPath?: unknown;
         serviceImagesSha256?: unknown;
+        dependencyLockSha256?: unknown;
+        browserRunnerSha256?: unknown;
       };
       entries?: Record<string, { sha256?: unknown; planningWeight?: unknown }>;
     };
-    if (
-      parsed.schemaVersion !== 1 ||
-      parsed.tier !== "integration" ||
-      parsed.units !== "milliseconds"
-    ) {
+    if (parsed.schemaVersion !== 1 || parsed.tier !== tier || parsed.units !== "milliseconds") {
       throw new Error("unsupported schema, tier, or units");
     }
     const environment = parsed.environment;
@@ -322,9 +336,7 @@ export function integrationShardWeights(
       environment.platform !== process.platform ||
       environment.architecture !== process.arch ||
       environment.bunVersion !== Bun.version ||
-      typeof environment.bunVersionFileSha256 !== "string" ||
-      typeof environment.serviceImagesPath !== "string" ||
-      typeof environment.serviceImagesSha256 !== "string"
+      typeof environment.bunVersionFileSha256 !== "string"
     ) {
       throw new Error("profile environment or toolchain does not match this runner");
     }
@@ -335,15 +347,26 @@ export function integrationShardWeights(
     if (hashFile(".bun-version") !== environment.bunVersionFileSha256) {
       throw new Error("profile Bun version file fence is stale");
     }
-    if (hashFile(environment.serviceImagesPath) !== environment.serviceImagesSha256) {
-      throw new Error("profile service-image fence is stale");
+    if (tier === "integration") {
+      if (
+        typeof environment.serviceImagesPath !== "string" ||
+        typeof environment.serviceImagesSha256 !== "string" ||
+        hashFile(environment.serviceImagesPath) !== environment.serviceImagesSha256
+      ) {
+        throw new Error("profile service-image fence is stale");
+      }
+    } else if (
+      hashFile("bun.lock") !== environment.dependencyLockSha256 ||
+      hashFile("scripts/run-browser-e2e.ts") !== environment.browserRunnerSha256
+    ) {
+      throw new Error("profile browser runner or dependency fence is stale");
     }
     if (!parsed.entries || Array.isArray(parsed.entries))
       throw new Error("entries must be an object");
-    const discovered = discoverTestFiles(root).integration;
+    const discovered = discoverTestFiles(root)[tier];
     const paths = Object.keys(parsed.entries).sort();
     if (JSON.stringify(paths) !== JSON.stringify(discovered)) {
-      throw new Error("profile file set does not exactly match discovered integration tests");
+      throw new Error(`profile file set does not exactly match discovered ${tier} tests`);
     }
     const weights = new Map<string, number>();
     for (const path of paths) {
@@ -363,7 +386,7 @@ export function integrationShardWeights(
     return {
       mode: "profile",
       weights,
-      reason: "content-fenced integration planning profile",
+      reason: `content-fenced ${tier} planning profile`,
       profileSha256: createHash("sha256").update(bytes).digest("hex"),
     };
   } catch (error) {

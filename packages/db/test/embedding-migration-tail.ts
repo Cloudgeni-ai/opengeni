@@ -1,4 +1,5 @@
 import { allowanceMigrationTail } from "./allowance-migration-tail";
+import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
 
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
@@ -39,6 +40,7 @@ export const embeddingMigrationTail = [
   "0469_knowledge_source_discovery.sql",
   // Patches the read function from withheld 0461; replay after its creation.
   "0640_knowledge_entry_created_since.sql",
+  ...knowledgeActorMigrationTail,
   "0478_sender_owned_connections.sql",
   // Replayed 0402/0433 still consume historical Pack tables. Remove them only
   // after those earlier accepted-work and Skill cutovers have completed.
@@ -63,6 +65,9 @@ export const embeddingMigrationTail = [
   // routines require that catalog. Replay both after the withheld guard.
   "0797_subscription_plan_foundation.sql",
   "0798_subscription_plan_maintenance.sql",
+  // Replaces 0797's catalog setter and plan routines; replay after 0797 so the
+  // withheld CREATE FUNCTION does not collide with the newer definition.
+  "0801_subscription_plan_legacy_prices.sql",
   // Reuses the revision guard installed by withheld 0521; its validation
   // follow-up must run after the original promotional-credit routines.
   "0613_model_scoped_promotional_credits.sql",
@@ -97,6 +102,11 @@ export const embeddingMigrationTail = [
   "0598_claude_subscription_account_pools.sql",
   // Uses the existing session inventory/capability routines withheld by these fixtures.
   "0604_insights_raw_usage_api.sql",
+  // Hourly rollups consume 0604's usage-payer and scoped reader functions.
+  "0815_insights_usage_hourly.sql",
+  "0816_insights_usage_hourly_queue.sql",
+  "0817_insights_usage_hourly_backfill.sql",
+  "0818_insights_usage_hourly_reader.sql",
   // 0793 backfills while disabling the fence trigger introduced by withheld
   // 0345. 0794 patches 0604's two scoped readers and requires all nine;
   // 0795 extends 0793's audience predicate. Replay the dependency chain intact.
@@ -115,6 +125,8 @@ export const embeddingMigrationTail = [
   // M2 extends the membership finalizer to revoke legacy Claude rows; replay
   // only after the deliberately withheld 0598 Claude tables are restored.
   "0642_shared_subscription_core.sql",
+  // Reclaims capabilities from withheld 0642; replay after that table exists.
+  "0807_subscription_rls_admin_once_per_statement.sql",
   "0643_model_call_facts_subscription_connection_index.sql",
   "0644_subscription_inference_source_settings.sql",
   "0645_subscription_core_runtime.sql",
@@ -277,4 +289,24 @@ export const embeddingMigrationTail = [
   // Installs an inventory read policy with the session-tenancy fence helper
   // from withheld 0345; replay after it.
   "0792_scheduled_task_blocker_reviews.sql",
+  // Rewrites the session-tenancy fence registry and its capability routines
+  // from withheld 0345; replay after it.
+  "0800_session_tenancy_fence_registry_schema_name.sql",
+  // The history repair runner uses the tenancy trigger and workspace fences
+  // installed by withheld 0345, including its historical 0809 compatibility SQL.
+  "0809_session_open_settlement_index.sql",
+  "0811_session_events_usage_source_key_backfill.sql",
+  "0821_session_history_owner_backfill_repair.sql",
+  // The schedule-defaults repair takes workspace fences through the inventory
+  // helpers installed by withheld 0345; replay after it.
+  "0832_schedule_defaults_and_turn_notifications.sql",
+  // Replaces the 0345 tenancy fence and adds a WHEN clause over the 0275
+  // scheduled-run accepted execution snapshot; replay after both.
+  "0836_cheaper_session_write_fences.sql",
+  // Sets statistics options on the cursor table from 0374, withheld by these
+  // historical fixtures; replay after it.
+  "0837_hot_session_tables_analyze_cadence.sql",
+  // Empties the capability table from withheld 0642 and rewrites the reclaim
+  // routine from 0807; replay after both.
+  "0838_reclaim_exited_backend_runtime_capabilities.sql",
 ];

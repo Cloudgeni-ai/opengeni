@@ -16,6 +16,7 @@ import { cn } from "../lib/cn";
 import { interactionHostPlatform, type InteractionHostPlatform } from "../lib/host-platform";
 import { useDesktopStream } from "../hooks/use-desktop-stream";
 import type { DesktopWebSocketFactory } from "../hooks/use-relay-frame-stream";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type DesktopViewerProps = {
   /** The desktop cell of the negotiated capabilities (`capabilities.DesktopStream`). */
@@ -174,6 +175,7 @@ export function DesktopViewer({
   connectTimeoutMs = 13_000,
   className,
 }: DesktopViewerProps) {
+  const t = useOpenGeniText();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const onActivateRef = useRef(onActivate);
   const onAcknowledgeRef = useRef(onAcknowledge);
@@ -460,19 +462,19 @@ export function DesktopViewer({
       overlay =
         renderViewerCap?.() ??
         defaultNotice(
-          "Too many viewers",
-          "This session has reached its live-viewer limit. Try again shortly.",
+          t("desktopViewer.tooManyViewers"),
+          t("desktopViewer.thisSessionHasReachedIts"),
         );
       break;
     case "unavailable":
       overlay =
         renderUnavailable?.(reason) ??
-        defaultNotice("Desktop unavailable", unavailableCopy(reason));
+        defaultNotice(t("desktopViewer.desktopUnavailable"), unavailableCopy(t, reason));
       break;
     case "acknowledgment_error":
       overlay = defaultNotice(
-        "Couldn’t open desktop",
-        acknowledgmentError?.message ?? "The desktop acknowledgment failed.",
+        t("desktopViewer.couldnTOpenDesktop"),
+        acknowledgmentError?.message ?? t("desktopViewer.theDesktopAcknowledgmentFailed"),
         retryAcknowledgment,
       );
       break;
@@ -481,15 +483,15 @@ export function DesktopViewer({
       break;
     case "connect_failed":
       overlay = defaultNotice(
-        "Couldn’t connect",
-        "The desktop is warm but the live stream didn’t come up. This usually clears on a retry.",
+        t("desktopViewer.couldnTConnect"),
+        t("desktopViewer.theDesktopIsWarmBut"),
         reconnect,
       );
       break;
     case "error":
       overlay = defaultNotice(
-        "Desktop disconnected",
-        stream.error?.message ?? "The stream dropped.",
+        t("desktopViewer.desktopDisconnected"),
+        stream.error?.message ?? t("desktopViewer.theStreamDropped"),
         reconnect,
       );
       break;
@@ -546,7 +548,9 @@ export function DesktopViewer({
             />
           </span>
           <span className="text-og-sm">
-            {uiState === "opening" ? "Opening the desktop…" : "Connecting to the desktop…"}
+            {uiState === "opening"
+              ? t("desktopViewer.openingTheDesktop")
+              : t("desktopViewer.connectingToTheDesktop")}
           </span>
         </div>
       )}
@@ -577,8 +581,8 @@ export function DesktopViewer({
           disabledReason={
             !serverAllowsControl
               ? capability?.client === "frames"
-                ? "View-only — live control isn't available for this machine yet."
-                : "This deployment streams the desktop read-only."
+                ? t("desktopViewer.viewOnlyLiveControlIsn")
+                : t("desktopViewer.thisDeploymentStreamsTheDesktop")
               : undefined
           }
           onTakeControl={() => setTakeControl(true)}
@@ -655,6 +659,7 @@ function TakeControlCallToAction({
   disabledReason?: string | undefined;
   onTakeControl: () => void;
 }) {
+  const t = useOpenGeniText();
   return (
     // The wrapper spans the surface but is click-through (pointer-events-none); only
     // the button itself is interactive, so watchers can still see the desktop.
@@ -662,8 +667,8 @@ function TakeControlCallToAction({
       <button
         type="button"
         disabled={disabled}
-        aria-label="Take control of the desktop"
-        title={disabled ? disabledReason : "Take control of the desktop"}
+        aria-label={t("desktopViewer.takeControlOfTheDesktop")}
+        title={disabled ? disabledReason : t("desktopViewer.takeControlOfTheDesktop")}
         onClick={onTakeControl}
         className={cn(
           "group pointer-events-auto flex items-center gap-3 rounded-og-lg border px-5 py-3",
@@ -692,9 +697,11 @@ function TakeControlCallToAction({
           <MousePointerClickIcon className="size-5" strokeWidth={2} />
         </span>
         <span className="flex flex-col items-start leading-tight">
-          <span className="text-og-base font-semibold text-og-fg">Take control</span>
+          <span className="text-og-base font-semibold text-og-fg">
+            {t("desktopViewer.takeControl")}
+          </span>
           <span className="text-og-xs text-og-fg-subtle">
-            {disabled && disabledReason ? disabledReason : "Drive the mouse & keyboard"}
+            {disabled && disabledReason ? disabledReason : t("desktopViewer.driveTheMouseKeyboard")}
           </span>
         </span>
       </button>
@@ -711,23 +718,24 @@ function TakeControlCallToAction({
  * (not a faint ghost) so it's always discoverable as the way out.
  */
 function InControlBar({ shared, onRelease }: { shared: boolean; onRelease: () => void }) {
+  const t = useOpenGeniText();
   return (
     <div className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-between gap-2 p-2">
       <span className="pointer-events-auto inline-flex items-center gap-2 rounded-og-sm bg-og-accent px-2.5 py-1 text-og-xs font-medium text-og-accent-fg shadow-og-md">
         <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden />
-        You&apos;re in control
-        <span className="opacity-75">· click Return control (or Ctrl+Alt+Shift)</span>
+        {t("desktopViewer.youReInControl")}
+        <span className="opacity-75">{t("desktopViewer.clickReturnControlOrCtrl")}</span>
       </span>
       <div className="pointer-events-auto flex items-center gap-1.5">
         {shared && (
           <span className="rounded-og-sm bg-og-status-failed/85 px-2 py-0.5 text-og-xs text-og-accent-fg">
-            Shared sandbox — others are watching
+            {t("desktopViewer.sharedSandboxOthersAreWatching")}
           </span>
         )}
         <button
           type="button"
           onClick={onRelease}
-          title="Return control (or press Ctrl+Alt+Shift)"
+          title={t("desktopViewer.returnControlOrPressCtrl")}
           className={cn(
             "inline-flex items-center gap-1.5 rounded-og-sm border px-2.5 py-1 text-og-xs font-semibold shadow-og-md transition-colors",
             "border-og-accent bg-og-bg/90 text-og-fg backdrop-blur-sm",
@@ -735,31 +743,31 @@ function InControlBar({ shared, onRelease }: { shared: boolean; onRelease: () =>
           )}
         >
           <MonitorIcon className="size-3.5" strokeWidth={2} aria-hidden />
-          Return control
+          {t("desktopViewer.returnControl")}
         </button>
       </div>
     </div>
   );
 }
 
-function unavailableCopy(reason: CapabilityUnavailableReason | null): string {
+function unavailableCopy(t: OpenGeniText, reason: CapabilityUnavailableReason | null): string {
   switch (reason) {
     case "backend_unsupported":
-      return "This sandbox backend cannot stream a desktop.";
+      return t("desktopViewer.thisSandboxBackendCannotStream");
     case "tier_headless":
-      return "This deployment is headless — terminal, files, and diff only.";
+      return t("desktopViewer.thisDeploymentIsHeadlessTerminal");
     case "os_unsupported":
-      return "The sandbox OS does not support a desktop stream.";
+      return t("desktopViewer.theSandboxOsDoesNot");
     case "not_provisioned":
-      return "This sandbox doesn't have a desktop yet.";
+      return t("desktopViewer.thisSandboxDoesnTHave");
     case "disabled_by_policy":
-      return "Desktop streaming is disabled on this deployment.";
+      return t("desktopViewer.desktopStreamingIsDisabledOn");
     case "lease_cold":
       // Should not reach the unavailable notice (lease_cold warms), but keep
       // friendly copy as a fallback rather than the old dead-end wording.
-      return "Waiting for the sandbox to start…";
+      return t("desktopViewer.waitingForTheSandboxTo");
     default:
-      return "The desktop isn’t available for this sandbox.";
+      return t("desktopViewer.theDesktopIsnTAvailable");
   }
 }
 
@@ -771,13 +779,14 @@ function unavailableCopy(reason: CapabilityUnavailableReason | null): string {
  * being warmed automatically; we just tell the user it's happening.
  */
 function WarmingNotice({ onRetry }: { onRetry?: (() => void) | undefined }) {
+  const t = useOpenGeniText();
   return (
     <div className="flex max-w-sm flex-col items-center gap-3 rounded-og-lg border border-og-border bg-og-bg/90 p-5 text-center text-og-base text-og-fg backdrop-blur-sm">
       <LoaderCircleIcon className="size-7 animate-og-spin text-og-accent" strokeWidth={1.5} />
       <div className="space-y-1">
-        <div className="font-medium">Warming the sandbox…</div>
+        <div className="font-medium">{t("desktopViewer.warmingTheSandbox")}</div>
         <p className="text-og-sm text-og-fg-subtle">
-          Spinning up the desktop — this takes a few seconds.
+          {t("desktopViewer.spinningUpTheDesktopThis")}
         </p>
       </div>
       {onRetry && (
@@ -786,7 +795,7 @@ function WarmingNotice({ onRetry }: { onRetry?: (() => void) | undefined }) {
           onClick={onRetry}
           className="rounded-og-sm border border-og-border px-3 py-1.5 text-og-sm text-og-fg-muted transition-colors hover:text-og-fg pointer-coarse:min-h-11"
         >
-          Taking too long? Retry
+          {t("desktopViewer.takingTooLongRetry")}
         </button>
       )}
     </div>

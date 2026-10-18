@@ -68,7 +68,9 @@ export class CuaNativeTools {
     const result = ComputerNativeResult.shape.result.parse(JSON.parse(sdk.rawJson));
     const data = result.structuredContent as Record<string, unknown> | undefined;
     const effect = data?.effect ?? sdk.action?.effect;
-    const refused = effect === "refused" || data?.status === "refused";
+    const stoppedBeforeAction = request.tool === "run_steps" ? batchRanNothing(data) : null;
+    const refused =
+      effect === "refused" || data?.status === "refused" || stoppedBeforeAction !== null;
     const uncertain =
       effect === "partial" || effect === "suspected_noop" || (sdk.isError && !refused);
     const outcome = refused
@@ -82,15 +84,42 @@ export class CuaNativeTools {
       error:
         outcome === "completed"
           ? null
-          : {
-              code: refused ? ("invalid_action" as const) : ("driver_failed" as const),
-              message: refused
-                ? "CUA refused the operation; see its original result"
-                : "CUA did not confirm the full operation; see its original result",
-              retryable: false,
-            },
+          : stoppedBeforeAction === "find"
+            ? {
+                code: "locator_not_found" as const,
+                message: "CUA ran no step: it did not find the first step's target",
+                retryable: false,
+              }
+            : stoppedBeforeAction !== null
+              ? {
+                  code: "invalid_action" as const,
+                  message: "CUA ran no step: the batch stopped before its first action",
+                  retryable: false,
+                }
+              : {
+                  code: refused ? ("invalid_action" as const) : ("driver_failed" as const),
+                  message: refused
+                    ? "CUA refused the operation; see its original result"
+                    : "CUA did not confirm the full operation; see its original result",
+                  retryable: false,
+                },
     };
   }
+}
+
+/**
+ * The phase a run_steps batch stopped in when CUA proves it delivered nothing:
+ * rejected while planning, or stopped at the first step before its action
+ * (waiting for, finding, or out of time). Any later or action-phase stop may
+ * have changed the app and stays unknown.
+ */
+function batchRanNothing(data: Record<string, unknown> | undefined): string | null {
+  if (!data || data.ok !== false) return null;
+  if (data.code === "invalid_batch" && data.executed === 0) return "invalid_batch";
+  if (data.failed_step !== 0 || data.executed !== 1 || !Array.isArray(data.steps)) return null;
+  const first = data.steps[0] as Record<string, unknown> | undefined;
+  const phase = first?.ok === false ? first.phase : undefined;
+  return phase === "wait_for" || phase === "find" || phase === "time_budget" ? phase : null;
 }
 
 function canonical(value: unknown): string {

@@ -4,6 +4,7 @@ import {
   CapabilityCatalogRow,
   type CapabilityCatalogStatus,
 } from "./capability-catalog-row";
+import { useOpenGeniText } from "./messages/runtime";
 
 /** Status comes from the host/controller, never inferred from a display label. */
 export type ConnectionCatalogOption = {
@@ -52,6 +53,7 @@ export function ConnectionOptionRow({ option }: { option: ConnectionCatalogOptio
 }
 
 export function ConnectionServiceRow({ service }: { service: ConnectionCatalogService }) {
+  const t = useOpenGeniText();
   if (!service.options.length) return null;
   const connected = service.options.filter((option) => option.connected).length;
   const attention = service.options.find(
@@ -77,7 +79,13 @@ export function ConnectionServiceRow({ service }: { service: ConnectionCatalogSe
       </span>
       <CapabilityCatalogIndicator
         status={groupState}
-        label={attention?.status ?? `${connected} of ${service.options.length} added`}
+        label={
+          attention?.status ??
+          t("connectionCatalog.connectedOfLengthAdded", {
+            connected,
+            length: service.options.length,
+          })
+        }
       />
     </>
   );
@@ -119,8 +127,13 @@ export function ConnectionCatalog({
   resultLimit,
   onShowMore,
   className = "",
-  emptyMessage = "No connections match your search.",
+  emptyMessage: emptyMessageProp,
 }: ConnectionCatalogProps) {
+  const t = useOpenGeniText();
+  const emptyMessage =
+    emptyMessageProp === undefined
+      ? t("connectionCatalog.noConnectionsMatchYourSearch")
+      : emptyMessageProp;
   const search = query.trim().toLowerCase();
   const entries = grouped
     ? services
@@ -154,7 +167,7 @@ export function ConnectionCatalog({
       </div>
       {resultLimit && visible.length > resultLimit ? (
         <button className="og-catalog-more" type="button" onClick={onShowMore}>
-          View all connections
+          {t("connectionCatalog.viewAllConnections")}
         </button>
       ) : null}
     </>

@@ -1,5 +1,30 @@
 # @opengeni/contracts
 
+## 4.0.4
+
+### Minor Changes
+
+- f010292: When an agent's Skill, workspace instruction or Knowledge save is refused, the chat now tells the person. A "Not saved to Skills" (or workspace instructions, or Knowledge) row appears beside the agent's reply and stays visible when the turn folds. It appears only for genuine refusals: Agent learning is off where the change would be saved, the chat isn't allowed to make the change, or the agent was started from a Site page. It says why in plain words and links to Agent learning settings or the item. Mistakes the agent can correct and retry itself, such as citing evidence the destination's readers can't see, show no row. Previously a refusal was visible only inside the folded tool call, so a request to remember something could be lost silently.
+
+  The refusal travels as a content-free `_meta["opengeni/learningRefusal"]` fact on the tool result (destination, reason and the targeted Skill ID only), which the model never sees. New exports: `learningRefusalFromToolOutput` and the `LearningRefusal` type from `@opengeni/sdk/learning-refusal`; the full fact from `@opengeni/contracts/learning-refusal`; and `LearningRefusalActionsProvider` and `LearningRefusalPlace` from `@opengeni/react`, which let a host open the right page. `NoticeItem` gains an optional `learningRefusal`.
+
+### Patch Changes
+
+- e7113e3: Opening a document or presentation with a long edit history no longer blocks the server for about a second. The 64-bit checksum on stored edits now uses integer arithmetic instead of one BigInt per byte, with bit-identical results, and decoding a stored edit validates its nested command once instead of twice. Decoding a real 307-edit document history dropped from about 1.16 s to 0.12 s.
+- 2f6b8bd: A desktop observation now says when the accessibility tree is partial. When CUA stops reading a window early (a slow or very large app runs out its time budget, or the element limit is reached), the semantic snapshot carries `incomplete` with the reason and how many found elements were not read, and the model's text view ends with a line saying the tree is partial and to use the screenshot for anything not listed. Before, a partial tree looked complete, so a model could conclude a visible control did not exist.
+- 9482fe0: Report observed command-scope cleanup of background child processes with an
+  append-only result notice, preserving structured output and process containment.
+- 2a81601: Computer use now runs on CUA Driver 0.36. On macOS, drags are delivered to background windows without bringing them forward, background typing reaches editor surfaces and multi-window apps, and background actions no longer raise Chrome or re-activate the user's app. The batch tool `run_actions` is replaced by upstream's `run_steps`, which adds targeting by role and name, per-step waits and checks, and a diff of what changed (`observe: {}`). The new `run_script` tool runs a short sandboxed script against the same computer session for flows that need loops or branches; it has no filesystem, network or process access.
+- 71dfe30: When a machine already runs its limit of Opengeni browsers or computer sessions, opening another now fails with a clear, non-retryable `capacity_exhausted` error (HTTP 409) telling the agent to end sessions it no longer needs. Previously it was a retryable `resource_unavailable` 503, which agents saw as "Opengeni is temporarily unavailable" and retried. The API gives errors from older agents the same message.
+- 9fb9db3: A refused move to another machine now says why. Moving a running chat onto a personal (Only me) machine is refused with the new `chat_busy` code, a machine the person may not use with `personal_machine_not_permitted`, and a machine that is gone with `stale_pointer`; only a real simultaneous move is reported as `concurrent_swap`. Previously every refusal was reported as a concurrent swap. `useMachines` now shows plain copy chosen by the code and never the server's `reason` text, which is written for agents and logs.
+- 79ec9fd: Let a machine owner move a running chat to their personal Connected Machine. Record the click as consent for the current logical turn, retain it across replacement attempts, and recheck ownership and access before each operation without exposing other personal machines or resources. Remove the obsolete busy-chat refusal.
+- 5927aae: The retained-image limit per workspace is now configurable. `OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_BYTES` sets the deployment default (5 GiB, unchanged), and `OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_OVERRIDES` gives individual workspaces their own limit as a JSON object of workspace id to bytes. The hard-coded `COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES` contract constant is removed.
+- 6ab7b55: sandbox_file_publish now publishes files of any size object storage accepts in one upload (up to 5 GB), not only files under 25 MiB. Files up to 25 MiB are still read through the API. A larger file is hashed where it lives and uploaded by the sandbox or Connected Machine straight to a signed storage URL, so its bytes never pass through the API. The signed URL stays in a private file outside the workspace, and the file is checked against its digest before and after the upload, so a file that changes mid-upload is reported, not published. The resulting workspace File ID works for browser uploads like any other, so an agent can upload, for example, a 190 MB app bundle through a web form.
+- 3e061d6: Preserve default-following tool selection in schedules while retaining explicit choices and permission limits. Route ordinary notifications to the human whose authority the calling turn uses, including scheduled turns in an existing chat.
+- a22ed79: Preserve the seat_limit_reached error and bounded upgrade action through the public API error envelope and SDK.
+
+  Allow optional legacyStripePriceIds in subscription catalogs so existing subscriptions keep synchronizing after current Stripe prices change. New purchases still use only the current price.
+
 ## 3.4.0
 
 ### Minor Changes

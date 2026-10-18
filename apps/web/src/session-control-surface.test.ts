@@ -44,7 +44,7 @@ describe("session control surface architecture", () => {
 
   test("new-chat outage shows one calm notice instead of raw errors", async () => {
     const route = await source("routes/sessions-index.tsx");
-    expect(route).toContain("{OPENGENI_UPDATING_NOTICE}");
+    expect(route).toContain("{OPENGENI_UPDATING_NOTICE(t)}");
     expect(route).toContain("newSessionDraft.unavailable || connectionAccounts.unavailable");
     expect(route).toContain(
       "error: newSessionDraft.unavailable || newSessionDraft.conflict ? null : newSessionDraft.error",

@@ -481,11 +481,15 @@ test("a state sync before invoice payment keeps spending the already-granted all
 test("renewal expires the prior period without rollover; late ended grants expire immediately", async () => {
   if (!client || !shared) return;
   const { accountId } = await account();
-  const input = await activate(accountId, "pro", 100);
+  // The prior period must still be active while it is spent, or the debit is
+  // correctly PAYG against the top-up. Keep enough headroom for slow runners,
+  // then wait until the period has actually ended before renewing.
+  const input = await activate(accountId, "pro", 3_000);
   await grantPlanCreditPeriod(client.db, input);
   await topup(accountId, 30 * M);
+  expect(Date.now()).toBeLessThan(input.periodEnd.getTime());
   await debit(accountId, 50 * M);
-  await Bun.sleep(120);
+  await Bun.sleep(Math.max(0, input.periodEnd.getTime() - Date.now()) + 50);
   const next = { ...input, periodStart: new Date(), periodEnd: new Date(Date.now() + 3_600_000) };
   await sync(next);
   await grantPlanCreditPeriod(client.db, next);
@@ -825,6 +829,55 @@ test("expired invitations do not consume seats and organizations without plans r
   const other = await account();
   await Promise.all(Array.from({ length: 12 }, () => invite(other.accountId, other.subject)));
   expect((await getBillingBalance(client.db, other.accountId)).plan).toBeNull();
+}, 180_000);
+
+test("catalog setter validates legacy price aliases and rejects ambiguous current/historical prices", async () => {
+  if (!client || !shared) return;
+  const initial = await readSubscriptionPlanCatalog(client.db);
+  const catalog = initial.plans.map((plan) =>
+    plan.key === "pro"
+      ? { ...plan, stripePriceId: "price_pro_new", legacyStripePriceIds: ["price_pro_old"] }
+      : plan.key === "max"
+        ? { ...plan, stripePriceId: "price_max" }
+        : plan,
+  );
+  try {
+    await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(catalog)}, 'catalog-test', 'Allow an old price for existing subscribers')`;
+    expect(
+      (await readSubscriptionPlanCatalog(client.db)).plans.find((plan) => plan.key === "pro")
+        ?.legacyStripePriceIds,
+    ).toEqual(["price_pro_old"]);
+    for (const aliases of [
+      null,
+      "price_old",
+      [null],
+      [2],
+      [""],
+      [" price_old "],
+      ["x".repeat(201)],
+      ["price_max"],
+      ["price_pro_new"],
+      ["price_old", "price_old"],
+      Array.from({ length: 101 }, (_, n) => `price_${n}`),
+    ]) {
+      const invalid = catalog.map((plan) =>
+        plan.key === "pro" ? { ...plan, legacyStripePriceIds: aliases } : plan,
+      );
+      await expectState(async () => {
+        await shared!
+          .admin`select set_subscription_plan_catalog(${shared!.admin.json(invalid)}, 'catalog-test', 'Reject invalid or ambiguous price aliases')`;
+      }, "22023");
+    }
+    const sharedAlias = catalog.map((plan) =>
+      plan.key === "max" ? { ...plan, legacyStripePriceIds: ["price_pro_old"] } : plan,
+    );
+    await expectState(async () => {
+      await shared!
+        .admin`select set_subscription_plan_catalog(${shared!.admin.json(sharedAlias)}, 'catalog-test', 'Reject aliases shared between plans')`;
+    }, "22023");
+  } finally {
+    await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(initial.plans)}, 'catalog-test', 'Restore fixture catalog after alias validation')`;
+  }
 }, 180_000);
 
 test("catalog is owner-only, revisioned and immutable; changing credits only changes future grants", async () => {

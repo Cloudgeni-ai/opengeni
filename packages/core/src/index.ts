@@ -2,6 +2,7 @@ export { readSessionAttachmentFiles } from "./domain/session-file-access";
 export { verifyDirectModelAccess } from "./domain/direct-model-provider";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
+export * from "./domain/mcp-streamable-http-client";
 export * from "./domain/mcp-account-routes";
 export * from "./domain/session-connection-accounts";
 export * from "./domain/organization-integration-catalog";
@@ -100,6 +101,7 @@ export * from "./session-authorization";
 
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).
 export * from "./billing/limits";
+export * from "./domain/browser-retained-downloads";
 export * from "./billing/agent-run-admission";
 export * from "./billing/model-usage-settlement";
 export * from "./billing/model-call-admission";

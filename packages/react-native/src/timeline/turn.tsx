@@ -8,6 +8,7 @@ import {
   toolDisplayName,
   type TurnSummaryFacetConfiguration,
 } from "@opengeni/react/timeline-model";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { nativeLoadingPhrases } from "./composer-state";
 import {
   createContext,
@@ -86,13 +87,14 @@ export function useLiveNow(active: boolean): number {
 }
 
 function LiveElapsed({ since, style }: { since: string; style: TextStyle }) {
+  const t = useOpenGeniText();
   const startedAt = Date.parse(since);
   const now = useLiveNow(true);
   if (!Number.isFinite(startedAt)) return null;
   return (
     <Text
       style={[style, { fontVariant: ["tabular-nums"] }]}
-    >{` · ${formatElapsed(Math.max(0, now - startedAt))}`}</Text>
+    >{` · ${formatElapsed(t, Math.max(0, now - startedAt))}`}</Text>
   );
 }
 
@@ -133,6 +135,7 @@ export function TurnSummary({
 }: TurnSummaryProps) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const foldMemory = useContext(FoldMemoryContext);
   const registerSticky = useContext(StickyWorkHeaderContext);
   const releaseFollow = useReleaseFollow();
@@ -173,13 +176,14 @@ export function TurnSummary({
   const context = useMemo(
     () =>
       createTurnSummaryContext(
+        t,
         items,
         outcome,
         failureText,
         durationMs,
         contextCompactionCount ?? 0,
       ),
-    [items, outcome, failureText, durationMs, contextCompactionCount],
+    [t, items, outcome, failureText, durationMs, contextCompactionCount],
   );
   const definitions = useMemo(
     () => resolveTurnSummaryFacets(facetConfiguration),
@@ -221,7 +225,7 @@ export function TurnSummary({
       statusNode = (
         <Text
           style={text}
-        >{`${status.label ?? m.workedFor} ${formatElapsed(status.durationMs)}`}</Text>
+        >{`${status.label ?? m.workedFor} ${formatElapsed(t, status.durationMs)}`}</Text>
       );
     }
   } else if (status) {
@@ -486,7 +490,11 @@ export function PreparingState({
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
-  const phrases = nativeLoadingPhrases(m.loadingPhrases, phase);
+  const t = useOpenGeniText();
+  const phrases = useMemo(
+    () => nativeLoadingPhrases(t, m.loadingPhrases, phase),
+    [t, m.loadingPhrases, phase],
+  );
   const [index, setIndex] = useState(() => Math.floor(Math.random() * phrases.length));
   const [slow, setSlow] = useState(false);
   useEffect(() => {
@@ -542,6 +550,7 @@ export function RollingActivity({
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   const selected = rollingActivityItem(items, previousItem, mounted);
@@ -552,7 +561,7 @@ export function RollingActivity({
       style={{ flexDirection: "row", alignItems: "center", gap: 12, minWidth: 0, flex: 1 }}
       accessibilityLabel={
         item.kind === "tool-call"
-          ? toolDisplayName(item.name, item.display)
+          ? toolDisplayName(t, item.name, item.display)
           : item.kind === "reasoning"
             ? m.thinking
             : m.working

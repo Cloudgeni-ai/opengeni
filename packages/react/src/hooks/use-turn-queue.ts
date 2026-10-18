@@ -11,12 +11,15 @@ import type {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { normalizeError } from "../lib/error-message";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
+  projectionReadThrough,
   useDebouncedCallback,
   usePageLiveActivity,
   useSessionEventTrigger,
   type SessionEventFeedOptions,
 } from "./internal";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** Events that can change the authoritative prompt queue or effective control. */
 export function isTurnQueueEvent(event: Pick<SessionEvent, "type">): boolean {
@@ -102,6 +105,7 @@ export function useTurnQueue(
   sessionId: string | null | undefined,
   options: UseTurnQueueOptions = {},
 ): UseTurnQueueResult {
+  const t = useOpenGeniText();
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSession(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
@@ -247,6 +251,8 @@ export function useTurnQueue(
   }, [enabled, load, registerSessionReconciler, sessionId]);
 
   const scheduleRefresh = useDebouncedCallback(() => void load());
+  const freshSnapshot = stateTargetKey === targetKey ? snapshot : null;
+  const freshLoading = stateTargetKey === targetKey ? loading : enabled;
   useSessionEventTrigger(
     client,
     workspaceId,
@@ -256,8 +262,21 @@ export function useTurnQueue(
     {
       enabled,
       ...(options.events !== undefined ? { events: options.events } : {}),
+      readThrough: projectionReadThrough(freshSnapshot, freshLoading),
+      refresh: scheduleRefresh,
     },
     async () => await load(true),
+  );
+  // Until the first read lands, show the queue as it was when this
+  // conversation was last left (only when the host retains reads). Commands
+  // still act only on a fresh snapshot.
+  const retainedSnapshot = useRetainedSessionView(
+    client,
+    workspaceId,
+    sessionId,
+    "queue",
+    freshSnapshot,
+    { enabled, discard: stateTargetKey === targetKey && deniesRetainedView(error) },
   );
 
   const mutate = useCallback(
@@ -351,7 +370,7 @@ export function useTurnQueue(
       const turn = snapshotRef.current?.items.find((candidate) => candidate.id === turnId);
       if (targetKeyRef.current !== ownedTargetKey) return false;
       if (!turn) {
-        setMutationError(new Error("That queued prompt changed before Steer could be sent."));
+        setMutationError(new Error(t("hooks.useTurnQueue.thatQueuedPromptChangedBefore")));
         await load();
         return false;
       }
@@ -404,7 +423,7 @@ export function useTurnQueue(
       );
       return accepted;
     },
-    [client, load, mutate, sessionId, targetKey, workspaceId],
+    [client, load, mutate, sessionId, targetKey, workspaceId, t],
   );
 
   const removeTurn = useCallback(
@@ -422,7 +441,7 @@ export function useTurnQueue(
   );
 
   const identityMatches = stateTargetKey === targetKey;
-  const visibleSnapshot = identityMatches ? snapshot : null;
+  const visibleSnapshot = freshSnapshot ?? retainedSnapshot;
   const visiblePendingByTurn = identityMatches ? pendingByTurn : EMPTY_PENDING_BY_TURN;
   const mutating = useMemo(
     () => Object.keys(visiblePendingByTurn).length > 0,
@@ -441,7 +460,7 @@ export function useTurnQueue(
     activePersonalConnections: visibleSnapshot?.activePersonalConnections ?? [],
     effectiveControl: visibleSnapshot?.effectiveControl ?? null,
     stoppingPreviousAttempt: visibleSnapshot?.stoppingPreviousAttempt ?? false,
-    loading: identityMatches ? loading : enabled,
+    loading: freshLoading && retainedSnapshot === null,
     error: identityMatches ? error : null,
     refresh: load,
     moveTurn,

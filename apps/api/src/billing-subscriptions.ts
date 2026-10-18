@@ -44,6 +44,15 @@ export function selfServicePlan(plan: SubscriptionPlan): boolean {
   );
 }
 
+/** Price aliases identify existing subscriptions; they are never purchase targets. */
+function planForExistingPrice(plans: SubscriptionPlan[], priceId: string) {
+  return plans.find(
+    (plan) =>
+      selfServicePlan(plan) &&
+      (plan.stripePriceId === priceId || plan.legacyStripePriceIds?.includes(priceId)),
+  );
+}
+
 export function subscriptionItem(subscription: Stripe.Subscription): Stripe.SubscriptionItem {
   const item = subscription.items.data[0];
   if (
@@ -342,9 +351,7 @@ export class StripeSubscriptions {
         const target = await this.paidPlan(input.planKey);
         const subscription = await this.current(tx, input.accountId);
         const item = subscriptionItem(subscription);
-        const previous = (await this.store.catalog()).plans.find(
-          (plan) => plan.stripePriceId === item.price.id,
-        );
+        const previous = planForExistingPrice((await this.store.catalog()).plans, item.price.id);
         if (!previous || target.monthlyPriceMicros! <= previous.monthlyPriceMicros!) {
           throw new HTTPException(422, { message: "upgrade requires a higher-priced plan" });
         }
@@ -415,9 +422,7 @@ export class StripeSubscriptions {
         const target = await this.paidPlan(input.planKey);
         const subscription = await this.current(tx, input.accountId);
         const item = subscriptionItem(subscription);
-        const previous = (await this.store.catalog()).plans.find(
-          (plan) => plan.stripePriceId === item.price.id,
-        );
+        const previous = planForExistingPrice((await this.store.catalog()).plans, item.price.id);
         if (
           !previous ||
           target.monthlyPriceMicros! >= previous.monthlyPriceMicros! ||
@@ -632,14 +637,18 @@ export class StripeSubscriptions {
     // checkout. Later invoice.paid re-reads the active provider state normally.
     if (subscription.status === "incomplete") return;
     const item = subscriptionItem(subscription);
-    const plan = (await this.store.catalog()).plans.find(
-      (candidate) => candidate.stripePriceId === item.price.id && selfServicePlan(candidate),
-    );
+    const plan = planForExistingPrice((await this.store.catalog()).plans, item.price.id);
     if (!plan)
       throw new Error(`Subscription ${subscription.id} price is not in the self-service catalog`);
     if (
+      item.price.billing_scheme !== "per_unit" ||
       item.price.unit_amount === null ||
-      item.price.unit_amount * 10_000 !== plan.monthlyPriceMicros
+      !Number.isSafeInteger(item.price.unit_amount) ||
+      item.price.unit_amount <= 0 ||
+      // Legacy prices intentionally keep their original amount. Their explicit
+      // catalog alias supplies plan identity, not today's purchase price.
+      (item.price.id === plan.stripePriceId &&
+        item.price.unit_amount * 10_000 !== plan.monthlyPriceMicros)
     )
       throw new Error("subscription price does not match catalog");
     const supported: Record<string, Parameters<SubscriptionAccountStore["save"]>[0]["status"]> = {

@@ -440,6 +440,8 @@ message ExecResponse {
   bool timed_out = 4;
   // Wall-clock duration the process ran.
   uint64 duration_ms = 5;
+  // Positive native evidence that normal shell-exit cleanup stopped live children.
+  bool background_children_stopped = 6;
 }
 
 // =============================================================================
@@ -1177,6 +1179,7 @@ message OpExit {
   // Structured detail for failure_code (exact counters: retained bytes, the
   // IO error text, captured byte totals) — the out-of-band plane's food.
   map<string, string> failure_detail = 8;
+  bool background_children_stopped = 9;
 }
 
 // Transactional upload begin. Requires transactional_fs_write, not op_stream.
@@ -1457,14 +1460,30 @@ message AgentEvent {
     Heartbeat heartbeat = 10;
     GoingOffline going_offline = 11;
     AgentUpdateProgress agent_update_progress = 12;
+    OperationCompleted operation_completed = 13;
   }
+}
+
+// Lifecycle proof, independent of output attachment, credit and final ACK.
+// The authenticated events subject supplies the exact connection identity.
+// Output remains retained and must still be collected through OpAttach.
+message OperationCompleted {
+  string op_id = 1;
+  OpExit exit = 2;
 }
 
 // The control plane's ack of an AgentEvent (e.g. a HeartbeatAck).
 message AgentEventAck {
   oneof ack {
     HeartbeatAck heartbeat = 10;
+    OperationCompletedAck operation_completed = 11;
   }
+}
+
+// The server durably owns exit reconciliation. This acknowledges notification
+// delivery only: it grants no output custody, credit, final ACK or collection.
+message OperationCompletedAck {
+  string op_id = 1;
 }
 
 // =============================================================================

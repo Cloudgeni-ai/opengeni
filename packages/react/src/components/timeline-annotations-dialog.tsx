@@ -16,6 +16,7 @@ import {
   scrollAnnotationRowIntoList,
 } from "./timeline-annotation-layout";
 import { annotationDisplayOrdinal, cssEscapeAttribute } from "./timeline-annotation-shared";
+import { useOpenGeniText } from "../messages/runtime";
 
 function focusableElements(root: HTMLElement): HTMLElement[] {
   return [
@@ -50,6 +51,7 @@ export function TimelineAnnotationsDialog({
   onDismiss: (restoreFocus: boolean) => void;
   onCommit: () => void;
 }) {
+  const t = useOpenGeniText();
   const [unavailableId, setUnavailableId] = useState<string | null>(null);
   const [position, setPosition] = useState({ left: 12, top: 12, maxHeight: 0 });
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -181,7 +183,11 @@ export function TimelineAnnotationsDialog({
         ...portalStyle,
       }}
       className="og-root fixed z-[75] box-border flex w-[min(25rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 text-og-fg shadow-xl outline-hidden"
-      aria-label={editable ? "Edit quoted notes" : "Quoted notes"}
+      aria-label={
+        editable
+          ? t("timelineAnnotationsDialog.editQuotedNotes")
+          : t("timelineAnnotationsDialog.quotedNotes")
+      }
     >
       <div
         ref={headerRef}
@@ -192,7 +198,7 @@ export function TimelineAnnotationsDialog({
         <button
           type="button"
           className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border-0 bg-transparent text-og-fg-muted outline-hidden hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-11"
-          aria-label="Close"
+          aria-label={t("timelineAnnotationsDialog.close")}
           onClick={() => onDismiss(true)}
         >
           <XIcon className="size-3.5" aria-hidden="true" />
@@ -209,13 +215,13 @@ export function TimelineAnnotationsDialog({
             <section
               key={annotation.id}
               data-og-annotation-id={annotation.id}
-              aria-label={`Annotation ${ordinal}`}
+              aria-label={t("timelineAnnotationsDialog.annotationOrdinal", { ordinal })}
             >
               <AnnotationAccentRow>
                 <div className="flex items-start gap-1">
                   <div className="min-w-0 flex-1">
                     <p className="mb-0.5 text-og-xs font-medium tabular-nums text-og-fg-subtle">
-                      Annotation {ordinal}
+                      {t("timelineAnnotationsDialog.annotationOrdinal", { ordinal })}
                     </p>
                     <AnnotationQuoteSourceButton
                       annotation={annotation}
@@ -228,7 +234,9 @@ export function TimelineAnnotationsDialog({
                     <button
                       type="button"
                       className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border-0 bg-transparent text-og-fg-subtle outline-hidden hover:bg-og-surface-1 hover:text-og-status-failed focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-11"
-                      aria-label={`Remove annotation ${ordinal}`}
+                      aria-label={t("timelineAnnotationsDialog.removeAnnotationOrdinal", {
+                        ordinal,
+                      })}
                       onClick={() => onRemove(annotation.id)}
                     >
                       <XIcon className="size-3.5" aria-hidden="true" />
@@ -237,7 +245,7 @@ export function TimelineAnnotationsDialog({
                 </div>
                 {unavailableId === annotation.id ? (
                   <p role="status" className="text-og-xs text-og-status-waiting">
-                    Source is outside the loaded timeline window.
+                    {t("timelineAnnotationsDialog.sourceIsOutsideTheLoaded")}
                   </p>
                 ) : null}
                 {editable && onUpdate ? (

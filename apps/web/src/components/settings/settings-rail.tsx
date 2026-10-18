@@ -5,6 +5,7 @@
 // organization and keeps the same kind of page. Workspace, organization and
 // personal settings all draw this same rail, so a page never moves to another
 // rail and the scope of every page is visible.
+import { t } from "@/lib/console-text";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3Icon,
@@ -234,7 +235,7 @@ export function useSettingsRail(input: {
     input.organizationName ??
     managedWorkspace?.organizationName ??
     knownName ??
-    (accountId ? orgLabel(accountId, context.accessContext.accountGrants) : null);
+    (accountId ? orgLabel(t, accountId, context.accessContext.accountGrants) : null);
   // Models stays named when it refuses someone (members choose models in the
   // composer), so the page and the rail don't jump to another page.
   const organizationSection =

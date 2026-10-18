@@ -128,6 +128,29 @@ export async function actRun<T>(run: () => T | Promise<T>): Promise<T> {
   return result;
 }
 
+/**
+ * Mount `node` with real browser scheduling instead of `act`, which holds every
+ * update until its scope ends. Use it to measure when a render actually commits;
+ * `unmount` returns to `act` for cleanup.
+ */
+export function mountWithRealScheduling(node: ReactNode): { unmount: () => Promise<void> } {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+  const root = createRoot(container);
+  root.render(node);
+  return {
+    unmount: async () => {
+      globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  };
+}
+
 export type RenderedComponent = {
   /** The mount container — query it with `.querySelector` etc. */
   container: HTMLElement;

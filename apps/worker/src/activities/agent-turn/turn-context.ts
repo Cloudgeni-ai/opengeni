@@ -216,6 +216,8 @@ export type SubscriptionCoreTurn = {
 export type CodexSubscriptionCoreTurn = SubscriptionCoreTurn;
 
 export type ProviderTurnState = {
+  /** Survives step progress and is persisted on recovery, never inherited by another turn. */
+  persistentModelTransportHttpOnly?: boolean;
   // The Codex account this turn runs on (pin > workspace active), resolved once
   // a codex-billed turn is confirmed and threaded into the token resolver.
   effectiveCodexCredentialId: string | null;

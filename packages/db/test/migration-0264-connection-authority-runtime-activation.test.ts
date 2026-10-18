@@ -5,7 +5,7 @@ import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
 import { sql as query } from "drizzle-orm";
 import postgres from "postgres";
 import { createDb, withSessionRlsActorContext } from "../src/index";
-import { withSessionActivityRlsContext } from "../src/database";
+import { withLegacySessionActivityRlsContext as withSessionActivityRlsContext } from "./fixtures/legacy-session-activity";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 
 import { migrate } from "../src/migrate";
@@ -422,7 +422,9 @@ describe("migration 0264 connection authority runtime activation", () => {
       await sql.end({ timeout: 1 });
       await blank.release();
     }
-  }, 180_000);
+    // Building the historical schema and replaying its withheld authority tail
+    // are separate ledger passes; allow both to finish on shared test hosts.
+  }, 300_000);
 
   // Current sender-owned runtime coverage lives in sender-connection-accounts.test.ts.
   // Conversation-grant execution was retired by migration 0478.

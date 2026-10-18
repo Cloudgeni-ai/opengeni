@@ -107,11 +107,8 @@ export class SqliteBrowserWorkingRuntimeJournal {
     previousOperationId?: string,
   ) {
     const { failureCode: _failureCode, ...launch } = input;
-    const recoveryDigest = previousOperationId
-      ? createHash("sha256").update(`working-runtime-recovery:${previousOperationId}`).digest("hex")
-      : null;
-    const operationId = recoveryDigest
-      ? `${recoveryDigest.slice(0, 8)}-${recoveryDigest.slice(8, 12)}-4${recoveryDigest.slice(13, 16)}-8${recoveryDigest.slice(17, 20)}-${recoveryDigest.slice(20, 32)}`
+    const operationId = previousOperationId
+      ? recoveryOperationId(previousOperationId)
       : randomUUID();
     const receipt: BrowserWorkingRuntimeReceipt = {
       ...launch,
@@ -263,6 +260,61 @@ export class SqliteBrowserWorkingRuntimeJournal {
     return this.readopt(base, failed);
   }
 
+  /** The state an unsettled recovery left behind, when the latest receipt is
+   * one. A recovery (a reattach to, or relaunch of, the browser an exact
+   * earlier receipt recorded) that a driver failure or controller restart cut
+   * short leaves its launch receipt unsettled with no process recorded; its
+   * `base` is that earlier receipt. A reinstatement of such a base that was
+   * itself cut short is returned as `reinstating`. Anything else is null. */
+  interruptedRecovery(latest: BrowserWorkingRuntimeReceipt | null): InterruptedRecovery | null {
+    if (!latest || (latest.state !== "prepared" && latest.state !== "dispatched")) return null;
+    const pending: BrowserWorkingRuntimeReceipt = latest;
+    if (isInterruptedLaunchReceipt(latest)) {
+      const base = this.journal.findLatest(
+        (receipt) =>
+          recordedProcessReceipt(receipt) &&
+          recoveryOperationId(receipt.operationId) === latest.operationId,
+      )?.receipt;
+      return base && recordedProcessReceipt(base)
+        ? { kind: "interrupted", base, interrupted: latest }
+        : null;
+    }
+    if (pending.process === null) return null;
+    const interrupted = this.journal.findLatest(
+      (receipt) =>
+        isInterruptedLaunchReceipt(receipt) &&
+        reinstatementOperationId(receipt.operationId) === pending.operationId,
+    );
+    return interrupted ? { kind: "reinstating", receipt: pending } : null;
+  }
+
+  /** Make the exact receipt an interrupted recovery started from the latest
+   * again, so the browser it records can be recovered once more. The caller
+   * must first prove that browser is still that live process, or that it
+   * exited and no process uses the profile. The interrupted launch stays as
+   * history and is never settled failed: a failed launch reads as abandoned.
+   * Each step is idempotent, so a crash between writes is finished by the
+   * next recovery. */
+  reinstate(recovery: InterruptedRecovery): BrowserWorkingRuntimeReceipt {
+    let receipt: BrowserWorkingRuntimeReceipt;
+    if (recovery.kind === "interrupted") {
+      const { failureCode: _failureCode, ...base } = recovery.base;
+      receipt = {
+        ...base,
+        operationId: reinstatementOperationId(recovery.interrupted.operationId),
+        launchAttemptId: randomUUID(),
+        state: "prepared",
+      };
+      this.write(receipt);
+    } else {
+      receipt = recovery.receipt;
+    }
+    if (receipt.state === "prepared") this.write({ ...receipt, state: "dispatched" });
+    const completed: BrowserWorkingRuntimeReceipt = { ...receipt, state: "completed" };
+    this.write(completed);
+    return completed;
+  }
+
   close() {
     this.journal.close();
   }
@@ -366,6 +418,46 @@ function adoptedCopyBase(
 
 export function boundedFailureCode(value: unknown): string {
   return typeof value === "string" && FAILURE_CODE.test(value) ? value : "internal";
+}
+
+/** A completed launch or suspension that recorded its browser process: the
+ * receipts a recovery starts from. */
+export type RecordedProcessReceipt = BrowserWorkingRuntimeReceipt & {
+  process: OwnedManagedBrowserProcess;
+};
+
+/** See {@link SqliteBrowserWorkingRuntimeJournal.interruptedRecovery}. */
+export type InterruptedRecovery =
+  | {
+      kind: "interrupted";
+      base: RecordedProcessReceipt;
+      interrupted: BrowserWorkingRuntimeReceipt;
+    }
+  | { kind: "reinstating"; receipt: BrowserWorkingRuntimeReceipt };
+
+export function recordedProcessReceipt(
+  receipt: BrowserWorkingRuntimeReceipt,
+): receipt is RecordedProcessReceipt {
+  return (
+    (receipt.intent === "launch" || receipt.intent === "suspend") &&
+    receipt.state === "completed" &&
+    receipt.process !== null
+  );
+}
+
+function derivedOperationId(purpose: string, operationId: string): string {
+  const hash = createHash("sha256").update(`${purpose}:${operationId}`).digest("hex");
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
+
+/** The launch that recovers the browser `operationId` recorded. */
+function recoveryOperationId(operationId: string): string {
+  return derivedOperationId("working-runtime-recovery", operationId);
+}
+
+/** The receipt that reinstates a base after the recovery `operationId` was cut short. */
+function reinstatementOperationId(operationId: string): string {
+  return derivedOperationId("working-runtime-reinstate", operationId);
 }
 
 const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/u;

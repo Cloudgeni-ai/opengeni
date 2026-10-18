@@ -12,6 +12,7 @@ import {
   truncateAnnotationQuote,
   visibleClientRect,
 } from "./timeline-annotation-shared";
+import { useOpenGeniText } from "../messages/runtime";
 
 type SelectionCandidate = {
   annotation: DraftTimelineAnnotation;
@@ -161,6 +162,7 @@ export function TimelineAnnotationSelection({
   sources: ReadonlyMap<string, TimelineAnnotationSourceDescriptor>;
   onAnnotate?: ((annotation: DraftTimelineAnnotation) => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const [candidate, setCandidate] = useState<SelectionCandidate | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const initialSelectionObservedRef = useRef(false);
@@ -249,7 +251,7 @@ export function TimelineAnnotationSelection({
       data-og-annotation-popover=""
       style={{ left: candidate.left, top: candidate.top, ...portalStyle }}
       className="og-root fixed z-[80] flex max-w-[min(18rem,calc(100vw-1.5rem))] -translate-x-1/2 items-start gap-2 rounded-2xl border border-og-border bg-og-surface-1 px-3 py-2 text-og-sm font-medium text-og-fg shadow-xl outline-hidden transition hover:border-og-accent/40 hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
-      aria-label={`Add a note about “${preview}”`}
+      aria-label={t("timelineAnnotationSelection.addANoteAboutPreview", { preview })}
       title={candidate.annotation.quote}
       onPointerDown={(event) => event.preventDefault()}
       onClick={() => {
@@ -260,7 +262,7 @@ export function TimelineAnnotationSelection({
     >
       <QuoteIcon className="mt-0.5 size-3.5 shrink-0 text-og-accent" aria-hidden="true" />
       <span className="min-w-0 text-left">
-        <span className="block leading-5">Add note</span>
+        <span className="block leading-5">{t("timelineAnnotationSelection.addNote")}</span>
         <span className="mt-0.5 block truncate text-og-xs font-normal text-og-fg-muted">
           {preview}
         </span>

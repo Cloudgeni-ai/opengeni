@@ -849,6 +849,32 @@ pub(crate) struct OpCgroupHandle {
 
 #[cfg(target_os = "linux")]
 impl OpCgroupHandle {
+    /// cgroup.procs omits zombies and includes session-detached descendants.
+    /// Descendant cgroups are part of the same recursive kill boundary.
+    pub(crate) fn has_live_children(&self, anchor_pid: i32) -> std::io::Result<bool> {
+        let Some(dir) = &self.dir else {
+            return Ok(false);
+        };
+        let mut pending = vec![dir.clone()];
+        while let Some(dir) = pending.pop() {
+            let processes = std::fs::read_to_string(dir.join("cgroup.procs"))?;
+            if processes
+                .lines()
+                .filter_map(|pid| pid.parse::<i32>().ok())
+                .any(|pid| pid != anchor_pid)
+            {
+                return Ok(true);
+            }
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    pending.push(entry.path());
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Gives the leaf to a successor process image without killing or removing
     /// it. A CPU lease is deliberately leaked: the quota must stay enforced
     /// until the successor re-acquires it, and `exec` ends this image's count.
@@ -1039,9 +1065,9 @@ impl OpCgroupHandle {
 
 /// Verifies the manager-owned startup topology and returns active [`OpCgroups`], or `None` (with a
 /// once-logged reason) when isolation is unavailable — the agent then serves with
-/// today's behavior. Call this ONCE at startup, before any host exec or
-/// agent-infrastructure child (for example Xvfb) is spawned, so only host work
-/// lands in per-op leaves.
+/// today's behavior. Call this ONCE per process image at startup, before new
+/// host execs are spawned. Infrastructure children (for example Xvfb) may
+/// already inhabit the supervisor leaf after an in-place exec handover.
 ///
 /// `handed_over` lists operation leaves whose commands a predecessor process
 /// image handed to this one; they are kept for adoption instead of reclaimed.
@@ -1151,25 +1177,10 @@ fn discover_delegated_service() -> Option<CgroupStartup> {
         );
         return None;
     }
-    let current_pid = std::process::id();
-    let sole_supervisor_member = std::fs::read_to_string(supervisor_dir.join("cgroup.procs"))
-        .ok()
-        .and_then(|contents| {
-            let members = contents
-                .split_whitespace()
-                .map(str::parse::<u32>)
-                .collect::<Result<Vec<_>, _>>()
-                .ok()?;
-            (members == [current_pid]).then_some(())
-        })
-        .is_some();
-    if !sole_supervisor_member {
-        tracing::warn!(
-            dir = %supervisor_dir.display(),
-            "OOM cgroup isolation unavailable: the supervisor subgroup is not owned solely by this runner process"
-        );
-        return None;
-    }
+    // /proc/self/cgroup already identifies our supervisor leaf. An exec update
+    // preserves its infrastructure children, so exclusive process membership is
+    // neither required nor stable. Only the delegated root must remain empty:
+    // enabling its controllers must not move or disrupt any supervisor process.
     let service_root_empty = std::fs::read_to_string(service_dir.join("cgroup.procs"))
         .is_ok_and(|contents| contents.split_whitespace().next().is_none());
     if !service_root_empty {

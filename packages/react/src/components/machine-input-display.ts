@@ -1,22 +1,25 @@
 import { isSessionId } from "../timeline/agent-identity";
 import { namedAgentTitle, type AgentTitleParts } from "../timeline/platform-activity-presentation";
 import type { MachineInputMember } from "../timeline/types";
+import { type OpenGeniText } from "../messages/runtime";
 
-export const MACHINE_INPUT_META: Record<MachineInputMember["kind"], string> = {
-  scheduled_occurrence: "Scheduled update",
-  goal_continuation: "Goal continued",
-  background_command_result: "Command result received",
-  session_wait_timeout: "Wait ended",
-  agent_message: "Agent update",
-  agent_steer_instruction: "Agent direction",
-  child_terminal_result: "Agent result received",
-  media_generation_result: "Video update",
-  child_requires_action: "Agent needs input",
-  child_requires_action_resolved: "Agent unblocked",
-  child_paused: "Agent paused",
-  child_waiting_capacity: "Agent waiting for capacity",
-  child_progress: "Agent progress",
-};
+export const MACHINE_INPUT_META = (
+  t: OpenGeniText,
+): Record<MachineInputMember["kind"], string> => ({
+  scheduled_occurrence: t("machineInputDisplay.scheduledUpdate"),
+  goal_continuation: t("machineInputDisplay.goalContinued"),
+  background_command_result: t("machineInputDisplay.commandResultReceived"),
+  session_wait_timeout: t("machineInputDisplay.waitEnded"),
+  agent_message: t("machineInputDisplay.agentUpdate"),
+  agent_steer_instruction: t("machineInputDisplay.agentDirection"),
+  child_terminal_result: t("machineInputDisplay.agentResultReceived"),
+  media_generation_result: t("machineInputDisplay.videoUpdate"),
+  child_requires_action: t("machineInputDisplay.agentNeedsInput"),
+  child_requires_action_resolved: t("machineInputDisplay.agentUnblocked"),
+  child_paused: t("machineInputDisplay.agentPaused"),
+  child_waiting_capacity: t("machineInputDisplay.agentWaitingForCapacity"),
+  child_progress: t("machineInputDisplay.agentProgress"),
+});
 
 /**
  * Collapsed landmark label for a coalesced machine-input batch.
@@ -25,11 +28,12 @@ export const MACHINE_INPUT_META: Record<MachineInputMember["kind"], string> = {
  * ("Update from Release audit", "3 updates from Audit and Flake · Wait ended").
  */
 export function machineInputBatchLabel(
+  t: OpenGeniText,
   members: readonly MachineInputMember[],
   titleFor?: ((sessionId: string) => string | null) | undefined,
 ): string {
-  if (members.length === 0) return "Updates";
-  const named = titleFor ? namedAgentBatchLabel(members, titleFor) : null;
+  if (members.length === 0) return t("machineInputDisplay.updates");
+  const named = titleFor ? namedAgentBatchLabel(t, members, titleFor) : null;
   if (named) return named;
   const counts = new Map<MachineInputMember["kind"], number>();
   for (const member of members) {
@@ -40,43 +44,74 @@ export function machineInputBatchLabel(
     const n = members.length;
     switch (kind) {
       case "background_command_result":
-        return n === 1 ? "Command result received" : `${n} command results received`;
+        return n === 1
+          ? t("machineInputDisplay.commandResultReceived")
+          : t("machineInputDisplay.commandResultsReceivedCount", { count: n });
       case "session_wait_timeout":
-        return n === 1 ? "Wait ended" : `${n} waits ended`;
+        return n === 1
+          ? t("machineInputDisplay.waitEnded")
+          : t("machineInputDisplay.waitsEndedCount", { count: n });
       case "child_terminal_result":
-        return n === 1 ? "Agent result received" : `${n} agent results received`;
+        return n === 1
+          ? t("machineInputDisplay.agentResultReceived")
+          : t("machineInputDisplay.agentResultsReceivedCount", { count: n });
       case "goal_continuation":
-        return n === 1 ? "Goal continued" : `${n} goal continuations`;
+        return n === 1
+          ? t("machineInputDisplay.goalContinued")
+          : t("machineInputDisplay.goalContinuationsCount", { count: n });
       case "scheduled_occurrence":
-        return n === 1 ? "Scheduled update" : `${n} scheduled updates`;
+        return n === 1
+          ? t("machineInputDisplay.scheduledUpdate")
+          : t("machineInputDisplay.scheduledUpdatesCount", { count: n });
       case "agent_message":
-        return n === 1 ? "Agent update" : `${n} agent updates`;
+        return n === 1
+          ? t("machineInputDisplay.agentUpdate")
+          : t("machineInputDisplay.agentUpdatesCount", { count: n });
       case "agent_steer_instruction":
-        return n === 1 ? "Agent direction" : `${n} agent directions`;
+        return n === 1
+          ? t("machineInputDisplay.agentDirection")
+          : t("machineInputDisplay.agentDirectionsCount", { count: n });
       case "media_generation_result":
-        return n === 1 ? "Video ready" : `${n} video updates`;
+        return n === 1
+          ? t("machineInputDisplay.videoReady")
+          : t("machineInputDisplay.videoUpdatesCount", { count: n });
       case "child_requires_action":
-        return n === 1 ? "Agent needs input" : `${n} agents need input`;
+        return n === 1
+          ? t("machineInputDisplay.agentNeedsInput")
+          : t("machineInputDisplay.agentsNeedInputCount", { count: n });
       case "child_requires_action_resolved":
-        return n === 1 ? "Agent unblocked" : `${n} agents unblocked`;
+        return n === 1
+          ? t("machineInputDisplay.agentUnblocked")
+          : t("machineInputDisplay.agentsUnblockedCount", { count: n });
       case "child_paused":
-        return n === 1 ? "Agent paused" : `${n} agents paused`;
+        return n === 1
+          ? t("machineInputDisplay.agentPaused")
+          : t("machineInputDisplay.agentsPausedCount", { count: n });
       case "child_waiting_capacity":
-        return n === 1 ? "Agent waiting for capacity" : `${n} agents waiting for capacity`;
+        return n === 1
+          ? t("machineInputDisplay.agentWaitingForCapacity")
+          : t("machineInputDisplay.agentsWaitingForCapacityCount", { count: n });
       case "child_progress":
-        return n === 1 ? "Agent progress" : `${n} agent progress notes`;
+        return n === 1
+          ? t("machineInputDisplay.agentProgress")
+          : t("machineInputDisplay.agentProgressNotesCount", { count: n });
     }
   }
   const parts = [...counts.entries()].map(([kind, count]) => {
-    const label = MACHINE_INPUT_META[kind];
-    return count === 1 ? label : `${count}× ${label}`;
+    const label = MACHINE_INPUT_META(t)[kind];
+    return count === 1 ? label : t("machineInputDisplay.countTimesLabel", { count, label });
   });
   const preview = parts.slice(0, 2).join(", ");
   const suffix = parts.length > 2 ? ", …" : "";
-  return `${members.length} updates · ${preview}${suffix}`;
+  return t("machineInputDisplay.lengthUpdatesPreviewSuffix", {
+    length: members.length,
+    preview,
+    suffix,
+  });
 }
 
 function namedAgentBatchLabel(
+  t: OpenGeniText,
   members: readonly MachineInputMember[],
   titleFor: (sessionId: string) => string | null,
 ): string | null {
@@ -92,20 +127,27 @@ function namedAgentBatchLabel(
   const others = members.filter((member) => !isAgentMember(member));
   const agentPart =
     agents.length === 1
-      ? agentMemberTitle(agents[0]!, names[0]!).text
-      : `${agents.length} updates from ${
-          names.length === 1
-            ? names[0]
-            : names.length === 2
-              ? `${names[0]} and ${names[1]}`
-              : `${names.length} agents`
-        }`;
+      ? agentMemberTitle(t, agents[0]!, names[0]!).text
+      : names.length === 1
+        ? t("machineInputDisplay.updatesFromName", { count: agents.length, name: names[0]! })
+        : names.length === 2
+          ? t("machineInputDisplay.updatesFromTwoNames", {
+              count: agents.length,
+              first: names[0]!,
+              second: names[1]!,
+            })
+          : t("machineInputDisplay.updatesFromAgents", {
+              count: agents.length,
+              agents: names.length,
+            });
   if (others.length === 0) return agentPart;
   const counts = new Map<MachineInputMember["kind"], number>();
   for (const member of others) counts.set(member.kind, (counts.get(member.kind) ?? 0) + 1);
   const rest = [...counts.entries()]
     .map(([kind, count]) =>
-      count === 1 ? MACHINE_INPUT_META[kind] : `${count}× ${MACHINE_INPUT_META[kind]}`,
+      count === 1
+        ? MACHINE_INPUT_META(t)[kind]
+        : t("machineInputDisplay.countTimesLabel", { count, label: MACHINE_INPUT_META(t)[kind] }),
     )
     .join(", ");
   return `${agentPart} · ${rest}`;
@@ -133,11 +175,12 @@ export function readableMachineInputSource(sourceId: string): string | null {
 
 /** True when a cleaned single-member summary adds meaning beyond the pill label. */
 export function machineInputSummaryIsUseful(
+  t: OpenGeniText,
   kind: MachineInputMember["kind"],
   cleanedSummary: string,
 ): boolean {
   if (!cleanedSummary) return false;
-  const label = MACHINE_INPUT_META[kind].toLowerCase();
+  const label = MACHINE_INPUT_META(t)[kind].toLowerCase();
   const text = cleanedSummary.toLowerCase();
   if (text === label || text === `${label}.`) return false;
   // Generic child-finished boilerplate after UUID scrub is still noise.
@@ -180,31 +223,68 @@ export function agentMemberSessionId(
  * idle, so it reads "Result from …", never "finished".
  */
 export function agentMemberTitle(
+  t: OpenGeniText,
   member: Pick<MachineInputMember, "kind" | "classification">,
   name: string | null,
 ): AgentTitleParts {
-  const fallback = MACHINE_INPUT_META[member.kind];
+  const fallback = MACHINE_INPUT_META(t)[member.kind];
   switch (member.kind) {
     case "agent_message":
-      return namedAgentTitle(name, "Update from ", "", fallback);
+      return namedAgentTitle(
+        name,
+        (agent) => t("machineInputDisplay.updateFromName", { name: agent }),
+        fallback,
+      );
     case "agent_steer_instruction":
-      return namedAgentTitle(name, "Direction from ", "", fallback);
+      return namedAgentTitle(
+        name,
+        (agent) => t("machineInputDisplay.directionFromName", { name: agent }),
+        fallback,
+      );
     case "child_terminal_result":
       return member.classification === "failure"
-        ? namedAgentTitle(name, "", " failed", "Agent failed")
-        : namedAgentTitle(name, "Result from ", "", fallback);
+        ? namedAgentTitle(
+            name,
+            (agent) => t("machineInputDisplay.nameFailed", { name: agent }),
+            t("machineInputDisplay.agentFailed"),
+          )
+        : namedAgentTitle(
+            name,
+            (agent) => t("machineInputDisplay.resultFromName", { name: agent }),
+            fallback,
+          );
     case "child_requires_action":
-      return namedAgentTitle(name, "", " needs input", fallback);
+      return namedAgentTitle(
+        name,
+        (agent) => t("machineInputDisplay.nameNeedsInput", { name: agent }),
+        fallback,
+      );
     case "child_requires_action_resolved":
-      return namedAgentTitle(name, "", " unblocked", fallback);
+      return namedAgentTitle(
+        name,
+        (agent) => t("machineInputDisplay.nameUnblocked", { name: agent }),
+        fallback,
+      );
     case "child_paused":
-      return namedAgentTitle(name, "", " paused", fallback);
+      return namedAgentTitle(
+        name,
+        (agent) => t("machineInputDisplay.namePaused", { name: agent }),
+        fallback,
+      );
     case "child_waiting_capacity":
-      return namedAgentTitle(name, "", " is waiting for capacity", fallback);
+      return namedAgentTitle(
+        name,
+        (agent) => t("machineInputDisplay.nameIsWaitingForCapacity", { name: agent }),
+        fallback,
+      );
     case "child_progress":
-      return namedAgentTitle(name, "Progress from ", "", fallback);
+      return namedAgentTitle(
+        name,
+        (agent) => t("machineInputDisplay.progressFromName", { name: agent }),
+        fallback,
+      );
     default:
-      return namedAgentTitle(null, "", "", fallback);
+      return namedAgentTitle(null, () => fallback, fallback);
   }
 }
 
@@ -235,7 +315,10 @@ function cleanLines(text: string): string {
  * carries them, without the model-facing "Worker <id> …" framing. `preview`
  * is the most useful single passage; `body` is everything worth reading.
  */
-export function agentMemberText(member: Pick<MachineInputMember, "kind" | "summary">): {
+export function agentMemberText(
+  t: OpenGeniText,
+  member: Pick<MachineInputMember, "kind" | "summary">,
+): {
   preview: string;
   body: string;
 } {
@@ -258,7 +341,11 @@ export function agentMemberText(member: Pick<MachineInputMember, "kind" | "summa
     case "child_paused": {
       const match = /^Worker \S+ was paused by (.+?)\.(?:\s*Reason:\s*([\s\S]*))?$/.exec(raw);
       if (!match) return same(cleanLines(raw));
-      return same(match[2]?.trim() ? cleanLines(match[2]) : `Paused by ${match[1]}`);
+      return same(
+        match[2]?.trim()
+          ? cleanLines(match[2])
+          : t("machineInputDisplay.pausedByValue", { value: match[1] }),
+      );
     }
     case "child_waiting_capacity":
       return same(capitalize(cleanLines(raw.replace(/^Worker \S+ is\s+/, ""))));
@@ -279,9 +366,9 @@ export function agentMemberText(member: Pick<MachineInputMember, "kind" | "summa
         rest
           .map((line) =>
             line
-              .replace(/^Worker goal:\s*/, "Goal: ")
-              .replace(/^Completion evidence:\s*/, "Evidence: ")
-              .replace(/^Pause rationale:\s*/, "Paused because: "),
+              .replace(/^Worker goal:\s*/, `${t("machineInputDisplay.goalLabel")} `)
+              .replace(/^Completion evidence:\s*/, `${t("machineInputDisplay.evidenceLabel")} `)
+              .replace(/^Pause rationale:\s*/, `${t("machineInputDisplay.pausedBecauseLabel")} `),
           )
           .join("\n"),
       );

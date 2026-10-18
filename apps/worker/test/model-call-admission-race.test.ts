@@ -347,3 +347,37 @@ test("a refused admission is never joined by a later transport check", async () 
     barrier.close();
   }
 });
+
+test("the producer reports its settlement wait and admission time on its own clock", async () => {
+  let clock = 0;
+  const observed: Array<[string, number]> = [];
+  const admitted = deferred();
+  const barrier = createModelCallAdmission({
+    signal: new AbortController().signal,
+    admit: () => admitted.promise,
+    observe: (phase, seconds) => observed.push([phase, seconds]),
+    now: () => clock,
+  });
+  try {
+    const event = {
+      type: "response_done",
+      response: { id: "r1", usage: {}, output: [] },
+    } as Parameters<typeof barrier.onModelResponse>[0];
+    void barrier.onModelResponse(event);
+    const entry = barrier.beforeModelRequest("model_entry");
+    clock = 250;
+    barrier.settle({ type: "raw_model_stream_event", data: event });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    clock = 400;
+    admitted.resolve();
+    await entry;
+    // A transport check joins the call's admission and reports nothing new.
+    await barrier.beforeModelRequest("transport");
+    expect(observed).toEqual([
+      ["settlement_wait", 0.25],
+      ["admission", 0.15],
+    ]);
+  } finally {
+    barrier.close();
+  }
+});

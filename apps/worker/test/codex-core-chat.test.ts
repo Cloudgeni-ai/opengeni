@@ -52,10 +52,7 @@ import {
   type TurnCredentialLeaseDeps,
 } from "../src/activities/agent-turn/credential-leases";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
-import {
-  CodexIncludedUsageExhaustedError,
-  CodexIncludedUsageUnknownError,
-} from "../src/activities/agent-turn/codex-credit-policy";
+import { CodexIncludedUsageExhaustedError } from "../src/activities/agent-turn/codex-credit-policy";
 import {
   coreCodexFailoverDisposition,
   SUBSCRIPTION_CORE_CODEX_TURN_REFUSAL_LIMIT,
@@ -98,13 +95,12 @@ afterEach(() => {
 });
 
 /**
- * The context checkpoint request when the pre-dispatch usage check cannot
- * verify included usage: the credit guard refuses inside the Codex
- * transport's token resolution, the OpenAI client wraps that refusal, and the
- * runtime wraps the result as a compaction provider failure. Nothing was sent.
+ * The context checkpoint request refused by the included-usage policy before
+ * anything is sent: the Codex transport rejects, the OpenAI client wraps that
+ * refusal, and the runtime wraps the result as a compaction provider failure.
  */
-async function checkpointRequestUsageVerificationFailure(
-  refusal: () => Error = () => new CodexIncludedUsageUnknownError(),
+async function checkpointRequestCreditPolicyRefusal(
+  refusal: () => Error = () => new CodexIncludedUsageExhaustedError(3600),
 ): Promise<CompactionProviderResponseError> {
   let dispatched = 0;
   const client = new OpenAI({
@@ -138,13 +134,10 @@ async function checkpointRequestUsageVerificationFailure(
 }
 
 describe("checkpoint request refused by the included-usage policy", () => {
-  test.each([
-    ["unverifiable", () => new CodexIncludedUsageUnknownError()],
-    ["exhausted", () => new CodexIncludedUsageExhaustedError(3600)],
-  ] as const)(
+  test.each([["exhausted", () => new CodexIncludedUsageExhaustedError(3600)]] as const)(
     "%s included usage recovers the same turn instead of ending it",
     async (_label, refusal) => {
-      const error = await checkpointRequestUsageVerificationFailure(refusal);
+      const error = await checkpointRequestCreditPolicyRefusal(refusal);
       expect(error.code).toBe(refusal().code);
       expect(turnErrors.shouldRecoverCompactionProviderFailure(error)).toBe(true);
     },
@@ -871,10 +864,7 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
     };
   }
 
-  test.each([
-    ["usage_verification_policy", { kind: "rate_limit", cooldownSeconds: 60 }],
-    ["included_usage_policy", { kind: "quota", cooldownSeconds: 60 }],
-  ] as const)(
+  test.each([["included_usage_policy", { kind: "quota", cooldownSeconds: 60 }]] as const)(
     "credit-policy refusal (%s) keeps a stored exhausted weekly window; a usage reading still replaces it",
     async (origin, failure) => {
       const now = new Date("2026-10-08T12:00:00Z");
@@ -884,18 +874,13 @@ describe("core Codex usage, quota and refusal bookkeeping", () => {
         resetsAt: weeklyReset,
       });
       const observation = await creditPolicyObservation({ ...failure, origin }, now);
-      // The write itself: a 60-second rate-limit hold with no windows when
-      // usage could not be verified; one exhausted `included_usage` window
-      // (and no deadline) when included usage is exhausted.
+      // The write itself: one exhausted `included_usage` window and no deadline.
       const hold = now.getTime() + 60_000;
       expect(observation).toEqual({
-        windows:
-          origin === "included_usage_policy"
-            ? [{ id: "included_usage", usedPercent: 100, resetsAt: hold, status: "exhausted" }]
-            : [],
+        windows: [{ id: "included_usage", usedPercent: 100, resetsAt: hold, status: "exhausted" }],
         modelCooldowns: {},
-        exhaustedUntil: origin === "usage_verification_policy" ? hold : null,
-        exhaustedKind: origin === "usage_verification_policy" ? "rate_limit" : null,
+        exhaustedUntil: null,
+        exhaustedKind: null,
         revision: 0,
         observedAt: now.getTime(),
         observedRefreshGeneration: 5,
@@ -1990,10 +1975,9 @@ describe("core Codex failure settlement", () => {
 
   test.each([
     ["provider quota refusal", () => usageCap()],
-    ["unverifiable included usage", () => new CodexIncludedUsageUnknownError()],
     [
-      "unverifiable included usage on the checkpoint request",
-      () => checkpointRequestUsageVerificationFailure(),
+      "exhausted included usage on the checkpoint request",
+      () => checkpointRequestCreditPolicyRefusal(),
     ],
   ] as const)(
     "%s re-places the turn while a cancelled session-title request is unsettled",

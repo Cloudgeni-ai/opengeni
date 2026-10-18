@@ -7,6 +7,7 @@
 // codex account indicator — arrive as slots so the whole bar can be rendered
 // (and screenshotted) in isolation. `CanvasTopStrip` in rail-shell owns the
 // data wiring and passes the real slots.
+import { t } from "@/lib/console-text";
 import {
   OPEN_WORKSTREAM_CONTROL_EVENT,
   SessionStatus as SessionStatusBadge,
@@ -535,7 +536,7 @@ function CompactSessionStatus({
       </span>
     );
   }
-  const name = label ?? SESSION_STATUS_META[status].label;
+  const name = label ?? SESSION_STATUS_META(t)[status].label;
   return (
     <span
       data-compact-session-status={status}

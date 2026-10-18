@@ -205,6 +205,33 @@ describe("durable attempt tool catalogs", () => {
     ).toEqual(first);
   });
 
+  test("reuses one frozen verified catalog while the row read still gates access", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const first = catalog(scope);
+    await persistAttemptToolCatalog(client.db, first);
+    const read = () =>
+      getAttemptToolCatalog(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        attemptId: scope.attemptId,
+      });
+    const verified = await read();
+    expect(verified).toEqual(first);
+    // Repeated reads reuse one frozen verified catalog instead of re-hydrating it.
+    expect(await read()).toBe(verified);
+    expect(Object.isFrozen(verified!.entries[0]!.inputSchema)).toBe(true);
+    // The row read still gates every hit: another workspace's scope sees nothing.
+    const other = await fixture();
+    expect(
+      await getAttemptToolCatalog(client.db, {
+        accountId: other.accountId,
+        workspaceId: other.workspaceId,
+        attemptId: scope.attemptId,
+      }),
+    ).toBeNull();
+  });
+
   test("rejects a different immutable catalog for the same attempt", async () => {
     if (!available) return;
     const scope = await fixture();

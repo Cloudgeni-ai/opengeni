@@ -12,6 +12,7 @@ import { Icon, type NativeIconName } from "./icon";
 import { BottomSheet } from "./sheet";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { useOpenGeniText } from "@opengeni/react/messages";
 
 /* ----------------------------------------------------------------------------
    The web session header's Rename and Pin, behind one native overflow button:
@@ -89,7 +90,7 @@ export function SessionActionsButton(props: SessionActionsProps) {
     } catch (caught) {
       setPinnedOverride(null);
       const message =
-        `Couldn't ${next ? "pin" : "unpin"} this chat. ${caught instanceof Error ? caught.message : ""}`.trim();
+        `${m.pinFailed(next)} ${caught instanceof Error ? caught.message : ""}`.trim();
       setError(message);
       if (props.renderMenu) Alert.alert(message);
       else setMenuOpen(true);
@@ -291,6 +292,7 @@ function RenameForm(props: {
   onClose: () => void;
   onRenamed: (session: Session) => void;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const c = theme.colors;
@@ -330,7 +332,7 @@ function RenameForm(props: {
         accessibilityRole="header"
         style={{ ...fontStyle(theme, 600), fontSize: 17, color: c.fg }}
       >
-        Rename chat
+        {t("native.timeline.sessionActions.renameChat")}
       </Text>
       <TextInput
         accessibilityLabel={m.chatTitle}

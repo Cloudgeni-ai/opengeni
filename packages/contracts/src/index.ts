@@ -223,7 +223,6 @@ export {
   COMPUTER_SCREENSHOT_MAX_DIMENSION,
   COMPUTER_SCREENSHOT_MAX_PIXELS,
   COMPUTER_SCREENSHOT_RETENTION_MS,
-  COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
   GENERATED_IMAGE_MAX_BYTES,
   GENERATED_VIDEO_MAX_BYTES,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
@@ -787,6 +786,8 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "allowance_exhausted",
     /** The task's root usage limit is reached; details carry SessionUsageLimitReachedRefusal fields. */
     "session_usage_limit_reached",
+    /** Organization seats are full; details.action points to the plan upgrade flow. */
+    "seat_limit_reached",
     "unauthenticated",
     "forbidden",
     "not_found",
@@ -8753,12 +8754,11 @@ export type SessionAuthorizationPort = {
   ): Promise<SessionAuthorizationListScope>;
 };
 
-export const TIMELINE_ANNOTATION_MAX_COUNT = 12;
 export const TIMELINE_ANNOTATION_QUOTE_MAX_BYTES = 16 * 1024;
 export const TIMELINE_ANNOTATION_NOTE_MAX_BYTES = 2 * 1024;
 export const TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES = 512;
 export const TIMELINE_ANNOTATION_LABEL_MAX_BYTES = 256;
-export const TIMELINE_ANNOTATIONS_MAX_BYTES = 64 * 1024;
+export const TIMELINE_ANNOTATIONS_MAX_BYTES = 1024 * 1024;
 
 export const TimelineAnnotationSourceKind = /* @__PURE__ */ defineSchema(() =>
   z.enum(["user_message", "assistant_message", "tool_output"]),
@@ -8887,31 +8887,26 @@ export const TimelineAnnotation = /* @__PURE__ */ defineSchema(() =>
 export type TimelineAnnotation = z.infer<typeof TimelineAnnotation>;
 
 function timelineAnnotationArray<T extends z.ZodTypeAny>(item: T) {
-  return z
-    .array(item)
-    .max(TIMELINE_ANNOTATION_MAX_COUNT)
-    .superRefine((annotations, ctx) => {
-      const ids = new Set<string>();
-      for (let index = 0; index < annotations.length; index += 1) {
-        const id = (annotations[index] as { id?: unknown }).id;
-        if (typeof id === "string" && ids.has(id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [index, "id"],
-            message: "annotation ids must be unique",
-          });
-        }
-        if (typeof id === "string") ids.add(id);
-      }
-      if (
-        timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) > TIMELINE_ANNOTATIONS_MAX_BYTES
-      ) {
+  return z.array(item).superRefine((annotations, ctx) => {
+    const ids = new Set<string>();
+    for (let index = 0; index < annotations.length; index += 1) {
+      const id = (annotations[index] as { id?: unknown }).id;
+      if (typeof id === "string" && ids.has(id)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `annotations must be at most ${TIMELINE_ANNOTATIONS_MAX_BYTES} UTF-8 bytes`,
+          path: [index, "id"],
+          message: "annotation ids must be unique",
         });
       }
-    });
+      if (typeof id === "string") ids.add(id);
+    }
+    if (timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) > TIMELINE_ANNOTATIONS_MAX_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `annotations must be at most ${TIMELINE_ANNOTATIONS_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
 }
 
 export const DraftTimelineAnnotations = timelineAnnotationArray(DraftTimelineAnnotation);
@@ -10134,6 +10129,7 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
             commandId: z.string().uuid(),
           })
           .strict(),
+        notice: z.string().optional(),
       })
       .passthrough(),
     z
@@ -12213,6 +12209,7 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
       generatedSessionBinding: z
         .object({
           createIdempotencyKey: z.string().min(1).max(512),
+          toolPolicy: SessionToolPolicy.optional(),
           effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
           nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
           codexCompactionMode: CodexCompactionMode,
@@ -15361,6 +15358,10 @@ export const SessionCommandFailure = /* @__PURE__ */ defineSchema(() =>
 );
 export type SessionCommandFailure = z.infer<typeof SessionCommandFailure>;
 
+/** Appended only to a new result with positive native command-cleanup evidence. */
+export const CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE =
+  "Stopped background child processes when the shell exited. For long jobs, use exec_command on this machine with the job in the foreground, then command_read or command_wait with the returned command ID.";
+
 /** Stored reconciliation checkpoints, not a live provider probe or native ACK. */
 export const SessionBackgroundCommandReconciliation = /* @__PURE__ */ defineSchema(() =>
   z
@@ -15413,6 +15414,7 @@ export const SessionBackgroundCommand = /* @__PURE__ */ defineSchema(() =>
       exitCode: z.number().int().nullable(),
       settlementReason: z.string().nullable(),
       failure: SessionCommandFailure.optional(),
+      backgroundChildrenStopped: z.literal(true).optional(),
       startedAt: z.string(),
       settledAt: z.string().nullable(),
       completionObservedAt: z.string().nullable().optional(),

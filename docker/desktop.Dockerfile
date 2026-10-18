@@ -98,6 +98,7 @@ COPY examples/northstar-support/package.json examples/northstar-support/package.
 COPY examples/embedded-product/package.json examples/embedded-product/package.json
 COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY examples/tool-server/package.json examples/tool-server/package.json
+COPY packages/agent-host/package.json packages/agent-host/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json

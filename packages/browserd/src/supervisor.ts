@@ -64,10 +64,12 @@ import {
   type BrowserScreenshotOptions,
 } from "./media";
 import {
+  AgentBrowserCommandError,
   AgentBrowserJsonRunner,
   assertAgentBrowserSocketPath,
   browserProfileCryptoPolicy,
   reapManagedBrowserProcesses,
+  reapOrphanedAgentBrowserDaemons,
   inspectOwnedManagedBrowserProcess,
   stopEndedManagedBrowserProcess,
   assertManagedBrowserProfileUnused,
@@ -86,6 +88,8 @@ import {
   BrowserWorkingRuntimeUnavailableError,
   type BrowserWorkingRuntimeAuthority,
   type BrowserWorkingRuntimeReceipt,
+  type InterruptedRecovery,
+  recordedProcessReceipt,
 } from "./working-runtime-journal";
 import {
   ADOPTION_IN_FLIGHT,
@@ -113,6 +117,7 @@ import {
 } from "./working-copy-adoption";
 import { SqliteBrowserOperationJournal } from "./journal";
 import { BrowserWorkspaceFileStager } from "./workspace-files";
+import { markProfileExitedCleanly } from "./profile-exit-state";
 import {
   captureEncryptedBrowserProfile,
   restoreEncryptedBrowserProfile,
@@ -428,6 +433,8 @@ export class BrowserSupervisor {
   private closed = false;
   private closePromise: Promise<void> | null = null;
   private cleanupUncertain = false;
+  /** Browsers whose failed reattach could not prove its transport detached. */
+  private readonly recoveryTransportsUncertain = new Set<string>();
 
   private constructor(options: BrowserSupervisorOptions) {
     this.rootDirectory = resolve(options.rootDirectory);
@@ -568,6 +575,9 @@ export class BrowserSupervisor {
           throw error;
         }
       });
+      // Daemons whose browser is gone serve nothing and never exit on their
+      // own. Startup must not fail because one of them could not be stopped.
+      await reapOrphanedAgentBrowserDaemons(supervisor.rootDirectory).catch(() => 0);
     }
     return supervisor;
   }
@@ -922,9 +932,8 @@ export class BrowserSupervisor {
     }
     if (this.sessions.size + this.creating.size >= this.maxSessions) {
       throw new InteractionControllerError(
-        "resource_unavailable",
-        "browser supervisor session capacity is exhausted",
-        true,
+        "capacity_exhausted",
+        `This machine is already running its limit of ${this.maxSessions} Opengeni browsers. End browser sessions that are no longer needed, then open a new one; retrying will not help until one ends.`,
       );
     }
     const creation = this.buildRuntime(options);
@@ -1313,15 +1322,17 @@ export class BrowserSupervisor {
       // Missing memory cannot acknowledge cleanup of a possibly accepted
       // launch. Its exact binding/holder must stay addressable for cleanup,
       // unless this generation's latest launch provably never completed, or
-      // the person explicitly ends this exact generation and discards it.
+      // the control plane explicitly discards this exact generation: a
+      // person's end (removing its state) or the retirement of a browser
+      // whose task moved to another machine (keeping its state on disk).
       if (workingRuntimePresent) {
         await this.whileNoAdoption(reference.browserSessionId, async () => {
-          if (
-            options.removeState === true &&
-            options.discardWorkingRuntime === true &&
-            !suspendForShutdown
-          ) {
-            await this.retireNonResidentWorkingRuntime(reference, sessionDirectory);
+          if (options.discardWorkingRuntime === true && !suspendForShutdown) {
+            await this.retireNonResidentWorkingRuntime(
+              reference,
+              sessionDirectory,
+              options.removeState === true,
+            );
           } else if (
             options.removeState === true &&
             options.setAsideInterruptedLaunch === true &&
@@ -1438,11 +1449,15 @@ export class BrowserSupervisor {
    * is not one this launch's authority carries forward, refuses the launch;
    * the launch never falls back to anything else. */
   private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
-    return await this.withOwnedWorkingDirectory(
-      "launch",
-      options,
-      async () => await this.buildOwnedRuntime(options),
-    );
+    try {
+      return await this.withOwnedWorkingDirectory(
+        "launch",
+        options,
+        async () => await this.buildOwnedRuntime(options),
+      );
+    } catch (error) {
+      throw browserLaunchFailure(error);
+    }
   }
 
   private async buildOwnedRuntime(
@@ -1470,6 +1485,9 @@ export class BrowserSupervisor {
       }
     }
     let recoveredReceipt: BrowserWorkingRuntimeReceipt | null = null;
+    // Whether this launch starts a new browser on a profile a previous browser
+    // already ran, rather than reattaching to a live one.
+    let relaunchesProfile = false;
     if (options.recoverExistingWorkingDirectory) {
       try {
         await assertDirectory(this.rootDirectory);
@@ -1483,10 +1501,52 @@ export class BrowserSupervisor {
           true,
         );
         let receipt: BrowserWorkingRuntimeReceipt | null;
+        let interruptedRecovery: InterruptedRecovery | null;
         try {
           receipt = reader.latest();
+          interruptedRecovery = reader.interruptedRecovery(receipt);
         } finally {
           reader.close();
+        }
+        if (
+          interruptedRecovery &&
+          receipt &&
+          JSON.stringify(receipt.authority) === JSON.stringify(options.workingRuntimeAuthority) &&
+          receipt.launchDigest === workingLaunchDigest(options) &&
+          receipt.profile.device === profile.device &&
+          receipt.profile.inode === profile.inode
+        ) {
+          // An earlier recovery of this browser was cut short, by a controller
+          // restart or a failure whose cleanup could not reinstate it. The
+          // receipt it started from is reinstated once its browser is provably
+          // the same live process, or provably gone with no process using the
+          // profile; an adopted copy whose browser is gone is resettled to its
+          // copy below instead. A transport this controller could not detach
+          // keeps the browser refused: another reattach would share it.
+          if (this.recoveryTransportsUncertain.has(options.browserSessionId))
+            throw workingRuntimeUnavailable("process_state_unknown");
+          const recorded =
+            interruptedRecovery.kind === "interrupted"
+              ? interruptedRecovery.base.process
+              : interruptedRecovery.receipt.process!;
+          const state = await this.inspectOwnedProcess(recorded).catch(() => {
+            throw workingRuntimeUnavailable("process_state_unknown");
+          });
+          if (state === "exited")
+            await this.assertProfileUnused(profileDirectory).catch(() => {
+              throw workingRuntimeUnavailable("process_state_unknown");
+            });
+          if (state === "live" || !receipt.adoption) {
+            const writer = await SqliteBrowserWorkingRuntimeJournal.open({
+              ...options,
+              sessionDirectory,
+            });
+            try {
+              receipt = writer.reinstate(interruptedRecovery);
+            } finally {
+              writer.close();
+            }
+          }
         }
         if (
           adoptedCopyNeedsResettle(receipt) &&
@@ -1527,12 +1587,14 @@ export class BrowserSupervisor {
           await this.assertProfileUnused(profileDirectory).catch(() => {
             throw workingRuntimeUnavailable("process_state_unknown");
           });
+          relaunchesProfile = true;
         } else {
           const state = await this.inspectOwnedProcess(receipt.process).catch(() => {
             throw workingRuntimeUnavailable("process_state_unknown");
           });
           if (state === "exited" && !receipt.directoryLaunchAllowed)
             throw workingRuntimeUnavailable("receipt_not_adoptable");
+          relaunchesProfile = state === "exited";
         }
         recoveredReceipt = receipt;
         // Validate every path consumed by the existing writers before opening
@@ -1571,6 +1633,13 @@ export class BrowserSupervisor {
         "proxy authority is unavailable for a new browser launch",
         true,
       );
+    }
+    if (relaunchesProfile) {
+      // When the previous browser on this profile never shut down (it was
+      // lost, killed, or this is an adopted copy of a running one), Chromium
+      // would skip restoring its tabs. A failure here costs only the tabs,
+      // never the launch.
+      await markProfileExitedCleanly(profileDirectory).catch(() => false);
     }
     for (const directory of [
       sessionDirectory,
@@ -1849,6 +1918,36 @@ export class BrowserSupervisor {
           failures.push(cleanupError);
         }
       }
+      // A failed reattach left the browser running untouched once its
+      // transport detached. While it is provably the same live process, the
+      // receipt it was reattached from becomes the latest again, so the
+      // browser can be continued or ended instead of staying refused.
+      let recoveryReinstated = false;
+      if (
+        recoveredReceipt &&
+        !adoptedLaunch &&
+        !relaunchesProfile &&
+        recordedProcessReceipt(recoveredReceipt) &&
+        workingJournal &&
+        workingReceipt &&
+        !workingReceiptCompleted &&
+        driverClosed
+      ) {
+        try {
+          if ((await this.inspectOwnedProcess(recoveredReceipt.process)) === "live") {
+            workingJournal.reinstate({
+              kind: "interrupted",
+              base: recoveredReceipt,
+              interrupted: workingReceipt,
+            });
+            recoveryReinstated = true;
+          }
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
+      }
+      if (recoveredReceipt && !adoptedLaunch && !driverClosed)
+        this.recoveryTransportsUncertain.add(options.browserSessionId);
       if (workingReceipt) {
         console.error("browser launch failed before its working-runtime receipt completed", {
           browserSessionId: options.browserSessionId,
@@ -1859,7 +1958,9 @@ export class BrowserSupervisor {
             ? "completed"
             : launchReceiptSettled
               ? "failed"
-              : "dispatched",
+              : recoveryReinstated
+                ? "reinstated"
+                : "dispatched",
           failureCode: launchFailureCode(error),
           error,
         });
@@ -2379,13 +2480,17 @@ export class BrowserSupervisor {
   /** An explicit end of a session this controller no longer holds in memory
    * (it restarted, or the browser's runtime was lost), for the exact
    * controller generation the control plane still binds. Ending discards the
-   * browser, so nothing here needs preserving for recovery: any browser still
-   * running the session's private profile is stopped by verified identity,
-   * the working runtime is retired and the session's state is removed. History
+   * runtime, so nothing here needs preserving for recovery: any browser still
+   * running the session's private profile is stopped by verified identity
+   * and the working runtime is retired. With removeState the session's state
+   * is removed; without it (a browser whose task moved to another machine)
+   * the profile and downloads stay on disk. After an agent restart such a
+   * browser keeps running detached until something ends it here. History
    * that belongs to another generation stays preserved. */
   private async retireNonResidentWorkingRuntime(
     reference: BrowserSessionReference,
     sessionDirectory: string,
+    removeState: boolean,
   ): Promise<void> {
     let journal: SqliteBrowserWorkingRuntimeJournal;
     let latest: BrowserWorkingRuntimeReceipt | null;
@@ -2405,7 +2510,14 @@ export class BrowserSupervisor {
         throw workingRuntimeUnavailable();
       }
       await this.stopEndedProcess(join(sessionDirectory, "profile"), latest?.process ?? null);
-      if (latest && latest.intent !== "retire") journal.retire(latest);
+      if (latest && latest.intent !== "retire") {
+        const retiring = journal.retire(latest);
+        // A kept directory must record that its runtime ended, so no later
+        // recovery adopts it as a live browser.
+        if (!removeState) journal.complete(retiring, null);
+      } else if (latest?.intent === "retire" && latest.state !== "completed" && !removeState) {
+        journal.complete(latest, null);
+      }
     } finally {
       journal.close();
     }
@@ -2413,7 +2525,7 @@ export class BrowserSupervisor {
       recursive: true,
       force: true,
     });
-    await rm(sessionDirectory, { recursive: true, force: true });
+    if (removeState) await rm(sessionDirectory, { recursive: true, force: true });
   }
 
   /** Move an interrupted launch of this exact generation out of the session's
@@ -2791,6 +2903,11 @@ async function createBrowserDriver(
   if (context.headlessSessionCookies && !useHeadlessShell) {
     throw new Error("Headless cookie state requires its matching verified profile launcher");
   }
+  // A managed browser on macOS runs on the person's own desktop. A window
+  // would appear in front of them, take focus and intercept their typing;
+  // the agent and the person's live view work through CDP, so it stays
+  // offscreen. A linked ComputerSession drives the native window itself.
+  const offscreen = process.platform === "darwin" && context.headed && !context.linkedComputer;
   const runner = await AgentBrowserJsonRunner.create({
     namespace: "og",
     // A close followed immediately by another daemon using the same socket
@@ -2803,13 +2920,7 @@ async function createBrowserDriver(
     downloadDirectory: context.downloadDirectory,
     screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
-    // A managed browser on macOS runs on the person's own desktop. A window
-    // would appear in front of them, take focus and intercept their typing;
-    // the agent and the person's live view work through CDP, so it stays
-    // offscreen. A linked ComputerSession drives the native window itself.
-    ...(process.platform === "darwin" && context.headed && !context.linkedComputer
-      ? { offscreen: true }
-      : {}),
+    ...(offscreen ? { offscreen: true } : {}),
     ...(route?.kind === "proxy" && route.proxyUrl ? { proxyUrl: route.proxyUrl } : {}),
     ...(launchArguments.length > 0 ? { launchArguments } : {}),
     ...(route?.consistency.timezone ? { timezone: route.consistency.timezone } : {}),
@@ -2822,6 +2933,17 @@ async function createBrowserDriver(
       : {}),
     ...(context.launchEnvironment ? { environment: context.launchEnvironment } : {}),
     ...(binary ? { binary } : {}),
+  }).catch((error: unknown) => {
+    // Recovery proves the previous browser's state before reattaching or
+    // relaunching. A proof that cannot be completed is a definite refusal
+    // with the browser's state preserved, not an internal failure.
+    if (
+      context.recoverOwnedProcess &&
+      error instanceof AgentBrowserCommandError &&
+      error.code === "process_failed"
+    )
+      throw workingRuntimeUnavailable("process_state_unknown");
+    throw error;
   });
   return new AgentBrowserDriver({
     browserSessionId: context.browserSessionId,
@@ -2836,6 +2958,12 @@ async function createBrowserDriver(
         }
       : {}),
     focusEmulation: true,
+    // Headless and offscreen Chrome on this machine launch with an ordinary
+    // User-Agent switch, which empties their high-entropy Client Hints.
+    ...((process.platform === "darwin" || process.platform === "linux") &&
+    (!context.headed || offscreen)
+      ? { completeClientHints: true }
+      : {}),
     ...(headlessShell && browserExecutablePath === headlessShell.path
       ? { userAgentMetadataSource: "intercepted_local" as const }
       : {}),
@@ -3600,6 +3728,27 @@ function launchFailureCode(error: unknown): string {
   if (error instanceof AggregateError) return "cleanup_failed";
   const code = (error as { code?: unknown } | null)?.code;
   return boundedFailureCode(typeof code === "string" ? code : "internal");
+}
+
+const BROWSER_LAUNCH_REASON_MAX_CHARS = 1_000;
+
+/** A browser that cannot start says why, so the caller can act on it instead
+ * of retrying an opaque failure. The driver's own launch message (a missing
+ * Chrome, a crash on startup with its stderr) is already bounded to one line;
+ * every other failure keeps its original type and contract. */
+export function browserLaunchFailure(error: unknown): unknown {
+  if (!(error instanceof AgentBrowserCommandError) || !error.driverMessage) return error;
+  if (/^Chrome not found\b/u.test(error.driverMessage)) {
+    return new InteractionDefiniteDriverError(
+      "unsupported",
+      "No Google Chrome or Chromium is installed on this machine, so a browser cannot start here. Install Google Chrome on it, or open the browser on another placement.",
+    );
+  }
+  const reason = error.driverMessage.slice(0, BROWSER_LAUNCH_REASON_MAX_CHARS);
+  return new InteractionDefiniteDriverError(
+    "driver_failed",
+    `The browser could not start on this machine: ${reason}`,
+  );
 }
 
 function boundedPositiveInteger(value: number, label: string): number {

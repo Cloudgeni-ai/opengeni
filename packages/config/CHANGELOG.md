@@ -1,5 +1,40 @@
 # @opengeni/config
 
+## 4.0.4
+
+### Minor Changes
+
+- 0ce7609: The idle-session archive is now on by default (`OPENGENI_SESSION_ARCHIVE_ENABLED`, Helm `sessionArchive.enabled`). Sessions with no activity for 30 days move their bulky content to object storage and become read-only, which keeps PostgreSQL from growing without bound. Deployments without object storage never archive. Set `sessionArchive.enabled: false` (or `OPENGENI_SESSION_ARCHIVE_ENABLED=false`) to keep every session in PostgreSQL; an explicit `false` in a values file is respected.
+
+### Patch Changes
+
+- a34aebb: Responses WebSocket requests continue the previous response on the same connection: when a request extends the last completed response exactly, it sends `previous_response_id` and only the new input items, and falls back to the full request otherwise or when the provider no longer holds that response. The transport now serves the OpenAI API (`/v1/responses`) and Azure OpenAI's v1 API (`/openai/v1/responses`) as well as the Codex subscription, with one connection per conversation (`OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED`, default on). Other OpenAI-compatible hosts stay on HTTP. Each request's transport label and the model-request phase metrics say whether the input was full or incremental.
+
+  Share lifecycle and failure policy in the network package. Use the JavaScript WebSocket implementation to release sent buffers, retain only continuation fingerprints, coalesce concurrent handshakes, and retire idle connections when credentials change. The existing durable model-step retry budget owns dropped responses; its final retry uses HTTP, with no additional retry budget or timer-based cooldown. HTTP remains selected through turn recovery and subsequent successful steps, but a new turn tries the socket again. Definitive continuation refusal settles and re-admits request custody before a full-input resend. Transport diagnostics distinguish first-request cache behavior and final-prefix startup overlap; no speculative model prewarm is sent.
+
+- 5927aae: The retained-image limit per workspace is now configurable. `OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_BYTES` sets the deployment default (5 GiB, unchanged), and `OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_OVERRIDES` gives individual workspaces their own limit as a JSON object of workspace id to bytes. The hard-coded `COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES` contract constant is removed.
+- Updated dependencies [e7113e3]
+- Updated dependencies [958d157]
+- Updated dependencies [b4a3b7f]
+- Updated dependencies [88459ff]
+- Updated dependencies [2f6b8bd]
+- Updated dependencies [9482fe0]
+- Updated dependencies [2a81601]
+- Updated dependencies [71dfe30]
+- Updated dependencies [f010292]
+- Updated dependencies [9fb9db3]
+- Updated dependencies [79ec9fd]
+- Updated dependencies [1d24639]
+- Updated dependencies [7bac0d9]
+- Updated dependencies [a34aebb]
+- Updated dependencies [5927aae]
+- Updated dependencies [6ab7b55]
+- Updated dependencies [3e061d6]
+- Updated dependencies [a22ed79]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/codex@4.0.0
+  - @opengeni/xai-subscription@4.0.0
+
 ## 3.4.0
 
 ### Minor Changes

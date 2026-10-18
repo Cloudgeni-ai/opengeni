@@ -1,5 +1,132 @@
 # @opengeni/worker-bundle
 
+## 4.0.4
+
+### Patch Changes
+
+- e428801: Completed browser downloads stay saveable after the browser is suspended. Suspension removes the browser's working directory, so before an explicit suspend or an automatic idle or deadline save, each completed download is now kept as a workspace file. Listing, reading and saving a download then work while the browser is suspended, after it resumes on a new controller, and after the task moves to another machine, which imports the file from storage. A download that cannot be kept is logged and never blocks the suspension.
+- 2e4cf2a: Codex model requests no longer wait for a usage-limits read before each dispatch. The extra-credit guard now refuses a request only when usage observed this turn, from the headers every Codex response carries, shows an included window fully used and not yet reset, unless credit spending is allowed. Unknown usage admits the request, and connections already known to be exhausted are still not placed.
+- 88459ff: A Codex turn now opens its conversation's Responses WebSocket while the rest of the turn prepares, so the first model request no longer waits for the handshake (about half a second on a new connection). A request that arrives while that handshake is still in progress waits for it instead of opening a second connection, and the model SDK's own telemetry headers no longer split a conversation's connection.
+- d5b0003: Close session workflows after a verified worker-scoped deletion instead of polling forever. Preserve unavailable/RLS-hidden observations and legacy Temporal replay, and let idle/failure settlement, late dispatch recovery and input-wait settlement finish harmlessly when their session was deleted.
+- eeab688: Preserve an accepted turn's Personal Knowledge scope when its chat is shared, including subscription failover and Retry. Keep its existing snapshot and owner authority, apply current settings to new turns, and explain genuinely incompatible scope changes without reopening the same failed turn.
+- 47584d8: Each streamed model call now records how long it took: Opengeni's own work before dispatch, time to first token, time to first answer text and total duration, in milliseconds. The worker stores them on the call's usage event and its Insights fact (four nullable integer columns added without a table rewrite), so model speed and output tokens per second can be analysed per call later. Older calls and calls the worker did not stream stay unknown.
+- 1d24639: Reserve persistent Responses sockets for explicitly scoped conversation requests so title side requests cannot displace a warmed main connection or continuation chain. Add immutable request-receipt snapshots of local dispatch/socket timing and allowlisted response-scoped server timing, without changing model request content, prewarming, retries, or custody.
+- a34aebb: Responses WebSocket requests continue the previous response on the same connection: when a request extends the last completed response exactly, it sends `previous_response_id` and only the new input items, and falls back to the full request otherwise or when the provider no longer holds that response. The transport now serves the OpenAI API (`/v1/responses`) and Azure OpenAI's v1 API (`/openai/v1/responses`) as well as the Codex subscription, with one connection per conversation (`OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED`, default on). Other OpenAI-compatible hosts stay on HTTP. Each request's transport label and the model-request phase metrics say whether the input was full or incremental.
+
+  Share lifecycle and failure policy in the network package. Use the JavaScript WebSocket implementation to release sent buffers, retain only continuation fingerprints, coalesce concurrent handshakes, and retire idle connections when credentials change. The existing durable model-step retry budget owns dropped responses; its final retry uses HTTP, with no additional retry budget or timer-based cooldown. HTTP remains selected through turn recovery and subsequent successful steps, but a new turn tries the socket again. Definitive continuation refusal settles and re-admits request custody before a full-input resend. Transport diagnostics distinguish first-request cache behavior and final-prefix startup overlap; no speculative model prewarm is sent.
+
+- 5927aae: The retained-image limit per workspace is now configurable. `OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_BYTES` sets the deployment default (5 GiB, unchanged), and `OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_OVERRIDES` gives individual workspaces their own limit as a JSON object of workspace id to bytes. The hard-coded `COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES` contract constant is removed.
+- 5632ffc: Expired screenshots from private chats are reaped again, releasing workspace screenshot quota, and a screenshot that is no longer retained no longer fails every later turn of its session: it reaches the model as the same neutral image receipt used for withheld images.
+- 3e061d6: Preserve default-following tool selection in schedules while retaining explicit choices and permission limits. Route ordinary notifications to the human whose authority the calling turn uses, including scheduled turns in an existing chat.
+- 6bfdc6f: Sending SIGUSR2 to a worker for a CPU profile no longer drains it. The Temporal SDK also treats SIGUSR2 as a shutdown signal by default, so a profiling request stopped the worker from taking new work and restarted it. The worker now registers only SIGINT, SIGTERM and SIGQUIT with the SDK.
+- Updated dependencies [e7113e3]
+- Updated dependencies [35dcfa0]
+- Updated dependencies [fb0a25f]
+- Updated dependencies [9c0c567]
+- Updated dependencies [26b4c24]
+- Updated dependencies [a0c07e5]
+- Updated dependencies [a819a58]
+- Updated dependencies [b5fe653]
+- Updated dependencies [1e2ebb6]
+- Updated dependencies [e428801]
+- Updated dependencies [327d53a]
+- Updated dependencies [a8c5057]
+- Updated dependencies [6e8ab51]
+- Updated dependencies [958d157]
+- Updated dependencies [b4a3b7f]
+- Updated dependencies [88459ff]
+- Updated dependencies [3f21c12]
+- Updated dependencies [575b127]
+- Updated dependencies [2f6b8bd]
+- Updated dependencies [01b790e]
+- Updated dependencies [9482fe0]
+- Updated dependencies [2708a32]
+- Updated dependencies [09758fd]
+- Updated dependencies [08a7a88]
+- Updated dependencies [2a81601]
+- Updated dependencies [f2d5d8b]
+- Updated dependencies [903a3f5]
+- Updated dependencies [aeea237]
+- Updated dependencies [605af85]
+- Updated dependencies [d5b0003]
+- Updated dependencies [9cc3e18]
+- Updated dependencies [4098e67]
+- Updated dependencies [62a3815]
+- Updated dependencies [85889a5]
+- Updated dependencies [eeab688]
+- Updated dependencies [bf7a8f7]
+- Updated dependencies [b1b51e2]
+- Updated dependencies [0f1ea90]
+- Updated dependencies [71dfe30]
+- Updated dependencies [f010292]
+- Updated dependencies [9fb9db3]
+- Updated dependencies [6f005fa]
+- Updated dependencies [c378f15]
+- Updated dependencies [47584d8]
+- Updated dependencies [bd35473]
+- Updated dependencies [b1c5753]
+- Updated dependencies [42f4213]
+- Updated dependencies [e278e4d]
+- Updated dependencies [0eab0c8]
+- Updated dependencies [c6be5c7]
+- Updated dependencies [7931f9c]
+- Updated dependencies [79ec9fd]
+- Updated dependencies [40b175f]
+- Updated dependencies [6384b14]
+- Updated dependencies [ddaebe9]
+- Updated dependencies [1d24639]
+- Updated dependencies [7bac0d9]
+- Updated dependencies [a34aebb]
+- Updated dependencies [5927aae]
+- Updated dependencies [ff38f1d]
+- Updated dependencies [5632ffc]
+- Updated dependencies [790ac6e]
+- Updated dependencies [6ab7b55]
+- Updated dependencies [3e061d6]
+- Updated dependencies [9c61ebd]
+- Updated dependencies [a22ed79]
+- Updated dependencies [0ce7609]
+- Updated dependencies [cc182c7]
+- Updated dependencies [a312aaf]
+- Updated dependencies [6e15cfe]
+- Updated dependencies [2072131]
+- Updated dependencies [5b10fc9]
+- Updated dependencies [a2a47b3]
+- Updated dependencies [0c82106]
+- Updated dependencies [e47c979]
+- Updated dependencies [ba9ff31]
+- Updated dependencies [eaf6de4]
+- Updated dependencies [e2e75c0]
+- Updated dependencies [24b346d]
+- Updated dependencies [7b7b2b5]
+- Updated dependencies [23fc624]
+- Updated dependencies [9ddadf6]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/network@4.0.0
+  - @opengeni/runtime@4.0.0
+  - @opengeni/db@4.0.0
+  - @opengeni/interaction@4.0.0
+  - @opengeni/codemode@4.0.0
+  - @opengeni/agent-proto@4.0.0
+  - @opengeni/core@4.0.0
+  - @opengeni/codex@4.0.0
+  - @opengeni/sdk@4.0.0
+  - @opengeni/observability@4.0.0
+  - @opengeni/config@4.0.0
+  - @opengeni/capabilities@4.0.0
+  - @opengeni/documents@4.0.0
+  - @opengeni/events@4.0.0
+  - @opengeni/github@4.0.0
+  - @opengeni/storage@4.0.0
+  - @opengeni/tool-gateway@4.0.0
+  - @opengeni/vaults@4.0.0
+  - @opengeni/vaults-keeper@4.0.0
+  - @opengeni/vaults-onepassword@4.0.0
+  - @opengeni/vaults-protonpass@4.0.0
+  - @opengeni/xai-subscription@4.0.0
+  - @opengeni/jev@4.0.0
+  - @opengeni/subscriptions@4.0.0
+
 ## 3.4.0
 
 ### Patch Changes

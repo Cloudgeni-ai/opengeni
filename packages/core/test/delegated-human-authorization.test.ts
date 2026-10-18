@@ -479,7 +479,7 @@ describe("request-local verified delegated native human", () => {
       }),
       credentialKind: "organization",
     });
-    const workspace = spyOn(db, "requireWorkspace").mockResolvedValue(
+    const workspace = spyOn(db, "getWorkspace").mockResolvedValue(
       Workspace.parse({
         id: workspaceId,
         accountId: organizationId,

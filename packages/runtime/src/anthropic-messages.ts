@@ -49,6 +49,15 @@ export class AnthropicProtocolError extends Error {
   readonly code = "anthropic_protocol_error";
 }
 
+/**
+ * The response stream broke before its terminal event: it went silent past
+ * the idle timeout, or the connection ended without `message_stop`. This is
+ * a dropped connection, not a provider answer, so a caller may retry it.
+ */
+export class AnthropicStreamInterruptedError extends Error {
+  readonly code = "anthropic_stream_interrupted";
+}
+
 /** Preserve documented spend proof, without retaining an arbitrary error body. */
 function anthropicSpendLimitCode(error: unknown): string | undefined {
   if (!error || typeof error !== "object" || Array.isArray(error)) return undefined;
@@ -202,6 +211,18 @@ async function readErrorDetail(
   return detail;
 }
 
+/**
+ * Claude accepts only `[a-zA-Z0-9_-]` in tool call IDs. Calls recorded by
+ * other providers may carry other characters. Such an
+ * ID gets a stable, collision-safe Claude form; the call and its result map
+ * to the same form, and an ID that is already valid passes through unchanged.
+ */
+export function anthropicToolUseId(id: string): string {
+  if (/^[a-zA-Z0-9_-]+$/.test(id)) return id;
+  const readable = id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+  return `${readable}_${createHash("sha256").update(id).digest("hex").slice(0, 16)}`;
+}
+
 export function anthropicToolName(name: string, namespace?: string): string {
   if (!namespace && /^[a-zA-Z0-9_-]{1,64}$/.test(name)) return name;
   const identity = JSON.stringify([namespace ?? null, name]);
@@ -326,7 +347,7 @@ export function anthropicMessages(
         append("assistant", [
           {
             type: "tool_use",
-            id: text(item.callId ?? item.call_id, "tool ID"),
+            id: anthropicToolUseId(text(item.callId ?? item.call_id, "tool ID")),
             name: anthropicToolName(text(item.name, "tool name"), item.namespace),
             input: object(args),
           },
@@ -337,7 +358,7 @@ export function anthropicMessages(
         append("user", [
           {
             type: "tool_result",
-            tool_use_id: text(item.callId ?? item.call_id, "tool result ID"),
+            tool_use_id: anthropicToolUseId(text(item.callId ?? item.call_id, "tool result ID")),
             content: contentBlocks(item.output),
             ...(item.providerData?.anthropic?.is_error ? { is_error: true } : {}),
           },
@@ -1369,7 +1390,7 @@ export class AnthropicMessagesModel implements Model {
         }
       }
     }
-    throw new AnthropicProtocolError("Claude stream ended without message_stop");
+    throw new AnthropicStreamInterruptedError("Claude stream ended without message_stop");
   }
 }
 
@@ -1490,7 +1511,10 @@ export async function* anthropicSse(
         aborted,
         new Promise<never>((_, reject) => {
           timer = setTimeout(
-            () => reject(new AnthropicProtocolError("Claude stream timed out waiting for data")),
+            () =>
+              reject(
+                new AnthropicStreamInterruptedError("Claude stream timed out waiting for data"),
+              ),
             idleTimeoutMs,
           );
         }),

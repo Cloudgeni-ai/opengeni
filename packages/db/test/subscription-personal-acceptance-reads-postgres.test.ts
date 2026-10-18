@@ -485,8 +485,13 @@ beforeAll(async () => {
   // Stage a provisioned database without 0726, as a deployment is before it:
   // 0726 and every later migration (which may require 0726, or retire the
   // routines it patches) are held back, and only 0726 is applied below.
+  // Current session writers need the real additive 0834 activity xid column
+  // and trigger, which are independent of the routines this fixture exercises.
   const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
-    .filter((file) => file.endsWith(".sql") && file >= MIGRATION)
+    .filter(
+      (file) =>
+        file.endsWith(".sql") && file >= MIGRATION && file !== "0834_session_activity_xid.sql",
+    )
     .sort();
   const staging = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -497,6 +502,8 @@ beforeAll(async () => {
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
     await stageSiteSessionAudienceColumns(database.ownerUrl);
+    // Current event readers also project 0810's nullable usage source key.
+    await staging`alter table session_events add column usage_source_key text`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -641,11 +648,26 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "subscription plan maintenance inventory is missing",
       "subscription plan Free anniversary helper is missing",
     );
+    // 0805 (private actor visibility) and 0823 (personal machine consents).
+    heldBack.push(
+      ...[
+        "consent_session_turn_personal_machine(uuid, uuid, uuid, uuid)",
+        "get_session_attempt_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, boolean, boolean)",
+        "session_private_actor_visible_keys()",
+      ].map((routine) => `target-schema runtime capability ${routine} is missing or ambiguous`),
+      ...[
+        "assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean)",
+        "bind_session_attempt_machine_consent(uuid, uuid, uuid)",
+        "live_session_turn_machine_consent(uuid)",
+      ].map((routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`),
+    );
     // 0776 (Site Data), 0782 (published Sites) and 0783 (Site SQL): their tables
     // are in the runtime and protected contracts.
-    const siteDataTables = [
+    const runtimeTables = [
       // 0796 and 0797 (billing operations and subscription plans).
       "billing_subscription_operations",
+      // 0820 (retained browser downloads).
+      "browser_session_retained_downloads",
       "organization_plans",
       "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
@@ -677,10 +699,16 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "site_sql_rate_windows",
       "site_sql_usage",
       "site_viewer_sessions",
-    ].join(", ");
+    ];
+    // 0823 machine-consent tables are protected but not runtime-privileged.
+    const protectedTables = [
+      ...runtimeTables,
+      "session_attempt_machine_consents",
+      "session_turn_machine_consents",
+    ].sort();
     heldBack.push(
-      `runtime privilege tables are missing: ${siteDataTables}`,
-      `protected tables are missing: ${siteDataTables}`,
+      `runtime privilege tables are missing: ${runtimeTables.join(", ")}`,
+      `protected tables are missing: ${protectedTables.join(", ")}`,
     );
     const expected = [
       ...heldBack,

@@ -278,7 +278,7 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
       database.indexOf("export async function withWorkspaceSessionActivityRls<T>"),
     );
     expect(activityScope).toMatch(
-      /accountPrefix: "organization-membership:"[\s\S]*fenceMode === "shared" \? \[sessionTenancyLock\(scope.workspaceId\)\][\s\S]*return await withRlsScope\([\s\S]*locks,[\s\S]*await beginSessionActivityGate/u,
+      /accountPrefix: "organization-membership:"[\s\S]*fenceMode === "shared" \? \[sessionTenancyLock\(scope.workspaceId\)\][\s\S]*return await withRlsScope\([\s\S]*locks,[\s\S]*await assertRlsContextApplied/u,
     );
     const rlsScope = database.slice(
       database.indexOf("async function withRlsScope<T>"),

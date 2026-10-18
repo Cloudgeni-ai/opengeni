@@ -12,7 +12,11 @@ import {
 import OpenAI, { APIError } from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { projectChatToolImages } from "./chat-tool-images";
-import { projectHistoryForProvider } from "./provider-history-adapter";
+import {
+  chatRouteHoistsSystemMessages,
+  projectHistoryForProvider,
+  responsesRouteDeclaresAdditionalTools,
+} from "./provider-history-adapter";
 import {
   appendChatReasoningDetails,
   chatReasoning,
@@ -28,6 +32,7 @@ import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
 import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
+import { modelUsageTokenCountOrNull } from "./usage-telemetry";
 import {
   ResponsesStreamingTerminalError,
   responsesStreamingTerminalError,
@@ -55,11 +60,13 @@ function chatCompletionFinishReason(value: unknown): unknown {
     : undefined;
 }
 
-function chatRequest(request: ModelRequest): ModelRequest {
+function chatRequest(request: ModelRequest, modelId: string): ModelRequest {
   const input =
     typeof request.input === "string"
       ? request.input
-      : (projectHistoryForProvider(request.input, "chat") as ModelRequest["input"]);
+      : (projectHistoryForProvider(request.input, "chat", {
+          hoistsSystemMessages: chatRouteHoistsSystemMessages(modelId),
+        }) as ModelRequest["input"]);
   return projectChatReasoning(
     projectChatToolImages(input === request.input ? request : { ...request, input }),
   );
@@ -98,13 +105,42 @@ function withOpperReportedCost<T extends { providerData?: Record<string, any> | 
   };
 }
 
+function chatInputTokenDetails(usage: unknown): Record<string, unknown> | undefined {
+  const details = (usage as { prompt_tokens_details?: unknown } | undefined)?.prompt_tokens_details;
+  // The SDK projects only cached_tokens, dropping cache writes and other input
+  // details. Keep the provider evidence separate from the SDK's numeric schema.
+  return details && typeof details === "object" && !Array.isArray(details)
+    ? (details as Record<string, unknown>)
+    : undefined;
+}
+
+function sdkChatInputTokenDetails(details: Record<string, unknown>): Record<string, number> {
+  // Runner validates response_done before our telemetry normalizer sees it.
+  // Missing/null/malformed details must not fail an otherwise successful turn.
+  return Object.fromEntries(
+    Object.entries(details).filter(
+      (entry): entry is [string, number] => modelUsageTokenCountOrNull(entry[1]) !== null,
+    ),
+  );
+}
+
 /** Reject ambiguous completion before the SDK can commit output or execute tools. */
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
+  private readonly modelId: string;
+
+  constructor(...args: ConstructorParameters<typeof OpenAIChatCompletionsModel>) {
+    super(...args);
+    this.modelId = args[1];
+  }
+
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await super.getResponse(chatRequest(request));
+    const response = await super.getResponse(chatRequest(request, this.modelId));
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
+    const inputTokensDetails = chatInputTokenDetails(response.providerData?.usage);
+    if (inputTokensDetails)
+      response.usage.inputTokensDetails = [sdkChatInputTokenDetails(inputTokensDetails)];
     return withOpperReportedCost(
       {
         ...response,
@@ -123,8 +159,12 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     let reasoning: ChatReasoning | undefined;
     let reasoningDetails: Record<string, unknown>[] | undefined;
     let reportedCostUsd: string | undefined;
-    for await (const event of super.getStreamedResponse(chatRequest(request))) {
+    let inputTokensDetails: Record<string, unknown> | undefined;
+    for await (const event of super.getStreamedResponse(chatRequest(request, this.modelId))) {
       if (event.type === "model") {
+        const rawUsage = (event.event as { usage?: unknown } | undefined)?.usage;
+        // Mirror the SDK's last non-null usage snapshot, not a sum of chunks.
+        if (rawUsage) inputTokensDetails = chatInputTokenDetails(rawUsage);
         reportedCostUsd =
           opperReportedCostUsd((event.event as { usage?: unknown } | undefined)?.usage) ??
           reportedCostUsd;
@@ -150,6 +190,21 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
             response: withOpperReportedCost<typeof event.response>(
               {
                 ...event.response,
+                ...(inputTokensDetails
+                  ? {
+                      usage: {
+                        ...event.response.usage,
+                        inputTokensDetails: sdkChatInputTokenDetails(inputTokensDetails),
+                      },
+                      // Match non-streaming Chat's providerData.usage evidence so
+                      // telemetry retains invalid-field diagnostics and unknowns
+                      // rather than mistaking SDK sanitization for provider zero.
+                      providerData: {
+                        ...event.response.providerData,
+                        usage: { prompt_tokens_details: inputTokensDetails },
+                      },
+                    }
+                  : {}),
                 output: withChatReasoning(event.response.output, reasoning, reasoningDetails),
               },
               reportedCostUsd,
@@ -266,7 +321,9 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
       const input =
         typeof request.input === "string"
           ? request.input
-          : (projectHistoryForProvider(request.input, "responses") as ModelRequest["input"]);
+          : (projectHistoryForProvider(request.input, "responses", {
+              declaresAdditionalTools: responsesRouteDeclaresAdditionalTools(this.provider.kind),
+            }) as ModelRequest["input"]);
       return super._buildResponsesCreateRequest(
         input === request.input ? request : { ...request, input },
         stream,

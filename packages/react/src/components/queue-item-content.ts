@@ -1,3 +1,4 @@
+import { type OpenGeniText } from "../messages/runtime";
 /**
  * One presentation rule for a queued item, shared by the full queue and the
  * compact session-chrome dock so the two cannot drift. A turn with an empty
@@ -6,7 +7,8 @@
  */
 export type QueueItemContent = "text" | "annotations" | "unavailable";
 
-export const QUEUE_ITEM_CONTENT_UNAVAILABLE = "Content unavailable";
+export const QUEUE_ITEM_CONTENT_UNAVAILABLE = (t: OpenGeniText) =>
+  t("queueItemContent.contentUnavailable");
 
 export function queueItemContent(text: string, annotationCount: number): QueueItemContent {
   if (text.length > 0) return "text";

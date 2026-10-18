@@ -2,6 +2,7 @@ import {
   defaultChatComposerMessages,
   type ChatComposerMessages,
 } from "@opengeni/react/composer-messages";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
 import { useEffect, useState, type ComponentRef, type ReactNode, type Ref } from "react";
 import {
@@ -218,7 +219,8 @@ export function SessionComposer(props: SessionComposerProps) {
     const lifted = keyboard.height.value - offset;
     return { paddingBottom: lifted > 0 ? lifted + 8 : restingBottom };
   });
-  const messages = { ...defaultChatComposerMessages, ...props.messages };
+  const t = useOpenGeniText();
+  const messages = { ...defaultChatComposerMessages(t), ...props.messages };
   const fieldSize = ios ? 17 : 16;
   const compact = !props.options;
   const voice = props.voice?.available ? props.voice : undefined;
@@ -307,7 +309,7 @@ export function SessionComposer(props: SessionComposerProps) {
         ) : voice?.status === "error" && voice.error ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`${voice.error} Dismiss`}
+            accessibilityLabel={t("native.timeline.composer.errorDismiss", { error: voice.error })}
             onPress={voice.clearError}
             style={{
               flexDirection: "row",
@@ -478,6 +480,7 @@ function SavedRecordingStrip({ voice }: { voice: NativeVoiceInput }) {
  * the elapsed time, and stop (which transcribes into the draft).
  */
 function VoiceStrip({ voice }: { voice: NativeVoiceInput }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const c = theme.colors;
@@ -578,7 +581,7 @@ function VoiceStrip({ voice }: { voice: NativeVoiceInput }) {
       </View>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Stop and transcribe"
+        accessibilityLabel={t("native.timeline.composer.stopAndTranscribe")}
         onPress={voice.stop}
         disabled={!recording}
         hitSlop={6}
@@ -697,11 +700,14 @@ export function ComposerPill({
   /** Shown before the label (the web picker's maker mark). */
   leading?: ReactNode;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={[label, detail, fast ? "Fast" : null].filter(Boolean).join(", ")}
+      accessibilityLabel={[label, detail, fast ? t("native.timeline.composer.fast") : null]
+        .filter(Boolean)
+        .join(", ")}
       onPress={onPress}
       disabled={!onPress}
       style={({ pressed }) => ({

@@ -4,6 +4,7 @@ import {
   recordModelCallFact,
   type AppendEventInput,
   type CanonicalTurnStartupMilestoneReceipt,
+  type ModelCallTiming,
 } from "@opengeni/db";
 import {
   modelResponseServiceTierFromSdkEvent,
@@ -254,6 +255,8 @@ export async function processModelResponseTerminalEvent(input: {
   leaseLostMessage: string;
   setLastInputTokens: (tokens: number | null) => Promise<void>;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
+  /** Timing of the call this terminal response completes; read once per claimed response. */
+  responseTiming?: () => ModelCallTiming | null;
 }): Promise<
   | { status: "not_response" }
   | { status: "duplicate"; sourceKey: string }
@@ -289,6 +292,7 @@ export async function processModelResponseTerminalEvent(input: {
   }
   input.state.claimedSourceKeys.add(sourceKey);
   input.state.responseCount = responseOrdinal;
+  const timing = input.responseTiming?.() ?? null;
 
   const responseUsage = terminal.usage;
 
@@ -350,9 +354,11 @@ export async function processModelResponseTerminalEvent(input: {
         servingAccountHash: accountContext.servingAccountHash,
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
+        timing,
       });
       if (authoritative && billing) {
         await recordAuthoritativeModelCallFact({
+          timing,
           db: input.db,
           observability: input.observability,
           accountId: input.accountId,
@@ -595,6 +601,8 @@ export async function emitModelCallUsage(input: {
   servingAccountHash?: string;
   accountChangedFromPrevCall?: boolean;
   emittedSourceKeys?: Set<string>;
+  /** Worker-measured call timing, stored with the event for Insights repair. */
+  timing?: ModelCallTiming | null;
 }): Promise<boolean> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
@@ -633,6 +641,7 @@ export async function emitModelCallUsage(input: {
                 listByClassApprox: input.billingSnapshot.listByClassApprox ?? false,
               }
             : {}),
+          ...(input.timing ? { timing: input.timing } : {}),
           ...telemetry,
         },
       },
@@ -921,6 +930,7 @@ export async function recordAuthoritativeModelCallFact(input: {
   /** The shared-core subscription connection that served the call, if any. */
   subscriptionConnectionId?: string | null;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
+  timing?: ModelCallTiming | null;
 }): Promise<void> {
   try {
     const telemetry = input.billing.normalizedUsage.telemetry;
@@ -948,6 +958,7 @@ export async function recordAuthoritativeModelCallFact(input: {
       cacheWriteTokens: telemetry.cacheWriteTokens,
       reasoningTokens: telemetry.reasoningTokens,
       totalTokens: input.billing.normalizedUsage.totalTokens,
+      timing: input.timing ?? null,
       ...(input.contextContributions !== undefined
         ? { contextContributions: input.contextContributions }
         : {}),

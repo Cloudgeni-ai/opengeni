@@ -114,6 +114,8 @@ const withheldMigrations = [
   "0738_private_sessions_share_sandboxes.sql",
   // Policies and a routine over the shared connection table and owner helper from withheld 0645/0707.
   "0777_workspace_admin_subscription_connections.sql",
+  // Adds an UPDATE trigger for the MCP account-binding fence withheld 0494 installs.
+  "0836_cheaper_session_write_fences.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

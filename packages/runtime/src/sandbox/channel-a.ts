@@ -266,6 +266,27 @@ export type WorkspaceFileImportReceipt = {
   revision: number;
 };
 
+/** Size and SHA-256 of one workspace file, computed where the file lives. */
+export type WorkspaceFileDigest = {
+  path: string;
+  sizeBytes: number;
+  sha256: string;
+};
+
+/** Upload one exact workspace file to a signed PUT URL from the box itself, so
+ * its bytes never cross the control plane. The file must still have `sizeBytes`
+ * and `sha256` before and after the upload. */
+export type WorkspaceFileExportRequest = {
+  path: string;
+  sizeBytes: number;
+  sha256: string;
+  upload: {
+    url: string;
+    requiredHeaders: Readonly<Record<string, string>>;
+    expiresAt: string;
+  };
+};
+
 export type ChannelARoutedWorkspaceImportRequest = {
   request: WorkspaceFileImportRequest;
   workspaceRoot: string;
@@ -1790,6 +1811,110 @@ export class SandboxChannelAService {
       replayed: true,
       revision: this.revision,
     };
+  }
+
+  /** Size and SHA-256 of one regular workspace file, computed on the box. The
+   * resolved file must stay inside the workspace root. */
+  async digestWorkspaceFile(value: string): Promise<WorkspaceFileDigest> {
+    const path = assertSafeRelPath(value, this.workspaceRoot);
+    const frame = crypto.randomUUID().replaceAll("-", "");
+    const markers = workspaceFileMarkers("DIGEST", frame);
+    const script = [
+      "set +e",
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
+      PORTABLE_SHA256_FILE_FUNCTION,
+      ...this.confinedWorkspaceFileScript(path, markers),
+      `bytes=$(wc -c <"$target" | tr -d ' \\n') || { printf %s ${shellQuote(markers.unavailable)}; exit 70; }`,
+      `digest=$(opengeni_sha256_file "$target") || { printf %s ${shellQuote(markers.unavailable)}; exit 70; }`,
+      `printf '%s\\t%s\\t%s' ${shellQuote(markers.ok)} "$bytes" "$digest"`,
+    ].join("; ");
+    const result = await this.runReadOnly({ cmd: internalBashCommand(script) });
+    if (result.sessionId !== undefined) {
+      throw new ChannelAUnavailableError("Workspace file digest did not settle; retry it.");
+    }
+    throwWorkspaceFileMarkerError(result, markers, path);
+    const prefix = `${markers.ok}\t`;
+    const index = result.stdout.indexOf(prefix);
+    const [bytes, digest] = (index < 0 ? "" : result.stdout.slice(index + prefix.length))
+      .trim()
+      .split("\t");
+    const sizeBytes = Number(bytes);
+    if (
+      result.exitCode !== 0 ||
+      !Number.isSafeInteger(sizeBytes) ||
+      sizeBytes < 0 ||
+      !digest ||
+      !/^[0-9a-f]{64}$/u.test(digest)
+    ) {
+      throw new ChannelAUnavailableError("Workspace file digest is temporarily unavailable.");
+    }
+    return { path, sizeBytes, sha256: digest };
+  }
+
+  /** Upload one exact workspace file to a signed PUT URL from the box. Like an
+   * import, the signed URL and headers are staged outside the workspace and
+   * never enter argv, environment, stdout or events. The file is verified
+   * against the expected size and digest before and after the upload, so a
+   * file changed mid-upload is reported instead of published. */
+  async exportWorkspaceFile(req: WorkspaceFileExportRequest): Promise<WorkspaceFileDigest> {
+    const path = assertSafeRelPath(req.path, this.workspaceRoot);
+    if (!Number.isSafeInteger(req.sizeBytes) || req.sizeBytes < 0) {
+      throw new ChannelAValidationError("workspace export size is invalid");
+    }
+    const expectedSha256 = workspaceImportSha256(req.sha256);
+    const config = workspaceExportCurlConfig(req.upload, req.sizeBytes);
+    const transferId = crypto.randomUUID();
+    const configPath = `/tmp/opengeni-private/workspace-exports/${transferId}.curl`;
+    const frame = transferId.replaceAll("-", "");
+    const markers = workspaceFileMarkers("EXPORT", frame);
+    const verify = (when: string) =>
+      `bytes=$(wc -c <"$target" | tr -d ' \\n') && digest=$(opengeni_sha256_file "$target") || { printf %s ${shellQuote(markers.unavailable)}; exit 70; }; if test "$bytes" != ${shellQuote(String(req.sizeBytes))} || test "$digest" != ${shellQuote(expectedSha256)}; then printf '%s\\t%s' ${shellQuote(markers.integrity)} ${when}; exit 74; fi`;
+    const script = [
+      "set +e",
+      "umask 077",
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
+      PORTABLE_SHA256_FILE_FUNCTION,
+      `config=${shellQuote(configPath)}`,
+      `trap 'rm -f "$config"' EXIT`,
+      ...this.confinedWorkspaceFileScript(path, markers),
+      verify("before"),
+      `curl --config "$config" --upload-file "$target" >/dev/null 2>&1 || { printf %s ${shellQuote(markers.unavailable)}; exit 73; }`,
+      verify("after"),
+      `printf %s ${shellQuote(markers.ok)}`,
+    ].join("; ");
+    let result: SynchronousCommandResult;
+    let unsettled = false;
+    try {
+      await this.writePlacementPrivate(configPath, config.content);
+      result = await this.runSynchronous({
+        cmd: internalBashCommand(script),
+        yieldTimeMs: (config.maxTimeSeconds + 60) * 1_000,
+        maxOutputTokens: 2_048,
+      });
+    } catch (error) {
+      unsettled = isNonReplayableCommandFault(error);
+      throw error;
+    } finally {
+      if (!unsettled) await this.session.deletePlacementPrivate?.(configPath, this.runAs);
+    }
+    throwWorkspaceFileMarkerError(result, markers, path);
+    if (result.exitCode !== 0 || !result.stdout.includes(markers.ok)) {
+      throw new ChannelAUnavailableError("Workspace file upload is temporarily unavailable.");
+    }
+    return { path, sizeBytes: req.sizeBytes, sha256: expectedSha256 };
+  }
+
+  /** Shell steps that set `$target` to the resolved regular file at `path`,
+   * failing with the frame's markers when it is missing or escapes the root. */
+  private confinedWorkspaceFileScript(path: string, markers: WorkspaceFileMarkers): string[] {
+    const file = this.workspaceRoot ? this.joinRoot(path) : `./${path}`;
+    return [
+      `root=$(opengeni_realpath_existing ${shellQuote(this.providerWorkspaceRoot())}) || { printf %s ${shellQuote(markers.unavailable)}; exit 70; }`,
+      `file=${shellQuote(file)}`,
+      `target=$(opengeni_realpath_existing "$file") || { printf %s ${shellQuote(markers.missing)}; exit 66; }`,
+      `case "$target" in "\${root%/}/"*) ;; *) printf %s ${shellQuote(markers.escape)}; exit 67 ;; esac`,
+      `test -f "$target" || { printf %s ${shellQuote(markers.notFile)}; exit 65; }`,
+    ];
   }
 
   /** Import one exact signed object into /workspace. The signed URL is staged
@@ -3804,6 +3929,80 @@ function workspaceImportCurlConfig(url: string): string {
     "connect-timeout = 30",
     "max-time = 900",
   ].join("\n");
+}
+
+type WorkspaceFileMarkers = {
+  ok: string;
+  missing: string;
+  notFile: string;
+  escape: string;
+  integrity: string;
+  unavailable: string;
+};
+
+function workspaceFileMarkers(kind: "DIGEST" | "EXPORT", frame: string): WorkspaceFileMarkers {
+  const marker = (name: string) => `__OPENGENI_WORKSPACE_${kind}_${frame}_${name}__`;
+  return {
+    ok: marker("OK"),
+    missing: marker("MISSING"),
+    notFile: marker("NOT_FILE"),
+    escape: marker("ESCAPE"),
+    integrity: marker("INTEGRITY"),
+    unavailable: marker("UNAVAILABLE"),
+  };
+}
+
+function throwWorkspaceFileMarkerError(
+  result: { stdout: string; exitCode: number | null },
+  markers: WorkspaceFileMarkers,
+  path: string,
+): void {
+  if (result.stdout.includes(markers.missing) || result.exitCode === 66) {
+    throw new ChannelANotFoundError(`file not found: ${path}`);
+  }
+  if (result.stdout.includes(markers.escape) || result.exitCode === 67) {
+    throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
+  }
+  if (result.stdout.includes(markers.notFile) || result.exitCode === 65) {
+    throw new ChannelAValidationError(`path is not a regular file: ${path}`);
+  }
+  if (result.stdout.includes(markers.integrity) || result.exitCode === 74) {
+    throw new ChannelAConflictError(`file changed while it was being uploaded: ${path}`);
+  }
+}
+
+/** At least 1 MB/s, at most three hours, and never less than 15 minutes. */
+function workspaceExportCurlConfig(
+  upload: WorkspaceFileExportRequest["upload"],
+  sizeBytes: number,
+): { content: string; maxTimeSeconds: number } {
+  const target = workspaceImportSource({ url: upload.url, expiresAt: upload.expiresAt });
+  const quote = (value: string) => value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+  const headers = Object.entries(upload.requiredHeaders ?? {}).map(([name, value]) => {
+    if (
+      !/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$/u.test(name) ||
+      typeof value !== "string" ||
+      value.length > 4_096 ||
+      /[\u0000-\u001f\u007f]/u.test(value)
+    ) {
+      throw new ChannelAValidationError("workspace export upload header is invalid");
+    }
+    return `header = "${quote(`${name}: ${value}`)}"`;
+  });
+  const maxTimeSeconds = Math.min(3 * 60 * 60, Math.max(900, Math.ceil(sizeBytes / 1_000_000)));
+  return {
+    content: [
+      `url = "${quote(target.url)}"`,
+      ...headers,
+      "fail",
+      "silent",
+      "show-error",
+      'proto = "=http,https"',
+      "connect-timeout = 30",
+      `max-time = ${maxTimeSeconds}`,
+    ].join("\n"),
+    maxTimeSeconds,
+  };
 }
 
 function shellQuote(s: string): string {

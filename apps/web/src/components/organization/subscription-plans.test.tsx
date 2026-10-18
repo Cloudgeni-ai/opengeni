@@ -94,6 +94,9 @@ test("upgrade confirms proration, fresh replacement credit and targets the selec
   const client = clientFixture();
   const changed = mock(() => {});
   await mount(plans(client, "pro", true, changed));
+  expect(document.body.textContent).toContain("$100.00 monthly credit");
+  expect(document.body.textContent).toContain("$500.00 monthly credit");
+  expect(document.body.textContent?.match(/5× prepaid credit/g)).toHaveLength(2);
   await click("Upgrade to Max");
   expect(document.body.textContent).toContain("Stripe prorates unused time");
   expect(document.body.textContent).toContain("replaced, not added");
@@ -274,13 +277,24 @@ test("balance splits monthly, promotional and other general credit without doubl
     />,
   );
   expect(document.body.textContent).toContain("$158.45");
-  expect(document.body.textContent).toContain("$123.45");
-  expect(document.body.textContent).toContain("$25.00");
+  expect(document.body.textContent).toContain("$73.45");
+  expect(document.body.textContent).toContain("$75.00");
   expect(document.body.textContent).toContain("$10.00");
   expect(document.body.textContent).toContain("Other general credit");
 });
 
-test("seat refusal recognizes the real legacy body and offers exactly one upgrade action", async () => {
+test("seat refusal recognizes current and legacy bodies and offers exactly one upgrade action", async () => {
+  const envelope = JSON.stringify({
+    error: {
+      status: 402,
+      code: "seat_limit_reached",
+      message: "Organization seat limit reached. Upgrade your plan to add people.",
+      retryable: false,
+      details: { action: { type: "upgrade", href: "/billing" } },
+    },
+  });
+  expect(isSeatLimitError(new OpenGeniApiError(402, envelope, { mutation: true }))).toBe(true);
+  expect(isSeatLimitError({ status: 402, body: envelope })).toBe(true);
   expect(
     isSeatLimitError(
       new OpenGeniApiError(
@@ -301,4 +315,31 @@ test("seat refusal recognizes the real legacy body and offers exactly one upgrad
   expect(document.querySelectorAll("button").length).toBe(1);
   await click("View upgrade options");
   expect(upgrade).toHaveBeenCalledTimes(1);
+});
+
+test("status-only seat fallback needs a full finite plan and never masks another typed refusal", () => {
+  const full = { seatsUsed: 5, seatLimit: 5 };
+  for (const error of [
+    { status: 402 },
+    { status: 402, body: "not json" },
+    new OpenGeniApiError(
+      402,
+      JSON.stringify({ error: { code: "payment_required", message: "Request failed." } }),
+      { mutation: true },
+    ),
+  ]) {
+    expect(isSeatLimitError(error, full)).toBe(true);
+    expect(isSeatLimitError(error, { seatsUsed: 4, seatLimit: 5 })).toBe(false);
+    expect(isSeatLimitError(error, { seatsUsed: 5, seatLimit: null })).toBe(false);
+    expect(isSeatLimitError(error, null)).toBe(false);
+  }
+  expect(isSeatLimitError({ status: 403 }, full)).toBe(false);
+  expect(isSeatLimitError({ status: 402, code: "allowance_exhausted" }, full)).toBe(false);
+  expect(isSeatLimitError({ status: 402, code: "session_usage_limit_reached" }, full)).toBe(false);
+  expect(
+    isSeatLimitError(
+      { status: 402, body: JSON.stringify({ error: { code: "allowance_exhausted" } }) },
+      full,
+    ),
+  ).toBe(false);
 });

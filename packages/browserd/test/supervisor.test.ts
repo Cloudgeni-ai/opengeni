@@ -508,8 +508,9 @@ describe("BrowserSupervisor", () => {
         const second = reference(2);
         await supervisor.createSession({ ...first, headed: false });
         await expect(supervisor.createSession({ ...second, headed: false })).rejects.toMatchObject({
-          code: "resource_unavailable",
-          retryable: true,
+          code: "capacity_exhausted",
+          retryable: false,
+          message: expect.stringContaining("limit of 1 Opengeni browsers"),
         });
         await supervisor.endSession(first);
         expect(
@@ -2009,6 +2010,69 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
+  test("retiring a browser this controller lost stops its exact process and keeps its state", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      // The task moved to another machine after an agent restart left this
+      // browser running detached: the control plane retires the exact
+      // generation and keeps the profile and downloads on disk.
+      const stopped: Array<{ profileDirectory: string; pid: number | null }> = [];
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        stopEndedProcess: async (profileDirectory, recorded) => {
+          stopped.push({ profileDirectory, pid: recorded?.pid ?? null });
+        },
+        createDriver: async (context) => fakeDriver(context),
+      });
+      try {
+        const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+        const exact = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+        };
+        await expect(
+          supervisor.endSession(
+            { ...exact, controllerGeneration: "controller-other" },
+            { removeState: false, discardWorkingRuntime: true },
+          ),
+        ).rejects.toThrow("preserved");
+        expect(stopped).toEqual([]);
+
+        await supervisor.endSession(exact, { removeState: false, discardWorkingRuntime: true });
+        expect(stopped).toEqual([
+          { profileDirectory: join(sessionDirectory, "profile"), pid: 2001 },
+        ]);
+        expect(await exists(join(sessionDirectory, "profile"))).toBe(true);
+        const journal = await SqliteBrowserWorkingRuntimeJournal.open(
+          { sessionDirectory, ...exact },
+          true,
+        );
+        try {
+          expect(journal.latest()).toMatchObject({
+            intent: "retire",
+            state: "completed",
+            process: null,
+          });
+        } finally {
+          journal.close();
+        }
+        // A retried retirement is idempotent; it only rechecks for survivors.
+        await supervisor.endSession(exact, { removeState: false, discardWorkingRuntime: true });
+        expect(stopped.at(-1)).toEqual({
+          profileDirectory: join(sessionDirectory, "profile"),
+          pid: null,
+        });
+        // A resume can never adopt the retired directory as a live browser.
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toThrow();
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
   test("an interrupted launch is set aside intact only when no browser runs its profile", async () => {
     await withInterruptedLaunchFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
       const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
@@ -2437,11 +2501,18 @@ describe("same-working-directory controller restart", () => {
     },
   );
 
-  test("failed accepted reattach detaches transport, preserves owned Chrome, and leaves dispatch unknown", async () => {
+  test("failed accepted reattach detaches transport, preserves owned Chrome, and reinstates its receipt", async () => {
     await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
       let closes = 0,
         detaches = 0,
         drivers = 0;
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      const before = await SqliteBrowserWorkingRuntimeJournal.open(
+        { ...options, sessionDirectory },
+        true,
+      );
+      const base = before.latest()!;
+      before.close();
       const supervisor = await BrowserSupervisor.open({
         rootDirectory,
         socketRootDirectory,
@@ -2467,6 +2538,59 @@ describe("same-working-directory controller restart", () => {
           supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
         ).rejects.toThrow();
         const journal = await SqliteBrowserWorkingRuntimeJournal.open(
+          { ...options, sessionDirectory },
+          true,
+        );
+        try {
+          // The live browser it started from is recorded as the latest again.
+          const latest = journal.latest()!;
+          expect(latest.operationId === base.operationId).toBe(false);
+          expect(latest).toMatchObject({
+            intent: base.intent,
+            state: "completed",
+            process: base.process,
+            profile: base.profile,
+            directoryLaunchAllowed: base.directoryLaunchAllowed,
+          });
+        } finally {
+          journal.close();
+        }
+        // So the same browser can be recovered again rather than refused.
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toThrow("synthetic accepted transport disappeared");
+        expect({ closes, detaches, drivers }).toEqual({ closes: 0, detaches: 2, drivers: 2 });
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("a failed reattach whose transport did not detach keeps the browser refused", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      let drivers = 0;
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        createDriver: async (context) => {
+          drivers++;
+          return {
+            ...fakeDriver(context),
+            async start() {
+              throw new Error("synthetic accepted transport disappeared");
+            },
+            async detach() {
+              throw new Error("synthetic detach failed");
+            },
+          };
+        },
+      });
+      try {
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toThrow();
+        const journal = await SqliteBrowserWorkingRuntimeJournal.open(
           {
             ...options,
             sessionDirectory: join(rootDirectory, "sessions", options.browserSessionId),
@@ -2481,8 +2605,54 @@ describe("same-working-directory controller restart", () => {
         await expect(
           supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
         ).rejects.toThrow("preserved");
-        await expect(supervisor.endSession(options)).rejects.toThrow("preserved");
-        expect({ closes, detaches, drivers }).toEqual({ closes: 0, detaches: 1, drivers: 1 });
+        expect(drivers).toBe(1);
+      } finally {
+        // Closing reports the same unsettled cleanup.
+        await expect(supervisor.close()).rejects.toThrow("shutdown failed");
+      }
+    });
+  });
+
+  test("a reattach cut short by a controller restart is recovered from the receipt it started from", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      const writer = await SqliteBrowserWorkingRuntimeJournal.open({
+        ...options,
+        sessionDirectory,
+      });
+      const base = writer.latest()!;
+      // The earlier controller claimed the reattach and died before it settled.
+      writer.begin({ ...base, intent: "launch", process: null }, base.operationId);
+      writer.close();
+      let drivers = 0;
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        createDriver: async (context) => {
+          drivers++;
+          return {
+            ...fakeDriver(context),
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+          };
+        },
+      });
+      try {
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        expect(drivers).toBe(1);
+        const journal = await SqliteBrowserWorkingRuntimeJournal.open(
+          { ...options, sessionDirectory },
+          true,
+        );
+        try {
+          expect(journal.latest()).toMatchObject({
+            intent: "launch",
+            state: "completed",
+            process: base.process,
+          });
+        } finally {
+          journal.close();
+        }
       } finally {
         await supervisor.close();
       }

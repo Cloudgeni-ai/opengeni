@@ -762,6 +762,12 @@ describe("Workspace Insights model bundle", () => {
           billingPath: "external",
           inputTokens: 1000,
           outputTokens: 500,
+          timing: {
+            preDispatchMs: 12,
+            timeToFirstTokenMs: 340,
+            timeToFirstTextMs: 910,
+            durationMs: 4_200,
+          },
         })},
         ${occurredAt}::timestamptz + interval '0.000123 seconds'
       )`;
@@ -788,6 +794,8 @@ describe("Workspace Insights model bundle", () => {
           billingPath: "external",
           inputTokens: 200,
           outputTokens: 100,
+          // Malformed timing never fails the repair; it is stored as unknown.
+          timing: { preDispatchMs: -1, timeToFirstTokenMs: 1.5, durationMs: "slow" },
         })},
         ${occurredAt}::timestamptz + interval '0.000456 seconds'
       )`;
@@ -808,6 +816,7 @@ describe("Workspace Insights model bundle", () => {
         billingPath: string;
         pricedCostMicros: number;
         totalTokens: number | null;
+        timing: Array<number | null>;
       }>
     >`
       select
@@ -815,7 +824,9 @@ describe("Workspace Insights model bundle", () => {
         provider,
         billing_path as "billingPath",
         priced_cost_micros::int as "pricedCostMicros",
-        total_tokens::int as "totalTokens"
+        total_tokens::int as "totalTokens",
+        jsonb_build_array(pre_dispatch_ms, time_to_first_token_ms, time_to_first_text_ms, duration_ms)
+          as timing
       from model_call_facts
       where workspace_id = ${seeded.workspaceId}
         and turn_id in (${turnId}, ${secondTurnId})
@@ -827,6 +838,7 @@ describe("Workspace Insights model bundle", () => {
         billingPath: "external",
         pricedCostMicros: 0,
         totalTokens: 1500,
+        timing: [12, 340, 910, 4_200],
       },
       {
         sourceKey: secondSourceKey,
@@ -834,6 +846,7 @@ describe("Workspace Insights model bundle", () => {
         billingPath: "external",
         pricedCostMicros: 0,
         totalTokens: 300,
+        timing: [null, null, null, null],
       },
     ]);
   });

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react",
-  "version": "3.4.0",
+  "version": "4.0.4",
   "description": "React hooks and styled components for Opengeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
@@ -46,6 +46,11 @@
       "style": "./styles/connect.css",
       "default": "./styles/connect.css"
     },
+    "./this-computer.css": {
+      "types": "./styles/this-computer.d.ts",
+      "style": "./styles/this-computer.css",
+      "default": "./styles/this-computer.css"
+    },
     "./connect": {
       "types": "./src/connect.ts",
       "default": "./src/connect.ts"
@@ -82,6 +87,10 @@
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"
     },
+    "./this-computer": {
+      "types": "./src/this-computer.ts",
+      "default": "./src/this-computer.ts"
+    },
     "./queue-presentation-model": {
       "types": "./src/queue-presentation-model.ts",
       "default": "./src/queue-presentation-model.ts"
@@ -89,6 +98,10 @@
     "./composer-messages": {
       "types": "./src/composer-messages.ts",
       "default": "./src/composer-messages.ts"
+    },
+    "./messages": {
+      "types": "./src/messages.ts",
+      "default": "./src/messages.ts"
     },
     "./sandbox-label-model": {
       "types": "./src/sandbox-label-model.ts",
@@ -275,7 +288,7 @@
     "@codemirror/lang-markdown": "^6.0.0",
     "@codemirror/lang-python": "^6.0.0",
     "@novnc/novnc": "^1.7.0",
-    "@opengeni/artifact-tool": "^3.0.0",
+    "@opengeni/artifact-tool": "^4.0.0",
     "@pierre/diffs": "^1.2.11",
     "@uiw/react-codemirror": "^4.23.0",
     "@xterm/addon-fit": "^0.11.0",

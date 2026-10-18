@@ -7,6 +7,16 @@
 
 # Non-RLS authority tables: can cross-organization denial move into the database?
 
+> **October 17, 2026 inventory addendum:** migration 0823 adds the dormant
+> `scoped_compute_capability_lock` policy on `workspace_memberships`. It is
+> `FOR UPDATE`, requires the current account and the existing owner-only
+> scoped-compute capability, and has `WITH CHECK (false)`. It permits the
+> definer's authorization row locks where RLS applies, not a new mutation lane.
+> It does not enable RLS or change this table's bootstrap exemption. The current
+> exact policy inventory and these bounds are asserted in
+> `packages/db/test/non-rls-authority-tables.test.ts`; the August record below
+> remains historical.
+
 Status: **three reasoned exemptions, one of them permanent by construction**
 
 ## The question

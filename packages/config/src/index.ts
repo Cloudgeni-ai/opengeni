@@ -163,6 +163,42 @@ const EnvGoalIdleBackoffMs = z.preprocess((value) => {
   });
 }, z.array(z.number().int().nonnegative()).min(1, "OPENGENI_GOAL_IDLE_BACKOFF_MS must list at least one delay in milliseconds").readonly());
 
+/** `{"<workspace id>": bytes}`: per-workspace retained-image limits. */
+const EnvRetainedImageWorkspaceQuotaOverrides = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const source = value.trim();
+    if (!source) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(source);
+    } catch {
+      return value;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
+    return Object.fromEntries(
+      Object.entries(parsed).map(([workspaceId, bytes]) => [workspaceId.toLowerCase(), bytes]),
+    );
+  },
+  z
+    .record(z.string().uuid(), z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER))
+    .default({}),
+);
+
+/** The retained-image byte limit for one workspace: its override, else the deployment default. */
+export function retainedImageWorkspaceQuotaBytes(
+  settings: Pick<
+    Settings,
+    "retainedImageWorkspaceQuotaBytes" | "retainedImageWorkspaceQuotaOverrides"
+  >,
+  workspaceId: string,
+): number {
+  return (
+    settings.retainedImageWorkspaceQuotaOverrides[workspaceId.toLowerCase()] ??
+    settings.retainedImageWorkspaceQuotaBytes
+  );
+}
+
 const EnvFirstPartyMcpTools = z.preprocess(
   (value) => {
     if (typeof value !== "string") return value;
@@ -733,6 +769,17 @@ const SettingsSchema = z.object({
     .positive()
     .max(Number.MAX_SAFE_INTEGER)
     .default(20 * 1024 * 1024 * 1024),
+  // Bytes of retained session images (screenshots, viewed images) a workspace
+  // keeps. When a new image does not fit, the workspace's oldest images are
+  // evicted to make room; a new image is only refused when it is larger than
+  // the whole limit. The overrides map a workspace id to its own limit.
+  retainedImageWorkspaceQuotaBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(5 * 1024 * 1024 * 1024),
+  retainedImageWorkspaceQuotaOverrides: EnvRetainedImageWorkspaceQuotaOverrides,
   videoGenerationTempDirectory: z.string().trim().min(1).max(1_024).default("/tmp/opengeni-video"),
   videoGenerationFfprobePath: z.string().trim().min(1).max(1_024).default("ffprobe"),
   // Opengeni's customer price, not a claim about the provider's delayed cost report.
@@ -782,8 +829,11 @@ const SettingsSchema = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(8 * 1024 * 1024),
-  /** Move idle sessions' bulky content to object storage (docs/session-storage-lifecycle.md). */
-  sessionArchiveEnabled: EnvBoolean.default(false),
+  /**
+   * Move idle sessions' bulky content to object storage (docs/session-storage-lifecycle.md).
+   * On by default; without object storage the worker skips archiving.
+   */
+  sessionArchiveEnabled: EnvBoolean.default(true),
   /** Days without a new turn before a session becomes eligible for the archive. */
   sessionArchiveIdleDays: z.coerce.number().int().min(1).max(3650).default(30),
   voiceInputResumableRetentionSeconds: z.coerce
@@ -960,6 +1010,12 @@ const SettingsSchema = z.object({
   // request per step. Requests the socket cannot carry fall back to HTTP.
   // OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED
   codexResponsesWebSocketEnabled: EnvBoolean.default(true),
+  // The same transport for the OpenAI API (/v1/responses) and Azure OpenAI's
+  // v1 API (/openai/v1/responses): one connection per conversation, each step
+  // continuing the previous response with only its new input. Other
+  // OpenAI-compatible hosts always use HTTP.
+  // OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED
+  openaiResponsesWebSocketEnabled: EnvBoolean.default(true),
   // Provider-neutral progressive disclosure for direct OpenAI/Azure native
   // client search and ordinary-function generic dispatch. Kept separate from
   // the Codex rollout so an emergency Codex opt-out cannot disable every model.
@@ -1220,8 +1276,22 @@ const SettingsSchema = z.object({
   runloopBlueprintId: z.string().optional(),
   runloopTunnel: EnvBoolean.default(true),
   runloopKeepAliveSeconds: z.coerce.number().int().positive().optional(),
-  // --- e2b (SDK reads E2B_API_KEY from env; mirrored for validation + forwarding) ---
+  // --- e2b: E2B's cloud or any E2B-compatible API ---
+  // The key, domain and addresses are handed to the SDK explicitly on every
+  // create and resume; unset ones keep the SDK's defaults (E2B's cloud).
   e2bApiKey: z.string().optional(),
+  // Sandboxes are reached as `<port>-<sandbox id>.<domain>`; the API is
+  // `https://api.<domain>` unless e2bApiUrl is set.
+  e2bDomain: z
+    .string()
+    .regex(/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::\d{1,5})?$/, {
+      message: "must be a host name such as sandboxes.example.com, without a scheme or path",
+    })
+    .optional(),
+  e2bApiUrl: z.string().url().optional(),
+  // One address for all envd traffic, routed by the E2b-Sandbox-Id and
+  // E2b-Sandbox-Port headers, instead of a name per sandbox.
+  e2bSandboxUrl: z.string().url().optional(),
   e2bTemplate: z.string().optional(),
   e2bTimeoutSeconds: z.coerce.number().int().positive().optional(),
   e2bTimeoutAction: z.enum(["pause", "kill"]).optional(),
@@ -4822,6 +4892,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_VIDEO_GENERATION_MAX_CONCURRENT_PER_WORKSPACE",
     ),
     videoGenerationWorkspaceQuotaBytes: optional("OPENGENI_VIDEO_GENERATION_WORKSPACE_QUOTA_BYTES"),
+    retainedImageWorkspaceQuotaBytes: optional("OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_BYTES"),
+    retainedImageWorkspaceQuotaOverrides: optional(
+      "OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_OVERRIDES",
+    ),
     videoGenerationTempDirectory: optional("OPENGENI_VIDEO_GENERATION_TEMP_DIRECTORY"),
     videoGenerationFfprobePath: optional("OPENGENI_VIDEO_GENERATION_FFPROBE_PATH"),
     videoGenerationCredit480pMicrosPerSecond: optional(
@@ -4895,6 +4969,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     codexResponsesWebSocketEnabled: optional("OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED"),
+    openaiResponsesWebSocketEnabled: optional("OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
@@ -4987,6 +5062,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     runloopTunnel: optional("OPENGENI_RUNLOOP_TUNNEL"),
     runloopKeepAliveSeconds: optional("OPENGENI_RUNLOOP_KEEP_ALIVE_SECONDS"),
     e2bApiKey: optional("OPENGENI_E2B_API_KEY"),
+    e2bDomain: optional("OPENGENI_E2B_DOMAIN"),
+    e2bApiUrl: optional("OPENGENI_E2B_API_URL"),
+    e2bSandboxUrl: optional("OPENGENI_E2B_SANDBOX_URL"),
     e2bTemplate: optional("OPENGENI_E2B_TEMPLATE"),
     e2bTimeoutSeconds: optional("OPENGENI_E2B_TIMEOUT_SECONDS"),
     e2bTimeoutAction: optional("OPENGENI_E2B_TIMEOUT_ACTION"),

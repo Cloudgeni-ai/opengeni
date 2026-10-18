@@ -1272,6 +1272,13 @@ describe("BrowserSession route discipline", () => {
     expect(route).toContain('operation: "browser.download.save"');
     expect(route).toContain("mayReplaceExisting: save.overwrite && dispatched.dispatchedNow");
     expect(route).toContain("createParents: true");
+    // A download kept as a workspace file is saved from that file first, so
+    // it needs no running browser.
+    expect(route.indexOf("getRetainedBrowserDownload")).toBeGreaterThanOrEqual(0);
+    expect(route.indexOf("getRetainedBrowserDownload")).toBeLessThan(
+      route.indexOf("sessionClient.download(downloadId)"),
+    );
+    expect(route).toContain("retained: { fileId: kept.fileId, uploadId: kept.uploadId }");
   });
 
   test("resolves linked browsers through the exact active ComputerSession placement", async () => {
@@ -1445,11 +1452,36 @@ describe("BrowserSession route discipline", () => {
     const resume = source.slice(resumeStart, endStart);
     expect(suspend).toContain("if (isTerminalOperation(prepared.operation.state))");
     expect(resume).toContain("if (isTerminalOperation(prepared.operation.state))");
+    // A controller that restarted is recovered from the browser's working copy
+    // before the suspension is prepared, so the capture saves the intact
+    // profile instead of recording the browser as lost.
+    expect(suspend.indexOf("recoverRestartedBrowserControllerBeforeSuspend(")).toBeGreaterThan(0);
+    expect(suspend.indexOf("recoverRestartedBrowserControllerBeforeSuspend(")).toBeLessThan(
+      suspend.indexOf("prepareBrowserSessionSuspend("),
+    );
+    const recoveryStart = source.indexOf(
+      "async function recoverRestartedBrowserControllerBeforeSuspend(",
+    );
+    const recovery = source.slice(
+      recoveryStart,
+      source.indexOf("async function recoverActiveBrowserController(", recoveryStart),
+    );
+    expect(recovery).toContain('browserSessionStorageMode(before.session) !== "private_profile"');
+    expect(recovery).toContain("await withActiveBrowserController(");
+    expect(recovery).toContain("await sessionClient.listTargets();");
+    // Recovery that fails leaves suspension to record the loss as before.
+    expect(recovery).toContain('console.warn("browser.suspend_controller_recovery_failed"');
     expect(suspend.indexOf("dispatchBrowserSessionOperation")).toBeLessThan(
       suspend.indexOf("stateUpload"),
     );
     expect(suspend.indexOf("stateUpload")).toBeLessThan(suspend.indexOf("createPutUrl"));
     expect(suspend.indexOf("createPutUrl")).toBeLessThan(suspend.indexOf("client.captureState"));
+    // Suspension removes the working directory: completed downloads are kept
+    // as workspace files before the capture stops the browser.
+    expect(suspend.indexOf("retainBrowserDownloads(")).toBeGreaterThanOrEqual(0);
+    expect(suspend.indexOf("retainBrowserDownloads(")).toBeLessThan(
+      suspend.indexOf("client.captureState"),
+    );
     expect(suspend).toContain('afterCapture: "stop"');
     expect(suspend.indexOf("client.captureState")).toBeLessThan(
       suspend.indexOf("commitBrowserSessionSuspension"),
@@ -1470,6 +1502,18 @@ describe("BrowserSession route discipline", () => {
       resume.indexOf("client.createSession"),
     );
     expect(resume).toContain("...(networkRoute ? { networkRoute } : {})");
+    // Any failure between preparation and dispatch (restore preparation, an
+    // offline or moved placement) settles the prepared resume back to
+    // suspended instead of leaving the browser restoring forever.
+    expect(resume.indexOf("preparedForDispatch = true")).toBeGreaterThan(
+      resume.indexOf("if (isTerminalOperation(prepared.operation.state))"),
+    );
+    expect(resume.indexOf("preparedForDispatch = true")).toBeLessThan(
+      resume.indexOf("prepareBrowserPrivateCheckpointRestore"),
+    );
+    expect(resume.lastIndexOf("failBrowserSessionResumePreparation")).toBeGreaterThan(
+      resume.indexOf("withBrowserPlacement"),
+    );
   });
 
   test("resumes an expired resume only after ending its retained controller generation", async () => {
@@ -1527,13 +1571,15 @@ describe("BrowserSession route discipline", () => {
       source.indexOf("async function continueExpiredBrowserResume"),
       source.indexOf("async function settleExpiredBrowserResume"),
     );
-    expect(continuation).toContain("if (!expired?.controllerGeneration) return null;");
+    expect(continuation).toContain(
+      "if (!expired?.controllerGeneration) return { unavailable: null };",
+    );
     expect(continuation).toContain(
       'browserSessionStorageMode(record.session) !== "private_profile"',
     );
     // The same generation is re-adopted from its own working directory on the
     // controller instance that holds it; nothing is restored or discarded.
-    expect(continuation).toContain("binding.placementInstanceId");
+    expect(continuation).toContain("retained?.placementInstanceId ?? null");
     expect(continuation).toContain("controllerGeneration: binding.controllerGeneration");
     expect(continuation).toContain("recoverExistingWorkingDirectory: true");
     // Its operation is recorded only after adoption, so the heartbeat holds the
@@ -1546,6 +1592,37 @@ describe("BrowserSession route discipline", () => {
     expect(continuation.indexOf("client.createSession(")).toBeLessThan(
       continuation.indexOf("continueExpiredBrowserSessionResume(deps.db"),
     );
+  });
+
+  test("continues a browser lost to a restarted controller only from its working copy", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resume = source.slice(
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"'),
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"'),
+    );
+    expect(resume).toContain('before.session.failureCode === "controller_resource_missing"');
+    const continuation = source.slice(
+      source.indexOf("async function continueExpiredBrowserResume"),
+      source.indexOf("async function settleExpiredBrowserResume"),
+    );
+    // Its cleared binding is rebuilt for the failed suspension's generation on
+    // the placement instance that now hosts the controller.
+    expect(continuation).toContain("const binding = retained ?? {");
+    expect(continuation).toContain("placementInstanceId: placement.placementInstanceId,");
+    const settle = source.slice(
+      source.indexOf("async function settleExpiredBrowserResume"),
+      source.indexOf("async function finishSuspendedBrowserControllerCleanup"),
+    );
+    // It ran past its checkpoint, so it is never settled back to it.
+    expect(settle.indexOf("if (!expired.settleable)")).toBeGreaterThan(-1);
+    expect(settle.indexOf("if (!expired.settleable)")).toBeLessThan(
+      settle.indexOf("withBrowserPlacement("),
+    );
+    // The refusal says why the copy could not be continued: the controller's
+    // own explanation, or which precondition it failed.
+    expect(continuation).toContain("return { unavailable: error.error.message };");
+    expect(resume).toContain("continued.unavailable,");
+    expect(settle).toContain("could not be recovered. ${unavailable}");
   });
 
   test("preserves exact human, service, and agent-attempt action provenance", () => {
@@ -1688,6 +1765,42 @@ test("working copy routes carry the browser record's exact authority, and only a
         exactAuthority: true,
         audits: [],
       })),
+      // A lost browser has no active binding. Its working copy is reached
+      // through the generation its last launch retained, as resume reaches it,
+      // with the same exact authority; a loss with no retained copy refuses.
+      {
+        scenario: "lost-inspect",
+        status: 200,
+        calls: ["POST /working-copy/inspection"],
+        exactAuthority: true,
+        audits: [],
+        adoptable: true,
+        explainsExclusions: true,
+        provisioned: 1,
+      },
+      {
+        scenario: "lost-adopt",
+        status: 200,
+        calls: ["POST /working-copy/adoptions"],
+        exactAuthority: true,
+        audits: [
+          "browserSession.working_copy.adoption_requested",
+          "controller",
+          "browserSession.working_copy.adoption_settled",
+        ],
+        phase: "adopted",
+        provisioned: 1,
+      },
+      {
+        scenario: "lost-no-copy",
+        status: 409,
+        calls: [],
+        exactAuthority: true,
+        audits: [],
+        message:
+          "This browser was lost without a working copy that its controller still keeps, so there is nothing to inspect or adopt. Resume it to restore its last saved state.",
+        provisioned: 0,
+      },
     ]);
   } finally {
     if (child.exitCode === null) child.kill();
@@ -1735,6 +1848,7 @@ async function workingCopyRoutesFixture() {
   let calls: string[] = [];
   let audits: string[] = [];
   let exactAuthority = true;
+  let provisioned = 0;
   const tokenGeneration = () => (scenario === "adopt-token-rotated" ? 2 : 1);
   mock.module(resolveFromApi("@opengeni/db"), () => ({
     ...db,
@@ -1746,13 +1860,17 @@ async function workingCopyRoutesFixture() {
       session: {
         id: browserSessionId,
         workspaceId,
-        lifecycle: "active",
+        lifecycle: scenario.startsWith("lost") ? "lost" : "active",
         placement,
-        controller: {
-          controllerId: "opengeni-browserd",
-          controllerGeneration,
-          placementInstanceId: instanceId,
-        },
+        // A lost browser keeps no active binding; its last launch's
+        // generation is retained by the expired resume instead.
+        controller: scenario.startsWith("lost")
+          ? null
+          : {
+              controllerId: "opengeni-browserd",
+              controllerGeneration,
+              placementInstanceId: instanceId,
+            },
         driverId: "opengeni.cdp.v1",
         engine: "chromium",
         headless: true,
@@ -1766,6 +1884,8 @@ async function workingCopyRoutesFixture() {
       activeSandboxId: scenario === "machine-moved" ? randomUUID() : machineId,
     }),
     touchBrowserSessionController: async () => scenario !== "holder-lost",
+    getExpiredBrowserSessionResume: async () =>
+      scenario === "lost-no-copy" ? null : { controllerGeneration, settleable: false },
     terminalizeStaleConnectedInteractionPlacement: async () => ({ sourcePlacementChanged: false }),
     getBrowserPrivateCheckpointAuthority: async () => null,
     recordAuditEvent: async (_db: unknown, event: { action: string }) => {
@@ -1900,6 +2020,27 @@ async function workingCopyRoutesFixture() {
       },
     });
   mock.module(channelHref, () => ({ ...channel, withChannelARead: routed, withChannelA: routed }));
+  // A lost browser's controller is ensured on its machine first, as for
+  // resume; the ensured controller is the same fake controller.
+  const sandboxRuntime = (await import(
+    resolveFromApi("@opengeni/runtime/sandbox")
+  )) as typeof import("@opengeni/runtime/sandbox");
+  mock.module(resolveFromApi("@opengeni/runtime/sandbox"), () => ({
+    ...sandboxRuntime,
+    provisionBrowserControlClient: async (
+      session: never,
+      input: { adminToken: string; nativeAuthority?: never },
+    ) => {
+      provisioned += 1;
+      return {
+        client: new sandboxRuntime.BrowserControlClient(session, {
+          adminToken: input.adminToken,
+          ...(input.nativeAuthority ? { nativeAuthority: input.nativeAuthority } : {}),
+        }),
+        server: { port: server.port, marker: "synthetic" },
+      };
+    },
+  }));
   const { registerBrowserSessionRoutes } = await import(routeHref);
   const app = new Hono();
   app.onError((error, context) =>
@@ -1929,13 +2070,17 @@ async function workingCopyRoutesFixture() {
       "holder-lost",
       "machine-moved",
       "access-revoked",
+      "lost-inspect",
+      "lost-adopt",
+      "lost-no-copy",
     ]) {
       scenario = next;
       calls = [];
       audits = [];
       exactAuthority = true;
+      provisioned = 0;
       const response =
-        next === "inspect"
+        next === "inspect" || next === "lost-inspect" || next === "lost-no-copy"
           ? await app.request(`${base}/inspection`, {
               method: "POST",
               headers: { "content-type": "application/json" },
@@ -1961,16 +2106,24 @@ async function workingCopyRoutesFixture() {
         calls,
         exactAuthority,
         audits: audits.filter(
-          (entry) => entry !== "controller" || next.startsWith("adopt") || next === "revert",
+          (entry) =>
+            entry !== "controller" ||
+            next.startsWith("adopt") ||
+            next === "revert" ||
+            next === "lost-adopt",
         ),
       };
-      if (response.status === 200 && next === "inspect") {
+      if (response.status === 200 && (next === "inspect" || next === "lost-inspect")) {
         result.adoptable = body.adoptable;
         result.explainsExclusions = String(body.explanation).includes(
           "chrome-launch, working-runtime.sqlite-shm",
         );
       } else if (response.status === 200) {
         result.phase = body.adoption?.phase;
+      }
+      if (next.startsWith("lost")) {
+        result.provisioned = provisioned;
+        if (response.status !== 200) result.message = body.message;
       }
       results.push(result);
     }

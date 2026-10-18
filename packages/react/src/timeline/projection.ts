@@ -14,6 +14,8 @@ import {
   type TimelineAnnotation,
 } from "@opengeni/sdk";
 import fleetDecisionItem from "./fleet-decision-projection";
+import { learningRefusalFromToolOutput } from "@opengeni/sdk/learning-refusal";
+import { learningRefusalText } from "./learning-refusal-copy";
 import {
   allowanceExhaustedMessage,
   parseAllowanceExhaustedRefusal,
@@ -54,6 +56,7 @@ import type {
   ToolCallTruncation,
   WorkerItem,
 } from "./types";
+import { type OpenGeniText } from "../messages/runtime";
 
 export { toolDisplayName, mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 
@@ -156,11 +159,15 @@ function timelineAnnotationToolOutputText(output: unknown): string | null {
 }
 
 export function buildTimeline(
+  t: OpenGeniText,
   events: SessionEvent[],
   options: { partialStart?: boolean } = {},
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
   const allowanceNotices = new Set<string>();
+  // One "not saved" notice per turn for the same refused change, however
+  // often the agent retried it.
+  const learningRefusalNotices = new Set<string>();
   const allowanceNotice = (event: SessionEvent, turnId: string | null) => {
     const refusal = parseAllowanceExhaustedRefusal(event.payload);
     if (!refusal) return null;
@@ -939,6 +946,29 @@ export function buildTimeline(
             label: target.name,
           };
         }
+        // A refused Skill, instruction, or Knowledge change is told to the
+        // person outside the folded work row, whatever the agent then says.
+        const learningRefusal = learningRefusalFromToolOutput(payload.output);
+        if (learningRefusal) {
+          const key = JSON.stringify([
+            turnId ?? target.turnId,
+            learningRefusal.destination,
+            learningRefusal.reason,
+            learningRefusal.skillId ?? null,
+          ]);
+          if (!learningRefusalNotices.has(key)) {
+            learningRefusalNotices.add(key);
+            closeStreamingTail();
+            items.push({
+              kind: "notice",
+              id: `${event.id}-learning-refusal`,
+              tone: "failed",
+              text: learningRefusalText(t, learningRefusal),
+              learningRefusal,
+              occurredAt: event.occurredAt,
+            });
+          }
+        }
         break;
       }
 
@@ -1034,7 +1064,7 @@ export function buildTimeline(
         if (existing && status !== "running") {
           existing.status = status;
           if (origin) existing.origin = origin;
-          const message = failureMessage(payload);
+          const message = failureMessage(t, payload);
           if (message) {
             existing.output = existing.output ? `${existing.output}\n${message}` : message;
           }
@@ -1048,7 +1078,7 @@ export function buildTimeline(
             turnId,
             name,
             command: typeof payload.command === "string" ? payload.command : null,
-            output: failureMessage(payload) ?? "",
+            output: failureMessage(t, payload) ?? "",
             origin,
             status,
             occurredAt: event.occurredAt,
@@ -1165,10 +1195,10 @@ export function buildTimeline(
         // Never expose connection ids, personal labels, or provider error text.
         const text =
           payload.reason === "return_to_preferred"
-            ? "Returned to your preferred model."
+            ? t("timeline.projection.returnedToYourPreferredModel")
             : payload.reason === "failover_cross_provider"
-              ? "Switched to a fallback model."
-              : "Switched to another subscription account.";
+              ? t("timeline.projection.switchedToAFallbackModel")
+              : t("timeline.projection.switchedToAnotherSubscriptionAccount");
         items.push({
           kind: "notice",
           id: event.id,
@@ -1181,7 +1211,7 @@ export function buildTimeline(
 
       case "codex.capacity.waiting":
       case "turn.capacity_waiting": {
-        const capacityWait = capacityWaitPresentation(event.type, payload, turnId);
+        const capacityWait = capacityWaitPresentation(t, event.type, payload, turnId);
         const item: NoticeItem = {
           kind: "notice",
           id: event.id,
@@ -1212,7 +1242,8 @@ export function buildTimeline(
             kind: "notice",
             id: event.id,
             tone: "waiting",
-            text: "Approval needed — the turn is paused until someone decides.",
+            text: t("timeline.projection.approvalNeededTheTurnIs"),
+            approval: true,
             occurredAt: event.occurredAt,
           },
           turnId,
@@ -1403,14 +1434,14 @@ export function buildTimeline(
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
           items.push(turnEndItem(event, "complete", null));
-          items.push(sessionUsageLimitNotice(event, payload));
+          items.push(sessionUsageLimitNotice(t, event, payload));
           break;
         }
         if (allowance) {
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
-          items.push(turnEndItem(event, "failed", ALLOWANCE_TURN_END_TEXT));
+          items.push(turnEndItem(event, "failed", ALLOWANCE_TURN_END_TEXT(t)));
           allowanceNotice(event, turnId);
           break;
         }
@@ -1418,12 +1449,12 @@ export function buildTimeline(
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
-          items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE));
+          items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE(t)));
           items.push({
             kind: "notice",
             id: event.id,
             tone: "failed",
-            text: CREDIT_EXHAUSTION_MESSAGE,
+            text: CREDIT_EXHAUSTION_MESSAGE(t),
             occurredAt: event.occurredAt,
           });
           break;
@@ -1503,7 +1534,7 @@ export function buildTimeline(
             kind: "notice",
             id: `${pendingWaitOutcome.id}-visible-outcome`,
             tone: "waiting",
-            text: waitingOutcomeText(pendingWaitOutcome.reason),
+            text: waitingOutcomeText(t, pendingWaitOutcome.reason),
             recordedOutcome: true,
             ...(pendingWorkerSessions.size > 0
               ? { waitingAgents: pendingWorkerSessions.size }
@@ -1525,10 +1556,10 @@ export function buildTimeline(
         // back to the generic error/message extraction.
         const allowance = parseAllowanceExhaustedRefusal(payload);
         const failureText = allowance
-          ? ALLOWANCE_TURN_END_TEXT
+          ? ALLOWANCE_TURN_END_TEXT(t)
           : isCreditExhaustionPayload(payload)
-            ? CREDIT_EXHAUSTION_MESSAGE
-            : failureMessage(payload);
+            ? CREDIT_EXHAUSTION_MESSAGE(t)
+            : failureMessage(t, payload);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
         // as calm "interrupted" (same as turn.cancelled); an item that itself
@@ -1541,7 +1572,7 @@ export function buildTimeline(
         // text, and no separate notice repeats it.
         // Retry reopens the same logical turn, so only a landmark from this
         // attempt (after the turn's previous settlement) can own this failure.
-        const failure = allowance ? null : presentTurnFailureText(failureText);
+        const failure = allowance ? null : presentTurnFailureText(t, failureText);
         let landmarkIndex = -1;
         if (failure?.detail !== undefined && turnId !== null) {
           // Skip the turn-end just pushed for this failure.
@@ -1570,8 +1601,10 @@ export function buildTimeline(
             kind: "notice",
             id: event.id,
             tone: "failed",
-            text: failure?.summary ?? "The turn failed.",
-            ...(failure?.detail ? { details: { label: "Details", value: failure.detail } } : {}),
+            text: failure?.summary ?? t("timeline.projection.theTurnFailed"),
+            ...(failure?.detail
+              ? { details: { label: t("timeline.projection.details"), value: failure.detail } }
+              : {}),
             occurredAt: event.occurredAt,
           });
         }
@@ -1596,7 +1629,7 @@ export function buildTimeline(
             kind: "notice",
             id: event.id,
             tone: "cancelled",
-            text: "Interrupted.",
+            text: t("timeline.projection.interrupted"),
             occurredAt: event.occurredAt,
           });
         }
@@ -1611,7 +1644,7 @@ export function buildTimeline(
           kind: "notice",
           id: event.id,
           tone: "input",
-          text: "Your previously approved workspace instruction was saved.",
+          text: t("timeline.projection.yourPreviouslyApprovedWorkspaceInstruction"),
           occurredAt: event.occurredAt,
         });
         break;
@@ -1971,7 +2004,7 @@ export function stripOpaqueCitationTokens(text: string): string {
  * carries who can raise it and when it resets (and is host-customizable), so
  * the summary line stays a neutral fact instead of repeating remedy prose.
  */
-const ALLOWANCE_TURN_END_TEXT = "Usage limit reached";
+const ALLOWANCE_TURN_END_TEXT = (t: OpenGeniText) => t("timeline.projection.usageLimitReached");
 
 /** The turn-end payload shape, as `isCreditExhaustion` wants it. */
 function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
@@ -2059,10 +2092,11 @@ export type GroupTimelineOptions = {
 };
 
 export function groupTimeline(
+  t: OpenGeniText,
   items: TimelineItem[],
   options: GroupTimelineOptions = {},
 ): TimelineGroup[] {
-  if (options.readableTurns || options.foldExchanges) return groupReadableTurns(items);
+  if (options.readableTurns || options.foldExchanges) return groupReadableTurns(t, items);
   const groups: TimelineGroup[] = [];
   for (const item of items) {
     // A recovered capacity wait is over; it leaves no warning behind.
@@ -2091,7 +2125,7 @@ export function groupTimeline(
 }
 
 /** Live prose stays primary; settled progress joins its own turn's work history. */
-function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
+function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGroup[] {
   type Work = Extract<TimelineGroup, { kind: "activity" }>;
   let groups: TimelineGroup[] = [];
   const turns = new Map<string, Work>();
@@ -2249,7 +2283,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
               kind: "notice",
               id: item.id,
               tone: "failed",
-              text: item.failureText ?? "The turn failed before retrying.",
+              text: item.failureText ?? t("timeline.projection.theTurnFailedBeforeRetrying"),
               occurredAt: item.occurredAt,
             },
           });
@@ -2296,7 +2330,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         item.tone === "waiting" &&
         !item.recordedOutcome &&
         !item.resolvedAt &&
-        item.text.startsWith("Approval needed") &&
+        item.approval === true &&
         current !== undefined &&
         !current.endedAt;
       // Likewise the live "waiting on you" divider: the open turn's header
@@ -2318,7 +2352,10 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
           !item.resolvedAt
         ) {
           current.waiting = {
-            label: item.text.startsWith("Approval needed") ? "Waiting for you" : "Waiting",
+            label:
+              item.approval === true
+                ? t("timeline.projection.waitingForYou")
+                : t("timeline.projection.waiting"),
             since: item.occurredAt,
           };
         } else if (
@@ -2327,7 +2364,10 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
           !item.blocked &&
           !item.resolvedAt
         ) {
-          current.waiting = { label: "Waiting for you", since: item.occurredAt };
+          current.waiting = {
+            label: t("timeline.projection.waitingForYou"),
+            since: item.occurredAt,
+          };
         } else if (
           item.kind === "session-status" &&
           ["paused", "cancelled", "failed"].includes(item.status) &&
@@ -2993,8 +3033,8 @@ function turnEndItem(
 }
 
 /** Plain text for a usage-limit stop whose marker carried no readable amounts. */
-const SESSION_USAGE_LIMIT_STOP_TEXT =
-  "This task's usage limit is reached. A person can raise or remove the limit to continue.";
+const SESSION_USAGE_LIMIT_STOP_TEXT = (t: OpenGeniText) =>
+  t("timeline.projection.thisTaskSUsageLimit");
 
 /**
  * The stop row for a `segmentLimit: "session_usage_limit"` completion. Only the
@@ -3002,6 +3042,7 @@ const SESSION_USAGE_LIMIT_STOP_TEXT =
  * reads as the same neutral stop instead of a credit or failure notice.
  */
 function sessionUsageLimitNotice(
+  t: OpenGeniText,
   event: SessionEvent,
   payload: Record<string, unknown>,
 ): NoticeItem {
@@ -3011,7 +3052,7 @@ function sessionUsageLimitNotice(
     id: `${event.id}-session-usage-limit`,
     // Neutral: not a failure, and not an open wait the turn header should claim.
     tone: "cancelled",
-    text: refusal ? sessionUsageLimitReachedMessage(refusal) : SESSION_USAGE_LIMIT_STOP_TEXT,
+    text: refusal ? sessionUsageLimitReachedMessage(refusal) : SESSION_USAGE_LIMIT_STOP_TEXT(t),
     sessionUsageLimit: {
       rootSessionId: refusal?.rootSessionId ?? null,
       limitMicros: refusal?.limitMicros ?? null,
@@ -3153,7 +3194,15 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
     );
     if (first && first !== visibleMessage) visibleMessages.unshift(first);
   }
-  const body = collected.filter((group) => !visibleMessages.includes(group as never));
+  // A change the person asked to keep that was not saved stays in view beside
+  // the answer, whatever the agent said about it.
+  const keptNotices = collected.filter(
+    (group) =>
+      group.kind === "item" && group.item.kind === "notice" && !!group.item.learningRefusal,
+  );
+  const body = collected.filter(
+    (group) => !visibleMessages.includes(group as never) && !keptNotices.includes(group),
+  );
   if (body.length === 0) {
     return;
   }
@@ -3179,7 +3228,7 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
     turnGroup.failureText = turnEnd.failureText;
   }
 
-  groups.splice(startIndex, collectedLength, turnGroup, ...visibleMessages);
+  groups.splice(startIndex, collectedLength, turnGroup, ...keptNotices, ...visibleMessages);
 }
 
 /** Whether the input boundary before a turn includes a person's message. */
@@ -3687,8 +3736,8 @@ function elapsedDurationMs(startedAt: string, completedAt: string): number | nul
   return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
 }
 
-function failureMessage(payload: Record<string, unknown>): string | null {
-  return presentFailure(payload).reason;
+function failureMessage(t: OpenGeniText, payload: Record<string, unknown>): string | null {
+  return presentFailure(t, payload).reason;
 }
 
 function goalText(payload: Record<string, unknown>): string | null {
@@ -3742,6 +3791,7 @@ const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|accou
  * account) keeps its recorded, actionable reason and is not labelled a limit.
  */
 function capacityWaitPresentation(
+  t: OpenGeniText,
   type: string,
   payload: Record<string, unknown>,
   turnId: string | null,
@@ -3756,26 +3806,28 @@ function capacityWaitPresentation(
       type === "turn.capacity_waiting"
         ? [payload.error, payload.detail]
         : [payload.detail, payload.error];
-    const detail = stringValue(first) || stringValue(second) || "Waiting for an account.";
+    const detail =
+      stringValue(first) || stringValue(second) || t("timeline.projection.waitingForAnAccount");
     return {
       turnId,
       label:
-        stringValue(payload.waitReason) === "pinned_account_disabled" ? "Needs you" : "Waiting",
+        stringValue(payload.waitReason) === "pinned_account_disabled"
+          ? t("timeline.projection.needsYou")
+          : t("timeline.projection.waiting"),
       detail,
       text: detail,
     };
   }
   return {
     turnId,
-    label: CAPACITY_LIMIT_LABEL,
-    detail: CAPACITY_LIMIT_DETAIL,
-    text: `${CAPACITY_LIMIT_LABEL}. ${CAPACITY_LIMIT_DETAIL}`,
+    label: CAPACITY_LIMIT_LABEL(t),
+    detail: CAPACITY_LIMIT_DETAIL(t),
+    text: `${CAPACITY_LIMIT_LABEL(t)}. ${CAPACITY_LIMIT_DETAIL(t)}`,
   };
 }
 
-const CAPACITY_LIMIT_LABEL = "Usage limit reached";
-const CAPACITY_LIMIT_DETAIL =
-  "Try again after your quota resets, or switch to another model or provider.";
+const CAPACITY_LIMIT_LABEL = (t: OpenGeniText) => t("timeline.projection.usageLimitReached");
+const CAPACITY_LIMIT_DETAIL = (t: OpenGeniText) => t("timeline.projection.tryAgainAfterYourQuota");
 
 /** Lifecycle evidence that a capacity wait is over. */
 function endsCapacityWait(event: SessionEvent, payload: Record<string, unknown>): boolean {
@@ -3796,8 +3848,8 @@ function endsCapacityWait(event: SessionEvent, payload: Record<string, unknown>)
   }
 }
 
-function waitingOutcomeText(reason: string): string {
-  return /^waiting\b/i.test(reason) ? reason : `Waiting: ${reason}`;
+function waitingOutcomeText(t: OpenGeniText, reason: string): string {
+  return /^waiting\b/i.test(reason) ? reason : t("timeline.projection.waitingReason", { reason });
 }
 
 /**

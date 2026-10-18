@@ -3,7 +3,7 @@ import type {
   SessionBackgroundCommandActivity,
   SessionBackgroundCommandReconciliation,
 } from "@opengeni/contracts";
-import { SessionCommandFailure } from "@opengeni/contracts";
+import { SessionCommandFailure, CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, getTableColumns, gte, inArray, sql, type SQL } from "drizzle-orm";
 
@@ -19,10 +19,19 @@ export type ConnectedMachineBackgroundCommandProof = {
   exitCode: number | null;
   reason: string;
   failure?: SessionCommandFailure;
+  backgroundChildrenStopped?: boolean;
   observedAt: Date;
 };
 
 export const SESSION_BACKGROUND_COMMAND_REASON_MAX_BYTES = 512;
+
+/** Existing reconciler policy, shared by initial push collection failures. */
+export function connectedCommandReconciliationRetryMs(attempts: number, periodMs = 30_000): number {
+  return Math.min(
+    5 * 60_000,
+    Math.max(periodMs, 30_000) * 2 ** Math.min(4, Math.max(0, attempts - 1)),
+  );
+}
 
 export function boundedSessionBackgroundCommandReason(value: string, label: string): string {
   const normalized = value.trim();
@@ -383,6 +392,9 @@ function mapCommand(
     exitCode: row.exitCode ?? null,
     settlementReason: row.settlementReason ?? null,
     ...(failure ? { failure } : {}),
+    ...(row.provider === "connected_machine" && row.backgroundChildrenStopped
+      ? { backgroundChildrenStopped: true as const }
+      : {}),
     startedAt: row.startedAt.toISOString(),
     settledAt: row.settledAt?.toISOString() ?? null,
     completionObservedAt: row.completionObservedAt?.toISOString() ?? null,
@@ -728,6 +740,67 @@ function connectedClaimIdentityWhere(claim: ConnectedMachineBackgroundCommandCla
   );
 }
 
+/** Only the first exit notification bypasses polling backoff. Delivery retries
+ * cannot erase a failed collector's backoff or steal another active claim. */
+export async function claimPushedConnectedCommandCompletion(
+  db: Database,
+  input: ConnectedCommandOutputIdentity & { claimTtlMs: number },
+): Promise<ConnectedMachineBackgroundCommandClaim | null> {
+  if (!Number.isSafeInteger(input.claimTtlMs) || input.claimTtlMs <= 0)
+    throw new Error("Connected command completion claim TTL is invalid");
+  return withRlsContext(db, input, async (tx) => {
+    const table = schema.sessionBackgroundCommands;
+    const identity = and(
+      eq(table.id, input.commandId),
+      eq(table.accountId, input.accountId),
+      eq(table.workspaceId, input.workspaceId),
+      eq(table.sessionId, input.sessionId),
+      eq(table.provider, "connected_machine"),
+      eq(table.controlWorkspaceId, input.controlWorkspaceId),
+      eq(table.enrollmentId, input.enrollmentId),
+      eq(table.connectionInstanceId, input.connectionInstanceId),
+      eq(table.opId, input.opId),
+      inArray(table.state, ["running", "stopping"]),
+    );
+    const [row] = await tx.select().from(table).where(identity).for("update").limit(1);
+    if (!row) return null;
+    const now = new Date();
+    const firstNotification = row.completionNotifiedAt === null;
+    if (firstNotification)
+      await tx
+        .update(table)
+        .set({ reconcileAfter: now, completionNotifiedAt: now })
+        .where(identity);
+    if (
+      (!firstNotification && row.reconcileAfter.getTime() > now.getTime()) ||
+      row.reconcileProofOutcome !== null ||
+      (row.reconcileClaimId !== null &&
+        row.reconcileClaimedAt !== null &&
+        row.reconcileClaimedAt.getTime() > now.getTime() - input.claimTtlMs)
+    )
+      return null;
+    const claimId = crypto.randomUUID();
+    await tx
+      .update(table)
+      .set({
+        reconcileClaimId: claimId,
+        reconcileClaimedAt: now,
+        reconcileAfter: new Date(now.getTime() + input.claimTtlMs),
+        reconcileAttempts: row.reconcileAttempts + 1,
+        lastReconcileOutcome: "claimed",
+        updatedAt: now,
+      })
+      .where(identity);
+    return {
+      ...input,
+      claimId,
+      state: row.state as "running" | "stopping",
+      reconcileAttempts: row.reconcileAttempts + 1,
+      proof: null,
+    };
+  });
+}
+
 /** Checkpoint one exact terminal provider observation before lifecycle settlement.
  * A retry may reuse an identical proof; a divergent proof is a hard identity fault. */
 export async function recordConnectedMachineBackgroundCommandProof(
@@ -781,6 +854,7 @@ export async function recordConnectedMachineBackgroundCommandProof(
           reconcileProofExitCode: input.proof.exitCode,
           reconcileProofReason: reason,
           runnerFailure: failure,
+          backgroundChildrenStopped: sql`${schema.sessionBackgroundCommands.backgroundChildrenStopped} OR ${input.proof.backgroundChildrenStopped === true}`,
           reconcileProofObservedAt: input.proof.observedAt,
           lastReconcileOutcome: `proof_${input.proof.outcome}`,
           updatedAt: new Date(),
@@ -814,7 +888,9 @@ export async function deferConnectedMachineBackgroundCommandReconciliation(
       const rows = await scopedDb
         .update(schema.sessionBackgroundCommands)
         .set({
-          reconcileAfter: new Date(Date.now() + input.retryAfterMs),
+          reconcileAfter: sql`case when ${outcome} = 'provider_running'
+            and ${schema.sessionBackgroundCommands.completionNotifiedAt} > ${schema.sessionBackgroundCommands.reconcileClaimedAt}
+            then now() else ${new Date(Date.now() + input.retryAfterMs).toISOString()}::timestamptz end`,
           reconcileClaimId: null,
           reconcileClaimedAt: null,
           lastReconcileOutcome: outcome,
@@ -1141,6 +1217,7 @@ export async function settleConnectedMachineSessionBackgroundCommandWithMutation
     exitCode: number | null;
     reason: string;
     failure?: SessionCommandFailure | undefined;
+    backgroundChildrenStopped?: boolean | undefined;
   },
   mutateTerminal: SessionBackgroundCommandTerminalMutation,
 ): Promise<SessionBackgroundCommand | null> {
@@ -1170,6 +1247,7 @@ export async function settleConnectedMachineSessionBackgroundCommandWithMutation
           exitCode: input.outcome === "exited" ? input.exitCode : null,
           settlementReason: reason,
           runnerFailure: failure,
+          backgroundChildrenStopped: sql`${schema.sessionBackgroundCommands.backgroundChildrenStopped} OR ${input.backgroundChildrenStopped === true}`,
           settledAt,
           reconcileClaimId: null,
           reconcileClaimedAt: null,
@@ -1178,6 +1256,7 @@ export async function settleConnectedMachineSessionBackgroundCommandWithMutation
           reconcileProofReason: reason,
           reconcileProofObservedAt: settledAt,
           lastReconcileOutcome: `settled_${input.outcome}`,
+          reconcileAfter: settledAt,
           updatedAt: new Date(),
         })
         .where(
@@ -1236,6 +1315,27 @@ export type SessionCommandIdentity = {
   sessionId: string;
   commandId: string;
 };
+
+/** Internal exact-identity discovery for an authenticated machine event. This
+ * returns only a locator; settlement must revalidate it under the session fence. */
+export async function locateConnectedCommandCompletion(
+  db: Database,
+  input: {
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    opId: string;
+  },
+): Promise<(SessionCommandIdentity & { terminal: boolean }) | null> {
+  const rows = await db.execute<SessionCommandIdentity & { terminal: boolean }>(sql`
+    select account_id as "accountId", workspace_id as "workspaceId",
+      session_id as "sessionId", command_id as "commandId", terminal
+    from opengeni_private.locate_connected_command_completion(
+      ${input.controlWorkspaceId}::uuid, ${input.enrollmentId}::uuid,
+      ${input.connectionInstanceId}::text, ${input.opId}::text
+    )`);
+  return rows[0] ?? null;
+}
 
 /** Observe terminal state, not output consumption. Native terminal-result adapters
  * call this after settlement. Session-first ordering serializes settlement and
@@ -1481,5 +1581,8 @@ export async function readSessionBackgroundCommandOutput(
     terminal,
     completionObservedAt: observed?.completionObservedAt ?? null,
     ...page,
+    ...(terminal && command.backgroundChildrenStopped
+      ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
+      : {}),
   };
 }

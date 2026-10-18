@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import {
   attachSessionCapability,
   prepareSessionCapabilityAccess,
@@ -412,6 +413,7 @@ function SessionCapabilitySetup({
             if (!updated?.enabled)
               throw new Error("Setup could not be verified. Refresh and try again.");
             const plan = await prepareSessionCapabilityAccess(
+              t,
               context.client,
               workspaceId,
               sessionId,
@@ -423,7 +425,7 @@ function SessionCapabilitySetup({
               setParentAccessReview({ plan, invocation });
               return;
             }
-            await applySessionCapabilityAccess(context.client, plan, current);
+            await applySessionCapabilityAccess(t, context.client, plan, current);
             await onConfigured?.();
             if (current()) onComplete();
           },
@@ -462,6 +464,7 @@ function SessionCapabilitySetup({
       const plan =
         parentAccessPlan ??
         (await prepareSessionCapabilityAccess(
+          t,
           context.client,
           workspaceId,
           sessionId,
@@ -476,7 +479,7 @@ function SessionCapabilitySetup({
         setParentAccessReview({ plan, invocation });
         return;
       }
-      await applySessionCapabilityAccess(context.client, plan, current);
+      await applySessionCapabilityAccess(t, context.client, plan, current);
       if (current()) setParentAccessReview(null);
       if (current()) await onConfigured?.();
       if (current()) onComplete();
@@ -634,6 +637,7 @@ function SessionCodexAppsSetup({
       if (!item?.enabled || !item.runtime.available)
         throw new Error("Choose an active subscription for Codex Apps before continuing.");
       await attachSessionCapability(
+        t,
         context.client,
         workspaceId,
         sessionId,

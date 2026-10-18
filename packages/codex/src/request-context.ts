@@ -55,6 +55,8 @@ export type CodexModelRequestEvent = {
   phase: "started" | "headers" | "first_byte" | "completed" | "failed" | "timed_out";
   model?: string;
   durationMs: number;
+  /** Request audit start to actual transport dispatch, excluding provider time. */
+  dispatchDelayMs?: number;
   responseObserved: boolean;
   timeoutPolicy: CodexResponseTimeoutPolicy;
   timeoutClass?: CodexResponseTimeoutClass;

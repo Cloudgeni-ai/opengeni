@@ -14,6 +14,7 @@ import {
   type ComputerBackendActionCommand,
   type NativeComputerHandshake,
 } from "../src";
+import { UnsettledCleanupError } from "../src/cleanup-error";
 
 const computerSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
@@ -488,7 +489,7 @@ describe("ComputerDriver", () => {
     }
   });
 
-  test("retains failed retired-helper cleanup and does not create a replacement", async () => {
+  test("fails clearly and does not create a replacement when a failed helper may still run", async () => {
     const poisoned = new FixtureNativeTransport();
     poisoned.targetsError = new Error("fixture transport failed");
     poisoned.close = async () => {
@@ -504,12 +505,57 @@ describe("ComputerDriver", () => {
         return new FixtureNativeTransport();
       },
     });
-    await expect(driver.listTargets()).rejects.toThrow(
-      "retired native computer helper cleanup failed",
-    );
+    await expect(driver.listTargets()).rejects.toMatchObject({
+      name: "InteractionControllerError",
+      code: "controller_lost",
+    });
+    await expect(driver.listTargets()).rejects.toMatchObject({ code: "controller_lost" });
     expect(factories).toBe(0);
     await expect(driver.close()).rejects.toThrow("computer driver cleanup failed");
     await expect(driver.close()).rejects.toThrow("computer driver cleanup failed");
+  });
+
+  test("replaces a crashed helper whose process already exited", async () => {
+    const crashed = new FixtureNativeTransport();
+    crashed.targetsError = new Error("native computer helper exited");
+    crashed.close = async () => {
+      throw new UnsettledCleanupError([], "native computer helper cleanup was not confirmed", {
+        processExited: true,
+      });
+    };
+    let factories = 0;
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: crashed,
+      clientFactory: async () => {
+        factories++;
+        return new FixtureNativeTransport();
+      },
+    });
+    await expect(driver.listTargets()).resolves.toMatchObject([{ id: "window-1" }]);
+    await expect(driver.listTargets()).resolves.toMatchObject([{ id: "window-1" }]);
+    expect(factories).toBe(1);
+    await driver.close();
+  });
+
+  test("reports a retryable unavailable helper when its replacement cannot start", async () => {
+    const crashed = new FixtureNativeTransport();
+    crashed.targetsError = new Error("native computer helper exited");
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: crashed,
+      clientFactory: async () => {
+        throw new Error("fixture helper failed to start");
+      },
+    });
+    await expect(driver.listTargets()).rejects.toMatchObject({
+      name: "InteractionControllerError",
+      code: "resource_unavailable",
+      retryable: true,
+    });
+    await driver.close();
   });
 
   test("fans one native source out to independent concurrent frame profiles", async () => {

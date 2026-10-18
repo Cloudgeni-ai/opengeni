@@ -14,7 +14,9 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/allowance-refusal.ts",
+    "src/learning-refusal.ts",
     "src/app-links.ts",
+    "src/this-computer.ts",
     "src/chat/index.ts",
     "src/tenant-workspaces.ts",
     "src/session-proxy.ts",
@@ -63,6 +65,7 @@ export default defineConfig({
   external: [/^@opengeni\//],
   noExternal: [
     "@opengeni/contracts/allowance-refusal",
+    "@opengeni/contracts/learning-refusal",
     "@opengeni/contracts/session-usage-limit-refusal",
     "@opengeni/contracts/browser-storage",
     "@opengeni/contracts/mcp-endpoint",

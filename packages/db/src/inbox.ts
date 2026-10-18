@@ -1,6 +1,6 @@
-import { LOCAL_HUMAN_SUBJECT_ID } from "@opengeni/contracts";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
+import { anyOf } from "./sql-arrays";
 import * as schema from "./schema";
 
 // The inbox (0655). Session events open and close items in the event writer's
@@ -309,63 +309,46 @@ export async function setInboxSettings(
 }
 
 /**
- * The person a session works for (its owner, else who started it, else the
- * owner of the schedule whose run created it; on a local install, its one
- * human) and its parent, or null when no person does. Mirrors
- * `session_person_v1`, which the inbox projection uses (0661, 0677).
+ * A turn works for its initiating human, including an explicitly absent human.
+ * Legacy non-turn inbox operations retain the session recipient convention.
  */
 export async function getSessionInboxRecipient(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  turnId?: string,
 ): Promise<{ subjectId: string; parentSessionId: string | null } | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        accountId: schema.sessions.accountId,
-        owner: schema.sessions.ownerSubjectId,
-        creator: schema.sessions.createdBySubjectId,
-        parent: schema.sessions.parentSessionId,
-      })
-      .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .limit(1);
-    if (!row) return null;
-    let subjectId = row.owner?.startsWith("user:")
-      ? row.owner
-      : row.creator.startsWith("user:")
-        ? row.creator
-        : null;
-    let scheduleOwner: string | null = null;
-    if (!subjectId) {
-      // A scheduled run works for the schedule's owner (0661).
-      const [run] = await scopedDb
-        .select({ owner: schema.scheduledTasks.ownerSubjectId })
-        .from(schema.scheduledTaskRuns)
-        .innerJoin(
-          schema.scheduledTasks,
-          eq(schema.scheduledTasks.id, schema.scheduledTaskRuns.taskId),
-        )
-        .where(
-          and(
-            eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
-            eq(schema.scheduledTaskRuns.sessionId, sessionId),
-          ),
-        )
-        .orderBy(desc(schema.scheduledTaskRuns.createdAt))
-        .limit(1);
-      scheduleOwner = run?.owner ?? null;
-      subjectId = scheduleOwner?.startsWith("user:") ? scheduleOwner : null;
-    }
-    if (
-      !subjectId &&
-      [row.owner, row.creator, scheduleOwner].includes(LOCAL_HUMAN_SUBJECT_ID) &&
-      (await isLocalInstallAccount(scopedDb, row.accountId))
-    ) {
-      // A local install's one human, only inside its own organization (0677).
-      subjectId = LOCAL_HUMAN_SUBJECT_ID;
-    }
-    return subjectId ? { subjectId, parentSessionId: row.parent ?? null } : null;
+    const rows = await scopedDb.execute(sql`
+      WITH recipient AS (
+        SELECT s.parent_session_id, s.account_id,
+          CASE WHEN ${turnId ?? null}::uuid IS NOT NULL THEN ARRAY[t.initiating_human_subject_id]
+          ELSE ARRAY[s.owner_subject_id, s.created_by_subject_id, (
+            SELECT task.owner_subject_id FROM scheduled_task_runs run
+            JOIN scheduled_tasks task ON task.id = run.task_id
+            WHERE run.workspace_id = s.workspace_id AND run.session_id = s.id
+            ORDER BY run.created_at DESC LIMIT 1
+          )] END AS subjects
+        FROM sessions s LEFT JOIN session_turns t
+          ON t.workspace_id = s.workspace_id AND t.session_id = s.id
+          AND t.id = ${turnId ?? null}::uuid
+        WHERE s.workspace_id = ${workspaceId}::uuid AND s.id = ${sessionId}::uuid
+      )
+      SELECT coalesce(
+        (SELECT subject FROM unnest(subjects) WITH ORDINALITY AS candidates(subject, position)
+          WHERE subject LIKE 'user:%' ORDER BY position LIMIT 1),
+        CASE WHEN 'dev' = ANY(subjects) AND EXISTS (
+          SELECT 1 FROM managed_accounts a WHERE a.id = recipient.account_id
+            AND a.external_source = 'opengeni:local' AND a.external_id = 'default'
+        ) THEN 'dev' END
+      ) AS subject_id, parent_session_id FROM recipient
+    `);
+    const row = rows[0] as
+      | { subject_id: string | null; parent_session_id: string | null }
+      | undefined;
+    return row?.subject_id
+      ? { subjectId: row.subject_id, parentSessionId: row.parent_session_id }
+      : null;
   });
 }
 
@@ -383,27 +366,11 @@ export async function getSessionTitles(
       .where(
         and(
           eq(schema.sessions.workspaceId, workspaceId),
-          inArray(schema.sessions.id, [...sessionIds]),
+          anyOf(schema.sessions.id, [...sessionIds]),
         ),
       );
     return new Map(rows.map((row) => [row.id, row.title]));
   });
-}
-
-/** The built-in organization of a local install (`opengeni:local`/`default`). */
-async function isLocalInstallAccount(db: Database, accountId: string): Promise<boolean> {
-  const [account] = await db
-    .select({ id: schema.managedAccounts.id })
-    .from(schema.managedAccounts)
-    .where(
-      and(
-        eq(schema.managedAccounts.id, accountId),
-        eq(schema.managedAccounts.externalSource, "opengeni:local"),
-        eq(schema.managedAccounts.externalId, "default"),
-      ),
-    )
-    .limit(1);
-  return Boolean(account);
 }
 
 /** The session's account, read under its workspace's context, or null if it isn't there. */

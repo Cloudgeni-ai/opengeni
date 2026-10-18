@@ -604,6 +604,115 @@ headedE2e(
 );
 
 e2e(
+  "a screenshot taken right after a viewport change shows the new viewport",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-viewport-shot-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: "vpshot_" + randomUUID().slice(0, 8),
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    try {
+      const observation = await driver.start(
+        dataUrl(`<!doctype html><meta name="viewport" content="width=device-width">
+        <title>Viewport shot</title><body style="margin:0;background:#2a6"><h1>Resize me</h1>`),
+      );
+      const sizes = [
+        { width: 390, height: 844, mobile: true },
+        { width: 1280, height: 633, mobile: false },
+        { width: 768, height: 1024, mobile: true },
+        { width: 1024, height: 700, mobile: false },
+      ];
+      for (let round = 0; round < 3; round += 1) {
+        for (const size of sizes) {
+          // The agent asks for no observation, then captures straight away.
+          await driver.dispatch({
+            ...command(observation, { type: "viewport", deviceScaleFactor: 1, ...size }),
+            observationMode: "none",
+          });
+          const shot = await driver.captureScreenshot(observation.target.id, {
+            format: "jpeg",
+            quality: 50,
+          });
+          expect([shot.width, shot.height]).toEqual([size.width, size.height]);
+        }
+      }
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "a tab opened after a viewport change has the size the agent set, and earlier tabs keep theirs",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-viewport-tab-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: "vptab_" + randomUUID().slice(0, 8),
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    const page = (title: string) =>
+      dataUrl(`<!doctype html><meta name="viewport" content="width=device-width">
+        <title>${title}</title><body style="margin:0"><h1>${title}</h1>`);
+    try {
+      const first = await driver.start(page("First"));
+      const earlier = await driver.openTarget(page("Earlier"));
+      const earlierSize = [earlier.viewport?.width, earlier.viewport?.height];
+      await driver.dispatch({
+        ...command(first, {
+          type: "viewport",
+          width: 1600,
+          height: 1000,
+          deviceScaleFactor: 1,
+          mobile: false,
+        }),
+        observationMode: "none",
+      });
+      const opened = await driver.openTarget(page("Later"));
+      expect([opened.viewport?.width, opened.viewport?.height]).toEqual([1600, 1000]);
+      const shot = await driver.captureScreenshot(opened.target.id, {
+        format: "jpeg",
+        quality: 50,
+      });
+      expect([shot.width, shot.height]).toEqual([1600, 1000]);
+      const unchanged = await driver.observe(earlier.target.id);
+      expect([unchanged.viewport?.width, unchanged.viewport?.height]).toEqual(earlierSize);
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+e2e(
   "keeps scaled mobile frames stable during pointer interaction",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-scale-");
@@ -2166,6 +2275,74 @@ chromiumE2e(
         "Cannot navigate to invalid URL",
       );
     } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+chromiumE2e(
+  "a page whose server never answers fails within the commit deadline and names the cause",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-silent-server-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `silent_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+      navigationCommitTimeoutMs: 2_000,
+    });
+    // Accepts connections and never answers, like a server behind a stalled
+    // proxy; a black-holed address behaves the same from the browser's side.
+    const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+    const freed = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+    const refusedPort = freed.port;
+    freed.stop(true);
+    try {
+      const initial = await driver.start(fixture("Before"));
+      const started = Date.now();
+      // The request was sent, so the action outcome stays conservative, but
+      // the receipt names why the page did not load.
+      const navigation = driver.dispatch(
+        command(initial, { type: "navigate", url: `http://127.0.0.1:${silent.port}/` }),
+      );
+      await expect(navigation).rejects.toMatchObject({ code: "outcome_unknown" });
+      await expect(navigation).rejects.toThrow(
+        "timeout: browser could not load the requested URL: its server did not respond within 2 seconds",
+      );
+      expect(Date.now() - started).toBeLessThan(10_000);
+      // The tab stopped loading and still shows the page it had.
+      expect(names(await driver.observe(initial.target.id))).toContain("Static page content");
+      await expect(
+        driver.openTarget(`http://127.0.0.1:${silent.port}/opened`),
+      ).rejects.toMatchObject({ code: "timeout" });
+      expect(await driver.listTargets()).toHaveLength(1);
+      // A page that can't load names Chromium's reason.
+      await expect(
+        driver.openTarget(`http://127.0.0.1:${refusedPort}/refused`),
+      ).rejects.toMatchObject({
+        code: "resource_unavailable",
+        message: "browser could not navigate to the requested URL (net::ERR_CONNECTION_REFUSED)",
+      });
+    } finally {
+      silent.stop(true);
       await driver.close();
       await rm(directory, { recursive: true, force: true });
     }

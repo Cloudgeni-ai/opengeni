@@ -2942,7 +2942,7 @@ export type FsReadResponse = {
   isBinary: boolean;
   revision: number;
 };
-export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 25 * 1024 * 1024 - 1;
+export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 5_000_000_000;
 export type PublishSandboxFileArtifactRequest = { path: string };
 export type SandboxFileArtifactReceipt = {
   type: "sandbox_file";
