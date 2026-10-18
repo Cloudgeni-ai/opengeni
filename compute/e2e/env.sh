@@ -20,8 +20,9 @@
 # Steps of up, each also runnable alone: infra (addresses, NAT, firewall,
 # registry), fleet (terraform), stack (the VM and its tools), build (images,
 # the host bundle and the stored sandbox images, from OPENGENI_REF and
-# COMPUTE_REF), deploy (secrets, the chart, the public front). Also: status
-# and ssh [command].
+# COMPUTE_REF), deploy (secrets, the chart, the public front). Also: status,
+# ssh [command], and host-logs [run] (each host's journal into the run's
+# results; suite does it after every run).
 #
 # Settings: PROJECT; ZONE (europe-west4-a); PREFIX (compute-e2e; every
 # resource's name starts with it); LABELS (purpose=compute-e2e, as k=v,...);
@@ -124,6 +125,10 @@ infra() {
   rule "$PREFIX-ssh" tcp:22 "$from"
   rule "$PREFIX-https" tcp:443 "$from,$nat/32,$(stack_ip)/32"
   rule "$PREFIX-acme" tcp:80 0.0.0.0/0
+  # Hosts have no public address: their journals come over the stack VM.
+  local internal
+  internal=$(g compute addresses describe "$STACK-internal" --region "$REGION" --format='value(address)')
+  rule "$PREFIX-ssh-hosts" tcp:22 "$internal/32" "$PREFIX-host"
   log "registry $(registry)"
   exists g artifacts repositories describe "$PREFIX" --location "$REGION" ||
     g artifacts repositories create "$PREFIX" --location "$REGION" --repository-format docker \
@@ -134,7 +139,7 @@ rule() {
     g compute firewall-rules update "$1" --source-ranges "$3"
   else
     g compute firewall-rules create "$1" --network default --allow "$2" --source-ranges "$3" \
-      --target-tags "$STACK"
+      --target-tags "${4:-$STACK}"
   fi
 }
 
@@ -301,7 +306,35 @@ suite() {
     tee "$STATE/suite-$run.log" || true
   mkdir -p "$STATE/runs"
   copy_from "e2e/runs/$run" "$STATE/runs/" || true
+  RUN=$run host_logs || true
   if [ -f "$STATE/runs/$run/results.md" ]; then cat "$STATE/runs/$run/results.md"; fi
+}
+
+# Each host's journal since the run began (all of it without a run) into
+# $STATE/runs/$RUN: OS Login over the stack VM, which the hosts allow SSH
+# from.
+host_logs() {
+  local run=${RUN:-} dir since=() name
+  dir=$STATE/runs/${run:-hosts-$(date -u +%Y%m%dT%H%M%SZ)}
+  mkdir -p "$dir"
+  # From a minute before the run began (results.json), or the whole journal.
+  local began
+  began=$(jq -r '.started // empty | sub("[.][0-9]+Z$"; "Z") | fromdateiso8601 - 60' "$dir/results.json" 2>/dev/null || true)
+  [ -n "$began" ] && since=(--since "@$began")
+  # This account's OS Login user and key (gcloud's own, registered once).
+  local login=$HOME/.ssh/google_compute_engine user ip
+  [ -f "$login" ] || ssh-keygen -q -t ed25519 -N '' -f "$login"
+  g compute os-login ssh-keys add --key-file "$login.pub" --ttl 1d >/dev/null
+  user=$(g compute os-login describe-profile --format='value(posixAccounts[0].username)')
+  local jump
+  jump="ssh ${SSH_OPTS[*]} -W %h:%p $USER_NAME@$(stack_ip)"
+  while read -r name ip; do
+    log "journal of $name"
+    ssh -n -T -i "$login" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$STATE/known_hosts" \
+      -o LogLevel=ERROR -o ConnectTimeout=20 -o "ProxyCommand=$jump" "$user@$ip" \
+      "sudo journalctl --no-pager -o short-iso-precise ${since[*]} -u 'compute-*'" \
+      >"$dir/host-$name.log" 2>"$dir/host-$name.err" || log "no journal from $name (see host-$name.err)"
+  done < <(g compute instances list --filter "name~^$PREFIX-host" --format 'value(name,networkInterfaces[0].networkIP)')
 }
 
 # --- down -----------------------------------------------------------------
@@ -320,7 +353,7 @@ down() {
   if exists g artifacts repositories describe "$PREFIX" --location "$REGION"; then
     g artifacts repositories delete "$PREFIX" --location "$REGION"
   fi
-  for r in "$PREFIX-ssh" "$PREFIX-https" "$PREFIX-acme"; do
+  for r in "$PREFIX-ssh" "$PREFIX-ssh-hosts" "$PREFIX-https" "$PREFIX-acme"; do
     if exists g compute firewall-rules describe "$r"; then g compute firewall-rules delete "$r"; fi
   done
   if exists g compute routers describe "$PREFIX-router" --region "$REGION"; then
@@ -361,5 +394,6 @@ case "${1:-}" in
   down) down ;;
   status) status ;;
   ssh) shift; on "$@" ;;
+  host-logs) RUN=${2:-${RUN:-}} host_logs ;;
   *) sed -n '2,33p' "$0" >&2; exit 2 ;;
 esac

@@ -23,6 +23,9 @@ const OPENGENI_URL = env("OPENGENI_URL");
 const API_CONTRACT = env("API_CONTRACT");
 const MODEL = env("MODEL");
 const OUT = env("OUT");
+const STARTED = new Date().toISOString();
+// No check takes longer (a host loss waits for the lost host's lease).
+const CHECK_TIMEOUT_MS = 30 * 60_000;
 const COMPUTE_SERVICE = env("COMPUTE_SERVICE");
 const COMPUTE_ADDRESS = env("COMPUTE_ADDRESS", "127.0.0.1");
 const COMPUTE_PORT = Number(env("COMPUTE_PORT", "8080"));
@@ -64,6 +67,9 @@ async function og<T = any>(method: string, path: string, body?: unknown): Promis
       "x-opengeni-api-contract": API_CONTRACT,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
+    // Longer than any request's own timeout (a 120 s command), so a request
+    // that never answers fails its check instead of stopping the run.
+    signal: AbortSignal.timeout(600_000),
   });
   const text = await response.text();
   if (!response.ok) throw new HttpError(response.status, text, `${method} ${path}`);
@@ -283,15 +289,29 @@ check("commands", "commands run in the sandbox", ["create"], async () => {
   return out.trim().replaceAll("\n", " | ");
 });
 
-check("background", "a background command runs and is listed", ["create"], async () => {
+check("background", "a background command runs, is listed while it runs, and stops when asked", ["create"], async () => {
+  const marker = `bg-${rand()}`;
   const turn = await say(
-    "Start this as a background command with your background command tool, wait for it to finish, " +
-      "then reply with its output: `sh -c 'for i in 1 2 3; do echo tick $i; sleep 1; done'`",
+    "Start this command with your exec_command tool with yield_time_ms 1000, so that it keeps running in the " +
+      `background, and do not wait for it or stop it; reply with its command ID only: \`sh -c 'echo ${marker}; sleep 900'\``,
   );
-  const listed = await og<any>("GET", `${ses()}/background-commands`);
-  const commands = Array.isArray(listed) ? listed : (listed.commands ?? listed.items ?? []);
-  if (commands.length === 0) throw new Error(`none listed; tools used: ${turn.tools.join(", ")}`);
-  return `${commands.length} listed (${commands.map((c: any) => c.state ?? c.status).join(", ")}); tools ${turn.tools.join(", ")}`;
+  const active = async () => {
+    const listed = await og<any>("GET", `${ses()}/background-commands`);
+    return (listed.commands ?? []) as any[];
+  };
+  const mine = (await active()).filter((one) => JSON.stringify(one).includes(marker));
+  if (mine.length === 0) {
+    throw new Error(`not listed while running; reply "${turn.text.slice(0, 200)}"; tools ${turn.tools.join(", ")}`);
+  }
+  const command = mine[0];
+  const id = command.commandId ?? command.id;
+  await og("DELETE", `${ses()}/background-commands/${id}`);
+  const deadline = Date.now() + 60_000;
+  while ((await active()).some((one) => (one.commandId ?? one.id) === id)) {
+    if (Date.now() > deadline) throw new Error(`command ${id} still listed 60 s after it was stopped`);
+    await sleep(2_000);
+  }
+  return `command ${id} listed as ${command.state ?? command.status} and gone after the stop`;
 });
 
 check("files", "files write, read and list (the file browser's API)", ["create"], async () => {
@@ -362,7 +382,12 @@ check("port", "a port in the sandbox is reachable through the fabric's front doo
   await execOk(
     "cd e2e && (setsid nohup python3 -m http.server 8765 --bind 127.0.0.1 >/tmp/e2e-http.log 2>&1 &) && sleep 2",
   );
-  const response = await connectGet(8765, "/hello.txt");
+  const response = await connectGet(8765, "/hello.txt").catch(async (error) => {
+    const inside = await exec("ss -ltnp; curl -sS -m 5 http://127.0.0.1:8765/hello.txt; cat /tmp/e2e-http.log").catch(
+      (failed) => ({ stdout: `(could not look: ${failed})`, stderr: "" }),
+    );
+    throw new Error(`${error}; inside the sandbox: ${(inside.stdout + inside.stderr).slice(0, 600)}`);
+  });
   if (!response.includes(state.marker!)) throw new Error(`answer ${response.slice(0, 300)}`);
   return "GET /hello.txt over connect/8765 returned the file";
 });
@@ -385,7 +410,15 @@ check("desktop", "the agent opens the desktop and sees it", ["create"], async ()
   const sessions = Array.isArray(listed) ? listed : (listed.computerSessions ?? listed.items ?? listed.sessions ?? []);
   const mine = sessions.filter((one: any) => JSON.stringify(one).includes(state.session!.id));
   if (mine.length === 0) throw new Error(`no computer session; reply "${turn.text.slice(0, 200)}"; tools ${turn.tools.join(", ")}`);
-  return `${mine.length} computer session(s); reply "${turn.text.trim().slice(0, 120)}"`;
+  const working = mine.filter((one: any) => !["failed", "closed", "ended"].includes(String(one.lifecycle)));
+  if (working.length === 0) {
+    const how = mine.map((one: any) => `${one.lifecycle} ${one.failure ?? one.failureReason ?? ""}`.trim()).join(", ");
+    throw new Error(`computer session ${how}; reply "${turn.text.slice(0, 200)}"; tools ${turn.tools.join(", ")}`);
+  }
+  if (!turn.tools.some((name) => /computer_(observe|screenshot|act)/.test(name))) {
+    throw new Error(`no screenshot taken; reply "${turn.text.slice(0, 200)}"; tools ${turn.tools.join(", ")}`);
+  }
+  return `computer session ${working[0].lifecycle}; reply "${turn.text.trim().slice(0, 120)}"`;
 });
 
 check("ui", "the web UI: file browser, terminal and desktop (Playwright)", ["files", "terminal"], async () => {
@@ -536,7 +569,12 @@ for (const one of checks.filter((c) => selected.has(c.id))) {
   let status: Status = "pass";
   let detail: string;
   try {
-    detail = await one.run();
+    detail = await Promise.race([
+      one.run(),
+      sleep(CHECK_TIMEOUT_MS).then(() => {
+        throw new Error(`no result within ${CHECK_TIMEOUT_MS / 60_000} min`);
+      }),
+    ]);
   } catch (error) {
     status = error instanceof NotApplicable ? "n/a" : "fail";
     detail = error instanceof Error ? error.message : String(error);
@@ -563,6 +601,7 @@ const meta = {
   opengeni: process.env.OPENGENI_SHA ?? "",
   compute: process.env.COMPUTE_SHA ?? "",
   model: MODEL,
+  started: STARTED,
   finished: new Date().toISOString(),
 };
 writeFileSync(`${OUT}/results.json`, JSON.stringify({ ...meta, results }, null, 2));
