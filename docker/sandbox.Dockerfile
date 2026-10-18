@@ -557,6 +557,10 @@ ENV OPENGENI_BROWSERD_LIGHTPANDA_BINARY=/usr/local/lib/opengeni/lightpanda
 ENV OPENGENI_BROWSERD_BROWSER_EXECUTABLE=/usr/lib/chromium/chromium
 ENV OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY=/usr/local/lib/opengeni/opengeni-computer-native
 ENV OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux
+# The image ships opengeni-computer-native as its desktop driver and stages no
+# CUA runtime, so it selects that driver explicitly: an isolated Linux seat
+# otherwise defaults to CUA.
+ENV OPENGENI_BROWSERD_COMPUTER_BACKEND=native
 ENV NODE_PATH=/opt/opengeni/codemode-runtime/node_modules
 
 COPY --from=browserd-build /out/opengeni-browserd /usr/local/bin/opengeni-browserd
