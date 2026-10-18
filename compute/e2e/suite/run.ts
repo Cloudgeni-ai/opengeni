@@ -183,7 +183,12 @@ type Sandbox = { id: string; host: string | null; owner_epoch: number; metadata:
 const hosts = () => fabric<Host[]>("GET", "/v1/hosts", undefined, OPERATOR_KEY);
 const sandbox = () => fabric<Sandbox>("GET", `/v1/sandboxes/${state.sandbox}`);
 
-/** One HTTP GET to a port inside the sandbox, over the fabric's connect stream. */
+/**
+ * One HTTP GET to a TCP port inside the sandbox, over the fabric's connect
+ * stream. connect/<n> reaches guest vsock port n; a guest TCP port is reached
+ * through the guest's gateway (vsock 57), whose first line names it.
+ */
+const GATEWAY_PORT = 57;
 function connectGet(port: number, path: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const socket = tlsConnect({ host: COMPUTE_ADDRESS, port: COMPUTE_PORT, servername: COMPUTE_SERVICE, ca: COMPUTE_CA });
@@ -192,7 +197,7 @@ function connectGet(port: number, path: string): Promise<string> {
     const timer = setTimeout(() => socket.destroy(new Error("connect timed out")), 120_000);
     socket.on("secureConnect", () => {
       socket.write(
-        `GET /v1/sandboxes/${state.sandbox}/connect/${port} HTTP/1.1\r\nHost: ${COMPUTE_SERVICE}\r\n` +
+        `GET /v1/sandboxes/${state.sandbox}/connect/${GATEWAY_PORT} HTTP/1.1\r\nHost: ${COMPUTE_SERVICE}\r\n` +
           `X-API-Key: ${OPENGENI_KEY}\r\nConnection: Upgrade\r\nUpgrade: compute-stream\r\n\r\n`,
       );
     });
@@ -210,16 +215,19 @@ function connectGet(port: number, path: string): Promise<string> {
         }
         upgraded = true;
         buffer = buffer.subarray(end + 4);
-        socket.write(`GET ${path} HTTP/1.0\r\nHost: localhost\r\n\r\n`);
+        socket.write(`tcp ${port}\nGET ${path} HTTP/1.0\r\nHost: localhost\r\n\r\n`);
       }
     });
-    socket.on("end", () => {
+    // The gateway answers its header with "ok" (or "error <reason>") first.
+    const settle = () => {
       clearTimeout(timer);
-      resolve(buffer.toString());
-    });
+      const text = buffer.toString();
+      if (text.startsWith("ok\n")) resolve(text.slice(3));
+      else reject(new Error(`gateway answered ${JSON.stringify(text.slice(0, 300))}`));
+    };
+    socket.on("end", settle);
     socket.on("close", () => {
-      clearTimeout(timer);
-      if (upgraded) resolve(buffer.toString());
+      if (upgraded) settle();
     });
     socket.on("error", (error) => {
       clearTimeout(timer);
@@ -383,13 +391,13 @@ check("port", "a port in the sandbox is reachable through the fabric's front doo
     "cd e2e && (setsid nohup python3 -m http.server 8765 --bind 127.0.0.1 >/tmp/e2e-http.log 2>&1 &) && sleep 2",
   );
   const response = await connectGet(8765, "/hello.txt").catch(async (error) => {
-    const inside = await exec("ss -ltnp; curl -sS -m 5 http://127.0.0.1:8765/hello.txt; cat /tmp/e2e-http.log").catch(
+    const inside = await exec("grep -i ':223D ' /proc/net/tcp; curl -sS -m 5 http://127.0.0.1:8765/hello.txt; cat /tmp/e2e-http.log").catch(
       (failed) => ({ stdout: `(could not look: ${failed})`, stderr: "" }),
     );
     throw new Error(`${error}; inside the sandbox: ${(inside.stdout + inside.stderr).slice(0, 600)}`);
   });
   if (!response.includes(state.marker!)) throw new Error(`answer ${response.slice(0, 300)}`);
-  return "GET /hello.txt over connect/8765 returned the file";
+  return "GET /hello.txt to guest port 8765 through the gateway (connect/57) returned the file";
 });
 
 check("browser", "the agent browses with the in-sandbox browser", ["create"], async () => {

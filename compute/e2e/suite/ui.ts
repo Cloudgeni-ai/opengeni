@@ -1,5 +1,6 @@
 // The web UI pass: opens the suite's session in Opengeni's web app with
-// Playwright and uses its Files, Terminal and Desktop tabs as a person would.
+// Playwright, opens its workspace (the session header's "Open workspace")
+// and uses the Files, Terminal and Desktop tabs as a person would.
 // Writes $OUT/ui.json ({ files, terminal, desktop } → "pass: ..." or
 // "fail: ...") and a screenshot per tab.
 import { writeFileSync } from "node:fs";
@@ -22,9 +23,14 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
 page.setDefaultTimeout(60_000);
 
+/** Opens the workspace dock if it is closed, then the tab `name` in it. */
 async function tab(name: string) {
-  const control = page.getByRole("tab", { name, exact: true }).or(page.getByRole("button", { name, exact: true }));
-  await control.first().click();
+  const open = page.getByRole("button", { name: "Open workspace", exact: true });
+  if (await open.first().isVisible().catch(() => false)) await open.first().click();
+  const panels = page.getByRole("tablist", { name: "Workspace panels" });
+  await panels.first().waitFor();
+  // A tab's name may carry a count after its label.
+  await panels.getByRole("tab", { name: new RegExp(`^${name}\\b`) }).first().click();
 }
 
 async function step(name: string, run: () => Promise<string>) {
