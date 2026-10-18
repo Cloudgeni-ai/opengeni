@@ -278,6 +278,7 @@ import {
   parseConnectionAccountIntent,
   sessionCreateConnectionSelectionFailure,
 } from "./mcp-account-bindings";
+import { withoutLapsedWorkspaceAccountBindings } from "./lapsed-workspace-account-bindings";
 export {
   SessionCreateConnectionSelectionUnavailableError,
   parseConnectionAccountIntent,
@@ -29967,6 +29968,16 @@ async function createSessionInTransaction(
       privateCreateOwnerSubjectId = owner;
     }
   }
+  // Agent-created work copies its parent turn's accounts, which can name a
+  // shared account disconnected or reconnected since. The new session runs
+  // without that connector, as the parent's own turn already does, instead of
+  // the account fence refusing the whole create. Same narrowing as an accepted
+  // prompt: nothing is added or replaced, and the fence still checks the rest.
+  const { bindings: acceptedMcpAccountBindings } = await withoutLapsedWorkspaceAccountBindings(
+    tx as unknown as Database,
+    input.workspaceId,
+    parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
+  );
   try {
     insertedRows = await tx
       .insert(schema.sessions)
@@ -30010,7 +30021,7 @@ async function createSessionInTransaction(
             firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
             firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
             initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
-            initialMcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
+            initialMcpAccountBindings: acceptedMcpAccountBindings,
             initialConnectionAccountIntent: parseConnectionAccountIntent(
               input.connectionAccountIntent,
             ),
