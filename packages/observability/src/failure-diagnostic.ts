@@ -176,6 +176,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
   const seen = new Set<unknown>();
   let causeSqlState: string | undefined;
   let statement: ReturnType<typeof databaseStatement>;
+  let rejectionReason: "personal_machine_owner_required" | undefined;
   let error = input.error;
   while (error && typeof error === "object" && !seen.has(error) && causes.length < 4) {
     seen.add(error);
@@ -185,6 +186,16 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
       causeSqlState = driverCode;
     }
     pgContext.push(...postgresContext(error).slice(0, 8 - pgContext.length));
+    if (
+      kind === "PostgresError" &&
+      driverCode === "42501" &&
+      own(error, "message") === "only the personal machine owner may attach it" &&
+      postgresContext(error).some(
+        ({ functionName }) => functionName === "admit_session_attempt_personal_machine",
+      )
+    ) {
+      rejectionReason = "personal_machine_owner_required";
+    }
     statement ??= databaseStatement(error);
     const stack = own(error, "stack");
     const frames =
@@ -252,6 +263,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
     causes,
     postgresContext: pgContext,
     databaseStatement: statement,
+    rejectionReason,
     eventTypes: (input.eventTypes ?? [])
       .slice(0, 32)
       .filter((type) => SessionEventType.safeParse(type).success),

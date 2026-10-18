@@ -19458,7 +19458,8 @@
         "$.activeEpoch": "integer!",
         "$.activeSandboxId": "string! null",
         "$.machines": "array!",
-        "$.machines[]": "ref(MachineView)"
+        "$.machines[]": "ref(MachineView)",
+        "$.sessionMachineAccess": "ref(SessionMachineAccess)? null"
       }
     },
     "ManagedOrganizationMembershipProjection": {
@@ -24398,6 +24399,19 @@
         "$.groups[].total": "integer!",
         "$.groups[].unread": "integer!",
         "$.needsYouCount": "integer!"
+      }
+    },
+    "SessionMachineAccess": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.isOwner": "boolean!",
+        "$.machineName": "string!",
+        "$.ownerName": "string! null",
+        "$.queuedTurnBlocked": "boolean!",
+        "$.sandboxId": "string!"
       }
     },
     "SessionMcpApprovalPolicy": {
@@ -31591,6 +31605,7 @@
       "SessionListPageOptions": "type",
       "SessionListResponse": "type",
       "SessionListTotals": "type",
+      "SessionMachineAccess": "type",
       "SessionMcpApprovalPolicy": "type",
       "SessionMcpApprovalPolicyTarget": "type",
       "SessionMcpCredentialUpdateInput": "type",
