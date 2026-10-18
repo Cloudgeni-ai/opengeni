@@ -171,6 +171,13 @@ voice model answers and hands work to the agent in the same chat, and the
 transcript lands in the timeline. It stays hidden when no model is available,
 when the proxy sets `realtimeVoice: false`, or when you pass
 `realtimeVoice={false}`. The voice code loads lazily on first display.
+The voice button never names the voice model (the model menu does, when
+shown), and neither does the React Native call screen. To name the action
+after your assistant, set its text through `messages`: on the web,
+`"realtime.realtimeControl.startVoice": "Talk to Ava"`, with
+`"realtime.realtimeControl.tryVoiceAgain"` and
+`"realtime.realtimeControl.talkLiveWithTheAgent"` for the retry label and the
+idle hint; on React Native, `"native.timeline.messages.startACall"`.
 
 The working indicator before the first reply says "Thinking…". Pass
 `genieLoading` (`phrases`, `messages`, `orb`, or a whole `render`) to use your
@@ -680,11 +687,13 @@ const norwegian: OpenGeniMessages = {
 
 - Keys are stable, typed identifiers. `englishMessages` is the complete default
   catalog: export it to your translation tooling as is.
-- Templates use single-brace parameters (`"Start voice with {model}"`); a
+- Templates use single-brace parameters (`"Move queued prompt {index} up"`); a
   translation must keep the same parameters.
 - Counted text uses plural suffixes (`_zero`, `_one`, `_two`, `_few`, `_many`,
   `_other`) chosen with `Intl.PluralRules` for `locale`, so each language
-  supplies the forms it needs. `_other` is always required.
+  supplies the forms it needs. `_other` is always required. Where the runtime
+  has no `Intl.PluralRules` (Hermes on React Native), 1 uses `_one` and every
+  other count `_other`; no polyfill is needed.
 - `locale` also sets the language of the dates, times and numbers the
   components format.
 - Missing keys fall back to an outer provider, then English, never to a raw key.
