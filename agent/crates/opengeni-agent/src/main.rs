@@ -669,7 +669,8 @@ fn operation_cgroups(
 /// one link, dialed through the sandbox's host with no credential, and keeps
 /// the relay credential the host sends in memory. It reports what it has in
 /// use as the guest's activity file, reconnects at once on `SIGUSR1` (sent
-/// after each restore), and never enrolls, renews, updates itself or installs
+/// when its host has lost its connections), and never enrolls, renews,
+/// updates itself or installs
 /// a service: the fabric owns the sandbox's enrollment and image.
 async fn run_fabric(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     let fabric = fabric::FabricConfig::load(link_file).map_err(to_boxed)?;
@@ -754,8 +755,9 @@ async fn run_fabric(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     Ok(())
 }
 
-/// Wires `SIGUSR1` to an immediate reconnect: the guest init sends it after
-/// each restore, when the agent's connections to its host are gone.
+/// Wires `SIGUSR1` to an immediate reconnect: the guest init sends it when
+/// the sandbox's host has no stream for the agent's connections (after a
+/// move, a recovery on another host or a restart of the host agent).
 fn spawn_reconnect_handler(reconnect: supervisor::ReconnectSignal) {
     #[cfg(unix)]
     tokio::spawn(async move {
@@ -763,12 +765,12 @@ fn spawn_reconnect_handler(reconnect: supervisor::ReconnectSignal) {
         let mut restored = match signal(SignalKind::user_defined1()) {
             Ok(restored) => restored,
             Err(error) => {
-                warn!(%error, "could not install the SIGUSR1 handler; reconnects after a restore wait for back-off");
+                warn!(%error, "could not install the SIGUSR1 handler; reconnects after the host loses the link wait for back-off");
                 return;
             }
         };
         while restored.recv().await.is_some() {
-            info!("sandbox restored; reconnecting to its host");
+            info!("the host lost this sandbox's connections; reconnecting at once");
             reconnect.request();
         }
     });
