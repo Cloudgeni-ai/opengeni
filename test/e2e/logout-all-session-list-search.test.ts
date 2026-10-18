@@ -1,6 +1,23 @@
 import { expect, test } from "bun:test";
 import { exactLogoutAllSessionListSearch } from "./logout-all-session-list-search";
 
+test.each(["toString", "constructor", "__proto__", "hasOwnProperty", "valueOf"])(
+  "logout-all fence rejects inherited extra query key %s",
+  (key) => {
+    for (const search of [
+      "?view=page&limit=50&parentSessionId=null",
+      "?view=page&limit=1&pinsOnly=true",
+      "?view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includeTotals=true&includePinned=false",
+      "?view=page&limit=4&parentSessionId=null&projection=summary&channelId=null&sortBy=updatedAt&archiveStatus=active&includePinned=false",
+    ]) {
+      expect(exactLogoutAllSessionListSearch(search)).toBe(true);
+      const params = new URLSearchParams(search);
+      params.append(key, "1");
+      expect(exactLogoutAllSessionListSearch(`?${params}`)).toBe(false);
+    }
+  },
+);
+
 test("logout-all session-list fence admits only the finite legacy and current rail reads", () => {
   for (const search of [
     "",
