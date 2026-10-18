@@ -40,6 +40,7 @@ export function reportSessionPersistenceFailure(
   try {
     observability.error(
       `Session persistence failed: stage=${diagnostic.stage} sqlState=${diagnostic.sqlState ?? "unknown"}` +
+        (diagnostic.rejectionReason ? ` reason=${diagnostic.rejectionReason}` : "") +
         (statement ? ` statement=${statement.operation}:${statement.relation}` : "") +
         (functions ? ` functions=${functions}` : ""),
       {

@@ -1,5 +1,6 @@
-import type { Session } from "@opengeni/sdk";
-import { useId, useRef, useState } from "react";
+import type { Session, SessionMachineAccess } from "@opengeni/sdk";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { PersonalMachineExplanation } from "./session-machine-access-notice";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 
@@ -122,6 +123,8 @@ export function SessionAdmissionNotice({
   busy,
   refreshRequired = false,
   onRecheck,
+  machineAccess,
+  machineAction,
 }: {
   session: Session;
   canControl: boolean;
@@ -130,17 +133,53 @@ export function SessionAdmissionNotice({
   refreshRequired?: boolean;
   /** Existing authorized Resume request, followed by a fresh session read. */
   onRecheck: () => Promise<void>;
+  machineAccess?: SessionMachineAccess | null;
+  machineAction?: ReactNode;
 }) {
   const descriptionId = useId();
   const pending = useRef(false);
   const [checking, setChecking] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [blockedMachine, setBlockedMachine] = useState<{
+    sandboxId: string;
+    blockedAt: string | undefined;
+  } | null>(null);
   const reason = admissionReason(session);
+  const machineBlocked =
+    reason?.reason === "database_claim_rejected" &&
+    reason.permissionDenied &&
+    machineAccess?.queuedTurnBlocked === true;
+  const blockedAt = session.admissionBlock?.blockedAt;
+  const machineSandboxId = machineAccess?.sandboxId;
+  useEffect(() => {
+    if (machineBlocked && machineSandboxId) {
+      setBlockedMachine((previous) =>
+        previous?.sandboxId === machineSandboxId && previous.blockedAt === blockedAt
+          ? previous
+          : { sandboxId: machineSandboxId, blockedAt },
+      );
+    }
+  }, [machineBlocked, machineSandboxId, blockedAt]);
   if (!reason) return null;
-  const copy = reasonCopy(reason);
+  const machineChanged =
+    reason.reason === "database_claim_rejected" &&
+    reason.permissionDenied &&
+    !machineBlocked &&
+    blockedMachine !== null &&
+    blockedMachine.blockedAt === blockedAt &&
+    blockedMachine.sandboxId !== session.activeSandboxId;
+  const copy = machineChanged
+    ? {
+        title: "Machine changed",
+        body: "The saved message has not started yet.",
+        next: "Recheck access to try it on the selected machine. It will not retry automatically.",
+        action: "Recheck access",
+      }
+    : reasonCopy(reason);
 
   async function recheck() {
-    if (pending.current || busy || (paused && !refreshRequired) || !canControl) return;
+    if (pending.current || busy || ((paused || machineBlocked) && !refreshRequired) || !canControl)
+      return;
     pending.current = true;
     setChecking(true);
     setFailed(false);
@@ -155,10 +194,19 @@ export function SessionAdmissionNotice({
   }
 
   return (
-    <Notice tone="failed" title={copy.title}>
+    <Notice
+      tone={machineChanged ? "waiting" : "failed"}
+      title={machineBlocked ? "This message needs a different machine" : copy.title}
+    >
       <div id={descriptionId} role="status" aria-live="polite">
-        <p>{copy.body}</p>
-        <p className="mt-1">{copy.next}</p>
+        {machineBlocked && machineAccess ? (
+          <PersonalMachineExplanation access={machineAccess} queued action={machineAction} />
+        ) : (
+          <>
+            <p>{copy.body}</p>
+            <p className="mt-1">{copy.next}</p>
+          </>
+        )}
       </div>
       {refreshRequired ? (
         <p className="mt-2">Session controls changed. Refresh the status before rechecking.</p>
@@ -172,7 +220,7 @@ export function SessionAdmissionNotice({
         <Button
           type="button"
           className="mt-2 min-h-11"
-          disabled={busy || checking}
+          disabled={busy || checking || (machineBlocked && !refreshRequired)}
           aria-busy={checking}
           aria-describedby={descriptionId}
           onClick={() => void recheck()}

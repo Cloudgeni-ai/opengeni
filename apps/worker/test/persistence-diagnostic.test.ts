@@ -7,7 +7,7 @@ test.each([false, true])(
   "claim logs identify the rejected statement when diagnostic export fails: %s",
   (exportFails) => {
     const secret = "PRIVATE_SQL_PARAMETER";
-    const driver = Object.assign(new Error(secret), {
+    const driver = Object.assign(new Error("only the personal machine owner may attach it"), {
       name: "PostgresError",
       code: "42501",
       where: `PL/pgSQL function admit_session_attempt_personal_machine() line 62 at RAISE\nSQL statement ${secret}`,
@@ -61,6 +61,7 @@ test.each([false, true])(
     expect(logs).toHaveLength(1);
     expect(logs[0]).toContain("stage=session_attempts.claim sqlState=42501");
     expect(logs[0]).toContain("statement=insert:session_turn_attempts");
+    expect(logs[0]).toContain("reason=personal_machine_owner_required");
     expect(logs[0]).toContain("admit_session_attempt_personal_machine:62");
     expect(logs[0]).toContain(error.details.correlationId);
     expect(logs[0]).not.toContain(secret);

@@ -723,6 +723,16 @@ owner-only. Live owner/membership, enrollment/authority generations, session
 execution epoch, interruption and route checks precede dispatch. See
 [Connected Machines](connected-machines.md).
 
+The human Machines response may explain the personal machine attached to a
+chat: its name, owner's display name, and whether the next queued human turn
+has a different initiator. `get_session_machine_access` first resolves the chat
+under the viewer's ordinary RLS, then uses a narrow compute-read capability;
+it neither adds the machine to discovery nor authorizes attachment or execution.
+The console warns before Send and offers the existing authorized machine picker.
+Known owner mismatches disable futile rechecks until the pointer or access changes;
+changing machines never clears an explicit pause. Claim diagnostics classify the
+reviewed owner rejection without logging SQL, parameters or raw exception text.
+
 Modal recovery: singleton human consent (`packages/core/src/application/sandbox-recovery.ts`)
 or proved provider loss (`packages/db/src/index.ts`): the quiescent group restores a
 verified checkpoint, else continues empty, warning every member; never replays.
