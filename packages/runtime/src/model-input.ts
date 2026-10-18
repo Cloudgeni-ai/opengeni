@@ -524,7 +524,7 @@ export function baseModelInputFilterForSettings(settings: Settings): CallModelIn
 }
 
 /**
- * Show an entry-tool call's frozen family disclosure after its result. Runs
+ * Declare an entry-tool call's frozen family after its step's results. Runs
  * before the item projection, which removes the marker from the call.
  */
 const interactionFamilyDisclosureFilter: CallModelInputFilter = ({ modelData }) => {

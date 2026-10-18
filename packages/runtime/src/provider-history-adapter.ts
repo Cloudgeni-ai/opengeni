@@ -4,8 +4,87 @@ import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
+/** Request-local projection choices that depend on the target route. */
+export type ProviderHistoryOptions = {
+  /**
+   * The Chat route moves system messages to the start of the conversation
+   * (Gemini), so a later system message would rewrite the cached prefix.
+   * Mid-conversation declarations then use a machine-origin user message.
+   */
+  hoistsSystemMessages?: boolean;
+  /**
+   * The Responses route accepts the `additional_tools` input item (see
+   * responsesRouteDeclaresAdditionalTools). Other Responses routes get the
+   * same declaration as a developer message carrying the definitions as text.
+   */
+  declaresAdditionalTools?: boolean;
+};
+
 const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/;
 const HISTORICAL_FACT_MAX_CHARS = 32_000;
+
+/** Marks a request-local item that declares tools newly available to the model. */
+export const TOOL_DISCLOSURE_KEY = "opengeni.tool_disclosure.v1";
+const TOOL_DISCLOSURE_TEXT_WITH_INVOKE =
+  "These tools are now available. Call one by its name, or through tool_invoke with its name and a nested arguments object. Definitions:";
+const MACHINE_ORIGIN_PREFIX = "Opengeni tool update (machine-origin input; no new human message).";
+
+/**
+ * Responses routes verified live to accept `additional_tools`, call a declared
+ * tool by name on the next step, and keep the earlier prefix cached. Every
+ * other Responses route (direct OpenAI, Azure OpenAI, xAI, OpenAI-compatible
+ * gateways) gets the developer-message form until it is verified: gateways
+ * that do not know the item reject the whole request.
+ */
+const RESPONSES_ROUTES_WITH_ADDITIONAL_TOOLS: ReadonlySet<string> = new Set(["codex-subscription"]);
+
+/** True when the Responses provider kind accepts the `additional_tools` item. */
+export function responsesRouteDeclaresAdditionalTools(providerKind: string): boolean {
+  return RESPONSES_ROUTES_WITH_ADDITIONAL_TOOLS.has(providerKind);
+}
+
+/**
+ * A provider-neutral declaration of tools that became available mid-turn. It
+ * is a developer message carrying the frozen definitions; each provider
+ * projection renders it in that API's own form: a Responses `additional_tools`
+ * item where the route accepts it, otherwise a developer or system message
+ * as text. With tool_invoke (generic dispatch) the text carries the
+ * definitions, and the model calls them by name or through tool_invoke. Native
+ * Responses transports have no tool_invoke, and GPT models do not call a
+ * function declared only in text, so there the text names the tools and asks
+ * the model to load them with its native tool_search.
+ */
+export function toolDisclosureItem(
+  tools: Record<string, unknown>[],
+  options: { viaToolInvoke: boolean },
+): Record<string, unknown> {
+  const names = tools.map((tool) => String(tool.name));
+  return {
+    type: "message",
+    role: "developer",
+    content: options.viaToolInvoke
+      ? `${TOOL_DISCLOSURE_TEXT_WITH_INVOKE}\n${JSON.stringify({ tools })}`
+      : `These tools are now available: ${names.join(", ")}. Load them with tool_search using names ${JSON.stringify(names)}, then call them by name.`,
+    providerData: { [TOOL_DISCLOSURE_KEY]: { tools } },
+  };
+}
+
+function disclosedTools(item: Record<string, unknown>): Record<string, unknown>[] | null {
+  if (item.type !== "message" || item.role !== "developer") return null;
+  const providerData =
+    item.providerData && typeof item.providerData === "object"
+      ? (item.providerData as Record<string, unknown>)
+      : null;
+  const disclosure = providerData?.[TOOL_DISCLOSURE_KEY] as { tools?: unknown } | undefined;
+  return disclosure && Array.isArray(disclosure.tools)
+    ? (disclosure.tools as Record<string, unknown>[])
+    : null;
+}
+
+/** True when a Chat route is known to hoist mid-conversation system messages. */
+export function chatRouteHoistsSystemMessages(modelId: string): boolean {
+  return /^(google\/|gemini)/i.test(modelId) || /\/gemini/i.test(modelId);
+}
 
 export class ProviderHistoryIncompatibleError extends Error {
   readonly name = "ProviderHistoryIncompatibleError";
@@ -227,6 +306,7 @@ function chatSystemContent(content: unknown): unknown {
 export function projectHistoryForProvider(
   items: Array<Record<string, unknown>>,
   providerApi: HistoryProviderApi,
+  options: ProviderHistoryOptions = {},
 ): Array<Record<string, unknown>> {
   const nativeClaude = providerApi === "anthropic-messages";
   // Each distinct session goal context reaches the model once per request.
@@ -236,110 +316,7 @@ export function projectHistoryForProvider(
     return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
   });
   const input = projected.every((item, index) => item === items[index]) ? items : projected;
-  const wire = projectWireHistory(withWireValidFunctionCallArguments(input), providerApi);
-  return providerApi === "responses" ? wire : withContiguousToolResults(wire, providerApi);
-}
-
-/**
- * Claude and Chat Completions accept a step's parallel tool results only as
- * one uninterrupted run answering every call of that step. History can hold
- * other items between those results, for example a family disclosure shown
- * after an entry tool's result when that call was not the step's last. Those
- * providers reject such a request before any model output, so the chat would
- * fail every turn on its own valid history. Request-locally, move each item
- * that would break the run to just after the run's last result, keeping their
- * order; the moved items are then read the same way, so a run they open stays
- * whole too. Results of calls made before the run keep their place, and so do
- * person messages on Claude, which joins them into the same results message.
- * Only histories these providers rejected change, so no prefix a provider has
- * already accepted is altered, and canonical history is never rewritten. The
- * Responses API accepts the interleaved order and is left as is.
- */
-export function withContiguousToolResults(
-  items: Array<Record<string, unknown>>,
-  providerApi: "chat" | "anthropic-messages",
-): Array<Record<string, unknown>> {
-  const answered = new Set<string>();
-  for (const item of items) {
-    const id = item.type === "function_call_result" ? callId(item) : null;
-    if (id) answered.add(id);
-  }
-  if (answered.size === 0) return items;
-  const emittedResults = new Set<string>();
-  const deferredCalls = new Set<string>();
-  const outstanding = new Set<string>();
-  let answering = false;
-  let deferred: Array<Record<string, unknown>> = [];
-  let output: Array<Record<string, unknown>> | null = null;
-  // Moved items replay before the next original item, innermost first.
-  const replays: Array<{ items: Array<Record<string, unknown>>; next: number }> = [];
-  let index = 0;
-  const emit = (item: Record<string, unknown>) => {
-    output?.push(item);
-  };
-  for (;;) {
-    const replay = replays.at(-1);
-    if (replay && replay.next >= replay.items.length) {
-      replays.pop();
-      continue;
-    }
-    if (!replay && index >= items.length) break;
-    const item = replay ? replay.items[replay.next++]! : items[index++]!;
-    const resultId = item.type === "function_call_result" ? callId(item) : null;
-    if (resultId && outstanding.delete(resultId)) {
-      emit(item);
-      emittedResults.add(resultId);
-      answering = outstanding.size > 0;
-      if (!answering && deferred.length) {
-        replays.push({ items: deferred, next: 0 });
-        deferred = [];
-      }
-      continue;
-    }
-    const wireCall = wireCallId(item, providerApi);
-    const breaksRun =
-      answering &&
-      (resultId
-        ? deferredCalls.has(resultId)
-        : !(providerApi === "anthropic-messages" && isPersonMessage(item)));
-    if (breaksRun) {
-      output ??= items.slice(0, index - 1);
-      deferred.push(item);
-      if (wireCall) deferredCalls.add(wireCall);
-      continue;
-    }
-    emit(item);
-    if (resultId) emittedResults.add(resultId);
-    if (!wireCall) continue;
-    deferredCalls.delete(wireCall);
-    if (answered.has(wireCall) && !emittedResults.has(wireCall)) outstanding.add(wireCall);
-  }
-  if (!output) return items;
-  for (const item of deferred) output.push(item);
-  return output;
-}
-
-/** The ID a provider's wire format pairs with a later function_call_result. */
-function wireCallId(
-  item: Record<string, unknown>,
-  providerApi: "chat" | "anthropic-messages",
-): string | null {
-  if (item.type === "function_call") return callId(item);
-  // The Chat converter sends a stored file search as an ordinary tool call.
-  if (
-    providerApi === "chat" &&
-    item.type === "hosted_tool_call" &&
-    item.name === "file_search_call" &&
-    typeof item.id === "string" &&
-    item.id.length > 0
-  ) {
-    return item.id;
-  }
-  return null;
-}
-
-function isPersonMessage(item: Record<string, unknown>): boolean {
-  return (item.type ?? "message") === "message" && item.role === "user";
+  return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi, options);
 }
 
 /**
@@ -407,14 +384,25 @@ export function withWireValidFunctionCallArguments(
 function projectWireHistory(
   items: Array<Record<string, unknown>>,
   providerApi: HistoryProviderApi,
+  options: ProviderHistoryOptions,
 ): Array<Record<string, unknown>> {
   if (providerApi === "responses") {
     // agents-js 0.14's message converter supports system/user/assistant only.
     // The Responses API itself supports developer; use the SDK's raw-item adapter.
     let changed = false;
     const projected = items.map((item, index) => {
-      const next =
-        item.type === "message" && item.role === "developer"
+      const tools = disclosedTools(item);
+      const next = tools
+        ? options.declaresAdditionalTools
+          ? {
+              type: "unknown",
+              providerData: { type: "additional_tools", role: "developer", tools },
+            }
+          : {
+              type: "unknown",
+              providerData: { type: "message", role: "developer", content: item.content },
+            }
+        : item.type === "message" && item.role === "developer"
           ? { type: "unknown", providerData: item }
           : (foreignReasoningFact(item, providerApi) ??
             portableChatMetadata(item, items[index - 1]));
@@ -429,8 +417,9 @@ function projectWireHistory(
       throw new ProviderHistoryIncompatibleError(providerApi, "compaction");
     let changed = false;
     const projected = items.map((item, index) => {
-      const next =
-        item.type === "message" && item.role === "developer"
+      const next = disclosedTools(item)
+        ? { type: "message", role: "system", content: item.content }
+        : item.type === "message" && item.role === "developer"
           ? { ...item, role: "system" }
           : (foreignReasoningFact(item, providerApi) ??
             portableChatMetadata(item, items[index - 1]));
@@ -452,6 +441,12 @@ function projectWireHistory(
 
   let changed = false;
   const projected = items.map((item) => {
+    if (disclosedTools(item)) {
+      changed = true;
+      return options.hoistsSystemMessages
+        ? { type: "message", role: "user", content: `${MACHINE_ORIGIN_PREFIX}\n${item.content}` }
+        : { type: "message", role: "system", content: item.content };
+    }
     const reasoning = foreignReasoningFact(item, providerApi);
     if (reasoning) {
       changed = true;

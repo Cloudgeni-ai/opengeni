@@ -100,7 +100,7 @@ import {
 import {
   describeInvalidToolArguments,
   interactionToolInputJsonSchema,
-  withRefShorthandLocators,
+  browserActModelInputSchema,
 } from "./interaction-tool-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
 import { compactComputerImage, compactComputerImageContent } from "./computer-image-encoding";
@@ -1245,7 +1245,7 @@ export function createInteractionAttemptToolDefinitions(
     description:
       "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; set view=full for every element, or view=none when no post-action outline is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
-    modelInputSchema: withRefShorthandLocators,
+    modelInputSchema: browserActModelInputSchema,
     output: BrowserAgentActionReceipt,
     readOnly: false,
     idempotent: true,

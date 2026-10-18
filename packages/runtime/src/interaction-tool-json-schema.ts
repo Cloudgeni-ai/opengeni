@@ -39,8 +39,69 @@ const LOCATOR_FIELDS = new Set(["locator", "from", "to"]);
  * the output tokens of `{kind:'ref',ref}`. The tool expands it before
  * validation.
  */
-export function withRefShorthandLocators(schema: AttemptToolJsonSchema): AttemptToolJsonSchema {
-  return refShorthand(schema) as AttemptToolJsonSchema;
+function withRefShorthandLocators(schema: AttemptToolJsonSchema): JsonSchemaNode {
+  return refShorthand(schema) as JsonSchemaNode;
+}
+
+/**
+ * browser_act's model view: ref shorthand, with each shape shown once. The locator object is
+ * described on `action.locator` only: `from` and `to` take a ref or "a locator
+ * like locator", and a batch item takes "the same fields as action" with its
+ * own type list. Rendered in full, those repeats are about half of the tool's
+ * schema. The tool's Zod schema still validates every field.
+ */
+export function browserActModelInputSchema(schema: AttemptToolJsonSchema): AttemptToolJsonSchema {
+  const shorthand = withRefShorthandLocators(schema);
+  const top = isNode(shorthand.properties) ? shorthand.properties : null;
+  const action = top && isNode(top.action) ? top.action : null;
+  const fields = action && isNode(action.properties) ? { ...action.properties } : null;
+  if (!top || !action || !fields) return shorthand as AttemptToolJsonSchema;
+  const locatorKind = locatorObject(fields.locator)?.properties;
+  const kind = isNode(locatorKind) && isNode(locatorKind.kind) ? locatorKind.kind : null;
+  for (const field of ["from", "to"]) {
+    if (!isNode(fields[field])) continue;
+    fields[field] = {
+      anyOf: [
+        { type: "string", description: "An element ref." },
+        {
+          type: "object",
+          properties: kind ? { kind } : {},
+          required: kind ? ["kind"] : [],
+          description: "A locator object with the same fields as locator.",
+        },
+      ],
+    };
+  }
+  const actions = isNode(fields.actions) ? fields.actions : null;
+  const item = actions && isNode(actions.items) ? actions.items : null;
+  const itemType = item && isNode(item.properties) ? item.properties.type : null;
+  if (actions && isNode(itemType)) {
+    fields.actions = {
+      ...actions,
+      items: {
+        type: "object",
+        properties: { type: itemType },
+        required: ["type"],
+        description: "One action with the same fields as action, of any type except batch.",
+      },
+    };
+  }
+  return {
+    ...shorthand,
+    properties: { ...top, action: { ...action, properties: fields } },
+  } as AttemptToolJsonSchema;
+}
+
+function locatorObject(schema: unknown): JsonSchemaNode | null {
+  if (!isNode(schema)) return null;
+  if (Array.isArray(schema.anyOf)) {
+    for (const member of schema.anyOf) {
+      const found = locatorObject(member);
+      if (found) return found;
+    }
+    return null;
+  }
+  return isNode(schema.properties) && isNode(schema.properties.kind) ? schema : null;
 }
 
 function refShorthand(node: unknown): unknown {

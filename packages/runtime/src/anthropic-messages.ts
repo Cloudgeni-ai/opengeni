@@ -213,8 +213,7 @@ async function readErrorDetail(
 
 /**
  * Claude accepts only `[a-zA-Z0-9_-]` in tool call IDs. Calls recorded by
- * other providers or synthesized by Opengeni (for example a disclosure
- * search such as `opengeni:family:<id>`) may carry other characters. Such an
+ * other providers may carry other characters. Such an
  * ID gets a stable, collision-safe Claude form; the call and its result map
  * to the same form, and an ID that is already valid passes through unchanged.
  */
