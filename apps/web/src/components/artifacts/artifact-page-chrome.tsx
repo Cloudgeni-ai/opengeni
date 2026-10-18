@@ -17,6 +17,7 @@ import type { DetailBackLink } from "@/components/ui/detail-page";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { artifactKindLabel, type ArtifactKind } from "@/lib/artifact-catalog";
 import { artifactLibraryFilters, artifactLibrarySearch } from "@/lib/artifact-library-navigation";
+import type { ArtifactReturnSearch } from "@/lib/routes";
 
 // Resolved at render, not in a module-level table: these icons can live in a
 // chunk that loads after this one, and a table built while this module loads
@@ -50,6 +51,26 @@ export function ArtifactKindTile({ kind }: { kind: ArtifactKind }) {
 
 /** Detail pages fill the content column; `DetailPage` draws the 960px frame. */
 export const ARTIFACT_DETAIL_FRAME = "max-w-none px-0 py-0 pb-0 sm:px-0 lg:px-0";
+
+/**
+ * Whether the artifact page shows the artifact itself, full screen. Links from
+ * outside the Artifacts list (chats, notifications, copied or pasted URLs)
+ * do; the list marks its links with `browse` to land on the detail page.
+ * Switching replaces the history entry, so the browser's back button still
+ * returns to wherever the person came from.
+ */
+export function useArtifactFullView(): [boolean, (fullView: boolean) => void] {
+  const navigate = useNavigate();
+  const search: ArtifactReturnSearch = useSearch({ strict: false });
+  const fullView = search.browse !== true && search.view === undefined;
+  const setFullView = (next: boolean) =>
+    void navigate({
+      to: ".",
+      search: { ...search, browse: next ? undefined : true },
+      replace: true,
+    });
+  return [fullView, setFullView];
+}
 
 /** "← Artifacts", keeping the way back to the session it was opened from. */
 export function useArtifactsBackLink(workspaceId: string, fromSession?: string): DetailBackLink {

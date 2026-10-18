@@ -48,6 +48,17 @@ OPENGENI_ENROLL_TOKEN=<token> \
 
 The agent works in the chosen folder and uses the machine's own Git setup.
 
+### Large file writes
+
+On supported Linux and macOS filesystems, large file replacements are transferred
+in bounded chunks and published only after verification. Machine-addressed writes
+such as `run_on` need an agent that supports these transfers without a session
+route. If an older transactional agent is connected, writes above 262144 bytes
+(256 KiB) fail before writing, with an instruction to update the agent; smaller
+writes still work. Agents predating transactional transfers retain their original
+single-message size limit. Parent directories must already exist for a
+transactional replacement.
+
 ## Connect more workspaces
 
 One agent can connect to several workspaces, even on different Opengeni deployments. Each connection is independent.

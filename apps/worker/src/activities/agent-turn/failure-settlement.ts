@@ -1,4 +1,5 @@
 import { recordSessionUsageLimitEvent } from "@opengeni/core";
+import { reportSessionPersistenceFailure } from "./persistence-diagnostic";
 import { shouldFallbackModelSocket } from "./persistent-transport-recovery";
 import {
   requestSessionTurnRecovery as persistSessionTurnRecovery,
@@ -227,33 +228,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     });
   // Capture before any recovery/checkpoint DB operation can fail again.
   if (isSessionEventPersistenceError(error)) {
-    try {
-      const diagnosticId = observability.recordFailureDiagnostic({
-        code: error.details.code,
-        stage:
-          error.details.stage === "session_events.append_generic"
-            ? "session_events.append_generic"
-            : error.details.stage === "session_events.append_for_turn_attempt"
-              ? "session_events.append_for_turn_attempt"
-              : error.details.stage === "session_attempts.claim"
-                ? "session_attempts.claim"
-                : "failure_settlement",
-        retryDecision: error.details.retryOutcome,
-        error,
-        sessionId: input.sessionId,
-        ...(attempt.turnId ? { turnId: attempt.turnId } : {}),
-        attemptId: input.attemptId,
-        attempts: error.details.attempts,
-        eventTypes: error.details.eventTypes,
-        sqlState: error.details.sqlState,
-        ...(error.details.database.constraint
-          ? { constraint: error.details.database.constraint }
-          : {}),
-      });
-      observability.error("session event persistence failed", { correlationId: diagnosticId });
-    } catch {
-      // Failure settlement must not depend on telemetry availability.
-    }
+    reportSessionPersistenceFailure(observability, error, {
+      sessionId: input.sessionId,
+      ...(attempt.turnId ? { turnId: attempt.turnId } : {}),
+      attemptId: input.attemptId,
+    });
   }
   // Graceful worker shutdown (deploy / rollout restart): checkpoint the
   // same current inference for a new fenced attempt instead of failing the

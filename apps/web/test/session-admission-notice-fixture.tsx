@@ -7,6 +7,7 @@ const reasons = [
   "database_claim_rejected",
   "initiator_membership_required",
   "personal_resource_grant_required",
+  "future_reason",
 ];
 
 createRoot(document.getElementById("root")!).render(
@@ -15,7 +16,12 @@ createRoot(document.getElementById("root")!).render(
     {reasons.map((reason) => (
       <SessionAdmissionNotice
         key={reason}
-        session={{ status: "requires_action", admissionBlock: { reason } } as unknown as Session}
+        session={
+          {
+            status: "requires_action",
+            admissionBlock: { reason, sqlState: "42501" },
+          } as unknown as Session
+        }
         canControl
         paused={false}
         busy={false}

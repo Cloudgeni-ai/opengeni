@@ -2,10 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { LightboxProvider, createWorkspaceRetainedArtifactLoader } from "@opengeni/react";
 import { PatchApplyCommand, isPatchFilename } from "@opengeni/react/artifacts";
-import { DownloadIcon, RefreshCwIcon } from "lucide-react";
+import { DownloadIcon, Maximize2Icon, RefreshCwIcon } from "lucide-react";
 import { useAppContext } from "@/context";
 import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
-import { RetainedFilePreview } from "@/components/artifacts/retained-file-preview";
+import { ArtifactFullView } from "@/components/artifacts/artifact-full-view";
+import {
+  RetainedFilePreview,
+  retainedPreviewKind,
+} from "@/components/artifacts/retained-file-preview";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Button } from "@/components/ui/button";
 import { CopyableMono } from "@/components/common";
@@ -17,6 +21,7 @@ import {
   ARTIFACT_DETAIL_FRAME,
   ArtifactKindTile,
   useArtifactsBackLink,
+  useArtifactFullView,
 } from "@/components/artifacts/artifact-page-chrome";
 import { userErrorText } from "@/lib/api-error";
 import { saveRetainedArtifact } from "@/lib/retained-artifact-download";
@@ -70,6 +75,7 @@ function RetainedArtifactDetail({
 }) {
   const { client, accessKeyVersion } = useAppContext();
   const back = useArtifactsBackLink(workspaceId, fromSession);
+  const [fullView, setFullView] = useArtifactFullView();
   const key = `${workspaceId}:${artifactId}:${accessKeyVersion}`;
   const [state, setState] = useState<{
     key: string;
@@ -120,6 +126,12 @@ function RetainedArtifactDetail({
   const artifact = loaded?.artifact;
   const filename =
     loaded?.filename || (artifact?.contentType.startsWith("image/") ? "Image" : "Artifact");
+  // Only a file with something to look at has a full view; the rest open on
+  // their page, where Download is.
+  const expandable =
+    !embedded &&
+    artifact !== undefined &&
+    retainedPreviewKind(artifact.contentType, loaded?.filename) !== null;
   const patchLoader = useMemo(
     () => createWorkspaceRetainedArtifactLoader(client, workspaceId),
     [client, workspaceId],
@@ -150,6 +162,37 @@ function RetainedArtifactDetail({
       if (generation === downloads.generation) setDownloading(false);
     }
   };
+  const downloadButton = artifact ? (
+    <RowButton onClick={() => void download()} disabled={downloading}>
+      <DownloadIcon aria-hidden="true" />
+      {downloading ? "Opening…" : artifact.kind === "generated_video" ? "Open video" : "Download"}
+    </RowButton>
+  ) : null;
+  const downloadNotice =
+    artifact && downloadError ? (
+      <Notice
+        tone="failed"
+        live="assertive"
+        className="mt-6"
+        title={
+          artifact.kind === "generated_video"
+            ? "Couldn't open the video"
+            : "Couldn't download the file"
+        }
+      >
+        {downloadError}
+      </Notice>
+    ) : null;
+  const preview = artifact ? (
+    <RetainedFilePreview
+      workspaceId={workspaceId}
+      artifact={artifact}
+      title={filename}
+      filename={loaded?.filename}
+      workbenchTextPreview={embedded}
+      fullSize
+    />
+  ) : null;
   const header = artifact ? (
     <DetailPageHeader
       leading={
@@ -161,17 +204,25 @@ function RetainedArtifactDetail({
         formatBytes(artifact.originalBytes),
       ]}
       actions={
-        <RowButton onClick={() => void download()} disabled={downloading}>
-          <DownloadIcon aria-hidden="true" />
-          {downloading
-            ? "Opening…"
-            : artifact.kind === "generated_video"
-              ? "Open video"
-              : "Download"}
-        </RowButton>
+        <>
+          {expandable ? (
+            <RowButton onClick={() => setFullView(true)}>
+              <Maximize2Icon aria-hidden="true" />
+              Full screen
+            </RowButton>
+          ) : null}
+          {downloadButton}
+        </>
       }
     />
   ) : null;
+  if (expandable && fullView)
+    return (
+      <ArtifactFullView title={filename} onBack={() => setFullView(false)} actions={downloadButton}>
+        {downloadNotice ? <div className="mb-4 [&>*]:mt-0">{downloadNotice}</div> : null}
+        {preview}
+      </ArtifactFullView>
+    );
   return (
     <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
       <DetailPage back={embedded ? undefined : back}>
@@ -198,20 +249,7 @@ function RetainedArtifactDetail({
         {artifact ? (
           <>
             {header}
-            {downloadError ? (
-              <Notice
-                tone="failed"
-                live="assertive"
-                className="mt-6"
-                title={
-                  artifact.kind === "generated_video"
-                    ? "Couldn't open the video"
-                    : "Couldn't download the file"
-                }
-              >
-                {downloadError}
-              </Notice>
-            ) : null}
+            {downloadNotice}
             {artifact.kind === "file" && loaded?.filename && isPatchFilename(loaded.filename) ? (
               <div className="mt-6">
                 <PatchApplyCommand
@@ -222,14 +260,7 @@ function RetainedArtifactDetail({
               </div>
             ) : null}
             <div className="mt-6 min-h-48 min-w-0 rounded-[14px] bg-surface-2 p-4 max-sm:p-2">
-              <RetainedFilePreview
-                workspaceId={workspaceId}
-                artifact={artifact}
-                title={filename}
-                filename={loaded?.filename}
-                workbenchTextPreview={embedded}
-                fullSizeImage
-              />
+              {preview}
             </div>
           </>
         ) : null}

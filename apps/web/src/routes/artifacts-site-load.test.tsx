@@ -87,8 +87,25 @@ mock.module("@/components/artifacts/site-conversations", () => ({
 const actualArtifacts = await import("@opengeni/react/artifacts");
 mock.module("@opengeni/react/artifacts", () => ({
   ...actualArtifacts,
-  ArtifactSandbox: ({ children }: { children?: ReactNode }) =>
-    createElement("div", { "data-testid": "site-sandbox" }, children),
+  ArtifactSandbox: ({
+    children,
+    fullScreen,
+    onFullScreenChange,
+  }: {
+    children?: ReactNode;
+    fullScreen?: boolean;
+    onFullScreenChange?: (fullScreen: boolean) => void;
+  }) =>
+    createElement(
+      "div",
+      { "data-testid": "site-sandbox", "data-full-screen": String(fullScreen) },
+      createElement(
+        "button",
+        { type: "button", onClick: () => onFullScreenChange?.(!fullScreen) },
+        "Toggle full screen",
+      ),
+      children,
+    ),
 }));
 
 mock.module("@/components/ui/confirm-dialog", () => ({
@@ -107,7 +124,7 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-async function renderDetail() {
+async function renderDetail(initialEntry = "/") {
   const { ArtifactDetailRoute } = await import("./artifacts");
   const route = createRootRoute({
     component: () =>
@@ -118,7 +135,7 @@ async function renderDetail() {
   });
   const router = createRouter({
     routeTree: route,
-    history: createMemoryHistory({ initialEntries: ["/"] }),
+    history: createMemoryHistory({ initialEntries: [initialEntry] }),
   });
   const container = document.createElement("div");
   document.body.append(container);
@@ -127,7 +144,7 @@ async function renderDetail() {
     await router.load();
     root.render(createElement(RouterProvider, { router }));
   });
-  return { container, root };
+  return { container, root, router };
 }
 
 /** Archive lives in the page's ⋯ menu. */
@@ -156,6 +173,61 @@ test("loaded Site keeps Archive and Edit with Opengeni behind permission checks"
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+test("a link opens the Site full screen; leaving it shows the Site's page", async () => {
+  loadError = null;
+  const { container, root, router } = await renderDetail("/");
+  const sandbox = () => container.querySelector('[data-testid="site-sandbox"]')!;
+  const toggle = () =>
+    [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Toggle full screen",
+    )!;
+  try {
+    expect(sandbox().getAttribute("data-full-screen")).toBe("true");
+    await act(async () => toggle().click());
+    expect(router.state.location.search).toEqual({ browse: true });
+    expect(sandbox().getAttribute("data-full-screen")).toBe("false");
+    // Expanding from the page replaces the same history entry.
+    const entries = router.history.length;
+    await act(async () => toggle().click());
+    expect(router.state.location.search).toEqual({});
+    expect(sandbox().getAttribute("data-full-screen")).toBe("true");
+    expect(router.history.length).toBe(entries);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("the Artifacts list and archived Sites open the Site's page", async () => {
+  loadError = null;
+  const listed = await renderDetail("/?browse=true");
+  try {
+    expect(
+      listed.container
+        .querySelector('[data-testid="site-sandbox"]')
+        ?.getAttribute("data-full-screen"),
+    ).toBe("false");
+  } finally {
+    await act(async () => listed.root.unmount());
+    listed.container.remove();
+  }
+  snapshot.detail.artifact.status = "archived" as "active";
+  const archived = await renderDetail("/");
+  try {
+    // Uncontrolled: the frame expands only when asked.
+    expect(
+      archived.container
+        .querySelector('[data-testid="site-sandbox"]')
+        ?.getAttribute("data-full-screen"),
+    ).toBe("undefined");
+    expect(archived.container.textContent).toContain("This Site is archived");
+  } finally {
+    snapshot.detail.artifact.status = "active";
+    await act(async () => archived.root.unmount());
+    archived.container.remove();
   }
 });
 

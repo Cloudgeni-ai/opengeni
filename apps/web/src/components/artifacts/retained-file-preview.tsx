@@ -19,6 +19,7 @@ import {
 import { isRetainedImageContentType } from "@opengeni/react/artifacts";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { InlineChatImage } from "./inline-chat-image";
 import { DeferredChatMedia } from "@opengeni/react/artifacts";
 import { isRetainedTextPreview } from "./retained-text-preview-policy";
@@ -59,8 +60,8 @@ type PreviewProps = {
   filename?: string;
   /** Explicit opt-in for the workbench; chat and other viewers stay unchanged. */
   workbenchTextPreview?: boolean;
-  /** Let image detail pages fill the available viewer instead of the chat slot. */
-  fullSizeImage?: boolean;
+  /** Let artifact pages size images and video to the window instead of the chat slot. */
+  fullSize?: boolean;
 };
 
 export function RetainedFilePreview(props: PreviewProps) {
@@ -94,7 +95,7 @@ function RetainedFilePreviewBody({
   artifact: initialArtifact,
   title,
   filename,
-  fullSizeImage,
+  fullSize,
 }: PreviewProps) {
   // The parent remounts on receipt changes, not object allocation on a rerender.
   const [artifact] = useState(initialArtifact);
@@ -161,7 +162,7 @@ function RetainedFilePreviewBody({
         workspaceId={workspaceId}
         artifactId={artifact.artifactId}
         alt={title}
-        viewer={fullSizeImage}
+        viewer={fullSize}
       />
     );
   if (!kind)
@@ -195,7 +196,10 @@ function RetainedFilePreviewBody({
         preload="metadata"
         aria-label={title}
         onError={() => setFailed(true)}
-        className="max-h-[480px] w-full rounded-md"
+        className={cn(
+          "w-full rounded-md",
+          fullSize ? "max-h-[calc(100dvh-12rem)]" : "max-h-[480px]",
+        )}
       />
     );
   if (kind === "audio")

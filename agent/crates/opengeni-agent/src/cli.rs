@@ -371,7 +371,8 @@ pub struct CodemodeCallArgs {
     /// Generated path, model name, or `server.tool` identity from `codemode list`.
     pub tool: String,
 
-    /// Tool arguments as one JSON object. Defaults to `{}`.
+    /// Tool arguments as a JSON object, `-` to read stdin, or `@path` to read a
+    /// UTF-8 JSON file. Defaults to `{}`; stdin is read only when requested.
     #[arg(default_value = "{}")]
     pub arguments: String,
 
@@ -764,6 +765,36 @@ mod tests {
             }
             other => panic!("expected codemode call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn codemode_call_accepts_explicit_input_sources_and_keeps_default_arguments() {
+        for source in ["-", "@arguments with spaces.json"] {
+            let cli = Cli::parse_from([
+                "opengeni-agent",
+                "codemode",
+                "call",
+                "demo.write",
+                source,
+                "--full",
+            ]);
+            let Some(Command::Codemode(CodemodeArgs {
+                action: CodemodeAction::Call(args),
+            })) = cli.command
+            else {
+                panic!("codemode call")
+            };
+            assert_eq!(args.arguments, source);
+            assert!(args.full);
+        }
+        let cli = Cli::parse_from(["opengeni-agent", "codemode", "call", "demo.write"]);
+        let Some(Command::Codemode(CodemodeArgs {
+            action: CodemodeAction::Call(args),
+        })) = cli.command
+        else {
+            panic!("codemode call")
+        };
+        assert_eq!(args.arguments, "{}");
     }
 
     #[test]
