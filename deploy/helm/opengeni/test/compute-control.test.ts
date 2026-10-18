@@ -204,7 +204,8 @@ describe("computeControl", () => {
     expect(script).toContain("pg_advisory_xact_lock");
     expect(script).toContain("as superseded");
     expect(script).toContain("'opengeni compute provisioning, password revision ' || :'revision'");
-    for (const bad of ["2026-10-18", "-1", "next"]) {
+    // A fraction would round to a revision another value also gives.
+    for (const bad of ["2026-10-18", "-1", "next", 1.5, -0.5, -1, 1e20]) {
       const rendered = await helmTemplate(withRevision(bad));
       expect(rendered.exitCode).not.toBe(0);
       expect(rendered.stderr).toContain("passwordRevision must be a whole number");

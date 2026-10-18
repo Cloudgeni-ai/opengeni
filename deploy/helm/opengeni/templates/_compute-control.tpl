@@ -65,7 +65,12 @@ that give the role a password, so that an earlier one cannot undo a later.
 */}}
 {{- define "opengeni.computeControl.passwordRevision" -}}
 {{- $revision := .Values.computeControl.database.passwordRevision | default 0 -}}
+{{- /* A number in values arrives as a float: one with a fraction would
+round to a revision another value also gives. */ -}}
 {{- if kindIs "float64" $revision -}}
+{{- if ne $revision (float64 (int64 $revision)) -}}
+{{- fail "computeControl.database.passwordRevision must be a whole number, raised at each change of the password" -}}
+{{- end -}}
 {{- $revision = int64 $revision -}}
 {{- end -}}
 {{- $revision = toString $revision -}}
