@@ -133,7 +133,7 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg ogtag "$O
       OPENGENI_OPENAI_PROVIDER: "azure",
       OPENGENI_AZURE_OPENAI_BASE_URL: $base,
       OPENGENI_OPENAI_ALLOWED_MODELS: $model,
-      OPENGENI_OPENAI_DEFAULT_MODEL: $model
+      OPENGENI_OPENAI_MODEL: $model
     } end)),
     computeControl: {
       enabled: true,

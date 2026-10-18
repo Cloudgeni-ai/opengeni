@@ -188,9 +188,11 @@ jobs:
         working-directory: .
         run: |
           sudo apt-get install -y -qq xfsprogs >/dev/null
-          # Sparse: it takes only what the gate writes. Each step's
-          # sandboxes book their whole disk, so the room must be real.
-          sudo truncate -s 90G /mnt/lab.img
+          # Sparse: it takes only what the gate writes, while each
+          # sandbox books its whole disk in the filesystem's free space,
+          # so the filesystem is far larger than what is written (at
+          # 90G the lab and smoke steps ran out of bookable room).
+          sudo truncate -s 400G /mnt/lab.img
           sudo mkfs.xfs -q /mnt/lab.img
           sudo mkdir -p /lab
           sudo mount -o loop,noatime /mnt/lab.img /lab
@@ -228,3 +230,11 @@ jobs:
         run: |
           df -h / /lab
           sudo du -xsh /lab/* 2>/dev/null | sort -h | tail -15
+      - name: Keep the conformance logs and results
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: compute-conformance-${{ github.run_id }}
+          path: /lab/t/e2b-conformance
+          if-no-files-found: ignore
+          retention-days: 14
