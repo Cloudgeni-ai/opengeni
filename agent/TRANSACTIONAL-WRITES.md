@@ -120,7 +120,7 @@ permissions are not repaired, and no `runAs` or expanded host authority is impli
 
 On macOS, descriptor-based extended ACL inspection lives in the small
 `opengeni-agent-files-ffi` crate, independent of desktop frameworks and TCC.
-Destination/staged-file ACLs and inode flags fail closed. Parent-directory
+Destination/staging ACLs and inode flags fail closed. Parent-directory
 metadata is not replaced: the standard home ACL (`group:everyone deny delete`)
 and other directory attributes remain untouched and kernel-enforced. Inherited
 ACLs on a staged file remain unsupported, rather than being silently stripped.
