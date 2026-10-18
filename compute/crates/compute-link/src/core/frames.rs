@@ -165,7 +165,10 @@ impl Core {
             Ending::Revoked | Ending::Superseded => {
                 tracing::warn!(sandbox = id, ?code, message, "a gateway ended a session");
                 sandbox.refused = true;
-                sandbox.waiting.clear();
+                // What waits goes, and is owed nothing; what its agent got
+                // it may still answer, once a new ticket opens a session.
+                let dropped = std::mem::take(&mut sandbox.waiting);
+                sandbox.dropped(&dropped.messages);
             }
             Ending::Lost | Ending::Other => {
                 tracing::info!(
@@ -216,8 +219,9 @@ impl Core {
     }
 
     pub(super) fn message(&mut self, now: u64, id: &str, queued: Queued) {
-        if let Some(reply) = &queued.reply {
-            self.asked(now, id, reply);
+        let reply = queued.reply.clone();
+        if reply.is_some() {
+            self.asked(now, id);
         }
         let Some(sandbox) = self.sandboxes.get_mut(id) else {
             return;
@@ -226,16 +230,25 @@ impl Core {
             return;
         };
         let open = matches!(sandbox.session, Session::Open { .. });
-        if open && sub.guest.is_some() {
+        let taken = if open && sub.guest.is_some() {
             self.deliver(id, queued);
-        } else if !sandbox.waiting.push(queued, &self.settings) && !sandbox.waiting.dropping {
-            sandbox.waiting.dropping = true;
-            tracing::warn!(
-                sandbox = id,
-                waiting = sandbox.waiting.messages.len(),
-                bytes = sandbox.waiting.bytes,
-                "messages for an agent that is not connected are dropped: as many wait as the host keeps"
-            );
+            true
+        } else if sandbox.waiting.push(queued, &self.settings) {
+            true
+        } else {
+            if !sandbox.waiting.dropping {
+                sandbox.waiting.dropping = true;
+                tracing::warn!(
+                    sandbox = id,
+                    waiting = sandbox.waiting.messages.len(),
+                    bytes = sandbox.waiting.bytes,
+                    "messages for an agent that is not connected are dropped: as many wait as the host keeps"
+                );
+            }
+            false
+        };
+        if taken && let Some(reply) = reply {
+            self.owes(now, id, reply);
         }
     }
 

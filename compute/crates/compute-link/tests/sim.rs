@@ -135,8 +135,8 @@ struct Sandbox {
     told: Option<Running>,
     /// The requests the core took for it, by reply subject, with when.
     taken: HashMap<String, u64>,
-    /// Those its agent has not sent an answer to: the core certainly owes
-    /// them still.
+    /// Those its agent got and has not sent an answer to, since its agent
+    /// process last changed: the core certainly owes them still.
     owes: HashSet<String>,
 }
 
@@ -382,7 +382,6 @@ impl Sim {
                 self.sandboxes[n].id, self.now, self.sandboxes[n].told, self.sandboxes[n].last_wake
             );
             self.sandboxes[n].taken.insert(reply.clone(), self.now);
-            self.sandboxes[n].owes.insert(reply);
         }
         if let (Some((n, _, must)), Some(woke)) = (fell_asleep, asleep_woke) {
             assert!(
@@ -429,16 +428,15 @@ impl Sim {
             return None;
         };
         let n = self.index(sandbox);
-        let (hold, now, max) = (self.settings.hold_ms, self.now, self.settings.max_waiting);
+        let (hold, now) = (self.settings.hold_ms, self.now);
         let sandbox = &mut self.sandboxes[n];
         (sandbox.attached && sandbox.told != Some(Running::Asleep)).then(|| {
             sandbox.taken.retain(|_, at| now < *at + hold);
             let may = !sandbox.taken.is_empty();
-            let must = sandbox.taken.len() < max
-                && sandbox
-                    .owes
-                    .iter()
-                    .any(|reply| sandbox.taken.contains_key(reply));
+            let must = sandbox
+                .owes
+                .iter()
+                .any(|reply| sandbox.taken.contains_key(reply));
             (n, may, must)
         })
     }
@@ -767,7 +765,16 @@ impl Sim {
                         .and_then(|name| name.strip_prefix("opengeni-agent/connection/"))
                 {
                     let sandbox = self.sandboxes[self.conn_of[&conn]].id.clone();
-                    self.host_instance.insert(sandbox, instance.to_owned());
+                    let n = self.conn_of[&conn];
+                    // Another agent process owes nothing the one before got.
+                    if self
+                        .host_instance
+                        .insert(sandbox, instance.to_owned())
+                        .as_deref()
+                        != Some(instance)
+                    {
+                        self.sandboxes[n].owes.clear();
+                    }
                 }
                 self.input(Input::Guest { conn, op });
             }
@@ -886,9 +893,11 @@ impl Sim {
         );
         // Most requests are answered; an agent may leave one, as a stale or
         // unknown one.
-        if let Some(reply) = reply
-            && self.rng.chance(70)
-        {
+        if let Some(reply) = reply {
+            if !self.rng.chance(70) {
+                self.sandboxes[n].owes.insert(reply);
+                return;
+            }
             self.sandboxes[n].owes.remove(&reply);
             self.agent_sends(
                 conn,

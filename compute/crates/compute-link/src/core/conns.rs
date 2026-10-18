@@ -177,6 +177,7 @@ impl Core {
             sandbox.subs.clear();
             sandbox.next_sid = 1;
             sandbox.waiting.clear();
+            sandbox.owes_nothing();
             sandbox.relay = None;
             sandbox.retry_at = None;
             sandbox.retry_delay = self.settings.retry_min_ms;

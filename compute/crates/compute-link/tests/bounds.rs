@@ -48,6 +48,11 @@ fn guest(core: &mut Core, now: u64, conn: ConnId, op: ClientOp) {
 
 /// Accepts `conn` and has it say `CONNECT`.
 fn connect(core: &mut Core, now: u64, conn: ConnId) {
+    connect_as(core, now, conn, INSTANCE);
+}
+
+/// Accepts `conn` and has it say `CONNECT` as agent process `instance`.
+fn connect_as(core: &mut Core, now: u64, conn: ConnId, instance: &str) {
     core.on(
         now,
         Input::Accepted {
@@ -60,7 +65,7 @@ fn connect(core: &mut Core, now: u64, conn: ConnId) {
         now,
         conn,
         ClientOp::Connect(Connect {
-            name: Some(format!("{CONNECTION_NAME}{INSTANCE}")),
+            name: Some(format!("{CONNECTION_NAME}{instance}")),
             ..Connect::default()
         }),
     );
@@ -404,8 +409,10 @@ fn a_request_left_unanswered_is_woken_for_only_while_it_is_young() {
 
 #[test]
 fn the_requests_an_agent_owes_answers_to_are_bounded() {
+    let hold = 120_000;
     let mut core = core(Settings {
         max_waiting: 2,
+        hold_ms: hold,
         ..Settings::default()
     });
     connect(&mut core, 0, 1);
@@ -417,14 +424,184 @@ fn the_requests_an_agent_owes_answers_to_are_bounded() {
         let reply = format!("_INBOX.{n}");
         send(&mut core, 1, (s, 1), Some(&reply), Bytes::from(vec![n]));
     }
-    // One past the bound still wakes it...
+    // One past the bound wakes it like the others...
     assert_eq!(wakes(&core.take()), 3);
     told(&mut core, 2, Running::Awake);
     answer(&mut core, 3, 1, "_INBOX.1");
     answer(&mut core, 3, 1, "_INBOX.2");
-    // ...but is not woken for again.
+    // ...and, its answer not told apart, is owed one until it is old.
+    told(&mut core, 4, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 1);
+    answer(&mut core, 5, 1, "_INBOX.3");
+    told(&mut core, hold, Running::Awake);
+    told(&mut core, hold + 1, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 0);
+}
+
+/// Past the bound, a request soon after a wake has no wake of its own
+/// either: it is owed an answer all the same, so a sandbox that goes to
+/// sleep before it answers is woken for it.
+#[test]
+fn a_request_past_the_bound_soon_after_a_wake_is_woken_for_when_its_sandbox_sleeps() {
+    let mut core = core(Settings {
+        max_waiting: 1,
+        wake_every_ms: 250,
+        ..Settings::default()
+    });
+    connect(&mut core, 0, 1);
+    let s = open(&mut core, 0);
+    sub(&mut core, 0, 1, "rpc", "1");
+    told(&mut core, 0, Running::Awake);
+    core.take();
+    send(
+        &mut core,
+        10,
+        (s, 1),
+        Some("_INBOX.A"),
+        Bytes::from_static(b"a"),
+    );
+    assert_eq!(wakes(&core.take()), 1);
+    send(
+        &mut core,
+        20,
+        (s, 1),
+        Some("_INBOX.B"),
+        Bytes::from_static(b"b"),
+    );
+    let effects = core.take();
+    assert_eq!(wakes(&effects), 0, "within the wake interval");
+    assert_eq!(delivered(&effects, 1), ["b"]);
+    answer(&mut core, 30, 1, "_INBOX.A");
+    told(&mut core, 40, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 1, "it still owes B an answer");
+}
+
+/// A request dropped because as many wait as the host keeps never
+/// reaches the agent, which owes it nothing: it wakes the sandbox once,
+/// as any request does, and the sandbox may sleep again.
+#[test]
+fn a_request_dropped_unread_is_owed_nothing() {
+    let (mut core, s) = asleep(Settings {
+        max_waiting: 1,
+        ..Settings::default()
+    });
+    told(&mut core, 0, Running::Asleep);
+    core.take();
+    // A receipt fills what may wait; the request after it is dropped.
+    send(&mut core, 1, (s, 1), None, Bytes::from_static(b"receipt"));
+    send(
+        &mut core,
+        2,
+        (s, 1),
+        Some("_INBOX.1"),
+        Bytes::from_static(b"request"),
+    );
+    assert_eq!(wakes(&core.take()), 1);
+    told(&mut core, 3, Running::Awake);
     told(&mut core, 4, Running::Asleep);
     assert_eq!(wakes(&core.take()), 0);
+}
+
+/// Requests that waited for a subscription its agent then gave up never
+/// reach it, and are owed nothing.
+#[test]
+fn requests_dropped_with_their_subscription_are_owed_nothing() {
+    let grace = 10_000;
+    let (mut core, s) = asleep(Settings {
+        grace_ms: grace,
+        ..Settings::default()
+    });
+    told(&mut core, 0, Running::Asleep);
+    send(
+        &mut core,
+        1,
+        (s, 1),
+        Some("_INBOX.1"),
+        Bytes::from_static(b"request"),
+    );
+    // The agent comes back and does not take the subscription up again.
+    connect(&mut core, 2, 2);
+    core.on(2 + grace, Input::Tick);
+    let effects = core.take();
+    assert_eq!(unsubs(&effects), [1], "the subscription ended");
+    assert_eq!(delivered(&effects, 2), Vec::<Bytes>::new());
+    told(&mut core, 3 + grace, Running::Awake);
+    told(&mut core, 4 + grace, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 0);
+}
+
+/// Another agent process holds the sandbox's session from scratch: what
+/// the one before was asked, it will never answer.
+#[test]
+fn another_agent_process_owes_nothing_the_one_before_was_asked() {
+    let mut core = core(Settings::default());
+    connect(&mut core, 0, 1);
+    let s = open(&mut core, 0);
+    sub(&mut core, 0, 1, "rpc", "1");
+    told(&mut core, 0, Running::Awake);
+    send(
+        &mut core,
+        1,
+        (s, 1),
+        Some("_INBOX.1"),
+        Bytes::from_static(b"request"),
+    );
+    core.on(2, Input::GuestClosed { conn: 1 });
+    connect_as(&mut core, 3, 2, "i2");
+    core.take();
+    told(&mut core, 4, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 0);
+}
+
+/// A session ended for good drops what waits for its agent, which is owed
+/// nothing; a request its agent already got it may still answer.
+#[test]
+fn a_session_ended_for_good_owes_only_what_its_agent_got() {
+    let hold = 120_000;
+    let mut core = core(Settings {
+        hold_ms: hold,
+        ..Settings::default()
+    });
+    connect(&mut core, 0, 1);
+    let s = open(&mut core, 0);
+    sub(&mut core, 0, 1, "rpc", "1");
+    sub(&mut core, 0, 1, "later", "2");
+    told(&mut core, 0, Running::Awake);
+    send(
+        &mut core,
+        1,
+        (s, 1),
+        Some("_INBOX.1"),
+        Bytes::from_static(b"got"),
+    );
+    core.on(2, Input::GuestClosed { conn: 1 });
+    send(
+        &mut core,
+        3,
+        (s, 2),
+        Some("_INBOX.2"),
+        Bytes::from_static(b"waits"),
+    );
+    core.on(
+        4,
+        Input::Gateway {
+            link: LINK,
+            frame: GatewayFrame::Closed {
+                s,
+                code: compute_protocol::link::Ending::Superseded,
+                message: String::new(),
+            },
+            payload: Bytes::new(),
+        },
+    );
+    core.take();
+    told(&mut core, 5, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 1, "it still owes the one it got");
+    // Once the one it got is old, the one dropped, younger, is owed
+    // nothing either.
+    told(&mut core, hold, Running::Awake);
+    told(&mut core, hold + 1, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 0, "and nothing for the one dropped");
 }
 
 fn errors(effects: &[Effect], to: ConnId) -> Vec<String> {

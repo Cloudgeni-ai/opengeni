@@ -26,12 +26,15 @@
 //! - A request, a message with a reply subject someone waits on, wakes its
 //!   sandbox: at once when the host does not say it runs, and otherwise at
 //!   most once per [`Settings::wake_every_ms`], which counts it as active
-//!   and withdraws a sleep asked of it. The agent then owes the request an
-//!   answer until it publishes on that reply subject or the request is
-//!   [`Settings::hold_ms`] old, and a sandbox that goes to sleep owing one
-//!   is woken again. Any other message (an acknowledgement, a receipt, a
-//!   notice) reaches the agent whenever it runs and never wakes it, so an
-//!   explicit sleep stays until something asks the agent for something.
+//!   and withdraws a sleep asked of it. A request delivered to the agent,
+//!   or waiting for it, is then owed an answer until the agent publishes
+//!   on that reply subject, the request is [`Settings::hold_ms`] old, or
+//!   it is dropped unread (with its subscription, or with the agent
+//!   process that would have answered it); a sandbox that goes to sleep
+//!   owing one is woken again. One dropped because too many wait is owed
+//!   nothing. Any other message (an acknowledgement, a receipt, a notice)
+//!   reaches the agent whenever it runs and never wakes it, so an explicit
+//!   sleep stays until something asks the agent for something.
 //! - Subscriptions a reconnected agent did not take up within
 //!   [`Settings::grace_ms`] end, and so do those of a connection that
 //!   ended while others of its agent stay, each counted from when it was
@@ -91,8 +94,10 @@ pub struct Settings {
     pub max_subs: usize,
     /// Messages that may wait for a sandbox's agent at once; one more is
     /// dropped. Opengeni sends a sleeping agent a few at a time. It also
-    /// bounds the requests a sandbox's agent may owe answers to: one past
-    /// it still wakes the sandbox, but is not woken for again.
+    /// bounds the requests a sandbox's agent is kept owing answers to, one
+    /// by one: past it, a sandbox owes answers to all it got since, until
+    /// the latest is [`Settings::hold_ms`] old, as no answer to them is
+    /// told apart.
     pub max_waiting: usize,
     /// What the messages waiting for a sandbox's agent may hold, each
     /// counted as its bytes plus [`OP_OVERHEAD`]; one past it is dropped.
@@ -230,6 +235,11 @@ struct Sandbox {
     /// The requests its agent owes an answer to, by reply subject, with
     /// when each arrived.
     unanswered: HashMap<String, u64>,
+    /// When the latest request its agent owes an answer to arrived that
+    /// [`Sandbox::unanswered`] had no room for: until it is
+    /// [`Settings::hold_ms`] old, the agent owes an answer as if it never
+    /// sent one.
+    untracked: Option<u64>,
     /// Whether it runs, as the host last said; every session that opens is
     /// told.
     running: Option<Running>,
@@ -247,6 +257,22 @@ impl Sandbox {
         if !self.unanswered.is_empty() {
             self.unanswered.remove(subject);
         }
+    }
+
+    /// `dropped` will not reach its agent: none of it is owed an answer.
+    fn dropped<'a>(&mut self, dropped: impl IntoIterator<Item = &'a Queued>) {
+        for queued in dropped {
+            if let Some(reply) = &queued.reply {
+                self.answered(reply);
+            }
+        }
+    }
+
+    /// Nothing its agent was asked will be answered: another agent process
+    /// holds its session.
+    fn owes_nothing(&mut self) {
+        self.unanswered.clear();
+        self.untracked = None;
     }
 }
 
@@ -537,6 +563,7 @@ impl Core {
                 grace_until: None,
                 woke_at: None,
                 unanswered: HashMap::new(),
+                untracked: None,
                 running: None,
             },
         );
@@ -848,7 +875,8 @@ impl Core {
         let Some(sub) = sandbox.subs.remove(&sid) else {
             return;
         };
-        sandbox.waiting.take(sid);
+        let dropped = sandbox.waiting.take(sid);
+        sandbox.dropped(&dropped);
         if let Some((conn, guest)) = sub.guest
             && let Some(conn) = self.conns.get_mut(&conn)
         {
@@ -886,29 +914,16 @@ impl Core {
         });
     }
 
-    /// A request for sandbox `id`'s agent arrived, to be answered on
-    /// `reply`: the agent owes it an answer, and the sandbox is woken for
+    /// A request for sandbox `id`'s agent arrived: the sandbox is woken for
     /// it. While the host says it runs, at most once per
     /// [`Settings::wake_every_ms`]: a request in between needs no wake of
     /// its own, since the sandbox is woken again if it goes to sleep
     /// before it answers ([`Core::owed`]).
-    pub(super) fn asked(&mut self, now: u64, id: &str, reply: &str) {
-        let (hold, most, every) = (
-            self.settings.hold_ms,
-            self.settings.max_waiting,
-            self.settings.wake_every_ms,
-        );
+    pub(super) fn asked(&mut self, now: u64, id: &str) {
+        let every = self.settings.wake_every_ms;
         let Some(sandbox) = self.sandboxes.get_mut(id) else {
             return;
         };
-        if sandbox.unanswered.len() >= most {
-            sandbox
-                .unanswered
-                .retain(|_, at| now < at.saturating_add(hold));
-        }
-        if sandbox.unanswered.len() < most || sandbox.unanswered.contains_key(reply) {
-            sandbox.unanswered.insert(reply.to_owned(), now);
-        }
         if sandbox.running == Some(Running::Awake)
             && sandbox
                 .woke_at
@@ -922,6 +937,27 @@ impl Core {
         });
     }
 
+    /// A request to be answered on `reply` reached sandbox `id`'s agent, or
+    /// waits for it: the agent owes it an answer. Past
+    /// [`Settings::max_waiting`] young ones, it owes one to all it gets
+    /// until the latest is [`Settings::hold_ms`] old.
+    pub(super) fn owes(&mut self, now: u64, id: &str, reply: String) {
+        let (hold, most) = (self.settings.hold_ms, self.settings.max_waiting);
+        let Some(sandbox) = self.sandboxes.get_mut(id) else {
+            return;
+        };
+        if sandbox.unanswered.len() >= most && !sandbox.unanswered.contains_key(&reply) {
+            sandbox
+                .unanswered
+                .retain(|_, at| now < at.saturating_add(hold));
+        }
+        if sandbox.unanswered.len() < most || sandbox.unanswered.contains_key(&reply) {
+            sandbox.unanswered.insert(reply, now);
+        } else {
+            sandbox.untracked = Some(now);
+        }
+    }
+
     /// Sandbox `id` went to sleep: it is woken again if its agent still
     /// owes an answer to a request younger than [`Settings::hold_ms`],
     /// which it got too late to answer before it slept.
@@ -933,7 +969,13 @@ impl Core {
         sandbox
             .unanswered
             .retain(|_, at| now < at.saturating_add(hold));
-        if !sandbox.unanswered.is_empty() {
+        if sandbox
+            .untracked
+            .is_some_and(|at| now >= at.saturating_add(hold))
+        {
+            sandbox.untracked = None;
+        }
+        if !sandbox.unanswered.is_empty() || sandbox.untracked.is_some() {
             sandbox.woke_at = Some(now);
             self.effects.push(Effect::Wake {
                 sandbox: id.to_owned(),
