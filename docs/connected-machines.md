@@ -1417,12 +1417,17 @@ lost authority do not prove cleanup: private staging may remain until the link
 ends, and a process crash may leave an orphan. There is no automatic sweep or
 adoption of unknown transfers.
 
-The native implementation supports ordinary Linux and macOS APFS regular files
-with existing parent directories. It fails closed on unsupported symlinks, hard links,
+The native implementation supports ordinary Linux and macOS APFS regular files.
+Expected-absent creates honor `create_parents`: missing directories are created
+through pinned handles and remain after cancellation or failure; file publication
+is still atomic. Existing-base edits never create missing parents. It fails closed on unsupported symlinks, hard links,
 ownership, special modes, and extended metadata rather than silently discarding
 their semantics. Transactional editing does not implement `runAs` impersonation.
-macOS permits OS-generated provenance only when replacement preserves its exact
-bytes; extended ACLs, other attributes and inode flags remain unsupported.
+macOS leaves parent-directory ACLs and attributes untouched, including the standard
+home-directory ACL. The replacement inode keeps OS-assigned provenance; the old
+inode's provenance is not copied or required to match. Destination/staged-file
+ACLs, other file attributes and inode flags remain unsupported rather than being
+silently removed.
 Expected-base checks detect observed changes but are not a filesystem
 compare-and-swap against unrelated concurrent writers.
 
