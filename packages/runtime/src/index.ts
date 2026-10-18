@@ -436,6 +436,11 @@ import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
 export { InputWaitYield, modelResponseHasVisibleText } from "./input-wait-yield";
 import { withModelStepHandover } from "./model-step-handover";
 export { ModelStepHandover } from "./model-step-handover";
+export {
+  ModelPreemption,
+  isPreemptedModelResponse,
+  preemptedResponseCutOffText,
+} from "./model-preemption";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -9054,6 +9059,8 @@ export type RunAgentStreamOptions = {
   beforeModelRequest?: ModelCallLifecycle["beforeModelRequest"];
   /** Register terminal response settlement before the next producer model request. */
   onModelResponse?: ModelCallLifecycle["onModelResponse"];
+  /** Lets a Steer cut the in-flight model request short (see streamWithPreemption). */
+  modelPreemption?: ModelCallLifecycle["modelPreemption"];
   /** Abort the provider/tool loop when the owning activity is cancelled. */
   signal?: AbortSignal;
   /** Nonblocking phase measurements for request preparation before provider I/O. */
@@ -9308,6 +9315,7 @@ export async function runAgentStream(
           ? { beforeModelRequest: overrides.beforeModelRequest }
           : {}),
         ...(overrides.onModelResponse ? { onModelResponse: overrides.onModelResponse } : {}),
+        ...(overrides.modelPreemption ? { modelPreemption: overrides.modelPreemption } : {}),
       },
       () =>
         withPreparedCompactionRequest(agent, () =>

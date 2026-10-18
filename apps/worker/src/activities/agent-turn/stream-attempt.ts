@@ -29,6 +29,7 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { handOverWaitToSteer } from "./waiting-steer";
+import { startSteerWatch, type SteerWatch } from "./steer-watch";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
@@ -49,6 +50,8 @@ import {
   runOwnedSandboxSetup,
   modelResponseHasVisibleText,
   ModelStepHandover,
+  isPreemptedModelResponse,
+  preemptedResponseCutOffText,
   type SandboxFileDownload,
   type OpenGeniRuntime,
   type GeneratedSessionTitle,
@@ -681,14 +684,20 @@ export async function runTurnStreamAttempt(
   let workerPreparationTotalRecorded = false;
   let toolsExecuted = false;
   let finalReplyNudged = false;
-  // A Steer is read at the next model-step boundary of every ordinary turn:
-  // admission leaves the attempt running, and this check hands over before
-  // the next model request, after the completed step's tool calls finished.
+  // A Steer reaches every ordinary turn within moments and cuts nothing off.
+  // The Steer watch notices it: a model request still generating ends early
+  // with what had completed, and long tool waits return their live handles.
+  // The turn then reaches its next model-step boundary, where admission hands
+  // over before the next request, after the step's tool calls finished.
   // Standalone compaction is maintenance with no model step to yield from.
   const yieldsToSteer = turn.source !== "compaction";
-  // Set when admission ends the stream at a step boundary for a Steer; the
-  // stream then completes normally and is settled as a handover.
+  let steerWatch: SteerWatch | null = null;
+  // Set when the stream ended for a Steer, at a step boundary or by cutting
+  // the model request short; the stream is then settled as a handover.
   let steerHandover = false;
+  // Streamed text of a cut-off request that never completed. Never model
+  // input; the handover event carries it so the timeline keeps showing it.
+  let preemptedCutOffText = "";
   const revalidateModelCallAdmission = async (options: { yieldToSteer?: boolean } = {}) => {
     // Every model request of the stream yields, including the first one after
     // a claim or recovery: a Steer admitted while the previous attempt was
@@ -730,14 +739,7 @@ export async function runTurnStreamAttempt(
     if (usage.status === "rejected") throw usage.reason;
     creditPolicyRevision = usage.value;
     if (pendingSteer.status === "rejected") throw pendingSteer.reason;
-    // Ending the turn stops the processes it still owns (for example a
-    // yielded local shell command that was not adopted as a background
-    // command). Keep working until they finish; the Steer is read at the
-    // first step boundary after that.
-    if (
-      pendingSteer.value &&
-      !(eventing.toolCancellationFenceRef.current?.holdsTurnOwnedProcesses() ?? false)
-    ) {
+    if (pendingSteer.value) {
       // The request has not left the worker. The SDK finishes the run at
       // this boundary after delivering every event of the completed step.
       steerHandover = true;
@@ -751,6 +753,10 @@ export async function runTurnStreamAttempt(
       throw new Error("Run input was not prepared");
     }
     steerHandover = false;
+    // Keep the fence in step with a Steer the watch already noticed.
+    eventing.toolCancellationFenceRef.current?.setForegroundWaitYield(
+      steerWatch?.signal().aborted === true,
+    );
     // The previous stream was persisted before compaction; the sink is now
     // seeded from its durable replacement. Do not reconcile the old prefix
     // against that replacement while checking the next stream's admission.
@@ -1016,6 +1022,7 @@ export async function runTurnStreamAttempt(
             responseCreditPolicyRevisions.add(creditPolicyRevision);
             return modelCallAdmission.onModelResponse(event);
           },
+          ...(steerWatch ? { modelPreemption: () => steerWatch?.signal() } : {}),
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
           onModelVisibleContext: async (snapshot) => {
@@ -1380,6 +1387,16 @@ export async function runTurnStreamAttempt(
         // Release after settlement. The producer checks fresh admission before
         // its next request; a final response keeps the revision it ran under.
         modelCallAdmission.settle(next.value);
+        if (
+          next.value.type === "raw_model_stream_event" &&
+          isPreemptedModelResponse(next.value.data)
+        ) {
+          // A Steer cut this model request short. The SDK either ends the run
+          // with the completed text or asks for another step, which admission
+          // then hands over; both settle below as a handover.
+          steerHandover = true;
+          preemptedCutOffText += preemptedResponseCutOffText(next.value.data);
+        }
         const durableSdkEvent = generatedImageReceipt
           ? compactGeneratedImageSdkEvent(next.value, generatedImageReceipt)
           : next.value;
@@ -2179,7 +2196,14 @@ export async function runTurnStreamAttempt(
       await flushHeldSessionUsageReceipts(db, input.sessionId);
       const settled = await eventing.settle!({
         events: [
-          { type: "turn.superseded", payload: { reason: "steer", atModelStep: true } },
+          {
+            type: "turn.superseded",
+            payload: {
+              reason: "steer",
+              atModelStep: true,
+              ...(preemptedCutOffText ? { cutOffText: preemptedCutOffText } : {}),
+            },
+          },
           { type: "session.status.changed", payload: { status: "queued" } },
         ],
         turnStatus: "superseded",
@@ -2190,6 +2214,8 @@ export async function runTurnStreamAttempt(
       if (settled === "pending_steer_withdrawn") {
         // The Steer was withdrawn or claimed in between. Keep working:
         // rebuild the input from the durable history and resume sampling.
+        preemptedCutOffText = "";
+        steerWatch?.rearm();
         await prepareRunAttemptInput();
         return "resume_after_withdrawn_handover";
       }
@@ -2444,6 +2470,24 @@ export async function runTurnStreamAttempt(
     });
   }
   try {
+    if (yieldsToSteer) {
+      steerWatch = await startSteerWatch({
+        db,
+        bus,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: activeTurnId,
+        onPending: (pending) =>
+          eventing.toolCancellationFenceRef.current?.setForegroundWaitYield(pending),
+        onError: (error) =>
+          observability.warn("steer watch check failed", {
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            ...safeErrorDiagnostic(error),
+          }),
+      });
+    }
     let retriedAfterCompaction = false;
     finalReplyNudged = await sessionTurnHasFinalReplyNudge(
       db,
@@ -2673,6 +2717,7 @@ export async function runTurnStreamAttempt(
     if (isCoreSourceDisconnectedError(error)) await finishParallelSessionTitle();
     throw error;
   } finally {
+    steerWatch?.close();
     await cancelParallelSessionTitle();
   }
 }

@@ -310,12 +310,14 @@ export type TurnToolCancellationFence = {
     args: ChannelAExecArgs,
   ): Promise<SynchronousCommandResult>;
   /**
-   * Whether ending the turn now would stop work the turn still owns: a
-   * yielded shell process that was not adopted as a session background
-   * command, a shell start or remote command still settling, or a sandbox
-   * call in flight. A voluntary turn handover waits while this holds.
+   * While active, every model-facing foreground wait (the exec_command and
+   * write_stdin wait windows) returns at its next provider slice with the
+   * process's live handle, exactly as when its window ends: the process keeps
+   * running and is adopted as a session background command where the provider
+   * allows. The worker activates this while a Steer waits for this turn, so
+   * the Steer is read within a slice instead of after the requested wait.
    */
-  holdsTurnOwnedProcesses(): boolean;
+  setForegroundWaitYield(active: boolean): void;
   /**
    * Remove every attempt-scoped secret file the wrapped sessions wrote
    * (`secretfile` paths, leftover env files). Called at attempt end after the
@@ -967,6 +969,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private reason: unknown;
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly shellSessions = new Map<number, ActiveShellSession>();
+  /** See setForegroundWaitYield. */
+  private foregroundWaitYield = false;
   private readonly pendingShellStarts = new Set<PendingShellStart>();
   private readonly remoteExecs = new Set<ActiveRemoteExec>();
   private rawExecInvoke: FunctionToolInvoke | null = null;
@@ -1004,13 +1008,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     await this.ensureDrain();
   }
 
-  holdsTurnOwnedProcesses(): boolean {
-    return (
-      this.shellSessions.size > 0 ||
-      this.pendingShellStarts.size > 0 ||
-      this.remoteExecs.size > 0 ||
-      this.inFlight.size > 0
-    );
+  setForegroundWaitYield(active: boolean): void {
+    this.foregroundWaitYield = active;
   }
 
   async clearSecretFiles(): Promise<void> {
@@ -2049,6 +2048,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       // that lands between slices never lets the command be adopted below.
       if (this.cancelled) throw cancellationError(this.reason);
       if (performance.now() - startedAt >= waitMs) break;
+      // A Steer is waiting: return control now, as if the window had ended.
+      if (this.foregroundWaitYield) break;
       if (quietReturnAfterMs !== undefined && lastOutputAt !== null) {
         const now = performance.now();
         const quietMs = now - lastOutputAt;

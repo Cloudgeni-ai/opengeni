@@ -456,39 +456,45 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(adoptions).toBe(0);
   });
 
-  test("a yielded turn-owned process holds the turn until it exits; an adopted one does not", async () => {
+  test("a waiting Steer cuts a long foreground wait short; the process keeps running in the background", async () => {
     const controller = createTurnToolCancellationController();
-    expect(controller.holdsTurnOwnedProcesses()).toBe(false);
-    // The first command is adoptable (120); the second is process-local (119).
-    let launches = 0;
-    const exec = functionTool("exec_command", async () =>
-      launches++ === 0 ? running(120, "ready\n") : running(119, "ready\n"),
-    );
-    const write = functionTool("write_stdin", async () => exited(0, "finished\n"));
+    let reads = 0;
+    let adoptions = 0;
+    const exec = functionTool("exec_command", async () => running(120, "building\n"));
+    // Every read reports the process still running, as a long build would.
+    const write = functionTool("write_stdin", async () => {
+      reads += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return running(120, "");
+    });
     const session = {
-      hasRetainedProcess: (sessionId: number) => sessionId === 119 || sessionId === 120,
-      canAdoptRetainedProcessAsBackgroundCommand: (sessionId: number) => sessionId === 120,
-      adoptRetainedProcessAsBackgroundCommand: async () => {},
+      hasRetainedProcess: (sessionId: number) => sessionId === 120,
+      canAdoptRetainedProcessAsBackgroundCommand: () => true,
+      adoptRetainedProcessAsBackgroundCommand: async () => {
+        adoptions += 1;
+      },
     };
-    const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write], session) as Array<
+    const [wrappedExec] = controller.wrapTools([exec, write], session) as Array<
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    // A session-adopted background command survives the turn ending.
-    await wrappedExec!.invoke(
+    const startedAt = performance.now();
+    const pending = wrappedExec!.invoke(
       runContext,
-      JSON.stringify({ cmd: "adopted-task", yield_time_ms: 0 }),
+      JSON.stringify({ cmd: "long-build", yield_time_ms: 30_000 }),
     );
-    expect(controller.holdsTurnOwnedProcesses()).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(await pendingAfterMicrotasks(pending)).toBe(true);
+    controller.setForegroundWaitYield(true);
+    const output = String(await pending);
 
-    // A process-local handle is stopped when the turn ends, so it holds the turn.
-    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "local-task", yield_time_ms: 0 }));
-    expect(controller.holdsTurnOwnedProcesses()).toBe(true);
-    await wrappedWrite!.invoke(
-      runContext,
-      JSON.stringify({ session_id: 119, chars: "", yield_time_ms: 0 }),
-    );
-    expect(controller.holdsTurnOwnedProcesses()).toBe(false);
+    // Returned within a slice, with the same running receipt a finished wait
+    // window produces, and the process was handed to the session, not stopped.
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    expect(output).toContain("Process running with session ID 120");
+    expect(output).toContain("building");
+    expect(reads).toBeGreaterThan(0);
+    expect(adoptions).toBe(1);
   });
 
   test("detects only a bare stdin-driven shell as the command's final step", () => {

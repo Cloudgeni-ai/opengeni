@@ -443,12 +443,6 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       attemptId: input.attemptId,
     });
     if (!pending) return null;
-    // The same guard as the model-step handover: ending the turn now would
-    // stop a process it still owns, so the Steer waits for a later boundary
-    // (the next model-call admission re-checks it).
-    if (eventing.toolCancellationFenceRef.current?.holdsTurnOwnedProcesses() ?? false) {
-      return null;
-    }
     const settled = await eventing.settle({
       events: [
         {

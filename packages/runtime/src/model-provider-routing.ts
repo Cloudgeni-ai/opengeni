@@ -28,6 +28,7 @@ import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
 import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
+import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
 import { modelUsageTokenCountOrNull } from "./usage-telemetry";
 import {
   ResponsesStreamingTerminalError,
@@ -209,6 +210,33 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     protected readonly provider: ResolvedModelProvider,
   ) {
     super(client, model);
+  }
+
+  /**
+   * A Steer can cut the stream short (see streamWithPreemption). End it with
+   * the assistant messages the provider already marked done
+   * (`response.output_item.done`) instead of failing the request. Usage is
+   * unknown: Responses reports it only on the terminal event.
+   */
+  override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
+    let responseId: string | undefined;
+    const completed: unknown[] = [];
+    try {
+      for await (const event of super.getStreamedResponse(request)) {
+        if (event.type === "model") {
+          const raw = event.event as { type?: unknown; item?: unknown; response?: { id?: unknown } };
+          if (raw?.type === "response.created" && typeof raw.response?.id === "string")
+            responseId = raw.response.id;
+          if (raw?.type === "response.output_item.done" && raw.item) completed.push(raw.item);
+        }
+        yield event;
+      }
+    } catch (error) {
+      if (!isModelPreempted(request.signal)) throw error;
+      // Completed wire message items already have the SDK message shape that
+      // preemptedResponseDone keeps (role, status, output_text parts, phase).
+      yield preemptedResponseDone({ id: responseId, output: completed });
+    }
   }
 
   protected override _fetchResponse(
