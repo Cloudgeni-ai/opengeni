@@ -55,6 +55,8 @@ while the credential generation matches and the connection still serves the
 workspace. Successful durable draft saves may prepare this shared metadata;
 typing admits no turn, reserves no turn capacity and makes no inference call.
 Personal credentials are never probed outside their accepted-turn lease.
+Draft hints also skip shared credentials that need renewal; they never rotate
+tokens or degrade connection health before a person sends.
 See [typing preparation](design/typing-turn-preparation.md) for timing and verification.
 
 - **In scope:** accounts a person signs into (Codex, Claude, SuperGrok) and

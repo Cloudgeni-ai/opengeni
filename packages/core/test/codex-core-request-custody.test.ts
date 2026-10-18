@@ -82,6 +82,23 @@ function fixture(fetchImpl: CodexFetch) {
 }
 
 describe("core model discovery physical request custody", () => {
+  test("typing skips a refresh-due credential without probing or poisoning normal access", async () => {
+    const upstream = mock<CodexFetch>(async () => Response.json({ models: [] }));
+    const f = fixture(upstream);
+    const normal = f.deps.getCoreToken;
+    f.deps.getCoreToken = mock(async (...args) => (args[4] ? normal(...args) : null));
+    const before = Date.now();
+    const until = await refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps, {
+      refreshCredentials: false,
+    });
+    expect(until).toBeGreaterThanOrEqual(before + 5_000);
+    expect(upstream).not.toHaveBeenCalled();
+    expect(f.deps.recordModels).not.toHaveBeenCalled();
+    expect(f.reserve).not.toHaveBeenCalled();
+    await refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps);
+    expect(upstream).toHaveBeenCalledTimes(1);
+  });
+
   test("a fresh persisted catalog is reusable without credentials or provider I/O", async () => {
     const upstream = mock<CodexFetch>(async () => {
       throw new Error("must not dispatch");

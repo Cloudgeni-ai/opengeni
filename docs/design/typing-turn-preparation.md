@@ -42,6 +42,9 @@ cross-process freshness miss instead of introducing a speculative turn lifecycle
    preparation outside the save response. Empty drafts and disabled subscription
    deployments do nothing. Only a selected Codex subscription model causes a
    shared-account catalog refresh. Draft text is not sent to a provider.
+   Preparation reads only an already-fresh credential through the normal scoped
+   resolver. If its existing refresh policy says renewal is due, the hint skips
+   that connection: typing must never rotate a token or mark an account unusable.
 2. The core catalog reader already checks live workspace scope, source policy,
    allocator eligibility and credential generation. Expose its fresh observation
    with the original observation and expiry times. The model picker and real
@@ -49,6 +52,10 @@ cross-process freshness miss instead of introducing a speculative turn lifecycle
 3. Missing, expired or generation-mismatched facts take the existing provider
    discovery path. Failed discovery remains unknown, not an entitlement denial.
    Personal connections still require an accepted-turn lease and are not probed.
+   Normal model access retains proactive credential renewal; only the speculative
+   hint uses the resolver's fresh-only read. This avoids an admission race where
+   a failed speculative renewal could turn a zero-credit subscription draft into
+   a refusal before its real Send.
 4. On the accepted path, overlap learning-policy freezing with attachment-authority
    reading. Both finish before installing the same file-access context. This does
    not move model-input projection or reorder durable conversation writes.

@@ -604,6 +604,8 @@ and original expiry remain current; stale observations use the existing scoped
 token/probe path. Successful durable composer saves can prepare those facts via
 `packages/core/src/application/draft-model-preparation.ts`. Typing never admits a
 turn, starts a workflow, acquires a turn lease, calls a model, or wakes compute.
+Its credential read is fresh-only: renewal and connection-health changes are
+left to normal access, so preparing a draft cannot revoke its own readiness.
 See [typing preparation](design/typing-turn-preparation.md).
 
 Claude projects system inputs at native phase boundaries, adding a labeled

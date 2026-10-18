@@ -272,6 +272,7 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       deps: SubscriptionCoreConnectionResolverDeps = {},
     ): {
       getToken: () => Promise<SubscriptionCoreConnectionToken>;
+      getFreshToken: () => Promise<SubscriptionCoreConnectionToken | null>;
       refresh: () => Promise<SubscriptionCoreConnectionToken>;
     } {
       const load = deps.load ?? operations().loadSubscriptionCoreConnectionCredential;
