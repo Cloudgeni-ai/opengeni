@@ -15,7 +15,11 @@ import type {
 } from "@opengeni/db";
 import { readSubscriptionCoreTurnIdentity } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { recordTurnStartupPhase } from "../../observability-metrics";
+import {
+  recordTurnStartupPhase,
+  measureTurnStartupPhase,
+  type TurnStartupPhase,
+} from "../../observability-metrics";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 import {
   subscriptionCoreCapacityFailure,
@@ -195,27 +199,41 @@ export async function selectCoreSubscriptionTurnCapacity(
   };
 
   const startedAt = performance.now();
+  const measure = <T>(phase: TurnStartupPhase, run: () => Promise<T>) =>
+    measureTurnStartupPhase(
+      observability,
+      {
+        phase,
+        provider: provider.startupPhaseProvider,
+        backend: turn.sandboxBackend,
+      },
+      run,
+    );
   let outcome: "completed" | "failed" = "completed";
   try {
-    const identity = await readSubscriptionCoreTurnIdentity(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId,
-    });
+    const identity = await measure("credential_identity_read", () =>
+      readSubscriptionCoreTurnIdentity(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+      }),
+    );
     if (!identity) return fenced();
-    await provider.recoverHealth(deps, identity);
+    await measure("credential_health_recovery", () => provider.recoverHealth(deps, identity));
     await provider.beforePlacement?.(deps, identity);
     const leaseRequestedAt = performance.now();
-    const placement = await provider.place(db, {
-      identity,
-      attemptId: input.attemptId,
-      executionGeneration: attempt.executionGeneration,
-      holderId,
-      productModelId: turnExecutionPolicy.productModelId,
-      reasoningLevel: turnExecutionPolicy.reasoningEffort,
-      leaseTtlMs: provider.leaseTtlMs,
-    });
+    const placement = await measure("credential_placement", () =>
+      provider.place(db, {
+        identity,
+        attemptId: input.attemptId,
+        executionGeneration: attempt.executionGeneration,
+        holderId,
+        productModelId: turnExecutionPolicy.productModelId,
+        reasoningLevel: turnExecutionPolicy.reasoningEffort,
+        leaseTtlMs: provider.leaseTtlMs,
+      }),
+    );
     switch (placement.kind) {
       case "not_visible":
       case "attempt_fenced":
@@ -261,7 +279,11 @@ export async function selectCoreSubscriptionTurnCapacity(
     lease.held = true;
     lease.startHeartbeat();
 
-    await provider.recordSelection?.(deps, placement, turnId);
+    if (provider.recordSelection) {
+      await measure("credential_selection_receipt", () =>
+        provider.recordSelection!(deps, placement, turnId),
+      );
+    }
     return { ok: true };
   } catch (error) {
     outcome = "failed";

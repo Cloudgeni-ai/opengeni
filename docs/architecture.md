@@ -598,8 +598,13 @@ Accepted execution-policy digests tolerate only provably additive latency-mode
 and input-modality declarations, retaining the frozen mode and request tier;
 provider identity and all other executable fields remain exact.
 `packages/core/src/codex-model-availability.ts` requires exact live support on every
-permitted serving account for browser/default/agent choices. It rechecks authority,
-refreshes tokens, and caches support by workspace/credential/revision.
+permitted serving account for browser/default/agent choices. It rechecks authority
+and reuses the shared core's stored catalog only while its credential generation
+and original expiry remain current; stale observations use the existing scoped
+token/probe path. Successful durable composer saves can prepare those facts via
+`packages/core/src/application/draft-model-preparation.ts`. Typing never admits a
+turn, starts a workflow, acquires a turn lease, calls a model, or wakes compute.
+See [typing preparation](design/typing-turn-preparation.md).
 
 Claude projects system inputs at native phase boundaries, adding a labeled
 machine-continuation anchor when needed, without changing canonical roles/content.

@@ -18,7 +18,7 @@ const CATALOG_CACHE_MS = SUBSCRIPTION_MODEL_CATALOG_TTL_MS;
 const CATALOG_ERROR_CACHE_MS = 5_000;
 type CatalogCacheEntry = {
   expiresAt: number;
-  result: Promise<{ ok: boolean; slugs: string[]; checkedAt: string }>;
+  result: Promise<{ ok: boolean; slugs: string[]; checkedAt: string; expiresAt: number }>;
 };
 const catalogs = new Map<string, CatalogCacheEntry>();
 
@@ -95,7 +95,20 @@ async function loadCoreConnectionCatalog(
   context: WorkspaceCodexCatalogContext,
   connection: SubscriptionCoreCodexServingConnection,
   deps: CatalogDependencies,
-): Promise<{ ok: boolean; slugs: string[]; checkedAt: string }> {
+): Promise<{ ok: boolean; slugs: string[]; checkedAt: string; expiresAt: number }> {
+  // listServing has just checked live scope, cutover, health and credential
+  // generation. Reuse the database observation across API/worker processes;
+  // a cache hit needs neither a bearer read nor a physical provider request.
+  const observed = connection.modelCatalog;
+  const now = Date.now();
+  if (observed && observed.observedAt <= now && observed.expiresAt > now) {
+    return {
+      ok: true,
+      slugs: observed.slugs,
+      checkedAt: new Date(observed.observedAt).toISOString(),
+      expiresAt: observed.expiresAt,
+    };
+  }
   try {
     // The token read rechecks the enabled cutover and the workspace scope
     // before the cache is consulted.
@@ -149,13 +162,19 @@ async function loadCoreConnectionCatalog(
             ok: result.ok,
             slugs: result.slugs,
             checkedAt: new Date(observedAt).toISOString(),
+            expiresAt: entry.expiresAt,
           };
         }),
     };
     catalogs.set(key, entry);
     return await entry.result;
   } catch {
-    return { ok: false, slugs: [], checkedAt: new Date().toISOString() };
+    return {
+      ok: false,
+      slugs: [],
+      checkedAt: new Date().toISOString(),
+      expiresAt: Date.now() + CATALOG_ERROR_CACHE_MS,
+    };
   }
 }
 
@@ -170,14 +189,19 @@ export async function refreshCoreCodexModelEntitlements(
   settings: Settings,
   context: WorkspaceCodexCatalogContext,
   deps: CatalogDependencies = defaultCatalogDependencies(),
-): Promise<void> {
-  if ((await deps.disposition(db, context.accountId, context.workspaceId)) !== "core") return;
+): Promise<number> {
+  const idleExpiry = Date.now() + CATALOG_CACHE_MS;
+  if ((await deps.disposition(db, context.accountId, context.workspaceId)) !== "core")
+    return idleExpiry;
   const connections = await deps.listServing(db, context);
-  await Promise.all(
+  const observations = await Promise.all(
     connections
       .filter((connection) => connection.ownership === "shared")
       .map((connection) => loadCoreConnectionCatalog(db, settings, context, connection, deps)),
   );
+  // A draft hint may suppress later hints only while the facts it reused
+  // remain fresh, not for another full TTL starting at the hint itself.
+  return Math.min(idleExpiry, ...observations.map((observation) => observation.expiresAt));
 }
 
 /**
