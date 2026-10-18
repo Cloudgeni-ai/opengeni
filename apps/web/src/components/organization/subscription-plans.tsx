@@ -154,16 +154,15 @@ export function SubscriptionPlans({
               </RowButton>
             ) : null}
           </div>
-          <UsageMeter
-            label="Monthly plan credit"
-            percent={
-              plan.creditGrantedMicros > 0
-                ? (plan.creditRemainingMicros / plan.creditGrantedMicros) * 100
-                : 0
-            }
-            valueLabel={`${formatMoneyMicros(plan.creditRemainingMicros, "usd")} of ${formatMoneyMicros(plan.creditGrantedMicros, "usd")} left`}
-            {...(reset ? { resetsLabel: reset } : {})}
-          />
+          {/* No grant this period (e.g. a Free org without monthly credit): show no empty meter. */}
+          {plan.creditGrantedMicros > 0 ? (
+            <UsageMeter
+              label="Monthly plan credit"
+              percent={(plan.creditRemainingMicros / plan.creditGrantedMicros) * 100}
+              valueLabel={`${formatMoneyMicros(plan.creditRemainingMicros, "usd")} of ${formatMoneyMicros(plan.creditGrantedMicros, "usd")} left`}
+              {...(reset ? { resetsLabel: reset } : {})}
+            />
+          ) : null}
           {plan.cancelAtPeriodEnd ? (
             <Notice title="Cancellation scheduled">
               Your paid plan ends{reset ? ` ${reset}` : " at the end of this period"}. You'll move
@@ -202,11 +201,7 @@ export function SubscriptionPlans({
               >
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="text-sm font-semibold text-fg">{item.label}</h3>
-                  {selected ? (
-                    <MetaChip>Current</MetaChip>
-                  ) : item.key === "pro" ? (
-                    <MetaChip>Popular</MetaChip>
-                  ) : null}
+                  {selected ? <MetaChip>Current</MetaChip> : null}
                 </div>
                 <div>
                   <p className="text-xl font-semibold tracking-[-0.5px] text-fg">
