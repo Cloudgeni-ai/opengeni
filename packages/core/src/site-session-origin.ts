@@ -15,6 +15,8 @@ export type SiteSessionOrigin = {
   versionId?: string;
   frame?: "inline" | "preview";
   frameId?: string;
+  /** Server-admitted owner grant for this exact existing chat; never supplied by Site code. */
+  existingSessionId?: string;
 };
 
 export const SITE_ORIGIN_METADATA_KEY = "_opengeniSiteOrigin";

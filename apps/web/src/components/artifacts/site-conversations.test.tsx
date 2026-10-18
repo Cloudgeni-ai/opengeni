@@ -100,6 +100,7 @@ test("owner can choose an existing chat, then revoke access without changing the
     await flush();
     await click(button("Allow an existing chat"));
     expect(container.textContent).toContain("send messages as you");
+    expect(container.textContent).toContain("existing tools and permissions");
     expect(container.textContent).toContain("Chat mine");
     expect(container.textContent).not.toContain("Chat someone-else");
     await click(button("Allow chat"));

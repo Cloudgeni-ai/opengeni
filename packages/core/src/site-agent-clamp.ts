@@ -11,7 +11,9 @@ import { siteSessionOriginFromMetadata } from "./site-session-origin";
 /**
  * Whether an agent acts for a Site page: its session, a spawning ancestor or
  * its root session was started from a Site (a published Site or an inline or
- * preview frame), or its current or a spawning ancestor turn arrived from one.
+ * preview frame), or its current or a spawning ancestor turn arrived from one
+ * without an exact server-admitted existing-chat grant. Surface alone does not
+ * replace that existing chat's authority.
  * The same evidence the Site Data agent clamp uses
  * (apps/api/src/site-data/service.ts), plus frame origins without a
  * published Site id.

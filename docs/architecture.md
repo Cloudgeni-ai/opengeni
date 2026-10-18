@@ -54,7 +54,11 @@ merged refs intersect that ceiling and children cannot widen it. Console Site
 agents use it for the overlap of Site-declared tools and the viewer's permissions.
 Private console Sites may also reach an existing chat only through its owner's
 explicit, viewer-bound Site/chat grant. This uses native session routes and
-live revocation, not a changed origin or audience; see [Site conversations](site-conversations.md).
+live revocation, not a changed origin or audience. New inputs to an explicitly
+allowed existing chat retain its normal execution authority; the server freezes
+the exact-chat grant distinction alongside Site provenance on the accepted turn,
+not in caller metadata or a live grant lookup during execution. Site-created
+lineages remain clamped; see [Site conversations](site-conversations.md).
 Their editable-artifact writes also require immutable create/import provenance
 within the same Site-clamped session tree; read-created session links grant no edits.
 After a worker claims a turn, its session RLS actor carries the canonical

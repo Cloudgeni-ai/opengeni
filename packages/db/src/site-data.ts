@@ -2104,7 +2104,7 @@ export type SiteDataAgentSession = {
    * root session (read directly, so a lineage too deep to walk still finds it).
    */
   originSiteIds: string[];
-  /** Whether the current turn or a spawning ancestor turn arrived from a Site page. */
+  /** Whether a current/spawning turn carries restricted Site authority (not an owner-allowed chat). */
   siteTurn: boolean;
   /** The scheduled task whose run created this exact session, if any. */
   scheduledTaskId: string | null;
@@ -2159,7 +2159,10 @@ export async function getSiteDataAgentSession(
           )
           select chain.depth, s.id is not null as found, s.parent_session_id,
                  s.metadata->'_opengeniSiteOrigin'->>'siteId' as origin_site_id,
-                 t.surface as turn_surface
+                 case when s.site_access_root_id is null
+                      and t.metadata->'_opengeniSiteOrigin'->>'existingSessionId' = t.session_id::text
+                      and t.metadata->'_opengeniSiteOrigin'->>'siteId' is not null
+                   then null else t.surface end as turn_surface
             from chain
             left join sessions s on s.workspace_id = ${scope.workspaceId} and s.id = chain.session_id
             left join session_turns t on t.workspace_id = ${scope.workspaceId}

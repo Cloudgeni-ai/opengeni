@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
-  canAccessSessionFromSite,
+  getSessionSiteAccess,
   getSession,
   getSessionAuthorityProjection,
   type Database,
@@ -30,12 +30,14 @@ export async function siteMayAccessSession(
   requireAudience = false,
 ): Promise<boolean> {
   if (origin.siteId && consoleSiteAccess.getStore()) {
-    return canAccessSessionFromSite(db, {
-      workspaceId: grant.workspaceId,
-      sessionId,
-      siteId: origin.siteId,
-      subjectId: grant.subjectId,
-    });
+    return (
+      (await getSessionSiteAccess(db, {
+        workspaceId: grant.workspaceId,
+        sessionId,
+        siteId: origin.siteId,
+        subjectId: grant.subjectId,
+      })) !== null
+    );
   }
   if (requireAudience) {
     const authority = await getSessionAuthorityProjection(db, grant.workspaceId, sessionId);

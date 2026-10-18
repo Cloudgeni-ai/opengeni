@@ -28,6 +28,7 @@ import {
   createSession,
   createWorkspace,
   ensureExternalIdentity,
+  getSiteDataAgentSession,
   PostgresEditableArtifactStore,
   touchEditableArtifactSessionLink,
   withSessionRlsActorContext,
@@ -233,8 +234,8 @@ async function fixture(overrides: { sandboxBackend?: "none" | "docker" } = {}) {
     return row!;
   };
   const turns = async (sessionId: string) =>
-    await shared.admin<{ surface: string | null; metadata: Record<string, unknown> }[]>`
-      select surface, metadata from session_turns where session_id = ${sessionId}
+    await shared.admin<{ id: string; surface: string | null; metadata: Record<string, unknown> }[]>`
+      select id, surface, metadata from session_turns where session_id = ${sessionId}
       order by created_at`;
   const agentGrant = async (sessionId: string): Promise<AccessGrant> => {
     const [turn] = await shared.admin<{ id: string }[]>`
@@ -246,8 +247,13 @@ async function fixture(overrides: { sandboxBackend?: "none" | "docker" } = {}) {
     };
   };
   /** An agent grant with a running turn and attempt, as the worker's first-party MCP sees it. */
-  const liveAgentGrant = async (sessionId: string): Promise<AccessGrant> => {
-    const [turn] = await shared.admin<{ id: string }[]>`
+  const liveAgentGrant = async (
+    sessionId: string,
+    existingTurnId?: string,
+  ): Promise<AccessGrant> => {
+    const [turn] = existingTurnId
+      ? [{ id: existingTurnId }]
+      : await shared.admin<{ id: string }[]>`
       insert into session_turns (
         account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
         status, position, prompt, model, reasoning_effort, sandbox_backend,
@@ -261,8 +267,11 @@ async function fixture(overrides: { sandboxBackend?: "none" | "docker" } = {}) {
       ) returning id`;
     const attemptId = crypto.randomUUID();
     await shared.admin.begin(async (tx) => {
+      // This fixture materializes the worker's fenced claim for an accepted turn.
+      await tx`select set_config('opengeni.session_inference_claim', '1', true)`;
       await tx`update sessions set active_turn_id = ${turn!.id} where id = ${sessionId}`;
-      await tx`update session_turns set active_attempt_id = ${attemptId} where id = ${turn!.id}`;
+      await tx`update session_turns set active_attempt_id = ${attemptId}, status = 'running',
+        execution_generation = 1 where id = ${turn!.id}`;
       await tx`insert into session_turn_attempts (
           id, account_id, workspace_id, session_id, turn_id, execution_generation,
           state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
@@ -299,8 +308,9 @@ async function fixture(overrides: { sandboxBackend?: "none" | "docker" } = {}) {
   };
 }
 
-test("existing-chat search includes pinned private children", async () => {
+test("owner-approved child chats keep session authority, pinned discovery and Site provenance", async () => {
   const f = await fixture();
+  const site = await f.publish("Private project dashboard", { visibility: "private" });
   const rootResponse = await f.call(
     "POST",
     "/sessions",
@@ -313,31 +323,33 @@ test("existing-chat search includes pinned private children", async () => {
   );
   expect(rootResponse.status, await rootResponse.clone().text()).toBe(202);
   const root = ((await rootResponse.json()) as { id: string }).id;
-  const agent = await f.liveAgentGrant(root);
-  const child = await withSessionRlsActorContext({ subjectId: f.grant.subjectId }, () =>
-    createSession(db.db, {
-      accountId: f.accountId,
-      workspaceId: f.workspace.id,
-      parentSessionId: root,
-      visibility: "user_private",
-      createdByActor: {
-        type: "agent_attempt",
-        sessionId: root,
-        turnId: String(agent.metadata!.turnId),
-        attemptId: String(agent.metadata!.attemptId),
-        executionGeneration: 1,
-      },
-      initialMessage: "Existing specialist",
-      resources: [],
-      metadata: {},
-      createdBy: { kind: "subject", subjectId: f.grant.subjectId },
-      subjectId: f.grant.subjectId,
-      model: "gpt-5.6-sol",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-    }),
-  );
+  const rootAgent = await f.liveAgentGrant(root);
+  const childOf = (parent: string, agent: AccessGrant) =>
+    withSessionRlsActorContext({ subjectId: f.grant.subjectId }, () =>
+      createSession(db.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspace.id,
+        parentSessionId: parent,
+        visibility: "user_private",
+        createdByActor: {
+          type: "agent_attempt",
+          sessionId: parent,
+          turnId: String(agent.metadata!.turnId),
+          attemptId: String(agent.metadata!.attemptId),
+          executionGeneration: 1,
+        },
+        initialMessage: "Existing specialist",
+        resources: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId: f.grant.subjectId },
+        subjectId: f.grant.subjectId,
+        model: "gpt-5.6-sol",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      }),
+    );
+  const child = await childOf(root, rootAgent);
   const title = "Long-running specialist child";
   const renamed = await f.call("PATCH", `/sessions/${child.id}`, {}, { title });
   expect(renamed.status, await renamed.clone().text()).toBe(200);
@@ -348,7 +360,83 @@ test("existing-chat search includes pinned private children", async () => {
   const found = await (await f.call("GET", search)).json();
   expect(found.pinned.map((s: { id: string }) => s.id)).toEqual([child.id]);
   expect(found.pinned[0].tenancy.ownedByCurrentUser).toBe(true);
-});
+
+  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+  const access = `/published-artifacts/${site.siteId}/session-access/${child.id}`;
+  expect((await f.call("PUT", access)).status).toBe(200);
+  const sent = await f.call("POST", `/sessions/${child.id}/events`, site.frame("existing"), {
+    type: "user.message",
+    payload: { text: "Continue coordinating the existing work" },
+  });
+  expect(sent.status, await sent.clone().text()).toBeLessThan(300);
+  const turn = (await f.turns(child.id)).at(-1)!;
+  expect(turn).toMatchObject({
+    surface: "site",
+    metadata: {
+      _opengeniSiteOrigin: { siteId: site.siteId, existingSessionId: child.id },
+    },
+  });
+  const agent = await f.liveAgentGrant(child.id, turn.id);
+  expect(await siteAgentClamp(db.db, agent)).toEqual({ clamped: false, originSiteIds: [] });
+  await expect(
+    assertNotSiteClampedAgent(db.db, agent, "workspace settings"),
+  ).resolves.toBeUndefined();
+  expect(
+    await siteAgentMayReachSession(db.db, scope, { sessionId: child.id, turnId: turn.id }, root),
+  ).toBe(true);
+  const grandchild = await childOf(child.id, agent);
+  expect(await siteSessionClamp(db.db, scope, grandchild.id, null)).toMatchObject({
+    clamped: false,
+  });
+
+  // The grant never rewrites accepted authority when revoked. It stops new frame inputs.
+  expect((await f.call("DELETE", access)).status).toBe(200);
+  expect(await getSiteDataAgentSession(db.db, scope, child.id, turn.id)).toMatchObject({
+    siteTurn: false,
+    complete: true,
+  });
+  // Old inputs and proof for a different chat remain restricted. Never infer
+  // accepted authority from today's grant, nor rewrite historical turn metadata.
+  for (const origin of [
+    { siteId: site.siteId },
+    { siteId: site.siteId, existingSessionId: root },
+    { existingSessionId: child.id },
+  ]) {
+    await shared.admin`update session_turns
+      set metadata = jsonb_build_object('_opengeniSiteOrigin', ${shared.admin.json(origin)})
+      where id = ${turn.id}`;
+    expect(await getSiteDataAgentSession(db.db, scope, child.id, turn.id)).toMatchObject({
+      siteTurn: true,
+      complete: true,
+    });
+  }
+  await shared.admin`update session_turns set metadata = ${shared.admin.json(turn.metadata)}
+    where id = ${turn.id}`;
+  expect(
+    (
+      await f.call("POST", `/sessions/${child.id}/events`, site.frame("revoked"), {
+        type: "user.message",
+        payload: { text: "No new input after revoke" },
+      })
+    ).status,
+  ).toBe(404);
+
+  // An ordinary Site-created agent cannot obtain this authority by supplying metadata.
+  const created = await f.call("POST", "/sessions", site.frame("created"), {
+    initialMessage: "Site work",
+    metadata: {
+      _opengeniSiteOrigin: { siteId: site.siteId, existingSessionId: child.id },
+    },
+  });
+  expect(created.status, await created.clone().text()).toBe(202);
+  const createdId = ((await created.json()) as { id: string }).id;
+  expect((await f.sessionRow(createdId)).metadata._opengeniSiteOrigin).not.toHaveProperty(
+    "existingSessionId",
+  );
+  expect(await siteAgentClamp(db.db, await f.agentGrant(createdId))).toMatchObject({
+    clamped: true,
+  });
+}, 30_000);
 
 test("Site composer config binds the host workspace instead of querying the site-host alias", async () => {
   const f = await fixture();

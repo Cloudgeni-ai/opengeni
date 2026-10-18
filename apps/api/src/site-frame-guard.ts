@@ -12,6 +12,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import type { Context, Next } from "hono";
+import { getSessionSiteAccess } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "./http/api-error";
 import { resolveSiteRequestOrigin } from "./site-session-origin";
@@ -70,7 +71,7 @@ export function siteFrameGuard(deps: ApiRouteDeps) {
       return;
     }
     const grant = await requireAccessGrant(c, deps, workspaceId);
-    const origin = await resolveSiteRequestOrigin(deps.db, grant, frame);
+    let origin = await resolveSiteRequestOrigin(deps.db, grant, frame);
     if (match.operation.id === "sessions.list") {
       const params = new URL(c.req.url).searchParams;
       const origins = params.getAll("originSiteId");
@@ -86,9 +87,19 @@ export function siteFrameGuard(deps: ApiRouteDeps) {
         throw new HTTPException(404, { message: "Unsupported Site session API path" });
     }
     if (match.sessionId !== null) {
-      const check = () => siteMayAccessSession(deps.db, grant, match.sessionId!, origin, true);
-      if (!(await (frame.marker === "1" ? withConsoleSiteSessionAccess(check) : check())))
-        throw new HTTPException(404, { message: "session not found" });
+      const access =
+        frame.marker === "1" && origin.siteId
+          ? await getSessionSiteAccess(deps.db, {
+              workspaceId,
+              sessionId: match.sessionId,
+              siteId: origin.siteId,
+              subjectId: grant.subjectId,
+            })
+          : await siteMayAccessSession(deps.db, grant, match.sessionId, origin, true);
+      if (!access) throw new HTTPException(404, { message: "session not found" });
+      // Freeze the authority distinction at admission; retain Site provenance.
+      // Revoking the grant stops future inputs, not work the owner already accepted.
+      if (access === "allowed") origin = { ...origin, existingSessionId: match.sessionId };
     }
     if (c.req.method !== "GET" && match.operation.id !== "sessions.create") {
       // Hono caches the parsed body, so the route reads the same JSON.

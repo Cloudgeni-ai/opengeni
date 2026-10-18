@@ -853,7 +853,8 @@ export async function resolveSiteDataAccess(
   const grant = authority;
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
   // An agent whose session (or spawning lineage, root session, or current
-  // turn) came from a Site page acts for that page: it gets the same frame
+  // turn without an owner-approved existing-chat receipt) came from a Site page
+  // acts for that page: it gets the same frame
   // clamp as the page. A lineage that cannot be read in full fails closed:
   // viewer reach on the one Site it names, or no Site Data at all.
   const agentIds = agentSessionIds(grant);

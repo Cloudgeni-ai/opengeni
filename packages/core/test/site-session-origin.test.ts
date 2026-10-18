@@ -72,3 +72,13 @@ test("a Site page reaches only sessions of the same Site or the same frame", () 
   const anonymous = { siteId: null, title: "", frame: "inline" as const };
   expect(siteOriginsMatch(anonymous, { siteId: null, title: "" })).toBe(false);
 });
+
+test("existing-chat admission proof is not inherited from stored session origins", () => {
+  const origin = { siteId: "site", title: "Dashboard", existingSessionId: "chat" };
+  expect(withSiteSessionOrigin(origin, () => currentSiteSessionOrigin())).toEqual(origin);
+  expect(siteSessionOriginFromMetadata({ _opengeniSiteOrigin: origin })).toEqual({
+    siteId: "site",
+    title: "Dashboard",
+  });
+  expect(sessionCreationMetadata({ _opengeniSiteOrigin: origin })).toEqual({});
+});

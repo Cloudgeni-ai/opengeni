@@ -53,8 +53,13 @@ Both list filters remain viewer-authorized and bound into pagination cursors.
 
 The Site retains the same operation and text-only body restrictions; approvals,
 credentials, attachments and hidden model context still belong in the console.
-Site-submitted turns record their real Site origin and retain existing Site
-execution restrictions. Ordinary console requests retain their normal behavior.
+For an explicitly allowed existing chat, Site-submitted turns keep that chat's
+normal tools and authority, just like console messages. Allow only Sites you
+trust to direct that agent. The server records both the real Site origin and
+the exact existing-chat authorization on each accepted turn; the page cannot
+forge this distinction. Site-created sessions, their descendants and unmarked
+legacy Site turns retain the Site execution restrictions. This does not change
+previously accepted turns or their history.
 **Remove access** revokes subsequent reads and writes immediately; an open event
 stream rechecks every two seconds and closes on revocation. Already accepted
 work is not cancelled and already delivered text cannot be recalled.

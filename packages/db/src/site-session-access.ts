@@ -17,13 +17,13 @@ export function siteSessionAccessFilter(siteId: string, subjectId: string) {
   )`;
 }
 
-export async function canAccessSessionFromSite(
+export async function getSessionSiteAccess(
   db: Database,
   input: { workspaceId: string; siteId: string; sessionId: string; subjectId: string },
-): Promise<boolean> {
+): Promise<"created" | "allowed" | null> {
   return withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
     const rows = await tx
-      .select({ id: schema.sessions.id })
+      .select({ siteAccessRootId: schema.sessions.siteAccessRootId })
       .from(schema.sessions)
       .where(
         and(
@@ -33,7 +33,7 @@ export async function canAccessSessionFromSite(
         ),
       )
       .limit(1);
-    return rows.length === 1;
+    return rows[0] ? (rows[0].siteAccessRootId ? "created" : "allowed") : null;
   });
 }
 

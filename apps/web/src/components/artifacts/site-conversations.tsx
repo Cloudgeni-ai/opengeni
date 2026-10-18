@@ -140,7 +140,7 @@ export function SiteConversationsPanel({
     <section aria-label={`Conversations in ${title}`} className="flex min-w-0 flex-col gap-4">
       <p className="text-sm leading-5 text-fg-muted">
         {adding
-          ? `Choose a chat you own. ${title} will be able to read it and send messages as you. Approvals stay in the console.`
+          ? `Choose a chat you own. ${title} can read it and send messages as you, using the chat’s existing tools and permissions. Only allow Sites you trust. Approvals stay in the console.`
           : `Conversations available in ${title}, including ones you explicitly allowed.`}
       </p>
       {canManageAccess && (
