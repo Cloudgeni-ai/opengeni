@@ -17,6 +17,7 @@
 set -euo pipefail
 : "${STACK_IP:?}" "${HOSTS:?}" "${ZONE:?}" "${HOSTS_PORT:?}"
 export PATH=$HOME/.cargo/bin:$HOME/.bun/bin:/snap/bin:$PATH
+export KUBECONFIG=$HOME/.kube/config
 # shellcheck disable=SC1091
 . "$HOME/e2e/out/build.env"
 fleet=$HOME/e2e/fleet
@@ -46,12 +47,11 @@ for name in postgres app-db compute-db delegation stream relay enrollment nats-c
 done
 [ -s "$sec/link.pem" ] || openssl genpkey -algorithm ed25519 -out "$sec/link.pem" 2>/dev/null
 if [ ! -s "$sec/nats-seed" ]; then
-  docker run --rm --entrypoint bun "opengeni-api:$OPENGENI_TAG" -e '
-    import { nkeys } from "@opengeni/events";
-    const account = nkeys.createAccount();
-    console.log(new TextDecoder().decode(account.getSeed()) + "\t" + account.getPublicKey());' |
-    tee >(cut -f1 >"$sec/nats-seed") | cut -f2 >"$sec/nats-public"
-  sleep 1
+  # The auth callout's account key pair (seed, then public key).
+  docker run --rm natsio/nats-box:0.20.0 nk -gen account -pubout >"$sec/nats-keys"
+  sed -n 1p "$sec/nats-keys" >"$sec/nats-seed"
+  sed -n 2p "$sec/nats-keys" >"$sec/nats-public"
+  rm -f "$sec/nats-keys"
 fi
 # The fleet service's API certificate, from an authority of this
 # environment that Opengeni's pods trust.
@@ -153,7 +153,14 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg ogtag "$O
   }' >"$HOME/e2e/values.json"
 
 log "helm upgrade --install $release ($chart at $COMPUTE_SHA, images $OPENGENI_TAG)"
-helm upgrade --install "$release" "$chart" -n "$ns" -f "$HOME/e2e/values.json" --wait --timeout 25m
+# No --wait: the chart migrates (and makes compute-control's schema) in
+# post-install hooks, which Helm would only run once every pod is ready,
+# and the pods are not ready before the schema exists. Helm still waits
+# for the hook Jobs; the rollouts are awaited after.
+helm upgrade --install "$release" "$chart" -n "$ns" -f "$HOME/e2e/values.json" --timeout 25m
+for name in $(k get deploy -o name); do
+  k rollout status "$name" --timeout 15m
+done
 
 log "Caddy for $app, $relay and $files"
 ip() { k get svc "$1" -o jsonpath='{.spec.clusterIP}'; }

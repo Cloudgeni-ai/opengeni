@@ -68,7 +68,7 @@ subset with what it needs.
 | run-as | not applicable while Opengeni never runs commands as another user |
 | sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level; the next Opengeni request wakes it, with its files |
 | move | the fabric moves the sandbox to another host; its files come along |
-| host-loss | after a save to remote, the sandbox's host is reset; the sandbox comes back from that save |
+| host-loss | after a sleep to remote, the sandbox's host is stopped; the sandbox wakes on another host from that copy |
 | ui | Playwright in the web app: the Files tab lists the file, a command typed in the Terminal tab runs, the Desktop tab draws the desktop |
 
 A check whose needs failed is skipped, so every run reports every check.

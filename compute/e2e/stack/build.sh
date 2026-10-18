@@ -12,6 +12,7 @@
 # Writes ~/e2e/out/build.env. Each step is skipped when its output for the
 # same commit exists.
 set -euo pipefail
+shopt -s inherit_errexit
 : "${OPENGENI_SHA:?}" "${COMPUTE_SHA:?}" "${REGISTRY:?}" "${BUCKET:?}"
 export PATH=$HOME/.cargo/bin:$HOME/.bun/bin:/snap/bin:$PATH
 og=/srv/e2e/opengeni
@@ -21,7 +22,7 @@ out=$HOME/e2e/out
 mkdir -p "$out"
 ogtag=e2e-${OPENGENI_SHA:0:12}
 cmtag=e2e-${COMPUTE_SHA:0:12}
-log() { printf '[build %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+log() { printf '[build %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 imported() { sudo k3s ctr -n k8s.io images ls -q | grep -qx "docker.io/library/$1"; }
 to_k3s() {
   imported "$1" && return
@@ -76,9 +77,13 @@ to_k3s "opengeni-compute-control:$cmtag"
 # The sandbox images, by digest.
 sandbox_image() {
   local dockerfile=$2 ref=$REGISTRY/$1:$ogtag
-  if ! docker image inspect "$ref" >/dev/null 2>&1; then
+  if ! docker image inspect "$ref" >/dev/null 2>&1 || ! has_agent "$ref"; then
     log "  $ref"
-    docker build -q -f "$og/docker/$dockerfile" -t "$ref" "$og" >/dev/null
+    # The artifact runtime bundle (above) was assembled for another commit,
+    # which the sandbox images verify; they build without it (the artifact
+    # tool in the sandbox is then unavailable, which no check uses).
+    docker build -q -f "$og/docker/$dockerfile" --build-arg OPENGENI_ARTIFACT_RUNTIME_BUNDLE=.release/none \
+      -t "$ref" "$og" >/dev/null
     if ! has_agent "$ref"; then
       log "  $ref has no opengeni-agent: adding one built from $OPENGENI_SHA"
       docker build -q -f "$here/agent.Dockerfile" --build-arg "BASE=$ref" -t "$ref" "$og/agent" >/dev/null

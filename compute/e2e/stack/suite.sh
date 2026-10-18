@@ -5,6 +5,7 @@
 set -euo pipefail
 : "${RUN:?}" "${PROJECT:?}" "${ZONE:?}"
 export PATH=$HOME/.cargo/bin:$HOME/.bun/bin:/snap/bin:$PATH
+export KUBECONFIG=$HOME/.kube/config
 # shellcheck disable=SC1091
 . "$HOME/e2e/endpoints.env"
 sec=$HOME/e2e/secrets

@@ -387,9 +387,23 @@ check("desktop", "the agent opens the desktop and sees it", ["create"], async ()
   return `${mine.length} computer session(s); reply "${turn.text.trim().slice(0, 120)}"`;
 });
 
+check("ui", "the web UI: file browser, terminal and desktop (Playwright)", ["files", "terminal"], async () => {
+  const run = spawnSync("bun", [`${import.meta.dir}/ui.ts`], {
+    encoding: "utf8",
+    env: { ...process.env, WORKSPACE: state.workspace!, SESSION: state.session!.id, MARKER: state.marker! },
+    timeout: 15 * 60_000,
+  });
+  writeFileSync(`${OUT}/ui.log`, `${run.stdout}\n${run.stderr}`);
+  const parsed = JSON.parse(readFileSync(`${OUT}/ui.json`, "utf8")) as Record<string, string>;
+  const failed = Object.entries(parsed).filter(([, value]) => !value.startsWith("pass"));
+  const summary = Object.entries(parsed).map(([name, value]) => `${name}: ${value}`).join("; ");
+  if (run.status !== 0 || failed.length > 0) throw new Error(summary || `ui.ts exited ${run.status}`);
+  return summary;
+});
+
 check("run-as", "commands as another user", ["create"], async () => {
   throw new NotApplicable(
-    "Opengeni never sets runAs (sandboxRunAs returns undefined) and the compute session refuses one",
+    "the compute backend does not support runAs yet (it waits on the agent's run_as), and Opengeni's sandboxRunAs sets none",
   );
 });
 
@@ -423,7 +437,7 @@ check("move", "a move to another host keeps the sandbox's files", ["files", "hos
   return `${before.host} -> ${after.host} in ${seconds(start)}`;
 });
 
-check("host-loss", "a lost host's sandbox comes back from its last save", ["files", "hosts"], async () => {
+check("host-loss", "a lost host's sandbox comes back elsewhere from its last archived copy", ["files", "hosts"], async () => {
   const kept = `kept-${rand()}`;
   await og("POST", `${ses()}/fs/write`, { path: "e2e/kept.txt", content: kept, encoding: "utf8" });
   await fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level: "remote" });
@@ -432,12 +446,14 @@ check("host-loss", "a lost host's sandbox comes back from its last save", ["file
   await og("POST", `${ses()}/fs/write`, { path: "e2e/late.txt", content: late, encoding: "utf8" });
   const before = await sandbox();
   const lost = before.host!;
-  log(`resetting ${lost}`);
+  // Stopped, the machine is plainly gone: its lease lapses, the service
+  // fences it (finds it stopped) and the sandbox wakes elsewhere.
+  log(`stopping ${lost}`);
   const start = Date.now();
-  const reset = spawnSync("gcloud", ["compute", "instances", "reset", lost, "--zone", ZONE, "--project", PROJECT, "--quiet"], {
+  const stop = spawnSync("gcloud", ["compute", "instances", "stop", lost, "--zone", ZONE, "--project", PROJECT, "--quiet"], {
     encoding: "utf8",
   });
-  if (reset.status !== 0) throw new Error(`reset: ${reset.stderr}`);
+  if (stop.status !== 0) throw new Error(`stop: ${stop.stderr}`);
   let out = "";
   for (;;) {
     if (Date.now() - start > 20 * 60_000) throw new Error("no recovery within 20 minutes");
@@ -452,22 +468,8 @@ check("host-loss", "a lost host's sandbox comes back from its last save", ["file
   }
   const after = await sandbox();
   const lostState = (await hosts()).find((host) => host.name === lost)?.state ?? "gone";
-  return `${lost} reset; back on ${after.host} (epoch ${before.owner_epoch} -> ${after.owner_epoch}) in ${seconds(start)}; ` +
+  return `${lost} stopped; back on ${after.host} (epoch ${before.owner_epoch} -> ${after.owner_epoch}) in ${seconds(start)}; ` +
     `the save kept, the late write ${out.includes(late) ? "kept too" : "lost (after the last save)"}; ${lost} is now ${lostState}`;
-});
-
-check("ui", "the web UI: file browser, terminal and desktop (Playwright)", ["files", "terminal"], async () => {
-  const run = spawnSync("bun", [`${import.meta.dir}/ui.ts`], {
-    encoding: "utf8",
-    env: { ...process.env, WORKSPACE: state.workspace!, SESSION: state.session!.id, MARKER: state.marker! },
-    timeout: 15 * 60_000,
-  });
-  writeFileSync(`${OUT}/ui.log`, `${run.stdout}\n${run.stderr}`);
-  const parsed = JSON.parse(readFileSync(`${OUT}/ui.json`, "utf8")) as Record<string, string>;
-  const failed = Object.entries(parsed).filter(([, value]) => !value.startsWith("pass"));
-  const summary = Object.entries(parsed).map(([name, value]) => `${name}: ${value}`).join("; ");
-  if (run.status !== 0 || failed.length > 0) throw new Error(summary || `ui.ts exited ${run.status}`);
-  return summary;
 });
 
 // --- Run ------------------------------------------------------------------
