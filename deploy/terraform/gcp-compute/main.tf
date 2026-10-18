@@ -120,11 +120,20 @@ resource "google_storage_bucket_iam_member" "control_objects" {
 # host certificates against an instance identity token, the host account
 # is as trusted as every host (see operations.md, Security).
 
+# Certificate Authority Service never reuses a deleted pool's name, so
+# each pool gets a suffix and a fleet can be torn down and made again.
+resource "random_id" "pool" {
+  byte_length = 3
+}
+
 resource "google_privateca_ca_pool" "fleet" {
-  name     = "${var.name_prefix}-fleet"
+  name     = "${var.name_prefix}-fleet-${random_id.pool.hex}"
   location = var.region
-  tier     = "DEVOPS"
-  labels   = local.labels
+  # Enterprise keeps the certificates it issues, so Terraform can manage
+  # the fleet service's certificate and a lost host's can be revoked; the
+  # DevOps tier keeps none (about $20 against $200 a month per authority).
+  tier   = "ENTERPRISE"
+  labels = local.labels
 
   issuance_policy {
     maximum_lifetime = "2592000s"
@@ -380,7 +389,7 @@ resource "google_compute_instance_group_manager" "hosts" {
   # drained first (operations.md, Upgrading hosts): never all at once.
   update_policy {
     type                  = "OPPORTUNISTIC"
-    minimal_action        = "REFRESH"
+    minimal_action        = "REPLACE"
     max_surge_fixed       = 1
     max_unavailable_fixed = 0
   }
