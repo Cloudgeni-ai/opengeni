@@ -645,8 +645,10 @@ export {
 export {
   COMPUTE_METADATA,
   createComputeOrphanSweepProgress,
+  reconcileStaleComputeEnrollments,
   sweepComputeOrphans,
   type ComputeOrphanSweepProgress,
+  type StaleComputeEnrollment,
   type ComputeOrphanSweepResult,
   type ComputeSandboxIdentity,
 } from "./compute/orphans";

@@ -62854,12 +62854,22 @@ export async function releaseSandboxAgentLink(
 
 /**
  * A deadline (and optional stop signal) for maintenance work such as the
- * compute orphan sweep. Every bounded database call runs under a statement
- * timeout that ends at the deadline, so lock waits (the workspace tenancy lock
- * included) end with it; a stopped call returns at once and its transaction
- * rolls back instead of committing late.
+ * compute orphan sweep. A bounded call runs in one transaction that ends at the
+ * absolute deadline: every statement runs under a statement timeout no longer
+ * than the time left, the statement in progress at the deadline (or when the
+ * signal aborts) is cancelled on the server, and work that finishes after the
+ * deadline rolls back instead of committing late. Lock waits (the workspace
+ * tenancy lock included) end with it. `db` must be the pool, not a
+ * transaction: the cancellation goes over another pooled connection.
  */
 export type DatabaseWorkBound = { deadlineAtMs: number; signal?: AbortSignal | undefined };
+
+export class DatabaseWorkDeadlineError extends Error {
+  constructor() {
+    super("The maintenance deadline passed; the database work was rolled back.");
+    this.name = "DatabaseWorkDeadlineError";
+  }
+}
 
 async function withinWorkBound<T>(
   db: Database,
@@ -62870,25 +62880,64 @@ async function withinWorkBound<T>(
   const signal = bound.signal;
   signal?.throwIfAborted();
   const remainingMs = bound.deadlineAtMs - Date.now();
-  if (remainingMs <= 0) throw new Error("The maintenance deadline passed before the query.");
+  if (remainingMs <= 0) throw new DatabaseWorkDeadlineError();
+  // The transaction's server process and start, so the statement it is running
+  // at the deadline can be cancelled. The cancel names this exact transaction
+  // (a pooled connection that has moved on to other work is left alone), the
+  // server ignores one that arrives between statements, and none is sent once
+  // the work has finished.
+  let transaction: { pid: number; startedAt: string } | null = null;
+  let finished = false;
+  let cancelled = false;
+  const cancel = (): void => {
+    if (finished || !transaction || cancelled) return;
+    cancelled = true;
+    void db
+      .execute(
+        sql`select pg_catalog.pg_cancel_backend(activity.pid)
+          from pg_catalog.pg_stat_activity activity
+          where activity.pid = ${transaction.pid}::integer
+            and activity.xact_start = ${transaction.startedAt}::timestamptz`,
+      )
+      .catch(() => undefined);
+  };
+  const timer = setTimeout(cancel, remainingMs);
+  signal?.addEventListener("abort", cancel, { once: true });
   const work = withDatabaseStatementTimeout(db, remainingMs, async (bounded) => {
-    const value = await fn(bounded);
-    // A stopped caller has moved on: roll back rather than commit late.
+    const [current] = await rawRows<{ pid: number | string; started_at: string }>(
+      bounded,
+      sql`select pg_catalog.pg_backend_pid() as pid, pg_catalog.now()::text as started_at`,
+    );
+    transaction = { pid: Number(current!.pid), startedAt: current!.started_at };
+    if (signal?.aborted || Date.now() >= bound.deadlineAtMs) cancel();
+    let value: T;
+    try {
+      value = await fn(bounded);
+    } finally {
+      finished = true;
+    }
+    // A stopped or late call rolls back rather than commit after its bound.
     signal?.throwIfAborted();
+    if (Date.now() >= bound.deadlineAtMs) throw new DatabaseWorkDeadlineError();
     return value;
   });
-  if (!signal) return await work;
-  work.catch(() => {});
-  let onAbort: (() => void) | undefined;
-  const stopped = new Promise<never>((_, reject) => {
-    onAbort = () => reject(signal.reason ?? new Error("The maintenance work was stopped."));
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-  stopped.catch(() => {});
   try {
-    return await Promise.race([work, stopped]);
+    if (!signal) return await work;
+    work.catch(() => {});
+    let onAbort: (() => void) | undefined;
+    const stopped = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error("The maintenance work was stopped."));
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    stopped.catch(() => {});
+    try {
+      return await Promise.race([work, stopped]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
   } finally {
-    if (onAbort) signal.removeEventListener("abort", onAbort);
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", cancel);
   }
 }
 
@@ -62985,25 +63034,19 @@ export async function computeSandboxNamed(
 }
 
 /**
- * Revoke compute sandbox enrollments nothing can use any more: active, created
- * more than ten minutes ago (the create settle window), and their group's
- * lease neither names them nor is warming a new box. These are enrollments
- * whose sandbox is already gone (a delete whose revoke failed, a create that
- * never made one), which no fabric listing shows the orphan sweep. The
- * cross-workspace inventory (migration 0846) returns ids only; each revoke runs
- * under its workspace's RLS and re-checks the same condition, so an enrollment
- * a lease names in the meantime stays active. A failed revoke is counted and
- * found again by the next call. With a bound, every query ends by its deadline
- * and no new revoke starts once it is stopped.
+ * Compute sandbox enrollments nothing can use any more: active, created more
+ * than ten minutes ago (the create settle window), and their group's lease
+ * neither names them nor is warming a new box. These are enrollments whose
+ * sandbox is already gone (a delete whose revoke failed, a create that never
+ * made one), which no fabric listing shows the orphan sweep. The
+ * cross-workspace inventory (migration 0846) returns ids only, oldest first by
+ * id; revoke each with {@link revokeStaleComputeSandboxEnrollment}.
  */
-export async function revokeStaleComputeSandboxEnrollments(
+export async function listStaleComputeSandboxEnrollments(
   db: Database,
   bound?: DatabaseWorkBound,
-): Promise<{
-  revoked: { workspaceId: string; enrollmentId: string }[];
-  failed: number;
-}> {
-  const candidates = await withinWorkBound(
+): Promise<{ workspaceId: string; enrollmentId: string }[]> {
+  const rows = await withinWorkBound(
     db,
     bound,
     async (boundedDb) =>
@@ -63012,63 +63055,67 @@ export async function revokeStaleComputeSandboxEnrollments(
         sql`
           select workspace_id, enrollment_id
           from opengeni_private.list_stale_compute_sandbox_enrollments()
+          order by enrollment_id
         `,
       ),
   );
-  const revoked: { workspaceId: string; enrollmentId: string }[] = [];
-  let failed = 0;
-  for (const candidate of candidates) {
-    if (bound && (bound.signal?.aborted || Date.now() >= bound.deadlineAtMs)) break;
-    const scoped = withinWorkBound(db, bound, (boundedDb) =>
-      withWorkspaceRls(boundedDb, candidate.workspace_id, async (scopedDb) => {
-        const rows = await rawRows<{ id: string }>(
-          scopedDb,
-          sql`
-          update enrollments e
-          set status = 'revoked',
-              revoked_at = now(),
-              connection_instance_id = null,
-              connection_lease_expires_at = null,
-              updated_at = now()
-          where e.workspace_id = ${candidate.workspace_id}
-            and e.id = ${candidate.enrollment_id}
-            and e.kind = 'sandbox'
-            and e.status = 'active'
-            and e.created_at < now() - interval '10 minutes'
-            and not exists (
-              select 1 from sandbox_leases lease
-              where lease.workspace_id = e.workspace_id
-                and lease.sandbox_group_id = e.sandbox_group_id
-                and (
-                  lease.liveness = 'warming'
-                  or lease.resume_state #>> '{sessionState,enrollmentId}' = e.id::text
-                )
-            )
-          returning e.id
-        `,
-        );
-        return rows.length > 0;
-      }),
-    );
-    try {
-      if (await scoped) {
-        revoked.push({
-          workspaceId: candidate.workspace_id,
-          enrollmentId: candidate.enrollment_id,
-        });
-      }
-    } catch (error) {
-      // A workspace deleted since the inventory took its enrollments with it.
-      if (
-        error instanceof Error &&
-        error.message === `Workspace not found: ${candidate.workspace_id}`
-      ) {
-        continue;
-      }
-      failed += 1;
+  return rows.map((row) => ({ workspaceId: row.workspace_id, enrollmentId: row.enrollment_id }));
+}
+
+/**
+ * Revoke one enrollment the stale inventory listed, under its workspace's RLS.
+ * The revoke re-checks the inventory's condition, so an enrollment a lease
+ * names in the meantime stays active (false). A deleted workspace took the
+ * enrollment with it, which is false too. With a bound, the work ends by its
+ * deadline or stop and then commits nothing.
+ */
+export async function revokeStaleComputeSandboxEnrollment(
+  db: Database,
+  candidate: { workspaceId: string; enrollmentId: string },
+  bound?: DatabaseWorkBound,
+): Promise<boolean> {
+  const scoped = withinWorkBound(db, bound, (boundedDb) =>
+    withWorkspaceRls(boundedDb, candidate.workspaceId, async (scopedDb) => {
+      const rows = await rawRows<{ id: string }>(
+        scopedDb,
+        sql`
+        update enrollments e
+        set status = 'revoked',
+            revoked_at = now(),
+            connection_instance_id = null,
+            connection_lease_expires_at = null,
+            updated_at = now()
+        where e.workspace_id = ${candidate.workspaceId}
+          and e.id = ${candidate.enrollmentId}
+          and e.kind = 'sandbox'
+          and e.status = 'active'
+          and e.created_at < now() - interval '10 minutes'
+          and not exists (
+            select 1 from sandbox_leases lease
+            where lease.workspace_id = e.workspace_id
+              and lease.sandbox_group_id = e.sandbox_group_id
+              and (
+                lease.liveness = 'warming'
+                or lease.resume_state #>> '{sessionState,enrollmentId}' = e.id::text
+              )
+          )
+        returning e.id
+      `,
+      );
+      return rows.length > 0;
+    }),
+  );
+  try {
+    return await scoped;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === `Workspace not found: ${candidate.workspaceId}`
+    ) {
+      return false;
     }
+    throw error;
   }
-  return { revoked, failed };
 }
 
 // THE LOUD-CONSENT APPROVE (the user's POST /approve). In ONE transaction:

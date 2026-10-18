@@ -37,7 +37,8 @@ import {
   leaseMayHaveUntrackedWriters,
   releaseWorkspaceArchiveCapture,
   revokeSandboxEnrollment,
-  revokeStaleComputeSandboxEnrollments,
+  listStaleComputeSandboxEnrollments,
+  revokeStaleComputeSandboxEnrollment,
   listIdleCheckpointCandidates,
   recordIdleCheckpointAttempt,
   claimSandboxCheckpointArtifactsForGc,
@@ -163,6 +164,7 @@ import {
   sweepModalOrphanSandboxes,
   ComputeFabricClient,
   createComputeOrphanSweepProgress,
+  reconcileStaleComputeEnrollments,
   sweepComputeOrphans,
   terminateManagedSandboxSession,
   terminateModalSandboxById,
@@ -3706,12 +3708,20 @@ export const COMPUTE_ORPHAN_SWEEP_INTERVAL_MS = 5 * 60_000;
 let lastComputeOrphanSweepAtMs = Number.NEGATIVE_INFINITY;
 /** This worker's traversal of the fabric inventory, carried between passes. */
 const computeOrphanSweepProgress = createComputeOrphanSweepProgress();
+/** This worker's traversal of the stale-enrollment inventory, likewise. */
+const staleComputeEnrollmentProgress = createComputeOrphanSweepProgress();
 
 /** The most one compute orphan sweep may take: the stale-enrollment reconcile,
  * the fabric listing, every database check and revoke (lock waits included)
  * and every delete. It shares a five-minute maintenance activity with the
  * other sweeps; what it does not reach is the next sweep's. */
 export const COMPUTE_ORPHAN_SWEEP_BUDGET_MS = 60_000;
+/** The part of that budget the stale-enrollment reconcile may use, so the
+ * fabric sweep always keeps the rest. */
+export const COMPUTE_STALE_ENROLLMENT_BUDGET_MS = 15_000;
+/** The most one candidate's database work may take (lock waits included), so
+ * a stuck one fails and sits out instead of holding a slot for the pass. */
+export const COMPUTE_SWEEP_ITEM_DB_BUDGET_MS = 5_000;
 
 /** The activity's cancellation, when this runs inside a Temporal activity. */
 function activityCancellationSignal(): AbortSignal | undefined {
@@ -3734,11 +3744,31 @@ async function sweepComputeOrphansForConfiguredBackend(
   const budget = AbortSignal.timeout(COMPUTE_ORPHAN_SWEEP_BUDGET_MS);
   const signal = cancellation ? AbortSignal.any([budget, cancellation]) : budget;
   const bound = { deadlineAtMs: nowMs + COMPUTE_ORPHAN_SWEEP_BUDGET_MS, signal };
+  /** One candidate's database work: its own short deadline inside the pass. */
+  const itemBound = (outer: { deadlineAtMs: number; signal: AbortSignal }) => ({
+    deadlineAtMs: Math.min(outer.deadlineAtMs, Date.now() + COMPUTE_SWEEP_ITEM_DB_BUDGET_MS),
+    signal: outer.signal,
+  });
   // Enrollments whose sandbox is already gone are not in any fabric listing:
   // revoke them from Opengeni's own records, whether or not compute is still
-  // configured.
+  // configured. This uses only part of the budget, so the fabric sweep runs too.
+  const staleSignal = AbortSignal.any([
+    signal,
+    AbortSignal.timeout(COMPUTE_STALE_ENROLLMENT_BUDGET_MS),
+  ]);
+  const staleBound = {
+    deadlineAtMs: Math.min(bound.deadlineAtMs, nowMs + COMPUTE_STALE_ENROLLMENT_BUDGET_MS),
+    signal: staleSignal,
+  };
   try {
-    const stale = await revokeStaleComputeSandboxEnrollments(db, bound);
+    const stale = await reconcileStaleComputeEnrollments({
+      list: async () => await listStaleComputeSandboxEnrollments(db, staleBound),
+      revoke: async (candidate) =>
+        await revokeStaleComputeSandboxEnrollment(db, candidate, itemBound(staleBound)),
+      nowMs,
+      signal: staleSignal,
+      progress: staleComputeEnrollmentProgress,
+    });
     for (const revoked of stale.revoked) {
       observability.warn("sandbox reaper: revoked stale compute sandbox enrollment", {
         ...revoked,
@@ -3767,9 +3797,9 @@ async function sweepComputeOrphansForConfiguredBackend(
       signal,
     }),
     gateway: settings.computeLinkUrl,
-    named: async (identity) => await computeSandboxNamed(db, identity, bound),
+    named: async (identity) => await computeSandboxNamed(db, identity, itemBound(bound)),
     revokeEnrollment: async (input) => {
-      await revokeSandboxEnrollment(db, input, bound);
+      await revokeSandboxEnrollment(db, input, itemBound(bound));
     },
     nowMs,
     signal,

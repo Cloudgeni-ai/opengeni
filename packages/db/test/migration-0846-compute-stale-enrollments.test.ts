@@ -6,7 +6,14 @@ import {
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { computeSandboxNamed, createDb, revokeStaleComputeSandboxEnrollments } from "../src";
+import {
+  computeSandboxNamed,
+  createDb,
+  DatabaseWorkDeadlineError,
+  listStaleComputeSandboxEnrollments,
+  revokeStaleComputeSandboxEnrollment,
+  type DatabaseWorkBound,
+} from "../src";
 import {
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
@@ -108,6 +115,24 @@ beforeAll(async () => {
   kept.push((await enroll(first, { ageMinutes: 1 })).id);
 }, 180_000);
 
+/** List, then revoke each listed enrollment in turn (as one sweep pass would). */
+async function revokeStaleComputeSandboxEnrollments(
+  db: Parameters<typeof listStaleComputeSandboxEnrollments>[0],
+  bound?: DatabaseWorkBound,
+): Promise<{ revoked: { workspaceId: string; enrollmentId: string }[]; failed: number }> {
+  const revoked: { workspaceId: string; enrollmentId: string }[] = [];
+  let failed = 0;
+  for (const candidate of await listStaleComputeSandboxEnrollments(db, bound)) {
+    if (bound && (bound.signal?.aborted || Date.now() >= bound.deadlineAtMs)) break;
+    try {
+      if (await revokeStaleComputeSandboxEnrollment(db, candidate, bound)) revoked.push(candidate);
+    } catch {
+      failed += 1;
+    }
+  }
+  return { revoked, failed };
+}
+
 afterAll(async () => {
   await app?.end();
   await owner?.end();
@@ -208,6 +233,73 @@ test("bounded sweep queries end by their deadline or stop, lock waits included",
     expect(after.revoked.map((row) => row.enrollmentId)).toEqual([enrollmentId]);
   } finally {
     holder.release();
+    await client.close();
+  }
+}, 60_000);
+
+test("a bounded call ends its database work at the deadline and never commits late", async () => {
+  const [source] = await fixture.admin`select account_id, workspace_id from enrollments
+    where id = ${stale[0]!}`;
+  const workspaceId = source!.workspace_id as string;
+  const enrollmentId = crypto.randomUUID();
+  await fixture.admin`insert into enrollments(id,account_id,workspace_id,kind,sandbox_group_id,
+    pubkey,exposure,status,created_at)
+    values(${enrollmentId},${source!.account_id},${workspaceId},'sandbox',${crypto.randomUUID()},
+      null,'whole-machine','active',now() - interval '30 minutes')`;
+  const tenancy = await fixture.admin.reserve();
+  const row = await fixture.admin.reserve();
+  const client = createDb(appUrl());
+  try {
+    // The tenancy lock is released after 210 ms, inside the 300 ms deadline;
+    // the revoke's UPDATE then waits on the enrollment's row lock, which is
+    // released only after the deadline. Without a deadline-wide cancel the
+    // UPDATE ran on and committed late.
+    await tenancy`select pg_advisory_lock(hashtextextended(${`session-tenancy:${workspaceId}`}::text, 0))`;
+    await row`begin`;
+    await row`select id from enrollments where id = ${enrollmentId} for update`;
+    setTimeout(() => {
+      void tenancy`select pg_advisory_unlock(hashtextextended(${`session-tenancy:${workspaceId}`}::text, 0))`.execute();
+    }, 210);
+    const releaseRow = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        void row`rollback`.then(() => resolve());
+      }, 700);
+    });
+    const started = Date.now();
+    const error = await revokeStaleComputeSandboxEnrollment(
+      client.db,
+      { workspaceId, enrollmentId },
+      { deadlineAtMs: started + 300 },
+    ).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(Error);
+    expect(Date.now() - started).toBeLessThan(480);
+    // The server is no longer running the revoke's statement.
+    // (The admin pool's connections are both reserved above, so ask on one of them.)
+    const active = await tenancy`select pid from pg_stat_activity
+      where usename = ${appRole} and state = 'active' and query ilike '%update enrollments%'`;
+    expect(active).toHaveLength(0);
+    await releaseRow;
+    const [still] = await tenancy`select status from enrollments where id = ${enrollmentId}`;
+    expect(still!.status).toBe("active");
+    // A call whose bound has already passed does nothing at all.
+    await expect(
+      revokeStaleComputeSandboxEnrollment(
+        client.db,
+        { workspaceId, enrollmentId },
+        { deadlineAtMs: Date.now() - 1 },
+      ),
+    ).rejects.toBeInstanceOf(DatabaseWorkDeadlineError);
+    // Unbounded by locks, the same revoke completes.
+    expect(
+      await revokeStaleComputeSandboxEnrollment(
+        client.db,
+        { workspaceId, enrollmentId },
+        { deadlineAtMs: Date.now() + 30_000 },
+      ),
+    ).toBe(true);
+  } finally {
+    tenancy.release();
+    row.release();
     await client.close();
   }
 }, 60_000);

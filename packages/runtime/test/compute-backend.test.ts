@@ -28,6 +28,7 @@ import {
   type NatsRequestConnection,
   sweepComputeOrphans,
   createComputeOrphanSweepProgress,
+  reconcileStaleComputeEnrollments,
 } from "../src/sandbox";
 import { COMPUTE_ORPHAN_SWEEP_LIMIT } from "../src/sandbox/compute/orphans";
 import { applyDiff } from "@openai/agents";
@@ -873,6 +874,54 @@ describe("compute sandbox client", () => {
     expect(await sweeping).toEqual({ examined: 1, deleted: [], failed: 0 });
     expect(Date.now() - started).toBeLessThan(3_000);
     expect(fabric.boxes.has("sbx-waiting")).toBe(true);
+  });
+
+  test("one stale enrollment stuck on a lock never keeps the others waiting, pass after pass", async () => {
+    const listed = ["enr-a", "enr-b", "enr-c"].map((enrollmentId) => ({
+      workspaceId: "ws",
+      enrollmentId,
+    }));
+    const progress = createComputeOrphanSweepProgress();
+    const attempts: string[] = [];
+    // enr-a's workspace stays locked: its revoke fails at its own short
+    // deadline. The others revoke at once.
+    const reconcile = (nowMs: number, concurrency: number) =>
+      reconcileStaleComputeEnrollments({
+        list: async () => listed,
+        revoke: async (candidate) => {
+          attempts.push(candidate.enrollmentId);
+          if (candidate.enrollmentId === "enr-a") {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            throw new Error("The maintenance deadline passed; the database work was rolled back.");
+          }
+          return true;
+        },
+        nowMs,
+        concurrency,
+        progress,
+      });
+    const startedAt = Date.now();
+    const first = await reconcile(startedAt, 1);
+    expect(first.revoked.map((r) => r.enrollmentId)).toEqual(["enr-b", "enr-c"]);
+    expect(first.failed).toBe(1);
+    // The failed one sits out the next pass instead of using it up.
+    attempts.length = 0;
+    await reconcile(startedAt + 5 * 60_000, 1);
+    expect(attempts).toEqual(["enr-b", "enr-c"]);
+    // A revoke that never answers holds one slot only, and the pass still ends
+    // with its signal.
+    const stop = new AbortController();
+    setTimeout(() => stop.abort(), 50);
+    const started = Date.now();
+    const stuck = await reconcileStaleComputeEnrollments({
+      list: async () => listed,
+      revoke: async (candidate) =>
+        candidate.enrollmentId === "enr-a" ? await new Promise<boolean>(() => {}) : true,
+      concurrency: 2,
+      signal: stop.signal,
+    });
+    expect(stuck.revoked.map((r) => r.enrollmentId)).toEqual(["enr-b", "enr-c"]);
+    expect(Date.now() - started).toBeLessThan(3_000);
   });
 
   test("deleting a sandbox revokes its enrollment only after the fabric delete", async () => {
