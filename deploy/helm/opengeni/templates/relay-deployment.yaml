@@ -64,6 +64,12 @@ spec:
             # The wss listener bind. The container port is the single source of truth.
             - name: OPENGENI_RELAY_BIND
               value: {{ printf "0.0.0.0:%d" (int .Values.relay.containerPort) | quote }}
+            # Producer registration returns this private route. Any public edge
+            # can forward the viewer to the selected owner without ingress affinity.
+            - name: OPENGENI_RELAY_ADVERTISE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             {{- with .Values.relay.metricsPort }}
             # GET /metrics moves to this internal listener and is never served on
             # the public wss port.

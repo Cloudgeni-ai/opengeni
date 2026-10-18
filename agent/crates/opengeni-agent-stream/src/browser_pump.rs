@@ -474,6 +474,7 @@ mod tests {
                 agent_id: "agent".to_string(),
                 kind: v1::StreamKind::Browser as i32,
                 port: 20_001,
+                relay_route: None,
             },
             token: "producer-token".to_string(),
             relay_url: "wss://relay.invalid/stream".to_string(),
