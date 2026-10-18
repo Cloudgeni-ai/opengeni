@@ -8,7 +8,10 @@ import { databaseBootConnectOptions } from "./boot-connect";
 
 import {
   DatabaseTransactionError,
+  isDatabaseConnectionLoss,
   isDatabasePersistenceFailure,
+  isRetryableDatabaseTransportFailure,
+  nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
@@ -855,34 +858,53 @@ async function restoreRlsContextSettings(
 
 /** Attribute only failures outside the application callback to our transaction
  * driver. BEGIN/COMMIT/ROLLBACK can throw raw postgres.js errors, unlike ORM
- * queries. This supplies provenance, never transaction retry permission. */
+ * queries. Only unentered pool admission can retry; entered callbacks cannot. */
 async function withDatabaseTransactionProvenance<T>(
   db: Database,
   fn: (db: Database) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
 ): Promise<T> {
-  let entered = false;
-  let callbackFailure: { error: unknown } | undefined;
-  try {
-    return await db.transaction(async (tx) => {
-      entered = true;
-      try {
-        return await fn(tx as unknown as Database);
-      } catch (error) {
-        callbackFailure = { error };
-        throw error;
+  // Only admission on a pool can be retried here. Once the driver entered the
+  // callback, COMMIT may have succeeded and external effects may have run.
+  // A savepoint cannot repair its parent's lost connection either.
+  const maxAttempts = isTransactionHandle(db) ? 1 : 8;
+  for (let attempt = 1; ; attempt += 1) {
+    let entered = false;
+    let callbackFailure: { error: unknown } | undefined;
+    try {
+      return await db.transaction(async (tx) => {
+        entered = true;
+        try {
+          return await fn(tx as unknown as Database);
+        } catch (error) {
+          callbackFailure = { error };
+          throw error;
+        }
+      }, transactionConfig);
+    } catch (error) {
+      // A provider/tool rejection propagated by a successful rollback is still
+      // the provider/tool's error, even if it has a connection-looking code.
+      if (callbackFailure && callbackFailure.error === error) throw error;
+      if (
+        !entered &&
+        attempt < maxAttempts &&
+        (nestedPostgresSqlState(error) === "53300" ||
+          isDatabaseConnectionLoss(error) ||
+          isRetryableDatabaseTransportFailure(error))
+      ) {
+        // Equal jitter, 250 ms doubling to 4 s: at most 15.75 s of backoff.
+        // No pooled connection is held while waiting; each try reacquires one.
+        const ceilingMs = Math.min(250 * 2 ** (attempt - 1), 4_000);
+        await new Promise((resolve) => setTimeout(resolve, ceilingMs * (0.5 + Math.random() / 2)));
+        continue;
       }
-    }, transactionConfig);
-  } catch (error) {
-    // A provider/tool rejection propagated by a successful rollback is still
-    // the provider/tool's error, even if it has a connection-looking code.
-    if (callbackFailure && callbackFailure.error === error) throw error;
-    if (!isDatabasePersistenceFailure(error)) throw error;
-    throw new DatabaseTransactionError(
-      entered ? "settlement" : "admission",
-      error,
-      callbackFailure?.error,
-    );
+      if (!isDatabasePersistenceFailure(error)) throw error;
+      throw new DatabaseTransactionError(
+        entered ? "settlement" : "admission",
+        error,
+        callbackFailure?.error,
+      );
+    }
   }
 }
 

@@ -13,16 +13,23 @@ test("live admission projection never retains a prior transactional write advert
     connectionInstanceId: "runner-a",
     workspaceRoot: "/workspace",
     opStream: false,
-    agentCapabilities: { transactionalFsWrite: true },
+    agentCapabilities: { transactionalFsWrite: true, transactionalFsWriteMachine: true },
   } as unknown as EnrollmentRecord;
   expect(connectionBindingFor(services, enrollment)?.transactionalFsWriteSupported).toBe(true);
+  expect(connectionBindingFor(services, enrollment)?.transactionalFsWriteMachineSupported).toBe(
+    true,
+  );
   enrollment.agentCapabilities = { transactionalFsWrite: false };
   expect(connectionBindingFor(services, enrollment)?.transactionalFsWriteSupported).toBe(false);
+  expect(connectionBindingFor(services, enrollment)?.transactionalFsWriteMachineSupported).toBe(
+    false,
+  );
   enrollment.agentCapabilities = {};
   enrollment.connectionInstanceId = "runner-b";
   expect(connectionBindingFor(services, enrollment)).toMatchObject({
     connectionInstanceId: "runner-b",
     transactionalFsWriteSupported: false,
+    transactionalFsWriteMachineSupported: false,
   });
   expect(connectionBindingFor(services, null)).toBeNull();
 });

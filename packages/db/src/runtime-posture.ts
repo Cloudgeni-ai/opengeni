@@ -618,6 +618,7 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
   "finalize_scoped_enrollment(uuid, uuid, text, text, boolean, boolean, text, text, text, boolean)",
   "list_scoped_enrollments(uuid, uuid, uuid, text)",
   "get_scoped_sandbox(uuid, uuid, uuid)",
+  "get_session_machine_access(uuid, uuid, uuid)",
   "authorize_scoped_sandbox_attach(uuid, uuid, uuid)",
   "materialize_scoped_rig_version_for_attempt(uuid, uuid, uuid, uuid, uuid, integer)",
   "authorize_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid)",

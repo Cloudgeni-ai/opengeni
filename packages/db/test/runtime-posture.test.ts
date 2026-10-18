@@ -2430,6 +2430,7 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("scoped_machine_dependent_sessions") ||
         routine.name.includes("personal_machine") ||
         routine.name.startsWith("get_session_attempt_machine(") ||
+        routine.name.startsWith("get_session_machine_access(") ||
         routine.name.includes("connected_machine_audience") ||
         routine.name.includes("subscription_codex_refresh") ||
         routine.name.includes("authorize_subscription_ownerless_session_access") ||

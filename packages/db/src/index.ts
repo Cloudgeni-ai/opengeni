@@ -1,3 +1,4 @@
+export { getSessionMachineAccess } from "./session-machine-access";
 import {
   decodeActivityXid,
   encodeActivityXid,
@@ -49962,7 +49963,7 @@ export async function failWarmingToCold(
 }
 
 // Opengeni compute's fabric sleeps an idle sandbox itself and keeps its memory
-// and disk, so a compute lease is never drained for being idle (0840): it stays
+// and disk, so a compute lease is never drained for being idle (0843): it stays
 // warm without holders until its group ends or it rotates. A rotation or an
 // archive capture still drains it.
 function computeLeaseStaysWarmWhenIdle(
@@ -51291,9 +51292,16 @@ async function deadlineOwnerQuiescencePending(
   return false;
 }
 
+/** Backends whose retained commands outlive their turn and can therefore be the
+ * only thing keeping a box warm. Docker and local commands run under an
+ * in-sandbox supervisor and have no provider deadline, so only this idle rule
+ * ever drains such a box. Matches `list_command_containment_candidates`. */
+const COMMAND_CONTAINMENT_BACKENDS: ReadonlySet<string> = new Set(["modal", "docker", "local"]);
+
 /**
- * Contain legacy retained commands that are the only thing keeping a Modal box
- * warm. One rule decides, independent of command health: the lease holds only
+ * Contain unsupervised retained commands that are the only thing keeping a
+ * Modal, Docker or local box warm (on Modal, the legacy ones without native
+ * supervision). One rule decides, independent of command health: the lease holds only
  * process holders and their parent admissions, no supervised process, capture
  * or reaper hold, and either the whole sandbox group has been idle for
  * `idleCommandContainmentMs`, or a provider-deadline rotation's bounded stop
@@ -51356,7 +51364,7 @@ export async function enrollRetainedCommandContainment(
     const initial = await readLease(tx, input.workspaceId, input.sandboxGroupId);
     if (
       !initial ||
-      initial.backend !== "modal" ||
+      !COMMAND_CONTAINMENT_BACKENDS.has(initial.backend) ||
       !initial.instanceId ||
       !["warm", "draining"].includes(initial.liveness)
     )
@@ -51400,7 +51408,8 @@ export async function enrollRetainedCommandContainment(
         (coalesce(process.provider_command, '{}'::jsonb) ? 'supervision') as supervised,
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
-          and process.provider_backend = 'modal' and process.route_target_id is null) as owned,
+          and process.provider_backend = ${initial.backend}
+          and process.route_target_id is null) as owned,
         coalesce(${deadlineRotation}
           and process.deadline_cancellation_requested_at < ${deadlineGrace}
           and process.reconcile_attempts >= 1
@@ -54881,6 +54890,9 @@ export async function retainWorkspaceMutationProcess(
       commandId: string;
       command: string;
     };
+    /** A Docker or local command under the in-sandbox supervisor: any worker
+     * built with that supervisor can reach it, older ones cannot. */
+    inSandboxSupervisor?: boolean;
     owner:
       | {
           kind: "turn";
@@ -55127,6 +55139,7 @@ export async function retainWorkspaceMutationProcess(
               routeTargetId: admission.route_target_id,
               routeEpoch: Number(admission.route_epoch),
               providerSessionId: input.providerSessionId,
+              reconcilerVersion: input.inSandboxSupervisor ? 2 : 1,
               // The retained process inherits the EXACT authority admitted with
               // its parent operation. It is copied, never re-resolved: the
               // process may outlive the request or turn behind it, and a later
@@ -55245,6 +55258,72 @@ export async function getRetainedProcess(
   });
 }
 
+/** The session background command a later turn of the same session reaches
+ * by the provider handle an earlier turn returned to the model. The handle is
+ * a lookup key here, not authority: the row must be an active process of this
+ * exact session, on the caller's exact home lease epoch and provider instance,
+ * whose lifecycle was transferred to a still-running background command.
+ * Anything else, or more than one match, is null. */
+export async function findRunningSessionBackgroundProcess(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    providerSessionId: number;
+    providerBackend: string;
+    /** Omit only when the caller binds the result to an exact live backend
+     * identity itself; more than one match is then null as well. */
+    providerInstanceId?: string | undefined;
+    leaseEpoch?: number | undefined;
+  },
+): Promise<SandboxRetainedProcess | null> {
+  if (!Number.isSafeInteger(input.providerSessionId) || input.providerSessionId <= 0) return null;
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const process = schema.sandboxRetainedProcesses;
+    const background = schema.sessionBackgroundCommands;
+    const rows = await scopedDb
+      .select()
+      .from(process)
+      .where(
+        and(
+          eq(process.workspaceId, input.workspaceId),
+          eq(process.sessionId, input.sessionId),
+          eq(process.providerSessionId, input.providerSessionId),
+          eq(process.state, "active"),
+          eq(process.providerBackend, input.providerBackend),
+          ...(input.providerInstanceId === undefined
+            ? []
+            : [eq(process.providerInstanceId, input.providerInstanceId)]),
+          ...(input.leaseEpoch === undefined ? [] : [eq(process.leaseEpoch, input.leaseEpoch)]),
+          eq(process.routeKind, "home"),
+          isNull(process.routeTargetId),
+          exists(
+            scopedDb
+              .select({ id: background.id })
+              .from(background)
+              .where(
+                and(
+                  eq(background.workspaceId, process.workspaceId),
+                  eq(background.sessionId, process.sessionId),
+                  eq(background.retainedProcessId, process.id),
+                  eq(background.state, "running"),
+                ),
+              ),
+          ),
+        ),
+      )
+      .limit(2);
+    return rows.length === 1 ? mapRetainedProcess(rows[0]!) : null;
+  });
+}
+
+/** The newest retained-process kind this build's reaper can reach. Version 2
+ * adds Docker and local commands under the in-sandbox supervisor. The claim
+ * returns only rows at or below the caller's version, so during a rolling
+ * deploy an older worker's reaper leaves newer rows to a newer worker instead
+ * of probing its own memory for them and settling a live command as lost. */
+export const RETAINED_PROCESS_RECONCILER_VERSION = 2;
+
 /** Claim a bounded, oldest-due batch of active retained processes whose exact
  * owner attempt is closed, whose direct request returned, or whose lifecycle
  * was explicitly transferred to a session background command. Claim
@@ -55279,7 +55358,8 @@ export async function claimTerminalRetainedProcesses(
       select account_id, workspace_id, session_id, process_id, claim_id,
         owner_state, owner_attempt_outcome
       from opengeni_private.claim_terminal_retained_processes(
-        ${input.claimId}::uuid, ${input.limit}::integer, ${input.claimTtlMs}::bigint
+        ${input.claimId}::uuid, ${input.limit}::integer, ${input.claimTtlMs}::bigint,
+        ${RETAINED_PROCESS_RECONCILER_VERSION}::integer
       )
     `,
   );
@@ -83552,8 +83632,14 @@ function backgroundCommandTerminalMutation(input: {
         events.push(mapEvent(finishedEvent));
         return;
       }
-      const classification: SystemUpdateClassification =
-        command.state === "exited" && command.exitCode === 0 && !command.failure
+      // A command stopped on request (a person's Stop, the agent's own stop, or
+      // a session Pause/Cancel) did not finish on its own; its exit code says
+      // only how it ended (a terminal wrapper can even report 0).
+      const stoppedOnRequest =
+        command.state === "exited" && command.cancelRequestedAt !== null && !command.failure;
+      const classification: SystemUpdateClassification = stoppedOnRequest
+        ? "info"
+        : command.state === "exited" && command.exitCode === 0 && !command.failure
           ? "success"
           : "failure";
       const commandLabel = command.commandPreview || "Background command";
@@ -83568,9 +83654,11 @@ function backgroundCommandTerminalMutation(input: {
               ? `\`${commandLabel}\` is no longer running because its sandbox was shut down or lost; whether it finished is unknown. Check its effects before running it again.`
               : command.state === "lost"
                 ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
-                : command.exitCode === 0
-                  ? `${commandLabel}: completed successfully.`
-                  : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+                : stoppedOnRequest
+                  ? `\`${commandLabel}\` was stopped.`
+                  : command.exitCode === 0
+                    ? `${commandLabel}: completed successfully.`
+                    : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,

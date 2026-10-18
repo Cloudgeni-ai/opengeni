@@ -2325,11 +2325,12 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0842_compute_lease_group_end_and_sleep.sql",
-      "0841_compute_commands_settle_by_push.sql",
-      "0840_compute_leases_skip_idle_drain.sql",
-      "0839_sandbox_enrollments.sql",
+      "0845_compute_lease_group_end_and_sleep.sql",
+      "0844_compute_commands_settle_by_push.sql",
+      "0843_compute_leases_skip_idle_drain.sql",
+      "0842_sandbox_enrollments.sql",
       "0838_reclaim_exited_backend_runtime_capabilities.sql",
+      "0841_session_machine_access_explanation.sql",
       "0837_hot_session_tables_analyze_cadence.sql",
       "0836_cheaper_session_write_fences.sql",
       "0832_schedule_defaults_and_turn_notifications.sql",
@@ -2854,6 +2855,8 @@ describe("release schema contract", () => {
       "0793_private_site_sessions.sql",
       "0794_site_ai_insights.sql",
       "0795_site_lifecycle_cancellation.sql",
+      "0839_docker_local_command_containment.sql",
+      "0840_retained_process_reconciler_version.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

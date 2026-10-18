@@ -2013,6 +2013,9 @@ BEGIN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.finalize_scoped_enrollment(uuid, uuid, text, text, boolean, boolean, text, text, text, boolean) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_scoped_enrollments(uuid, uuid, uuid, text) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.get_scoped_sandbox(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      IF to_regprocedure(format('%I.get_session_machine_access(uuid,uuid,uuid)', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.get_session_machine_access(uuid,uuid,uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      END IF;
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.authorize_scoped_sandbox_attach(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.materialize_scoped_rig_version_for_attempt(uuid, uuid, uuid, uuid, uuid, integer) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.authorize_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid) TO %I', ${literal(schema)}, ${literal(role)});

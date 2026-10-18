@@ -53,6 +53,8 @@ for (const fromSession of [undefined, sessionId]) {
         root.render(<RouterProvider router={router} />);
       });
       expect(container.textContent).toContain("notes.txt");
+      // Nothing to look at: a link opens the file's page, where Download is.
+      expect(document.body.querySelector("[data-artifact-fullscreen]")).toBeNull();
       const links = [...container.querySelectorAll("a")].filter(
         (link) => link.textContent?.trim() === "Artifacts",
       );

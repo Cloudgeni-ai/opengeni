@@ -61,6 +61,7 @@ import {
   pgSchema,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -10369,10 +10370,10 @@ export const sandboxLeases = pgTable(
       enum: ["provider_deadline", "operator", "teardown_claim"],
     }),
     // A chat or workspace deletion ended this compute lease's group: its
-    // sandbox is deleted without a workspace capture (0842).
+    // sandbox is deleted without a workspace capture (0845).
     groupEndRequestedAt: timestamp("group_end_requested_at", { withTimezone: true }),
     // The agent gateway reported the current compute sandbox asleep since then;
-    // warm time does not accrue while it sleeps (0842).
+    // warm time does not accrue while it sleeps (0845).
     computeAsleepSince: timestamp("compute_asleep_since", { withTimezone: true }),
     // The SQL migration owns the two DEFERRABLE foreign keys and deferred
     // scope/state constraint triggers. Drizzle does not model deferrability, so
@@ -10900,6 +10901,11 @@ export const sandboxRetainedProcesses = pgTable(
     reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", {
       withTimezone: true,
     }),
+    // The oldest reconciler that can reach this process (migration 0840).
+    // Docker and local commands under the in-sandbox supervisor are 2: a
+    // worker built before that supervisor would look for them in its own
+    // memory and settle a live command as lost, so its claim skips them.
+    reconcilerVersion: smallint("reconciler_version").notNull().default(1),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -11624,7 +11630,7 @@ export const enrollments = pgTable(
     originWorkspaceId: uuid("origin_workspace_id"),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
     // 'machine' is a Connected Machine. 'sandbox' is the agent inside one
-    // Opengeni compute sandbox (migration 0839): bound to its sandbox group,
+    // Opengeni compute sandbox (migration 0842): bound to its sandbox group,
     // reached through the agent gateway, with no key or bearer, and never
     // listed, offered, attached or granted as a machine.
     kind: text("kind", { enum: enrollmentKindValues }).notNull().default("machine"),

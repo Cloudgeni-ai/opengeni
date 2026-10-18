@@ -37,7 +37,7 @@ Nothing in Opengeni may message a compute agent on a timer: every message
 wakes the sandbox. Liveness comes from the gateway's session and claim. A
 background command on a compute sandbox settles from the agent's pushed
 completion; the reconciler claims it only after that push or once it is
-retired (connection replaced, enrollment revoked), never to poll it (0841).
+retired (connection replaced, enrollment revoked), never to poll it (0844).
 A stopping command (Stop, Pause or Cancel) is still claimed, because that
 claim delivers the cancellation to the agent.
 
@@ -77,10 +77,10 @@ skips sandbox enrollments, and machine routes list machines only.
 - **Idle**: when the last holder releases a compute lease, nothing is
   captured or deleted. The fabric sleeps the sandbox by its own rules and
   keeps memory and disk; Opengeni never drains a compute lease for being idle
-  (migration 0840 and the drain points in `packages/db/src/index.ts`). The
+  (migration 0843 and the drain points in `packages/db/src/index.ts`). The
   next turn finds the same sandbox and its first request wakes it.
 - **Group end**: deleting the chat or workspace marks the lease
-  (`group_end_requested_at`, migration 0842) and drains it at once. The reaper
+  (`group_end_requested_at`, migration 0845) and drains it at once. The reaper
   then deletes the sandbox on the fabric without a tar capture and revokes its
   enrollment; the lease's capture fence still decides who may terminate it,
   and a fence loss leaves the box for its new owner. The marker is cleared
@@ -138,4 +138,4 @@ otherwise. See "Run as another local user" in `docs/connected-machines.md`.
 Canonical code: `packages/runtime/src/sandbox/compute/`,
 `packages/runtime/src/sandbox/providers/compute.ts`,
 `packages/core/src/sandbox/compute-plane.ts`,
-`apps/api/src/sandbox/compute-gateway*.ts`, migrations 0839 to 0842.
+`apps/api/src/sandbox/compute-gateway*.ts`, migrations 0842 to 0845.

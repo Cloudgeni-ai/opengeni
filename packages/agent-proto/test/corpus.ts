@@ -117,6 +117,7 @@ export function canonicalHello(): Hello {
       operationResourcePolicy: false,
       operationCpuQuota: false,
       transactionalFsWrite: false,
+      transactionalFsWriteMachine: false,
       credentialRenew: false,
       macPermissions: undefined,
       browserControlHttp: false,

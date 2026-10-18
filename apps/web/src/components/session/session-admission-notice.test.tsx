@@ -29,7 +29,7 @@ function session(reason = "database_claim_rejected", status = "requires_action")
     status,
     admissionBlock: {
       reason,
-      sqlState: "42501 secret-database-detail",
+      sqlState: "42501",
       retryPolicy: "explicit_recheck",
       blockedAt: "2026-09-18T12:00:00Z",
     },
@@ -57,6 +57,86 @@ async function render(overrides: Partial<Parameters<typeof SessionAdmissionNotic
 }
 
 describe("session admission notice", () => {
+  test("a confirmed pointer change offers recheck without claiming the saved message ran", async () => {
+    const onRecheck = await render({
+      session: { ...session(), activeSandboxId: "machine" },
+      machineAccess: {
+        sandboxId: "machine",
+        machineName: "Build box",
+        ownerName: "Alex",
+        isOwner: false,
+        queuedTurnBlocked: true,
+      },
+    });
+    await act(async () =>
+      root!.render(
+        <SessionAdmissionNotice
+          session={{ ...session(), activeSandboxId: "workspace-machine" }}
+          canControl
+          paused={false}
+          busy={false}
+          machineAccess={null}
+          onRecheck={onRecheck}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("Machine changed");
+    expect(container.textContent).toContain("The saved message has not started yet");
+    expect(container.querySelector("button")?.disabled).toBe(false);
+    expect(onRecheck).not.toHaveBeenCalled();
+  });
+  test("known owner mismatch names the machine and disables a futile recheck", async () => {
+    const onRecheck = await render({
+      machineAccess: {
+        sandboxId: "machine",
+        machineName: "Build box",
+        ownerName: "Alex",
+        isOwner: false,
+        queuedTurnBlocked: true,
+      },
+      machineAction: <button>Choose machine</button>,
+    });
+    expect(container.textContent).toContain("This message needs a different machine");
+    expect(container.textContent).toContain("Alex’s personal machine");
+    expect(container.textContent).toContain("The queued message is saved");
+    const recheck = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Recheck access",
+    )!;
+    expect(recheck.disabled).toBe(true);
+    await act(async () => recheck.click());
+    expect(onRecheck).not.toHaveBeenCalled();
+  });
+
+  test("machine owner sees why somebody else's queued message cannot start", async () => {
+    await render({
+      machineAccess: {
+        sandboxId: "machine",
+        machineName: "Build box",
+        ownerName: "Alex",
+        isOwner: true,
+        queuedTurnBlocked: true,
+      },
+    });
+    expect(container.textContent).toContain("your personal machine");
+    expect(container.textContent).toContain("Messages from other people cannot start");
+    expect(container.textContent).toContain("ask a workspace admin to share this machine");
+    expect(container.textContent).not.toContain("Copy request");
+  });
+
+  test("a new machine or a non-permission failure retains ordinary recheck guidance", async () => {
+    await render({
+      machineAccess: {
+        sandboxId: "new-machine",
+        machineName: "My machine",
+        ownerName: "Sam",
+        isOwner: true,
+        queuedTurnBlocked: false,
+      },
+    });
+    expect(container.textContent).not.toContain("This message needs a different machine");
+    expect(container.querySelector("button")?.disabled).toBe(false);
+  });
+
   function control(state: "active" | "paused", version: number) {
     return {
       state,
@@ -189,19 +269,43 @@ describe("session admission notice", () => {
   });
 
   for (const [reason, copy] of [
-    ["database_claim_rejected", "Nothing is needed from you"],
+    ["database_claim_rejected", "blocked by a permission check"],
     ["initiator_membership_required", "person who started this work"],
     ["personal_resource_grant_required", "personal resource"],
-    ["future_reason", "Nothing is needed from you"],
+    ["future_reason", "Ask a workspace admin to investigate"],
   ] as const) {
     test(`safe explanation for ${reason}`, async () => {
       const recheck = await render({ session: session(reason) });
       expect(container.textContent).toContain(copy);
       expect(container.textContent).toContain("will not retry automatically");
+      expect(container.textContent).toContain("queued work is saved");
+      expect(container.textContent).not.toContain("Nothing is needed from you");
       expect(container.innerHTML).not.toContain("secret-database-detail");
       expect(container.innerHTML).not.toContain("42501");
       expect(container.querySelector('[role="status"]')).not.toBeNull();
       expect(recheck).not.toHaveBeenCalled();
+    });
+  }
+
+  test("permission denial explains the prerequisite before rechecking", async () => {
+    await render();
+    expect(container.textContent).toContain("Permission needed");
+    expect(container.textContent).toContain("machine and resources");
+    expect(container.textContent).toContain("After access changes");
+    expect(container.querySelector("button")?.textContent).toBe("Recheck access");
+  });
+
+  for (const sqlState of ["23514", null, "42501 secret-database-detail"]) {
+    test(`non-permission or malformed SQLSTATE gets honest generic recovery: ${sqlState}`, async () => {
+      const value = session();
+      await render({
+        session: { ...value, admissionBlock: { ...value.admissionBlock!, sqlState } } as Session,
+      });
+      expect(container.textContent).toContain("Couldn't start");
+      expect(container.textContent).toContain("Once the problem is fixed");
+      expect(container.textContent).not.toContain("permission check");
+      expect(container.innerHTML).not.toContain("secret-database-detail");
+      expect(container.querySelector("button")?.textContent).toBe("Try again");
     });
   }
 
@@ -256,7 +360,7 @@ describe("session admission notice", () => {
     expect(button.textContent).toBe("Rechecking…");
     await act(async () => finish());
     expect(button.disabled).toBe(false);
-    expect(container.textContent).toContain("Stuck");
+    expect(container.textContent).toContain("Permission needed");
   });
 
   test("failure is announced without exposing server errors", async () => {

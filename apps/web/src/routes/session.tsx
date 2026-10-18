@@ -138,7 +138,15 @@ import { userErrorText } from "@/lib/api-error";
 import { ConsoleComposer } from "@/components/Composer";
 import { CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "@/lib/allowance-labels";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
-import { SessionRunsOnMenuBody, useSessionRunsOn } from "@/components/session/sandbox-switcher";
+import {
+  SessionRunsOnMenuBody,
+  SessionMachinePickerAction,
+  useSessionRunsOn,
+} from "@/components/session/sandbox-switcher";
+import {
+  currentSessionMachineAccess,
+  SessionMachineAccessNotice,
+} from "@/components/session/session-machine-access-notice";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { useSessionOpening } from "@/lib/session-opening";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
@@ -2257,6 +2265,10 @@ function SessionChatPane(props: {
   );
   // "+" > Runs on: the compute this chat runs on and the machines it can move to.
   const runsOn = useSessionRunsOn(props.session.id, props.session.sandboxBackend);
+  const machineAccess = currentSessionMachineAccess(
+    runsOn.fleet.sessionMachineAccess,
+    props.session.activeSandboxId,
+  );
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -2285,7 +2297,7 @@ function SessionChatPane(props: {
   // it here, so it goes through the same move as the machine card (repoint, then
   // a message that carries that consent). Other machines only repoint.
   const runsOnAttach = runsOn.fleet.attach;
-  const runsOnPreviousSandboxId = runsOn.activeMachine?.sandboxId ?? null;
+  const runsOnPreviousSandboxId = runsOn.fleet.activeSandboxId;
   // While the chat runs on the person's own machine (only its owner sees it in
   // their list), each message renews their consent for this chat, so a chat
   // whose move message never landed recovers on the next ordinary Send. The
@@ -2301,10 +2313,13 @@ function SessionChatPane(props: {
     context.accessContext === null ||
     context.accessContext === undefined ||
     hasWorkspacePermission(context.accessContext, props.session.workspaceId, "sessions:control");
+  const reloadSessionAfterMachineChange = props.onReloadSession;
   const moveRunsOn = useCallback(
     async (machine: MachineView): Promise<string | null> => {
       if (!isPersonalMachine(machine)) {
-        await runsOnAttach(machine.sandboxId);
+        if (!(await runsOnAttach(machine.sandboxId)))
+          return "The machine change could not be confirmed. Try refreshing the machine list.";
+        await reloadSessionAfterMachineChange();
         return null;
       }
       const result = await moveChatToMachine({
@@ -2316,12 +2331,17 @@ function SessionChatPane(props: {
         sendMessage: (message) =>
           context.client.sendMessage(props.session.workspaceId, props.session.id, message),
       });
-      return result.moved ? null : result.reason;
+      if (result.moved) await reloadSessionAfterMachineChange();
+      return result.moved
+        ? null
+        : (result.reason ??
+            "The machine change could not be confirmed. Refresh the machine list and try again.");
     },
     [
       context.client,
       props.session.id,
       props.session.workspaceId,
+      reloadSessionAfterMachineChange,
       readChatSendContext,
       runsOnAttach,
       runsOnCanMessage,
@@ -2568,6 +2588,7 @@ function SessionChatPane(props: {
       policyValid: composerPolicyValidRef.current,
       personalDecision:
         personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
+      machineAccessDenied: machineAccess !== null && !machineAccess.isOwner,
       personalLoading:
         durableToolsSaving ||
         durableToolsSaveInFlight.current ||
@@ -3559,6 +3580,16 @@ function SessionChatPane(props: {
               <SessionAdmissionNotice
                 key={`${props.session.workspaceId}:${props.session.id}`}
                 session={props.session}
+                machineAccess={machineAccess}
+                machineAction={
+                  <SessionMachinePickerAction
+                    queuedWork
+                    runsOn={runsOn}
+                    workspaceId={props.session.workspaceId}
+                    rigId={props.session.rigId}
+                    move={moveRunsOn}
+                  />
+                }
                 canControl={workspacePermissions.includes("sessions:control")}
                 paused={admissionControl.state === "paused"}
                 refreshRequired={admissionRefreshRequired}
@@ -3637,8 +3668,27 @@ function SessionChatPane(props: {
                 }}
                 disabled={terminal}
                 header={
-                  unavailableModelNotice || usageLimitNotice ? (
+                  unavailableModelNotice ||
+                  usageLimitNotice ||
+                  (machineAccess && !machineAccess.isOwner) ? (
                     <>
+                      {!(
+                        props.session.admissionBlock?.reason === "database_claim_rejected" &&
+                        props.session.admissionBlock.sqlState === "42501" &&
+                        machineAccess?.queuedTurnBlocked
+                      ) ? (
+                        <SessionMachineAccessNotice
+                          access={machineAccess}
+                          action={
+                            <SessionMachinePickerAction
+                              runsOn={runsOn}
+                              workspaceId={props.session.workspaceId}
+                              rigId={props.session.rigId}
+                              move={moveRunsOn}
+                            />
+                          }
+                        />
+                      ) : null}
                       {unavailableModelNotice}
                       {usageLimitNotice}
                     </>

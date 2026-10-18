@@ -18,6 +18,7 @@ import { isDeepStrictEqual } from "node:util";
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import {
   createProviderCommandRetainer,
+  getRetainedProviderCommand,
   supervisedCommandProtocolReady,
 } from "@opengeni/db/retained-provider-commands";
 import {
@@ -26,6 +27,7 @@ import {
   advanceWorkspaceGenerationForRetainedProcess,
   retainedProviderCommandPersistence,
   advanceWorkspaceGeneration,
+  findRunningSessionBackgroundProcess,
   getRetainedProcess,
   retainWorkspaceMutationProcess,
   retainedProcessSettlementIdentity,
@@ -63,6 +65,7 @@ import {
   establishSandboxSessionFromEnvelope,
   isProviderSandboxGoneDuringRoutedOperation,
   isProviderSandboxNotFoundError,
+  isInSandboxSupervisedProcess,
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -87,6 +90,7 @@ import {
   type RoutingSandboxCaptureWaitObserver,
   type RoutingSandboxWaitObservation,
   type RoutingRetainedProcess,
+  type RoutingRetainedProcessAdoption,
   type RoutingRetainedProcessTerminalProof,
   type SelfhostedOpObserver,
   type SelfhostedConnectionBinding,
@@ -555,6 +559,10 @@ function afterPersistableHomeMutation(
           admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
           operation: op,
           providerBinding: boundAdmission.providerBinding ?? null,
+          inSandboxSupervisor: isInSandboxSupervisedProcess(
+            backend.session,
+            retainedProcess.providerSessionId,
+          ),
           owner: {
             kind: "turn",
             turnId: fence.turnId,
@@ -941,6 +949,49 @@ function adoptRetainedProcessAsBackgroundCommandForTurn(
   };
 }
 
+/** A later turn reaches a background command an earlier turn of this session
+ * started by the handle the model was given. The lookup is only a locator: the
+ * routing session binds the result to its exact home backend or refuses it. */
+function findSessionProcessForTurn(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+  sdkBackendId: string,
+  home?: { leaseEpoch: number; instanceId: string },
+): ((providerSessionId: number) => Promise<RoutingRetainedProcessAdoption | null>) | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  const providerBackend = sandboxBackendForSdkBackendId(sdkBackendId) ?? sdkBackendId;
+  return async (providerSessionId) => {
+    const process = await findRunningSessionBackgroundProcess(services.db, {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      providerSessionId,
+      providerBackend,
+      ...(home ? { leaseEpoch: home.leaseEpoch, providerInstanceId: home.instanceId } : {}),
+    });
+    if (!process) return null;
+    const providerCommand = await getRetainedProviderCommand(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+    });
+    return {
+      process: {
+        id: process.id,
+        providerSessionId: process.providerSessionId,
+        ...(providerCommand ? { providerCommand } : {}),
+      },
+      backend: {
+        sandboxId: null,
+        leaseEpoch: process.leaseEpoch,
+        providerInstanceId: process.providerInstanceId,
+        activeEpoch: process.routeEpoch,
+      },
+    };
+  };
+}
+
 /** Build the selfhosted `ControlRpc` over the events bus's request/reply
  *  connection. A null bus / unconfigured NATS yields a NatsControlRpc whose
  *  connection factory returns null → agent_offline on every op (never a throw). */
@@ -984,6 +1035,9 @@ export function wrapTurnBoxWithRouting(
     services,
     ids,
   );
+  const findSessionProcess = ids.homeLease
+    ? findSessionProcessForTurn(services, ids, established.backendId, ids.homeLease)
+    : undefined;
   const resolver = makeActiveBackendResolver({
     workspaceId: ids.workspaceId,
     defaultBackend: established.session as RoutableBackendSession,
@@ -1196,6 +1250,7 @@ export function wrapTurnBoxWithRouting(
       ? { captureProcessOutput: captureRetainedProcessOutputForTurn(services, ids)! }
       : {}),
     ...(adoptProcessAsBackgroundCommand ? { adoptProcessAsBackgroundCommand } : {}),
+    ...(findSessionProcess ? { findSessionProcess } : {}),
     ...(ids.homeLease
       ? {
           onDefaultBackendError: async ({
@@ -1286,6 +1341,11 @@ export function wrapLazyTurnBoxWithRouting(
     ids,
   );
   const defaultBackend = sandboxBackendForSdkBackendId(args.backendId);
+  // The lazily provisioned home's epoch and instance are known only after
+  // provisioning; the routing session binds the lookup to that exact backend.
+  const findSessionProcess = args.homeLeaseIdentity
+    ? findSessionProcessForTurn(services, ids, args.backendId)
+    : undefined;
   const defaultSupportsPty = defaultBackend
     ? selectBackend(defaultBackend).capabilities.Terminal.pty
     : false;
@@ -1476,6 +1536,7 @@ export function wrapLazyTurnBoxWithRouting(
       ? { captureProcessOutput: captureRetainedProcessOutputForTurn(services, ids)! }
       : {}),
     ...(adoptProcessAsBackgroundCommand ? { adoptProcessAsBackgroundCommand } : {}),
+    ...(findSessionProcess ? { findSessionProcess } : {}),
     ...(args.homeLeaseIdentity
       ? {
           onDefaultBackendError: async ({
@@ -1566,6 +1627,7 @@ export type SelfhostedTurnSessionArgs = {
   operationCpuQuotaSupported: boolean;
   /** Feature advertisement only; refreshed by exact live admission for each operation. */
   transactionalFsWriteSupported?: boolean;
+  transactionalFsWriteMachineSupported?: boolean;
   browserControlHttpSupported?: boolean;
   runAsSupported?: boolean;
   /** The active pointer's epoch — the control-op fence echoed to the agent. */
@@ -1644,6 +1706,8 @@ export function connectionBindingFor(
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
     transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+    transactionalFsWriteMachineSupported:
+      enrollment.agentCapabilities.transactionalFsWriteMachine === true,
     browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
     runAsSupported: enrollment.agentCapabilities.runAs === true,
   };
@@ -1814,6 +1878,7 @@ export async function establishSelfhostedTurnSession(
     operationResourcePolicySupported: args.operationResourcePolicySupported,
     operationCpuQuotaSupported: args.operationCpuQuotaSupported,
     transactionalFsWriteSupported: args.transactionalFsWriteSupported === true,
+    transactionalFsWriteMachineSupported: args.transactionalFsWriteMachineSupported === true,
     browserControlHttpSupported: args.browserControlHttpSupported === true,
     runAsSupported: args.runAsSupported === true,
     resolveOperationAdmission: async () => {

@@ -17,6 +17,7 @@ test("each synchronous composer blocker identifies its recovery reason", () => {
     [{ policyValid: false }, "policy"],
     [{ personalDecision: true }, "personal_decision"],
     [{ personalLoading: true }, "personal_loading"],
+    [{ machineAccessDenied: true }, "machine_permission"],
   ] as const) {
     expect(getComposerSendBlocker({ ...ready, ...change })).toBe(expected);
   }
