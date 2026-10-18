@@ -1417,11 +1417,10 @@ model answer still being written is cut short (its completed text stays), short
 tool calls finish, and long command or session waits return early while the
 work keeps running. The turn then hands over (`turn.superseded` with reason
 `steer`, `atModelStep: true` and, when an answer was cut short, `cutOffText`)
-and the Steer runs next with the full history. While it waits, the queue
-snapshot lists it as a queued turn with `metadata.delivery: "steer"`; the
-session screens show it only as the person's message. `steerQueueItem` with
-`interrupt: true`
-stops the running attempt now instead, including tool calls in flight.
+and the Steer runs next with the full history. The session screens show it
+only as the person's message, and the queue snapshot does not list it.
+`steerQueueItem` with `interrupt: true` on the turn that `steerMessage`
+returned stops the running attempt now instead, including tool calls in flight.
 
 ```ts
 // Queue (default): stacks behind the running turn.
@@ -1431,23 +1430,21 @@ await client.sendMessage(workspaceId, sessionId, {
 });
 
 // Steer: send + promote to the queue front; read within seconds.
-await client.steerMessage(workspaceId, sessionId, {
+const steered = await client.steerMessage(workspaceId, sessionId, {
   text: "Stop — prod is paging, look at that first",
+  clientEventId: crypto.randomUUID(),
+});
+
+// Hard interrupt: stop the running attempt for that Steer now, including
+// tool calls in flight (rarely needed; the Steer is read within seconds).
+await client.steerQueueItem(workspaceId, sessionId, steered.turn.id, {
+  expectedTurnVersion: steered.turn.version,
+  interrupt: true,
   clientEventId: crypto.randomUUID(),
 });
 
 // Manage the server-authoritative queue while it waits.
 const queue = await client.getQueue(workspaceId, sessionId);
-
-// Hard interrupt: stop the running attempt for the waiting Steer.
-const waitingSteer = queue.items.find((turn) => turn.metadata.delivery === "steer");
-if (waitingSteer) {
-  await client.steerQueueItem(workspaceId, sessionId, waitingSteer.id, {
-    expectedTurnVersion: waitingSteer.version,
-    interrupt: true,
-    clientEventId: crypto.randomUUID(),
-  });
-}
 const waiting = queue.items.at(-1)!;
 await client.moveQueueItem(workspaceId, sessionId, waiting.id, {
   expectedQueueVersion: queue.version,

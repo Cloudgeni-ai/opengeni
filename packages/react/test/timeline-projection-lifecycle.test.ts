@@ -168,6 +168,58 @@ describe("projection lifecycle audit regressions", () => {
     expect(work(fold([streamed[0]!, streamed[1]!, handover]))[0]!.outcome).toBe("complete");
   });
 
+  test("cut-off text stays above the Steer that cut it, live or archived", () => {
+    const steer = event(
+      4,
+      "user.message",
+      { text: "What is the status?", delivery: "steer", routing: "accepted_for_steering" },
+      "turn-2",
+    );
+    const handover = event(5, "turn.superseded", {
+      reason: "steer",
+      atModelStep: true,
+      cutOffText: "Looking through the",
+    });
+    const order = (events: SessionEvent[]) =>
+      buildTimeline(englishText, events).flatMap((item) =>
+        item.kind === "agent-message" || item.kind === "user-message" ? [item.text] : [],
+      );
+    const started = event(1, "turn.started");
+    const finished = event(2, "agent.message.completed", { messageId: "a", text: "Checking" });
+    const cut = event(3, "agent.message.delta", { messageId: "b", text: "Looking through the" });
+    const expected = ["Checking", "Looking through the", "What is the status?"];
+    expect(order([started, finished, cut, steer, handover])).toEqual(expected);
+    expect(order([started, finished, steer, handover])).toEqual(expected);
+    // Only the cut message streamed in this turn.
+    expect(order([started, cut, steer, handover])).toEqual([
+      "Looking through the",
+      "What is the status?",
+    ]);
+  });
+
+  test("a Steer that replaces an approval wait closes the turn quietly; the hard interrupt does not", () => {
+    const waiting = [
+      event(1, "turn.started"),
+      event(2, "agent.toolCall.created", { id: "deploy", name: "deploy", arguments: {} }),
+      event(3, "session.requiresAction", { approvals: [{ id: "deploy", name: "deploy" }] }),
+      event(4, "user.message", { text: "Do the staging one first", delivery: "steer" }, "turn-2"),
+    ];
+    const replaced = [
+      ...waiting,
+      event(5, "turn.superseded", { reason: "steer", targetTurnId: "turn-2" }),
+    ];
+    expect(work(fold(replaced))[0]!.outcome).toBe("complete");
+    // Only the historical approval note; nothing reads as interrupted.
+    expect(
+      buildTimeline(englishText, replaced).filter(
+        (item) => item.kind === "notice" && item.tone !== "waiting",
+      ),
+    ).toEqual([]);
+    // The API hard interrupt stops a live attempt and still reads as stopped.
+    const interrupted = [...waiting, event(5, "turn.superseded", { reason: "steer" })];
+    expect(work(fold(interrupted))[0]!.outcome).toBe("cancelled");
+  });
+
   test("a finished message completing after the cut-off one keeps stream order, without repeating it", () => {
     // Claude settles completions only when the cut request ends, after the
     // unfinished message's deltas.

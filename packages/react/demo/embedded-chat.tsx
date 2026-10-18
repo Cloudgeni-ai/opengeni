@@ -337,25 +337,8 @@ const client = fakeClient({
       effectiveControl: control,
       activePersonalConnections: [],
       stoppingPreviousAttempt: false,
-      // A waiting Steer is a queued turn; the session screen never lists it.
-      items:
-        scenario === "steer-waiting"
-          ? [
-              {
-                id: STEER_TURN,
-                workspaceId: WORKSPACE_ID,
-                sessionId: SELECTED,
-                status: "queued",
-                prompt: "Also check whether October was double charged too.",
-                resources: [],
-                version: 1,
-                triggerEventId: events.find((event) => event.turnId === STEER_TURN)?.id,
-                metadata: { delivery: "steer", deferredUntilModelStep: true },
-                createdAt: minutesAgo(0.5),
-                updatedAt: minutesAgo(0.5),
-              },
-            ]
-          : [],
+      // The queue snapshot never lists a prompt accepted for steering.
+      items: [],
       pendingInputs: [],
       pendingInputAttachment: null,
     }) as never,

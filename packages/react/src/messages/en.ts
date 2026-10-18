@@ -2340,7 +2340,7 @@ export const englishMessages = {
     "Show full content for queued prompt {number}",
   "queueSurfaceImplementation.steer": "Steer",
   "queueSurfaceImplementation.steerInterruptTheCurrentTurn":
-    "Steer — interrupt the current turn and send this message now",
+    "Steer — the agent reads this message now, without stopping its work",
   "queueSurfaceImplementation.steerQueuedPromptIndex": "Steer queued prompt {index}",
   "queueSurfaceImplementation.thatPromptChangedBeforeIt":
     "That prompt changed before it could be moved to the composer.",
@@ -2705,7 +2705,7 @@ export const englishMessages = {
   "sessionChrome.steer": "Steer",
   "sessionChrome.steerLatestQueuedMessage": "Steer latest queued message",
   "sessionChrome.steerQueuedPromptIndex": "Steer queued prompt {index}",
-  "sessionChrome.steerTip": "Interrupt the current turn and send this message now",
+  "sessionChrome.steerTip": "The agent reads this message now, without stopping its work",
   "sessionChrome.theApplicationSUsagePolicy":
     "The application's usage policy blocks another run. Resume when it allows.",
   "sessionChrome.theSelectedModelIsBlocked":

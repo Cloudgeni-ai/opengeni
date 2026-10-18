@@ -1172,11 +1172,14 @@ first admission hands over before any inference, so the next model request
 reads them together. The session screens show a Steer only as the person's
 message: the timeline draws it where it was sent, closes the handed-over turn
 quietly and continues with the Steer turn's work, and the queue surfaces list
-nothing for a waiting Steer (it is not a queued message the person can
-reorder). A queued Send is unaffected and still runs after the whole turn.
-`steerQueueItem` with `interrupt: true` (an API option on the waiting Steer
-turn, `metadata.delivery: "steer"`; the web and React Native surfaces no longer
-offer it)
+nothing for a waiting Steer (the queue snapshot excludes a turn accepted for
+steering). A turn that a Steer replaced while it only waited (an approval, a
+question or capacity; its `turn.superseded` names `targetTurnId` or
+`targetUpdateId`) also closes quietly, and its approvals stop being
+actionable. A queued Send is unaffected and still runs after the whole turn.
+`steerQueueItem` with `interrupt: true` (an API option on the Steer's turn as
+`steerMessage` returned it; the web and React Native surfaces no longer offer
+it)
 keeps the earlier behaviour: it inserts the interruption row, moves the row to
 the head and stops the live attempt now, including tool calls in flight. The
 workspace setting `busySend` (`queue` by default) and the composer's `busySend`

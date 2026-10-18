@@ -1624,13 +1624,20 @@ export function buildTimeline(
         if (event.type === "turn.cancelled" && turnId && !prescan.startedTurnIds.has(turnId)) {
           break;
         }
-        // The turn handed over to a Steer at a safe boundary (its next model
-        // step, or right after a context compaction). Nothing was cut off: the
-        // agent reads the message next and carries on, so the turn closes
-        // quietly instead of as interrupted.
+        // The turn handed over to a Steer at a safe boundary: its next model
+        // step, right after a context compaction, or while it only waited (an
+        // approval, a question or capacity; those supersessions name their
+        // target). No running work was stopped: the agent reads the message
+        // next and carries on, so the turn closes quietly instead of as
+        // interrupted. Only the API hard interrupt stops a live attempt.
+        const steerReplacedWait =
+          (payload.reason === "steer" || payload.reason === "agent_steer") &&
+          (typeof payload.targetTurnId === "string" || typeof payload.targetUpdateId === "string");
         if (
           event.type === "turn.superseded" &&
-          (payload.atModelStep === true || payload.deferredUntilCompaction === true)
+          (payload.atModelStep === true ||
+            payload.deferredUntilCompaction === true ||
+            steerReplacedWait)
         ) {
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
@@ -1638,7 +1645,9 @@ export function buildTimeline(
           // stays visible, after the messages that did finish (their
           // completions arrive only when the cut request ends). When those
           // deltas are absent (an archived history) the recorded cut-off text
-          // stands in, as a plain progress note rather than an error.
+          // stands in, as a plain progress note rather than an error. Either
+          // way it stays with this turn's work, before the Steer's own
+          // message, which was recorded while this request still streamed.
           const cutOffText = stringValue(payload.cutOffText);
           const unsettled = items.filter(
             (item): item is AgentMessageItem =>
@@ -1646,26 +1655,44 @@ export function buildTimeline(
               item.turnId === turnId &&
               unsettledStreamedMessages.has(item),
           );
+          const insertAfterTurnWork = (moved: TimelineItem[], fallbackIndex: number): void => {
+            let anchor = fallbackIndex - 1;
+            for (let index = items.length - 1; index >= 0; index -= 1) {
+              const item = items[index]!;
+              if ("turnId" in item && item.turnId === turnId) {
+                anchor = index;
+                break;
+              }
+            }
+            items.splice(anchor + 1, 0, ...moved);
+          };
           if (cutOffText && unsettled.length > 0) {
+            const firstIndex = items.indexOf(unsettled[0]!);
             for (const item of unsettled) {
               items.splice(items.indexOf(item), 1);
-              items.push(item);
               unsettledStreamedMessages.delete(item);
             }
+            insertAfterTurnWork(unsettled, firstIndex);
           }
           if (cutOffText && unsettled.length === 0) {
             closeStreamingTail();
-            items.push({
-              kind: "agent-message",
-              id: `${event.id}:cut-off`,
-              turnId,
-              text: cutOffText,
-              phase: "commentary",
-              streaming: false,
-              occurredAt: event.occurredAt,
-            });
+            insertAfterTurnWork(
+              [
+                {
+                  kind: "agent-message",
+                  id: `${event.id}:cut-off`,
+                  turnId,
+                  text: cutOffText,
+                  phase: "commentary",
+                  streaming: false,
+                  occurredAt: event.occurredAt,
+                },
+              ],
+              items.length,
+            );
           }
-          finalizeOpen(turnId, "complete", event.occurredAt);
+          // A call still waiting for approval or an answer never ran.
+          finalizeOpen(turnId, steerReplacedWait ? "cancelled" : "complete", event.occurredAt);
           items.push(turnEndItem(event, "complete", null));
           break;
         }
