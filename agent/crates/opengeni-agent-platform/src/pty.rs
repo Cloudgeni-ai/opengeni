@@ -186,6 +186,15 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
     cmd.args(&argv[1..]);
     if !req.cwd.is_empty() {
         cmd.cwd(&req.cwd);
+    } else if let Some(identity) = &identity {
+        // Without a cwd the terminal starts where a login would: the user's
+        // home, or `/` when the account has none (login(1) does the same).
+        // portable-pty would otherwise chdir into $HOME and fail.
+        if identity.home.is_dir() {
+            cmd.cwd(&identity.home);
+        } else {
+            cmd.cwd("/");
+        }
     }
     if let Some(identity) = &identity {
         for (k, v) in identity.login_env() {

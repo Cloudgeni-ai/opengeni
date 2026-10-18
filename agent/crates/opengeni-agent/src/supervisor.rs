@@ -3732,6 +3732,7 @@ mod tests {
                 path: "after-idle".into(),
                 parents: false,
                 mode: 0o700,
+                run_as: String::new(),
             })),
         };
         client

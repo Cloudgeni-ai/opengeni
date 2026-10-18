@@ -124,7 +124,8 @@ async fn exec_runs_with_the_users_ids_groups_and_login_environment() {
 #[tokio::test]
 async fn the_child_cannot_regain_root() {
     let Some(_) = identity() else { return };
-    let platform = NativePlatform::with_root(shared_dir().path());
+    let dir = shared_dir();
+    let platform = NativePlatform::with_root(dir.path());
     let reply = exec_as(
         &platform,
         "grep -E '^(Uid|Gid|CapEff)' /proc/self/status",
@@ -132,6 +133,7 @@ async fn the_child_cannot_regain_root() {
     )
     .await;
     let status = String::from_utf8_lossy(&reply.stdout);
+    assert_eq!(status.lines().count(), 3, "{status}");
     for line in status.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         match fields[0] {
@@ -177,7 +179,8 @@ async fn the_agent_keeps_its_own_identity() {
 #[tokio::test]
 async fn unknown_users_fail_with_their_typed_error() {
     let Some(_) = identity() else { return };
-    let platform = NativePlatform::with_root(shared_dir().path());
+    let dir = shared_dir();
+    let platform = NativePlatform::with_root(dir.path());
     let error = platform
         .exec(&v1::ExecRequest {
             command: vec!["true".to_string()],
@@ -365,7 +368,7 @@ fn pty_children_run_as_the_user_and_own_their_terminal() {
             command: vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "echo \"$(id -u) $USER $(stat -c %u \"$(tty)\")\"".into(),
+                "echo \"$(id -u) $USER $(stat -c %u \"$(tty)\") $(pwd)\"".into(),
             ],
             run_as: USER.into(),
             ..Default::default()
@@ -387,8 +390,14 @@ fn pty_children_run_as_the_user_and_own_their_terminal() {
         }
     }
     let text = String::from_utf8_lossy(&output);
+    // With no cwd the terminal starts in the user's home, or `/` without one.
+    let start = if user.home.is_dir() {
+        user.home.display().to_string()
+    } else {
+        "/".to_string()
+    };
     assert_eq!(
         text.trim(),
-        format!("{} {} {}", user.uid, user.name, user.uid)
+        format!("{} {} {} {start}", user.uid, user.name, user.uid)
     );
 }
