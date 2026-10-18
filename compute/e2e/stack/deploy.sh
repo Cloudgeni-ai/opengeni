@@ -137,10 +137,10 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg nats "$na
     api: {image: img("opengeni-api")},
     worker: {image: img("opengeni-worker")},
     web: {image: img("opengeni-web")},
-    # One relay: it pairs the two dials of a stream in the memory of one replica, and
-    # Caddy here has no channel affinity (docs/deployment.md, "Ingress channel
-    # affinity"); the autoscaler of the chart would otherwise keep two.
-    relay: {enabled: true, replicaCount: 1, autoscaling: {enabled: false}, image: img("opengeni-relay")},
+    # The default relays of the chart (two, autoscaled); Caddy below sends
+    # both dials of a channel to the same one (docs/deployment.md, "Ingress
+    # channel affinity").
+    relay: {enabled: true, image: img("opengeni-relay")},
     postgres: {enabled: true, auth: {existingSecret: "opengeni-postgres"},
       args: ["-c", "max_connections=500"],
       runtime: {existingSecret: "opengeni-runtime"}},
@@ -183,11 +183,22 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg nats "$na
       storedImages: {opengeni: $sandbox, "opengeni-desktop": $desktop},
       gcpGroup: $group,
       scaling: {hostMemoryMib: $hostmib, min: ($hosts | tonumber), max: (($hosts | tonumber) + 2)},
-      hostsService: {type: "NodePort", nodePort: $port}
+      hostsService: {type: "NodePort", nodePort: $port},
+      # Every sandbox checkpoints each minute (default ten), so every check
+      # runs across checkpoints and the checkpoint check sees one.
+      extraArgs: ["--checkpoint-every-s=60"]
     }
   }' >"$HOME/e2e/values.json"
 
 log "helm upgrade --install $release ($chart at $COMPUTE_SHA, images $OPENGENI_TAG)"
+if [ "${FRESH:-0}" = 1 ] && helm status "$release" -n "$ns" >/dev/null 2>&1; then
+  # FRESH=1: a new database (Opengeni's and the fleet's), object store and
+  # NATS, as a first install has. The secrets above stay; the hosts register
+  # again when the new fleet service starts.
+  log "FRESH=1: removing release $release and its volumes"
+  helm uninstall "$release" -n "$ns" --wait --timeout 10m
+  k delete pvc -l "app.kubernetes.io/instance=$release" --wait --timeout 5m
+fi
 # No --wait: the chart migrates Opengeni's database in a post-install hook,
 # which Helm would only run once every pod is ready, and the pods are not
 # ready before the migrations. Helm still waits for the hook Jobs; the
@@ -201,6 +212,28 @@ done
 log "Caddy for $app, $relay, $files and $nats"
 ip() { k get svc "$1" -o jsonpath='{.spec.clusterIP}'; }
 port() { k get svc "$1" -o jsonpath="{.spec.ports[?(@.name==\"$2\")].port}"; }
+# The relay pairs a channel's two dials in one replica's memory, so Caddy
+# sends both to the same replica: it resolves every relay pod through a
+# headless Service of this environment (cluster DNS) and hashes the dial's
+# channel query (docs/deployment.md, "Ingress channel affinity").
+relay_pods=$release-e2e-relay-pods
+relay_port=$(k get deploy "$full-relay" -o jsonpath='{.spec.template.spec.containers[0].ports[?(@.name=="wss")].containerPort}')
+relay_selector=$(k get svc "$full-relay" -o json | jq -r '.spec.selector | to_entries[] | "    \(.key): \(.value)"')
+k apply -f - >/dev/null <<SVC
+apiVersion: v1
+kind: Service
+metadata:
+  name: $relay_pods
+spec:
+  clusterIP: None
+  selector:
+$relay_selector
+  ports:
+    - name: wss
+      port: $relay_port
+      targetPort: wss
+SVC
+dns=$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 $app {
 	@api path /v1/* /healthz /install.sh /install.ps1 /uninstall.sh /opengeni-agent-minisign.pub /agent/* /.well-known/*
@@ -208,7 +241,15 @@ $app {
 	reverse_proxy $(ip "$full-web"):$(port "$full-web" http)
 }
 $relay {
-	reverse_proxy $(ip "$full-relay"):$(k get svc "$full-relay" -o jsonpath='{.spec.ports[0].port}')
+	reverse_proxy {
+		dynamic a {
+			name $relay_pods.$ns.svc.cluster.local
+			port $relay_port
+			resolvers $dns
+			refresh 5s
+		}
+		lb_policy query channel
+	}
 }
 $files {
 	reverse_proxy $(ip "$full-garage"):3900

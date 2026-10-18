@@ -8,13 +8,19 @@ export type Status = "pass" | "fail" | "skip" | "n/a";
  * `from` and `to`, when the next request woke it. */
 export type LevelProof = { kind: "level"; sandbox: string; level: string; from: string; to: string };
 
+/** That the host checkpointed the running sandbox (a completed checkpoint
+ * step) between `from` and `to`, while the check's streams stayed open. */
+export type CheckpointProof = { kind: "checkpoint"; sandbox: string; from: string; to: string };
+
+export type Proof = LevelProof | CheckpointProof;
+
 export type Result = {
   id: string;
   title: string;
   status: Status;
   detail: string;
   seconds: number;
-  proofs?: LevelProof[];
+  proofs?: Proof[];
 };
 
 export type Meta = {
@@ -37,7 +43,7 @@ export function render(meta: Meta, results: Result[], verified: boolean): string
     `${counts(results, "pass")} passed, ${counts(results, "fail")} failed, ${counts(results, "skip")} skipped, ` +
       `${counts(results, "n/a")} not applicable.`,
     ...(proofs && !verified
-      ? ["", "Not yet verified: the sleep checks pass only once the hosts' journals show each level (env.sh suite does that)."]
+      ? ["", "Not yet verified: the sleep and checkpoint checks pass only once the hosts' journals show each level or checkpoint (env.sh suite does that)."]
       : []),
     "",
     `| check | result | seconds | detail |`,

@@ -264,7 +264,7 @@ deploy() {
   [ -f "$STATE/model.env" ] && model=$STATE/model.env
   log "deploy on $STACK (log in $STATE/deploy.log)"
   # The model's key travels on stdin, never on a command line.
-  on "STACK_IP=$(stack_ip) HOSTS=$HOSTS ZONE=$ZONE HOSTS_PORT=$HOSTS_PORT bash e2e/deploy.sh" \
+  on "STACK_IP=$(stack_ip) HOSTS=$HOSTS ZONE=$ZONE HOSTS_PORT=$HOSTS_PORT FRESH=${FRESH:-0} bash e2e/deploy.sh" \
     <"$model" >"$STATE/deploy.log" 2>&1 || { tail -60 "$STATE/deploy.log" >&2; return 1; }
   tail -5 "$STATE/deploy.log" >&2
 }

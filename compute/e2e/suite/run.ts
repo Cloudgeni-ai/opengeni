@@ -14,7 +14,7 @@ import { hostname, tmpdir } from "node:os";
 import { request as httpsRequest } from "node:https";
 import { connect as tlsConnect } from "node:tls";
 import { describeFrame, frameStats, notAFrame } from "./frame.ts";
-import { counts, render, type LevelProof, type Result, type Status } from "./report.ts";
+import { counts, render, type Proof, type Result, type Status } from "./report.ts";
 
 const env = (name: string, fallback?: string): string => {
   const value = process.env[name] ?? fallback;
@@ -558,135 +558,251 @@ check("git", "git status and log of a repository in the sandbox", ["create"], as
   return `head ${status.head}, untracked b.txt, one commit`;
 });
 
-check("terminal", "a command typed into the interactive terminal runs in the sandbox", ["create"], async () => {
-  // The web app's way in: attach a terminal viewer, which mints the terminal
-  // plane, then speak that plane. On a compute sandbox the agent serves it as a
-  // relay PTY (packages/react/src/hooks/use-terminal-stream.ts); the relay
-  // messages come from the same checkout's hand-mirrored wire module.
+// --- The viewer's terminal: a relay PTY ---------------------------------------
+
+/**
+ * A terminal as the web app opens it: attach a terminal viewer, which mints
+ * the terminal plane, then speak that plane. On a compute sandbox the agent
+ * serves it as a relay PTY (packages/react/src/hooks/use-terminal-stream.ts);
+ * the relay messages come from the same checkout's hand-mirrored wire module.
+ */
+type Pty = {
+  viewerId: string;
+  /** Output so far, decoded. */
+  output(): string;
+  /** When each output frame arrived (ms since the epoch). */
+  frames: number[];
+  /** What the socket saw, for a failure's message. */
+  seen: string[];
+  /** Keystrokes, the way a person types them. */
+  type(text: string): void;
+  /** Until `done(output)` holds; fails if the socket ends or after `limitMs`. */
+  until(done: (output: string) => boolean, limitMs: number, what: string): Promise<void>;
+  close(): Promise<void>;
+};
+
+async function openPty(): Promise<Pty> {
   const wire = await import(`${OPENGENI_DIR}/packages/react/src/lib/relay-wire.ts`);
-  const marker = `pty-${rand()}`;
   const viewer = await og<any>("POST", `${ses()}/viewers`, { terminal: true });
-  try {
-    if (viewer.terminalTransport !== "relay-pty" || !viewer.terminalUrl) {
-      throw new Error(
-        `viewer attach minted no relay terminal: transport ${viewer.terminalTransport}, url ${viewer.terminalUrl ? "set" : "null"}`,
-      );
-    }
-    const endpoint = new URL(viewer.terminalUrl);
-    const channel = {
-      channelId: endpoint.searchParams.get("channel") ?? "",
-      workspaceId: endpoint.searchParams.get("ws") ?? "",
-      agentId: endpoint.searchParams.get("agent") ?? "",
-      kind: wire.STREAM_KIND_PTY,
-      port: Number(endpoint.searchParams.get("port") ?? "0"),
-    };
-    const datagram = (tag: number, body: Uint8Array) => {
-      const bytes = new Uint8Array(body.length + 1);
-      bytes[0] = tag;
-      bytes.set(body, 1);
-      return bytes;
-    };
-    const socket = new WebSocket(viewer.terminalUrl);
-    socket.binaryType = "arraybuffer";
-    const decoder = new TextDecoder();
-    let output = "";
-    // What the socket saw, for a failure's message.
-    const seenOnSocket: string[] = [];
-    const outcome = await new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(
-        () =>
-          reject(
-            new Error(
-              `no echo within 60 s; socket ${seenOnSocket.join(", ") || "never opened"}; output ${JSON.stringify(output.slice(-300))}`,
-            ),
-          ),
-        60_000,
-      );
-      socket.onerror = () => {
-        clearTimeout(timer);
-        reject(new Error("the relay socket failed"));
-      };
-      socket.onclose = (event) => {
-        clearTimeout(timer);
-        reject(new Error(`the relay socket closed (${event.code} ${event.reason})`));
-      };
-      socket.onopen = () => {
-        seenOnSocket.push("open");
-        socket.send(
-          datagram(1, wire.encodeStreamOpen({ channel, token: viewer.terminalToken ?? "", role: wire.STREAM_ROLE_CLIENT, resumeFromSeq: "0" })),
-        );
-      };
-      let inputSeq = 0n;
-      let typed = false;
-      // Type the command the way a person would, keystrokes ending in Enter,
-      // once the shell has printed something (its prompt) or after 3 s.
-      const type = () => {
-        if (typed) return;
-        typed = true;
-        seenOnSocket.push("typed");
-        socket.send(
-          datagram(
-            3,
-            wire.encodeStreamFrame({
-              channelId: channel.channelId,
-              seq: (inputSeq++).toString(),
-              data: new TextEncoder().encode(`echo ${marker}-$((1+1)) | tee e2e/${marker}.txt && echo ${marker}-done\r`),
-              producedAtMs: String(Date.now()),
-            }),
-          ),
-        );
-      };
-      socket.onmessage = (event) => {
-        if (typeof event.data === "string") {
-          seenOnSocket.push(`text ${event.data.slice(0, 80)}`);
-          return;
-        }
-        const bytes = new Uint8Array(event.data as ArrayBuffer);
-        if (bytes.length < 1) return;
-        const body = bytes.subarray(1);
-        if (bytes[0] === 2) {
-          const ack = wire.decodeStreamOpenAck(body);
-          seenOnSocket.push(`ack ${ack.accepted ? "accepted" : "refused"}`);
-          if (!ack.accepted) {
-            clearTimeout(timer);
-            reject(new Error(`the relay refused the terminal: ${ack.error?.message ?? "no reason"}`));
-            return;
-          }
-          setTimeout(type, 3_000);
-        } else if (bytes[0] === 3) {
-          if (!output) seenOnSocket.push("output");
-          setTimeout(type, 300);
-          output += decoder.decode(wire.decodeStreamFrame(body).data, { stream: true });
-          if (output.includes(`${marker}-2`) && output.includes(`${marker}-done`)) {
-            clearTimeout(timer);
-            resolve(`relay PTY echoed the typed command (${output.length} bytes of output)`);
-          }
-        } else {
-          seenOnSocket.push(`tag ${bytes[0]}`);
-        }
-      };
-    });
-    socket.onclose = null;
-    socket.close();
-    // What proves the command ran, not just that its input was echoed: the
-    // file it wrote, holding the shell's own arithmetic.
-    const file = await og<any>("POST", `${ses()}/fs/read`, { path: `e2e/${marker}.txt`, encoding: "utf8" });
-    if (String(file?.content ?? "").trim() !== `${marker}-2`) {
-      throw new Error(`the typed command's file holds ${JSON.stringify(String(file?.content ?? "").slice(0, 80))}`);
-    }
-    return `${outcome}; its file e2e/${marker}.txt holds ${marker}-2`;
-  } catch (error) {
-    // Whether the typed command ran tells input from output apart.
-    const ran = await og<any>("POST", `${ses()}/fs/read`, { path: `e2e/${marker}.txt`, encoding: "utf8" })
-      .then((file) => JSON.stringify(file ?? "").includes(`${marker}-2`))
-      .catch(() => false);
-    throw new Error(`${error instanceof Error ? error.message : String(error)}; the typed command ${ran ? "ran (its file exists)" : "did not run"}`);
-  } finally {
-    await og("DELETE", `${ses()}/viewers/${viewer.viewerId}`, undefined, { cleanup: true }).catch((error) =>
-      cleanupErrors.push(`terminal: closing its viewer: ${error}`),
+  const closeViewer = () =>
+    og("DELETE", `${ses()}/viewers/${viewer.viewerId}`, undefined, { cleanup: true }).catch((error) =>
+      cleanupErrors.push(`closing terminal viewer ${viewer.viewerId}: ${error}`),
+    );
+  if (viewer.terminalTransport !== "relay-pty" || !viewer.terminalUrl) {
+    await closeViewer();
+    throw new Error(
+      `viewer attach minted no relay terminal: transport ${viewer.terminalTransport}, url ${viewer.terminalUrl ? "set" : "null"}`,
     );
   }
+  const endpoint = new URL(viewer.terminalUrl);
+  const channel = {
+    channelId: endpoint.searchParams.get("channel") ?? "",
+    workspaceId: endpoint.searchParams.get("ws") ?? "",
+    agentId: endpoint.searchParams.get("agent") ?? "",
+    kind: wire.STREAM_KIND_PTY,
+    port: Number(endpoint.searchParams.get("port") ?? "0"),
+  };
+  const datagram = (tag: number, body: Uint8Array) => {
+    const bytes = new Uint8Array(body.length + 1);
+    bytes[0] = tag;
+    bytes.set(body, 1);
+    return bytes;
+  };
+  const socket = new WebSocket(viewer.terminalUrl);
+  socket.binaryType = "arraybuffer";
+  const decoder = new TextDecoder();
+  let output = "";
+  let ended: Error | undefined;
+  let accepted = false;
+  const frames: number[] = [];
+  const seen: string[] = [];
+  const end = (error: Error) => {
+    ended ??= error;
+  };
+  socket.onerror = () => end(new Error("the relay socket failed"));
+  socket.onclose = (event) => end(new Error(`the relay socket closed (${event.code} ${event.reason})`));
+  onCheckAbort((reason) => {
+    end(reason instanceof Error ? reason : new Error(String(reason)));
+    socket.close();
+  });
+  socket.onopen = () => {
+    seen.push("open");
+    socket.send(
+      datagram(1, wire.encodeStreamOpen({ channel, token: viewer.terminalToken ?? "", role: wire.STREAM_ROLE_CLIENT, resumeFromSeq: "0" })),
+    );
+  };
+  socket.onmessage = (event) => {
+    if (typeof event.data === "string") {
+      seen.push(`text ${event.data.slice(0, 80)}`);
+      return;
+    }
+    const bytes = new Uint8Array(event.data as ArrayBuffer);
+    if (bytes.length < 1) return;
+    const body = bytes.subarray(1);
+    if (bytes[0] === 2) {
+      const ack = wire.decodeStreamOpenAck(body);
+      seen.push(`ack ${ack.accepted ? "accepted" : "refused"}`);
+      if (ack.accepted) accepted = true;
+      else end(new Error(`the relay refused the terminal: ${ack.error?.message ?? "no reason"}`));
+    } else if (bytes[0] === 3) {
+      if (!output) seen.push("output");
+      frames.push(Date.now());
+      output += decoder.decode(wire.decodeStreamFrame(body).data, { stream: true });
+    } else {
+      seen.push(`tag ${bytes[0]}`);
+    }
+  };
+  let inputSeq = 0n;
+  const until = async (done: (output: string) => boolean, limitMs: number, what: string) => {
+    const start = Date.now();
+    for (;;) {
+      if (done(output)) return;
+      if (ended) throw new Error(`${what}: ${ended.message}; socket ${seen.join(", ")}; output ${JSON.stringify(output.slice(-300))}`);
+      if (Date.now() - start > limitMs) {
+        throw new Error(`${what} within ${limitMs / 1000} s; socket ${seen.join(", ") || "never opened"}; output ${JSON.stringify(output.slice(-300))}`);
+      }
+      await sleep(100);
+    }
+  };
+  const pty: Pty = {
+    viewerId: viewer.viewerId,
+    output: () => output,
+    frames,
+    seen,
+    type(text) {
+      seen.push("typed");
+      socket.send(
+        datagram(
+          3,
+          wire.encodeStreamFrame({
+            channelId: channel.channelId,
+            seq: (inputSeq++).toString(),
+            data: new TextEncoder().encode(text),
+            producedAtMs: String(Date.now()),
+          }),
+        ),
+      );
+    },
+    until,
+    async close() {
+      socket.onclose = null;
+      socket.onerror = null;
+      socket.close();
+      await closeViewer();
+    },
+  };
+  try {
+    await until(() => accepted, 60_000, "the relay did not accept the terminal");
+    // The shell's prompt, or 3 s, before typing (as a person would).
+    await until((out) => out.length > 0, 3_000, "no prompt").catch(() => undefined);
+    await sleep(300);
+  } catch (error) {
+    await pty.close();
+    throw error;
+  }
+  return pty;
+}
+
+/** Whether the file a typed command wrote holds what its shell computed. */
+async function fileHolds(path: string, expected: string): Promise<string> {
+  const file = await og<any>("POST", `${ses()}/fs/read`, { path, encoding: "utf8" }).catch(() => undefined);
+  return String(file?.content ?? "").trim() === expected ? "" : `${path} holds ${JSON.stringify(String(file?.content ?? "").slice(0, 80))}`;
+}
+
+check("terminal", "a command typed into the interactive terminal runs in the sandbox", ["create"], async () => {
+  const marker = `pty-${rand()}`;
+  const pty = await openPty();
+  try {
+    pty.type(`echo ${marker}-$((1+1)) | tee e2e/${marker}.txt && echo ${marker}-done\r`);
+    await pty.until((out) => out.includes(`${marker}-2`) && out.includes(`${marker}-done`), 60_000, "no echo");
+  } catch (error) {
+    // Whether the typed command ran tells input from output apart.
+    const wrong = await fileHolds(`e2e/${marker}.txt`, `${marker}-2`);
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; the typed command ${wrong ? "did not run" : "ran (its file exists)"}`);
+  } finally {
+    await pty.close();
+  }
+  // What proves the command ran, not just that its input was echoed: the
+  // file it wrote, holding the shell's own arithmetic.
+  const wrong = await fileHolds(`e2e/${marker}.txt`, `${marker}-2`);
+  if (wrong) throw new Error(`the typed command's file: ${wrong}`);
+  return `relay PTY echoed the typed command (${pty.output().length} bytes of output); its file e2e/${marker}.txt holds ${marker}-2`;
 });
+
+check(
+  "checkpoint",
+  "a command's output and an open terminal keep streaming while the host checkpoints the running sandbox",
+  ["terminal"],
+  async () => {
+    // The fleet checkpoints every running sandbox each minute here
+    // (deploy.sh), pausing it for a moment; the agent's connections are
+    // streams that outlive that. A terminal ticks for 150 s and a command
+    // (the API's longest, 110 s) ticks alongside; neither may lose a tick,
+    // the terminal may not go quiet for 10 s or close, and the host's
+    // journal must show a checkpoint inside each window (verify.ts).
+    const token = rand();
+    const TICKS = 150;
+    const RUN_TICKS = 110;
+    const sightings = new Set<string>();
+    const pty = await openPty();
+    try {
+      const ptyFrom = new Date().toISOString();
+      pty.type(`for i in $(seq 1 ${TICKS}); do echo T${token}-$((i*1))-X; sleep 1; done; echo T${token}-end-$((6*7))\r`);
+      const ticked = (out: string, count: number) => new Set(out.match(new RegExp(`T${token}-(\\d+)-X`, "g")) ?? []).size >= count;
+      await pty.until((out) => ticked(out, 1), 30_000, "the terminal did not start ticking");
+      const firstTick = pty.frames.length - 1;
+      const runFrom = new Date().toISOString();
+      const command = exec(`for i in $(seq 1 ${RUN_TICKS}); do echo C${token}-$i $(date +%s); sleep 1; done`, 120_000);
+      // The host's own view, each second, for the record.
+      let watching = true;
+      const watch = (async () => {
+        while (watching) {
+          const now = await sandboxState().catch(() => undefined);
+          if (now?.step) sightings.add(now.step);
+          await sleep(1_000).catch(() => (watching = false));
+        }
+      })();
+      let result: Exec;
+      let runTo: string;
+      try {
+        result = await command;
+        runTo = new Date().toISOString();
+        await pty.until((out) => out.includes(`T${token}-end-42`), (TICKS + 60) * 1_000, "the terminal did not finish ticking");
+      } finally {
+        watching = false;
+        await watch;
+      }
+      const ptyTo = new Date().toISOString();
+      // The command: every tick, in order, and its exit status.
+      const lines = result.stdout.trim().split("\n").filter((line) => line.startsWith(`C${token}-`));
+      const numbers = lines.map((line) => Number(line.split(" ")[0].split("-")[1]));
+      const inOrder = numbers.length === RUN_TICKS && numbers.every((n, i) => n === i + 1);
+      if (result.exitCode !== 0 || !inOrder) {
+        throw new Error(
+          `the command exited ${result.exitCode} with ${numbers.length} of ${RUN_TICKS} ticks ` +
+            `(${inOrder ? "in order" : `first missing ${numbers.findIndex((n, i) => n !== i + 1) + 1}`}); stderr ${result.stderr.slice(-300)}`,
+        );
+      }
+      const clocks = lines.map((line) => Number(line.split(" ")[1]));
+      const guestGap = Math.max(...clocks.slice(1).map((t, i) => t - clocks[i]));
+      // The terminal: every tick, and no quiet spell.
+      const ticks = new Set(pty.output().match(new RegExp(`T${token}-(\\d+)-X`, "g")) ?? []).size;
+      if (ticks !== TICKS) throw new Error(`the terminal showed ${ticks} of ${TICKS} ticks`);
+      const streamed = pty.frames.slice(firstTick);
+      const gap = Math.max(...streamed.slice(1).map((t, i) => t - streamed[i]));
+      if (gap > 10_000) throw new Error(`the terminal went quiet for ${(gap / 1000).toFixed(1)} s while ticking`);
+      proofs.push({ kind: "checkpoint", sandbox: state.sandbox!, from: ptyFrom, to: ptyTo });
+      proofs.push({ kind: "checkpoint", sandbox: state.sandbox!, from: runFrom, to: runTo });
+      return (
+        `the terminal showed all ${TICKS} ticks, longest quiet ${(gap / 1000).toFixed(1)} s; ` +
+        `the command returned all ${RUN_TICKS} ticks in order, exit 0, longest guest-clock gap ${guestGap} s; ` +
+        `steps the host reported meanwhile: ${[...sightings].join(", ") || "none seen"}`
+      );
+    } finally {
+      await pty.close();
+    }
+  },
+);
 
 check("port", "a guest TCP port answers through the fabric's connect stream (not an Opengeni preview URL)", ["files"], async () => {
   await execOk(
@@ -788,7 +904,7 @@ async function step<T>(name: string, run: () => Promise<T>): Promise<T> {
 
 // What the running check claims that only the hosts' journals can prove
 // (verify.ts checks it once env.sh has copied them).
-let proofs: LevelProof[] = [];
+let proofs: Proof[] = [];
 
 // A process that lives through the sleep: it holds 32 MiB derived from its
 // token and answers with its token, pid and whether that memory is intact.

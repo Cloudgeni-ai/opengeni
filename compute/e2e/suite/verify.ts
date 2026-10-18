@@ -5,14 +5,18 @@
 // host's state to report the level; the journal is the record of it, made by
 // the host itself. It also counts, from the guests' consoles, how often each
 // sandbox's agent restored and reconnected at once (once per move or host
-// loss is expected, not once per restore).
+// loss is expected, not once per restore). Every wake inside a sleep
+// check's window, and the one that ends it, is printed with what asked for it
+// (compute.wake.by: fleet, agent_link or guest_port). A checkpoint check
+// passes only if the journal shows a completed checkpoint of its sandbox
+// while its streams were open.
 //
 //   bun verify.ts <run directory>   (results.json and host-*.log)
 //
 // Rewrites results.json and results.md; exits 1 when a check failed or was
 // skipped, as run.ts does.
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { counts, render, type LevelProof, type Meta, type Result } from "./report.ts";
+import { counts, render, type CheckpointProof, type LevelProof, type Meta, type Proof, type Result } from "./report.ts";
 
 const dir = process.argv[2];
 if (!dir) {
@@ -21,7 +25,7 @@ if (!dir) {
 }
 const saved = JSON.parse(readFileSync(`${dir}/results.json`, "utf8")) as Meta & { results: Result[] };
 
-type Step = { at: number; sandbox: string; step: string; cause: string; before: string; after: string; host: string };
+type Step = { at: number; sandbox: string; step: string; cause: string; by: string; before: string; after: string; host: string };
 const steps: Step[] = [];
 const journals = readdirSync(dir).filter((name) => /^host-.*\.log$/.test(name));
 for (const name of journals) {
@@ -40,6 +44,7 @@ for (const name of journals) {
       sandbox: String(event["compute.sandbox.id"]),
       step: String(event["compute.step"]),
       cause: String(event["compute.cause"] ?? ""),
+      by: String(event["compute.wake.by"] ?? ""),
       before: String(event["compute.level.before"] ?? ""),
       after: String(event["compute.level.after"] ?? ""),
       host: name.replace(/^host-|\.log$/g, ""),
@@ -49,13 +54,23 @@ for (const name of journals) {
 steps.sort((a, b) => a.at - b.at);
 const clock = (ms: number) => new Date(ms).toISOString().slice(11, 22);
 
+/** A step that woke the sandbox, with its cause and what asked for it. */
+const wake = (s: Step) => `${s.step} (${s.cause}${s.by ? `, by ${s.by}` : ""}) at ${clock(s.at)}`;
+
 /** Why the journals do not show `proof`, or how they do. */
-function check(proof: LevelProof): { ok: boolean; how: string } {
+function check(proof: Proof): { ok: boolean; how: string } {
+  return proof.kind === "checkpoint" ? checkpointed(proof) : leveled(proof);
+}
+
+function leveled(proof: LevelProof): { ok: boolean; how: string } {
   if (journals.length === 0) return { ok: false, how: "no host journals to verify the level with" };
   const from = Date.parse(proof.from);
   const to = Date.parse(proof.to);
   const mine = steps.filter((s) => s.sandbox === proof.sandbox);
   const during = mine.filter((s) => s.at >= from && s.at <= to);
+  // Any wake inside the window undid a sleep the check asked for.
+  const undone = during.filter((s) => s.after === "running" && s.before !== "running");
+  const wakes = undone.length ? `; woken inside the window: ${undone.map(wake).join(", ")}` : "";
   const last = during.at(-1);
   if (!last || last.after !== proof.level) {
     return {
@@ -63,16 +78,23 @@ function check(proof: LevelProof): { ok: boolean; how: string } {
       how:
         `host journal: the sandbox was not at ${proof.level} when the next request came (` +
         (last ? `its last completed step before it, ${last.step} at ${clock(last.at)}, left it ${last.after}` : "no step completed between the sleep and the request") +
-        ")",
+        `)${wakes}`,
     };
   }
   const woke = mine.find((s) => s.at > to && s.before === proof.level);
   return {
     ok: true,
-    how:
-      `host journal: ${proof.level} at ${clock(last.at)} on ${last.host}` +
-      (woke ? `, woken from it by ${woke.step} (${woke.cause}) at ${clock(woke.at)}` : ""),
+    how: `host journal: ${proof.level} at ${clock(last.at)} on ${last.host}` + (woke ? `, woken from it by ${wake(woke)}` : "") + wakes,
   };
+}
+
+function checkpointed(proof: CheckpointProof): { ok: boolean; how: string } {
+  if (journals.length === 0) return { ok: false, how: "no host journals to verify the checkpoint with" };
+  const from = Date.parse(proof.from);
+  const to = Date.parse(proof.to);
+  const done = steps.filter((s) => s.sandbox === proof.sandbox && s.step === "checkpoint" && s.at >= from && s.at <= to);
+  if (done.length === 0) return { ok: false, how: "host journal: no checkpoint of the sandbox completed while the streams were open" };
+  return { ok: true, how: `host journal: ${done.length} checkpoint(s) while streaming, at ${done.map((s) => `${clock(s.at)} on ${s.host}`).join(", ")}` };
 }
 
 for (const result of saved.results) {

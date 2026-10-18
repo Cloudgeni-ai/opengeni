@@ -45,7 +45,13 @@ the workstation only drives it.
    hosts endpoint as a NodePort, a link signing key, Opengeni's team link
    to the API's agent gateway); Caddy in front with Let's Encrypt
    certificates for `opengeni.`, `relay.` and `files.` names of the VM's
-   address (sslip.io). It waits for `HOSTS` live hosts.
+   address (sslip.io). It waits for `HOSTS` live hosts. The chart's default
+   two relays run; Caddy resolves the relay pods through a headless Service
+   and hashes each dial's `channel` query, the channel affinity
+   docs/deployment.md requires. The fleet checkpoints running sandboxes every
+   60 s (`--checkpoint-every-s=60`), so every check runs across checkpoints.
+   `FRESH=1 env.sh deploy` first removes the release and its volumes, for a
+   new database, object store and NATS.
 
 Hosts reach the fleet service on the internal network, and Opengeni's agent
 gateway and relay over HTTPS through the NAT. NATS stays inside the cluster.
@@ -78,11 +84,12 @@ frame), not only that a request was accepted.
 | files | `fs/write`, `fs/read` and `fs/list` (the file browser's API) agree |
 | git | `git/status` and `git/log` of a repository made in the sandbox |
 | terminal | a terminal opened through the viewer relay runs a typed command, which writes a random value to a file that is then read back |
+| checkpoint | while the host checkpoints the running sandbox, a terminal ticks for 150 s and a `terminal/exec` command ticks for 110 s alongside: every tick arrives, the terminal is never quiet for 10 s or closed, and `suite/verify.ts` requires a completed checkpoint step in the hosts' journals inside each window |
 | port | an HTTP server on a guest TCP port answers through the fabric's `connect` stream to the guest gateway (vsock 57, header `tcp <port>`); this is the fabric's stream, not an Opengeni preview URL |
 | browser | a page with a random title is served in the sandbox; the agent opens it with the browser tools, a tool result carries the title and the reply names it |
 | desktop | the agent's computer session becomes active, a computer tool call succeeds, and a screen frame fetched through the API decodes as a real desktop (at least 640x400, several colours) |
 | run-as | not applicable: Opengeni never asks any backend to run a sandbox's commands as another user (the runtime's `sandboxRunAs` gives none), so no public API reaches it; the compute agent advertises `run_as`, which the agent's Linux tests cover as root |
-| sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level, and the host's state (`GET /v1/sandboxes/{id}/state`) must report the level with no step under way and keep it 3 s; the next Opengeni request wakes it, with its files, the same boot generation and a running process that holds 32 MiB of known memory (same pid, memory intact). After the run, `suite/verify.ts` checks the hosts' journals: the sandbox's last completed step before the wake must have reached that level, or the check fails |
+| sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level, and the host's state (`GET /v1/sandboxes/{id}/state`) must report the level with no step under way and keep it 3 s; the next Opengeni request wakes it, with its files, the same boot generation and a running process that holds 32 MiB of known memory (same pid, memory intact). After the run, `suite/verify.ts` checks the hosts' journals: the sandbox's last completed step before the wake must have reached that level, or the check fails; every wake inside a sleep's window and the one that ends it are reported with what asked for it (`compute.wake.by`) |
 | move | the sandbox sleeps (Saved) and the fabric moves it to another host; its files come along |
 | host-loss | after a sleep to remote that the host's state confirms, the sandbox's host is stopped; the sandbox wakes, with its files, on a different live host under a higher owner epoch, and the lost host no longer owns it |
 | delete | deleting the session deletes its sandbox on the fabric |

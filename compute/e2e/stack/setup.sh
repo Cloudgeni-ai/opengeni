@@ -8,6 +8,11 @@ set -euo pipefail
 : "${REPO_URL:?}" "${OPENGENI_SHA:?}" "${COMPUTE_SHA:?}" "${E2E_USER:?}"
 HELM_VERSION=v3.22.1
 HELM_SHA256=896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+# Caddy from its own release (Ubuntu's 2.6 has no query-hash load
+# balancing, which the relay's channel affinity needs); the package stays
+# for its service unit and user.
+CADDY_VERSION=2.11.7
+CADDY_SHA256=727b91701a392de6ebc5027509f548bf39979e5216340d0faed8fa5e69c84f8b
 log() { printf '[setup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 home=$(getent passwd "$E2E_USER" | cut -d: -f6)
 as_user() { sudo -u "$E2E_USER" -H bash -lc "$1"; }
@@ -21,6 +26,20 @@ usermod -aG docker "$E2E_USER"
 systemctl enable --now docker
 # Builds are big; the boot disk holds them.
 sysctl -qw fs.inotify.max_user_watches=1048576 fs.inotify.max_user_instances=8192
+
+log "Caddy $CADDY_VERSION"
+if ! caddy version 2>/dev/null | grep -q "^v$CADDY_VERSION "; then
+  work=$(mktemp -d)
+  curl -fsSL -o "$work/caddy.tgz" \
+    "https://github.com/caddyserver/caddy/releases/download/v$CADDY_VERSION/caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
+  echo "$CADDY_SHA256  $work/caddy.tgz" | sha256sum -c --quiet -
+  tar -xzf "$work/caddy.tgz" -C "$work" caddy
+  install -m 0755 "$work/caddy" /usr/bin/caddy
+  rm -rf "$work"
+  # An upgrade of the package would put its own binary back.
+  apt-mark hold caddy >/dev/null
+  systemctl restart caddy
+fi
 
 log "Helm $HELM_VERSION"
 if ! helm version --short 2>/dev/null | grep -q "^$HELM_VERSION"; then
