@@ -4085,13 +4085,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<CdpAccessibilityEntry> {
     await this.refreshFrame(state);
     if (locator.kind === "css" || locator.kind === "test_id" || locator.kind === "placeholder") {
-      const selector =
-        locator.kind === "css"
-          ? locator.selector
-          : locator.kind === "test_id"
-            ? `[data-testid="${cssString(locator.value)}"]`
-            : `[placeholder="${cssString(locator.text)}"]`;
-      const backendDOMNodeId = await this.uniqueDomMatch(state, selector);
+      const backendDOMNodeId = await this.uniqueDomMatch(state, domLocatorSelector(locator));
       return syntheticEntry(backendDOMNodeId);
     }
     // A reference already identifies one concrete node. Revalidate that node
@@ -4115,32 +4109,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       return entry;
     }
-    let matches: CdpAccessibilityEntry[];
-    if (locator.kind === "role") {
-      matches = accessibility.entries.filter(
-        (entry) =>
-          entry.backendDOMNodeId !== null &&
-          entry.role.toLowerCase() === locator.role.toLowerCase() &&
-          (locator.name === undefined ||
-            (locator.exact
-              ? entry.name === locator.name
-              : (entry.name ?? "").toLocaleLowerCase().includes(locator.name.toLocaleLowerCase()))),
-      );
-    } else if (locator.kind === "label") {
-      matches = accessibility.entries.filter(
-        (entry) =>
-          entry.backendDOMNodeId !== null &&
-          entry.name === locator.text &&
-          isFormControlRole(entry.role),
-      );
-    } else {
-      matches = accessibility.entries.filter(
-        (entry) =>
-          entry.backendDOMNodeId !== null &&
-          entry.role === "text" &&
-          (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase()),
-      );
-    }
+    const matches = accessibilityLocatorMatches(accessibility.entries, locator);
     const needle = locator.kind === "role" ? locator.name : locator.text;
     // "Save" also matches "Save as draft". When exactly one candidate's whole
     // name is the requested text, that is the element the caller named.
@@ -4205,6 +4174,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async uniqueDomMatch(state: TargetState, selector: string): Promise<number> {
+    const nodeIds = await this.domMatchNodeIds(state, selector);
+    if (nodeIds.length === 0) {
+      throw new InteractionDefiniteDriverError(
+        "locator_not_found",
+        "browser locator found no element",
+      );
+    }
+    if (nodeIds.length !== 1) {
+      throw new InteractionDefiniteDriverError(
+        "locator_ambiguous",
+        "browser locator matched multiple elements",
+      );
+    }
+    return await this.describeBackendNode(state, nodeIds[0]!);
+  }
+
+  private async domMatchNodeIds(state: TargetState, selector: string): Promise<number[]> {
     const document = await this.sendTarget<{ root?: unknown }>(state, "DOM.getDocument", {
       depth: 0,
       pierce: true,
@@ -4227,28 +4213,48 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       throw error;
     }
-    const nodeIds = Array.isArray(result.nodeIds)
+    return Array.isArray(result.nodeIds)
       ? result.nodeIds.filter((value): value is number => typeof value === "number")
       : [];
-    if (nodeIds.length === 0) {
-      throw new InteractionDefiniteDriverError(
-        "locator_not_found",
-        "browser locator found no element",
-      );
-    }
-    if (nodeIds.length !== 1) {
-      throw new InteractionDefiniteDriverError(
-        "locator_ambiguous",
-        "browser locator matched multiple elements",
-      );
-    }
+  }
+
+  private async describeBackendNode(state: TargetState, nodeId: number): Promise<number> {
     const described = await this.sendTarget<{ node?: unknown }>(state, "DOM.describeNode", {
-      nodeId: nodeIds[0],
+      nodeId,
     });
     if (!isRecord(described.node) || typeof described.node.backendNodeId !== "number") {
       throw new Error("CDP did not resolve the DOM locator");
     }
     return described.node.backendNodeId;
+  }
+
+  /**
+   * Every element a locator names. A wait asks whether such an element is on
+   * screen, not which one to act on, so several matches are not an error:
+   * "visible" holds when any match is visible and "hidden" when none is.
+   */
+  private async locatorCandidates(
+    state: TargetState,
+    locator: BrowserLocator,
+  ): Promise<CdpAccessibilityEntry[]> {
+    if (locator.kind === "ref") return [await this.resolveLocatorInPage(state, locator)];
+    await this.refreshFrame(state);
+    if (locator.kind === "css" || locator.kind === "test_id" || locator.kind === "placeholder") {
+      const nodeIds = await this.domMatchNodeIds(state, domLocatorSelector(locator));
+      const entries: CdpAccessibilityEntry[] = [];
+      for (const nodeId of nodeIds.slice(0, WAIT_LOCATOR_CANDIDATE_LIMIT)) {
+        entries.push(syntheticEntry(await this.describeBackendNode(state, nodeId)));
+      }
+      return entries;
+    }
+    const accessibility = await this.refreshAccessibility(state);
+    const byBackend = new Map<number, CdpAccessibilityEntry>();
+    for (const entry of accessibilityLocatorMatches(accessibility.entries, locator)) {
+      if (entry.backendDOMNodeId !== null && !byBackend.has(entry.backendDOMNodeId)) {
+        byBackend.set(entry.backendDOMNodeId, entry);
+      }
+    }
+    return [...byBackend.values()].slice(0, WAIT_LOCATOR_CANDIDATE_LIMIT);
   }
 
   private async clickNode(
@@ -5115,16 +5121,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async locatorVisible(state: TargetState, locator: BrowserLocator): Promise<boolean> {
-    let entry: CdpAccessibilityEntry;
+    let candidates: CdpAccessibilityEntry[];
     try {
-      entry = await this.resolveLocator(state, locator);
+      candidates = await this.locatorCandidates(state, locator);
     } catch (error) {
       if (error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found") {
         return false;
       }
       throw error;
     }
-    return (await this.callOnNode(state, entry.backendDOMNodeId, VISIBLE_FUNCTION, [])) === true;
+    for (const entry of candidates) {
+      state.nodeRoute = this.oopifForFrame(state, entry.frameId);
+      try {
+        if ((await this.callOnNode(state, entry.backendDOMNodeId, VISIBLE_FUNCTION, [])) === true) {
+          return true;
+        }
+      } catch (error) {
+        // A match removed between listing and reading is simply not visible.
+        if (
+          !(error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found")
+        ) {
+          throw error;
+        }
+      }
+    }
+    return false;
   }
 
   /**
@@ -5737,6 +5758,49 @@ function sameAccessibleName(name: string | null, requested: string): boolean {
 }
 
 const AMBIGUOUS_LOCATOR_LISTED_MATCHES = 5;
+/** Bounds the per-poll work of a wait whose locator matches many elements. */
+const WAIT_LOCATOR_CANDIDATE_LIMIT = 50;
+
+function domLocatorSelector(
+  locator: Extract<BrowserLocator, { kind: "css" | "test_id" | "placeholder" }>,
+): string {
+  return locator.kind === "css"
+    ? locator.selector
+    : locator.kind === "test_id"
+      ? `[data-testid="${cssString(locator.value)}"]`
+      : `[placeholder="${cssString(locator.text)}"]`;
+}
+
+function accessibilityLocatorMatches(
+  entries: readonly CdpAccessibilityEntry[],
+  locator: Extract<BrowserLocator, { kind: "role" | "label" | "text" }>,
+): CdpAccessibilityEntry[] {
+  if (locator.kind === "role") {
+    return entries.filter(
+      (entry) =>
+        entry.backendDOMNodeId !== null &&
+        entry.role.toLowerCase() === locator.role.toLowerCase() &&
+        (locator.name === undefined ||
+          (locator.exact
+            ? entry.name === locator.name
+            : (entry.name ?? "").toLocaleLowerCase().includes(locator.name.toLocaleLowerCase()))),
+    );
+  }
+  if (locator.kind === "label") {
+    return entries.filter(
+      (entry) =>
+        entry.backendDOMNodeId !== null &&
+        entry.name === locator.text &&
+        isFormControlRole(entry.role),
+    );
+  }
+  return entries.filter(
+    (entry) =>
+      entry.backendDOMNodeId !== null &&
+      entry.role === "text" &&
+      (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase()),
+  );
+}
 
 /** Name the candidates so the caller can act on one ref instead of guessing. */
 function ambiguousLocatorMessage(matches: readonly CdpAccessibilityEntry[]): string {
