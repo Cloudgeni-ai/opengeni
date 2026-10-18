@@ -17,15 +17,21 @@
 //!   holds several connections at once (Opengeni's agent opens a control
 //!   and a bulk one), each with subscriptions of its own; a connection of
 //!   another instance starts a new session and ends them all.
-//! - A message for a subscription no connection holds waits, and wakes the
-//!   sandbox, until a connection subscribes to it again or it has waited
-//!   [`Settings::hold_ms`]. Every message that arrives counts as activity.
-//!   Every message wakes its sandbox, at most once per
-//!   [`Settings::wake_every_ms`]; one that comes sooner wakes it once that
-//!   interval is over, since the sandbox may have gone to sleep in between.
-//!   What waits for a sandbox is bounded ([`Settings::max_waiting`] and
-//!   [`Settings::waiting_bytes`]); one more is dropped, as a NATS server
-//!   drops a message for a slow consumer, and its sender times out.
+//! - A message for a subscription no connection holds waits until a
+//!   connection subscribes to it again or it has waited
+//!   [`Settings::hold_ms`]. What waits for a sandbox is bounded
+//!   ([`Settings::max_waiting`] and [`Settings::waiting_bytes`]); one more
+//!   is dropped, as a NATS server drops a message for a slow consumer, and
+//!   its sender times out.
+//! - A request, a message with a reply subject someone waits on, wakes its
+//!   sandbox: at once when the host does not say it runs, and otherwise at
+//!   most once per [`Settings::wake_every_ms`], which counts it as active
+//!   and withdraws a sleep asked of it. The agent then owes the request an
+//!   answer until it publishes on that reply subject or the request is
+//!   [`Settings::hold_ms`] old, and a sandbox that goes to sleep owing one
+//!   is woken again. Any other message (an acknowledgement, a receipt, a
+//!   notice) reaches the agent whenever it runs and never wakes it, so an
+//!   explicit sleep stays until something asks the agent for something.
 //! - Subscriptions a reconnected agent did not take up within
 //!   [`Settings::grace_ms`] end, and so do those of a connection that
 //!   ended while others of its agent stay, each counted from when it was
@@ -70,8 +76,8 @@ pub struct Settings {
     /// refusal; it doubles up to `retry_max_ms`.
     pub retry_min_ms: u64,
     pub retry_max_ms: u64,
-    /// Arriving messages wake a sandbox at most this often; one that
-    /// arrives sooner wakes it when the interval is over.
+    /// Requests wake a sandbox the host says runs at most this often; a
+    /// sandbox it does not say runs is woken for each.
     pub wake_every_ms: u64,
     /// What a connection may send before its session opens, by
     /// [`ClientOp::cost`]; past it, the connection ends as a slow consumer.
@@ -84,7 +90,9 @@ pub struct Settings {
     /// its limit. Opengeni's agent holds a handful.
     pub max_subs: usize,
     /// Messages that may wait for a sandbox's agent at once; one more is
-    /// dropped. Opengeni sends a sleeping agent a few at a time.
+    /// dropped. Opengeni sends a sleeping agent a few at a time. It also
+    /// bounds the requests a sandbox's agent may owe answers to: one past
+    /// it still wakes the sandbox, but is not woken for again.
     pub max_waiting: usize,
     /// What the messages waiting for a sandbox's agent may hold, each
     /// counted as its bytes plus [`OP_OVERHEAD`]; one past it is dropped.
@@ -219,9 +227,9 @@ struct Sandbox {
     grace_until: Option<u64>,
     /// When it was last woken.
     woke_at: Option<u64>,
-    /// A message came too soon after the last wake for another: it is
-    /// woken again at this time.
-    wake_due: Option<u64>,
+    /// The requests its agent owes an answer to, by reply subject, with
+    /// when each arrived.
+    unanswered: HashMap<String, u64>,
     /// Whether it runs, as the host last said; every session that opens is
     /// told.
     running: Option<Running>,
@@ -231,6 +239,14 @@ impl Sandbox {
     /// Keeps [`Sandbox::grace_until`] the earliest of its subscriptions'.
     fn regrace(&mut self) {
         self.grace_until = self.subs.values().filter_map(|sub| sub.ends_at).min();
+    }
+
+    /// Its agent published on `subject`, which answers the request it owed
+    /// an answer on it, if any.
+    fn answered(&mut self, subject: &str) {
+        if !self.unanswered.is_empty() {
+            self.unanswered.remove(subject);
+        }
     }
 }
 
@@ -415,7 +431,6 @@ impl Core {
                         .map(|at| at + self.settings.hold_ms),
                     sandbox.grace_until,
                     sandbox.retry_at,
-                    sandbox.wake_due,
                 ]
             })
             .flatten()
@@ -451,7 +466,7 @@ impl Core {
                 payload,
             } => self.gateway(now, link, frame, payload),
             Input::LinkDown { link } => self.link_down(now, link),
-            Input::Running { sandbox, running } => self.running(&sandbox, running),
+            Input::Running { sandbox, running } => self.running(now, &sandbox, running),
             Input::Tick => self.tick(now),
         }
     }
@@ -521,7 +536,7 @@ impl Core {
                 retry_delay: self.settings.retry_min_ms,
                 grace_until: None,
                 woke_at: None,
-                wake_due: None,
+                unanswered: HashMap::new(),
                 running: None,
             },
         );
@@ -739,7 +754,7 @@ impl Core {
         }
     }
 
-    fn running(&mut self, id: &str, running: Running) {
+    fn running(&mut self, now: u64, id: &str, running: Running) {
         let Some(sandbox) = self.sandboxes.get_mut(id) else {
             return;
         };
@@ -762,6 +777,7 @@ impl Core {
             // once more: if an earlier save was lost, this one is what a
             // restarted host opens.
             self.save(id);
+            self.owed(now, id);
         }
     }
 
@@ -769,7 +785,6 @@ impl Core {
         let hold = self.settings.hold_ms;
         let mut retry = Vec::new();
         let mut graced = Vec::new();
-        let mut woken = Vec::new();
         for (id, sandbox) in &mut self.sandboxes {
             if let Some(at) = now.checked_sub(hold) {
                 sandbox.waiting.expire(at);
@@ -781,14 +796,6 @@ impl Core {
                 sandbox.retry_at = None;
                 retry.push(id.clone());
             }
-            if sandbox.wake_due.is_some_and(|at| at <= now) {
-                sandbox.wake_due = None;
-                sandbox.woke_at = Some(now);
-                woken.push(id.clone());
-            }
-        }
-        for sandbox in woken {
-            self.effects.push(Effect::Wake { sandbox });
         }
         for id in graced {
             self.end_unclaimed(now, &id);
@@ -879,26 +886,58 @@ impl Core {
         });
     }
 
-    fn wake(&mut self, now: u64, id: &str) {
-        let every = self.settings.wake_every_ms;
+    /// A request for sandbox `id`'s agent arrived, to be answered on
+    /// `reply`: the agent owes it an answer, and the sandbox is woken for
+    /// it. While the host says it runs, at most once per
+    /// [`Settings::wake_every_ms`]: a request in between needs no wake of
+    /// its own, since the sandbox is woken again if it goes to sleep
+    /// before it answers ([`Core::owed`]).
+    pub(super) fn asked(&mut self, now: u64, id: &str, reply: &str) {
+        let (hold, most, every) = (
+            self.settings.hold_ms,
+            self.settings.max_waiting,
+            self.settings.wake_every_ms,
+        );
         let Some(sandbox) = self.sandboxes.get_mut(id) else {
             return;
         };
-        match sandbox.woke_at {
-            // Too soon for another wake: it comes when the interval is
-            // over, so that a sandbox that went to sleep since the last
-            // one (an explicit sleep right after a request, say) is not
-            // left asleep with this message.
-            Some(at) if now < at.saturating_add(every) => {
-                sandbox.wake_due.get_or_insert(at.saturating_add(every));
-            }
-            _ => {
-                sandbox.woke_at = Some(now);
-                sandbox.wake_due = None;
-                self.effects.push(Effect::Wake {
-                    sandbox: id.to_owned(),
-                });
-            }
+        if sandbox.unanswered.len() >= most {
+            sandbox
+                .unanswered
+                .retain(|_, at| now < at.saturating_add(hold));
+        }
+        if sandbox.unanswered.len() < most || sandbox.unanswered.contains_key(reply) {
+            sandbox.unanswered.insert(reply.to_owned(), now);
+        }
+        if sandbox.running == Some(Running::Awake)
+            && sandbox
+                .woke_at
+                .is_some_and(|at| now < at.saturating_add(every))
+        {
+            return;
+        }
+        sandbox.woke_at = Some(now);
+        self.effects.push(Effect::Wake {
+            sandbox: id.to_owned(),
+        });
+    }
+
+    /// Sandbox `id` went to sleep: it is woken again if its agent still
+    /// owes an answer to a request younger than [`Settings::hold_ms`],
+    /// which it got too late to answer before it slept.
+    fn owed(&mut self, now: u64, id: &str) {
+        let hold = self.settings.hold_ms;
+        let Some(sandbox) = self.sandboxes.get_mut(id) else {
+            return;
+        };
+        sandbox
+            .unanswered
+            .retain(|_, at| now < at.saturating_add(hold));
+        if !sandbox.unanswered.is_empty() {
+            sandbox.woke_at = Some(now);
+            self.effects.push(Effect::Wake {
+                sandbox: id.to_owned(),
+            });
         }
     }
 }

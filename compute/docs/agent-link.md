@@ -288,7 +288,9 @@ Until `opened`, the host keeps what the guest sends for the session.
   lease, every five seconds, whether or not the sandbox runs; a renewal that
   finds a later epoch or another instance ends the session with `closed`.
 - **Sleep.** The host keeps a session open while its sandbox sleeps. A
-  `msg` for a sandbox that is not running wakes it. The agent's connection
+  request, a `msg` with a `reply`, for a sandbox that is not running wakes
+  it; any other `msg` (an acknowledgement, a receipt) reaches the agent
+  whenever it next runs and never wakes it. The agent's connection
   outlives sleep (section 3), so a message for a subscription it holds is
   sent on it at once and reaches the agent when the woken guest takes its
   stream up again. A message for a subscription no connection holds waits,
@@ -353,13 +355,20 @@ What the host does, exactly (`compute-link`, its `core` module):
   a gateway silent that long, whatever is being written. What the gateway
   sends is read while up to 16 MiB of it waits for the host.
 - **Messages wait for 120 s.** A message for a subscription no connection
-  holds waits that long for the agent to subscribe again. Every message
-  that arrives wakes its sandbox, at most once every 250 ms: one that comes
-  sooner wakes it when the 250 ms are over, since the sandbox may have
-  gone to sleep in between (a request sent on a connection whose VM was
-  just paused or saved reaches the agent once that wake resumes it, on the
-  same stream). Messages that arrive count as activity; what the agent
-  sends does not.
+  holds waits that long for the agent to subscribe again.
+- **Only requests wake.** A message with a reply subject wakes its
+  sandbox: at once if the host last said it sleeps, and otherwise at most
+  once every 250 ms. The agent owes it an answer until it publishes on
+  that reply subject, or for 120 s, and a sandbox that falls asleep owing
+  one is woken again at once (so a request sent on a connection whose VM
+  was just paused or saved reaches the agent once that wake resumes it, on
+  the same stream). A message with no reply subject, such as Opengeni's
+  acknowledgement of a frame or an event the agent sent, never wakes a
+  sandbox, so an explicit sleep lasts until someone asks the agent for
+  something. Requests count as activity; other messages, and what the
+  agent sends, do not. The host bounds the requests a sandbox may owe
+  answers to at once (1024); one past that still wakes it, but is not
+  woken for again.
 - **Subscriptions not taken up within 10 s end.** After the agent
   reconnects, the host unsubscribes those it did not subscribe to again;
   after one of its connections ends while others stay, those it held end

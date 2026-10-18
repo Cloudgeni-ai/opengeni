@@ -1,7 +1,7 @@
 use compute_core::{At, Durability, Level, SandboxView, State, Step};
 use compute_engine::MemoryStats;
 
-use super::{Why, cause, pressure_since};
+use super::{By, Why, cause, pressure_since};
 use crate::observe::{Cause, TraceContext};
 
 fn view() -> SandboxView {
@@ -31,6 +31,7 @@ fn a_wake_is_for_the_request_that_asked_for_it() {
     let asked = Why {
         cause: Cause::Request,
         trace: trace(),
+        by: Some(By::Fleet),
     };
     assert!(asked.trace.is_some());
     for step in [Step::Resume, Step::Restore, Step::Boot, Step::Fetch] {
@@ -84,6 +85,7 @@ fn a_checkpoint_is_for_its_schedule_whatever_else_holds() {
     let asked = Why {
         cause: Cause::Request,
         trace: trace(),
+        by: Some(By::Fleet),
     };
     for view in [running, pressed] {
         for asked in [None, Some(asked)] {
@@ -106,9 +108,11 @@ fn sleep_steps_are_for_pressure_then_a_request_then_idleness() {
         state: State::RUNNING,
         ..view()
     };
+    // A request to sleep: only a wake names what asked.
     let asked = Why {
         cause: Cause::Request,
         trace: trace(),
+        by: None,
     };
     for step in [
         Step::Pause,
@@ -149,6 +153,7 @@ fn everything_while_the_agent_takes_over_is_recovery() {
     let asked = Why {
         cause: Cause::Request,
         trace: trace(),
+        by: Some(By::Fleet),
     };
     for step in Step::ALL {
         assert_eq!(

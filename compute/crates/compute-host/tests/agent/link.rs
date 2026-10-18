@@ -440,7 +440,7 @@ async fn connect(gateway: &mut Gateway, socket: &Path, sandbox: Id, ticket: &str
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_sandbox_agent_reaches_its_gateway_and_a_message_wakes_its_sleeping_sandbox() {
+async fn a_sandbox_agent_reaches_its_gateway_and_only_a_request_wakes_its_sleeping_sandbox() {
     let mut gateway = Gateway::start().await;
     let lab = linked_lab(Lab::root(), Arc::default()).await;
     let sandbox = id(1);
@@ -468,6 +468,8 @@ async fn a_sandbox_agent_reaches_its_gateway_and_a_message_wakes_its_sleeping_sa
     lab.wait_level(sandbox, LevelName::Saved).await;
     gateway.told(Running::Asleep).await;
     agent.vm.stop();
+    // An acknowledgement of what the agent sent before it slept waits for
+    // it, and the sandbox stays asleep.
     gateway.send(&GatewayFrame::Msg {
         s,
         sid,
@@ -475,14 +477,38 @@ async fn a_sandbox_agent_reaches_its_gateway_and_a_message_wakes_its_sleeping_sa
         reply: None,
         headers: None,
     });
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status = lab.status().await;
+        let held = status.sandboxes.iter().find(|held| held.id == sandbox);
+        assert!(
+            held.is_some_and(|held| held.level == LevelName::Saved && held.step.is_none()),
+            "an acknowledgement woke it: {held:?}"
+        );
+    }
+    // A request wakes it.
+    gateway.send(&GatewayFrame::Msg {
+        s,
+        sid,
+        subject: subject.clone(),
+        reply: Some("_INBOX.gw.1".into()),
+        headers: None,
+    });
     lab.wait_level(sandbox, LevelName::Running).await;
 
-    // The woken guest takes the stream up again, and the message the host
-    // kept on it reaches the agent on the connection it subscribed on.
+    // The woken guest takes the stream up again, and the messages the host
+    // kept on it reach the agent, in order, on the connection it
+    // subscribed on.
     agent.vm.run();
     let message = agent.line().await;
     assert!(
         message.starts_with(&format!("MSG {subject} 1 0")),
+        "{message}"
+    );
+    assert_eq!(agent.line().await, "\r\n", "its empty payload");
+    let message = agent.line().await;
+    assert!(
+        message.starts_with(&format!("MSG {subject} 1 _INBOX.gw.1 0")),
         "{message}"
     );
     assert_eq!(agent.line().await, "\r\n", "its empty payload");

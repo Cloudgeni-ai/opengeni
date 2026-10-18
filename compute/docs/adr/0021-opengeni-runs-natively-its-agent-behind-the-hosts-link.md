@@ -77,14 +77,22 @@ and 16.1).
   vsock socket which sandbox it is. For each sandbox it keeps one session
   on its link to Opengeni: the guest's subscriptions, opened upstream once,
   stay open while the sandbox sleeps, and so do the agent's connections.
-  The guest's publishes go up the same session. A message that arrives for
-  a sandbox that is not running wakes it, as any traffic does, and reaches
-  the agent on its connection once it runs; after a reconnect, once the
-  agent has subscribed again. A wake that fails drops what waited, and the
-  sender's own retry, under its replay identity, takes over. A message to a
-  sandbox counts as activity, so it stays awake while used; what the agent
-  publishes (its heartbeats, every five seconds) does not, so an idle
-  sandbox still sleeps. The host keeps each session's connection instance
+  The guest's publishes go up the same session. A request (a message with
+  a reply subject) that arrives for a sandbox that is not running wakes
+  it, and reaches the agent on its connection once it runs; after a
+  reconnect, once the agent has subscribed again. The host wakes it again
+  if it falls asleep before its agent answers. A wake that fails drops what
+  waited, and the sender's own retry, under its replay identity, takes
+  over. A request counts as activity, so a sandbox stays awake while used.
+  A message nobody waits on (the acknowledgements of what the agent sent,
+  receipts of its events) reaches the agent whenever it runs and neither
+  wakes it nor counts, and nor does what the agent publishes (its
+  heartbeats, every five seconds), so an idle sandbox still sleeps and an
+  explicit sleep lasts until someone asks the agent for something.
+  (Amended after the end-to-end runs: every message used to wake its
+  sandbox, and the acknowledgements Opengeni sends for the agent's last
+  frames before a sleep woke it again within milliseconds.) The host keeps
+  each session's connection instance
   and subscriptions in the sandbox's record, so a restarted host agent
   opens them again before its guests run.
 - **One link per host and Opengeni deployment.** The host agent dials

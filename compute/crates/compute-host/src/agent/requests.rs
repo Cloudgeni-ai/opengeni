@@ -22,7 +22,7 @@ use crate::store::{OwnerEpoch, Store};
 
 use super::disk::AfterReading;
 use super::holds::{Write, hold_id};
-use super::observe::Why;
+use super::observe::{By, Why};
 use super::{Command, Event, HostAgent, HostError, Reply, Slot, Waiter, Woke, unix_ms_now};
 
 /// Replies to `reply` once the write in `outcome` has made a change
@@ -93,9 +93,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 id,
                 generation,
                 priority,
+                by,
                 reply,
             } => {
-                let result = self.touch(id, generation, priority);
+                let result = self.touch(id, generation, priority, by);
                 if let Some(reply) = reply {
                     let _ = reply.send(result);
                 }
@@ -186,12 +187,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Notes that a request asks about `id`, for the step it causes.
-    fn note_ask(&mut self, id: Id) {
+    /// Notes that `by` asked for sandbox `id` to wake, for the step that
+    /// wakes it to say.
+    fn note_ask(&mut self, id: Id, by: By) {
         let trace = self.trace;
         if let Some(slot) = self.slots.get_mut(&id.0) {
             slot.asked = Some(Why {
                 cause: Cause::Request,
                 trace,
+                by: Some(by),
             });
         }
     }
@@ -240,13 +244,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         id: Id,
         generation: Option<u64>,
         priority: Priority,
+        by: By,
     ) -> Result<(), HostError> {
         self.check(id, generation)?;
         self.not_handing_off(id)?;
         if !self.slots.contains_key(&id.0) {
             return Err(HostError::NotFound(id));
         }
-        self.note_ask(id);
+        self.note_ask(id, by);
         self.input(Input::Touch {
             sandbox: id.0,
             priority,
@@ -300,7 +305,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             queued: false,
             reply,
         });
-        self.note_ask(id);
+        self.note_ask(id, By::Fleet);
         self.input(Input::Hold {
             sandbox: id.0,
             hold,
@@ -360,6 +365,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             slot.sleep_asked = Some(Why {
                 cause: Cause::Request,
                 trace,
+                by: None,
             });
         }
         self.input(Input::Sleep {
@@ -383,7 +389,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         self.not_handing_off(id)?;
         let until = ttl.map(|ttl| self.now() + ttl);
-        self.note_ask(id);
+        self.note_ask(id, By::Fleet);
         self.input(Input::Hold {
             sandbox: id.0,
             hold: hold_id(&name),

@@ -477,6 +477,8 @@ enum Command {
         id: Id,
         generation: Option<u64>,
         priority: Priority,
+        /// What asked.
+        by: observe::By,
         /// Told whether the request was accepted; guest activity needs no
         /// answer.
         reply: Option<Reply<()>>,
@@ -994,11 +996,13 @@ struct Warm {
     uses: Uses,
 }
 
-/// Wakes a sandbox when data arrives for it on a guest port.
+/// Wakes a sandbox when data arrives for it on a guest port, or a request
+/// for its agent on its agent link: `by` says which.
 #[derive(Clone, Debug)]
 struct Toucher {
     id: Id,
     commands: mpsc::WeakUnboundedSender<Command>,
+    by: observe::By,
 }
 
 impl Activity for Toucher {
@@ -1008,6 +1012,7 @@ impl Activity for Toucher {
                 id: self.id,
                 generation: None,
                 priority: Priority::Interactive,
+                by: self.by,
                 reply: None,
             });
         }
@@ -1227,6 +1232,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let toucher = Toucher {
             id,
             commands: self.commands_tx.clone(),
+            by: observe::By::GuestPort,
         };
         let owner = (spec.uid, spec.gid);
         let ports =

@@ -537,6 +537,11 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   events for its `compute.sandbox.id`. Steps carry time per phase, bytes,
   cause and the host-side pressure the sandbox saw since its previous
   event. A caller that sends `traceparent` finds them under its own trace.
+- **Find what woke a sandbox**: a wake step a caller asked for carries
+  `compute.wake.by`: `fleet` (a wake, touch, hold or connection through
+  the fleet), `agent_link` (a request for its agent, a message with a
+  reply subject; acknowledgements and other messages nobody waits on never
+  wake one) or `guest_port` (data for the guest on a port that wakes it).
 
 ## Upgrades
 
