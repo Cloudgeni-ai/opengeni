@@ -1279,12 +1279,13 @@ check(
     const secondAt = new Date().toISOString();
     const killed = await step("kill the sandbox's Firecracker on its host", async () => {
       const dir = vmDir(state.sandbox!);
-      // Only the VMM whose root is this sandbox's jail.
+      // Only the VMM the jail's pid file names, checked to be Firecracker
+      // started for this sandbox (`--id <sandbox>`).
       return onHost(
         host,
         `pid=$(sudo cat ${dir}/root/firecracker.pid); [ -n "$pid" ] || exit 3; ` +
           `[ "$(sudo cat /proc/$pid/comm)" = firecracker ] || exit 4; ` +
-          `[ "$(sudo readlink /proc/$pid/root)" = ${dir}/root ] || exit 5; ` +
+          `sudo cat /proc/$pid/cmdline | tr '\\0' ' ' | grep -q -- ' --id ${state.sandbox} ' || exit 5; ` +
           `sudo kill -9 $pid; for i in $(seq 50); do sudo kill -0 $pid 2>/dev/null || break; sleep 0.1; done; ` +
           `sudo kill -0 $pid 2>/dev/null && exit 6; echo $pid`,
       ).trim();
