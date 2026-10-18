@@ -121,11 +121,15 @@ and 16.1).
 - **Idle includes the agent.** The host already asks a guest how many
   quiet commands it runs before it sleeps it for being idle (ADR 3). The
   guest now adds counts that guest programs register as files under
-  `/run/compute/activity/`. The agent registers its running operations, its
-  open terminal, desktop and port streams that moved bytes within the
-  stream silence limit, and its attached browser and computer controllers.
-  So a sandbox sleeps only when the agent is idle too, and an open
-  terminal, desktop or browser view keeps it awake, as ADR 3 promised.
+  `/run/compute/activity/`. The agent registers its running operations and
+  its open terminal, desktop, browser and computer streams that moved bytes
+  within the stream silence limit. So a sandbox sleeps only when the agent
+  is idle too, and a terminal or view in use keeps it awake, as ADR 3
+  promised. Two things do not count, because they would keep a sandbox
+  awake for ever: desktop frames the agent sends (it captures the screen at
+  a fixed rate, changed or not; what a viewer sends still counts), and a
+  browser controller that is merely running (each use of it is a message,
+  which counts on the host).
 - **A sandbox with no owner is woken through the fleet service.** A
   sandbox whose host was lost, or that was handed off and not yet adopted,
   has no session, so a message to it finds no responder. Opengeni's

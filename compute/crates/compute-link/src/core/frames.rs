@@ -110,9 +110,9 @@ impl Core {
                 payload: Bytes::new(),
             });
         }
-        let conn = sandbox.conn;
+        let conns: Vec<ConnId> = sandbox.conns.iter().copied().collect();
         self.set_relay(id, relay);
-        if let Some(conn) = conn {
+        for conn in conns {
             self.ready(now, conn);
         }
     }
@@ -139,7 +139,7 @@ impl Core {
         } else {
             tracing::warn!(sandbox = id, ?code, message, "a gateway refused a session");
             sandbox.refused = true;
-            self.close_sandbox_conn(id, Some("Authorization Violation"));
+            self.close_sandbox_conns(now, id, Some("Authorization Violation"));
         }
     }
 
@@ -172,10 +172,12 @@ impl Core {
         }
         // Its agent connects again, to a session that is open, or not at
         // all.
-        self.close_sandbox_conn(id, Some("Session Ended"));
+        self.close_sandbox_conns(now, id, Some("Session Ended"));
     }
 
-    /// The gateway refused one operation.
+    /// The gateway refused one operation: a subscription, told to the
+    /// connection that holds it, if one does, or another, told to every
+    /// connection, as the gateway does not say which one sent it.
     pub(super) fn refused_op(&mut self, id: &str, code: &str, message: &str, sid: Option<u32>) {
         tracing::info!(
             sandbox = id,
@@ -187,21 +189,22 @@ impl Core {
         let Some(sandbox) = self.sandboxes.get(id) else {
             return;
         };
-        let conn = sandbox.conn;
-        let text = match sid.and_then(|sid| sandbox.subs.get(&sid).map(|sub| (sid, sub))) {
-            Some((sid, sub)) => {
-                let text = format!(
-                    "Permissions Violation for Subscription to \"{}\"",
-                    sub.subject
-                );
-                self.remove_sub(id, sid, false);
-                self.save(id);
-                text
+        if let Some((sid, sub)) = sid.and_then(|sid| sandbox.subs.get(&sid).map(|sub| (sid, sub))) {
+            let text = format!(
+                "Permissions Violation for Subscription to \"{}\"",
+                sub.subject
+            );
+            let holder = sub.guest.as_ref().map(|(conn, _)| *conn);
+            self.remove_sub(id, sid, false);
+            self.save(id);
+            if let Some(conn) = holder {
+                self.send(conn, ServerOp::Err(text));
             }
-            None => message.to_owned(),
-        };
-        if let Some(conn) = conn {
-            self.send(conn, ServerOp::Err(text));
+        } else {
+            let conns: Vec<ConnId> = sandbox.conns.iter().copied().collect();
+            for conn in conns {
+                self.send(conn, ServerOp::Err(message.to_owned()));
+            }
         }
     }
 
@@ -214,21 +217,22 @@ impl Core {
             return;
         };
         let open = matches!(sandbox.session, Session::Open { .. });
-        match sandbox.conn {
-            Some(conn) if open && sub.guest.is_some() => self.deliver(id, conn, queued),
-            _ => sandbox.queued.push_back(queued),
+        if open && sub.guest.is_some() {
+            self.deliver(id, queued);
+        } else {
+            sandbox.queued.push_back(queued);
         }
     }
 
     /// Sends a message to the connection that holds its subscription.
-    pub(super) fn deliver(&mut self, id: &str, conn: ConnId, queued: Queued) {
+    pub(super) fn deliver(&mut self, id: &str, queued: Queued) {
         let Some(sandbox) = self.sandboxes.get_mut(id) else {
             return;
         };
         let Some(sub) = sandbox.subs.get_mut(&queued.sid) else {
             return;
         };
-        let Some(guest) = sub.guest.clone() else {
+        let Some((conn, guest)) = sub.guest.clone() else {
             return;
         };
         sub.delivered += 1;
@@ -255,19 +259,19 @@ impl Core {
         };
         let payload = Bytes::from(serde_json::to_vec(&relay).unwrap_or_default());
         sandbox.relay = Some(relay);
-        let Some(conn) = sandbox.conn else {
-            return;
-        };
-        let Some(sids) = self.conns.get(&conn).map(|conn| {
-            conn.sids
-                .iter()
-                .filter(|(_, target)| **target == Target::Relay)
-                .map(|(sid, _)| sid.clone())
-                .collect::<Vec<_>>()
-        }) else {
-            return;
-        };
-        for sid in sids {
+        let sids: Vec<(ConnId, String)> = sandbox
+            .conns
+            .iter()
+            .filter_map(|conn| self.conns.get(conn).map(|state| (*conn, state)))
+            .flat_map(|(conn, state)| {
+                state
+                    .sids
+                    .iter()
+                    .filter(|(_, target)| **target == Target::Relay)
+                    .map(move |(sid, _)| (conn, sid.clone()))
+            })
+            .collect();
+        for (conn, sid) in sids {
             self.send(conn, relay_delivery(sid, payload.clone()));
         }
     }

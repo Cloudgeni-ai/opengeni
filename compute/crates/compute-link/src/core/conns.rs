@@ -47,7 +47,7 @@ impl Core {
     }
 
     /// Ends a connection, sending `error` first if given.
-    pub(super) fn close_conn(&mut self, conn: ConnId, error: Option<&str>) {
+    pub(super) fn close_conn(&mut self, now: u64, conn: ConnId, error: Option<&str>) {
         if !self.conns.contains_key(&conn) {
             return;
         }
@@ -55,28 +55,50 @@ impl Core {
             self.send(conn, ServerOp::Err(error.to_owned()));
         }
         self.effects.push(Effect::CloseGuest { conn });
-        self.drop_conn(conn);
+        self.drop_conn(now, conn);
     }
 
-    pub(super) fn close_sandbox_conn(&mut self, id: &str, error: Option<&str>) {
-        if let Some(conn) = self.sandboxes.get(id).and_then(|sandbox| sandbox.conn) {
-            self.close_conn(conn, error);
+    /// Ends every connection of the sandbox's agent.
+    pub(super) fn close_sandbox_conns(&mut self, now: u64, id: &str, error: Option<&str>) {
+        let conns: Vec<ConnId> = self
+            .sandboxes
+            .get(id)
+            .map(|sandbox| sandbox.conns.iter().copied().collect())
+            .unwrap_or_default();
+        for conn in conns {
+            self.close_conn(now, conn, error);
         }
     }
 
-    /// Forgets a connection that ended.
-    pub(super) fn drop_conn(&mut self, conn: ConnId) {
+    /// Forgets a connection that ended. Its subscriptions wait for a
+    /// connection to take them up: the agent's next one, or, while others
+    /// of its agent stay, one within the grace period.
+    pub(super) fn drop_conn(&mut self, now: u64, conn: ConnId) {
         let Some(state) = self.conns.remove(&conn) else {
             return;
         };
-        if let Some(sandbox) = self.sandboxes.get_mut(&state.sandbox)
-            && sandbox.conn == Some(conn)
-        {
-            sandbox.conn = None;
-            sandbox.grace_until = None;
-            for sub in sandbox.subs.values_mut() {
+        let grace = self.settings.grace_ms;
+        let Some(sandbox) = self.sandboxes.get_mut(&state.sandbox) else {
+            return;
+        };
+        if !sandbox.conns.remove(&conn) {
+            return;
+        }
+        let mut released = false;
+        for sub in sandbox.subs.values_mut() {
+            if sub
+                .guest
+                .as_ref()
+                .is_some_and(|(holder, _)| *holder == conn)
+            {
                 sub.guest = None;
+                released = true;
             }
+        }
+        if sandbox.conns.is_empty() {
+            sandbox.grace_until = None;
+        } else if released && matches!(sandbox.session, Session::Open { .. }) {
+            sandbox.grace_until.get_or_insert(now + grace);
         }
     }
 
@@ -85,17 +107,19 @@ impl Core {
             return;
         };
         match (stage, op) {
-            (Stage::AwaitInfo, _) => self.close_conn(conn, Some("Protocol Error")),
+            (Stage::AwaitInfo, _) => self.close_conn(now, conn, Some("Protocol Error")),
             (Stage::AwaitConnect, ClientOp::Connect(connect)) => self.connect(now, conn, &connect),
-            (Stage::AwaitConnect, _) => self.close_conn(conn, Some("Authorization Violation")),
+            (Stage::AwaitConnect, _) => {
+                self.close_conn(now, conn, Some("Authorization Violation"));
+            }
             (Stage::Connected, ClientOp::Pong) => {}
-            (Stage::Connected, op) if self.scope_of(conn).is_some() => self.operate(conn, op),
-            (Stage::Connected, op) => self.hold(conn, op),
+            (Stage::Connected, op) if self.scope_of(conn).is_some() => self.operate(now, conn, op),
+            (Stage::Connected, op) => self.hold(now, conn, op),
         }
     }
 
     /// Keeps what a connection sent before its session opened.
-    pub(super) fn hold(&mut self, conn: ConnId, op: ClientOp) {
+    pub(super) fn hold(&mut self, now: u64, conn: ConnId, op: ClientOp) {
         let limit = self.settings.pending_bytes;
         let Some(state) = self.conns.get_mut(&conn) else {
             return;
@@ -106,10 +130,12 @@ impl Core {
         };
         state.pending.push(op);
         if state.pending_bytes > limit {
-            self.close_conn(conn, Some("Slow Consumer"));
+            self.close_conn(now, conn, Some("Slow Consumer"));
         }
     }
 
+    /// A connection said `CONNECT`: it joins its agent's session, or, for
+    /// another agent process, starts a new one.
     pub(super) fn connect(&mut self, now: u64, conn: ConnId, connect: &Connect) {
         let Some(instance) = connect
             .name
@@ -118,7 +144,7 @@ impl Core {
             .filter(|instance| is_token(instance))
             .map(str::to_owned)
         else {
-            self.close_conn(conn, Some("Authorization Violation"));
+            self.close_conn(now, conn, Some("Authorization Violation"));
             return;
         };
         let Some(state) = self.conns.get_mut(&conn) else {
@@ -133,15 +159,11 @@ impl Core {
         let Some(sandbox) = self.sandboxes.get(&id) else {
             return;
         };
-        if sandbox.instance.as_deref() == Some(instance.as_str()) {
-            // The same agent again: it takes up the session.
-            if let Some(old) = sandbox.conn {
-                self.close_conn(old, None);
-            }
-        } else {
-            // Another agent process: a new session.
+        if sandbox.instance.as_deref() != Some(instance.as_str()) {
+            // Another agent process: a new session. The same agent again
+            // joins its session beside the connections it holds.
             self.end_session(&id);
-            self.close_sandbox_conn(&id, None);
+            self.close_sandbox_conns(now, &id, None);
             let sandbox = self.sandboxes.get_mut(&id).expect("checked above");
             sandbox.instance = Some(instance);
             sandbox.subs.clear();
@@ -153,9 +175,9 @@ impl Core {
             self.save(&id);
         }
         let sandbox = self.sandboxes.get_mut(&id).expect("checked above");
-        sandbox.conn = Some(conn);
+        sandbox.conns.insert(conn);
         if sandbox.refused {
-            self.close_conn(conn, Some("Authorization Violation"));
+            self.close_conn(now, conn, Some("Authorization Violation"));
             return;
         }
         if matches!(sandbox.session, Session::Open { .. }) {
@@ -170,7 +192,7 @@ impl Core {
         let state = self.conns.get(&conn)?;
         let sandbox = self.sandboxes.get(&state.sandbox)?;
         match &sandbox.session {
-            Session::Open { scope, .. } if sandbox.conn == Some(conn) => Some(scope),
+            Session::Open { scope, .. } if sandbox.conns.contains(&conn) => Some(scope),
             _ => None,
         }
     }
@@ -188,11 +210,11 @@ impl Core {
             if !self.conns.contains_key(&conn) {
                 return;
             }
-            self.operate(conn, op);
+            self.operate(now, conn, op);
         }
         let grace = self.settings.grace_ms;
         if let Some(sandbox) = self.sandboxes.get_mut(&id)
-            && sandbox.conn == Some(conn)
+            && sandbox.conns.contains(&conn)
             && sandbox.subs.values().any(|sub| sub.guest.is_none())
         {
             sandbox.grace_until = Some(now + grace);
@@ -200,18 +222,18 @@ impl Core {
     }
 
     /// Does what a connection whose session is open asked.
-    pub(super) fn operate(&mut self, conn: ConnId, op: ClientOp) {
+    pub(super) fn operate(&mut self, now: u64, conn: ConnId, op: ClientOp) {
         match op {
             ClientOp::Ping => self.send(conn, ServerOp::Pong),
             ClientOp::Pong => {}
-            ClientOp::Connect(_) => self.close_conn(conn, Some("Protocol Error")),
+            ClientOp::Connect(_) => self.close_conn(now, conn, Some("Protocol Error")),
             ClientOp::Sub {
                 subject,
                 queue,
                 sid,
             } => self.subscribe(conn, subject, queue, sid),
             ClientOp::Unsub { sid, max } => self.unsubscribe(conn, &sid, max),
-            ClientOp::Pub(publish) => self.publish(conn, publish),
+            ClientOp::Pub(publish) => self.publish(now, conn, publish),
         }
     }
 
@@ -269,7 +291,7 @@ impl Core {
             .iter_mut()
             .find(|(_, sub)| sub.guest.is_none() && sub.subject == subject && sub.queue == queue);
         let sid = if let Some((sid, sub)) = taken {
-            sub.guest = Some(guest.clone());
+            sub.guest = Some((conn, guest.clone()));
             sub.delivered = 0;
             sub.max = None;
             *sid
@@ -281,7 +303,7 @@ impl Core {
                 Sub {
                     subject: subject.clone(),
                     queue: queue.clone(),
-                    guest: Some(guest.clone()),
+                    guest: Some((conn, guest.clone())),
                     delivered: 0,
                     max: None,
                 },
@@ -315,7 +337,7 @@ impl Core {
         }
         self.ok(conn);
         for queued in waiting {
-            self.deliver(&id, conn, queued);
+            self.deliver(&id, queued);
         }
     }
 
@@ -347,7 +369,7 @@ impl Core {
         self.ok(conn);
     }
 
-    pub(super) fn publish(&mut self, conn: ConnId, publish: Publish) {
+    pub(super) fn publish(&mut self, now: u64, conn: ConnId, publish: Publish) {
         let Some(scope) = self.scope_of(conn) else {
             return;
         };
@@ -366,7 +388,7 @@ impl Core {
             .get(&sandbox.gateway)
             .map_or(0, |link| link.max_payload);
         if publish.size() > max_payload as usize {
-            self.close_conn(conn, Some("Maximum Payload Violation"));
+            self.close_conn(now, conn, Some("Maximum Payload Violation"));
             return;
         }
         let Some((link, s)) = sandbox.session.on() else {

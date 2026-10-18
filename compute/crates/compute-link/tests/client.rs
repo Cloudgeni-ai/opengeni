@@ -460,6 +460,20 @@ impl Agent {
             }
         }
     }
+
+    /// That the client has not lost its connection so far.
+    fn still_connected(&mut self) {
+        while let Ok(event) = self.events.try_recv() {
+            assert!(
+                !matches!(event, async_nats::Event::Disconnected),
+                "the client lost its connection"
+            );
+        }
+        assert_eq!(
+            self.client.connection_state(),
+            async_nats::connection::State::Connected
+        );
+    }
 }
 
 async fn message(subscriber: &mut async_nats::Subscriber) -> async_nats::Message {
@@ -1113,5 +1127,89 @@ async fn a_connection_that_is_not_an_agent_is_refused() {
     .unwrap();
     assert_eq!(answer, b"-ERR 'Unknown Protocol Operation'\r\n");
     gateway.quiet(Duration::from_millis(200)).await;
+    port.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agents_control_and_bulk_connections_share_its_session() {
+    let mut gateway = Gateway::start().await;
+    let hub = hub();
+    hub.attach(
+        SANDBOX.into(),
+        link(&gateway, "ticket-1"),
+        scratch("two-connections"),
+        Arc::new(Wakes::default()),
+    );
+    gateway.up().await;
+    let port = Port::start(hub.clone()).await;
+    let addr = port.addr;
+
+    // Opengeni's agent dials its control connection, subscribes on it,
+    // then dials its bulk connection under the same name.
+    let connecting = tokio::spawn(async move { connect(addr, "inst-1").await });
+    let s = gateway.open("inst-1", "ticket-1", SCOPE_1, "relay-1").await;
+    let mut control = timeout(WAIT, connecting).await.unwrap().unwrap();
+    let mut rpc_sub = control.client.subscribe(rpc(SCOPE_1)).await.unwrap();
+    control.client.flush().await.unwrap();
+    let (frame, _) = gateway.frame().await;
+    assert_eq!(
+        frame,
+        HostFrame::Sub {
+            s,
+            sid: 1,
+            subject: rpc(SCOPE_1),
+            queue: None
+        }
+    );
+    let mut bulk = timeout(WAIT, connect(addr, "inst-1")).await.unwrap();
+    // It joins the open session: the gateway hears of no new one.
+    gateway.quiet(Duration::from_millis(200)).await;
+
+    // Both work at once: the bulk one publishes and the control one gets
+    // its requests, and neither is ended.
+    bulk.client
+        .publish(format!("{SCOPE_1}.events"), Bytes::from_static(b"frame"))
+        .await
+        .unwrap();
+    bulk.client.flush().await.unwrap();
+    let (frame, payload) = gateway.frame().await;
+    assert_eq!(
+        frame,
+        HostFrame::Pub {
+            s,
+            subject: format!("{SCOPE_1}.events"),
+            reply: None,
+            headers: None
+        }
+    );
+    assert_eq!(payload.as_ref(), b"frame");
+    let request = GatewayFrame::Msg {
+        s,
+        sid: 1,
+        subject: rpc(SCOPE_1),
+        reply: None,
+        headers: None,
+    };
+    gateway.send(&request, b"one");
+    assert_eq!(message(&mut rpc_sub).await.payload.as_ref(), b"one");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    control.still_connected();
+    bulk.still_connected();
+
+    // The bulk one going leaves the control one and its subscription.
+    drop(bulk);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    gateway.send(&request, b"two");
+    assert_eq!(message(&mut rpc_sub).await.payload.as_ref(), b"two");
+    gateway.quiet(Duration::from_millis(200)).await;
+    control.still_connected();
+
+    // Another agent process ends the session and its connections.
+    let connecting = tokio::spawn(async move { connect(addr, "inst-2").await });
+    let (frame, _) = gateway.frame().await;
+    assert_eq!(frame, HostFrame::Close { s });
+    control.disconnected().await;
+    gateway.open("inst-2", "ticket-1", SCOPE_2, "relay-2").await;
+    let _second = timeout(WAIT, connecting).await.unwrap().unwrap();
     port.stop();
 }
