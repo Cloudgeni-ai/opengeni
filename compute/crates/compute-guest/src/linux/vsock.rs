@@ -182,4 +182,8 @@ impl crate::relay::Duplex for Stream {
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         Stream::shutdown(self, how)
     }
+
+    fn set_read_timeout(&self, limit: Option<Duration>) -> io::Result<()> {
+        Stream::set_read_timeout(self, limit)
+    }
 }

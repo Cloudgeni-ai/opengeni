@@ -690,6 +690,9 @@ struct Slot<V> {
     _ports: Option<Listeners>,
     /// The listener for its agent's connections, on a host with links.
     _link: Option<Listeners>,
+    /// Whether its guest can run, for its agent-link streams; see
+    /// [`HostAgent::tell_clocks`].
+    link_clock: crate::resume::RunClock,
     op: Option<Running>,
     destroy: bool,
     removers: Vec<Reply<()>>,
@@ -1254,7 +1257,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             };
         let holds = holds::Holds::new(paths.holds.clone(), self.records.ownership());
-        let link = self.listen_link(id, &spec);
+        let link_clock = crate::resume::RunClock::default();
+        let link = self.listen_link(id, &spec, &link_clock);
         self.slots.insert(
             id.0,
             Slot {
@@ -1266,6 +1270,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 dead: None,
                 _ports: ports,
                 _link: link,
+                link_clock,
                 op: None,
                 destroy: false,
                 removers: Vec::new(),
@@ -1450,6 +1455,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.execute(action);
         }
         self.actions = actions;
+        self.tell_clocks();
     }
 }
 

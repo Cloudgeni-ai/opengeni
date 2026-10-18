@@ -20,6 +20,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::time::Duration;
 
 /// A connection the relay can copy in one direction while it copies the
 /// other on another handle, and end in either direction.
@@ -37,6 +38,13 @@ pub trait Duplex: Read + Write + Send + Sized + 'static {
     ///
     /// As `shutdown(2)`.
     fn shutdown(&self, how: Shutdown) -> io::Result<()>;
+
+    /// How long a read may wait before it fails; `None` for ever.
+    ///
+    /// # Errors
+    ///
+    /// As `setsockopt(2)`.
+    fn set_read_timeout(&self, limit: Option<Duration>) -> io::Result<()>;
 }
 
 impl Duplex for TcpStream {
@@ -46,6 +54,10 @@ impl Duplex for TcpStream {
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         TcpStream::shutdown(self, how)
+    }
+
+    fn set_read_timeout(&self, limit: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_read_timeout(self, limit)
     }
 }
 
@@ -57,6 +69,10 @@ impl Duplex for std::os::unix::net::UnixStream {
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         std::os::unix::net::UnixStream::shutdown(self, how)
+    }
+
+    fn set_read_timeout(&self, limit: Option<Duration>) -> io::Result<()> {
+        std::os::unix::net::UnixStream::set_read_timeout(self, limit)
     }
 }
 
