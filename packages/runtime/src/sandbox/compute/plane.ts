@@ -1,11 +1,13 @@
 // The Connected Machine plane a compute sandbox's agent is reached over.
 //
-// Every compute box runs Opengeni's machine agent, so the runtime needs the
-// same live pieces a Connected Machine session uses: the NATS request/reply
-// connection (ControlRpc), the op-stream frame transport, the database read
-// that resolves an enrollment's current live connection, and enrollment
-// revocation. The runtime leaf owns none of them; the API and worker inject
-// them once at boot, exactly as they inject the selfhosted applyDiff.
+// Every compute sandbox runs Opengeni's machine agent, reached through its
+// host's link to the agent gateway, which puts the agent's traffic on
+// Opengeni's NATS exactly where a Connected Machine's would be. So the runtime
+// needs the same live pieces a Connected Machine session uses: the NATS
+// request/reply connection (ControlRpc), the op-stream frame transport, the
+// database read that resolves an enrollment's current live connection, and the
+// sandbox enrollment's creation and revocation. The runtime leaf owns none of
+// them; the API and worker inject them once at boot.
 
 import type { ControlRpc } from "../selfhosted/control-rpc";
 import type { OpStreamTransport } from "../selfhosted/op-transport";
@@ -28,13 +30,25 @@ export interface ComputeAgentPlane {
   controlRpc(): ControlRpc;
   /** The op-stream frame transport, or null when the deployment has none. */
   opStreamTransport(): OpStreamTransport | null;
-  /** The enrollment's current live connection, or null when it has none
-   * (not yet enrolled, asleep past its connection lease, or revoked). */
+  /** The enrollment's current live connection, or null when it has none (its
+   * host has not opened the agent's session at the gateway, or it was revoked).
+   * A sleeping sandbox's session stays open, so it resolves. */
   resolveConnection(input: {
     workspaceId: string;
     enrollmentId: string;
   }): Promise<ComputeAgentConnection | null>;
-  /** Revoke the sandbox enrollment (idempotent; absent is success). */
+  /** Create the sandbox's enrollment, active at once and keyless, bound to the
+   * sandbox group (idempotent for the same id and group). */
+  createEnrollment(input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    sandboxGroupId: string;
+    hasDisplay: boolean;
+    workspaceRoot: string;
+  }): Promise<void>;
+  /** Revoke the sandbox enrollment, which ends its session at the gateway
+   * (idempotent; absent is success). */
   revokeEnrollment(input: { workspaceId: string; enrollmentId: string }): Promise<void>;
 }
 
@@ -48,7 +62,7 @@ export function setComputeAgentPlane(plane: ComputeAgentPlane | undefined): void
 export function getComputeAgentPlane(): ComputeAgentPlane {
   if (!injectedPlane) {
     throw new Error(
-      "compute sandbox: the agent plane is not installed in this process (the API and worker install it at boot when OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true)",
+      "compute sandbox: the agent plane is not installed in this process (the API and worker install it at boot when the compute backend is configured)",
     );
   }
   return injectedPlane;

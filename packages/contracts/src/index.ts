@@ -772,13 +772,14 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     supportsRunAs: false,
   },
   // Opengeni compute: a managed microVM from Opengeni's own sandbox fabric.
-  // Every box runs the Connected Machine agent, enrolled with a single-use
-  // sandbox enrollment, so the transport is the agent's (PTY, desktop frames,
-  // browser control and on-demand ports over the relay). The lifetime is a
-  // managed sandbox's: the fabric sleeps an idle box itself and keeps its
-  // memory and disk across sleep, moves and host loss, so there is no hard
-  // lifetime and no idle killer, and resume is a wake of the same box. A
-  // portable tar is only the fallback that moves a workspace to another backend.
+  // Every sandbox runs the Connected Machine agent, reached through its host's
+  // link to Opengeni's agent gateway, so the transport is the agent's (PTY,
+  // desktop frames, browser control and on-demand ports over the relay). The
+  // lifetime is a managed sandbox's: the fabric sleeps an idle sandbox itself
+  // and keeps its memory and disk across sleep, moves and host loss, so there
+  // is no hard lifetime and no idle killer, and a message to a sleeping
+  // sandbox wakes it. A portable tar is only the fallback that moves a
+  // workspace to another backend.
   compute: {
     backend: "compute",
     backendId: "compute",
@@ -3901,14 +3902,11 @@ const enrollTokenClaims = {
   jti: enrollTokenId.optional(),
 };
 
-// Three token kinds, separated by their domain claim. `enroll` is the original
+// Two token kinds, separated by their domain claim. `enroll` is the original
 // workspace-shared token. `enroll_user` binds the authenticated human who
 // minted it as the machine's owner. A distinct typ (rather than an optional
 // claim) makes an API replica that predates personal tokens reject one as
 // invalid instead of stripping the owner and connecting a workspace machine.
-// `enroll_sandbox` is minted by Opengeni itself for one compute sandbox: the
-// agent inside the box exchanges it for an enrollment of kind `sandbox`, bound
-// to that sandbox group, which is never listed or attachable as a machine.
 export const EnrollTokenPayload = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("typ", [
     z.object({
@@ -3927,27 +3925,11 @@ export const EnrollTokenPayload = /* @__PURE__ */ defineSchema(() =>
       // Personal tokens were single-use from the start, so the id is required.
       jti: enrollTokenId,
     }),
-    z.object({
-      typ: z.literal("enroll_sandbox"),
-      ...enrollTokenClaims,
-      // The enrollment id the exchange creates; the provider addresses the
-      // box's agent by it before the agent has connected.
-      enrollmentId: z.string().uuid(),
-      // The sandbox group (lease) whose box this is. Its lifetime bounds the
-      // enrollment's.
-      sandboxGroupId: z.string().uuid(),
-      // The fabric sandbox id is not known at mint; the provider's create
-      // request id ties the enrollment to the fabric create.
-      requestId: z.string().min(1).max(256),
-      jti: enrollTokenId,
-    }),
   ]),
 );
 export type EnrollTokenPayload = z.infer<typeof EnrollTokenPayload>;
 
-/** Who can use the machine a verified enroll token connects. A sandbox
- * enrollment's use is authorized by its lease, never by machine scope; it is
- * recorded as workspace scope and excluded from every machine surface. */
+/** Who can use the machine a verified enroll token connects. */
 export function enrollTokenScope(payload: EnrollTokenPayload): EnrollTokenScope {
   return payload.typ === "enroll_user" ? "user" : "workspace";
 }

@@ -59870,9 +59870,15 @@ export type EnrollmentRecord = {
   workspaceId: string;
   scope: "organization" | "workspace" | "user";
   generation: number;
+  /** "sandbox" is the agent inside one Opengeni compute sandbox, bound to
+   * `sandboxGroupId`; such enrollments are never machines. Absent in rows
+   * read through the scoped machine listing, which returns machines only. */
+  kind?: "machine" | "sandbox";
+  sandboxGroupId?: string | null;
   sandboxId?: string | null;
   sandboxName?: string | null;
-  pubkey: string;
+  /** Null exactly for sandbox enrollments, which hold no credential. */
+  pubkey: string | null;
   exposure: EnrollmentExposure;
   hasDisplay: boolean;
   opStream: boolean;
@@ -59926,6 +59932,8 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     workspaceId: row.workspaceId,
     scope: row.authorityScope as EnrollmentRecord["scope"],
     generation: Number(row.generation),
+    kind: row.kind === "sandbox" ? "sandbox" : "machine",
+    sandboxGroupId: row.sandboxGroupId ?? null,
     sandboxId: null,
     sandboxName: null,
     pubkey: row.pubkey,
@@ -60576,12 +60584,12 @@ export async function listEnrollments(
   }
   const workspaceId = access;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const where = options.status
-      ? and(
-          eq(schema.enrollments.workspaceId, workspaceId),
-          eq(schema.enrollments.status, options.status),
-        )
-      : eq(schema.enrollments.workspaceId, workspaceId);
+    // Machines only: a compute sandbox's enrollment is never a machine.
+    const where = and(
+      eq(schema.enrollments.workspaceId, workspaceId),
+      eq(schema.enrollments.kind, "machine"),
+      ...(options.status ? [eq(schema.enrollments.status, options.status)] : []),
+    );
     const rows = await scopedDb
       .select()
       .from(schema.enrollments)
@@ -62311,6 +62319,305 @@ export async function finalizeEnrollmentByToken(
     }
     throw error;
   }
+}
+
+// CREATE a compute sandbox's enrollment. Opengeni makes it itself, before the
+// fabric create, under the id the sandbox's init names as its agent id. It is
+// active at once, kind 'sandbox', bound to the sandbox group, with no public
+// key and no bearer: the agent inside holds no credential and is reached only
+// through its host's link to the agent gateway. It gets no sandboxes row and
+// is never a machine; its use is authorized by its lease. Repeating the create
+// for the same id and group is a no-op.
+export class SandboxEnrollmentConflictError extends Error {
+  constructor() {
+    super("The enrollment id is taken by another enrollment");
+    this.name = "SandboxEnrollmentConflictError";
+  }
+}
+
+export async function createSandboxEnrollment(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    sandboxGroupId: string;
+    hasDisplay: boolean;
+    workspaceRoot: string;
+  },
+): Promise<EnrollmentRecord> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .insert(schema.enrollments)
+        .values({
+          id: input.enrollmentId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          kind: "sandbox",
+          sandboxGroupId: input.sandboxGroupId,
+          pubkey: null,
+          exposure: "whole-machine",
+          hasDisplay: input.hasDisplay,
+          // Opengeni owns the sandbox; screen control needs no human consent.
+          allowScreenControl: true,
+          workspaceRoot: input.workspaceRoot,
+          status: "active",
+        })
+        .onConflictDoNothing({ target: schema.enrollments.id });
+      const [row] = await scopedDb
+        .select()
+        .from(schema.enrollments)
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+          ),
+        )
+        .limit(1);
+      if (
+        !row ||
+        row.kind !== "sandbox" ||
+        row.sandboxGroupId !== input.sandboxGroupId ||
+        row.status !== "active"
+      ) {
+        throw new SandboxEnrollmentConflictError();
+      }
+      return mapEnrollment(row);
+    },
+  );
+}
+
+/** Why the agent gateway refuses or ends a sandbox's link session. */
+export type SandboxAgentLinkRefusal = "unknown_agent" | "revoked" | "stale_epoch" | "duplicate";
+export type SandboxAgentLinkEnd = "revoked" | "superseded" | "lost";
+
+type SandboxAgentLinkInput = {
+  workspaceId: string;
+  agentId: string;
+  /** The fabric owner epoch from the sandbox's ticket. */
+  epoch: number;
+  connectionInstanceId: string;
+};
+
+function assertSandboxAgentLinkInput(input: SandboxAgentLinkInput, leaseMs?: number): void {
+  if (!input.connectionInstanceId || input.connectionInstanceId.length > 128) {
+    throw new Error("connection instance id must be 1-128 characters");
+  }
+  if (!Number.isSafeInteger(input.epoch) || input.epoch < 0) {
+    throw new Error("link epoch must be a non-negative integer");
+  }
+  if (leaseMs !== undefined && (!Number.isSafeInteger(leaseMs) || leaseMs < 1_000)) {
+    throw new Error("connection lease must be at least one second");
+  }
+}
+
+async function lockSandboxEnrollment(scopedDb: Database, workspaceId: string, agentId: string) {
+  const [row] = await scopedDb
+    .select()
+    .from(schema.enrollments)
+    .where(and(eq(schema.enrollments.workspaceId, workspaceId), eq(schema.enrollments.id, agentId)))
+    .for("update")
+    .limit(1);
+  return row;
+}
+
+/**
+ * OPEN a sandbox's link session at the agent gateway: fence it by the fabric
+ * owner epoch, then claim the agent's connection instance. Under the row lock:
+ * an epoch below the highest recorded is refused (`stale_epoch`); a higher one
+ * is recorded and takes the claim from any other instance, since the fabric
+ * has fenced the sandbox's previous owner; an equal one claims exactly as the
+ * NATS callout does for a Connected Machine (`duplicate` while another
+ * instance's lease is live). The claim's lease is the database clock's.
+ */
+export async function openSandboxAgentLink(
+  db: Database,
+  input: SandboxAgentLinkInput & { leaseMs: number },
+): Promise<
+  | { opened: true; connectionGeneration: number; superseded: boolean }
+  | { opened: false; code: SandboxAgentLinkRefusal }
+> {
+  assertSandboxAgentLinkInput(input, input.leaseMs);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const row = await lockSandboxEnrollment(scopedDb, input.workspaceId, input.agentId);
+    if (!row || row.kind !== "sandbox") return { opened: false, code: "unknown_agent" };
+    if (row.status !== "active") return { opened: false, code: "revoked" };
+    const recordedEpoch = row.linkEpoch === null ? null : Number(row.linkEpoch);
+    if (recordedEpoch !== null && input.epoch < recordedEpoch) {
+      return { opened: false, code: "stale_epoch" };
+    }
+    const now = await enrollmentConnectionClock(scopedDb);
+    const sameInstance = row.connectionInstanceId === input.connectionInstanceId;
+    const newerEpoch = recordedEpoch === null || input.epoch > recordedEpoch;
+    const claimAvailable =
+      newerEpoch ||
+      sameInstance ||
+      row.connectionInstanceId === null ||
+      row.connectionLeaseExpiresAt === null ||
+      row.connectionLeaseExpiresAt.getTime() <= now.getTime();
+    if (!claimAvailable) {
+      await scopedDb
+        .update(schema.enrollments)
+        .set({
+          connectionDuplicateDeniedCount: sql`${schema.enrollments.connectionDuplicateDeniedCount} + 1`,
+          connectionDuplicateDeniedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.agentId),
+          ),
+        );
+      return { opened: false, code: "duplicate" };
+    }
+    const connectionGeneration = Number(row.connectionGeneration) + (sameInstance ? 0 : 1);
+    await scopedDb
+      .update(schema.enrollments)
+      .set({
+        linkEpoch: input.epoch,
+        connectionInstanceId: input.connectionInstanceId,
+        connectionGeneration,
+        connectionLeaseExpiresAt: new Date(now.getTime() + input.leaseMs),
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.agentId),
+        ),
+      );
+    return {
+      opened: true,
+      connectionGeneration,
+      superseded: newerEpoch && recordedEpoch !== null,
+    };
+  });
+}
+
+/**
+ * RENEW an open link session's claim. The gateway calls this every few seconds
+ * while the session is open, whether the sandbox runs or sleeps, so a sleeping
+ * sandbox stays reachable. It ends the session when the enrollment was revoked,
+ * a later epoch opened elsewhere (`superseded`), or another instance holds the
+ * claim (`lost`).
+ */
+export async function renewSandboxAgentLink(
+  db: Database,
+  input: SandboxAgentLinkInput & { leaseMs: number },
+): Promise<{ renewed: true } | { renewed: false; code: SandboxAgentLinkEnd }> {
+  assertSandboxAgentLinkInput(input, input.leaseMs);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const row = await lockSandboxEnrollment(scopedDb, input.workspaceId, input.agentId);
+    if (!row || row.kind !== "sandbox" || row.status !== "active") {
+      return { renewed: false, code: "revoked" };
+    }
+    if (row.linkEpoch !== null && Number(row.linkEpoch) > input.epoch) {
+      return { renewed: false, code: "superseded" };
+    }
+    if (row.connectionInstanceId !== input.connectionInstanceId) {
+      return { renewed: false, code: "lost" };
+    }
+    const now = await enrollmentConnectionClock(scopedDb);
+    const leaseExpiresAt = new Date(now.getTime() + input.leaseMs);
+    await scopedDb
+      .update(schema.enrollments)
+      .set({
+        // Never shorten a lease a heartbeat extended further.
+        connectionLeaseExpiresAt:
+          row.connectionLeaseExpiresAt && row.connectionLeaseExpiresAt > leaseExpiresAt
+            ? row.connectionLeaseExpiresAt
+            : leaseExpiresAt,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.agentId),
+        ),
+      );
+    return { renewed: true };
+  });
+}
+
+/** RELEASE a link session's claim when its host closes it, so the agent's next
+ * instance can open at once. Only the exact epoch and instance release. */
+export async function releaseSandboxAgentLink(
+  db: Database,
+  input: SandboxAgentLinkInput,
+): Promise<{ released: boolean }> {
+  assertSandboxAgentLinkInput(input);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const now = await enrollmentConnectionClock(scopedDb);
+    const rows = await scopedDb
+      .update(schema.enrollments)
+      .set({ connectionLeaseExpiresAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.agentId),
+          eq(schema.enrollments.kind, "sandbox"),
+          eq(schema.enrollments.linkEpoch, input.epoch),
+          eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+        ),
+      )
+      .returning({ id: schema.enrollments.id });
+    return { released: rows.length > 0 };
+  });
+}
+
+// REVOKE a compute sandbox's enrollment when the sandbox is deleted, which
+// ends its link session at the gateway. Idempotent; never touches a machine.
+export async function revokeSandboxEnrollment(
+  db: Database,
+  input: { workspaceId: string; enrollmentId: string; now?: Date },
+): Promise<{ revoked: boolean }> {
+  const now = input.now ?? new Date();
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.enrollments)
+      .set({
+        status: "revoked",
+        revokedAt: now,
+        connectionInstanceId: null,
+        connectionLeaseExpiresAt: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.enrollmentId),
+          eq(schema.enrollments.kind, "sandbox"),
+          eq(schema.enrollments.status, "active"),
+        ),
+      )
+      .returning({ id: schema.enrollments.id });
+    return { revoked: rows.length > 0 };
+  });
+}
+
+/** The live sandbox enrollments of one sandbox group, for orphan cleanup. */
+export async function listSandboxEnrollmentsForGroup(
+  db: Database,
+  input: { workspaceId: string; sandboxGroupId: string },
+): Promise<EnrollmentRecord[]> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.enrollments)
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.kind, "sandbox"),
+          eq(schema.enrollments.sandboxGroupId, input.sandboxGroupId),
+          eq(schema.enrollments.status, "active"),
+        ),
+      );
+    return rows.map(mapEnrollment);
+  });
 }
 
 // THE LOUD-CONSENT APPROVE (the user's POST /approve). In ONE transaction:

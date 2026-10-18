@@ -27,7 +27,7 @@ import {
   parseMcpServers,
   McpServerConnectionRefSchema,
   requiredSandboxEnvForBackend,
-  computeAgentApiUrl,
+  computeGatewayConfigured,
   computeSettingsIssues,
   resolveStreamTokenSecret,
   retryStartupDependency,
@@ -2650,7 +2650,7 @@ describe("backend-gated sandbox required-credential validation", () => {
     );
   });
 
-  test("compute is validated only when selected and needs the agent plane", () => {
+  test("compute is validated only when selected and needs the gateway and relay", () => {
     // Not selected: nothing compute-related is required.
     expect(() =>
       withEnv({ OPENGENI_SANDBOX_BACKEND: "docker" }, () => getSettings()),
@@ -2662,27 +2662,37 @@ describe("backend-gated sandbox required-credential validation", () => {
       OPENGENI_SANDBOX_BACKEND: "compute",
       OPENGENI_COMPUTE_API_URL: "http://compute.test:8080",
       OPENGENI_COMPUTE_API_KEY: "k",
-      OPENGENI_PUBLIC_BASE_URL: "https://opengeni.test",
-      OPENGENI_SANDBOX_SELFHOSTED_ENABLED: "true",
-      OPENGENI_ENROLLMENT_SIGNING_SECRET: "enrollment-signing-secret",
-      OPENGENI_SELFHOSTED_NATS_URL: "nats://127.0.0.1:4222",
+      OPENGENI_COMPUTE_LINK_URL: "wss://opengeni.test/v1/compute/agent-link",
+      OPENGENI_SELFHOSTED_RELAY_URL: "wss://relay.opengeni.test",
+      OPENGENI_DELEGATION_SECRET: "delegation-secret",
     };
     const settings = withEnv(ready, () => getSettings());
     expect(computeSettingsIssues(settings)).toEqual([]);
+    expect(computeGatewayConfigured(settings)).toBe(true);
     expect(settings.computeVcpus).toBe(2);
     expect(settings.computeMemoryMib).toBe(4096);
-    expect(computeAgentApiUrl(settings)).toBe("https://opengeni.test");
     expect(() =>
-      withEnv({ ...ready, OPENGENI_SANDBOX_SELFHOSTED_ENABLED: "false" }, () => getSettings()),
-    ).toThrow("OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true is required");
+      withEnv({ ...ready, OPENGENI_COMPUTE_LINK_URL: undefined }, () => getSettings()),
+    ).toThrow("OPENGENI_COMPUTE_LINK_URL is required");
+    expect(() =>
+      withEnv({ ...ready, OPENGENI_SELFHOSTED_RELAY_URL: undefined }, () => getSettings()),
+    ).toThrow("OPENGENI_SELFHOSTED_RELAY_URL and the relay token secret are required");
     expect(() =>
       withEnv({ ...ready, OPENGENI_COMPUTE_MEMORY_REQUEST_MIB: "8192" }, () => getSettings()),
     ).toThrow("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB must not exceed");
+    const production = {
+      ...settings,
+      environment: "production" as const,
+      computeLinkUrl: "ws://opengeni.test/v1/compute/agent-link",
+    };
     expect(
-      computeSettingsIssues({ ...settings, environment: "production" }).some((issue) =>
-        issue.includes("must use https"),
-      ),
+      computeSettingsIssues(production).some((issue) => issue.includes("must use https")),
     ).toBe(true);
+    expect(computeSettingsIssues(production).some((issue) => issue.includes("wss:// URL"))).toBe(
+      true,
+    );
+    // Modal stays the default and compute is never required by default.
+    expect(computeGatewayConfigured(withEnv({}, () => getSettings()))).toBe(false);
   });
 
   test("SANDBOX_REQUIRED_ENV + requiredSandboxEnvForBackend agree", () => {

@@ -1106,6 +1106,7 @@ export async function countOnlineMachines(
       .where(
         and(
           eq(schema.enrollments.workspaceId, workspaceId),
+          eq(schema.enrollments.kind, "machine"),
           eq(schema.enrollments.status, "active"),
           gte(schema.enrollments.lastSeenAt, cutoff),
         ),

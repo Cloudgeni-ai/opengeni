@@ -11581,6 +11581,7 @@ export const sandboxPtySessions = pgTable(
 // ONE source of truth for each CHECK.
 export const enrollmentExposureValues = ["whole-machine"] as const;
 export const enrollmentStatusValues = ["active", "revoked"] as const;
+export const enrollmentKindValues = ["machine", "sandbox"] as const;
 export const enrollmentOsValues = ["linux", "macos", "windows"] as const;
 export const sandboxKindValues = ["modal", "selfhosted"] as const;
 export const agentUpdateStatusValues = [
@@ -11616,8 +11617,18 @@ export const enrollments = pgTable(
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
     originWorkspaceId: uuid("origin_workspace_id"),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
-    // The agent's ed25519 public key (the machine identity).
-    pubkey: text("pubkey").notNull(),
+    // 'machine' is a Connected Machine. 'sandbox' is the agent inside one
+    // Opengeni compute sandbox (migration 0839): bound to its sandbox group,
+    // reached through the agent gateway, with no key or bearer, and never
+    // listed, offered, attached or granted as a machine.
+    kind: text("kind", { enum: enrollmentKindValues }).notNull().default("machine"),
+    sandboxGroupId: uuid("sandbox_group_id"),
+    // The highest fabric owner epoch the agent gateway accepted for a sandbox
+    // enrollment; null for machines.
+    linkEpoch: bigint("link_epoch", { mode: "number" }),
+    // The agent's ed25519 public key (the machine identity). Null exactly for
+    // sandbox enrollments, which hold no credential.
+    pubkey: text("pubkey"),
     exposure: text("exposure", { enum: enrollmentExposureValues })
       .notNull()
       .default("whole-machine"),
@@ -11738,6 +11749,17 @@ export const enrollments = pgTable(
       .where(sql`${table.authorityScope} = 'user'`),
     // List a workspace's ACTIVE machines without scanning revoked rows.
     workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
+    sandboxGroup: index("enrollments_sandbox_group_idx")
+      .on(table.workspaceId, table.sandboxGroupId)
+      .where(sql`${table.kind} = 'sandbox'`),
+    kindValid: check("enrollments_kind_check", sql`${table.kind} in ('machine', 'sandbox')`),
+    sandboxBinding: check(
+      "enrollments_sandbox_binding_check",
+      sql`(${table.kind} = 'machine' and ${table.sandboxGroupId} is null
+          and ${table.pubkey} is not null and ${table.linkEpoch} is null)
+        or (${table.kind} = 'sandbox' and ${table.sandboxGroupId} is not null
+          and ${table.pubkey} is null and ${table.authorityScope} = 'workspace')`,
+    ),
     authorityShape: check(
       "enrollments_authority_shape_check",
       sql`(

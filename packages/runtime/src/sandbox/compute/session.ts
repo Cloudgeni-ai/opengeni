@@ -3,15 +3,18 @@
 //
 // Lifecycle is a managed sandbox's (lease, group, workspace setup, persistence
 // fallback), transport is the agent's (op-stream exec, files, Git, PTY,
-// desktop frames, browser control, ports over the relay). The fabric sleeps an
-// idle box on its own and keeps memory and disk, so before talking to an agent
-// that may be asleep the session asks the fabric to wake the box and waits for
-// the agent to answer. Opengeni never tears a compute box down for idleness;
-// it is deleted (and its enrollment revoked) only when its group ends.
+// desktop frames, browser control, ports over the relay). The agent holds no
+// credential: its host keeps one link to Opengeni's agent gateway and carries
+// the agent's NATS traffic, so a request to a sleeping sandbox reaches its host,
+// which wakes it. Only when no host serves the sandbox (its host was lost, or
+// it moved and is not yet adopted) does a request find no responder; the
+// session then asks the fabric to wake the sandbox, which places and adopts
+// it, and resends the request under its replay identity until the agent
+// answers. Opengeni never tears a compute sandbox down for idleness; it is
+// deleted (and its enrollment revoked) only when its group ends.
 
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
-import { signEnrollToken } from "@opengeni/contracts";
 import {
   Manifest,
   Permissions,
@@ -57,20 +60,18 @@ import {
   type SelfhostedRelayConfig,
   type SelfhostedSessionDeps,
 } from "../selfhosted/session";
-import { ComputeFabricClient, isComputeFabricNotFound, type ComputeCreateRequest } from "./fabric";
+import { ComputeFabricClient, isComputeFabricGone, type ComputeCreateRequest } from "./fabric";
 import type { ComputeAgentConnection, ComputeAgentPlane } from "./plane";
 
 export const COMPUTE_WORKSPACE_ROOT = "/workspace";
 export const COMPUTE_STATE_VERSION = 1;
 const COMPUTE_PRIVATE_ROOT = "/tmp/opengeni-private";
-/** The agent answered this recently, so the box is taken to be awake. A box
- * that slept inside the window costs one failed request: the control RPC then
- * wakes it and resends. */
-const AGENT_FRESH_MS = 30_000;
-const ENROLL_SANDBOX_TOKEN_TTL_SECONDS = 60 * 60;
+/** The least time between two fabric wakes of one sandbox while a request
+ * keeps finding no responder. */
+const WAKE_INTERVAL_MS = 5_000;
 
-/** Who a compute box belongs to. Required to create one: the enrollment the
- * box's agent exchanges its token for is bound to this lease. */
+/** Who a compute sandbox belongs to. Required to create one: its agent's
+ * enrollment is bound to this lease. */
 export interface ComputeCreateIdentity {
   accountId: string;
   workspaceId: string;
@@ -136,13 +137,6 @@ function isNoResponder(response: ControlResponse): boolean {
   );
 }
 
-function agentStoppedAnswering(response: ControlResponse): boolean {
-  return (
-    response.error?.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE ||
-    response.error?.code === ErrorCode.ERROR_CODE_TIMEOUT
-  );
-}
-
 export interface ComputeWakeGateDeps {
   fabric: Pick<ComputeFabricClient, "wake">;
   sandboxId: string;
@@ -151,95 +145,104 @@ export interface ComputeWakeGateDeps {
   /** One raw liveness probe against an exact connection. */
   probe: (connection: ComputeAgentConnection) => Promise<boolean>;
   readyTimeoutMs: number;
-  freshMs?: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
 
 /**
- * Decides when a box may be asleep and, then, wakes it through the fabric and
- * waits until its agent answers. Single flight: concurrent operations share one
- * wake. A box whose agent answered within `freshMs` is used directly.
+ * Reaches a compute sandbox's agent. Normally the gateway holds the agent's
+ * session, asleep or not, and the agent's connection resolves at once. When it
+ * does not (no host serves the sandbox), the gate asks the fabric to wake the
+ * sandbox, which places and adopts it, and waits until the new host's session
+ * opens and the agent answers. Single flight: concurrent operations share one
+ * recovery.
  */
 export class ComputeWakeGate {
-  private answeredAtMs = Number.NEGATIVE_INFINITY;
-  private suspect = true;
   private inflight: Promise<ComputeAgentConnection> | null = null;
+  private lastWakeAtMs = Number.NEGATIVE_INFINITY;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
-  private readonly freshMs: number;
 
   constructor(private readonly deps: ComputeWakeGateDeps) {
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.freshMs = deps.freshMs ?? AGENT_FRESH_MS;
   }
 
-  markAnswered(): void {
-    this.answeredAtMs = this.now();
-    this.suspect = false;
+  get readyTimeoutMs(): number {
+    return this.deps.readyTimeoutMs;
   }
 
-  markSuspect(): void {
-    this.suspect = true;
-  }
-
-  /** The connection the next operation should use, waking the box first when
-   * it may have slept since the agent last answered. */
+  /** The agent's live connection, recovering the sandbox when none is open. */
   async admit(): Promise<ComputeAgentConnection> {
-    if (!this.suspect && this.now() - this.answeredAtMs < this.freshMs) {
-      const connection = await this.deps.resolveConnection();
-      if (connection) return connection;
-      this.suspect = true;
-    }
+    const connection = await this.deps.resolveConnection();
+    if (connection) return connection;
+    return await this.recover();
+  }
+
+  /** Wake the sandbox through the fabric and wait until its agent answers. */
+  async recover(): Promise<ComputeAgentConnection> {
     this.inflight ??= this.wakeAndWait().finally(() => {
       this.inflight = null;
     });
     return await this.inflight;
   }
 
-  private async wakeAndWait(): Promise<ComputeAgentConnection> {
-    const deadline = this.now() + this.deps.readyTimeoutMs;
+  /** Ask the fabric to wake the sandbox, at most once per interval. */
+  async wake(): Promise<void> {
+    if (this.now() - this.lastWakeAtMs < WAKE_INTERVAL_MS) return;
+    this.lastWakeAtMs = this.now();
     try {
       await this.deps.fabric.wake(this.deps.sandboxId);
     } catch (error) {
-      if (isComputeFabricNotFound(error)) {
+      if (isComputeFabricGone(error)) {
         throw new SandboxExactResumeInstanceUnavailableError("compute", this.deps.sandboxId);
       }
       throw error;
     }
+  }
+
+  /** Wait until the agent answers on its current connection, without waking. */
+  async waitForAgent(deadline: number): Promise<ComputeAgentConnection> {
     let delayMs = 100;
     for (;;) {
       const connection = await this.deps.resolveConnection();
       if (connection && (await this.deps.probe(connection).catch(() => false))) {
-        this.markAnswered();
         return connection;
       }
       if (this.now() >= deadline) {
         throw agentOfflineError(
-          `The compute sandbox ${this.deps.sandboxId} runs, but its agent did not answer within ${Math.round(this.deps.readyTimeoutMs / 1000)}s.`,
+          `The agent of compute sandbox ${this.deps.sandboxId} did not answer within ${Math.round(this.deps.readyTimeoutMs / 1000)}s.`,
         );
       }
       await this.sleep(Math.min(delayMs, Math.max(0, deadline - this.now())));
       delayMs = Math.min(2_000, delayMs * 2);
     }
   }
+
+  private async wakeAndWait(): Promise<ComputeAgentConnection> {
+    const deadline = this.now() + this.deps.readyTimeoutMs;
+    this.lastWakeAtMs = Number.NEGATIVE_INFINITY;
+    await this.wake();
+    return await this.waitForAgent(deadline);
+  }
 }
 
 /**
- * The control transport of one compute box. Every answer marks the agent as
- * live; a request nobody received (the box went to sleep since the agent last
- * answered) wakes the box and is resent unchanged, under the same request id
- * (its replay identity), until the agent answers or the ready deadline passes.
- * A wake that brings the agent back on a different connection returns the
- * original no-responder answer so the session re-admits the operation on the
- * new connection.
+ * The control transport of one compute sandbox. A request nobody received
+ * means no host serves the sandbox; it wakes the sandbox through the fabric
+ * and resends the identical request, under the same request id (its replay
+ * identity), until the agent answers or the ready deadline passes. When the
+ * agent comes back on another connection the original no-responder answer is
+ * returned, so the session re-admits the operation on the new connection.
  */
 export class ComputeWakingControlRpc implements ControlRpc {
   constructor(
     private readonly inner: ControlRpc,
     private readonly gate: ComputeWakeGate,
     private readonly enrollmentId: string,
+    private readonly now: () => number = Date.now,
+    private readonly sleep: (ms: number) => Promise<void> = (ms) =>
+      new Promise((resolve) => setTimeout(resolve, ms)),
   ) {}
 
   async request(
@@ -247,25 +250,27 @@ export class ComputeWakingControlRpc implements ControlRpc {
     req: ControlRequest,
     opts: { timeoutMs: number },
   ): Promise<ControlResponse> {
-    const response = await this.inner.request(subject, req, opts);
-    if (!agentStoppedAnswering(response)) {
-      this.gate.markAnswered();
-      return response;
-    }
-    this.gate.markSuspect();
+    let response = await this.inner.request(subject, req, opts);
     if (!isNoResponder(response)) return response;
-    // Never delivered: safe to resend the identical request once the box runs.
-    const connection = await this.gate.admit();
-    const current = subjectFor(
-      connection.workspaceId,
-      this.enrollmentId,
-      connection.connectionInstanceId,
-    );
-    if (current !== subject) return response;
-    const resent = await this.inner.request(subject, req, opts);
-    if (agentStoppedAnswering(resent)) this.gate.markSuspect();
-    else this.gate.markAnswered();
-    return resent;
+    const deadline = this.now() + this.gate.readyTimeoutMs;
+    let delayMs = 200;
+    while (isNoResponder(response) && this.now() < deadline) {
+      // Never delivered: safe to resend once a host serves the sandbox again.
+      await this.gate.wake();
+      const connection = await this.gate.admit().catch(() => null);
+      if (connection) {
+        const current = subjectFor(
+          connection.workspaceId,
+          this.enrollmentId,
+          connection.connectionInstanceId,
+        );
+        if (current !== subject) return response;
+      }
+      await this.sleep(Math.min(delayMs, Math.max(0, deadline - this.now())));
+      delayMs = Math.min(2_000, delayMs * 2);
+      response = await this.inner.request(subject, req, opts);
+    }
+    return response;
   }
 }
 
@@ -429,21 +434,21 @@ export class ComputeSandboxSession extends SelfhostedSession {
     return new ComputeSandboxSession({ ...this.computeDeps, gate: this.gate, turn });
   }
 
-  /** Wake the box if needed and wait until its agent answers. */
+  /** Wait until the sandbox's agent answers, waking the sandbox through the
+   * fabric only if no host serves it. */
   async waitForAgent(): Promise<void> {
     await this.gate.admit();
   }
 
-  async start(): Promise<void> {
-    await this.waitForAgent();
-  }
+  /** Nothing to start: a request to a sleeping sandbox wakes it. */
+  async start(): Promise<void> {}
 
   async running(): Promise<boolean> {
     try {
       await this.computeDeps.fabric.get(this.state.sandboxId);
       return true;
     } catch (error) {
-      if (isComputeFabricNotFound(error)) return false;
+      if (isComputeFabricGone(error)) return false;
       throw error;
     }
   }
@@ -684,6 +689,24 @@ export async function deleteComputeBox(
   });
 }
 
+/** Undo a create whose outcome is unknown: delete the sandbox its request made,
+ * if any, and revoke the enrollment it would have run under. */
+export async function discardComputeCreate(
+  fabric: Pick<ComputeFabricClient, "lookupRequest" | "delete">,
+  plane: Pick<ComputeAgentPlane, "revokeEnrollment">,
+  input: { requestId: string; workspaceId: string; enrollmentId: string },
+): Promise<void> {
+  try {
+    const found = await fabric.lookupRequest(input.requestId);
+    if (found.state === "live") await fabric.delete(found.sandbox.id);
+  } finally {
+    await plane.revokeEnrollment({
+      workspaceId: input.workspaceId,
+      enrollmentId: input.enrollmentId,
+    });
+  }
+}
+
 export interface ComputeSandboxClientOptions {
   fabric: ComputeFabricClient;
   /** Resolved lazily: the registry builds clients before the host installs it. */
@@ -694,8 +717,8 @@ export interface ComputeSandboxClientOptions {
   memoryMib: number;
   memoryRequestMib?: number;
   cpuRequestMillis?: number;
-  agentApiUrl: string;
-  enrollmentSigningSecret: string;
+  /** Start the agent with its own virtual desktop (the desktop image). */
+  desktop: boolean;
   readyTimeoutMs: number;
   controlTimeoutMs?: number;
   execTimeoutMs?: number;
@@ -736,9 +759,10 @@ export class ComputeSandboxClient {
   }
 
   /**
-   * Create one box: mint its single-use sandbox enrollment token, ask the
-   * fabric for the box (idempotent by request id, retried with the same id),
-   * then wait until its agent has enrolled and answers. The lease identity
+   * Create one sandbox: make its agent's enrollment, ask the fabric for the
+   * sandbox with an init naming that agent (idempotent by request id, retried
+   * with the same id and body), then wait until the host has opened the
+   * agent's session at the gateway and the agent answers. The lease identity
    * arrives as `opengeniCreateIdentity` in the second argument.
    */
   async create(
@@ -768,19 +792,13 @@ export class ComputeSandboxClient {
     const plane = this.options.plane();
     const enrollmentId = randomUUID();
     const requestId = randomUUID();
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const enrollToken = await signEnrollToken(this.options.enrollmentSigningSecret, {
-      typ: "enroll_sandbox",
-      workspaceId: identity.workspaceId,
+    await plane.createEnrollment({
       accountId: identity.accountId,
-      // Screen control of a box Opengeni owns needs no human consent.
-      allowScreenControl: true,
-      iat: nowSeconds,
-      exp: nowSeconds + ENROLL_SANDBOX_TOKEN_TTL_SECONDS,
-      jti: randomBytes(18).toString("base64url"),
+      workspaceId: identity.workspaceId,
       enrollmentId,
       sandboxGroupId: identity.sandboxGroupId,
-      requestId,
+      hasDisplay: this.options.desktop,
+      workspaceRoot: COMPUTE_WORKSPACE_ROOT,
     });
     const body: ComputeCreateRequest = {
       request_id: requestId,
@@ -797,20 +815,31 @@ export class ComputeSandboxClient {
         opengeni_workspace_id: identity.workspaceId,
         opengeni_sandbox_group_id: identity.sandboxGroupId,
         opengeni_enrollment_id: enrollmentId,
-        opengeni_request_id: requestId,
       },
       init: {
         env_vars: environment,
         default_user: "root",
         default_workdir: COMPUTE_WORKSPACE_ROOT,
         agent: {
-          api_url: this.options.agentApiUrl,
-          enroll_token: enrollToken,
+          workspace_id: identity.workspaceId,
+          agent_id: enrollmentId,
           workspace_root: COMPUTE_WORKSPACE_ROOT,
+          desktop: this.options.desktop,
         },
       },
     };
-    const view = await this.options.fabric.create(body);
+    let view;
+    try {
+      view = await this.options.fabric.create(body);
+    } catch (error) {
+      // The create may have taken effect without its answer reaching us.
+      await discardComputeCreate(this.options.fabric, plane, {
+        requestId,
+        workspaceId: identity.workspaceId,
+        enrollmentId,
+      }).catch(() => undefined);
+      throw error;
+    }
     const state: ComputeLiveState = {
       stateVersion: COMPUTE_STATE_VERSION,
       sandboxId: view.id,
@@ -829,14 +858,14 @@ export class ComputeSandboxClient {
     };
     const session = this.session(state, normalized.archiveLimits);
     try {
-      await session.waitForAgent();
+      await session.gate.waitForAgent(Date.now() + this.options.readyTimeoutMs);
       if (Object.keys(manifest.entries).length > 0) {
         for (const [path, entry] of Object.entries(manifest.entries)) {
           await session.materializeEntry({ path, entry });
         }
       }
     } catch (error) {
-      // Nothing durable names this box yet: do not leave it behind.
+      // Nothing durable names this sandbox yet: do not leave it behind.
       await deleteComputeBox(this.options.fabric, plane, state).catch(() => undefined);
       throw error;
     }
@@ -858,7 +887,7 @@ export class ComputeSandboxClient {
     try {
       await this.options.fabric.get(state.sandboxId);
     } catch (error) {
-      if (isComputeFabricNotFound(error)) {
+      if (isComputeFabricGone(error)) {
         throw new SandboxExactResumeInstanceUnavailableError("compute", state.sandboxId);
       }
       throw error;

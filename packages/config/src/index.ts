@@ -1357,9 +1357,10 @@ const SettingsSchema = z.object({
     .regex(/^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/)
     .optional(),
   // --- Opengeni compute (optional; Opengeni's own microVM sandbox fabric) ---
-  // Every compute box runs the Connected Machine agent, so this backend also
-  // needs the Connected Machine plane (enrollment signing secret, NATS, relay).
-  // Nothing here is read unless a session or the deployment selects `compute`.
+  // Every compute sandbox runs the Connected Machine agent, reached through
+  // its host's link to this API's agent gateway, so this backend also needs
+  // the relay and the agent op-stream. Nothing here is read unless a session
+  // or the deployment selects `compute`, or the gateway URL is set.
   computeApiUrl: z.string().url().optional(),
   computeApiKey: z.string().min(1).max(8192).optional(),
   // Fabric image refs. Omitted, the fleet's default image. The desktop image is
@@ -1371,10 +1372,13 @@ const SettingsSchema = z.object({
   // Guaranteed shares below the ceilings above; omitted, the whole ceiling.
   computeMemoryRequestMib: z.coerce.number().int().min(128).max(262_144).optional(),
   computeCpuRequestMillis: z.coerce.number().int().min(10).max(64_000).optional(),
-  // The Opengeni API origin the in-box agent exchanges its enrollment token
-  // with. Omitted, OPENGENI_PUBLIC_BASE_URL.
-  computeAgentApiUrl: z.string().url().optional(),
-  // How long create or wake waits for the box's agent to connect.
+  // The agent gateway's public WebSocket URL (wss://). Fabric hosts dial it,
+  // and it is the exact audience of their host tokens and sandbox tickets, so
+  // it must equal the URL the fleet is configured with for Opengeni's team.
+  // This API serves the gateway at its path.
+  computeLinkUrl: z.string().url().optional(),
+  // How long a create waits for the sandbox's agent to connect, and how long
+  // a request to an unreachable sandbox keeps waking and retrying it.
   computeAgentReadyTimeoutMs: z.coerce.number().int().min(1_000).max(900_000).default(120_000),
   // --- sandbox ownership inversion (P1.2 rollout flag, default OFF) ---
   // The keystone flag for the stateless resume-by-id model. When FALSE the
@@ -4678,7 +4682,7 @@ export const SANDBOX_REQUIRED_ENV: Record<
     { field: "openSandboxApiKey", env: "OPENGENI_OPENSANDBOX_API_KEY" },
     { field: "openSandboxImage", env: "OPENGENI_OPENSANDBOX_IMAGE" },
   ],
-  // compute also needs the Connected Machine plane; computeSettingsIssues checks it.
+  // compute also needs the gateway and relay; computeSettingsIssues checks them.
   compute: [
     { field: "computeApiUrl", env: "OPENGENI_COMPUTE_API_URL" },
     { field: "computeApiKey", env: "OPENGENI_COMPUTE_API_KEY" },
@@ -5140,7 +5144,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     computeMemoryMib: optional("OPENGENI_COMPUTE_MEMORY_MIB"),
     computeMemoryRequestMib: optional("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB"),
     computeCpuRequestMillis: optional("OPENGENI_COMPUTE_CPU_REQUEST_MILLIS"),
-    computeAgentApiUrl: optional("OPENGENI_COMPUTE_AGENT_API_URL"),
+    computeLinkUrl: optional("OPENGENI_COMPUTE_LINK_URL"),
     computeAgentReadyTimeoutMs: optional("OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS"),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
     rigVerificationLeaseOwnershipEnabled: optional(
@@ -11083,11 +11087,10 @@ export function streamTokenDegraded(settings: Settings): boolean {
   return settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined;
 }
 
-/** The origin the in-box agent of a compute sandbox exchanges its enrollment
- * token with, or undefined when the deployment has none. */
-export function computeAgentApiUrl(settings: Settings): string | undefined {
-  const raw = (settings.computeAgentApiUrl ?? settings.publicBaseUrl)?.trim();
-  return raw ? raw.replace(/\/+$/u, "") : undefined;
+/** Whether this deployment serves the compute agent gateway: the fabric API
+ * it reads link keys from and the gateway's own URL are both configured. */
+export function computeGatewayConfigured(settings: Settings): boolean {
+  return Boolean(settings.computeApiUrl && settings.computeApiKey && settings.computeLinkUrl);
 }
 
 /** Everything a deployment must configure before a compute sandbox can work,
@@ -11105,16 +11108,20 @@ export function computeSettingsIssues(settings: Settings): string[] {
   ) {
     issues.push("OPENGENI_COMPUTE_API_URL must use https outside local/test");
   }
-  if (!computeAgentApiUrl(settings)) {
-    issues.push("OPENGENI_COMPUTE_AGENT_API_URL or OPENGENI_PUBLIC_BASE_URL is required");
+  const linkUrl = settings.computeLinkUrl;
+  if (!linkUrl) {
+    issues.push("OPENGENI_COMPUTE_LINK_URL is required");
+  } else if (
+    !linkUrl.startsWith("wss://") &&
+    !(["local", "test"].includes(settings.environment) && linkUrl.startsWith("ws://"))
+  ) {
+    issues.push("OPENGENI_COMPUTE_LINK_URL must be a wss:// URL (ws:// only in local/test)");
   }
-  if (settings.sandboxSelfhostedEnabled !== true) {
-    issues.push("OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true is required (every box runs the agent)");
+  if (!settings.selfhostedRelayUrl || !resolveRelayTokenSecret(settings)) {
+    issues.push(
+      "OPENGENI_SELFHOSTED_RELAY_URL and the relay token secret are required (terminal, desktop and ports)",
+    );
   }
-  if (!resolveEnrollmentSigningSecret(settings)) {
-    issues.push("OPENGENI_ENROLLMENT_SIGNING_SECRET (or OPENGENI_DELEGATION_SECRET) is required");
-  }
-  if (!settings.selfhostedNatsUrl) issues.push("OPENGENI_SELFHOSTED_NATS_URL is required");
   if (settings.agentOpStreamEnabled !== true) {
     issues.push("OPENGENI_AGENT_OP_STREAM_ENABLED must stay true (agent exec needs op-stream)");
   }

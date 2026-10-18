@@ -1,11 +1,7 @@
 // Opengeni compute: managed microVMs from Opengeni's own sandbox fabric, each
 // running the Connected Machine agent. See docs/compute-backend.md.
 
-import {
-  computeAgentApiUrl,
-  computeSettingsIssues,
-  resolveEnrollmentSigningSecret,
-} from "@opengeni/config";
+import { computeSettingsIssues } from "@opengeni/config";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { ComputeFabricClient } from "../compute/fabric";
 import { getComputeAgentPlane } from "../compute/plane";
@@ -18,7 +14,7 @@ export const computeProvider: ProviderRegistration = {
   backend: "compute",
   exactResumeMode: "custom",
   instanceIdFields: ["sandboxId"],
-  // The fabric persists the box itself. A portable tar is only the read-only
+  // The fabric persists the sandbox itself. A portable tar is only the read-only
   // capture that moves a workspace to another backend.
   workspaceCapturePolicy: () => REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.compute,
@@ -27,6 +23,9 @@ export const computeProvider: ProviderRegistration = {
     if (issues.length > 0) throw new SandboxConfigError("compute", issues.join("; "));
   },
   build({ settings, environment }) {
+    // The desktop tier starts the agent with its own virtual desktop, from the
+    // desktop image when one is configured.
+    const desktop = settings.sandboxDesktopEnabled === true;
     return new ComputeSandboxClient({
       fabric: new ComputeFabricClient({
         baseUrl: settings.computeApiUrl!,
@@ -34,10 +33,8 @@ export const computeProvider: ProviderRegistration = {
       }),
       plane: getComputeAgentPlane,
       relay: resolveRelayConfig(settings),
-      image:
-        (settings.sandboxDesktopEnabled ? settings.computeDesktopImage : settings.computeImage) ??
-        settings.computeImage ??
-        null,
+      image: (desktop ? settings.computeDesktopImage : undefined) ?? settings.computeImage ?? null,
+      desktop,
       vcpus: settings.computeVcpus,
       memoryMib: settings.computeMemoryMib,
       ...(settings.computeMemoryRequestMib !== undefined
@@ -46,8 +43,6 @@ export const computeProvider: ProviderRegistration = {
       ...(settings.computeCpuRequestMillis !== undefined
         ? { cpuRequestMillis: settings.computeCpuRequestMillis }
         : {}),
-      agentApiUrl: computeAgentApiUrl(settings)!,
-      enrollmentSigningSecret: resolveEnrollmentSigningSecret(settings)!,
       readyTimeoutMs: settings.computeAgentReadyTimeoutMs,
       controlTimeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
       execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
