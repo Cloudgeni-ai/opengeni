@@ -1,13 +1,12 @@
 //! What the host does for each guest connection and each operation its agent sends.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use bytes::Bytes;
 use compute_protocol::link::{HostFrame, RELAY_SUBJECT, may_publish, may_subscribe};
 
 use super::{
-    CONNECTION_NAME, Conn, ConnId, Core, Effect, MAX_CONNS, MAX_SUBS, Queued, Session, Stage, Sub,
-    Target,
+    CONNECTION_NAME, Conn, ConnId, Core, Effect, MAX_CONNS, MAX_SUBS, Session, Stage, Sub, Target,
 };
 use crate::nats::{ClientOp, Connect, Delivery, Info, Publish, ServerOp, is_token};
 
@@ -177,7 +176,7 @@ impl Core {
             sandbox.instance = Some(instance);
             sandbox.subs.clear();
             sandbox.next_sid = 1;
-            sandbox.queued.clear();
+            sandbox.waiting.clear();
             sandbox.relay = None;
             sandbox.retry_at = None;
             sandbox.retry_delay = self.settings.retry_min_ms;
@@ -347,11 +346,7 @@ impl Core {
         };
         let sandbox = self.sandboxes.get_mut(&id).expect("a scope has a sandbox");
         sandbox.regrace();
-        let (waiting, rest): (VecDeque<Queued>, VecDeque<Queued>) =
-            std::mem::take(&mut sandbox.queued)
-                .into_iter()
-                .partition(|queued| queued.sid == sid);
-        sandbox.queued = rest;
+        let waiting = sandbox.waiting.take(sid);
         if let Some(state) = self.conns.get_mut(&conn) {
             state.sids.insert(guest, Target::Host(sid));
         }

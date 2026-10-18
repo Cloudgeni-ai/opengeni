@@ -19,7 +19,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use crate::core::{ConnId, Core, Effect, Input, LinkId, Settings};
 use crate::guest;
 use crate::link::{self, Outgoing};
-use crate::saved::{Saved, Saver};
+use crate::saved::{Owner, Saved, Saver};
 
 /// A host token for one gateway, from the fleet.
 #[derive(Clone)]
@@ -95,12 +95,16 @@ impl fmt::Debug for HubConfig {
 }
 
 /// The host's agent links. Cheap to clone; the hub runs while a clone
-/// lives, and when the last goes its links close and its guest
-/// connections end.
+/// lives, or until [`Hub::shutdown`], and when the last goes its links
+/// close and its guest connections end.
 #[derive(Clone, Debug)]
 pub struct Hub {
     commands: mpsc::UnboundedSender<Command>,
     next_conn: Arc<AtomicU64>,
+    stop: CancellationToken,
+    /// Cancelled once the hub has stopped and no write of the sessions it
+    /// keeps is under way.
+    stopped: CancellationToken,
     /// Stops the hub when the last clone goes: its links and guest
     /// connections hold senders too, so the channel alone would not.
     _running: Arc<DropGuard>,
@@ -119,6 +123,7 @@ pub(crate) enum Command {
         link: AgentLink,
         saved: Option<Saved>,
         save_at: PathBuf,
+        owner: Owner,
         wake: Arc<dyn Wake>,
     },
     Detach {
@@ -143,6 +148,7 @@ impl Hub {
     pub fn start(config: HubConfig) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let stop = CancellationToken::new();
+        let stopped = CancellationToken::new();
         let actor = Actor {
             core: Core::new(config.settings),
             started: Instant::now(),
@@ -151,25 +157,46 @@ impl Hub {
             timing: config.timing,
             commands: commands.downgrade(),
             wakers: HashMap::new(),
-            save_paths: HashMap::new(),
+            saves: HashMap::new(),
             conns: HashMap::new(),
             links: HashMap::new(),
             writers: HashMap::new(),
-            saver: Saver::start(stop.clone()),
+            saver: Saver::start(),
             link_ids: Arc::new(AtomicU64::new(1)),
         };
-        tokio::spawn(actor.run(receiver, stop.clone()));
+        tokio::spawn(actor.run(receiver, stop.clone(), stopped.clone()));
         Self {
             commands,
             next_conn: Arc::new(AtomicU64::new(1)),
+            stop: stop.clone(),
+            stopped,
             _running: Arc::new(stop.drop_guard()),
         }
     }
 
+    /// Stops the hub now, whatever clones of it remain: its links close
+    /// and its guest connections end. Returns once every session it was
+    /// asked to keep is written, each failed write tried once more, so a
+    /// hub started after it for the same sandboxes reads the latest and
+    /// is never overwritten by this one.
+    pub async fn shutdown(&self) {
+        self.stop.cancel();
+        self.stopped.cancelled().await;
+    }
+
     /// Attaches a sandbox whose agent is reached through `link`, keeping
-    /// its session at `save_at`. Again for an attached sandbox, it takes a
-    /// new ticket or gateway.
-    pub fn attach(&self, sandbox: String, link: AgentLink, save_at: PathBuf, wake: Arc<dyn Wake>) {
+    /// its session at `save_at`. Each write of it keeps `owner` until it
+    /// lands (see [`crate::saved`]), and the hub keeps it while the
+    /// sandbox is attached. Again for an attached sandbox, it takes a new
+    /// ticket or gateway.
+    pub fn attach(
+        &self,
+        sandbox: String,
+        link: AgentLink,
+        save_at: PathBuf,
+        owner: Owner,
+        wake: Arc<dyn Wake>,
+    ) {
         let saved = Saved::load(&save_at).unwrap_or_else(|error| {
             tracing::warn!(%sandbox, %error, "could not read an agent-link session");
             None
@@ -179,6 +206,7 @@ impl Hub {
             link,
             saved,
             save_at,
+            owner,
             wake,
         });
     }
@@ -218,7 +246,9 @@ struct Actor {
     timing: Timing,
     commands: mpsc::WeakUnboundedSender<Command>,
     wakers: HashMap<String, Arc<dyn Wake>>,
-    save_paths: HashMap<String, PathBuf>,
+    /// Where each attached sandbox's session is kept, and what its writes
+    /// keep.
+    saves: HashMap<String, (PathBuf, Owner)>,
     conns: HashMap<ConnId, guest::Handle>,
     /// The task keeping each gateway's link.
     links: HashMap<String, CancellationToken>,
@@ -236,23 +266,31 @@ impl Actor {
         mut self,
         mut commands: mpsc::UnboundedReceiver<Command>,
         stop: CancellationToken,
+        stopped: CancellationToken,
     ) {
+        // Even if this panics: whoever waits for it is not left waiting.
+        let _stopped = stopped.drop_guard();
         loop {
             let deadline = self
                 .core
                 .deadline()
                 .map(|ms| self.started + Duration::from_millis(ms));
             tokio::select! {
+                // First, so that once stopped it asks the saver for nothing
+                // more; then what is due, so that steady commands never
+                // hold back a deadline. A tick always moves the deadline
+                // past now.
+                biased;
                 () = stop.cancelled() => break,
-                command = commands.recv() => match command {
-                    Some(command) => self.command(command),
-                    None => break,
-                },
                 () = sleep_until(deadline), if deadline.is_some() => {
                     let now = self.now();
                     self.core.on(now, Input::Tick);
                     self.apply(None);
                 }
+                command = commands.recv() => match command {
+                    Some(command) => self.command(command),
+                    None => break,
+                },
             }
         }
         for cancel in self.links.values() {
@@ -260,6 +298,7 @@ impl Actor {
         }
         // Dropping their handles ends the guest connections.
         self.conns.clear();
+        self.saver.finish().await;
     }
 
     fn command(&mut self, command: Command) {
@@ -279,10 +318,11 @@ impl Actor {
                 link,
                 saved,
                 save_at,
+                owner,
                 wake,
             } => {
                 self.wakers.insert(sandbox.clone(), wake);
-                self.save_paths.insert(sandbox.clone(), save_at);
+                self.saves.insert(sandbox.clone(), (save_at, owner));
                 self.core.on(
                     now,
                     Input::Attach {
@@ -301,7 +341,7 @@ impl Actor {
                 );
                 self.apply(None);
                 self.wakers.remove(&sandbox);
-                self.save_paths.remove(&sandbox);
+                self.saves.remove(&sandbox);
                 return;
             }
             Command::Conn {
@@ -415,8 +455,8 @@ impl Actor {
                 }
             }
             Effect::Save { sandbox, saved } => {
-                if let Some(path) = self.save_paths.get(&sandbox) {
-                    self.saver.put(path.clone(), saved);
+                if let Some((path, owner)) = self.saves.get(&sandbox) {
+                    self.saver.put(path.clone(), saved, Arc::clone(owner));
                 }
             }
         }

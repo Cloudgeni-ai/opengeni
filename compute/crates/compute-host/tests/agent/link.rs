@@ -74,12 +74,16 @@ fn hub() -> Hub {
 }
 
 async fn linked_lab(root: PathBuf, world: Arc<super::World>) -> Lab {
+    linked_lab_with(root, world, hub()).await
+}
+
+async fn linked_lab_with(root: PathBuf, world: Arc<super::World>, hub: Hub) -> Lab {
     Lab::start_configured(
         root,
         world,
         Delays::default(),
         HostPolicy::default(),
-        |config| config.agent_link = Some(hub()),
+        |config| config.agent_link = Some(hub),
     )
     .await
 }
@@ -491,7 +495,8 @@ async fn a_new_ticket_opens_the_session_again_and_removing_the_sandbox_closes_it
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restarted_host_opens_its_sandboxes_sessions_again_before_their_agents_connect() {
     let mut gateway = Gateway::start().await;
-    let lab = linked_lab(Lab::root(), Arc::default()).await;
+    let links = hub();
+    let lab = linked_lab_with(Lab::root(), Arc::default(), links.clone()).await;
     let sandbox = id(3);
     create(&lab, sandbox, config(&gateway, "ticket-1")).await;
     gateway.up().await;
@@ -500,12 +505,13 @@ async fn a_restarted_host_opens_its_sandboxes_sessions_again_before_their_agents
     let subject = format!("{SCOPE}.rpc");
     agent.send(&format!("SUB {subject} 1\r\n")).await;
     assert!(matches!(gateway.frame().await, HostFrame::Sub { .. }));
-    // The session is kept on disk as the subscription is taken.
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let dir = lab.sandbox_dir(sandbox);
     let (root, world) = lab.stop().await;
     drop(agent);
+    // Stopped, the hub has written the session it was asked to keep as
+    // the subscription was taken.
+    links.shutdown().await;
     let kept = std::fs::read_to_string(dir.join("agent-link.json"))
         .expect("the session is kept in the sandbox's directory");
     assert!(kept.contains(&subject), "{kept}");

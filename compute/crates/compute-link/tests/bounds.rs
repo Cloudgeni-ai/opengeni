@@ -67,7 +67,7 @@ fn connect(core: &mut Core, now: u64, conn: ConnId) {
 }
 
 /// Answers the session's `open` with `opened`.
-fn open(core: &mut Core, now: u64) {
+fn open(core: &mut Core, now: u64) -> u32 {
     let s = core
         .take()
         .into_iter()
@@ -96,6 +96,7 @@ fn open(core: &mut Core, now: u64) {
         },
     );
     core.take();
+    s
 }
 
 fn sub(core: &mut Core, now: u64, conn: ConnId, name: &str, sid: &str) {
@@ -109,6 +110,119 @@ fn sub(core: &mut Core, now: u64, conn: ConnId, name: &str, sid: &str) {
             sid: sid.into(),
         },
     );
+}
+
+/// The gateway sends a message for the host's `sid`.
+fn msg(core: &mut Core, now: u64, s: u32, sid: u32, payload: Bytes) {
+    core.on(
+        now,
+        Input::Gateway {
+            link: LINK,
+            frame: GatewayFrame::Msg {
+                s,
+                sid,
+                subject: format!("{}.rpc", scope()),
+                reply: Some("_INBOX.r".into()),
+                headers: None,
+            },
+            payload,
+        },
+    );
+}
+
+/// The payloads delivered to `to`, in order.
+fn delivered(effects: &[Effect], to: ConnId) -> Vec<Bytes> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::ToGuest {
+                conn,
+                op: ServerOp::Msg(delivery),
+            } if *conn == to => Some(delivery.payload.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A sandbox whose agent subscribed to `rpc` (the host's sid 1) and then
+/// went, as one that sleeps; returns its session.
+fn asleep(settings: Settings) -> (Core, u32) {
+    let mut core = core(settings);
+    connect(&mut core, 0, 1);
+    let s = open(&mut core, 0);
+    sub(&mut core, 0, 1, "rpc", "1");
+    core.on(0, Input::GuestClosed { conn: 1 });
+    core.take();
+    (core, s)
+}
+
+#[test]
+fn messages_waiting_for_an_agent_are_bounded_in_number_and_the_oldest_are_kept() {
+    let (mut core, s) = asleep(Settings {
+        max_waiting: 4,
+        ..Settings::default()
+    });
+    // Tiny ones too: each one kept costs the host, whatever it carries.
+    for n in 0..10_000u32 {
+        msg(&mut core, 0, s, 1, Bytes::from(n.to_string()));
+    }
+    core.take();
+    connect(&mut core, 1, 2);
+    sub(&mut core, 1, 2, "rpc", "9");
+    assert_eq!(delivered(&core.take(), 2), ["0", "1", "2", "3"]);
+    // Delivered, they make room again.
+    core.on(2, Input::GuestClosed { conn: 2 });
+    for n in 0..6u32 {
+        msg(&mut core, 2, s, 1, Bytes::from(format!("again {n}")));
+    }
+    connect(&mut core, 3, 3);
+    sub(&mut core, 3, 3, "rpc", "9");
+    assert_eq!(
+        delivered(&core.take(), 3),
+        ["again 0", "again 1", "again 2", "again 3"]
+    );
+}
+
+#[test]
+fn messages_waiting_for_an_agent_are_bounded_in_bytes_counting_what_each_holds() {
+    let chunk = 64 << 10;
+    let (mut core, s) = asleep(Settings {
+        waiting_bytes: 1 << 20,
+        ..Settings::default()
+    });
+    for n in 0..80u8 {
+        msg(&mut core, 0, s, 1, Bytes::from(vec![n; chunk]));
+    }
+    core.take();
+    connect(&mut core, 1, 2);
+    sub(&mut core, 1, 2, "rpc", "9");
+    let payloads = delivered(&core.take(), 2);
+    // Sixteen chunks are a mebibyte of payload alone; with their subjects
+    // and overhead only fifteen fit.
+    assert_eq!(payloads.len(), 15);
+    for (n, payload) in payloads.iter().enumerate() {
+        assert_eq!(payload[0] as usize, n, "kept in order, oldest first");
+    }
+}
+
+#[test]
+fn messages_that_waited_too_long_go_and_make_room() {
+    let hold = 120_000;
+    let (mut core, s) = asleep(Settings {
+        max_waiting: 2,
+        hold_ms: hold,
+        ..Settings::default()
+    });
+    msg(&mut core, 0, s, 1, Bytes::from_static(b"old"));
+    msg(&mut core, 10, s, 1, Bytes::from_static(b"older"));
+    msg(&mut core, 20, s, 1, Bytes::from_static(b"dropped"));
+    assert_eq!(core.deadline(), Some(hold));
+    core.on(hold, Input::Tick);
+    msg(&mut core, hold, s, 1, Bytes::from_static(b"new"));
+    connect(&mut core, hold + 1, 2);
+    sub(&mut core, hold + 1, 2, "rpc", "9");
+    assert_eq!(delivered(&core.take(), 2), ["older", "new"]);
+    assert_eq!(core.deadline(), None);
 }
 
 fn errors(effects: &[Effect], to: ConnId) -> Vec<String> {

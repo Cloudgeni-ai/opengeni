@@ -20,6 +20,9 @@
 //! - A message for a subscription no connection holds waits, and wakes the
 //!   sandbox, until a connection subscribes to it again or it has waited
 //!   [`Settings::hold_ms`]. Every message that arrives counts as activity.
+//!   What waits for a sandbox is bounded ([`Settings::max_waiting`] and
+//!   [`Settings::waiting_bytes`]); one more is dropped, as a NATS server
+//!   drops a message for a slow consumer, and its sender times out.
 //! - Subscriptions a reconnected agent did not take up within
 //!   [`Settings::grace_ms`] end, and so do those of a connection that
 //!   ended while others of its agent stay, each counted from when it was
@@ -41,6 +44,7 @@ use bytes::Bytes;
 use compute_protocol::link::{AgentLink, GatewayFrame, Headers, HostFrame, Relay, Running};
 
 use crate::nats::{ClientOp, ServerOp};
+use crate::nats::{OP_OVERHEAD, header_block_len};
 use crate::saved::{Saved, SavedSub};
 
 /// A guest connection's number, unique on the host.
@@ -75,6 +79,12 @@ pub struct Settings {
     /// may hold; one past it is refused, as a NATS server refuses one past
     /// its limit. Opengeni's agent holds a handful.
     pub max_subs: usize,
+    /// Messages that may wait for a sandbox's agent at once; one more is
+    /// dropped. Opengeni sends a sleeping agent a few at a time.
+    pub max_waiting: usize,
+    /// What the messages waiting for a sandbox's agent may hold, each
+    /// counted as its bytes plus [`OP_OVERHEAD`]; one past it is dropped.
+    pub waiting_bytes: usize,
     /// Seeds the jitter of retries.
     pub seed: u64,
 }
@@ -90,6 +100,8 @@ impl Default for Settings {
             pending_bytes: 4 << 20,
             max_conns: 16,
             max_subs: 1024,
+            max_waiting: 1024,
+            waiting_bytes: 16 << 20,
             seed: 0x9e37_79b9_7f4a_7c15,
         }
     }
@@ -188,8 +200,8 @@ struct Sandbox {
     /// By the host's sid.
     subs: BTreeMap<u32, Sub>,
     next_sid: u32,
-    /// Messages for subscriptions no connection holds, oldest first.
-    queued: VecDeque<Queued>,
+    /// Messages for subscriptions no connection holds.
+    waiting: Waiting,
     relay: Option<Relay>,
     /// The connections of its instance that said `CONNECT`.
     conns: BTreeSet<ConnId>,
@@ -255,6 +267,79 @@ struct Queued {
     payload: Bytes,
 }
 
+impl Queued {
+    /// What keeping it costs: every byte it holds, plus [`OP_OVERHEAD`].
+    fn cost(&self) -> usize {
+        OP_OVERHEAD
+            + self.subject.len()
+            + self.reply.as_ref().map_or(0, String::len)
+            + self.headers.as_ref().map_or(0, header_block_len)
+            + self.payload.len()
+    }
+}
+
+/// Messages waiting for a sandbox's agent, oldest first, and what keeping
+/// them costs.
+#[derive(Debug, Default)]
+struct Waiting {
+    messages: VecDeque<Queued>,
+    bytes: usize,
+    /// One was dropped since the last went: the next drop is not logged.
+    dropping: bool,
+}
+
+impl Waiting {
+    /// Keeps `queued` if it fits the bounds; `false` if it was dropped.
+    fn push(&mut self, queued: Queued, settings: &Settings) -> bool {
+        let cost = queued.cost();
+        if self.messages.len() >= settings.max_waiting
+            || self.bytes.saturating_add(cost) > settings.waiting_bytes
+        {
+            return false;
+        }
+        self.bytes += cost;
+        self.messages.push_back(queued);
+        true
+    }
+
+    /// When the oldest arrived.
+    fn oldest(&self) -> Option<u64> {
+        self.messages.front().map(|queued| queued.at)
+    }
+
+    /// Drops those that arrived at or before `at`.
+    fn expire(&mut self, at: u64) {
+        while self.messages.front().is_some_and(|queued| queued.at <= at) {
+            self.pop_front();
+        }
+    }
+
+    fn pop_front(&mut self) -> Option<Queued> {
+        let queued = self.messages.pop_front()?;
+        self.bytes -= queued.cost();
+        self.dropping = false;
+        Some(queued)
+    }
+
+    /// Takes those for `sid`, in order.
+    fn take(&mut self, sid: u32) -> VecDeque<Queued> {
+        let (taken, rest): (VecDeque<Queued>, VecDeque<Queued>) =
+            std::mem::take(&mut self.messages)
+                .into_iter()
+                .partition(|queued| queued.sid == sid);
+        self.messages = rest;
+        if !taken.is_empty() {
+            self.bytes -= taken.iter().map(Queued::cost).sum::<usize>();
+            self.dropping = false;
+        }
+        taken
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[derive(Debug)]
 struct Conn {
     sandbox: String,
@@ -317,9 +402,9 @@ impl Core {
             .flat_map(|sandbox| {
                 [
                     sandbox
-                        .queued
-                        .front()
-                        .map(|queued| queued.at + self.settings.hold_ms),
+                        .waiting
+                        .oldest()
+                        .map(|at| at + self.settings.hold_ms),
                     sandbox.grace_until,
                     sandbox.retry_at,
                 ]
@@ -418,7 +503,7 @@ impl Core {
                 session: Session::Idle,
                 subs,
                 next_sid,
-                queued: VecDeque::new(),
+                waiting: Waiting::default(),
                 relay: None,
                 conns: BTreeSet::new(),
                 accepted: 0,
@@ -557,8 +642,9 @@ impl Core {
             return;
         };
         let delay = sandbox.retry_delay;
-        // Between half the delay and all of it.
-        let wait = delay / 2 + jitter % (delay / 2 + 1);
+        // Between half the delay and all of it, and never now, so that a
+        // tick always moves the deadline on.
+        let wait = (delay / 2 + jitter % (delay / 2 + 1)).max(1);
         sandbox.retry_at = Some(now + wait);
         sandbox.retry_delay = (delay * 2).min(self.settings.retry_max_ms);
     }
@@ -674,12 +760,8 @@ impl Core {
         let mut retry = Vec::new();
         let mut graced = Vec::new();
         for (id, sandbox) in &mut self.sandboxes {
-            while sandbox
-                .queued
-                .front()
-                .is_some_and(|queued| queued.at + hold <= now)
-            {
-                sandbox.queued.pop_front();
+            if let Some(at) = now.checked_sub(hold) {
+                sandbox.waiting.expire(at);
             }
             if sandbox.grace_until.is_some_and(|at| at <= now) {
                 graced.push(id.clone());
@@ -740,7 +822,7 @@ impl Core {
         let Some(sub) = sandbox.subs.remove(&sid) else {
             return;
         };
-        sandbox.queued.retain(|queued| queued.sid != sid);
+        sandbox.waiting.take(sid);
         if let Some((conn, guest)) = sub.guest
             && let Some(conn) = self.conns.get_mut(&conn)
         {

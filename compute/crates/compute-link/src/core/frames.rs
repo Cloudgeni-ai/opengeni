@@ -165,7 +165,7 @@ impl Core {
             Ending::Revoked | Ending::Superseded => {
                 tracing::warn!(sandbox = id, ?code, message, "a gateway ended a session");
                 sandbox.refused = true;
-                sandbox.queued.clear();
+                sandbox.waiting.clear();
             }
             Ending::Lost | Ending::Other => {
                 tracing::info!(
@@ -226,8 +226,14 @@ impl Core {
         let open = matches!(sandbox.session, Session::Open { .. });
         if open && sub.guest.is_some() {
             self.deliver(id, queued);
-        } else {
-            sandbox.queued.push_back(queued);
+        } else if !sandbox.waiting.push(queued, &self.settings) && !sandbox.waiting.dropping {
+            sandbox.waiting.dropping = true;
+            tracing::warn!(
+                sandbox = id,
+                waiting = sandbox.waiting.messages.len(),
+                bytes = sandbox.waiting.bytes,
+                "messages for an agent that is not connected are dropped: as many wait as the host keeps"
+            );
         }
     }
 

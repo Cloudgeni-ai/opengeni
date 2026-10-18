@@ -79,6 +79,11 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
   once that sandbox was deleted, so a caller that crashed between a create
   and recording its answer can find the sandbox and delete it, without
   creating one.
+- `GET /v1/sandboxes?key=value&...` lists the team's sandboxes whose
+  `metadata` holds every pair given (all of them with none), each with its
+  `created_ms`. A caller that tags its sandboxes, as Opengeni
+  does with its gateway's address, finds every one it made, so it can
+  delete those its own records no longer name.
 - The API serves TLS when the fleet service is given a certificate
   (`--api-tls-cert`, `--api-tls-key`); a deployment that Opengeni reaches
   over a network it does not own must.
@@ -283,10 +288,15 @@ What the host does, exactly (`compute-link`, its `core` module):
     slowed by its own socket;
   - at most 64 MiB waiting to be written to a connection: a guest that does
     not read its socket ends as a slow consumer, as with a NATS server.
+  - at most 1024 messages and 16 MiB waiting for a sandbox's agent to
+    subscribe again, each counted as the bytes it holds plus 64: one more
+    is dropped, as a NATS server drops a message for a slow consumer, and
+    its sender's request times out.
 
   Opengeni's agent holds two connections and a handful of subscriptions.
   The host's own record of a session is written by one writer that keeps
-  only the latest for each sandbox.
+  only the latest for each sandbox; a host agent that stops waits for it,
+  so the next one reads the latest record and is never overwritten.
 - **A link that goes ends its guests' connections,** as a NATS server that
   goes would, so each agent reconnects to a session that opens again on the
   next link. The host dials again with full-jitter back-off from 100 ms to
