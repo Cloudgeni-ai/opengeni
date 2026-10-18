@@ -212,7 +212,13 @@ Opengeni's `compute` backend reads:
 | `OPENGENI_SANDBOX_BACKEND` | `compute` for a deployment that uses it by default; leave it (default `modal`) to let sessions choose it |
 | `OPENGENI_COMPUTE_API_URL` | the service's API; when `computeControl` is enabled the chart sets `https://<apiTls.host>:8080` (plain `http://<release>-compute-control:8080` without `apiTls`, which Opengeni accepts only in local and test environments) |
 | `OPENGENI_COMPUTE_API_KEY` | the `opengeni` team's key, in the runtime Secret |
+| `OPENGENI_COMPUTE_LINK_URL` | the agent gateway's public `wss://` URL, the audience of the hosts' link tokens, so exactly the service's `--team-link` URL for Opengeni's team; the chart sets it from `computeControl.teamLinks[computeControl.opengeniTeam]` |
 | `OPENGENI_COMPUTE_IMAGE`, `OPENGENI_COMPUTE_DESKTOP_IMAGE` | stored image names, as in `computeControl.storedImages` |
+
+The backend also needs `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true`, the relay
+(`OPENGENI_SELFHOSTED_RELAY_URL` and its token secret) and the agent
+op-stream (`OPENGENI_AGENT_OP_STREAM_ENABLED`, on by default); Opengeni
+refuses to start with `OPENGENI_SANDBOX_BACKEND=compute` while any is missing.
 
 Every sandbox runs Opengeni's agent behind its host's link
 ([ADR 21](adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)),

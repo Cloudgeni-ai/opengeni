@@ -42,6 +42,11 @@ data:
   # API key is OPENGENI_COMPUTE_API_KEY in the runtime Secret.
   OPENGENI_COMPUTE_API_URL: {{ include "opengeni.computeControl.apiUrl" . | quote }}
   {{- end }}
+  {{- $computeLink := index (.Values.computeControl.teamLinks | default dict) (.Values.computeControl.opengeniTeam | default "") }}
+  {{- if and .Values.computeControl.enabled $computeLink (not (hasKey .Values.config "OPENGENI_COMPUTE_LINK_URL")) }}
+  # This release's agent gateway, as its fleet service names it to hosts.
+  OPENGENI_COMPUTE_LINK_URL: {{ $computeLink | quote }}
+  {{- end }}
   {{- if .Values.selfhosted.enabled }}
   # Bring-your-own-compute (selfhosted SandboxBackend) NON-SECRET wiring. The
   # SECRET keys (enrollment signing secret, relay/stream token secrets, the NATS

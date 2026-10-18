@@ -1349,6 +1349,11 @@ computeControl:
   # Hosts dial it, so it must be reachable from them with a certificate
   # they trust.
   teamLinks: {}
+  # The team this release's own compute backend belongs to: the team of its
+  # OPENGENI_COMPUTE_API_KEY. Its teamLinks entry is also the release's
+  # OPENGENI_COMPUTE_LINK_URL, the audience of its hosts' link tokens, so
+  # the two never differ.
+  opengeniTeam: opengeni
   # Where hosts archive sandboxes (gs://bucket/prefix, az://, s3://). The
   # service reads stored copies' pointers there; credentials come from the
   # pod's identity (serviceAccount.annotations, such as GKE Workload

@@ -141,6 +141,7 @@ describe("computeControl", () => {
 
     const config = find(manifests, "ConfigMap", "cc-opengeni-config");
     expect(config.data.OPENGENI_COMPUTE_API_URL).toBe("https://cc-opengeni-compute-control.default.svc:8080");
+    expect(config.data.OPENGENI_COMPUTE_LINK_URL).toBe("wss://opengeni.example.com/v1/compute/agent-link");
     for (const name of ["cc-opengeni-api", "cc-opengeni-worker-control", "cc-opengeni-worker-turns"]) {
       const pod = find(manifests, "Deployment", name).spec.template.spec;
       const env = pod.containers[0].env.find((e: any) => e.name === "NODE_EXTRA_CA_CERTS");
