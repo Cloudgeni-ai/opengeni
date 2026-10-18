@@ -27,6 +27,11 @@ instance as the NATS auth callout does, bridges `sub`/`pub`/`msg` with exactly
 the agent's NATS permissions, mints relay producer tokens, and renews the claim
 every 5 s while the session is open, asleep or not. A sleeping sandbox stays
 reachable; a message to it makes the host wake it.
+A session acts only within its last confirmed lease: when renewals keep
+failing past it, the gateway ends the session as `lost` (the host opens it
+again) and forwards nothing and mints no relay credential for it meanwhile.
+An open that a later epoch overtook while it was in flight is refused as
+`stale_epoch` and never evicts the newer session.
 
 Nothing in Opengeni may message a compute agent on a timer: every message
 wakes the sandbox. Liveness comes from the gateway's session and claim. A

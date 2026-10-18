@@ -271,12 +271,16 @@ class FakeNats implements AgentLinkNats {
 }
 
 class FakeStore implements ComputeAgentLinkStore {
+  readonly leaseMs = 20_000;
   readonly calls: string[] = [];
   renewAnswer: Awaited<ReturnType<ComputeAgentLinkStore["renew"]>> = { renewed: true };
   renewThrows = false;
+  /** An open for this epoch waits until the promise settles. */
+  readonly openGates = new Map<number, Promise<void>>();
   private release_: (() => void) | null = null;
   async open(claim: ComputeAgentLinkClaim) {
     this.calls.push(`open:${claim.connectionInstanceId}:${claim.epoch}`);
+    await this.openGates.get(claim.epoch);
     return { opened: true as const, superseded: false };
   }
   async renew(claim: ComputeAgentLinkClaim) {
@@ -319,10 +323,11 @@ async function gatewayWithLink(options: { now?: () => number } = {}) {
     maxWebSocketMessageBytes: 8 * 1024 * 1024,
     verifier: {
       verifyHostToken: async () => ({ host: "h1", expiresAtMs: Date.now() + 3_600_000 }),
-      verifyTicket: async (_ticket, expected) => ({
+      // A ticket "e<n>" carries owner epoch n; any other is epoch 1.
+      verifyTicket: async (ticket, expected) => ({
         sandbox: expected.sandbox,
         host: expected.host,
-        epoch: 1,
+        epoch: /^e\d+$/u.test(ticket) ? Number(ticket.slice(1)) : 1,
         team: "t1",
         workspaceId: WS,
         agentId: AGENT,
@@ -331,23 +336,28 @@ async function gatewayWithLink(options: { now?: () => number } = {}) {
     relay: { url: "wss://relay.test/stream", mint: async () => `ogr_token_${++minted}` },
     ...(options.now ? { now: options.now } : {}),
   });
-  let socket: FakeSocket | undefined;
-  const response = await gateway.upgrade(
-    new Request(AUDIENCE.replace("wss:", "https:"), {
-      headers: { authorization: "Bearer x", "sec-websocket-protocol": "opengeni.agent-link.v1" },
-    }),
-    {
-      upgrade: (_request, upgradeOptions) => {
-        socket = new FakeSocket(upgradeOptions.data);
-        return true;
+  /** Another host link to the same gateway. */
+  const connect = async () => {
+    let socket: FakeSocket | undefined;
+    const response = await gateway.upgrade(
+      new Request(AUDIENCE.replace("wss:", "https:"), {
+        headers: { authorization: "Bearer x", "sec-websocket-protocol": "opengeni.agent-link.v1" },
+      }),
+      {
+        upgrade: (_request, upgradeOptions) => {
+          socket = new FakeSocket(upgradeOptions.data);
+          return true;
+        },
       },
-    },
-  );
-  expect(response).toBeUndefined();
-  socket!.data.attach(socket as unknown as ApiWebSocketLike);
-  const send = (frame: HostFrame) => socket!.data.receive(encodeFrame(frame));
+    );
+    expect(response).toBeUndefined();
+    socket!.data.attach(socket as unknown as ApiWebSocketLike);
+    const send = (frame: HostFrame) => socket!.data.receive(encodeFrame(frame));
+    return { socket: socket!, send };
+  };
+  const { socket, send } = await connect();
   const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
-  return { gateway, nats, store, socket: socket!, send, settle };
+  return { gateway, nats, store, socket, send, settle, connect };
 }
 
 describe("agent gateway sessions", () => {
@@ -431,6 +441,75 @@ describe("agent gateway sessions", () => {
     expect(nats.subscriptions.size).toBe(0);
     // A session the gateway ended is not released: another instance holds it.
     expect(store.calls.some((call) => call.startsWith("release"))).toBe(false);
+  });
+
+  test("a session whose renewals keep failing loses its authority at the lease deadline", async () => {
+    let now = 1_000_000;
+    const { gateway, socket, send, settle, store, nats } = await gatewayWithLink({
+      now: () => now,
+    });
+    send({ t: "open", s: 1, sandbox: "sbx", ticket: "t", connection: INSTANCE });
+    send({ t: "sub", s: 1, sid: 1, subject: `${SCOPE}.rpc` });
+    await settle();
+    store.renewThrows = true;
+    // Within the last confirmed lease (20 s, less the clock allowance) the
+    // session still forwards.
+    now += 10_000;
+    socket.data.heard?.();
+    await gateway.tick();
+    send({ t: "pub", s: 1, subject: "_INBOX.1", payload: new Uint8Array([1]) });
+    await settle();
+    expect(nats.published).toHaveLength(1);
+    // Past it, the session ends as lost before anything else is forwarded,
+    // and its subscriptions go with it.
+    now += 8_000;
+    send({ t: "pub", s: 1, subject: "_INBOX.1", payload: new Uint8Array([2]) });
+    await settle();
+    expect(nats.published).toHaveLength(1);
+    expect(socket.frames.at(-1)).toMatchObject({ t: "closed", s: 1, code: "lost" });
+    expect(nats.subscriptions.size).toBe(0);
+    // An hour later no relay credential has been minted for it.
+    now += 3_600_000;
+    socket.data.heard?.();
+    await gateway.tick();
+    expect(socket.frames.filter((frame) => frame.t === "relay")).toHaveLength(0);
+  });
+
+  test("an inbound message after the lease deadline is not forwarded", async () => {
+    let now = 1_000_000;
+    const { socket, send, settle, store, nats } = await gatewayWithLink({
+      now: () => now,
+    });
+    send({ t: "open", s: 1, sandbox: "sbx", ticket: "t", connection: INSTANCE });
+    send({ t: "sub", s: 1, sid: "r", subject: `${SCOPE}.rpc` });
+    await settle();
+    const [subscription] = [...nats.subscriptions.values()];
+    store.renewThrows = true;
+    now += 25_000;
+    subscription!.deliver({ subject: `${SCOPE}.rpc`, data: new Uint8Array([7]) });
+    expect(socket.frames.some((frame) => frame.t === "msg")).toBe(false);
+    expect(socket.frames.at(-1)).toMatchObject({ t: "closed", s: 1, code: "lost" });
+  });
+
+  test("an older epoch's open that finishes last never evicts the newer session", async () => {
+    const { store, socket, send, settle, connect } = await gatewayWithLink();
+    let releaseEpoch1!: () => void;
+    store.openGates.set(1, new Promise<void>((resolve) => (releaseEpoch1 = resolve)));
+    const older = INSTANCE;
+    const newer = crypto.randomUUID();
+    send({ t: "open", s: 1, sandbox: "sbx", ticket: "e1", connection: older });
+    await settle();
+    const second = await connect();
+    second.send({ t: "open", s: 1, sandbox: "sbx", ticket: "e2", connection: newer });
+    await settle();
+    expect(second.socket.frames.at(-1)).toMatchObject({ t: "opened", s: 1 });
+    releaseEpoch1();
+    await settle();
+    expect(socket.frames.at(-1)).toMatchObject({ t: "refused", s: 1, code: "stale_epoch" });
+    expect(second.socket.frames.some((frame) => frame.t === "closed")).toBe(false);
+    // Only the stale open's own claim is released.
+    expect(store.calls).toContain(`release:${older}`);
+    expect(store.calls).not.toContain(`release:${newer}`);
   });
 
   test("the relay credential is refreshed before it expires", async () => {

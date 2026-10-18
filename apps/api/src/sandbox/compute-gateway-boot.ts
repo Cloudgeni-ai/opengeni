@@ -31,6 +31,7 @@ import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
  * connection lease. */
 export function databaseComputeAgentLinkStore(db: Database): ComputeAgentLinkStore {
   return {
+    leaseMs: AGENT_CONNECTION_LEASE_MS,
     open: async (claim) => {
       const result = await openSandboxAgentLink(db, {
         ...claim,

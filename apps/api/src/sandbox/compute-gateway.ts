@@ -40,6 +40,9 @@ import {
 /** The claim store the gateway opens, renews and releases sessions with
  * (`@opengeni/db` openSandboxAgentLink and friends in production). */
 export type ComputeAgentLinkStore = {
+  /** How long an open or a renewal keeps the claim, from the moment the call
+   * starts at the latest. */
+  readonly leaseMs: number;
   open(input: ComputeAgentLinkClaim): Promise<
     | { opened: true; superseded: boolean }
     | {
@@ -105,6 +108,9 @@ const PING_INTERVAL_MS = 20_000;
 const SILENCE_LIMIT_MS = 60_000;
 const RELAY_TTL_MS = 60 * 60_000;
 const RELAY_REFRESH_BEFORE_MS = 10 * 60_000;
+/** The claim's lease runs on the database clock; a session's authority ends
+ * this much before the lease would by the gateway's own clock. */
+const LEASE_CLOCK_ALLOWANCE_MS = 2_000;
 /** Renewals run this many at a time, so a large fleet spreads its database
  * load instead of opening every transaction at once. */
 const RENEW_CONCURRENCY = 16;
@@ -133,6 +139,10 @@ type Session = {
   scope: string;
   subscriptions: Map<string, { sid: AgentLinkSid; unsubscribe: () => void }>;
   relayExpiresAtMs: number;
+  /** When the last confirmed open or renewal stops covering this session.
+   * Past it nothing is forwarded and no credential is minted: another
+   * replica may hold the agent by then. */
+  leaseDeadlineMs: number;
   renewing: boolean;
   asleep: boolean;
 };
@@ -261,11 +271,14 @@ export class ComputeAgentGateway {
     }
   }
 
-  /** @internal Make `session` its agent's session here, ending any other. */
-  adopt(session: Session): void {
+  /** @internal Make `session` its agent's session here, ending any other.
+   * An open that a later epoch overtook while it was set up is not adopted
+   * (false): the newer session stays. */
+  adopt(session: Session): boolean {
     const key = agentKey(session.claim);
     const previous = this.agents.get(key);
     if (previous && previous !== session) {
+      if (previous.claim.epoch > session.claim.epoch) return false;
       previous.link.end(
         previous,
         previous.claim.epoch < session.claim.epoch ? "superseded" : "lost",
@@ -273,6 +286,28 @@ export class ComputeAgentGateway {
       );
     }
     this.agents.set(key, session);
+    return true;
+  }
+
+  /** @internal The deadline a claim confirmed by a call started at
+   * `startedAtMs` gives. */
+  leaseDeadline(startedAtMs: number): number {
+    return startedAtMs + this.options.store.leaseMs - LEASE_CLOCK_ALLOWANCE_MS;
+  }
+
+  /** @internal Whether `session` may still act for its agent. A session
+   * whose lease went unconfirmed past its deadline ends here as `lost`; its
+   * host opens it again. */
+  authorized(session: Session): boolean {
+    if (session.state !== "open") return false;
+    if (this.now() < session.leaseDeadlineMs) return true;
+    this.options.logger?.warn("compute gateway: a session's claim lapsed", {
+      errorCode: "compute_link_claim_lapsed",
+      workspaceId: session.claim.workspaceId,
+      agentId: session.claim.agentId,
+    });
+    session.link.end(session, "lost", "the gateway could not renew the agent's claim");
+    return false;
   }
 
   /** @internal */
@@ -317,29 +352,35 @@ export class ComputeAgentGateway {
   private async renew(session: Session): Promise<void> {
     if (session.state !== "open" || session.renewing) return;
     session.renewing = true;
+    const startedAtMs = this.now();
     try {
       const result = await this.options.store.renew(session.claim);
-      if (!result.renewed && session.state === "open") {
-        session.link.end(session, result.code, closedMessage(result.code));
+      if (!result.renewed) {
+        if (session.state === "open") {
+          session.link.end(session, result.code, closedMessage(result.code));
+        }
+        return;
       }
+      session.leaseDeadlineMs = Math.max(session.leaseDeadlineMs, this.leaseDeadline(startedAtMs));
     } catch {
-      // The lease outlives several missed renewals; the next tick retries, and
-      // a claim lost meanwhile ends the session then.
+      // The lease outlives several missed renewals and the next tick retries;
+      // once the last confirmed lease runs out the session ends.
       this.options.logger?.warn("compute gateway: a session renewal failed", {
         errorCode: "compute_link_renew_failed",
         workspaceId: session.claim.workspaceId,
         agentId: session.claim.agentId,
       });
+      this.authorized(session);
     } finally {
       session.renewing = false;
     }
   }
 
   private async refreshRelay(session: Session): Promise<void> {
-    if (session.state !== "open") return;
+    if (!this.authorized(session)) return;
     if (session.relayExpiresAtMs - this.now() > this.timings.relayRefreshBeforeMs) return;
     const relay = await this.mintRelay(session.claim);
-    if (session.state !== "open") return;
+    if (!this.authorized(session)) return;
     session.relayExpiresAtMs = relay.expires_at_ms;
     session.link.send({ t: "relay", s: session.s, ...relay });
   }
@@ -512,7 +553,7 @@ class AgentLink implements ApiWebSocketConnection {
         } else {
           const session = this.sessions.get(frame.s);
           // A frame for a session the gateway ended crossed its `closed`.
-          if (session?.state === "open") this.apply(session, frame);
+          if (session && this.gateway.authorized(session)) this.apply(session, frame);
         }
       }
     } finally {
@@ -552,6 +593,17 @@ class AgentLink implements ApiWebSocketConnection {
       epoch: ticket.epoch,
       connectionInstanceId: frame.connection.toLowerCase(),
     };
+    // Mint first: once the claim is taken nothing asynchronous may come
+    // between it and adoption, or a later epoch could open meanwhile. The
+    // credential is only handed over if the open succeeds.
+    let relay: { url: string; token: string; expires_at_ms: number };
+    try {
+      relay = await this.gateway.mintRelay(claim);
+    } catch {
+      this.refuse(frame.s, "unavailable");
+      return;
+    }
+    const startedAtMs = this.gateway.nowMs();
     let result: Awaited<ReturnType<ComputeAgentLinkStore["open"]>>;
     try {
       result = await this.gateway.options.store.open(claim);
@@ -561,14 +613,6 @@ class AgentLink implements ApiWebSocketConnection {
     }
     if (!result.opened) {
       this.refuse(frame.s, result.code);
-      return;
-    }
-    let relay: { url: string; token: string; expires_at_ms: number };
-    try {
-      relay = await this.gateway.mintRelay(claim);
-    } catch {
-      await this.release(claim);
-      this.refuse(frame.s, "unavailable");
       return;
     }
     if (this.terminal) {
@@ -584,11 +628,17 @@ class AgentLink implements ApiWebSocketConnection {
       scope: `agent.${claim.workspaceId}.${claim.agentId}.connection.${claim.connectionInstanceId}`,
       subscriptions: new Map(),
       relayExpiresAtMs: relay.expires_at_ms,
+      leaseDeadlineMs: this.gateway.leaseDeadline(startedAtMs),
       renewing: false,
       asleep: false,
     };
+    if (!this.gateway.adopt(session)) {
+      // A later epoch opened the agent here while this open was in flight.
+      await this.release(claim);
+      this.refuse(frame.s, "stale_epoch");
+      return;
+    }
     this.sessions.set(frame.s, session);
-    this.gateway.adopt(session);
     this.gateway.options.logger?.info("compute gateway: session opened", {
       host: this.host,
       workspaceId: claim.workspaceId,
@@ -664,7 +714,7 @@ class AgentLink implements ApiWebSocketConnection {
           frame.subject,
           frame.queue,
           (message) => {
-            if (session.state !== "open") return;
+            if (!this.gateway.authorized(session)) return;
             this.send({
               t: "msg",
               s: session.s,
