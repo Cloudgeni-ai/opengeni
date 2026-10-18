@@ -75,6 +75,7 @@ const SECTIONS = new Set([
   "people",
   "recovery",
   "developer",
+  "agents",
   "files",
   "access",
   "identity",

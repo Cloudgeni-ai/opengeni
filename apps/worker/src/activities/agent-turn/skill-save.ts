@@ -13,6 +13,8 @@ export type SkillSaveRequest = {
   expectedRevisionId: string | null;
   expectedScopeVersion: number;
   files: readonly SkillTextFile[];
+  /** An explicit destination for a new Skill; omitted means this chat's own. */
+  scope?: "personal" | "workspace";
   reason: string;
 };
 
@@ -41,6 +43,7 @@ const skillSaveArguments = z
       )
       .max(PORTABLE_SKILL_MAX_FILES),
     deletions: z.array(z.string().min(1).max(1024)).max(PORTABLE_SKILL_MAX_FILES).optional(),
+    scope: z.enum(["personal", "workspace"]).optional(),
     reason: z.string().min(1).max(2000),
   })
   .strict();
@@ -63,7 +66,7 @@ export function createSkillSaveAttemptToolDefinition(input: {
     codemodePath: ["opengeni", "skill_save"],
     title: "Save Skill text",
     description:
-      "Create or edit a Skill for reusable procedures or context-specific and personal behavioral preferences, not retrieval-only facts. Put its applicability in the SKILL.md description so the prompt index can guide skill_read; the full body is loaded when relevant. Short always-on workspace rules use instruction_policy_save. Supply only changed UTF-8 text files and explicit deletions; omitted files are preserved. No sandbox is needed. Use the revision and scope version returned by Skill discovery for stale-write protection. For creation choose a new UUID, set expectedRevisionId to null and expectedScopeVersion to 1. The effective Skills setting governs publication: Automatic publishes, Review first saves a pending revision in Knowledge > Needs review while the task continues, and Off prevents agent authoring. Report the actual receipt without asking an approval question. Private chats save personal Skills; shared chats save workspace Skills. Preserve the intended scope; another destination is not a workaround for unavailable scope or learning restrictions.",
+      "Create or edit a Skill for reusable procedures or context-specific and personal behavioral preferences, not retrieval-only facts. Put its applicability in the SKILL.md description so the prompt index can guide skill_read; the full body is loaded when relevant. Short always-on workspace rules use instruction_policy_save. Supply only changed UTF-8 text files and explicit deletions; omitted files are preserved. No sandbox is needed. Use the revision and scope version returned by Skill discovery for stale-write protection. For creation choose a new UUID, set expectedRevisionId to null and expectedScopeVersion to 1. The effective Skills setting governs publication: Automatic publishes, Review first saves a pending revision in Knowledge > Needs review while the task continues, and Off prevents agent authoring. Report the actual receipt without asking an approval question. A new Skill saves where this chat learns: personal in a private chat, workspace in a shared chat. Set scope only when the person wants it elsewhere: workspace for everyone in the workspace, or personal for only the person you act for. An edit keeps the Skill's own scope. Another destination is not a workaround for learning restrictions.",
     inputSchema: {
       type: "object",
       properties: {
@@ -89,6 +92,12 @@ export function createSkillSaveAttemptToolDefinition(input: {
           maxItems: PORTABLE_SKILL_MAX_FILES,
           uniqueItems: true,
           items: { type: "string", minLength: 1, maxLength: 1024 },
+        },
+        scope: {
+          type: "string",
+          enum: ["personal", "workspace"],
+          description:
+            "Only to save a new Skill somewhere other than this chat's default. Omit when editing.",
         },
         reason: { type: "string", minLength: 1, maxLength: 2000 },
       },
@@ -140,6 +149,7 @@ export function createSkillSaveAttemptToolDefinition(input: {
         expectedRevisionId,
         expectedScopeVersion: request.expectedScopeVersion,
         files: artifact.files,
+        ...(request.scope ? { scope: request.scope } : {}),
         reason: request.reason,
       });
       return {

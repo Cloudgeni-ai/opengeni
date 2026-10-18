@@ -22,6 +22,12 @@ import type {
   VaultItem,
   VaultItemSummary,
   VaultSummary,
+  InstallVaultProviderRequest,
+  InstallVaultProviderResponse,
+  ReplaceVaultProviderCredentialsRequest,
+  VaultProviderConnectionSummary,
+  ListVaultProviderConnectionsResponse,
+  DisconnectVaultProviderResponse,
 } from "./vault-types";
 
 /**
@@ -195,6 +201,48 @@ export function vaultsApi(client: VaultClientLike, workspaceId: string) {
           signal,
         )
       ).vaults,
+    installVaultProvider: (request: InstallVaultProviderRequest) =>
+      json<InstallVaultProviderResponse>("POST", `${base}/vault-providers/connections`, request),
+    /** Connections plus configured providers, even before the first connection. */
+    getVaultProviderCatalog: (signal?: AbortSignal) =>
+      json<ListVaultProviderConnectionsResponse>(
+        "GET",
+        `${base}/vault-providers/connections`,
+        undefined,
+        {},
+        signal,
+      ),
+    listVaultProviderConnections: async (signal?: AbortSignal) =>
+      (
+        await json<{ connections: VaultProviderConnectionSummary[] }>(
+          "GET",
+          `${base}/vault-providers/connections`,
+          undefined,
+          {},
+          signal,
+        )
+      ).connections,
+    replaceVaultProviderCredentials: (
+      connectionId: string,
+      request: ReplaceVaultProviderCredentialsRequest,
+    ) =>
+      json<InstallVaultProviderResponse>(
+        "PUT",
+        `${base}/vault-providers/connections/${enc(connectionId)}/credentials`,
+        request,
+      ),
+    disconnectVaultProvider: (connectionId: string) =>
+      json<DisconnectVaultProviderResponse>(
+        "DELETE",
+        `${base}/vault-providers/connections/${enc(connectionId)}`,
+      ),
+    /** Continue verification using the saved credentials, without replaying setup tokens. */
+    verifyVaultProviderConnection: (connectionId: string) =>
+      json<InstallVaultProviderResponse>(
+        "POST",
+        `${base}/vault-providers/connections/${enc(connectionId)}/verify`,
+        {},
+      ),
     linkProviderVault: (request: LinkProviderVaultRequest) =>
       json<VaultSummary>("POST", `${base}/vaults/link`, request),
     createManagedProviderVault: (
@@ -229,6 +277,9 @@ const VAULT_ERROR_CODES: ReadonlySet<string> = new Set<VaultErrorCode>([
   "provider_rate_limited",
   "provider_unavailable",
   "provider_conflict",
+  "provider_locked",
+  "provider_inventory_incomplete",
+  "provider_outcome_unknown",
   "variable_sets_removed",
   "secret_save_forbidden",
   "invalid_secret_name",

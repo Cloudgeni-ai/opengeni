@@ -193,6 +193,39 @@ describe("SessionRowContent", () => {
     return parse(markup).querySelector(".sr-only")?.textContent ?? "";
   }
 
+  test.each([false, true])("clips the full title without ellipsis (mobile=%s)", (mobile) => {
+    const title = "Cloudflare Storage for Per-Site Databases and Asset Sharing";
+    const host = parse(
+      renderToStaticMarkup(
+        <SessionRowContent
+          title={title}
+          stateLabel="Running"
+          mobile={mobile}
+          summary={active}
+          creator={human}
+          relativeTime="now"
+        />,
+      ),
+    );
+    const text = host.querySelector("[data-session-row-title]")!;
+    expect(text.textContent).toBe(title);
+    expect(text.className).toContain("overflow-hidden whitespace-nowrap");
+    expect(text.className).not.toContain("truncate");
+    expect(text.parentElement?.nextElementSibling?.hasAttribute("data-session-row-metadata")).toBe(
+      true,
+    );
+    if (mobile)
+      expect(host.querySelector("[data-session-row-state]")?.className).toContain("truncate");
+  });
+
+  test("keeps the title fade inside its column without extending into metadata", async () => {
+    const styles = await Bun.file(new URL("../../styles.css", import.meta.url)).text();
+    expect(styles).toContain(
+      "mask-image: linear-gradient(to right, #000 calc(100% - 1rem), transparent)",
+    );
+    expect(styles).not.toContain("[data-session-row-text]");
+  });
+
   test.each([
     ["a root row", human],
     ["a child row", null],

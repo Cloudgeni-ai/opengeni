@@ -20,6 +20,10 @@ function recordingObservability() {
 }
 
 test("the runtime forwards core logs and routes SDK records to the structured logger", () => {
+  // SIGUSR2 triggers CPU profiling; it must never drain the Temporal workers.
+  expect(
+    temporalRuntimeLoggingOptions(recordingObservability().observability).shutdownSignals,
+  ).toEqual(["SIGINT", "SIGTERM", "SIGQUIT"]);
   const { logged, observability } = recordingObservability();
   const options = temporalRuntimeLoggingOptions(observability);
 

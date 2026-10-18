@@ -3,6 +3,7 @@ import type * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { CodexCredentialLeaseLostError } from "../src/activities/agent-turn/credential-leases";
 import { executeCoreCodexImageGeneration } from "../src/activities/codex-image-generation";
+import { isAuxiliaryProviderDispatch } from "../src/activities/auxiliary-provider-dispatch";
 import type { CodexRequestContext } from "@opengeni/codex";
 
 type ImageContext = Pick<
@@ -169,6 +170,18 @@ test("a successful operation checks the chat lease, renews before dispatch and r
   });
   expect(harness.reservations[0]![4]).toEqual(physicalRequest);
   expect(harness.settlements).toEqual([]); // Retention failed; transport success is insufficient.
+});
+
+test("the turn's dispatch checks run as an auxiliary dispatch, outside main-call timing", async () => {
+  const observed: boolean[] = [];
+  const { promise } = run({
+    creditAdmission: async () => {
+      observed.push(isAuxiliaryProviderDispatch());
+    },
+  });
+  await promise;
+  expect(observed).toEqual([true]);
+  expect(isAuxiliaryProviderDispatch()).toBe(false);
 });
 
 test("an error after dispatch still releases the lease and records outcome unknown", async () => {

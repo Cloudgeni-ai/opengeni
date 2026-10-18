@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { modelDisplayName } from "@opengeni/react";
 import { labelReasoningEffort } from "@opengeni/react/model-policy";
 import { sessionAdmissionBlocked, sessionDisplayStatus } from "@opengeni/react/timeline-model";
@@ -225,7 +226,8 @@ export function sessionHoverFacts(
     model: modelId
       ? {
           id: modelId,
-          effort: effort && effort !== "none" ? `${labelReasoningEffort(effort)} reasoning` : null,
+          effort:
+            effort && effort !== "none" ? `${labelReasoningEffort(t, effort)} reasoning` : null,
         }
       : null,
     subAgents: subAgentFacts(session, descendantCount, descendantCountTruncated),

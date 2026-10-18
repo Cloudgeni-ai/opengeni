@@ -1276,8 +1276,11 @@ default path end to end: explicit external-member onboarding, server-side
 session creation with an explicit tool selection and stable idempotency key,
 `createSessionProxyHandler`, `<OpenGeniProvider>` + `<SessionConversation>`,
 and an authenticated product MCP server. It uses one preselected workspace and
-a fixed demo operator; use the organization-key `ensureWorkspace` flow above
-and your own authentication for production tenants.
+a fixed demo operator, and separates anonymous browsers with a signed visitor
+cookie checked in `authorizeSession`, a per-visitor copy of its product data,
+and a server-set signed visitor header on each session's MCP server; use the
+organization-key `ensureWorkspace` flow above and your own authentication for
+production tenants.
 
 The product controls whether it renders final answers only, assistant progress,
 selected tool calls, or a full operational timeline. Presentation filtering

@@ -1,4 +1,5 @@
-import type { SiteViewer } from "@opengeni/contracts";
+import type { SiteViewAs, SiteViewer } from "@opengeni/contracts";
+import { SITE_VIEW_COOKIE } from "./cookies";
 import { sha256Hex } from "./crypto";
 import { edgeCache, edgeCacheKey } from "./edge-cache";
 import { UpstreamError } from "./host-map";
@@ -9,10 +10,16 @@ import { siteCaller, type SiteContext } from "./site-context";
 export const ACCESS_PROBE_CACHE_TTL = 30;
 
 export type AccessProbe =
-  | { kind: "ok"; viewer: SiteViewer | null }
+  | { kind: "ok"; viewer: SiteViewer | null; viewAs: SiteViewAs | null }
   | { kind: "signin" }
   | { kind: "forbidden" }
   | { kind: "missing" };
+
+/** The preview role the API reports (`capabilities.viewAs`), or null. */
+function viewAsFrom(value: unknown): SiteViewAs | null {
+  const viewAs = (value as { capabilities?: { viewAs?: unknown } } | null)?.capabilities?.viewAs;
+  return viewAs === "invited" || viewAs === "public" ? viewAs : null;
+}
 
 function viewerFrom(value: unknown): SiteViewer | null {
   const viewer = (value as { viewer?: unknown } | null)?.viewer as Record<string, unknown> | null;
@@ -37,7 +44,8 @@ function viewerFrom(value: unknown): SiteViewer | null {
  * Confirm with the API that this site session may open this Site, using the
  * allowlisted `GET /v1/site-runtime/site/config`. The gateway only sees an
  * opaque token; presence of the cookie is never treated as access. A
- * confirmed result is cached briefly per (host, session hash).
+ * confirmed result is cached briefly per (host, session hash, preview
+ * cookie), so starting or ending "View as visitor" is seen at once.
  */
 export async function probeAccess(site: SiteContext): Promise<AccessProbe> {
   if (!site.session) return { kind: "signin" };
@@ -46,11 +54,16 @@ export async function probeAccess(site: SiteContext): Promise<AccessProbe> {
   // never reuses an earlier confirmation.
   const key = edgeCacheKey(site.hostname, "access", [
     site.record.generation,
-    await sha256Hex(`${site.hostname}\n${site.session}`),
+    await sha256Hex(
+      `${site.hostname}\n${site.session}\n${site.cookies.get(SITE_VIEW_COOKIE) ?? ""}`,
+    ),
   ]);
   if (cache) {
     const hit = await cache.match(key);
-    if (hit) return { kind: "ok", viewer: viewerFrom(await hit.json().catch(() => null)) };
+    if (hit) {
+      const cached = await hit.json().catch(() => null);
+      return { kind: "ok", viewer: viewerFrom(cached), viewAs: viewAsFrom(cached) };
+    }
   }
   let response: Response;
   try {
@@ -74,11 +87,12 @@ export async function probeAccess(site: SiteContext): Promise<AccessProbe> {
   }
   const body = await response.json().catch(() => null);
   const viewer = viewerFrom(body);
+  const viewAs = viewAsFrom(body);
   if (cache)
     site.ctx.waitUntil(
       cache.put(
         key,
-        new Response(JSON.stringify({ viewer }), {
+        new Response(JSON.stringify({ viewer, capabilities: { viewAs } }), {
           headers: {
             "Content-Type": "application/json",
             "Cache-Control": `public, max-age=${ACCESS_PROBE_CACHE_TTL}`,
@@ -86,7 +100,7 @@ export async function probeAccess(site: SiteContext): Promise<AccessProbe> {
         }),
       ),
     );
-  return { kind: "ok", viewer };
+  return { kind: "ok", viewer, viewAs };
 }
 
 async function discard<T>(response: Response, value: T): Promise<T> {

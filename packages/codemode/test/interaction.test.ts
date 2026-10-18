@@ -230,7 +230,7 @@ describe("Opengeni Codemode interaction facade", () => {
   test("exposes compact observation, explicit full tree, and focused reads", async () => {
     const fake = fakeClient((path) => {
       if (path === "interaction.browser.observe") {
-        return result({ semantic: null, agentView: { kind: "compact", nodes: [] } });
+        return result({ agentView: { sourceKind: "snapshot", nodes: [] } });
       }
       if (path === "interaction.browser.read") {
         return result({
@@ -244,7 +244,7 @@ describe("Opengeni Codemode interaction facade", () => {
     const tab = createOpenGeniCodemode(fake.client)
       .browsers.use(browserSessionId)
       .tabs.use("tab-1");
-    expect((await tab.observe()).agentView?.kind).toBe("compact");
+    expect((await tab.observe()).agentView.sourceKind).toBe("snapshot");
     await tab.observeFull();
     const focused = await tab.read({ role: "button", nameContains: "Save", limit: 4 });
     if (focused.source !== "accessibility") throw new Error("expected accessibility read");

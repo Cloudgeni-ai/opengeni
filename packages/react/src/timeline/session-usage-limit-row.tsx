@@ -5,6 +5,7 @@ import { cn } from "../lib/cn";
 import { DEFAULT_SESSION_USAGE_LIMIT_LABELS } from "../usage/session-usage-limit";
 import { useEntranceAnimation } from "./entrance";
 import type { SessionUsageLimitStop } from "./types";
+import { useOpenGeniText } from "../messages/runtime";
 
 /**
  * A compact historical marker: the task's usage limit stopped further model
@@ -14,8 +15,9 @@ import type { SessionUsageLimitStop } from "./types";
  * this row repeats neither. Never a credits or purchase remedy.
  */
 export function SessionUsageLimitRow({ stop }: { stop: SessionUsageLimitStop }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
-  const labels = DEFAULT_SESSION_USAGE_LIMIT_LABELS;
+  const labels = DEFAULT_SESSION_USAGE_LIMIT_LABELS(t);
   const amount =
     stop.usedMicros !== null && stop.limitMicros !== null
       ? labels.usedOfLimit(

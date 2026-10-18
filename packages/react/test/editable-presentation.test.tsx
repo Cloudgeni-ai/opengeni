@@ -19,6 +19,9 @@ import {
   replacePresentationRichText,
 } from "../src/components/artifacts/editable-presentation";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -257,6 +260,7 @@ describe("SDK-backed editable presentation", () => {
 
   test("composes catalog/editor-slide ABI while preserving hierarchy and inheritance", async () => {
     const composed = await composePresentationEditorProjection(
+      englishText,
       new FakePresentationSession() as unknown as EditableArtifactSession,
     );
     expect(composed.projection.slideSize).toEqual({ width: 960, height: 540 });

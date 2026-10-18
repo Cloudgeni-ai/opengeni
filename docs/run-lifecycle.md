@@ -215,6 +215,28 @@ session, so the same turn reruns its idempotent setup. Nothing is replayed.
 Running, NotFound, a different box, or a lease still on that epoch is never
 proof, and a refused reconciliation backs off by turn.
 
+That box must actually go away. Its setup request never settles while the box
+lives (no exit can be observed for an unknown Start), and the idle drain
+refuses to capture around an unsettled request, so before October 16, 2026 a
+box with no holder ran until the provider deadline. For a point-in-time (Modal
+snapshot) capture, the draining capture claim now treats a home-route setup
+request (`lazyOwnedSandboxSetup`/`eagerOwnedSandboxSetup`) as abandoned once
+its owner attempt has been closed for the idle grace
+(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, at least one minute), its turn is recovering
+with no active attempt, on the attempt's generation, with the exact
+`sandboxSetupOutcomeUnknown` marker for that attempt, and no process of that
+attempt is active. Only when every remaining unsettled request qualifies are
+they recorded in `deadline_forced_admission_ids` and handled exactly like the
+mandatory pre-deadline save: the workspace is captured around them, the box is
+terminated, and the cold commit settles them. The ended-epoch recovery above
+then resumes the turn on that saved workspace. Any other unsettled request, and
+every tar-style capture (which could read a box that is still writing), keeps
+waiting; the scope is deliberately limited to the case whose turn is known to
+wait for the box. The mandatory pre-deadline save itself no longer requires a
+stamped rotation on a draining lease: due rotations are only stamped on warm
+leases, so a lease that was already draining was killed uncaptured at the
+deadline and its resumed turn failed as unrecoverable.
+
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
 own batch's durable history-item receipt; a turn-wide update query can therefore
@@ -735,8 +757,19 @@ exactly idempotent transaction on these SQLSTATEs; connector-ledger
 transactions take the canonical event-write prefix and retry the same way.
 
 Versioned control observers distinguish unavailable session reads from idle
-business state. Missing and RLS-hidden rows are indistinguishable; neither is
-evidence of deletion, completion, or permission to resume. An unavailable
+business state. An absent observer read alone is not deletion evidence. Behind
+`session-close-deleted-v1`, a separate control lookup verifies the workspace's
+account and a subject-free worker RLS scope before proving session absence;
+an absent workspace also proves deletion. Wrong-account or actor-filtered reads
+stay unavailable, and database failures retry. A proven deletion closes the
+workflow without idle settlement, goal continuation, or parent notification.
+Old histories retain the unavailable result and timer command order until a live
+cycle records the patch. Idle/failure, dispatch recovery, input-wait settlement,
+interruption/quiescence and goal-continuation retries also re-prove deletion
+after a failed lookup and return harmlessly if deletion won the race. Session
+tree deletion is quiescence-gated database deletion, not Temporal termination;
+the control observer provides closure without a cross-system delete transaction.
+An unavailable
 observer retains a signal-interruptible 30-second control wait because restoring
 visibility is not guaranteed to produce a wake. The wake outbox retains its
 revision with `session_unavailable` and its existing bounded retry schedule.
@@ -3155,23 +3188,39 @@ during that wait returns inline and never becomes session background state.
 Only providers whose process locator is controllable from another worker may
 end that wait with a second, exact-attempt-fenced adoption transaction that
 inserts its session-owned command row immediately before the model receives the
-live locator. The SDK Local and Docker locators index an in-memory table on one
-worker session object. After the bounded foreground wait, those providers return
-an explicitly turn-scoped handle so the agent can test a running server. The
-shell remains registered with the exact turn cancellation fence: ordinary
-completion, Pause, Steer, and cancellation stop it and settle its process holder
-before workspace capture. It is not registered as a session background command,
-does not create terminal background notifications, and cannot be reused by a
-successor attempt. Never wait for an indefinitely running server to exit before
-returning control to its owning agent. On every managed backend, a yielded
-`exec_command` whose final step is a bare stdin-driven shell (`bash`,
-`sh -i`, `bash --noprofile --norc`; no `-c`, script, or other argument, as
-decided by `isBareInteractiveShellCommand` in
-`packages/runtime/src/sandbox/turn-tool-cancellation.ts`) takes the same
-turn-scoped path instead of adoption, also on later `write_stdin` reads: the
-agent drives it during the turn, and finalization stops it through the exact
-marker kill. Such a shell never exits on its own, so adopting it would keep the
-sandbox busy and block idle drain after the turn. A yielded
+live locator. On Docker and Unix-local boxes every command runs under a small
+POSIX `sh` supervisor inside the box
+(`packages/runtime/src/sandbox/durable-shell-process.ts`): stdin is a FIFO,
+output goes to a file with a committed read offset, and the exit status is
+written next to them, under `${TMPDIR:-/tmp}/opengeni-exec-<uid>/<namespace>/<id>`.
+Its handles are random numbers of at least 1,000,000, and any later session
+object for the same container or workspace (another turn, another worker, the
+reaper) reads, writes and stops the command with one short shell invocation, so
+these handles are adopted like Modal's. Interactive shells (`bash`, `sh -i`) are
+adopted too: a person who steers or whose turn ends expects what the agent
+started to keep running, and idle command containment (below) still drains a
+box nobody uses. A later turn reaches an adopted command by the handle the model
+was given: `write_stdin` and `command_input` first look up the session's running
+background command with that handle on the exact home lease epoch and provider
+instance (`findRunningSessionBackgroundProcess`) and bind it to the routing
+session; it stays session-owned and that turn neither adopts nor finalizes it.
+Only handles nothing outside one worker can reach stay turn-scoped: the SDK's
+own small in-memory Local and Docker handles (a `runAs` user, a terminal without
+util-linux `script`, or a box without `mkfifo` and fractional `sleep`) and
+OpenSandbox handles. After the bounded foreground wait those return an
+explicitly turn-scoped handle, stay registered with the exact turn cancellation
+fence, and are stopped and settled by ordinary completion, Pause, Steer and
+cancellation before workspace capture. A supervised Docker or local command is
+retained with `reconciler_version = 2` (migration 0840): a worker built before
+the supervisor would look for it in its own memory and settle a live command as
+lost, so the original three-argument
+`claim_terminal_retained_processes(uuid,integer,bigint)`, which such a worker
+calls, now returns only version 1 rows, and current workers call the
+four-argument claim with `RETAINED_PROCESS_RECONCILER_VERSION`. During a rolling
+deploy an older reaper therefore leaves these commands to a newer one. Bump the
+version, never reuse it, when a later process kind needs a newer reaper.
+Never wait for an indefinitely running
+server to exit before returning control to its owning agent. A yielded
 Connected Machine exec likewise creates its session-owned background-command
 row before returning; that row freezes the physical control workspace,
 enrollment, connection instance, and op ID. The exact parent admission,
@@ -3518,15 +3567,18 @@ counts inspections (`checkpointing` when browser saves were prepared,
 `inspection_failed`). A person returning exactly as the box is being released
 may see the browser `suspending`, then resume it.
 
-**Idle command containment.** A legacy retained command keeps its Modal box
-warm through a non-expiring process holder, so the zero-holder idle drain never
-runs for it and the box would stay up until the provider deadline kills it
-uncaptured. One rule contains such commands: running, stopping, unobservable,
+**Idle command containment.** An unsupervised retained command (a legacy Modal
+command, or any Docker or local background command) keeps its box warm through
+a non-expiring process holder, so the zero-holder idle drain never runs for it.
+A Modal box would stay up until the provider deadline kills it uncaptured;
+Docker and local boxes have no deadline at all, so a shell left open would keep
+them warm for ever. One rule contains such commands: running, stopping, unobservable,
 or repeatedly failing observation all qualify, as long as the command printed no
 output inside the window. The reaper reads a new inventory,
 `list_command_containment_candidates(limit, idle window)` from migrations
-0547/0599/0687,
-which lists enrolled drains, rotating leases, and warm or draining Modal leases
+0547/0599/0687/0839,
+which lists enrolled drains, rotating leases, and warm or draining Modal, Docker
+and local leases
 whose only holders are process holders of active non-supervised processes, with
 no capture or reaper hold and no open turn, turn finish, attempt close,
 holder-set change or admission in the group within the window. Exact
@@ -4415,45 +4467,37 @@ advances a cursor over an event it did not return.
 Session discovery is a separate compact monitoring projection, not a list of
 full session rows. `sessions_list` defaults to deterministic descending
 `(created_at, id)` order and can instead use the durable descending
-`(activity_revision, updated_at, id)` activity order. `updated_at` is the
-display/keyset suffix, not the snapshot clock. Revision zero is the untouched
-legacy bucket and still traverses by exact PostgreSQL timestamp/UUID suffix.
-Both paths use opaque, versioned, snapshot-bound keyset cursors and matching
-workspace-prefixed indexes. The workspace activity counter is created with the
-workspace, so an updated-order page reads its complete multi-query projection
-through one short read-only repeatable-read MVCC snapshot and never takes a
-counter or workspace-control lock. The page returns that decimal snapshot as
-`updatedThrough`; the next incremental scan passes it as
-`updatedAfter`, so application-clock timestamps, equal timestamps, inserts,
-and repeated updates cannot create a handoff gap. Semantic writers acquire only
-their domain locks while doing work. Their outermost database wrapper opens one
-workspace-scoped activity gate, lets row triggers tag the changed session set
-with the current full transaction id, settles every deferred constraint, and
-then finalizes exactly once: one counter increment and one shared revision
-stamped onto exactly that transaction's pending sessions. Low-level session
-writers accept only the branded gate handle, while the SQL trigger catches raw
-or stale callers at runtime. The finalizer clears the pending set in the same
-transaction. A zero-change
-transaction leaves the counter untouched; a semantic writer outside a matching
-gate, a conflicting nested workspace, a manual revision write, or an open gate
-without its finalizer fails closed and rolls back. A new gate must begin at the
-outer transaction boundary; same-workspace nested scopes reuse that owner, while
-an unrelated outer transaction is rejected. The counter therefore enters
-the lock graph only after other transaction work is complete, while discovery
-never enters that graph at all. Raw deltas do not mark a session pending. Known
-targets should be read with exact-ID `session_get`, whose model-facing
+`(activity_xid, updated_at, id)` activity order. `updated_at` is the
+display/keyset suffix, not the monitoring clock. Xid zero is the untouched
+pre-expansion bucket and traverses by exact PostgreSQL timestamp/UUID suffix.
+Updated ordering uses a live keyset, not a retained row snapshot; relevance
+alone freezes a numeric snapshot-xmax ceiling. Writers stamp the top-level
+transaction ID in a BEFORE trigger, in the original row write. Scoped writer
+handles retain tenant/actor proofs and domain fences but never advance a shared
+workspace counter or perform a second activity-finalization write.
+
+An incremental page captures snapshot xmin in the same statement as its rows
+and returns its tagged decimal token as `updatedThrough`. The next scan passes
+that value as `updatedAfter` and includes visible xids at or above it, with no
+upper bound. Continuation pages retain the first page's watermark. Lower xids
+that commit late remain eligible on the next scan: delivery is gap-free and
+at least once, not exact once or an event log. Finish every continuation before
+advancing the token. Legacy revision tokens restart conservatively on new
+readers; old readers and new tokens have an explicitly limited mixed-rollout
+compatibility window. See [session activity transaction IDs](session-activity-xid.md)
+for token encoding, cache invalidation, rolling safety and the subsequent
+contract cleanup. Known targets should be read with exact-ID `session_get`, whose model-facing
 projection independently bounds every aggregate and the complete pretty-printed
 response to 64 KiB; the REST session detail contract remains unchanged.
 
 `sessions.updated_at` records semantic monitoring activity time, while
-`sessions.activity_revision` is its transactional monotonic ordering fact; raw
+`sessions.activity_xid` records the writing transaction's allocation order; raw
 stream volume advances neither. A batch containing only raw message, reasoning,
 sandbox-command-output, or PTY
 deltas advances `last_sequence` but does not advance `updated_at` or
-`activity_revision`. A semantic event or explicit session mutation advances
-the timestamp, marks that session pending inside the activity gate, and shares
-the transaction's single finalized workspace revision with every other changed
-session. This keeps
+`activity_xid`. A semantic event or explicit session mutation advances
+the timestamp and stamps the same top-level xid on every session changed by
+that transaction. This keeps
 updated-order discovery useful even while a productive session emits a large
 raw token or terminal stream; `session_events` remains the exact sequenced
 audit path for those retained previews.

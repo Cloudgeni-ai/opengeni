@@ -15,6 +15,7 @@ import { useConnect } from "../hooks/use-connect";
 import { attachSessionCapability, sessionCapabilityTools } from "../session-capability-policy";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 import { matchingActiveMcpConnections } from "../mcp-connection-status";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type SessionMcpCapabilityCardProps = {
   client: OpenGeniClient;
@@ -89,6 +90,7 @@ function ScopedCard({
   logoSrc,
   ownershipCopy,
 }: McpConnectionCardProps) {
+  const t = useOpenGeniText();
   const [controller] = useState(
     () => new ConnectController(client.connectTransport(), workspaceId),
   );
@@ -137,13 +139,13 @@ function ScopedCard({
         if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
         if (inspected.kind === "oauth2") resolved = { ...resolved, authKind: "oauth2" };
         else if (inspected.kind === "unknown")
-          throw new Error(inspected.message ?? "Could not determine how to sign in. Try again.");
+          throw new Error(
+            inspected.message ?? t("sessionMcpCapabilityCard.couldNotDetermineHowTo"),
+          );
       }
     }
     if (!resolved || resolved.kind !== "mcp" || resolved.authKind !== "oauth2")
-      throw new Error(
-        "This recommendation is not an available OAuth MCP integration. Review the current connection catalog.",
-      );
+      throw new Error(t("sessionMcpCapabilityCard.thisRecommendationIsNotAn"));
     setItem(resolved);
     if (resolved.connectionRef)
       setOwnership(resolved.connectionRef.subjectScope === "subject" ? "personal" : "workspace");
@@ -191,7 +193,9 @@ function ScopedCard({
       .catch((failure) => {
         if (!abort.signal.aborted)
           setError(
-            failure instanceof Error ? failure.message : "Couldn't load connection details.",
+            failure instanceof Error
+              ? failure.message
+              : t("sessionMcpCapabilityCard.couldnTLoadConnectionDetails"),
           );
       })
       .finally(() => {
@@ -204,7 +208,7 @@ function ScopedCard({
     // These reads initialize that scope; rerunning on action closures would
     // cancel initialization whenever its own state updates render the card.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, workspaceId, sessionId, capabilityId, dialogOnly]);
+  }, [client, workspaceId, sessionId, capabilityId, dialogOnly, t]);
 
   useEffect(() => {
     const path = item?.logoAssetPath;
@@ -249,7 +253,7 @@ function ScopedCard({
           setError(
             failure instanceof Error
               ? failure.message
-              : "Connection setup could not finish. Try again.",
+              : t("sessionMcpCapabilityCard.connectionSetupCouldNotFinish"),
           );
       }
     } finally {
@@ -286,9 +290,7 @@ function ScopedCard({
       connection.metadata.mcpUrl !== (resolved.mcpUrl ?? resolved.endpointUrl) ||
       (connection.subjectId !== null) !== (attempt.ownership === "personal")
     )
-      throw new Error(
-        "The authorized account does not match this integration. Review its connection settings.",
-      );
+      throw new Error(t("sessionMcpCapabilityCard.theAuthorizedAccountDoesNot"));
     const previous = resolved.connectionRef;
     if (
       resolved.enabled &&
@@ -296,9 +298,7 @@ function ScopedCard({
       previous?.connectionId &&
       previous.connectionId !== connection.id
     )
-      throw new Error(
-        "This integration's selected account changed during setup. Review it before continuing.",
-      );
+      throw new Error(t("sessionMcpCapabilityCard.thisIntegrationSSelectedAccount"));
     await client.enableCapability(workspaceId, capabilityId, {
       connectionRef:
         attempt.ownership === "personal"
@@ -371,14 +371,9 @@ function ScopedCard({
           ownership !==
             (resolved.connectionRef.subjectScope === "subject" ? "personal" : "workspace")
         )
-          throw new Error(
-            "The connection ownership changed. Review the current account before continuing.",
-          );
+          throw new Error(t("sessionMcpCapabilityCard.theConnectionOwnershipChangedReview"));
         const mcpUrl = resolved.mcpUrl ?? resolved.endpointUrl;
-        if (!mcpUrl)
-          throw new Error(
-            "The current catalog has no authorization endpoint for this integration.",
-          );
+        if (!mcpUrl) throw new Error(t("sessionMcpCapabilityCard.theCurrentCatalogHasNo"));
         // Never silently replace an already selected account. Reauthorization
         // stays on its exact native connection ID.
         let reconnectAccountId = resolved.connectionRef?.connectionId ?? undefined;
@@ -391,9 +386,7 @@ function ScopedCard({
           );
           if (!active()) return;
           if (connections.length > 1)
-            throw new Error(
-              "More than one personal account matches. Choose the account in connection settings before reconnecting.",
-            );
+            throw new Error(t("sessionMcpCapabilityCard.moreThanOnePersonalAccount"));
           reconnectAccountId = connections[0]?.id;
         }
         // A closed request can still have reached the server. Keep its key for
@@ -452,13 +445,13 @@ function ScopedCard({
       await reconcile(result, active);
       if (!active()) return;
       if (result.state === "cancelled") {
-        setNotice("Sign-in was cancelled. You can try connecting again.");
+        setNotice(t("sessionMcpCapabilityCard.signInWasCancelledYou"));
         setRetryFresh(true);
         return;
       }
       if (result.state !== "complete") {
         if (["failed", "expired"].includes(result.state)) setRetryFresh(true);
-        throw new Error("Sign-in did not finish. You can try connecting again.");
+        throw new Error(t("sessionMcpCapabilityCard.signInDidNotFinish"));
       }
     } finally {
       lifetime.current?.signal.removeEventListener("abort", abortOnUnmount);
@@ -496,16 +489,16 @@ function ScopedCard({
       );
       if (!active()) return;
       if (!selected || selected.status !== "active")
-        throw new Error("This account needs reconnection before it can be used here.");
+        throw new Error(t("sessionMcpCapabilityCard.thisAccountNeedsReconnectionBefore"));
     }
     if (capability.connectionRef?.subjectScope === "subject") {
       const accounts = await client.listOwnConnectionAccounts(workspaceId);
       if (!active()) return;
       if (matchingActiveMcpConnections(capability, accounts).length === 0)
-        throw new Error("Your account needs reconnection before it can be used here.");
+        throw new Error(t("sessionMcpCapabilityCard.yourAccountNeedsReconnectionBefore"));
     }
     if (!active()) return;
-    await attachSessionCapability(client, workspaceId, sessionId, capability, active);
+    await attachSessionCapability(t, client, workspaceId, sessionId, capability, active);
     if (!active()) return;
     await onConfigured?.();
     if (!active()) return;
@@ -540,7 +533,7 @@ function ScopedCard({
       name={item?.name ?? name}
       subtitle={dialogSubtitle !== undefined ? "" : (item?.providerDomain ?? "")}
       logo={logo ?? logoSrc ?? null}
-      typeLabel={dialogSubtitle ?? "MCP server"}
+      typeLabel={dialogSubtitle ?? t("sessionMcpCapabilityCard.mcpServer")}
       description={hostDescription || item?.description || rationale}
       skill={false}
       expanded={expanded}
@@ -548,14 +541,14 @@ function ScopedCard({
       actionLabel={
         connected
           ? sessionId
-            ? "Use in this conversation"
-            : "Connected"
-          : `Connect ${item?.name ?? name}`
+            ? t("sessionMcpCapabilityCard.useInThisConversation")
+            : t("sessionMcpCapabilityCard.connected")
+          : t("sessionMcpCapabilityCard.connectName", { name: item?.name ?? name })
       }
       note={
         sessionId
-          ? "Review access before signing in. You'll return to this conversation after authorization."
-          : "Review access before signing in. You'll return here after authorization."
+          ? t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn")
+          : t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn2")
       }
       onOpen={() => void open()}
       onClose={close}
@@ -571,10 +564,12 @@ function ScopedCard({
         {!item ? (
           <>
             <p role="status">
-              {busy ? "Loading connection details…" : "Connection details are unavailable."}
+              {busy
+                ? t("sessionMcpCapabilityCard.loadingConnectionDetails")
+                : t("sessionMcpCapabilityCard.connectionDetailsAreUnavailable")}
             </p>
             <button disabled={busy} onClick={() => void open()}>
-              Retry
+              {t("sessionMcpCapabilityCard.retry")}
             </button>
           </>
         ) : (
@@ -584,10 +579,10 @@ function ScopedCard({
               <>
                 <p role="status" className="og-session-capability-progress">
                   {waiting
-                    ? `Finish signing in with ${item.name} in the opened window. This will close automatically when you’re connected.`
+                    ? t("sessionMcpCapabilityCard.finishSigningInWithName", { name: item.name })
                     : reconciling
-                      ? "Finishing your connection…"
-                      : "Preparing your connection…"}
+                      ? t("sessionMcpCapabilityCard.finishingYourConnection")
+                      : t("sessionMcpCapabilityCard.preparingYourConnection")}
                 </p>
                 {waiting ? (
                   <button
@@ -595,7 +590,7 @@ function ScopedCard({
                     className="og-session-capability-stop"
                     onClick={() => authorization.current?.abort(new ConnectPopupClosedError())}
                   >
-                    Stop waiting
+                    {t("sessionMcpCapabilityCard.stopWaiting")}
                   </button>
                 ) : null}
               </>
@@ -603,7 +598,10 @@ function ScopedCard({
               <>
                 {!item.connectionRef && !personalOnly ? (
                   <fieldset disabled={busy}>
-                    <legend>{ownershipCopy?.legend ?? "Who can use this connection?"}</legend>
+                    <legend>
+                      {ownershipCopy?.legend ??
+                        t("sessionMcpCapabilityCard.whoCanUseThisConnection")}
+                    </legend>
                     <label>
                       <input
                         type="radio"
@@ -611,7 +609,7 @@ function ScopedCard({
                         checked={ownership === "workspace"}
                         onChange={() => setOwnership("workspace")}
                       />
-                      Everyone in this workspace
+                      {t("sessionMcpCapabilityCard.everyoneInThisWorkspace")}
                     </label>
                     <label>
                       <input
@@ -620,22 +618,22 @@ function ScopedCard({
                         checked={ownership === "personal"}
                         onChange={() => setOwnership("personal")}
                       />
-                      Only me
+                      {t("sessionMcpCapabilityCard.onlyMe")}
                     </label>
                   </fieldset>
                 ) : null}
                 <p className="og-session-capability-scope">
                   {personalOnly && ownership === "personal"
-                    ? "Connects your own account. Only work you start can use it."
+                    ? t("sessionMcpCapabilityCard.connectsYourOwnAccountOnly")
                     : ownershipCopy
                       ? ownership === "workspace"
                         ? ownershipCopy.workspace
                         : ownershipCopy.personal
                       : ownership === "workspace"
                         ? sessionId
-                          ? "This connection will be available to your workspace and used in this conversation."
-                          : "This connection will be available to your workspace."
-                        : "This connection belongs to you. Your messages can use it; other participants use their own accounts."}
+                          ? t("sessionMcpCapabilityCard.thisConnectionWillBeAvailable")
+                          : t("sessionMcpCapabilityCard.thisConnectionWillBeAvailable2")
+                        : t("sessionMcpCapabilityCard.thisConnectionBelongsToYou")}
                 </p>
                 <button
                   className="og-session-capability-primary"
@@ -651,8 +649,9 @@ function ScopedCard({
                 >
                   {retryFresh ||
                   ((error || notice) && view.attempt?.nextAction.type === "authorize")
-                    ? "Try signing in again"
-                    : (connectLabel ?? `Continue to ${item.name}`)}
+                    ? t("sessionMcpCapabilityCard.trySigningInAgain")
+                    : (connectLabel ??
+                      t("sessionMcpCapabilityCard.continueToName", { name: item.name }))}
                 </button>
               </>
             ) : null}
@@ -660,15 +659,17 @@ function ScopedCard({
               <>
                 <p className="og-session-capability-scope">
                   {sessionId
-                    ? "Your account is connected. Enable it for this conversation to finish."
-                    : "Your account is connected."}
+                    ? t("sessionMcpCapabilityCard.yourAccountIsConnectedEnable")
+                    : t("sessionMcpCapabilityCard.yourAccountIsConnected")}
                 </p>
                 <button
                   className="og-session-capability-primary"
                   disabled={busy || view.busy}
                   onClick={() => void useHere()}
                 >
-                  {sessionId ? "Use in this conversation" : "Done"}
+                  {sessionId
+                    ? t("sessionMcpCapabilityCard.useInThisConversation")
+                    : t("sessionMcpCapabilityCard.done")}
                 </button>
               </>
             ) : null}

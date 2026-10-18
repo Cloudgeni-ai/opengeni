@@ -7,6 +7,7 @@ import {
   getWorkspaceInteractionRevisionState,
   listSessionEventPage,
   listWorkspaceControlEvents,
+  getWorkspaceControlEvent,
   readSessionEventStorageGapEnd,
   type Database,
 } from "@opengeni/db";
@@ -677,7 +678,10 @@ export async function sseWorkspaceControlStream(
         }
       }
     }
-    await writeFrame(formatWorkspaceControlEventSse(event));
+    // The bus is workspace-wide, not an authorization projection. Re-read the
+    // exact durable row under this stream's actor before delivering live data.
+    const visible = await getWorkspaceControlEvent(db, workspaceId, event.id);
+    if (visible) await writeFrame(formatWorkspaceControlEventSse(visible));
     lastSent = event.sequence;
   };
   delivery = createLatestWinsDelivery(send, fail);

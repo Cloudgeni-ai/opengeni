@@ -48,6 +48,26 @@ export function activityEvents(): SessionEvent[] {
     ],
   });
   tool("check-after");
+  // A remembered rule the chat could not save: the timeline tells the person.
+  push("agent.toolCall.created", {
+    id: "remember-rule",
+    name: "skill_save",
+    arguments: { skillId: "1b496aec-f6a2-410c-be19-68070edb7080" },
+  });
+  push("agent.toolCall.output", {
+    id: "remember-rule",
+    output: {
+      isError: true,
+      content: [{ type: "text", text: "Nothing was saved." }],
+      _meta: {
+        "opengeni/learningRefusal": {
+          destination: "skill",
+          reason: "learning_off",
+          skillId: "1b496aec-f6a2-410c-be19-68070edb7080",
+        },
+      },
+    },
+  });
   push("agent.message.completed", {
     id: "activity-reply",
     text: "The build passed. I also received the review while checking the layout.",

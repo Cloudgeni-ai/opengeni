@@ -27,6 +27,7 @@ import {
   annotationHasNote,
   resolveAnnotationRevealRoot,
 } from "./timeline-annotation-shared";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type { TimelineAnnotationLike } from "./timeline-annotation-chrome";
 
@@ -65,6 +66,7 @@ export function TimelineAnnotationCards({
   onRevealSource?: ((source: TimelineAnnotationSource) => boolean) | undefined;
   className?: string | undefined;
 }) {
+  const t = useOpenGeniText();
   const [unavailableId, setUnavailableId] = useState<string | null>(null);
   if (annotations.length === 0) return null;
   return (
@@ -80,10 +82,13 @@ export function TimelineAnnotationCards({
       {annotations.map((annotation, index) => {
         const ordinal = annotationDisplayOrdinal(annotation, index);
         return (
-          <section key={annotation.id} aria-label={`Annotation ${ordinal}`}>
+          <section
+            key={annotation.id}
+            aria-label={t("timelineAnnotations.annotationOrdinal", { ordinal })}
+          >
             <AnnotationAccentRow>
               <p className="mb-0.5 text-og-xs font-medium tabular-nums text-og-fg-subtle">
-                Annotation {ordinal}
+                {t("timelineAnnotations.annotationOrdinal", { ordinal })}
               </p>
               <AnnotationQuoteSourceButton
                 annotation={annotation}
@@ -93,7 +98,7 @@ export function TimelineAnnotationCards({
               />
               {unavailableId === annotation.id ? (
                 <p role="status" className="text-og-xs text-og-status-waiting">
-                  Source is outside the loaded timeline window.
+                  {t("timelineAnnotations.sourceIsOutsideTheLoaded")}
                 </p>
               ) : null}
               <AnnotationNotePreview
@@ -134,6 +139,7 @@ export function TimelineAnnotationsChip({
   /** Dense trigger for single-line rows such as the compact queue dock. */
   compact?: boolean | undefined;
 }) {
+  const t = useOpenGeniText();
   const focusRequested = Boolean(
     focusAnnotationId && annotations.some((item) => item.id === focusAnnotationId),
   );
@@ -152,7 +158,7 @@ export function TimelineAnnotationsChip({
   }, [focusAnnotationId, focusRequested]);
 
   if (annotations.length === 0) return null;
-  const countLabel = `${annotations.length} ${annotations.length === 1 ? "annotation" : "annotations"}`;
+  const countLabel = t("counts.annotations", { count: annotations.length });
   const incomplete = annotations.some((annotation) => !annotationHasNote(annotation.note));
   const canClear = Boolean(editable && onRemove);
 
@@ -178,7 +184,7 @@ export function TimelineAnnotationsChip({
             compact ? "min-h-6 py-0.5 text-og-xs" : "min-h-8 py-1 text-og-sm",
             canClear ? "pr-1 pl-2.5" : "px-2.5",
           )}
-          aria-label={`Review ${countLabel}`}
+          aria-label={t("timelineAnnotations.reviewCountlabel", { countLabel })}
           aria-haspopup="dialog"
           aria-expanded={open}
           onClick={() => setOpen((current) => !current)}
@@ -190,7 +196,7 @@ export function TimelineAnnotationsChip({
           <button
             type="button"
             className="inline-flex size-7 shrink-0 items-center justify-center rounded-full border-0 bg-transparent text-og-fg-subtle outline-hidden hover:text-og-status-failed focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-11"
-            aria-label="Remove all annotations"
+            aria-label={t("timelineAnnotations.removeAllAnnotations")}
             onClick={() => {
               for (const annotation of annotations) onRemove?.(annotation.id);
             }}

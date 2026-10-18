@@ -6,6 +6,19 @@ export function codexWorkspaceMetricKey(workspaceId: string): string {
   return createHash("sha256").update(workspaceId).digest("hex").slice(0, 12);
 }
 
+/** Stable across sessions, retries and workers, without hashing mutable prompts. */
+export function codexCacheAffinityKey(
+  workspaceId: string,
+  humanSubjectId: string | null,
+  sessionId: string,
+): string {
+  // Do not combine unrelated service-only or legacy sessions into one cohort.
+  if (!humanSubjectId) return sessionId;
+  return createHash("sha256")
+    .update(JSON.stringify(["opengeni-codex-affinity-v1", workspaceId, humanSubjectId]))
+    .digest("hex");
+}
+
 /** Stable public request identity across partial resumes and activity retries. */
 export function acceptsPromptCacheKeyForTurn(
   resolvedModel: {

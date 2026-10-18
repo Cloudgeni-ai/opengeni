@@ -154,7 +154,10 @@ test("complete totals keep base-table work bounded across deep trees and populat
       walk(plan);
       // Bounds guard physical work rather than wall time or a preferred plan
       // shape. Scanning all sessions once per depth violates this by >10x.
-      expect(visits.sessions).toBeLessThan((generatedCount + 1) * 3);
+      // Sessions are read for the roots, the descendant walk, and once per
+      // statement by each child table's hashed visibility probe (pins and
+      // event cursors), so a constant small multiple of the workspace.
+      expect(visits.sessions).toBeLessThan((generatedCount + 1) * 4);
       expect(visits.session_pins).toBeLessThan((generatedCount + 1) * 3);
     });
   }

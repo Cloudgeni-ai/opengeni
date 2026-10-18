@@ -48,6 +48,7 @@ import { userContentDispositionHeaders } from "../http/user-content";
 import {
   afterSiteArtifactMutation,
   notifySitePublicationChanged,
+  requireSiteVersionPublishOpen,
 } from "../site-publishing/service";
 import {
   projectWorkspaceArtifactDetailProvenance,
@@ -440,6 +441,8 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const grant = authorization.grant;
     const request = await body(context, PublishWorkspaceArtifactVersionRequest);
     const id = artifactId(context);
+    // A published Site gets no new versions while the platform brake is engaged.
+    await requireSiteVersionPublishOpen(deps, { accountId: grant.accountId, workspaceId }, id);
     try {
       const content = await prepareContent(deps, grant, {
         ...(request.html !== undefined ? { html: request.html } : {}),

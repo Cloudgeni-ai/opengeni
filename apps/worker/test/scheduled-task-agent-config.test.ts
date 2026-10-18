@@ -376,6 +376,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       initialMessage: task.agentConfig.prompt,
       resources: task.agentConfig.resources,
       tools: snapshot.resolvedTools,
+      toolPolicy: binding.toolPolicy ?? { mode: "explicit", inheritedFromSessionId: null },
       firstPartyMcpTools: snapshot.resolvedFirstPartyMcpTools,
       firstPartyMcpPermissions: snapshot.resolvedFirstPartyMcpPermissions,
       agentConfig: snapshot.resolvedAgentConfig,

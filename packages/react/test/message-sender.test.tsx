@@ -8,6 +8,9 @@ import {
   type UserMessageItem,
 } from "../src";
 import { registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -33,7 +36,7 @@ const events = [
 
 describe("who sent a message", () => {
   test("a person's message carries the sender frozen with it; others carry none", () => {
-    const senders = buildTimeline(events)
+    const senders = buildTimeline(englishText, events)
       .filter((item): item is UserMessageItem => item.kind === "user-message")
       .map((item) => item.sender ?? null);
     expect(senders).toEqual([

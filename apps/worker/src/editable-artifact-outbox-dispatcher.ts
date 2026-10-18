@@ -43,6 +43,8 @@ export type EditableArtifactOutboxWorkerOptions = Readonly<{
   dispatcherDatabaseUrl: string;
   databaseSearchPath?: string;
   databasePoolSize?: number;
+  /** Unset → decided from the URL; see `CreateDbOptions.preparedStatements`. */
+  databasePreparedStatements?: boolean;
   natsUrl: string;
   natsAuth: EditableArtifactHintNatsAuth;
   owner?: string;
@@ -121,6 +123,9 @@ export async function createEditableArtifactOutboxWorker(
   const database = createDb(dispatcherDatabaseUrl, {
     max: databasePoolSize,
     ...(options.databaseSearchPath ? { searchPath: options.databaseSearchPath } : {}),
+    ...(options.databasePreparedStatements === undefined
+      ? {}
+      : { preparedStatements: options.databasePreparedStatements }),
   });
   let broker: ConfirmedNatsEditableArtifactHintBroker;
   try {

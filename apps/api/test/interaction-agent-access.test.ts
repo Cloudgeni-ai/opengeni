@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import type { AccessGrant } from "@opengeni/contracts";
 import * as core from "@opengeni/core";
-import { filterInteractionSessionsForGrant } from "../src/interaction-agent-access";
+import {
+  filterInteractionSessionsForGrant,
+  INTERACTION_SOURCE_AUTHORIZATION_CONCURRENCY,
+} from "../src/interaction-agent-access";
 
 afterEach(() => mock.restore());
 
@@ -83,5 +86,43 @@ describe("interaction inventory visibility", () => {
     await expect(
       filterInteractionSessionsForGrant(deps, grant, [interaction("browser", "shared")]),
     ).rejects.toBe(unavailable);
+  });
+
+  test("distinct source chats are checked once each, a bounded number at a time", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const authorize = spyOn(core, "requireSessionAuthorization").mockImplementation(
+      async (_deps, _grant, input) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight -= 1;
+        if (input.sessionId.startsWith("private")) {
+          throw new core.SessionAuthorizationDeniedError("forbidden");
+        }
+        return {} as core.ResolvedSessionAuthorization;
+      },
+    );
+    const sessions = Array.from({ length: 40 }, (_, index) =>
+      interaction(`browser-${index}`, `${index % 4 === 0 ? "private" : "chat"}-${index % 20}`),
+    );
+    const result = await filterInteractionSessionsForGrant(deps, grant, sessions);
+    expect(authorize).toHaveBeenCalledTimes(20);
+    expect(peak).toBe(INTERACTION_SOURCE_AUTHORIZATION_CONCURRENCY);
+    expect(result).toEqual(sessions.filter((_, index) => index % 4 !== 0));
+  });
+
+  test("an outage stops starting further checks", async () => {
+    const unavailable = new Error("authorization unavailable");
+    const authorize = spyOn(core, "requireSessionAuthorization").mockRejectedValue(unavailable);
+    const sessions = Array.from({ length: 30 }, (_, index) =>
+      interaction(`browser-${index}`, `chat-${index}`),
+    );
+    await expect(filterInteractionSessionsForGrant(deps, grant, sessions)).rejects.toBe(
+      unavailable,
+    );
+    expect(authorize.mock.calls.length).toBeLessThanOrEqual(
+      INTERACTION_SOURCE_AUTHORIZATION_CONCURRENCY,
+    );
   });
 });

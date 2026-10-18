@@ -3,6 +3,9 @@ import { parseSecretReference, tokenizeSecretText } from "@opengeni/contracts";
 import type { SessionEvent, ToolActionReview } from "@opengeni/sdk";
 import type { ReactNode } from "react";
 import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -49,7 +52,7 @@ function chips(container: HTMLElement): HTMLElement[] {
 }
 
 function label(raw: string): string {
-  return secretReferenceLabelText(parseSecretReference(raw));
+  return secretReferenceLabelText(englishText, parseSecretReference(raw));
 }
 
 describe("secret reference labels", () => {
@@ -68,7 +71,9 @@ describe("secret reference labels", () => {
     expect(label("{{secret:id:6f1c1b8e-3b1a-4c55-9a51-0d0c8f2e7d11}}")).toBe("Secret");
     expect(label("{{secretfile:Deploy/kubeconfig}}")).toBe("Deploy · kubeconfig");
     // The name truncates; the field and markers never do.
-    expect(secretReferenceLabel(parseSecretReference("{{secret:GitHub/otp#previous}}"))).toEqual({
+    expect(
+      secretReferenceLabel(englishText, parseSecretReference("{{secret:GitHub/otp#previous}}")),
+    ).toEqual({
       primary: "GitHub",
       suffix: " · one-time code (previous)",
     });

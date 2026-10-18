@@ -6,6 +6,13 @@ import { resolve, join } from "node:path";
 import { promisify } from "node:util";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
+import { Manifest } from "@openai/agents/sandbox";
+import {
+  createSandboxClientForBackend,
+  isInSandboxSupervisedProcess,
+  RoutingSandboxSession,
+  serializeEstablishedSandboxEnvelope,
+} from "@opengeni/runtime";
 import { sessionAttemptPendingWritersSql } from "../../../packages/db/src/session-attempt-writers";
 import type { SandboxProviderCommand } from "@opengeni/contracts";
 import {
@@ -34,6 +41,7 @@ import {
   recoverManagedSessionBackgroundCommand,
   advanceWorkspaceGeneration,
   advanceWorkspaceGenerationForDirectRequest,
+  advanceWorkspaceGenerationForRetainedProcess,
   claimSessionWorkForAttempt,
   claimTerminalRetainedProcesses,
   countActiveRetainedProcessesByOwnerState,
@@ -41,6 +49,7 @@ import {
   evaluateSessionControl,
   createDb,
   createSession,
+  findRunningSessionBackgroundProcess,
   getRetainedProcess,
   initializeSessionStartAtomically,
   mutateSessionControlInTransaction,
@@ -56,6 +65,7 @@ import {
   SessionBackgroundCommandAdoptionFencedError,
   SandboxWorkspaceMutationFencedError,
   verifyWorkspaceMutationSettlement,
+  verifyRetainedProcessMutationSettlement,
   settleRetainedProcess,
   type Database,
   type DbClient,
@@ -77,6 +87,7 @@ import {
   probeRetainedProcessAtProvider,
   RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS,
   RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS,
+  RETAINED_PROCESS_STOP_SETTLE_WAIT_MS,
   type HistoricalModalSandboxLifecycleProbeFn,
   type RetainedProcessProbeFn,
 } from "../src/activities/sandbox-lease";
@@ -223,11 +234,26 @@ async function freshTurn(ids: WorkspaceIds): Promise<TurnFixture> {
   };
 }
 
+/** A real provider box for the lease instead of the default synthetic Modal one. */
+type LeaseBox = {
+  backend: string;
+  resumeBackendId: string;
+  instanceId: string;
+  resumeState: Record<string, unknown>;
+};
+
 async function insertWarmLease(
   ids: WorkspaceIds,
-  input: { sessionId: string; holderId: string; holderKind: "turn" | "direct" },
+  input: { sessionId: string; holderId: string; holderKind: "turn" | "direct"; box?: LeaseBox },
 ): Promise<{ leaseId: string; instanceId: string }> {
-  const instanceId = `retained-process-box-${crypto.randomUUID()}`;
+  const instanceId = input.box?.instanceId ?? `retained-process-box-${crypto.randomUUID()}`;
+  const backend = input.box?.backend ?? "modal";
+  const resumeBackendId = input.box?.resumeBackendId ?? "modal";
+  const resumeState = input.box?.resumeState ?? {
+    backendId: "modal",
+    sessionState: { providerState: { sandboxId: instanceId } },
+    workspaceArchive: "UNCHANGED_ARCHIVE",
+  };
   const [lease] = await admin<{ id: string }[]>`
     insert into sandbox_leases (
       account_id, workspace_id, sandbox_group_id, liveness, refcount,
@@ -235,12 +261,8 @@ async function insertWarmLease(
       resume_backend_id, resume_state, expires_at
     ) values (
       ${ids.accountId}, ${ids.workspaceId}, ${ids.groupId}, 'warm', 1,
-      ${input.holderKind === "turn" ? 1 : 0}, 0, ${instanceId}, 'modal', 7,
-      'modal', ${JSON.stringify({
-        backendId: "modal",
-        sessionState: { providerState: { sandboxId: instanceId } },
-        workspaceArchive: "UNCHANGED_ARCHIVE",
-      })}::text::jsonb, now() + interval '10 minutes'
+      ${input.holderKind === "turn" ? 1 : 0}, 0, ${instanceId}, ${backend}, 7,
+      ${resumeBackendId}, ${JSON.stringify(resumeState)}::text::jsonb, now() + interval '10 minutes'
     ) returning id`;
   await admin`
     insert into sandbox_lease_holders (
@@ -298,6 +320,8 @@ async function promoteTurnProcess(
     supervised?: boolean;
     routerCommand?: boolean;
     providerCommandSandboxId?: string;
+    box?: LeaseBox;
+    inSandboxSupervisor?: boolean;
   } = {},
 ): Promise<ProcessFixture> {
   const ids = await freshWorkspace();
@@ -306,6 +330,7 @@ async function promoteTurnProcess(
     sessionId: attempt.sessionId,
     holderId: attempt.holderId,
     holderKind: "turn",
+    ...(input.box ? { box: input.box } : {}),
   });
   const operation = `retainedProcessTurn-${crypto.randomUUID()}`;
   const admission = await advanceWorkspaceGeneration(db, {
@@ -368,12 +393,15 @@ async function promoteTurnProcess(
     admittedWorkspaceGeneration: admission.workspaceGeneration,
     operation,
     providerCommand: command,
-    providerBinding: MODAL_PROVIDER_BINDING,
+    ...(input.box && input.box.backend !== "modal"
+      ? {}
+      : { providerBinding: MODAL_PROVIDER_BINDING }),
     ...(input.backgroundCommand
       ? {
           backgroundCommand: { commandId: processId, command: input.backgroundCommand },
         }
       : {}),
+    ...(input.inSandboxSupervisor ? { inSandboxSupervisor: true } : {}),
     owner: {
       kind: "turn",
       turnId: attempt.turnId,
@@ -1314,6 +1342,356 @@ describe("retained-process terminal-owner reconciliation", () => {
     expect(outputs).toEqual([result]);
   }, 60_000);
 
+  test("a local shell outlives its turn: the reaper reads it, a later turn drives it, cancellation stops it", async () => {
+    if (!available) throw new Error("PostgreSQL required for session-owned process regression");
+    type LocalSession = {
+      state: { workspaceRootPath: string };
+      execCommand(args: Record<string, unknown>): Promise<string>;
+      writeStdin(args: Record<string, unknown>): Promise<string>;
+      close(): Promise<void>;
+    };
+    type LocalClient = {
+      create(manifest: Manifest): Promise<LocalSession>;
+      resumeExact(state: unknown): Promise<LocalSession>;
+    };
+    const localClient = createSandboxClientForBackend("local", SETTINGS) as LocalClient;
+    // Keep the host PATH so the in-sandbox supervisor finds mkfifo on any host.
+    const box = await localClient.create(
+      new Manifest({ environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }),
+    );
+    try {
+      const root = box.state.workspaceRootPath;
+      const handleOf = (banner: string) =>
+        Number(/Process running with session ID (\d+)/.exec(banner)?.[1] ?? Number.NaN);
+      const started = await box.execCommand({ cmd: "sh", yieldTimeMs: 200 });
+      const shellId = handleOf(started);
+      expect(shellId).toBeGreaterThanOrEqual(1_000_000);
+      const resumeState = await serializeEstablishedSandboxEnvelope({
+        client: localClient,
+        session: box,
+        sessionState: box.state,
+        instanceId: root,
+        backendId: "unix_local",
+      } as never);
+      if (!resumeState) throw new Error("Expected a resumable local envelope");
+      const fixture = await promoteTurnProcess({
+        providerSessionId: shellId,
+        backgroundCommand: "sh",
+        box: { backend: "local", resumeBackendId: "unix_local", instanceId: root, resumeState },
+      });
+      await adoptManagedSessionBackgroundCommand(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        turnId: fixture.attempt!.turnId,
+        executionGeneration: fixture.attempt!.executionGeneration,
+        attemptId: fixture.attempt!.attemptId,
+        processId: fixture.process.id,
+        expected: retainedProcessSettlementIdentity(fixture.process),
+        command: "sh",
+      });
+      // The turn ends. Nothing stops the shell: it is session-owned now.
+      await closeTurnOwner(fixture, fixture.attempt!, "completed");
+      const lease = await readLease(db, fixture.workspaceId, fixture.groupId);
+      if (!lease) throw new Error("Expected lease");
+      const retained = await durableProcess(fixture);
+      expect(retained).toMatchObject({ state: "active", providerBackend: "local" });
+
+      // The reaper reaches it from a session object of its own.
+      expect(
+        await probeRetainedProcessAtProvider(SETTINGS, lease, retained, "observe", async () => {}),
+      ).toEqual({ status: "deferred", reason: "provider_running" });
+
+      // A later turn finds it by the handle the model was given and drives it.
+      const lookup = {
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        providerSessionId: shellId,
+        providerBackend: "local",
+      };
+      expect(
+        await findRunningSessionBackgroundProcess(db, {
+          ...lookup,
+          providerInstanceId: "another-workspace",
+          leaseEpoch: 7,
+        }),
+      ).toBeNull();
+      expect(
+        await findRunningSessionBackgroundProcess(db, { ...lookup, providerBackend: "docker" }),
+      ).toBeNull();
+      const later = await localClient.resumeExact(structuredClone(box.state));
+      const owner = {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+      };
+      const laterTurn = new RoutingSandboxSession({
+        defaultResolved: {
+          session: later as never,
+          sandboxId: null,
+          kind: "local",
+          leaseEpoch: 7,
+          providerInstanceId: root,
+        },
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({
+          session: later as never,
+          sandboxId: null,
+          kind: "local",
+        }),
+        findSessionProcess: async (providerSessionId) => {
+          const found = await findRunningSessionBackgroundProcess(db, {
+            ...lookup,
+            providerSessionId,
+            providerInstanceId: root,
+            leaseEpoch: 7,
+          });
+          return found
+            ? {
+                process: { id: found.id, providerSessionId: found.providerSessionId },
+                backend: {
+                  sandboxId: null,
+                  leaseEpoch: found.leaseEpoch,
+                  providerInstanceId: found.providerInstanceId,
+                  activeEpoch: found.routeEpoch,
+                },
+              }
+            : null;
+        },
+        beforeProcessMutation: async ({ op, process }) =>
+          await advanceWorkspaceGenerationForRetainedProcess(db, {
+            ...owner,
+            processId: process.id,
+            operation: op,
+            captureWaitMs: 1_000,
+          }),
+        afterProcessMutation: async ({ op, process, admission, outcome }) => {
+          await verifyRetainedProcessMutationSettlement(db, {
+            ...owner,
+            processId: process.id,
+            admission: admission as never,
+            operation: op,
+            outcome,
+          });
+        },
+      });
+      const driven = await laterTurn.writeStdin({
+        sessionId: shellId,
+        chars: "echo from-later-turn; exit 3\n",
+        yieldTimeMs: 2_000,
+      });
+      expect(driven).toContain("from-later-turn");
+      // The shell may already report its exit within this read.
+      expect(driven).toMatch(
+        new RegExp(`Process (exited with code 3|running with session ID ${shellId})`),
+      );
+
+      // The reaper then proves the exit the later turn caused.
+      expect(
+        await probeRetainedProcessAtProvider(SETTINGS, lease, retained, "observe", async () => {}),
+      ).toMatchObject({ status: "proved", proof: { outcome: "exited", exitCode: 3 } });
+
+      // An explicit stop reaches a session-owned command through the supervisor.
+      const server = handleOf(await box.execCommand({ cmd: "sleep 600", yieldTimeMs: 200 }));
+      expect(server).toBeGreaterThanOrEqual(1_000_000);
+      let stopped: unknown;
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        stopped = await probeRetainedProcessAtProvider(
+          SETTINGS,
+          lease,
+          { ...retained, providerSessionId: server },
+          attempt === 0 ? "cancel" : "observe",
+          async () => {},
+        );
+        if ((stopped as { status: string }).status === "proved") break;
+      }
+      expect(stopped).toMatchObject({ status: "proved", proof: { outcome: "exited" } });
+    } finally {
+      await box.close();
+    }
+  }, 120_000);
+
+  test("rolling deploy: an older worker's reaper never claims a supervised local command", async () => {
+    if (!available) throw new Error("PostgreSQL required for the mixed-version reaper regression");
+    type LocalSession = {
+      state: { workspaceRootPath: string };
+      execCommand(args: Record<string, unknown>): Promise<string>;
+      close(): Promise<void>;
+    };
+    type LocalClient = { create(manifest: Manifest): Promise<LocalSession> };
+    const localClient = createSandboxClientForBackend("local", SETTINGS) as LocalClient;
+    const box = await localClient.create(
+      new Manifest({ environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }),
+    );
+    try {
+      const root = box.state.workspaceRootPath;
+      const started = await box.execCommand({ cmd: "sleep 600", yieldTimeMs: 200 });
+      const handle = Number(/Process running with session ID (\d+)/.exec(started)?.[1]);
+      // The worker derives the flag from the live session, as routing does.
+      expect(isInSandboxSupervisedProcess(box, handle)).toBe(true);
+      expect(isInSandboxSupervisedProcess(box, 71)).toBe(false);
+      const resumeState = await serializeEstablishedSandboxEnvelope({
+        client: localClient,
+        session: box,
+        sessionState: box.state,
+        instanceId: root,
+        backendId: "unix_local",
+      } as never);
+      if (!resumeState) throw new Error("Expected a resumable local envelope");
+      const supervised = await promoteTurnProcess({
+        providerSessionId: handle,
+        backgroundCommand: "sleep 600",
+        inSandboxSupervisor: isInSandboxSupervisedProcess(box, handle),
+        box: { backend: "local", resumeBackendId: "unix_local", instanceId: root, resumeState },
+      });
+      await adoptManagedSessionBackgroundCommand(db, {
+        accountId: supervised.accountId,
+        workspaceId: supervised.workspaceId,
+        sessionId: supervised.sessionId,
+        turnId: supervised.attempt!.turnId,
+        executionGeneration: supervised.attempt!.executionGeneration,
+        attemptId: supervised.attempt!.attemptId,
+        processId: supervised.process.id,
+        expected: retainedProcessSettlementIdentity(supervised.process),
+        command: "sleep 600",
+      });
+      await closeTurnOwner(supervised, supervised.attempt!, "completed");
+      // A process an older worker could also reach keeps the original version.
+      const legacy = await promoteTurnProcess({ outcome: "completed" });
+      const versions = await admin<{ id: string; reconciler_version: number }[]>`
+        select id, reconciler_version from sandbox_retained_processes
+        where id in (${supervised.process.id}, ${legacy.process.id})`;
+      expect(Object.fromEntries(versions.map((row) => [row.id, row.reconciler_version]))).toEqual({
+        [supervised.process.id]: 2,
+        [legacy.process.id]: 1,
+      });
+
+      // An older worker still calls the three-argument claim it was built with.
+      // It keeps reconciling the rows it understands, but is never handed the
+      // supervised command, so it can never probe its own memory for it and
+      // settle a live command as lost.
+      const oldReaperClaim = async () =>
+        (
+          await db.execute<{ process_id: string }>(sql`
+            select process_id from opengeni_private.claim_terminal_retained_processes(
+              ${crypto.randomUUID()}::uuid, 100::integer, 0::bigint
+            )`)
+        ).map((row) => row.process_id);
+      const oldClaims = await oldReaperClaim();
+      expect(oldClaims).toContain(legacy.process.id);
+      expect(oldClaims).not.toContain(supervised.process.id);
+      expect(await durableProcess(supervised)).toMatchObject({
+        state: "active",
+        reconcileClaimId: null,
+      });
+
+      // A newer worker running next to it claims and reaches the command.
+      const newClaims = await claimTerminalRetainedProcesses(db, {
+        claimId: crypto.randomUUID(),
+        limit: 100,
+        claimTtlMs: 0,
+      });
+      expect(newClaims.map((claim) => claim.process.id)).toContain(supervised.process.id);
+      const lease = await readLease(db, supervised.workspaceId, supervised.groupId);
+      if (!lease) throw new Error("Expected lease");
+      const retained = await durableProcess(supervised);
+      expect(
+        await probeRetainedProcessAtProvider(SETTINGS, lease, retained, "observe", async () => {}),
+      ).toEqual({ status: "deferred", reason: "provider_running" });
+      // Repeated old-reaper passes, including after the newer claim expires,
+      // still never return it.
+      expect(await oldReaperClaim()).not.toContain(supervised.process.id);
+      expect(await durableProcess(supervised)).toMatchObject({ state: "active" });
+      await expect(
+        (async () =>
+          await db.execute(sql`
+            select * from opengeni_private.claim_terminal_retained_processes(
+              ${crypto.randomUUID()}::uuid, 1::integer, 0::bigint, 0::integer
+            )`))(),
+      ).rejects.toThrow();
+
+      let stopped: unknown;
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        stopped = await probeRetainedProcessAtProvider(
+          SETTINGS,
+          lease,
+          retained,
+          attempt === 0 ? "cancel" : "observe",
+          async () => {},
+        );
+        if ((stopped as { status: string }).status === "proved") break;
+      }
+      expect(stopped).toMatchObject({ status: "proved", proof: { outcome: "exited" } });
+    } finally {
+      await box.close();
+    }
+  }, 120_000);
+
+  test("a Stop of a supervised local command that ignores TERM settles in one reaper pass", async () => {
+    if (!available) throw new Error("PostgreSQL required for the supervised stop regression");
+    type LocalSession = {
+      state: { workspaceRootPath: string };
+      execCommand(args: Record<string, unknown>): Promise<string>;
+      close(): Promise<void>;
+    };
+    type LocalClient = { create(manifest: Manifest): Promise<LocalSession> };
+    const localClient = createSandboxClientForBackend("local", SETTINGS) as LocalClient;
+    const box = await localClient.create(
+      new Manifest({ environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }),
+    );
+    try {
+      const root = box.state.workspaceRootPath;
+      // A command that survives TERM ends only at the supervisor's KILL.
+      const command = "trap '' TERM; while :; do sleep 1; done";
+      const started = await box.execCommand({ cmd: command, yieldTimeMs: 200 });
+      const handle = Number(/Process running with session ID (\d+)/.exec(started)?.[1]);
+      const resumeState = await serializeEstablishedSandboxEnvelope({
+        client: localClient,
+        session: box,
+        sessionState: box.state,
+        instanceId: root,
+        backendId: "unix_local",
+      } as never);
+      if (!resumeState) throw new Error("Expected a resumable local envelope");
+      const supervised = await promoteTurnProcess({
+        providerSessionId: handle,
+        backgroundCommand: command,
+        inSandboxSupervisor: isInSandboxSupervisedProcess(box, handle),
+        box: { backend: "local", resumeBackendId: "unix_local", instanceId: root, resumeState },
+      });
+      await adoptManagedSessionBackgroundCommand(db, {
+        accountId: supervised.accountId,
+        workspaceId: supervised.workspaceId,
+        sessionId: supervised.sessionId,
+        turnId: supervised.attempt!.turnId,
+        executionGeneration: supervised.attempt!.executionGeneration,
+        attemptId: supervised.attempt!.attemptId,
+        processId: supervised.process.id,
+        expected: retainedProcessSettlementIdentity(supervised.process),
+        command,
+      });
+      await closeTurnOwner(supervised, supervised.attempt!, "completed");
+      const lease = await readLease(db, supervised.workspaceId, supervised.groupId);
+      if (!lease) throw new Error("Expected lease");
+      const retained = await durableProcess(supervised);
+
+      // The one cancelling probe waits through the KILL escalation, so the
+      // Stop settles in this pass instead of after a reconciliation backoff.
+      const startedAt = Date.now();
+      const stopped = await probeRetainedProcessAtProvider(
+        SETTINGS,
+        lease,
+        retained,
+        "cancel",
+        async () => {},
+      );
+      expect(stopped).toMatchObject({ status: "proved" });
+      expect(Date.now() - startedAt).toBeLessThan(RETAINED_PROCESS_STOP_SETTLE_WAIT_MS + 3_000);
+    } finally {
+      await box.close();
+    }
+  }, 120_000);
+
   test("running and terminal reaper output is retained without observing completion", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ outcome: "completed", backgroundCommand: "work" });
@@ -1795,6 +2173,15 @@ describe("retained-process terminal-owner reconciliation", () => {
       exitCode: 130,
       settlementReason: "provider_exit_banner",
     });
+    // The agent learns the command was stopped, not that it failed or (for a
+    // terminal wrapper that exits 0 on a stop) that it completed successfully.
+    const updates = await admin<{ classification: string; summary: string }[]>`
+      select classification, summary from session_system_updates
+      where session_id = ${fixture.sessionId} and source_id = ${fixture.process.id}
+        and kind = 'background_command_result'`;
+    expect(updates).toEqual([
+      { classification: "info", summary: "`bun test --watch` was stopped." },
+    ]);
   });
 
   test("command-result failure rolls back retained-process settlement and retries proof without replay", async () => {
@@ -2498,7 +2885,9 @@ describe("retained-process terminal-owner reconciliation", () => {
         hasTemp: true,
         forceRls: true,
       });
-      expect(result.functions).toHaveLength(4);
+      // The three-argument claim an older worker calls and the versioned claim
+      // it wraps both pin the same search path.
+      expect(result.functions).toHaveLength(5);
       for (const fn of result.functions) {
         if (fn.name === "claim_terminal_retained_processes") {
           expect(fn.config).toEqual(["search_path=pg_catalog, public, pg_temp"]);

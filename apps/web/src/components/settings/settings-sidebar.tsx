@@ -2,9 +2,12 @@ import { Link } from "@tanstack/react-router";
 import { ArrowLeftIcon, MenuIcon, type LucideIcon } from "lucide-react";
 import {
   useEffect,
+  useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
+  type KeyboardEvent,
   type ReactElement,
   type ReactNode,
 } from "react";
@@ -22,9 +25,11 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import { Toolbar, ToolbarSearch } from "@/components/ui/toolbar";
 import { desktopBridge, windowControlsInPage } from "@/lib/desktop";
 import { cn } from "@/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
+import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from "./settings-search";
 
 /**
  * The settings shell for workspace, organization and personal settings.
@@ -33,9 +38,10 @@ import { SettingsActionsSlotContext } from "./settings-header-actions";
  * (sessions) for the settings rail, and its back link leaves settings and
  * restores the main rail. The rail lists every settings page the person can
  * use in one place, in labeled sections: Workspace, Organization and Your
- * account, each naming the workspace or organization it configures. Below
- * 1024px the rail folds into a header with the back link, the current page
- * and a Menu button that opens the rail in a drawer.
+ * account, each naming the workspace or organization it configures. A search
+ * field above the sections finds any of those pages, and the settings inside
+ * them, by name. Below 1024px the rail folds into a header with the back
+ * link, the current page and a Menu button that opens the rail in a drawer.
  *
  * Pages inside the shell drop their header icon; the settings rail gives context.
  */
@@ -147,6 +153,8 @@ function LinkShell({
   className?: string;
   children: ReactNode;
   "aria-label"?: string;
+  "aria-current"?: "page" | undefined;
+  "data-settings-search-result"?: string;
 }) {
   const linkProps = link.props as { className?: string };
   const Element = link.type as React.ElementType;
@@ -218,12 +226,56 @@ function SettingsRail({
   onNavigate?: () => void;
 }) {
   const ref = useRef<HTMLElement>(null);
+  const [query, setQuery] = useState("");
+  const entries = useMemo(() => settingsSearchEntries(sections), [sections]);
+  const results = useMemo(() => searchSettings(entries, query), [entries, query]);
+  const searching = query.trim().length > 0;
+  const resultsId = useId();
   // The rail is long (workspace and organization pages): keep the current page in view.
   useLayoutEffect(() => {
+    if (searching) return;
     ref.current
       ?.querySelector<HTMLElement>('[aria-current="page"]')
       ?.scrollIntoView?.({ block: "nearest" });
-  }, [activeId]);
+  }, [activeId, searching]);
+
+  const resultLinks = () =>
+    Array.from(
+      ref.current?.querySelectorAll<HTMLAnchorElement>("[data-settings-search-result]") ?? [],
+    );
+  // Down from the field moves into the results; Enter opens the best one.
+  const onSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      resultLinks()[0]?.focus();
+    } else if (event.key === "Enter") {
+      const first = resultLinks()[0];
+      if (first) {
+        event.preventDefault();
+        first.click();
+      }
+    }
+  };
+  // Up and down move between results; up from the first returns to the field.
+  const onResultsKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Escape") return;
+    const links = resultLinks();
+    const index = links.findIndex((link) => link === document.activeElement);
+    if (index < 0) return;
+    event.preventDefault();
+    const field = ref.current?.querySelector<HTMLInputElement>("[data-settings-search] input");
+    if (event.key === "Escape") {
+      setQuery("");
+      field?.focus();
+    } else if (event.key === "ArrowDown") {
+      links[Math.min(index + 1, links.length - 1)]?.focus();
+    } else if (index === 0) {
+      field?.focus();
+    } else {
+      links[index - 1]?.focus();
+    }
+  };
+
   return (
     <SettingsNav
       ref={ref}
@@ -235,7 +287,10 @@ function SettingsRail({
         className,
       )}
       onClick={(event) => {
-        if (event.target instanceof Element && event.target.closest("a[href]")) onNavigate?.();
+        if (event.target instanceof Element && event.target.closest("a[href]")) {
+          if (event.target.closest("[data-settings-search-result]")) setQuery("");
+          onNavigate?.();
+        }
       }}
       header={
         <div className="flex min-w-0 flex-col gap-3">
@@ -256,18 +311,111 @@ function SettingsRail({
             {back.link}
           </NavItem>
           {scope ? <div className="min-w-0">{scope}</div> : null}
+          <Toolbar data-settings-search>
+            <ToolbarSearch
+              value={query}
+              onValueChange={setQuery}
+              onKeyDown={onSearchKeyDown}
+              placeholder="Search settings"
+              aria-controls={searching ? resultsId : undefined}
+            />
+          </Toolbar>
         </div>
       }
     >
-      {sections.map((section, index) => (
-        <SettingsRailSectionView
-          key={section.id}
-          section={section}
+      {searching ? (
+        <SettingsSearchResults
+          id={resultsId}
+          query={query}
+          results={results}
           activeId={activeId}
-          first={index === 0}
+          onKeyDown={onResultsKeyDown}
+          onClear={() => {
+            setQuery("");
+            ref.current?.querySelector<HTMLInputElement>("[data-settings-search] input")?.focus();
+          }}
         />
-      ))}
+      ) : (
+        sections.map((section, index) => (
+          <SettingsRailSectionView
+            key={section.id}
+            section={section}
+            activeId={activeId}
+            first={index === 0}
+          />
+        ))
+      )}
     </SettingsNav>
+  );
+}
+
+/** Search results in place of the rail's sections: the page or setting, and where it lives. */
+function SettingsSearchResults({
+  id,
+  query,
+  results,
+  activeId,
+  onKeyDown,
+  onClear,
+}: {
+  id: string;
+  query: string;
+  results: SettingsSearchEntry[];
+  activeId: string | null;
+  onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div id={id} role="group" aria-label="Search results" className="flex min-w-0 flex-col">
+      <p className="sr-only" role="status">
+        {results.length === 1 ? "1 result" : `${results.length} results`}
+      </p>
+      {results.length === 0 ? (
+        <div className="flex min-w-0 flex-col items-start gap-1 px-2.5 py-2 text-sm leading-5 text-fg-muted">
+          <p className="m-0 min-w-0 break-words">No settings match “{query.trim()}”.</p>
+          <button
+            type="button"
+            onClick={onClear}
+            className="cursor-pointer rounded-sm font-medium text-fg underline decoration-border-strong underline-offset-4 outline-none hover:decoration-fg focus-visible:ring-2 focus-visible:ring-brand/55"
+          >
+            Clear search
+          </button>
+        </div>
+      ) : (
+        <ul className="m-0 flex min-w-0 list-none flex-col gap-0.5 p-0" onKeyDown={onKeyDown}>
+          {results.map((result) => {
+            const Icon = result.icon;
+            const current = result.id === activeId;
+            return (
+              <li key={result.id} className="min-w-0">
+                <LinkShell
+                  link={result.link}
+                  data-settings-search-result=""
+                  aria-current={current ? "page" : undefined}
+                  className={cn(
+                    "flex min-w-0 items-start gap-2.5 rounded-[10px] px-2.5 py-1.5 text-sm text-fg-label outline-none transition-colors duration-[120ms] hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-brand/55 pointer-coarse:py-2.5",
+                    current && "bg-selection text-fg hover:bg-selection",
+                  )}
+                >
+                  <span
+                    aria-hidden="true"
+                    className="flex h-5 w-4 shrink-0 items-center justify-center [&_svg]:size-4"
+                  >
+                    <Icon />
+                  </span>
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate leading-5">{result.label}</span>
+                    <span className="truncate text-xs leading-4.5 text-fg-muted">
+                      {result.location}
+                    </span>
+                  </span>
+                </LinkShell>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 

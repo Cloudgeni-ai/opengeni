@@ -3553,6 +3553,16 @@ describe("lazy sandbox provisioner single-flight", () => {
     );
   });
 
+  test("resuming journaled work starts deferred preparation before joining it", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
+    ).text();
+    const resume = source.slice(source.indexOf("const codemodeOperations = await"));
+    expect(resume).toMatch(
+      /async \(\) => \{\s*eventing\.preparedTools\?\.startDeferredPreparation\?\.\(\);\s*await eventing\.toolPreparationReady;/,
+    );
+  });
+
   test("lazy tool readiness installs its rejection handler before publishing the promise", async () => {
     const toolsSource = await Bun.file(
       new URL("../src/activities/agent-turn/tool-environment.ts", import.meta.url),
@@ -6265,7 +6275,7 @@ describe("transient provider error classifier", () => {
     expect(providerRecoveryCountAfterModelRequestPhase(4, "completed")).toBe(0);
   });
 
-  test("isolates session-title subscription requests from main-turn lifecycle callbacks", () => {
+  test("isolates session-title subscription requests from main-turn lifecycle callbacks", async () => {
     const getCodexToken = mock(async () => ({ accessToken: "codex-token", accountId: "acct" }));
     const refreshCodexToken = mock(async () => ({
       accessToken: "codex-token-2",
@@ -6295,7 +6305,12 @@ describe("transient provider error classifier", () => {
     expect(titleCodexContext.nextRequestId?.()).toBe("title-request");
     expect(titleCodexContext.turnMetadata).toEqual({ request_kind: "session_title" });
     expect(titleCodexContext.onUsageHeaders).toBe(codexContext.onUsageHeaders);
-    expect(titleCodexContext.beforeProviderDispatch).toBe(beforeProviderDispatch);
+    // The main dispatch checks still run for title requests, scoped as a title dispatch.
+    await titleCodexContext.beforeProviderDispatch?.({
+      requestId: "title-request",
+      transportAttempt: 1,
+    });
+    expect(beforeProviderDispatch).toHaveBeenCalledTimes(1);
     expect(titleCodexContext.onRequestPreparationDiagnostic).toBeUndefined();
     expect(titleCodexContext.onModelRequestDiagnostic).toBeUndefined();
     expect(titleCodexContext.onModelRequestEvent).toBeUndefined();
@@ -6330,10 +6345,10 @@ describe("transient provider error classifier", () => {
     expect(titleXaiContext.onModelRequestEvent).toBeUndefined();
   });
 
-  test("surfaces a stalled hosted-search continuation without unsafe replay", () => {
+  test("classifies a stalled hosted-search continuation as an interrupted stream", () => {
     expect(agentRunFailurePayload(new XaiSubscriptionHostedToolContinuationError())).toEqual({
       error:
-        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved.",
       code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
     });
@@ -6397,7 +6412,7 @@ describe("transient provider error classifier", () => {
     });
   });
 
-  test("surfaces a stalled SuperGrok stream with bounded correlation facts and no replay", () => {
+  test("surfaces a stalled SuperGrok stream with bounded correlation facts", () => {
     expect(
       agentRunFailurePayload(
         new XaiSubscriptionStreamIdleTimeoutError(
@@ -6409,8 +6424,7 @@ describe("transient provider error classifier", () => {
         ),
       ),
     ).toEqual({
-      error:
-        "SuperGrok stopped sending valid response events. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      error: "SuperGrok stopped sending valid response events. Partial output was preserved.",
       code: "xai_response_stream_idle_timeout",
       retryable: false,
       responseObserved: true,

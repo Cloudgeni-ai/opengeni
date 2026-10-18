@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createOpenGeniText } from "@opengeni/react/messages";
 import type { FileAttachmentClientLike } from "@opengeni/react/session";
 import type { NativeCryptoAdapter, NativeFileAdapter, NativePickedFile } from "../src/adapters";
 import {
@@ -9,6 +10,8 @@ import {
   sameNativeAttachmentScope,
   type NativeAttachment,
 } from "../src/attachments";
+
+const englishText = createOpenGeniText();
 
 const source: NativePickedFile = {
   id: "file-1",
@@ -38,7 +41,7 @@ describe("prepareNativeAttachmentUpload", () => {
       },
     };
 
-    const prepared = await prepareNativeAttachmentUpload({
+    const prepared = await prepareNativeAttachmentUpload(englishText, {
       source,
       files: fileAdapter(async () => bytes),
       crypto,
@@ -57,7 +60,7 @@ describe("prepareNativeAttachmentUpload", () => {
       sha256Hex: async () => "a".repeat(64),
     };
 
-    const prepared = await prepareNativeAttachmentUpload({
+    const prepared = await prepareNativeAttachmentUpload(englishText, {
       source,
       files: fileAdapter(async () => bytes),
       crypto,
@@ -74,7 +77,7 @@ describe("prepareNativeAttachmentUpload", () => {
     };
 
     await expect(
-      prepareNativeAttachmentUpload({
+      prepareNativeAttachmentUpload(englishText, {
         source,
         files: fileAdapter(async () => await new Promise<Uint8Array>(() => undefined)),
         crypto,
@@ -90,7 +93,7 @@ describe("prepareNativeAttachmentUpload", () => {
     };
 
     await expect(
-      prepareNativeAttachmentUpload({
+      prepareNativeAttachmentUpload(englishText, {
         source,
         files: fileAdapter(async () => new Uint8Array([1, 2, 3])),
         crypto,

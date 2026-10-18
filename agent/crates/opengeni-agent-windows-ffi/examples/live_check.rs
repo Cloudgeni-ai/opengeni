@@ -39,7 +39,9 @@ fn write_bmp(path: &Path, frame: &RgbaFrame) -> std::io::Result<()> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out = std::env::args().nth(1).unwrap_or_else(|| "live_check.bmp".to_string());
+    let out = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "live_check.bmp".to_string());
     let display = probe_display().ok_or("no interactive display")?;
     println!("display: {display:?}");
     println!("blocked: {:?}", blocked_reason());

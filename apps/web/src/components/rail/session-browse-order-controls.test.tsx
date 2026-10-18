@@ -18,6 +18,8 @@ describe("compact session view menu", () => {
               onSortByChange={() => {}}
               status="active"
               onStatusChange={() => {}}
+              mineOnly={false}
+              onMineOnlyChange={() => {}}
               showEmptyGroups
               onShowEmptyGroupsChange={() => {}}
             />
@@ -47,6 +49,8 @@ describe("compact session view menu", () => {
               onSortByChange={() => {}}
               status={status}
               onStatusChange={() => {}}
+              mineOnly={false}
+              onMineOnlyChange={() => {}}
               needsYouCount={needsYouCount}
               showEmptyGroups={false}
               onShowEmptyGroupsChange={() => {}}
@@ -57,5 +61,31 @@ describe("compact session view menu", () => {
     expect(render(0, "needs-you")).toContain("Needs you");
     expect(render(3)).not.toContain("3 waiting");
     expect(render(0)).not.toContain("waiting");
+  });
+
+  test("offers Only mine as a checkbox reflecting its state", () => {
+    const render = (mineOnly: boolean) =>
+      renderToStaticMarkup(
+        <DropdownMenu open>
+          <Primitive.Content forceMount>
+            <SessionBrowseOrderControls
+              groupBy="project"
+              onGroupByChange={() => {}}
+              sortBy="updatedAt"
+              onSortByChange={() => {}}
+              status="active"
+              onStatusChange={() => {}}
+              mineOnly={mineOnly}
+              onMineOnlyChange={() => {}}
+              showEmptyGroups={false}
+              onShowEmptyGroupsChange={() => {}}
+            />
+          </Primitive.Content>
+        </DropdownMenu>,
+      );
+    const checkbox = (markup: string) =>
+      markup.match(/<div[^>]*role="menuitemcheckbox"[^>]*>(?:(?!<\/div>).)*Only mine/)?.[0] ?? "";
+    expect(checkbox(render(true))).toContain('aria-checked="true"');
+    expect(checkbox(render(false))).toContain('aria-checked="false"');
   });
 });

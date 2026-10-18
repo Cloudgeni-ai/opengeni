@@ -1,11 +1,17 @@
 import type { SandboxItem, StartupPhaseItem, WorkerItem } from "./types";
+import { type OpenGeniText } from "../messages/runtime";
 
 /* Pure titles and durations for platform activity rows (startup phases and
    sandbox operations), shared by DOM and non-DOM renderers. */
 
-export function sandboxRowTitle(item: SandboxItem, displayName: (name: string) => string): string {
+export function sandboxRowTitle(
+  t: OpenGeniText,
+  item: SandboxItem,
+  displayName: (name: string) => string,
+): string {
   if (item.name === "sandbox.provision") {
     return startupPhaseTitle(
+      t,
       "sandbox",
       item.status === "cancelled" ? "complete" : item.status,
       item.origin ?? null,
@@ -15,81 +21,87 @@ export function sandboxRowTitle(item: SandboxItem, displayName: (name: string) =
 }
 
 export function startupPhaseTitle(
+  t: OpenGeniText,
   phase: StartupPhaseItem["phase"],
   status: StartupPhaseItem["status"],
   outcome: StartupPhaseItem["outcome"],
 ): string {
   if (status === "complete" && phase === "sandbox" && outcome && outcome !== "skipped") {
-    return `Sandbox ${outcome === "resumed" ? "reattached" : outcome}`;
+    if (outcome === "created") return t("timeline.platformActivityPresentation.sandboxCreated");
+    if (outcome === "restored") return t("timeline.platformActivityPresentation.sandboxRestored");
+    return t("timeline.platformActivityPresentation.sandboxReattached");
   }
   if (status === "complete" && phase === "rig" && outcome === "skipped") {
-    return "Sandbox Environment already ready";
+    return t("timeline.platformActivityPresentation.sandboxEnvironmentAlreadyReady");
   }
   const statusIndex =
     status === "running" ? 0 : status === "failed" ? 1 : status === "cancelled" ? 2 : 3;
-  return STARTUP_PHASE_TITLES[phase][statusIndex];
+  return STARTUP_PHASE_TITLES(t)[phase][statusIndex];
 }
 
-export const STARTUP_WAIT_TITLES: Record<NonNullable<StartupPhaseItem["blockedReason"]>, string> = {
-  capture_in_progress: "Waiting for sandbox checkpoint",
-  rotation_in_progress: "Waiting for sandbox rotation",
-  provider_recovery_in_progress: "Waiting for sandbox recovery",
-  compaction_required: "Compacting conversation first",
-};
+export const STARTUP_WAIT_TITLES = (
+  t: OpenGeniText,
+): Record<NonNullable<StartupPhaseItem["blockedReason"]>, string> => ({
+  capture_in_progress: t("timeline.platformActivityPresentation.waitingForSandboxCheckpoint"),
+  rotation_in_progress: t("timeline.platformActivityPresentation.waitingForSandboxRotation"),
+  provider_recovery_in_progress: t(
+    "timeline.platformActivityPresentation.waitingForSandboxRecovery",
+  ),
+  compaction_required: t("timeline.platformActivityPresentation.compactingConversationFirst"),
+});
 
-const STARTUP_PHASE_TITLES: Record<
-  StartupPhaseItem["phase"],
-  readonly [string, string, string, string]
-> = {
+const STARTUP_PHASE_TITLES = (
+  t: OpenGeniText,
+): Record<StartupPhaseItem["phase"], readonly [string, string, string, string]> => ({
   queue: [
-    "Waiting for a worker",
-    "Worker startup failed",
-    "Worker wait interrupted",
-    "Worker started",
+    t("timeline.platformActivityPresentation.waitingForAWorker"),
+    t("timeline.platformActivityPresentation.workerStartupFailed"),
+    t("timeline.platformActivityPresentation.workerWaitInterrupted"),
+    t("timeline.platformActivityPresentation.workerStarted"),
   ],
   sandbox: [
-    "Starting sandbox",
-    "Sandbox didn’t start",
-    "Sandbox startup interrupted",
-    "Sandbox ready",
+    t("timeline.platformActivityPresentation.startingSandbox"),
+    t("timeline.platformActivityPresentation.sandboxDidnTStart"),
+    t("timeline.platformActivityPresentation.sandboxStartupInterrupted"),
+    t("timeline.platformActivityPresentation.sandboxReady"),
   ],
   rig: [
-    "Setting up sandbox environment",
-    "Sandbox Environment setup failed",
-    "Sandbox Environment setup interrupted",
-    "Sandbox Environment ready",
+    t("timeline.platformActivityPresentation.settingUpSandboxEnvironment"),
+    t("timeline.platformActivityPresentation.sandboxEnvironmentSetupFailed"),
+    t("timeline.platformActivityPresentation.sandboxEnvironmentSetupInterrupted"),
+    t("timeline.platformActivityPresentation.sandboxEnvironmentReady"),
   ],
   repository: [
-    "Preparing repository",
-    "Repository preparation failed",
-    "Repository preparation interrupted",
-    "Repository ready",
+    t("timeline.platformActivityPresentation.preparingRepository"),
+    t("timeline.platformActivityPresentation.repositoryPreparationFailed"),
+    t("timeline.platformActivityPresentation.repositoryPreparationInterrupted"),
+    t("timeline.platformActivityPresentation.repositoryReady"),
   ],
   files: [
-    "Preparing files",
-    "File preparation failed",
-    "File preparation interrupted",
-    "Files ready",
+    t("timeline.platformActivityPresentation.preparingFiles"),
+    t("timeline.platformActivityPresentation.filePreparationFailed"),
+    t("timeline.platformActivityPresentation.filePreparationInterrupted"),
+    t("timeline.platformActivityPresentation.filesReady"),
   ],
   tools: [
-    "Connecting tools",
-    "Tool connection failed",
-    "Tool connection interrupted",
-    "Tools ready",
+    t("timeline.platformActivityPresentation.connectingTools"),
+    t("timeline.platformActivityPresentation.toolConnectionFailed"),
+    t("timeline.platformActivityPresentation.toolConnectionInterrupted"),
+    t("timeline.platformActivityPresentation.toolsReady"),
   ],
   model_preparation: [
-    "Preparing runtime and model request",
-    "Runtime/model preparation failed",
-    "Runtime/model preparation interrupted",
-    "Model request dispatched",
+    t("timeline.platformActivityPresentation.preparingRuntimeAndModelRequest"),
+    t("timeline.platformActivityPresentation.runtimeModelPreparationFailed"),
+    t("timeline.platformActivityPresentation.runtimeModelPreparationInterrupted"),
+    t("timeline.platformActivityPresentation.modelRequestDispatched"),
   ],
   provider_first_byte: [
-    "Waiting for model",
-    "Model didn’t respond",
-    "Model wait interrupted",
-    "Model started responding",
+    t("timeline.platformActivityPresentation.waitingForModel"),
+    t("timeline.platformActivityPresentation.modelDidnTRespond"),
+    t("timeline.platformActivityPresentation.modelWaitInterrupted"),
+    t("timeline.platformActivityPresentation.modelStartedResponding"),
   ],
-};
+});
 
 export function startupDuration(durationMs: number | null): string | null {
   if (durationMs === null || !Number.isFinite(durationMs) || durationMs < 0) return null;
@@ -112,55 +124,96 @@ export type AgentTitleParts = {
   text: string;
 };
 
+const AGENT_NAME_SLOT = "\u0000agent\u0000";
+
+/**
+ * `render` turns a name into the full title (a translated template with a `{name}` slot),
+ * so each language orders the words around the name itself.
+ */
 export function namedAgentTitle(
   name: string | null | undefined,
-  before: string,
-  after: string,
+  render: (name: string) => string,
   fallback: string,
 ): AgentTitleParts {
   const trimmed = name?.trim() ? name.trim() : null;
-  return trimmed
-    ? { before, name: trimmed, after, text: `${before}${trimmed}${after}` }
-    : { before: "", name: null, after: "", text: fallback };
+  if (!trimmed) return { before: "", name: null, after: "", text: fallback };
+  const shape = render(AGENT_NAME_SLOT);
+  const at = shape.indexOf(AGENT_NAME_SLOT);
+  if (at < 0) return { before: "", name: null, after: "", text: render(trimmed) };
+  const before = shape.slice(0, at);
+  const after = shape.slice(at + AGENT_NAME_SLOT.length);
+  return { before, name: trimmed, after, text: `${before}${trimmed}${after}` };
 }
 
 /** The worker step title for a spawn or message, by status, naming the agent when known. */
 export function workerRowTitleParts(
+  t: OpenGeniText,
   item: Pick<WorkerItem, "action" | "status">,
   name?: string | null,
 ): AgentTitleParts {
-  const fallback = workerRowTitle(item);
+  const fallback = workerRowTitle(t, item);
   const spawn = item.action === "spawn";
   switch (item.status) {
     case "running":
-      return namedAgentTitle(name, spawn ? "Spawning " : "Messaging ", "", fallback);
+      return namedAgentTitle(
+        name,
+        (agent) =>
+          spawn
+            ? t("timeline.platformActivityPresentation.spawningName", { name: agent })
+            : t("timeline.platformActivityPresentation.messagingName", { name: agent }),
+        fallback,
+      );
     case "failed":
-      return namedAgentTitle(name, spawn ? "Couldn't spawn " : "Couldn't message ", "", fallback);
+      return namedAgentTitle(
+        name,
+        (agent) =>
+          spawn
+            ? t("timeline.platformActivityPresentation.couldNotSpawnName", { name: agent })
+            : t("timeline.platformActivityPresentation.couldNotMessageName", { name: agent }),
+        fallback,
+      );
     case "cancelled":
-      return namedAgentTitle(name, spawn ? "Spawning " : "Messaging ", "", fallback);
+      return namedAgentTitle(
+        name,
+        (agent) =>
+          spawn
+            ? t("timeline.platformActivityPresentation.spawningName", { name: agent })
+            : t("timeline.platformActivityPresentation.messagingName", { name: agent }),
+        fallback,
+      );
     default:
-      return namedAgentTitle(name, spawn ? "Spawned " : "Messaged ", "", fallback);
+      return namedAgentTitle(
+        name,
+        (agent) =>
+          spawn
+            ? t("timeline.platformActivityPresentation.spawnedName", { name: agent })
+            : t("timeline.platformActivityPresentation.messagedName", { name: agent }),
+        fallback,
+      );
   }
 }
 
 /** The generic worker step title for a spawn or message, by status. */
-export function workerRowTitle(item: Pick<WorkerItem, "action" | "status">): string {
+export function workerRowTitle(
+  t: OpenGeniText,
+  item: Pick<WorkerItem, "action" | "status">,
+): string {
   const running = item.status === "running";
   const failed = item.status === "failed";
   const cancelled = item.status === "cancelled";
   return item.action === "spawn"
     ? running
-      ? "Spawning worker"
+      ? t("timeline.platformActivityPresentation.spawningWorker")
       : failed
-        ? "Worker spawn failed"
+        ? t("timeline.platformActivityPresentation.workerSpawnFailed")
         : cancelled
-          ? "Worker interrupted"
-          : "Worker spawned"
+          ? t("timeline.platformActivityPresentation.workerInterrupted")
+          : t("timeline.platformActivityPresentation.workerSpawned")
     : running
-      ? "Messaging worker"
+      ? t("timeline.platformActivityPresentation.messagingWorker")
       : failed
-        ? "Worker message failed"
+        ? t("timeline.platformActivityPresentation.workerMessageFailed")
         : cancelled
-          ? "Worker interrupted"
-          : "Worker messaged";
+          ? t("timeline.platformActivityPresentation.workerInterrupted")
+          : t("timeline.platformActivityPresentation.workerMessaged");
 }

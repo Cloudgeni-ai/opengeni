@@ -5,6 +5,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ArtifactButton } from "./artifact-chrome";
 import { useEditableArtifactView } from "./editable-artifact-ui";
 import { useSpreadsheetSubmissions } from "./spreadsheet-submissions";
+import { useOpenGeniText } from "../../messages/runtime";
 
 export type SpreadsheetDownload = (signal: AbortSignal) => Promise<Blob>;
 
@@ -17,6 +18,7 @@ export function SpreadsheetDownloadButton({
   title: string;
   download: SpreadsheetDownload;
 }) {
+  const t = useOpenGeniText();
   const view = useEditableArtifactView(session);
   const submissions = useSpreadsheetSubmissions();
   const submitting = useSyncExternalStore(
@@ -68,7 +70,7 @@ export function SpreadsheetDownloadButton({
           title
             .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
             .replace(/\.xlsx$/i, "")
-            .trim() || "Workbook"
+            .trim() || t("artifacts.spreadsheetDownload.workbook")
         }.xlsx`;
         anchor.rel = "noopener";
         anchor.click();
@@ -89,20 +91,26 @@ export function SpreadsheetDownloadButton({
     <>
       {error ? (
         <span role="alert" className="text-og-xs text-og-fg-muted">
-          Download failed. Try again.
+          {t("artifacts.spreadsheetDownload.downloadFailedTryAgain")}
         </span>
       ) : null}
       <ArtifactButton
         onClick={() => void start()}
         disabled={busy || !ready}
-        title={ready ? "Download workbook as XLSX" : "Wait for workbook changes to sync"}
+        title={
+          ready
+            ? t("artifacts.spreadsheetDownload.downloadWorkbookAsXlsx")
+            : t("artifacts.spreadsheetDownload.waitForWorkbookChangesTo")
+        }
       >
         {busy ? (
           <LoaderCircleIcon className="animate-spin" aria-hidden />
         ) : (
           <DownloadIcon aria-hidden />
         )}
-        {busy ? "Preparing…" : "Download"}
+        {busy
+          ? t("artifacts.spreadsheetDownload.preparing")
+          : t("artifacts.spreadsheetDownload.download")}
       </ArtifactButton>
     </>
   );

@@ -26,6 +26,7 @@ import {
   type SelfhostedOpStreamDeps,
   type SelfhostedOperationAdmission,
   type SelfhostedRelayConfig,
+  type SelfhostedSessionDeps,
 } from "../selfhosted/session";
 import type { SelfhostedOpObserver } from "../selfhosted/op-observer";
 import type { OpStreamOutputFrame } from "../selfhosted/op-stream";
@@ -67,6 +68,8 @@ export interface SelfhostedConnectionBinding {
   operationResourcePolicySupported: boolean;
   operationCpuQuotaSupported: boolean;
   transactionalFsWriteSupported?: boolean;
+  transactionalFsWriteMachineSupported?: boolean;
+  browserControlHttpSupported?: boolean;
 }
 
 export interface ActiveBackendResolverDeps {
@@ -126,17 +129,7 @@ export interface ActiveBackendResolverDeps {
     commandId: string,
     frames: OpStreamOutputFrame[],
   ) => Promise<void>;
-  selfhostedSettleBackgroundCommand?: (input: {
-    commandId: string;
-    controlWorkspaceId: string;
-    enrollmentId: string;
-    connectionInstanceId: string;
-    opId: string;
-    outcome: "exited" | "lost";
-    exitCode: number | null;
-    reason: string;
-    failure?: import("@opengeni/contracts").SessionCommandFailure;
-  }) => void | Promise<void>;
+  selfhostedSettleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
   /**
    * The run's declared sandbox environment — the SAME `Record<string,string>` the
    * worker turn threads into the agent's TARGET manifest (and into the group box at
@@ -406,6 +399,9 @@ export function makeActiveBackendResolver(
         operationResourcePolicySupported: connection.operationResourcePolicySupported,
         operationCpuQuotaSupported: connection.operationCpuQuotaSupported,
         transactionalFsWriteSupported: connection.transactionalFsWriteSupported === true,
+        transactionalFsWriteMachineSupported:
+          connection.transactionalFsWriteMachineSupported === true,
+        browserControlHttpSupported: connection.browserControlHttpSupported === true,
         // The routing proxy caches this session by sandbox+epoch, but command
         // policy and runner authority are mutable. Re-read one coherent DB
         // snapshot only when a new exec/Git is admitted.

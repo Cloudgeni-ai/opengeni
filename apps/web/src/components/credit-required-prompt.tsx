@@ -25,6 +25,7 @@ import { userErrorText } from "@/lib/api-error";
 import { validTopupAmount } from "@/lib/format";
 import { analyticsAction } from "@/lib/analytics-actions";
 import { billingCheckoutReturnUrl } from "@/lib/credit-checkout";
+import { subscriptionAction } from "@/lib/subscription-plans";
 
 const DEFAULT_TOPUP = "25.00";
 
@@ -58,8 +59,11 @@ export function CreditRequiredPromptView({
     if (!open) setGranted(null);
   }, [open]);
   const [stripeEnabled, setStripeEnabled] = useState(false);
+  const [upgradeAccountId, setUpgradeAccountId] = useState<string | null>(null);
+  const canUpgrade = open && canBuyCredits && accountId !== null && upgradeAccountId === accountId;
 
   useEffect(() => {
+    setUpgradeAccountId(null);
     if (!open || !accountId || !canBuyCredits) {
       setStripeEnabled(false);
       return;
@@ -68,8 +72,19 @@ export function CreditRequiredPromptView({
     setStripeEnabled(false);
     void client
       .getBilling({ accountId })
-      .then((billing) => {
+      .then(async (billing) => {
         if (active) setStripeEnabled(billing.mode === "stripe");
+        if (!active || !billing.balance.plan || billing.mode !== "stripe") return;
+        const catalog = await client.getBillingSubscriptionPlans({ accountId }).catch(() => null);
+        if (
+          active &&
+          catalog?.plan &&
+          catalog.plans.some((target) => {
+            const action = subscriptionAction(billing.balance.plan!, catalog.plans, target);
+            return action === "checkout" || action === "upgrade";
+          })
+        )
+          setUpgradeAccountId(accountId);
       })
       .catch(() => {
         if (active) setStripeEnabled(false);
@@ -153,12 +168,20 @@ export function CreditRequiredPromptView({
               <Link
                 to="/workspaces/$workspaceId/organization"
                 params={{ workspaceId }}
-                search={{ section: "models", workspace: workspaceId }}
+                search={
+                  canUpgrade
+                    ? { section: "billing" }
+                    : { section: "models", workspace: workspaceId }
+                }
                 onClick={() => onOpenChange(false)}
-                {...analyticsAction("connect_model")}
+                {...(canUpgrade ? {} : analyticsAction("connect_model"))}
               >
-                <SparklesIcon className="size-3.5" />
-                Connect a model
+                {canUpgrade ? (
+                  <CreditCardIcon className="size-3.5" />
+                ) : (
+                  <SparklesIcon className="size-3.5" />
+                )}
+                {canUpgrade ? "View upgrade options" : "Connect a model"}
               </Link>
             </Button>
           </DialogFooter>

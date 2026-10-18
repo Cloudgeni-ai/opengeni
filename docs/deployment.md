@@ -1934,10 +1934,19 @@ SDK/React/Codemode/ogtool manifest versions. Before a canary rollout, publish pa
 from the same source using `publish-canary.yml`, then set
 `OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
 `site-package-versions-<sha>` artifact. The publisher runs from protected `main`
-and admits only the exact commit the workflow run is on: npm provenance attests
-that commit, so the workflow, checkout and published source must all match, and
-an older ancestor is rejected. If `main` moves before the dispatch, publish the
-new `main` commit instead. The runtime includes these pins beside
+and accepts its own commit or a normally merged ancestor with successful exact-source
+main CI. For an ancestor, its controller and package source remain separate and
+the signed provenance names both; the run's head SHA is not the package source.
+Select the source-named artifact from the successful canonical publisher run.
+Environment approval and ordinary image/CI/deployment checks remain mandatory.
+Split-source failed receipts use V2 and cannot use the existing V1 receipt-only
+reconciliation lane; stop for reviewed recovery rather than relabel or replay them.
+The publisher runs its bundled controller on pinned native Node while keeping
+package builds on Bun. Retained signed provenance and sanitized diagnostics help
+investigate failed writes but are not registry acknowledgements. Never reuse an
+unknown version; any explicitly authorized replacement must use a fresh run and
+version after diagnosis and review.
+See `CONTRIBUTING.md` for the admission and provenance contract. The runtime includes these pins beside
 the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
 sandbox images do not include Site package archives; the local development
 image helper alone enables `OPENGENI_LOCAL_SITE_PACKAGES=true` for unreleased work.
@@ -2509,7 +2518,10 @@ helm upgrade --install opengeni "$OPENGENI_CHART_OCI" \
 Every migration declares `-- deployment-mode: rolling` or
 `-- deployment-mode: maintenance`. Rolling migrations apply while the previous
 release keeps serving; a maintenance migration needs every API, control and
-turn worker database login drained first. Before an upgrade, run the
+turn worker database login drained first. Rolling is the default: new
+maintenance migrations must state a `-- maintenance-justification:`, and
+incompatible changes are split into expand/contract steps across releases
+([migrations-expand-contract.md](migrations-expand-contract.md)). Before an upgrade, run the
 read-only plan from the new release's API image against the live database to
 decide whether the rollout needs a drain:
 
@@ -2595,6 +2607,33 @@ OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
 The chart defaults API, worker, and web deployments to zero-surge rolling updates (`maxSurge: 0`, `maxUnavailable: 1`) so one-node smoke clusters do not need spare node capacity during upgrades. Increase surge settings in larger production clusters if you want faster replacement and have capacity headroom.
 
 The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
+
+The in-cluster Postgres runs PostgreSQL 18 (`pgvector/pgvector:pg18-bookworm`). An
+init container checks the data directory's major version before the server
+starts. A directory from an older major (for example one created by an earlier
+chart that defaulted to PostgreSQL 17) does not start until you choose:
+
+- keep the old major: set `postgres.image.tag` back to that major's image
+  (for example `pg17`), or
+- upgrade in place: take a backup, plan a short outage, and set
+  `postgres.majorUpgrade.enabled=true` with `postgres.majorUpgrade.fromImage` at
+  the old major on the same OS release (the default is
+  `pgvector/pgvector:pg17`). The init container runs `pg_upgrade --link`, keeps
+  the old directory as `pgdata.pre-upgrade-from-<major>` and then starts
+  PostgreSQL 18. Until the new server has started once, rolling back is
+  restoring that directory and the old image; after that, restore from backup.
+  Before Helm touches the StatefulSet, a pre-upgrade hook Job rehearses the
+  upgrade: it copies the running server's schema (no rows) into a scratch
+  cluster of the old major and runs PostgreSQL 18's `pg_upgrade --check`
+  against it. If the check fails, the release fails while the old server keeps
+  serving, and the Job's log names the objects to change. Allow its time in the
+  Helm timeout (`postgres.majorUpgrade.preflight.activeDeadlineSeconds`).
+  Every extension library the old databases use must exist in the new image
+  (drop unused extensions whose library is missing first). Afterwards run
+  `vacuumdb --all --analyze-in-stages --missing-stats-only`, then
+  `vacuumdb --all --analyze-only`, and `ALTER EXTENSION ... UPDATE` for each
+  extension, turn `majorUpgrade.enabled` off again, and delete the retained
+  directory once you have verified the new cluster.
 
 Production self-hosted platform dependencies should use mature upstream projects rather than Opengeni-owned replicas of those systems:
 
@@ -2729,6 +2768,25 @@ that CA through a private ConfigMap/Secret before running
 `bun run deployment:temporal-values`. That database-to-Temporal-server TLS is
 separate from the Opengeni-to-Temporal client settings below.
 
+Budget PostgreSQL connections across processes, not just current activity:
+each API has a runtime pool (`OPENGENI_API_DATABASE_POOL_MAX`, default 32) and
+a separate managed-auth pool (maximum 10); each worker has the default runtime
+pool (10) plus one readiness connection. Web and relay do not open SQL pools.
+Include each deployment's independent surge, old terminating pods that are
+still draining, Temporal's per-service default and visibility pools, one-shot
+migration/provisioning jobs, catalog import (default pool 10), and operator
+connections. Subtract PostgreSQL's reserved slots from `max_connections`.
+Pools are lazy; observed idle/active counts are not the rollout upper bound.
+Set server capacity against that budget and measured backend memory rather
+than shrinking application pools to fit an accidental server default.
+
+Scoped transactions retry transient connection acquisition up to eight times
+with exponential equal-jitter backoff (250 ms to 4 s, at most 15.75 s total
+sleep, plus driver connection time). This never replays a callback that has
+started or a failed savepoint. Running turns whose database connection remains
+unavailable, including SQLSTATE 53300, use the existing fenced exact-attempt
+recovery lane; ordinary data/authentication failures remain failures.
+
 After the upstream Temporal chart is running, the stack wrapper applies
 `deploy/stacks/official-temporal-namespace-job.yaml` to register the Temporal
 namespace used by Opengeni (`default` by default). The Opengeni worker cannot
@@ -2749,6 +2807,11 @@ Use this boundary when building a production cluster:
 The runtime secret must provide values such as:
 
 - `OPENGENI_DATABASE_URL`
+- `OPENGENI_DATABASE_PREPARED_STATEMENTS=false` when the database URL goes through
+  a transaction-pooling proxy on a port other than 6432. Opengeni uses named
+  prepared statements on direct connections, which saves a round trip and a
+  re-plan per query, and turns them off by itself on port 6432 (PgBouncer,
+  including Azure Flexible Server's built-in pooler).
 - `OPENGENI_RUNTIME_DATABASE_ROLE=opengeni_app` for standalone FORCE-RLS deployments (the default)
 - `OPENGENI_TEMPORAL_HOST`
 - `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud; it enables TLS automatically
@@ -2777,6 +2840,17 @@ The runtime secret must provide values such as:
 - `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON
 - `OPENGENI_PRODUCT_ACCESS_MODE=local|configured|managed`, independent of cloud/infrastructure profile
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
+- `OPENGENI_SUBSCRIPTION_PLANS_ENABLED=false` is the default. Enabling it opts into
+  subscription API/webhook plan writes (and the separately integrated maintenance
+  service); prepaid top-ups remain independent. Configure the operator runtime
+  plan catalog's monthly USD Stripe prices first; Enterprise is operator-only.
+  Subscription checkout, immediate paid upgrades, period-end changes/cancellation
+  and portal access live under `/v1/billing/subscription`; the `plans` GET returns
+  runtime prices, credit, seats and self-service availability. All new subscription
+  endpoints return 404 while disabled; ordinary top-up webhooks continue to run.
+  Disabled subscription deliveries are retained but not marked processed, so they
+  can be replayed after activation. Stripe readiness/products/webhook configuration
+  are separate operator activation work, not performed by this flag.
 - `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. It is the master opt-in; the database runtime switch from migration 0521 can pause and resume grants without a deploy or restart (see "Verified signup trial runtime switch (0521)" above). The grant is account-wide. Operators can restrict and update eligible models with `bun run credits:policy`; `OPENGENI_CREDIT_PROMOTION_POLICY_JSON` is a bootstrap fallback until the first runtime policy revision. With neither configured, new grants remain unrestricted. See [scoped promotional credits](scoped-promotional-credits.md) for activation and existing-balance behavior. No payment card is required. A completed in-flight resource can leave a negative general balance, and future top-ups clear that balance first; no card is automatically charged. New work that names no model chooses a funded credits-billed model unless a saved workspace default or connected subscription wins; with no funded candidate it falls back to the deployment default. The signup welcome shows the amount, and the picker shows each model's current payment source. See "Default model for new work" in [`model-providers.md`](model-providers.md).
 - `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only|shadow|credits` and `OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only|shadow|credits` are independent of Stripe and default to `usage_only`. `shadow` is operator-only comparison, never a customer debit. Paid sandbox mode additionally needs a reviewed backend warm rate in `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON`; paid deployment-funded embeddings need `OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES` (integer USD micros per million input UTF-8 bytes) and `OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT` (ISO UTC timestamp; earlier queued jobs stay unpriced). This PR leaves commercial rates and production activation unset.
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
@@ -2787,6 +2861,20 @@ The runtime secret must provide values such as:
   admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
   those keys in Helm values, catalog JSON, or the deployment runtime Secret.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
+- `OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE` optionally replaces the margin used for every provider-rate credit price (built-in and operator model rates, web search, transcription, and live voice). Set an integer from `0` through `10000`; `0` bills the configured provider API rates without an added margin. Unset preserves current pricing behavior. It does not change provider-cost reporting or direct fixed customer credit prices (such as video-generation tariffs). Set the same value on both API and worker processes. For Helm, configure both:
+
+  ```yaml
+  api:
+    extraEnv:
+      - name: OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE
+        value: "0"
+  worker:
+    extraEnv:
+      - name: OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE
+        value: "0"
+  ```
+
+  This is a code/configuration capability only; deployments should opt in separately.
 - Promotional codes are entered and reviewed in the app; paid Stripe top-ups have no promotion-code field.
   Configure `OPENGENI_WEB_BASE_URL` when the browser and API use different
   origins; Checkout and billing-portal return URLs may use that configured web
@@ -2839,6 +2927,17 @@ charge.dispute.updated
 customer.created
 customer.updated
 ```
+
+With subscription plans enabled, also subscribe to
+`customer.subscription.created`, `customer.subscription.updated`,
+`customer.subscription.deleted`, `invoice.paid`, and `invoice.payment_failed`.
+Only a paid subscription invoice grants monthly plan credit; a subscription
+update or failed invoice never grants. Paid invoices replace, rather than stack
+with, the previous Free/paid period. Downgrades and cancellation are period-end
+operations. Configure Stripe's hosted portal accordingly before enabling plan
+changes there; the API's `change` endpoint uses a period-end subscription schedule.
+Ordinary subscription refunds/disputes remain an operator procedure; the automatic
+duplicate-subscription recovery cancels/refunds only the detected duplicate.
 
 Credits are granted only once Stripe reports the Checkout payment `paid`: at
 `checkout.session.completed` for immediate payment methods, or at

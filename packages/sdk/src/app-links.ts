@@ -115,3 +115,55 @@ export function accountForAppLink<Account extends AppLinkAccount>(
 export function appHandoffUrl(webUrl: string): string {
   return `opengeni://open?url=${encodeURIComponent(webUrl)}`;
 }
+
+/** A browser's requested destination, not permission to use the computer. */
+export interface ComputerConnectLink extends AppLink {
+  subjectId: string;
+}
+
+/** No credentials travel in this link. The app signs in and confirms locally. */
+export function computerConnectUrl(input: {
+  webUrl: string;
+  subjectId: string;
+  scheme?: string;
+}): string {
+  const scheme = input.scheme ?? "opengeni";
+  if (!/^[a-z][a-z0-9+.-]*$/u.test(scheme)) throw new Error("Invalid app scheme");
+  const url = new URL(`${scheme}://connect`);
+  url.searchParams.set("url", input.webUrl);
+  url.searchParams.set("subject", input.subjectId);
+  if (!parseComputerConnectLink(url.toString(), scheme))
+    throw new Error("Invalid computer destination");
+  return url.toString();
+}
+
+export function parseComputerConnectLink(
+  raw: string,
+  scheme = "opengeni",
+): ComputerConnectLink | null {
+  try {
+    const url = new URL(raw);
+    if (
+      url.protocol !== `${scheme}:` ||
+      url.host !== "connect" ||
+      !["", "/"].includes(url.pathname)
+    )
+      return null;
+    const subjectId = url.searchParams.get("subject");
+    const target = new URL(url.searchParams.get("url") ?? "");
+    // Handoffs carry a destination only, never arbitrary queries, fragments or credentials.
+    if (target.username || target.password || target.search || target.hash) return null;
+    if (!["https:", "http:"].includes(target.protocol)) return null;
+    const link = parseAppLink(target.toString());
+    if (
+      !link?.workspaceId ||
+      !subjectId ||
+      subjectId.length > 512 ||
+      /[\u0000-\u001f\u007f]/u.test(subjectId)
+    )
+      return null;
+    return { ...link, subjectId };
+  } catch {
+    return null;
+  }
+}

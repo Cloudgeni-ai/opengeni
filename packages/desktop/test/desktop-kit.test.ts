@@ -6,15 +6,7 @@ import { join, sep } from "node:path";
 import type { InboxItem, ListInboxResponse } from "@opengeni/sdk";
 
 import { AccountStore } from "../src/main/accounts";
-import {
-  agentBinaryCandidates,
-  connectionFor,
-  lastErrorLine,
-  parseConnections,
-  parseServiceRunning,
-  repairServer,
-  windowsInstallCommand,
-} from "../src/main/agent-cli";
+import { autostartDesktopEntry } from "../src/main/linux-integration";
 import {
   bannerText,
   diffInbox,
@@ -152,84 +144,13 @@ describe("native sign-in", () => {
   });
 });
 
-describe("agent command line", () => {
-  test("finds the installer's agent paths", () => {
-    expect(agentBinaryCandidates("darwin", "/Users/user", {})).toEqual([
-      "/Users/user/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent",
-      "/Users/user/.local/bin/opengeni-agent",
-    ]);
-    expect(agentBinaryCandidates("linux", "/home/user", {})).toEqual([
-      "/home/user/.local/bin/opengeni-agent",
-    ]);
-    expect(agentBinaryCandidates("win32", "C:\\Users\\user", {})).toEqual([
-      "C:\\Users\\user\\AppData\\Local\\Opengeni\\bin\\opengeni-agent.exe",
-    ]);
-    expect(
-      agentBinaryCandidates("win32", "C:\\Users\\user", { LOCALAPPDATA: "D:\\Local" }),
-    ).toEqual(["D:\\Local\\Opengeni\\bin\\opengeni-agent.exe"]);
-    expect(agentBinaryCandidates("linux", "/home/user", {})).toEqual([
-      "/home/user/.local/bin/opengeni-agent",
-    ]);
-    expect(agentBinaryCandidates("win32", "C:/Users/user", { LOCALAPPDATA: "C:/L" })[0]).toContain(
-      "opengeni-agent.exe",
+describe("Linux autostart", () => {
+  test("opens the app without a window at login", () => {
+    expect(autostartDesktopEntry("Opengeni", "/opt/Opengeni/opengeni")).toContain(
+      "Exec=/opt/Opengeni/opengeni --hidden",
     );
-  });
-
-  test("parses connections and matches the server and workspace", () => {
-    const output = [
-      "Configured Opengeni connections (2):",
-      "  c1  https://App.Example.com  workspace=w1  agent=a1",
-      "  c2  https://old.example (legacy origin unverified; reconnect once to confirm)  workspace=w2  agent=a2",
-    ].join("\n");
-    const connections = parseConnections(output);
-    expect(connections).toEqual([
-      { connectionId: "c1", apiUrl: "https://app.example.com", workspaceId: "w1", agentId: "a1" },
-      { connectionId: "c2", apiUrl: "https://old.example", workspaceId: "w2", agentId: "a2" },
-    ]);
-    expect(connectionFor(connections, "https://app.example.com/", "w1")?.connectionId).toBe("c1");
-    expect(connectionFor(connections, "https://app.example.com", "w2")).toBeNull();
-    expect(
-      parseConnections("No Opengeni connections configured. Run `opengeni-agent connect`."),
-    ).toEqual([]);
-  });
-
-  test("repairs a broken agent from the asking server, else its first connection", () => {
-    const connections = parseConnections(
-      "  c1  https://app.example.com  workspace=w1  agent=a1\n  c2  https://two.example  workspace=w2  agent=a2",
-    );
-    expect(repairServer(connections, "https://two.example/")).toBe("https://two.example");
-    expect(repairServer(connections)).toBe("https://app.example.com");
-    expect(repairServer([])).toBeNull();
-  });
-
-  test("reads the service status on each platform", () => {
-    expect(parseServiceRunning("opengeni-agent LaunchAgent: loaded")).toBe(true);
-    expect(parseServiceRunning("opengeni-agent LaunchAgent: not loaded")).toBe(false);
-    expect(parseServiceRunning("opengeni-agent service: active")).toBe(true);
-    expect(parseServiceRunning("opengeni-agent service: inactive")).toBe(false);
-    expect(parseServiceRunning("opengeni-agent background task: running")).toBe(true);
-    expect(parseServiceRunning("opengeni-agent background task: paused")).toBe(false);
-    expect(parseServiceRunning("opengeni-agent background task: not installed")).toBe(false);
-  });
-
-  test("keeps the last meaningful error line", () => {
-    expect(lastErrorLine("\u001b[31merror: enroll token expired\u001b[0m\n\n")).toBe(
-      "enroll token expired",
-    );
-    expect(lastErrorLine("   \n")).toBeNull();
-    expect(
-      lastErrorLine(
-        "opengeni-install: installing x (version: latest)\nopengeni-install: ERROR: failed to download https://h/a : timed out\nopengeni-install: cleaning up\n",
-      ),
-    ).toBe("failed to download https://h/a : timed out");
-    expect(lastErrorLine("opengeni-install: downloading binary + checksum + signature\n")).toBe(
-      "downloading binary + checksum + signature",
-    );
-  });
-
-  test("runs the Windows installer without a progress bar and keeps its exit code", () => {
-    expect(windowsInstallCommand("C:\\Users\\o'brien\\AppData\\Local\\Temp\\x\\install.ps1")).toBe(
-      "$ProgressPreference = 'SilentlyContinue'; & 'C:\\Users\\o''brien\\AppData\\Local\\Temp\\x\\install.ps1'; exit $LASTEXITCODE",
+    expect(autostartDesktopEntry("Opengeni", "/home/user/My Apps/Opengeni.AppImage")).toContain(
+      'Exec="/home/user/My Apps/Opengeni.AppImage" --hidden',
     );
   });
 });

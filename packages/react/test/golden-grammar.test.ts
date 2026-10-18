@@ -5,6 +5,9 @@ import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline } from "../src/timeline";
 import { serializeTimeline } from "./golden/serialize";
 import type { SerializedTimeline } from "./golden/serialize";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 const CONTRACT_CHANGED =
   "the event-grammar contract changed; if intentional, regenerate snapshots (bun packages/react/test/golden/regenerate.ts) and include the diff in your PR for review";
@@ -17,8 +20,8 @@ function readJson<T>(path: string): T {
 }
 
 function project(events: SessionEvent[]) {
-  const items = buildTimeline(events);
-  return serializeTimeline(items, groupTimeline(items));
+  const items = buildTimeline(englishText, events);
+  return serializeTimeline(items, groupTimeline(englishText, items));
 }
 
 describe("golden event grammar", () => {

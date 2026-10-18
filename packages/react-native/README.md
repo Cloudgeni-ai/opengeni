@@ -19,6 +19,56 @@ import { createExpoOpenGeniAdapters } from "@opengeni/react-native/expo";
 </OpenGeniReactNativeProvider>;
 ```
 
+To reopen a recently viewed conversation instantly, keep reads for the signed-in
+person's client with `useRetainedReads(client)` from `@opengeni/react/session`
+in a component that stays mounted while they are signed in. The screen then
+draws the conversation as it was left, with no spinner, and refreshes it in the
+background. Only do this when each signed-in person gets their own client
+object (a new client on sign-in, sign-out and account switch); the kept view is
+in memory only and is dropped when the client changes.
+
+```tsx
+import { useRetainedReads } from "@opengeni/react/session";
+
+function SignedIn({ client, children }) {
+  useRetainedReads(client);
+  return children;
+}
+```
+
+If the people using your app should not have to choose between queueing and
+steering, pass `busySend: "steer"` to `useOpenGeniNativeSession`. A normal Send
+while the agent works is then read as soon as the agent can, usually within
+seconds, instead of waiting for the whole turn: a reply it is still writing
+stops and it answers with your message in mind, and running tools are not cut
+off. The message simply
+appears in the conversation. People see one Send and nothing to learn: the
+shared session screen shows no Queue choice beside it and no Queue or Steer
+words (a message sent while the workstream is paused waits and shows as a
+waiting message). Pass `offerQueue: true` as well to offer Queue next to Send.
+Under the default `busySend: "queue"` the screen offers Steer next to Send.
+
+### Labels and languages
+
+The native components read their text from the same catalog as
+`@opengeni/react` (native-only text lives under `native.*` keys). Wrap the app in
+`OpenGeniMessagesProvider` from `@opengeni/react/messages` with your `locale` and
+`messages`; see the `@opengeni/react` README for keys, plurals and fallback.
+
+```tsx
+import { OpenGeniMessagesProvider } from "@opengeni/react/messages";
+
+<OpenGeniMessagesProvider locale="nb" messages={norwegian}>
+  <OpenGeniReactNativeProvider adapters={adapters}>{children}</OpenGeniReactNativeProvider>
+</OpenGeniMessagesProvider>;
+```
+
+The per-surface label props and providers (`NativeTimelineMessagesProvider`,
+`labels` on the timeline and call components) still override individual
+strings. Their defaults are now functions of the translator
+(`defaultNativeTimelineMessages(t)`, `DEFAULT_OPENGENI_NATIVE_LABELS(t)`), so
+pass `useOpenGeniText()` when you build on them.
+
 ## Voice calls with your agent
 
 A call is the web's realtime voice session on native WebRTC, reported to the system as a phone call (CallKit on iOS). It keeps working with the phone locked, follows AirPods and CarPlay, shows in the Phone app's recents, and ends from the lock screen or a headset.

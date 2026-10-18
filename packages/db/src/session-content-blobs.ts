@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import type { AttemptToolCatalog, ModelContextSnapshot } from "@opengeni/contracts";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Database } from "./database";
+import { anyOf } from "./sql-arrays";
 import * as schema from "./schema";
 
 /**
@@ -198,7 +199,7 @@ export async function writeSessionContentBlobs(
         and(
           eq(schema.sessionContentBlobs.workspaceId, scope.workspaceId),
           eq(schema.sessionContentBlobs.sessionId, scope.sessionId),
-          inArray(schema.sessionContentBlobs.digest, batch),
+          anyOf(schema.sessionContentBlobs.digest, batch),
         ),
       );
     const known = new Set(present.map((row) => row.digest));
@@ -241,7 +242,7 @@ export async function readSessionContentBlobs(
         and(
           eq(schema.sessionContentBlobs.workspaceId, scope.workspaceId),
           eq(schema.sessionContentBlobs.sessionId, scope.sessionId),
-          inArray(schema.sessionContentBlobs.digest, batch),
+          anyOf(schema.sessionContentBlobs.digest, batch),
         ),
       );
     for (const row of rows) values.set(row.digest, row.value);

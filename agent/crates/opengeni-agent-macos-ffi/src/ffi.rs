@@ -137,8 +137,24 @@ pub(super) fn machine_locked() -> Result<bool, MacFfiError> {
 
 /// Fires the Screen Recording + Accessibility system prompts once.
 pub(super) fn request_grants() {
+    request_screen_capture();
+    request_input_monitoring();
+    request_accessibility();
+}
+
+/// Asks for Screen Recording. macOS shows its prompt only the first time.
+pub(super) fn request_screen_capture() {
     let _ = CGRequestScreenCaptureAccess();
+}
+
+/// Asks for Input Monitoring. macOS shows its prompt only the first time.
+pub(super) fn request_input_monitoring() {
     let _ = CGRequestListenEventAccess();
+}
+
+/// Asks for Accessibility: macOS lists the app in Privacy & Security and offers
+/// to open it there.
+pub(super) fn request_accessibility() {
     // AXIsProcessTrustedWithOptions({ kAXTrustedCheckOptionPrompt: true }). The
     // key's documented value is the literal CFString "AXTrustedCheckOptionPrompt";
     // an NSDictionary is toll-free bridged to CFDictionaryRef, so we build one and

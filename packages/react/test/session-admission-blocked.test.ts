@@ -8,6 +8,9 @@ import {
 } from "../src/session-status-model";
 import { buildTimeline, groupTimeline } from "../src/timeline/projection";
 import type { SessionStatusItem } from "../src/timeline/types";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 const block = {
   reason: "database_claim_rejected",
@@ -35,7 +38,9 @@ function event(
 }
 
 const statuses = (events: SessionEvent[]) =>
-  buildTimeline(events).filter((item): item is SessionStatusItem => item.kind === "session-status");
+  buildTimeline(englishText, events).filter(
+    (item): item is SessionStatusItem => item.kind === "session-status",
+  );
 
 describe("admission-blocked sessions", () => {
   test("read as stuck, not as waiting on the person", () => {
@@ -45,8 +50,8 @@ describe("admission-blocked sessions", () => {
         admissionBlock: block,
       }),
     ).toBe("blocked");
-    expect(SESSION_STATUS_PRESENTATION.blocked.label).toBe("Stuck");
-    expect(SESSION_STATUS_PRESENTATION.blocked.tone).toBe("failed");
+    expect(SESSION_STATUS_PRESENTATION(englishText).blocked.label).toBe("Stuck");
+    expect(SESSION_STATUS_PRESENTATION(englishText).blocked.tone).toBe("failed");
     expect(recentSessionStatus({ status: "requires_action", admissionBlock: block })).toEqual({
       tone: "failed",
       pulse: false,
@@ -85,7 +90,7 @@ describe("admission-blocked sessions", () => {
     const [divider] = statuses(events);
     expect(divider).toMatchObject({ status: "requires_action", blocked: true });
     expect(divider!.resolvedAt).toBeUndefined();
-    const groups = groupTimeline(buildTimeline(events), {
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
       readableTurns: true,
     });
     for (const group of groups) {

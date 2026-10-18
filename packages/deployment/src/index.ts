@@ -106,7 +106,12 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
   },
   e2b: {
     required: ["OPENGENI_E2B_API_KEY"],
-    optional: ["OPENGENI_E2B_TEMPLATE"],
+    optional: [
+      "OPENGENI_E2B_DOMAIN",
+      "OPENGENI_E2B_API_URL",
+      "OPENGENI_E2B_SANDBOX_URL",
+      "OPENGENI_E2B_TEMPLATE",
+    ],
   },
   blaxel: {
     required: ["OPENGENI_BLAXEL_API_KEY"],
@@ -289,6 +294,11 @@ export const WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_WEB_FETCH_API_KEY",
   "OPENGENI_WEB_FETCH_BASE_URL",
   "OPENGENI_WEB_SEARCH_PROVIDER_MODE",
+];
+
+/** Optional deployment-wide margin for provider-rate credit charges. */
+export const CREDIT_MARGIN_BPS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE",
 ];
 
 /** Public workspace MCP OAuth rollout settings. The enable switch is
@@ -3051,6 +3061,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of CREDIT_MARGIN_BPS_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 

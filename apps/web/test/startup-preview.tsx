@@ -6,7 +6,13 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { ChatComposer, MessageTimeline, useComposer, buildTimeline } from "@opengeni/react";
+import {
+  ChatComposer,
+  MessageTimeline,
+  useComposer,
+  buildTimeline,
+  createOpenGeniText,
+} from "@opengeni/react";
 import type { TimelineItem } from "@opengeni/react";
 import type { Session, SessionEvent } from "@opengeni/sdk";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "../../../packages/react/test/fake-client";
@@ -58,7 +64,7 @@ function Preview() {
     ...(state === "machine" ? [] : [accepted]),
     ...(claimed ? [event("turn.started", {}, new Date().toISOString())] : []),
   ];
-  const items: TimelineItem[] = [prompt, ...buildTimeline(events)];
+  const items: TimelineItem[] = [prompt, ...buildTimeline(createOpenGeniText(), events)];
   if (state === "working")
     items.push({
       kind: "reasoning",

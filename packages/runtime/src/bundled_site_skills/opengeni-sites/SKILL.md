@@ -18,8 +18,9 @@ Site on the web is built in (see "Publish to the web").
 
 A Site never needs its own server, API key, or hosting provider to reach
 Opengeni. Model access, agent conversations, and workspace tools all come from
-the host bridge: `createOpenGeniSiteClient` from `@opengeni/sdk/site` plus the
-`@opengeni/react/session-ui` conversation surface. The parent page owns the
+the host bridge: `createOpenGeniSiteClient` from `@opengeni/sdk/site`. Use its
+`ai.run` helper for inline results, or `@opengeni/react/session-ui` when the app
+needs a conversation surface. The parent page owns the
 credentials and workspace identity; Site code receives neither, so "keep
 credentials server-side" is already satisfied by that bridge.
 
@@ -60,6 +61,45 @@ say which designs are possible and ask before building.
   runtime projection. Never edit only the generated HTML when source exists.
 - Keep secrets, Opengeni access keys, OAuth tokens, workspace ids, API base
   URLs, and signed URLs out of the source and generated HTML.
+
+## Make new Sites readable by default
+
+Choose a clear type scale before building. For new Sites without an explicit
+type scale, start main reading text at 16–18px, controls and table content at
+14–16px, and reserve smaller text for genuinely secondary metadata, not
+descriptions, navigation, labels needed to use a control, or key results.
+Use comfortable line heights (about 1.5–1.7 for prose) and reading widths of
+roughly 60–75 characters. Check the chosen font at its rendered size: a large
+headline does not make small body copy readable.
+
+Use `rem`/`em` for text, keep the browser's root font size, and allow browser
+zoom and user text scaling. Do not shrink primary copy on mobile to fit more
+columns; reflow the layout, wrap content, or scroll a wide table instead.
+Keep form text readable and let controls grow with their labels.
+
+These are authoring defaults, not a mandatory theme or runtime CSS override.
+Honor a user's deliberate design, retain an existing app's type system, and
+leave embedded components such as `SessionConversation` on their own styles.
+Do not inject a blanket font-size rule into existing Sites or use `!important`
+to force this scale onto a component library. If `frontend-design` is available,
+use it for visual direction alongside these readability defaults.
+
+For a new page, this optional starting point applies only to elements you mark
+with these classes; adapt it to the design rather than importing a global reset.
+The sizes below assume the usual 16px browser default and scale with it.
+
+```css
+.site-copy { font-size: 1.0625rem; line-height: 1.6; max-width: 70ch; }
+.site-control { font: inherit; font-size: 1rem; line-height: 1.5; }
+.site-table { font-size: 0.9375rem; line-height: 1.5; }
+.site-meta { font-size: 0.8125rem; line-height: 1.5; }
+```
+
+Before publishing, inspect actual paragraphs, labels, inputs, buttons, table
+cells and empty/error states at desktop and narrow mobile widths, then with
+text enlarged to 200%. Check computed sizes and look for clipped or overlapping
+text; fix layout pressure rather than making the content smaller. A fixture can
+demonstrate a type scale, but does not prove every generated Site follows it.
 
 ## Use normal Bun + React
 
@@ -200,6 +240,33 @@ const client = createOpenGeniSiteClient();
 const issues = await client.tools.linear.issues_list({ state: "Todo" });
 ```
 
+### Inline AI: the app chooses the interaction
+
+Use `site.ai.run({ initialMessage: appDefinedPrompt, idempotencyKey: actionId })`
+to return AI output inside the app without mounting chat or displaying history.
+Prompts, context, controls and results are app-designed; Draft, Summarize or
+Classify are merely possible examples, never required buttons or templates.
+Use `onText` for incremental text and `onSession` to retain a native handle before
+waiting. A result has `text`, `sessionId`, `turnId`, `after` and `status`:
+`completed`, `pending` (approval/input needed), or `cancelled`; failures reject.
+Validate any app-defined structured output before using it.
+
+This is ordinary native execution with the same model access, subscriptions,
+permissions, tool selection, approvals, metering and outsider caps. Aborting the
+observation does not cancel the task. `site.ai.result(id, { turnId })` replays
+without creating more work. Supplying `after` returns subsequent text only;
+retain earlier text or omit it for a full replay. Keep retry keys stable per
+action and handles in viewer-private state/storage, not shared Site Data.
+
+Site AI is private per viewer by default and does not clutter the workspace
+sidebar or ordinary search. Signed-in members use their real human identity;
+guests use existing cookie/visitor continuity, not a shared anonymous chat.
+If organization policy disallows private execution, surface its explicit
+refusal; never fall back to shared sessions. Privacy does not automatically
+extend to separately published artifacts or shared Site Data.
+
+### Optional conversation UI
+
 For embedded conversations, `site.client` is the ordinary Opengeni SDK client;
 `site.workspaceId` is a host-resolved routing alias. Use the normal React
 complete conversation surface—do not implement session REST or SSE yourself:
@@ -220,7 +287,7 @@ const site = createOpenGeniSiteClient();
 ```
 
 `sessionId` is the existing session or the id returned by `site.client.createSession`.
-For a normal chat app, offer a conversation selector and “New conversation”.
+For a normal chat app, a conversation selector and “New conversation” are optional.
 Create on first Send rather than mounting the page; keep the selected id in React
 state and reopen existing conversations through the SDK.
 Keep first-send creation single-flight; reuse its `idempotencyKey` when retrying,
@@ -233,14 +300,17 @@ write origin metadata yourself. The local preview has no published identity, so
 this filter returns no Site history there; test newly created/current conversations
 locally and the selector after publication.
 
-This is a default, not a restriction. For a project-focused app, use `channelId`
-on SDK creation/listing instead; its list may include conversations created
-elsewhere. Project management tools use `projectId` (see `opengeni-projects`
-when available). Do not automatically create a project just to group Site chats.
-Unfiled Site conversations group under their Site in the main sidebar; explicit
-projects and pins take precedence. Origin remains visible regardless of placement.
-The host Site page always provides its own Conversations panel independently of
-the navigation you build. Opening existing sessions never changes their origin.
+Do not automatically create a project just to group Site chats. Site execution
+does not appear in ordinary workspace discovery, even for its owner. The host
+Site page provides a viewer-scoped Conversations panel independently of app
+navigation. Opening existing sessions never changes their origin or audience.
+Page code cannot widen the Site boundary by supplying project, visibility,
+tools or credential fields; use ordinary authoring tools for project management.
+
+Per-Site AI costs are in Insights: actual credit charges are distinct from
+API-equivalent subscription/own-key estimates and unbilled platform counters.
+Usage is for limits. Do not build private transcript or viewer analytics into
+shared dashboards just because aggregate costs are visible there.
 
 `SessionConversation` connects timeline/history, durable composer drafts,
 queue display/edit/delete/steer, pause/resume, and human-input forms. Prefer it
@@ -372,6 +442,8 @@ Handle `OpenGeniSiteDataError` codes in the UI: `validation` (bad input or
 schema), `conflict` (stale `expectedVersion`, a duplicate unique value, or a
 schema changed or record grew mid-request: send it again),
 `not_found`, `forbidden` (the access mode does not allow it),
+`not_available_for_viewer` (this viewer of a published Site may not do it:
+show a friendly state, such as a sign-in button for guests),
 `quota_exceeded` (records 256 KB each, charged plus 512 bytes, 100 MB per Site
 and 100,000 per collection; at most 4 MB of records per request; files 10 MB
 each and 1 GB per Site, by default), `rate_limited` (retry later), and
@@ -438,7 +510,9 @@ const { rows, truncated } = await site.sql.run<{ choice: string; votes: number }
 ```
 
 Rows are untrusted input: render them as text. Handle `OpenGeniSiteSqlError`
-codes: `forbidden` (audience; `details.reason: "sign_in_required"` for guests),
+codes: `forbidden` (audience), `not_available_for_viewer` (on a published
+host, the query's audience excludes this viewer; `details.reason:
+"sign_in_required"` for guests),
 `not_found` (no such query), `validation` (missing or unknown params),
 `conflict` (a unique or primary key already taken), `sql_error` (also NOT
 NULL, CHECK and foreign-key failures),
@@ -477,6 +551,18 @@ bind such values as parameters). Quote columns named `begin`, `end` or
 Your authoring session's tools let you build, inspect, and publish the Site;
 they do not define what a human viewer may do in the published app. A conversation
 started inside the Site is a separate agent session with its own tool access.
+Its own data tools recheck current audience access on every call: removing an
+invitation or narrowing the audience takes effect even if cancellation fails.
+Non-member execution is funded in increments ($0.25 by default), with the
+session ceiling equal to metered spend plus reserved funding. Further work
+must fund its next increment; one provider call can overshoot before metering.
+
+For documents, spreadsheets and presentations, a Site-started agent needs the
+declared editing tools and may edit or export only artifacts created in its own
+Site-clamped session tree. Parent and child sessions share those creations;
+another conversation on the same Site does not. Reading or linking an existing
+workspace artifact does not grant editing access. There is no existing-artifact
+declaration field yet; use an ordinary authorized authoring session for those edits.
 
 There are two client surfaces:
 
@@ -604,10 +690,50 @@ workspace first.
   hosts that don't report viewers. Guests have no name or email. Offer a
   sign-in button that calls `site.auth.signIn()`; never build your own login.
 - Embedded agent and limits: the publication turns the Site's agent on or
-  off, picks its model, and sets a limit profile (`free` by default, then
-  `credits`, `unlimited` or `custom`). The organization pays; handle
-  `rate_limited` and budget errors as normal UI states.
-- The same Site HTML, tools and Site Data work there; no rebuild is needed.
+  off and picks its model. Workspace members are never limited by the Site.
+  People outside the workspace share one Site limit ($10 a month by
+  default) and an optional per-person limit, which workspace admins set;
+  anonymous guests also meet bot guards. Non-member model calls use organization
+  credits; members keep their normal billing, including subscriptions. Handle
+  `rate_limited`, `site_budget_exhausted` and retryable `site_budget_busy` (429), and
+  `site_platform_brake_engaged` (503) as normal UI states.
+- The same Site HTML and Site Data work there; no rebuild is needed.
+- Published-host agents get this Site's `site_data_query` and `site_data_write`,
+  plus `site_sql_run` when SQL is enabled; members also get read-only `site_sql_query`.
+  Member tools are intersected with live permissions: a member without artifact
+  publishing can still use AI without write tools, and without data-read permission
+  can use plain AI without data tools. Never request extra permission just to chat.
+  The server pins the Site and binds calls to the conversation's viewer, including
+  collection ownership and query audiences. No management tools or sandbox are
+  supplied; publication settings have no sandbox opt-in. Members get no Site
+  budget or stamped session usage limit. Existing Sites pick up defaults without
+  republishing. Platform allowances and the global brake never count model spend.
+
+**Build for the audience.** A published page can do only what its viewer
+may do. People outside the workspace (invited people and public visitors)
+never get workspace tools, and the Site's agent gives them none either; a
+subscription model (Codex, Claude or SuperGrok plan) is swapped for the
+workspace's credit-billed default for them. So for an invited or public
+Site:
+
+- keep the data the page needs in Site Data or Site SQL, not behind
+  workspace tools; call `site.tools` only in parts shown to members;
+- give guests the least they need: a collection's `guestAccess`, and
+  `everyone` only on queries guests must run;
+- read `const caps = await site.capabilities` (`null` on hosts that don't
+  report it) and hide what this viewer can't use: `caps.agent`,
+  `caps.workspaceTools`, `caps.siteData` (`viewer` or `guest`) and
+  `caps.sqlQueryAudiences`; `caps.viewAs` is set while a member previews the
+  Site as a visitor;
+- treat `not_available_for_viewer` (403) as a friendly state, never a crash.
+
+After publishing or changing access, read the publication's `warnings`
+(`opengeni__site_publication_get` or `_update`): each names what won't work
+for whom and what to change. Fix them in the page, or apply a warning's
+safe `fix` with `opengeni__site_publication_apply_fix` (a collection's
+guest access or a query's audience) when the user wants that audience to
+have it. Tell the user about warnings you leave, and suggest **View as
+visitor** on the Publish page to check the Site as its audience sees it.
 
 A published Site is a public web page. Never put secrets, tokens or private
 data in its HTML, and render viewer names, emails, records and agent replies
@@ -619,6 +745,8 @@ with `textContent` or React text, never `innerHTML`.
 - The compiled runtime is one self-contained HTML document within the published
   size limit.
 - Desktop and mobile interactions were exercised in the sandbox-local preview.
+- Reading text, controls and tables follow the chosen readable type scale;
+  mobile and 200% text scaling do not clip or shrink primary content.
 - Exercise live tools and SDK operations locally through `/__opengeni/site-tools/*`
   wherever the attempt's Codemode authority permits. Report remaining
   viewer-only checks explicitly; those do not by themselves block publication.

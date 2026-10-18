@@ -3,7 +3,11 @@ import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import postgres from "postgres";
 import type { AccessGrant, SessionEvent } from "@opengeni/contracts";
-import { controlHumanSessionWorkstream, postUserMessageTurn } from "@opengeni/core";
+import {
+  controlHumanSessionWorkstream,
+  postUserMessageTurn,
+  steerHumanQueuePrompt,
+} from "@opengeni/core";
 import {
   addSessionSystemUpdate,
   bootstrapWorkspace,
@@ -268,23 +272,23 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
             event.type === "session.control.steer_requested" &&
             event.payload.targetTurnId === urgent.turn.id,
         );
-        const quiesced = events.find(
-          (event) =>
-            event.type === "session.queue.changed" &&
-            event.turnId === initial.turn.id &&
-            event.payload.operation === "attempt_quiesced",
+        // The Steer cuts the streaming answer and the initial attempt hands over
+        // itself at that boundary: nothing is interrupted or left to quiesce.
+        const handedOver = events.find(
+          (event) => event.type === "turn.superseded" && event.turnId === initial.turn.id,
         );
         const replacementStarted = events.find(
           (event) => event.type === "turn.started" && event.turnId === urgent.turn.id,
         );
         expect(steerRequested).toBeDefined();
-        expect(quiesced).toBeDefined();
+        expect(handedOver).toBeDefined();
         expect(replacementStarted).toBeDefined();
-        expect(quiesced!.sequence).toBeGreaterThan(steerRequested!.sequence);
-        expect(replacementStarted!.sequence).toBeGreaterThan(quiesced!.sequence);
+        expect(handedOver!.sequence).toBeGreaterThan(steerRequested!.sequence);
+        expect(replacementStarted!.sequence).toBeGreaterThan(handedOver!.sequence);
         expect(
-          Date.parse(quiesced!.occurredAt) - Date.parse(urgent.accepted.occurredAt),
+          Date.parse(handedOver!.occurredAt) - Date.parse(urgent.accepted.occurredAt),
         ).toBeLessThan(2_000);
+        expect(urgent.turn.metadata).toMatchObject({ interruptionCount: 0 });
         expect(model.calls).toBe(2);
         const deliveredUpdates = await listSessionSystemUpdatesForTurn(
           dbClient.db,
@@ -414,9 +418,28 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           resources: [],
           tools: [],
           clientEventId: `receipt-exhaustion-steer-${crypto.randomUUID()}`,
-          delivery: "steer",
+          delivery: "send",
           controlEtag: beforeSteer!.effectiveControl.controlEtag,
         });
+        expect(urgent.turn.status).toBe("queued");
+        // A plain Steer hands over cooperatively at the next model step, with
+        // no quiescence. "Send now" on the queued message is the interrupting
+        // Steer that physically quiesces the running attempt.
+        await steerHumanQueuePrompt(
+          { db: dbClient.db, bus, workflowClient },
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+            subjectId: grant.subjectId,
+          },
+          urgent.turn.id,
+          {
+            clientEventId: `receipt-exhaustion-send-now-${crypto.randomUUID()}`,
+            expectedTurnVersion: urgent.turn.version,
+            interrupt: true,
+          },
+        );
 
         await handle.result();
 

@@ -1301,12 +1301,14 @@ try {
     join(minimalSpreadsheetRoot, "dist", "spreadsheet-artifact.js"),
     "utf8",
   );
-  if (!spreadsheetOnlyBundle.includes("This workbook has no worksheets.")) {
+  if (!spreadsheetOnlyBundle.includes("og-spreadsheet-canvas")) {
     throw new Error("Spreadsheet-only packed consumer did not include its editor runtime");
   }
+  // Code-only markers: every consumer carries the default English message catalog,
+  // so user-facing text such as "Document editor" no longer proves a modality leaked.
   for (const forbidden of [
     "DocumentArtifactSurface",
-    "Document editor",
+    "og-document-editor",
     "PresentationArtifactSurface",
     "presentation-selection",
   ]) {
@@ -1358,7 +1360,7 @@ try {
   for (const forbidden of [
     "function OpenGeniProvider",
     "streamWorkspaceControlEvents",
-    "Opengeni updated",
+    // Provider code only; its "Opengeni updated" text lives in the shared catalog.
     "data-opengeni-api-contract-mismatch",
     "react/jsx-runtime",
     "@uiw/react-codemirror",

@@ -373,10 +373,11 @@ Learned on Settings > Models, 27 Sep 2026.
   confirms in a dialog. Show them directly; don't fold two or three rows under an "Advanced".
 - **No control for what the system decides.** When the product picks something automatically
   (which Codex accounts new work uses), say the outcome in one line above the list ("New work uses
-  this workspace's Codex accounts. The organization's account is set aside while these are
-  connected.") and mute what is set aside ("Not in use") instead of offering a switch people read
-  as a filter. A saved explicit choice shows truthfully in that line with one quiet way back
-  ("Use automatically").
+  this workspace's Codex accounts together with the organization's accounts.") and mute what a
+  saved explicit choice sets aside ("Not in use") instead of offering a switch people read as a
+  filter. The line must match what placement actually does: picked automatically, both pools
+  serve. A saved explicit choice shows truthfully in that line with one quiet way back ("Use
+  automatically").
 - **Unconnected options are not rows.** A provider you haven't connected is a choice on the
   Connect (or New) page, never a list row with its own Connect button. With nothing connected, the
   list becomes the empty state with the one Connect action.
@@ -544,7 +545,7 @@ organization or personal settings URL, and the Insights and runtime pages listed
 settings rail) swaps the main rail for the settings rail, drawn by `SettingsShell`
 (`components/settings/settings-sidebar.tsx`, sections from `settings-rail.tsx`): a back link that
 leaves settings ("Back to sessions"), then the one workspace picker (the same component and menu as
-the main rail's: workspace name, organization under it), then every settings page the person can
+the main rail's: workspace name, organization under it), then a "Search settings" field, then every settings page the person can
 use in one rail, in three sections: **Workspace** (its settings and dashboards, then its runtime
 pages), **Organization** (only the organization pages this person can use) and **Your
 account**. Each section starts with a plain text header in 14/500 naming only the scope
@@ -555,7 +556,12 @@ headings. Inside a section, pages fall into at most two groups set apart by spac
 second level of labels: Workspace = its settings and dashboards, then its runtime (Secrets,
 Sandbox environments, Machines); Organization = the organization and its people (General, People,
 Workspaces, Organization identity), then what it provides, pays for and protects (Models,
-Integrations, Billing & usage, Developer, Security & data). Models is an Organization page only:
+Integrations, Connected agents, Billing & usage, Developer, Security & data). Typing in the search
+field replaces the sections with matching pages and the settings inside them (each with where it
+lives, "Workspace · General"), indexed from the rail itself so it never offers a page the person
+can't use (`components/settings/settings-search.ts`); Enter opens the first, arrows move through
+them, Escape clears. Connected agents is every signed-in member's page: how to add the Opengeni
+MCP server to each client, then their agents. Models is an Organization page only:
 every model setting, each workspace's included, lives there (section 7), and a workspace's old
 Models URL opens that workspace's page in it. Sections are split by one hairline.
 There are no per-section switchers. Workspace, organization and personal settings all draw this

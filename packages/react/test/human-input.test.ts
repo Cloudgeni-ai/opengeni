@@ -14,6 +14,9 @@ import {
 } from "../src";
 import type { SessionHumanInputRequest } from "@opengeni/sdk";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -124,7 +127,7 @@ describe("structured human-input projection", () => {
 describe("answersFromDrafts", () => {
   test("normalizes text, selections, and Other into the SDK response shape", () => {
     expect(
-      answersFromDrafts(questions, {
+      answersFromDrafts(englishText, questions, {
         summary: { values: ["Ship it"], other: "", otherSelected: false },
         targets: { values: ["staging"], other: "canary", otherSelected: true },
       }),
@@ -138,10 +141,10 @@ describe("answersFromDrafts", () => {
   });
 
   test("rejects missing required answers locally; text has no char min", () => {
-    const missing = answersFromDrafts(questions, {});
+    const missing = answersFromDrafts(englishText, questions, {});
     expect(Object.keys(missing.errors)).toEqual(["summary", "targets"]);
     expect(
-      answersFromDrafts(questions.slice(0, 1), {
+      answersFromDrafts(englishText, questions.slice(0, 1), {
         summary: { values: ["no"], other: "", otherSelected: false },
       }).errors,
     ).toEqual({});
@@ -149,14 +152,18 @@ describe("answersFromDrafts", () => {
 
   test("uses host validation copy without replacing the native validator", () => {
     expect(
-      answersFromDrafts(questions.slice(0, 1), {}, { required: "Dette feltet er påkrevd." }).errors
-        .summary,
+      answersFromDrafts(
+        englishText,
+        questions.slice(0, 1),
+        {},
+        { required: "Dette feltet er påkrevd." },
+      ).errors.summary,
     ).toBe("Dette feltet er påkrevd.");
   });
 
   test("Other selected with empty text prefers otherRequired over required", () => {
     expect(
-      answersFromDrafts(questions.slice(1), {
+      answersFromDrafts(englishText, questions.slice(1), {
         targets: { values: [], other: "", otherSelected: true },
       }).errors.targets,
     ).toBe("Enter a value for Other.");
@@ -165,6 +172,7 @@ describe("answersFromDrafts", () => {
   test("keeps exact Other text for a legacy choice that did not advertise it", () => {
     expect(
       answersFromDrafts(
+        englishText,
         [
           {
             id: "environment",

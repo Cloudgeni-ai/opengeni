@@ -1,6 +1,7 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageSquareIcon, RefreshCwIcon } from "lucide-react";
+import { toast } from "sonner";
 import type { SessionListResponse } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useAppContext } from "@/context";
@@ -13,12 +14,18 @@ import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Toolbar, ToolbarGroup, ToolbarSearch } from "@/components/ui/toolbar";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import { sessionStateLabel } from "@/lib/session-rail";
+import { userErrorText } from "@/lib/api-error";
 
 /**
  * The Site page's Conversations tab. Host-owned, so it works even when the
  * generated Site is broken.
  */
-export function SiteConversations(props: { workspaceId: string; siteId: string; title: string }) {
+export function SiteConversations(props: {
+  workspaceId: string;
+  siteId: string;
+  title: string;
+  canManageAccess?: boolean;
+}) {
   const { client } = useAppContext();
   return <SiteConversationsPanel {...props} client={client} />;
 }
@@ -28,17 +35,25 @@ export function SiteConversationsPanel({
   workspaceId,
   siteId,
   title,
+  canManageAccess = false,
 }: {
-  client: Pick<OpenGeniBrowserClient, "listSessionPage">;
+  client: Pick<
+    OpenGeniBrowserClient,
+    "listSessionPage" | "listSiteSessionAccess" | "setSiteSessionAccess"
+  >;
   workspaceId: string;
   siteId: string;
   title: string;
+  canManageAccess?: boolean;
 }) {
   const [search, setSearch] = useState("");
   const [archivedOnly, setArchivedOnly] = useState(false);
   const [page, setPage] = useState<SessionListResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [allowed, setAllowed] = useState<string[]>([]);
+  const [changing, setChanging] = useState<string | null>(null);
   const request = useRef<AbortController | null>(null);
   const load = useCallback(
     async (cursor?: string) => {
@@ -49,7 +64,8 @@ export function SiteConversationsPanel({
       setError(false);
       try {
         const next = await client.listSessionPage(workspaceId, {
-          originSiteId: siteId,
+          ...(!adding ? { siteAccessId: siteId } : {}),
+          includePinned: false,
           search,
           archivedOnly,
           limit: 30,
@@ -57,6 +73,11 @@ export function SiteConversationsPanel({
           signal: controller.signal,
         });
         if (controller.signal.aborted) return;
+        if (canManageAccess) {
+          const access = await client.listSiteSessionAccess(workspaceId, siteId);
+          if (controller.signal.aborted) return;
+          setAllowed(access.sessionIds);
+        }
         setPage((previous) =>
           cursor && previous
             ? {
@@ -78,22 +99,64 @@ export function SiteConversationsPanel({
         if (!controller.signal.aborted) setBusy(false);
       }
     },
-    [client, workspaceId, siteId, search, archivedOnly],
+    [client, workspaceId, siteId, search, archivedOnly, adding, canManageAccess],
   );
   useEffect(() => {
     setPage(null);
     void load();
     return () => request.current?.abort();
   }, [load]);
-  const sessions = page
+  const visibleSessions = page
     ? [...new Map([...page.pinned, ...page.sessions].map((s) => [s.id, s])).values()]
     : [];
+  const sessions = adding
+    ? visibleSessions.filter(
+        (session) => session.tenancy?.ownedByCurrentUser && !session.metadata._opengeniSiteOrigin,
+      )
+    : visibleSessions;
+  const changeAccess = async (sessionId: string, allow: boolean) => {
+    setChanging(sessionId);
+    try {
+      await client.setSiteSessionAccess(workspaceId, siteId, sessionId, allow);
+      setAllowed((current) =>
+        allow ? [...new Set([...current, sessionId])] : current.filter((id) => id !== sessionId),
+      );
+      toast.success(
+        allow ? "Chat allowed in this Site" : "Chat access removed",
+        !allow
+          ? {
+              action: { label: "Undo", onClick: () => void changeAccess(sessionId, true) },
+            }
+          : undefined,
+      );
+      await load();
+    } catch (failure) {
+      toast.error("Couldn’t change chat access", { description: userErrorText(failure) });
+    } finally {
+      setChanging(null);
+    }
+  };
   const navigate = useNavigate();
   return (
-    <section aria-label={`Conversations from ${title}`} className="flex min-w-0 flex-col gap-4">
+    <section aria-label={`Conversations in ${title}`} className="flex min-w-0 flex-col gap-4">
       <p className="text-sm leading-5 text-fg-muted">
-        Conversations started from {title}, including ones filed in projects.
+        {adding
+          ? `Choose a chat you own. ${title} will be able to read it and send messages as you. Approvals stay in the console.`
+          : `Conversations available in ${title}, including ones you explicitly allowed.`}
       </p>
+      {canManageAccess && (
+        <Button
+          type="button"
+          variant="outline"
+          className="self-start pointer-coarse:h-11"
+          onClick={() => {
+            setAdding((value) => !value);
+            setSearch("");
+          }}
+        >
+          {adding ? "Back to Site conversations" : "Allow an existing chat"}
+        </Button>
+      )}
       <Toolbar>
         <ToolbarSearch
           value={search}
@@ -136,7 +199,13 @@ export function SiteConversationsPanel({
       ) : sessions.length === 0 ? (
         <EmptyState
           variant="inline"
-          title={search ? "No matching conversations." : "No conversations yet."}
+          title={
+            search
+              ? "No matching conversations."
+              : adding
+                ? "No chats you own on this page."
+                : "No conversations yet."
+          }
         />
       ) : (
         <RowList label="Conversations" busy={busy}>
@@ -146,6 +215,26 @@ export function SiteConversationsPanel({
               leading={<LogoTile icon={<MessageSquareIcon />} name="Conversation" />}
               title={sessionDisplayTitle(session)}
               meta={[sessionStateLabel(session)]}
+              control={
+                canManageAccess && (adding || allowed.includes(session.id)) ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="pointer-coarse:h-11"
+                    disabled={changing !== null || (adding && allowed.includes(session.id))}
+                    aria-label={`${adding ? (allowed.includes(session.id) ? "Already allowed:" : "Allow") : "Remove access to"} ${sessionDisplayTitle(session)}`}
+                    onClick={() => void changeAccess(session.id, adding)}
+                  >
+                    {changing === session.id
+                      ? "Saving…"
+                      : adding
+                        ? allowed.includes(session.id)
+                          ? "Allowed"
+                          : "Allow chat"
+                        : "Remove access"}
+                  </Button>
+                ) : undefined
+              }
               href={`/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(session.id)}`}
               onOpen={(event) => {
                 if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;

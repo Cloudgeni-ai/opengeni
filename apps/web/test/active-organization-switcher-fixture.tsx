@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { OrganizationSwitcherLine } from "../src/components/rail/switcher-block";
 import { WorkspaceSwitcherTrigger } from "../src/components/rail/workspace-switcher";
 import { orgLabel, type OrgOption } from "../src/lib/org";
+import { t } from "../src/lib/console-text";
 import type { Workspace } from "../src/types";
 import "../src/styles.css";
 
@@ -12,7 +13,7 @@ const secondAccountId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 const organizations: OrgOption[] = [firstAccountId, secondAccountId].map((accountId) => ({
   accountId,
-  label: orgLabel(accountId, []),
+  label: orgLabel(t, accountId, []),
   canManage: false,
 }));
 

@@ -143,11 +143,12 @@ describe("Computer frame evidence pipeline", () => {
       expect(result.content).toEqual([
         {
           type: "text",
-          text: JSON.stringify({
-            ...observation,
-            frameId: frame.metadata.frameId,
-            capturedFrame: { width: sdkFrame.width, height: sdkFrame.height },
-          }),
+          text: [
+            `screen screen:0 "Fixture screen" at 0,0 size 1x1 focused`,
+            `Observation ${observation.observationId}, target generation ${observation.target.targetGeneration}, frame ${frame.metadata.frameId}`,
+            `Screenshot ${sdkFrame.width}x${sdkFrame.height} pixels; pointer x,y use these pixels.`,
+            "The accessibility tree has no readable elements; use the screenshot.",
+          ].join("\n"),
         },
         {
           type: "image",

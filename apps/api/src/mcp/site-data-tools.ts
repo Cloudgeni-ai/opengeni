@@ -26,6 +26,12 @@ import {
   uploadSiteDataFile,
   writeSiteData,
 } from "../site-data/operations";
+import {
+  SITE_AGENT_MANAGEMENT_MESSAGE,
+  SITE_AGENT_OTHER_SITE_MESSAGE,
+  type SiteAgentDataContext,
+  type SiteAgentDataResolution,
+} from "../site-publishing/agent-data-tools";
 
 type JsonResult = (value: unknown) => {
   content: Array<{ type: "text"; text: string }>;
@@ -41,6 +47,11 @@ const CollectionInput = z4
  * First-party Site Data tools. They act with the agent's own authority: the
  * person it acts for (a chat's person or a schedule's owner) decides whether
  * it manages the Site's data or is one of its viewers.
+ *
+ * A published Site's own agent (`siteAgent` resolves a Site context) is
+ * different: only `site_data_query` and `site_data_write` work, pinned to
+ * that Site (any other siteId is refused) and acting as the conversation's
+ * viewer, exactly as the Site's page does; every other tool refuses it.
  */
 export function registerSiteDataTools(
   server: McpServer,
@@ -48,12 +59,24 @@ export function registerSiteDataTools(
   grant: AccessGrant,
   authorize: () => Promise<void>,
   json: JsonResult,
+  siteAgent?: () => Promise<SiteAgentDataResolution>,
 ): void {
   const call =
-    <A>(fn: (args: A) => Promise<unknown>) =>
+    <A extends { siteId: string }>(
+      fn: (args: A) => Promise<unknown>,
+      forSiteAgent?: (site: SiteAgentDataContext, args: A) => Promise<unknown>,
+    ) =>
     async (args: A) => {
       await authorize();
       try {
+        const site = siteAgent ? await siteAgent() : null;
+        if (site && site.kind !== "ordinary") {
+          if (site.kind === "refused") throw new SiteDataError("forbidden", site.message);
+          if (!forSiteAgent) throw new SiteDataError("forbidden", SITE_AGENT_MANAGEMENT_MESSAGE);
+          if (args.siteId !== site.siteId)
+            throw new SiteDataError("forbidden", SITE_AGENT_OTHER_SITE_MESSAGE);
+          return json(await forSiteAgent(site, args));
+        }
         return json(await fn(args));
       } catch (error) {
         if (!(error instanceof SiteDataError)) throw error;
@@ -140,10 +163,16 @@ export function registerSiteDataTools(
         z4.object({ siteId: SiteIdInput, ...SiteDataQueryRequest.shape }),
       ),
     },
-    call((args: { siteId: string } & SiteDataQueryRequest) => {
-      const { siteId, ...query } = args;
-      return querySiteData(deps, grant, siteId, query);
-    }),
+    call(
+      (args: { siteId: string } & SiteDataQueryRequest) => {
+        const { siteId, ...query } = args;
+        return querySiteData(deps, grant, siteId, query);
+      },
+      (site, args) => {
+        const { siteId, ...query } = args;
+        return querySiteData(deps, site.viewer, siteId, query, { frameSiteId: site.siteId });
+      },
+    ),
   );
 
   server.registerTool(
@@ -155,10 +184,24 @@ export function registerSiteDataTools(
         z4.object({ siteId: SiteIdInput, ...SiteDataWriteRequest.shape }),
       ),
     },
-    call(async (args: { siteId: string } & SiteDataWriteRequest) => {
-      const written = await writeSiteData(deps, grant, args.siteId, args.operations);
-      return { results: written.results };
-    }),
+    call(
+      async (args: { siteId: string } & SiteDataWriteRequest) => {
+        const written = await writeSiteData(deps, grant, args.siteId, args.operations);
+        return { results: written.results };
+      },
+      async (site, args) => {
+        // Guests' writes count against the guest write limit, as on the page.
+        const wait = await site.guestWrite();
+        if (wait !== null)
+          throw new SiteDataError("rate_limited", "Too many writes; try again shortly", {
+            retryAfterSeconds: wait,
+          });
+        const written = await writeSiteData(deps, site.viewer, args.siteId, args.operations, {
+          frameSiteId: site.siteId,
+        });
+        return { results: written.results };
+      },
+    ),
   );
 
   server.registerTool(

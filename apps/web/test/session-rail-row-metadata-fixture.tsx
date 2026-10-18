@@ -87,6 +87,8 @@ function SessionRailRowMetadataFixture() {
             onSortByChange={setSortBy}
             status={status}
             onStatusChange={setStatus}
+            mineOnly={false}
+            onMineOnlyChange={() => {}}
             showEmptyGroups={showEmptyGroups}
             onShowEmptyGroupsChange={setShowEmptyGroups}
           />

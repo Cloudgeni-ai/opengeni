@@ -89,6 +89,7 @@ import {
   listOwnConnectionAccountsForGrant,
   hasReservedFikenMetadata,
   ONEPASSWORD_CREDENTIAL_ROLE,
+  EXTERNAL_VAULT_CREDENTIAL_ROLE,
   hasReservedOpenGeniSlackBotMetadata,
   isOpenGeniSlackBotConnection,
   openGeniSlackBotMetadata,
@@ -1043,6 +1044,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             c.req.param("connectionId"),
             grant.subjectId,
           );
+          assertNotReservedExternalVaultMetadata(existing?.metadata);
           if (existing && isOpenGeniSlackBotConnection(existing)) {
             const destination = ConnectorDocumentDestinationSelection.safeParse(
               payload.metadata?.documentDestination,
@@ -1359,6 +1361,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!existing) {
       throw new HTTPException(404, { message: "connection not found" });
     }
+    assertNotReservedExternalVaultMetadata(existing.metadata);
     const expectedVersion = c.req.query("expectedVersion");
     if (expectedVersion !== undefined) {
       if (!/^[1-9]\d*$/.test(expectedVersion) || !Number.isSafeInteger(Number(expectedVersion))) {
@@ -1973,9 +1976,23 @@ function assertNotReservedFikenMetadata(metadata: Record<string, unknown> | unde
 }
 
 function assertNotReservedOnePasswordMetadata(metadata: Record<string, unknown> | undefined): void {
+  assertNotReservedExternalVaultMetadata(metadata);
   if (metadata?.credentialRole === ONEPASSWORD_CREDENTIAL_ROLE) {
     throw new HTTPException(422, {
       message: "1Password connections are created by the verified 1Password install flow",
+    });
+  }
+}
+
+function assertNotReservedExternalVaultMetadata(
+  metadata: Record<string, unknown> | undefined,
+): void {
+  if (
+    metadata?.credentialRole === EXTERNAL_VAULT_CREDENTIAL_ROLE ||
+    metadata?.vaultProvider !== undefined
+  ) {
+    throw new HTTPException(422, {
+      message: "Vault connections are managed through the verified vault connection flow",
     });
   }
 }

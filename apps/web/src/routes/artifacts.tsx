@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
 import type {
   SiteViewer,
@@ -40,6 +41,7 @@ import {
   ARTIFACT_DETAIL_FRAME,
   ArtifactKindTile,
   useArtifactsBackLink,
+  useArtifactFullView,
 } from "@/components/artifacts/artifact-page-chrome";
 import { artifactKinds, type ArtifactKind } from "@/lib/artifact-catalog";
 import { invalidateArtifactCatalog, useArtifactCatalog } from "@/lib/use-artifact-catalog";
@@ -125,7 +127,7 @@ function SiteLoadError({
 }) {
   if (accessDenied)
     return <Notice title="You can't open this Site">{ARTIFACT_ACCESS_REQUIRED}</Notice>;
-  const view = artifactLoadErrorView(error, "site");
+  const view = artifactLoadErrorView(t, error, "site");
   return (
     <Notice
       tone="failed"
@@ -141,7 +143,7 @@ function SiteLoadError({
         ) : undefined
       }
     >
-      {artifactLoadErrorMessage(view)}
+      {artifactLoadErrorMessage(t, view)}
     </Notice>
   );
 }
@@ -388,6 +390,7 @@ function ArtifactDetailPage({
   const navigate = useNavigate();
   const back = useArtifactsBackLink(workspaceId, fromSession);
   const search = useSearch({ strict: false }) as ArtifactReturnSearch;
+  const [fullView, setFullView] = useArtifactFullView();
   const viewer = useConsoleSiteViewer();
   const [tab, setTab] = useState<SiteTab>("site");
   const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(null);
@@ -707,6 +710,10 @@ function ArtifactDetailPage({
                   toolBridge={archived ? undefined : siteToolBridge}
                   viewer={viewer}
                   connectedToolCount={toolCount}
+                  // Links open the Site full screen; an archived one opens on
+                  // its page, which says so, and expands only on request.
+                  fullScreen={archived ? undefined : fullView}
+                  onFullScreenChange={archived ? undefined : setFullView}
                 />
               ) : (
                 <Notice
@@ -781,6 +788,11 @@ function ArtifactDetailPage({
               workspaceId={workspaceId}
               siteId={artifactId}
               title={artifact.title}
+              canManageAccess={
+                !archived &&
+                artifact.visibility === "private" &&
+                artifact.ownerSubjectId === context.accessContext.subjectId
+              }
             />
           </LineTabsContent>
           {manageData ? (

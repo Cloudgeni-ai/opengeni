@@ -743,6 +743,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     getEnvironment: async () => {
       const prepared = eventing.preparedTools;
       if (!prepared) return null;
+      prepared.startDeferredPreparation?.();
       return ((await prepared.ready) ?? prepared).attemptToolEnvironment;
     },
   });
@@ -1107,7 +1108,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         spillOversizedModelToolResult: async ({ operationId, result }) =>
           await toolResultSpill.spill({ operationId, result }),
         localMcpServers,
-        ...(deferNonEagerToolPreparation ? { deferNonEagerUntilToolDemand: true } : {}),
+        ...(deferNonEagerToolPreparation
+          ? {
+              deferNonEagerUntilToolDemand: true,
+              deferredPreparationStart: "provider-dispatch" as const,
+            }
+          : {}),
         onPreparationPhase: (measurement) => {
           recordToolPreparationPhase(observability, {
             ...measurement,

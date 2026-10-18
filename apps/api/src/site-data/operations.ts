@@ -19,6 +19,7 @@ import {
   type SiteDataWriteOp,
 } from "@opengeni/db";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
+import { requireSitePlatformQuota } from "../site-publishing/platform-usage";
 import {
   assertSiteDataSchema,
   meterSiteData,
@@ -309,6 +310,7 @@ export async function writeSiteData(
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await requireSitePlatformQuota(deps, access.caller, ["storage_bytes"]);
   const reserved = await consume(access, "write", operations.length, {
     collections: validatedCollections(operations),
     bytes: siteDataValidationBytes(validatedData(operations)),
@@ -686,6 +688,7 @@ export async function uploadSiteDataFile(
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
   const objects = storage(deps);
   // Access, rate, then quota, before the body is read or reaches object storage.
+  await requireSitePlatformQuota(deps, access.caller, ["storage_bytes"]);
   await consume(access, "write", 1);
   const scope = input.scope ?? "shared";
   if (scope !== "shared" && scope !== "private")

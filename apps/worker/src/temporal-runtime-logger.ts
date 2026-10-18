@@ -13,6 +13,9 @@ export function temporalRuntimeLoggingOptions(
 ): RuntimeOptions {
   return {
     logger: createTemporalSdkLogger(observability),
+    // The SDK default also drains every worker on SIGUSR2, which this process
+    // reserves for on-demand CPU profiling (installCpuSamplingSignal).
+    shutdownSignals: ["SIGINT", "SIGTERM", "SIGQUIT"],
     telemetryOptions: {
       logging: {
         // The SDK's default core filter, now forwarded instead of printed.

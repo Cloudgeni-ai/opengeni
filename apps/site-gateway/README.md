@@ -53,6 +53,7 @@ Vars (`[vars]` in `wrangler.toml`):
 | `LOGIN_ONLY` | `true` makes public Sites require sign-in (staging) |
 | `ABUSE_EMAIL` | Contact on the takedown page; defaults to `abuse@<SITES_DOMAIN>` |
 | `TURNSTILE_SITE_KEY` | Optional; enables the human check together with `TURNSTILE_SECRET` |
+| `PLATFORM_REPORT_INTERVAL_SECONDS` | Seconds served-request counts wait before they are reported to the API (platform usage), 1 to 25; default 10 |
 
 Secrets (`.dev.vars` locally, `wrangler secret put` when deployed):
 
@@ -124,9 +125,33 @@ All are `__Host-` cookies (`Secure; HttpOnly; SameSite=Lax; Path=/`, no
 - `__Host-og_session`: opaque site-session token from the auth exchange; the API validates it.
 - `__Host-og_login`: signed state, PKCE verifier and return path for 10 minutes.
 - `__Host-og_h`: signed human proof bound to the Site host and visitor, for 1 hour (Turnstile only).
+- `__Host-og_view`: `invited` or `public` while a workspace member previews the Site as a visitor, for 7 days. Informational: the preview lives on the API's site session; the gateway uses the cookie only to key its access cache and to ask the API on public Sites.
 
 Inbound cookies and `Authorization` are never forwarded, and API
 `Set-Cookie` headers are dropped.
+
+## View as visitor
+
+`?og_view_as=public`, `?og_view_as=invited` or `?og_view_as=off` on a page
+load starts or ends a preview: the gateway signs `POST /auth/view-as` with the
+viewer's site session, and the API records it on that session for workspace
+members only (anyone else gets a 403 page). The gateway then redirects to the
+same page without the parameter. Without a site session the viewer signs in
+first; the parameter survives the return path. While previewing, the footer
+says "Viewing as a public visitor · Exit preview". The preview only ever
+shows less: the API treats the member as that role for every call.
+
+## Platform request counts
+
+Every request the gateway serves for a known Site host counts toward the
+workspace's platform usage, cache hits and refusals included. Counts wait in
+the isolate and are reported in signed batches (`POST
+/platform/requests`, signed for the Sites domain apex, at most 500 hosts per
+report) after `PLATFORM_REPORT_INTERVAL_SECONDS` or once 1,000 requests are
+waiting. A failed report keeps its id and is retried with the next one, and
+the API records each host once per report id, so a retry never counts twice.
+Counting never refuses or delays a request; an evicted isolate loses at most
+its unsent counts.
 
 ## Caching and takedown latency
 
@@ -140,6 +165,7 @@ new record never reads an older entry:
 | Host map | KV `host:<hostname>` | KV `cacheTtl` 60 seconds per colo; write-back entries expire after 5 minutes |
 | No such host | host | 10 seconds |
 | Access confirmation (members, invited, login-only) | host, generation, session hash | 30 seconds |
+| Access confirmation while previewing as a visitor | host, generation, session hash, `__Host-og_view` | 30 seconds |
 | Current version HTML | host, generation, Site, version | 60 seconds |
 | Browser copy of version HTML | `private, no-cache` plus ETag | revalidated on every load |
 

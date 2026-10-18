@@ -47,6 +47,10 @@ const { recordSubscriptionCoreServingPolicyForTurnAttempt: recordServing } =
 const { subscriptionCoreRequests } = await import("../src/subscription-core/requests");
 const { subscriptionCoreTurns } = await import("../src/subscription-core/turns");
 const { acquireSubscriptionTurnLease } = await import("../src/subscription-core-repository");
+const { freezeAgentLearningPolicy, saveKnowledgeEntry, getKnowledgeEntry } =
+  await import("../src/knowledge-entries");
+const { nestedPostgresSqlState } = await import("../src/persistence-errors");
+const { transitionSessionVisibility } = await import("../src/session-tenancy");
 const models = [
   {
     id: "home/model",
@@ -112,6 +116,143 @@ afterAll(async () => {
 }, 180_000);
 
 describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role", () => {
+  test("sharing a running private continuation preserves learning through failover and Retry", async () => {
+    const org = await fixture.organization();
+    const first = await fixture.connection(org, home);
+    const human = await fixture.turn(org, { private: true });
+    await fixture.finish(human);
+    const work = await fixture.turn(org, {
+      sessionId: human.identity.sessionId,
+      causalTurnId: human.turnId,
+    });
+    const context = (current: typeof work) => ({
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      actor: {
+        kind: "agent" as const,
+        sessionId: current.identity.sessionId,
+        turnId: current.turnId,
+        attemptId: current.attemptId,
+        executionGeneration: current.executionGeneration,
+      },
+    });
+    const learning = (current: typeof work) =>
+      freezeAgentLearningPolicy(fixture.client.db, context(current));
+    const accepted = await learning(work);
+    expect(accepted).toMatchObject({ defaultScope: "personal", subjectId: org.subjectId });
+    expect(
+      await subscriptionCoreTurns(home).placeSubscriptionCoreTurn(fixture.client.db, work),
+    ).toMatchObject({ kind: "run", connectionId: first });
+    await transitionSessionVisibility(fixture.client.db, {
+      workspaceId: org.workspaceId,
+      sessionId: work.identity.sessionId,
+      actorSubjectId: org.subjectId,
+      targetVisibility: "workspace_shared",
+      expectedAuthorityEpoch: 1,
+      operationKey: crypto.randomUUID(),
+    });
+    expect(await learning(work)).toEqual(accepted);
+    const replacement = await fixture.connection(org, home);
+    await fixture.exhausted(org.accountId, first);
+    const next = await fixture.recover(work);
+    expect(await learning(next)).toEqual(accepted);
+    // Sharing never promotes this accepted turn's writes to the workspace.
+    const request = {
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      entry: {
+        kind: "fact" as const,
+        title: "Accepted scope",
+        content: "Retain the original destination.",
+      },
+    };
+    const saved = await saveKnowledgeEntry(fixture.client.db, context(next), request);
+    expect(await getKnowledgeEntry(fixture.client.db, context(next), saved.entryId)).toMatchObject({
+      scope: "personal",
+    });
+    const [owner] = await fixture.admin`select scope_subject_id from knowledge_entries
+      where account_id=${org.accountId}::uuid and id=${saved.entryId}::uuid`;
+    expect(owner?.scope_subject_id).toBe(org.subjectId);
+    // An explicit destination remains available under its own accepted policy;
+    // sharing alone must not change the default used above or the frozen policy.
+    const explicit = await saveKnowledgeEntry(fixture.client.db, context(next), {
+      ...request,
+      operationId: crypto.randomUUID(),
+      scope: "workspace",
+    });
+    expect(
+      await getKnowledgeEntry(fixture.client.db, context(next), explicit.entryId),
+    ).toMatchObject({
+      scope: "workspace",
+    });
+    expect(await learning(next)).toEqual(accepted);
+    const stale = await learning(work).catch((error: unknown) => error);
+    expect(nestedPostgresSqlState(stale)).toBe("42501");
+    expect(
+      await subscriptionCoreTurns(home).placeSubscriptionCoreTurn(fixture.client.db, next),
+    ).toMatchObject({ kind: "run", connectionId: replacement });
+    const retried = await fixture.humanRetry(next, org.subjectId);
+    expect(await learning(retried)).toEqual(accepted);
+    await fixture.finish(retried);
+    const fresh = await fixture.turn(org, { sessionId: work.identity.sessionId });
+    expect(await learning(fresh)).toMatchObject({ defaultScope: "workspace", subjectId: null });
+  });
+
+  test("a frozen Personal scope cannot borrow another human's authority", async () => {
+    const org = await fixture.organization();
+    const work = await fixture.turn(org, { private: true });
+    const context = {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      actor: {
+        kind: "agent" as const,
+        sessionId: work.identity.sessionId,
+        turnId: work.turnId,
+        attemptId: work.attemptId,
+        executionGeneration: work.executionGeneration,
+      },
+    };
+    await transitionSessionVisibility(fixture.client.db, {
+      workspaceId: org.workspaceId,
+      sessionId: work.identity.sessionId,
+      actorSubjectId: org.subjectId,
+      targetVisibility: "workspace_shared",
+      expectedAuthorityEpoch: 1,
+      operationKey: crypto.randomUUID(),
+    });
+    // Simulate incompatible retained state with the fixture owner, never app authority.
+    await fixture.admin`insert into agent_learning_snapshots(account_id,workspace_id,session_id,turn_id,snapshot)
+      values (${org.accountId}::uuid,${org.workspaceId}::uuid,${work.identity.sessionId}::uuid,${work.turnId}::uuid,
+        '{"defaultScope":"personal","subjectId":"another-human"}'::jsonb)`;
+    await expect(freezeAgentLearningPolicy(fixture.client.db, context)).rejects.toMatchObject({
+      code: "knowledge_learning_scope_changed",
+    });
+  });
+
+  test("same-turn recovery skips an unassigned workspace-scoped connection", async () => {
+    const org = await fixture.organization();
+    const first = await fixture.connection(org, home);
+    const human = await fixture.turn(org);
+    await fixture.finish(human);
+    const work = await fixture.turn(org, {
+      sessionId: human.identity.sessionId,
+      causalTurnId: human.turnId,
+    });
+    expect(await place(fixture.client.db, home, work)).toMatchObject({
+      kind: "run",
+      connectionId: first,
+    });
+    await fixture.connection(org, home, { scopeKind: "workspaces" });
+    const replacement = await fixture.connection(org, home, { scopeKind: "workspaces" });
+    await fixture.admin`insert into subscription_connection_workspaces(account_id, connection_id, workspace_id) values (${org.accountId}::uuid, ${replacement}::uuid, ${org.workspaceId}::uuid)`;
+    await fixture.exhausted(org.accountId, first);
+    const next = await fixture.recover(work);
+    expect(await place(fixture.client.db, home, next)).toMatchObject({
+      kind: "run",
+      connectionId: replacement,
+    });
+  });
+
   test("D-34 narrow readiness proves receipt and kind without private table SELECT", async () => {
     const org = await fixture.organization();
     const work = await fixture.turn(org);

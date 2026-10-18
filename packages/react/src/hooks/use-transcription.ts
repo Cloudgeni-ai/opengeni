@@ -12,6 +12,7 @@ import {
   type WorkspaceTranscriptionPolicy,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type TranscriptionControlState = {
   status: TranscriptionLifecycleStatus;
@@ -253,6 +254,7 @@ export function useTranscription({
   lifecycleTimeouts,
   onDiagnostic,
 }: UseTranscriptionOptions): UseTranscriptionResult {
+  const t = useOpenGeniText();
   const [state, setState] = useState(INITIAL_TRANSCRIPTION_CONTROL_STATE);
   const stateRef = useRef(state);
   const valueRef = useRef(value);
@@ -277,12 +279,12 @@ export function useTranscription({
     (diagnostic: unknown) => {
       if (!onDiagnostic) return;
       try {
-        onDiagnostic(normalizeTranscriptionDiagnostic(diagnostic));
+        onDiagnostic(normalizeTranscriptionDiagnostic(t, diagnostic));
       } catch {
         // Observability must never break the local privacy or UI lifecycle.
       }
     },
-    [onDiagnostic],
+    [onDiagnostic, t],
   );
   const cleanupRuntimeRef = useRef({ cleanupTimeoutMs, reportDiagnostic });
 
@@ -336,12 +338,12 @@ export function useTranscription({
       if (!active || active.generation !== generation) return;
       sessionRef.current = null;
       if (activePolicyRef.current?.generation === generation) activePolicyRef.current = null;
-      detachSessionCleanup(active.session, {
+      detachSessionCleanup(t, active.session, {
         cleanupTimeoutMs,
         reportDiagnostic,
       });
     },
-    [cleanupTimeoutMs, reportDiagnostic],
+    [cleanupTimeoutMs, reportDiagnostic, t],
   );
 
   const start = useCallback(async (): Promise<boolean> => {
@@ -396,7 +398,7 @@ export function useTranscription({
       .then(
         (session) => {
           if (boundarySettled && !accepted) {
-            detachSessionCleanup(session, {
+            detachSessionCleanup(t, session, {
               cancelReason: "stale-generation",
               cleanupTimeoutMs,
               reportDiagnostic,
@@ -409,7 +411,7 @@ export function useTranscription({
             reportDiagnostic({
               operation: "start",
               code: classifyStartError(error),
-              detail: diagnosticDetail(error),
+              detail: diagnosticDetail(t, error),
             });
           }
           return { kind: "error" as const, error };
@@ -443,7 +445,9 @@ export function useTranscription({
       reportDiagnostic({
         operation: "start",
         code: "timeout",
-        detail: `Transcription adapter start exceeded ${startTimeoutMs}ms.`,
+        detail: t("hooks.useTranscription.transcriptionAdapterStartExceededStarttimeoutms", {
+          startTimeoutMs,
+        }),
       });
       apply({ type: "start.failed", generation, code: "timeout" });
       return false;
@@ -455,7 +459,7 @@ export function useTranscription({
       reportDiagnostic({
         operation: "start",
         code,
-        detail: diagnosticDetail(outcome.error),
+        detail: diagnosticDetail(t, outcome.error),
       });
       if (!controller.signal.aborted) {
         apply({ type: "start.failed", generation, code });
@@ -471,7 +475,7 @@ export function useTranscription({
       !isActiveTranscriptionStatus(current.status)
     ) {
       if (activePolicyRef.current?.generation === generation) activePolicyRef.current = null;
-      detachSessionCleanup(outcome.session, {
+      detachSessionCleanup(t, outcome.session, {
         ...(current.status === "error" ? {} : { cancelReason: "stale-generation" }),
         cleanupTimeoutMs,
         reportDiagnostic,
@@ -493,6 +497,7 @@ export function useTranscription({
     selection,
     startTimeoutMs,
     unavailableReason,
+    t,
   ]);
 
   const cancel = useCallback(async (): Promise<boolean> => {
@@ -511,14 +516,14 @@ export function useTranscription({
     apply({ type: "cancel.settled", generation });
     focusInput();
     if (active?.generation === generation) {
-      detachSessionCleanup(active.session, {
+      detachSessionCleanup(t, active.session, {
         cancelReason: "user-cancelled",
         cleanupTimeoutMs,
         reportDiagnostic,
       });
     }
     return true;
-  }, [apply, cleanupTimeoutMs, focusInput, reportDiagnostic]);
+  }, [apply, cleanupTimeoutMs, focusInput, reportDiagnostic, t]);
 
   const reset = useCallback(() => apply({ type: "reset" }), [apply]);
 
@@ -562,14 +567,14 @@ export function useTranscription({
       };
       if (active) {
         const runtime = cleanupRuntimeRef.current;
-        detachSessionCleanup(active.session, {
+        detachSessionCleanup(t, active.session, {
           cancelReason: "component-unmounted",
           cleanupTimeoutMs: runtime.cleanupTimeoutMs,
           reportDiagnostic: runtime.reportDiagnostic,
         });
       }
     },
-    [],
+    [t],
   );
 
   return {
@@ -631,7 +636,10 @@ export function normalizeTranscriptionErrorCode(code: unknown): TranscriptionErr
   }
 }
 
-export function normalizeTranscriptionDiagnostic(diagnostic: unknown): TranscriptionDiagnostic {
+export function normalizeTranscriptionDiagnostic(
+  t: OpenGeniText,
+  diagnostic: unknown,
+): TranscriptionDiagnostic {
   const source = isRecord(diagnostic) ? diagnostic : {};
   const operation =
     source.operation === "start" ||
@@ -640,7 +648,10 @@ export function normalizeTranscriptionDiagnostic(diagnostic: unknown): Transcrip
     source.operation === "close"
       ? source.operation
       : "session";
-  const rawDetail = typeof source.detail === "string" ? source.detail : "No diagnostic detail.";
+  const rawDetail =
+    typeof source.detail === "string"
+      ? source.detail
+      : t("hooks.useTranscription.noDiagnosticDetail");
   return {
     operation,
     code: normalizeTranscriptionErrorCode(source.code),
@@ -649,6 +660,7 @@ export function normalizeTranscriptionDiagnostic(diagnostic: unknown): Transcrip
 }
 
 function detachSessionCleanup(
+  t: OpenGeniText,
   session: TranscriptionSession,
   options: {
     cancelReason?: string | undefined;
@@ -658,6 +670,7 @@ function detachSessionCleanup(
 ): void {
   if (options.cancelReason) {
     void runBoundedCleanup(
+      t,
       "cancel",
       () => session.cancel(options.cancelReason),
       options.cleanupTimeoutMs,
@@ -665,6 +678,7 @@ function detachSessionCleanup(
     );
   }
   void runBoundedCleanup(
+    t,
     "close",
     () => session.close(),
     options.cleanupTimeoutMs,
@@ -673,6 +687,7 @@ function detachSessionCleanup(
 }
 
 async function runBoundedCleanup(
+  t: OpenGeniText,
   operation: "cancel" | "close",
   invoke: () => Promise<void>,
   timeoutMs: number,
@@ -696,14 +711,19 @@ async function runBoundedCleanup(
     code: outcome.kind === "timeout" ? "timeout" : "provider",
     detail:
       outcome.kind === "timeout"
-        ? `Transcription ${operation} exceeded ${timeoutMs}ms.`
-        : diagnosticDetail(outcome.error),
+        ? t("hooks.useTranscription.transcriptionOperationExceededTimeoutmsMs", {
+            operation,
+            timeoutMs,
+          })
+        : diagnosticDetail(t, outcome.error),
   });
 }
 
-function diagnosticDetail(error: unknown): string {
+function diagnosticDetail(t: OpenGeniText, error: unknown): string {
   if (error instanceof Error) return error.message;
-  return typeof error === "string" ? error : "Unknown transcription adapter failure.";
+  return typeof error === "string"
+    ? error
+    : t("hooks.useTranscription.unknownTranscriptionAdapterFailure");
 }
 
 function normalizeTimeout(value: number | undefined, fallback: number): number {

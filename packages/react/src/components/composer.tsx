@@ -54,12 +54,14 @@ import {
 } from "../lib/composer-responsive-context";
 import { composerSubmissionErrorMessage } from "../lib/format";
 import { defaultChatComposerMessages, type ChatComposerMessages } from "../composer-messages";
+import { singleSendText } from "../messages/single-send";
 import type { PickerModelRow } from "../model-policy";
 import { useLightboxOptional } from "../timeline/screenshot-lightbox";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
 import { TooltipProvider } from "./tooltip";
+import { useOpenGeniText } from "../messages/runtime";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 export type { ResponsiveBasis } from "../lib/composer-responsive-context";
@@ -80,6 +82,11 @@ export type ComposerDelivery = Pick<
   | "value"
   | "setValue"
   | "send"
+  | "sendToQueue"
+  | "busySend"
+  | "singleSend"
+  | "alternateSend"
+  | "sendAlternate"
   | "steer"
   | "sending"
   | "canSend"
@@ -252,7 +259,7 @@ export function useChatComposerController({
   controlLinks,
   disabled = false,
   attachments,
-  commands = defaultCommands,
+  commands: commandsProp,
   commandContext,
   onClearView,
   onPaste,
@@ -260,10 +267,16 @@ export function useChatComposerController({
   runControl = "pause",
   running = false,
 }: UseChatComposerControllerOptions) {
+  const t = useOpenGeniText();
+  const commands = useMemo(() => commandsProp ?? defaultCommands(t), [commandsProp, t]);
   const formatError = useErrorMessage();
+  const singleSend = delivery.singleSend === true;
   const messages = useMemo(
-    () => ({ ...defaultChatComposerMessages, ...messageOverrides }),
-    [messageOverrides],
+    () => ({
+      ...defaultChatComposerMessages(singleSend ? singleSendText(t) : t),
+      ...messageOverrides,
+    }),
+    [messageOverrides, singleSend, t],
   );
   const id = useId();
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -292,6 +305,8 @@ export function useChatComposerController({
   const [controlDetailsOpen, setControlDetailsOpen] = useState(false);
   const [paletteMounted, setPaletteMounted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // Which control's submission is in flight, so only that control shows it.
+  const [submittingMode, setSubmittingMode] = useState<ComposerSubmitMode | null>(null);
   const submittingRef = useRef(false);
   const controlOperationRef = useRef(false);
   const deliveryValue = delivery.value;
@@ -504,11 +519,20 @@ export function useChatComposerController({
       if (!delivery.canSend) return false;
       submittingRef.current = true;
       setSubmitting(true);
+      setSubmittingMode(mode);
       try {
-        return mode === "steer" || resumesOnSend ? await delivery.steer() : await delivery.send();
+        if (resumesOnSend) return await delivery.steer();
+        // With one Send, Cmd/Ctrl+Enter is just Send.
+        if (mode !== "steer" || singleSend) return await delivery.send();
+        // Cmd/Ctrl+Enter and the button beside Send send the other way:
+        // Steer when Send queues, queue when Send steers.
+        return delivery.sendAlternate ? await delivery.sendAlternate() : await delivery.steer();
       } finally {
         submittingRef.current = false;
-        if (mountedRef.current) setSubmitting(false);
+        if (mountedRef.current) {
+          setSubmitting(false);
+          setSubmittingMode(null);
+        }
       }
     },
     [
@@ -520,6 +544,7 @@ export function useChatComposerController({
       messages.annotationNotesRequired,
       messages.slashCommandBlocked,
       resumesOnSend,
+      singleSend,
     ],
   );
 
@@ -570,7 +595,7 @@ export function useChatComposerController({
             ? messages.controlChangedError
             : formatError(
                 delivery.error,
-                composerSubmissionErrorMessage(delivery.error) || messages.sendFailedError,
+                composerSubmissionErrorMessage(t, delivery.error) || messages.sendFailedError,
               ),
         }
       : null);
@@ -681,6 +706,10 @@ export function useChatComposerController({
     canSubmit,
     submitBlocker,
     submit,
+    busySend: delivery.busySend ?? "queue",
+    singleSend,
+    alternateSend: delivery.sendAlternate ? (delivery.alternateSend ?? null) : null,
+    submittingMode,
     handleKeyDown,
     handlePaste,
     handleFileChange,
@@ -1230,6 +1259,10 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
       return null;
     const busy = controller.pausing || controller.resuming;
     const tip = title ?? controller.messages.pauseTitle;
+    // On a narrow composer, Send and its Queue/Steer choice need the room
+    // while there is a draft, so Pause steps aside until it is sent or
+    // cleared, as the phone app's single trailing control does.
+    const yieldsToDraft = controller.submitBlocker !== "empty";
     return (
       <ComposerTip tip={tip}>
         <button
@@ -1245,6 +1278,7 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
             "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
             "hover:border-og-status-waiting/50 hover:text-og-status-waiting",
             "disabled:opacity-50",
+            yieldsToDraft && "og-composer-pause-yields max-sm:hidden",
             className,
           )}
         >
@@ -1275,6 +1309,7 @@ export const StopButton = forwardRef<HTMLButtonElement, ComposerStopButtonProps>
     { className, "aria-label": ariaLabel, title, children, ...props },
     ref,
   ) {
+    const t = useOpenGeniText();
     const controller = useComposerController();
     if (
       controller.runControl !== "stop" ||
@@ -1284,7 +1319,7 @@ export const StopButton = forwardRef<HTMLButtonElement, ComposerStopButtonProps>
     )
       return null;
     const busy = controller.pausing;
-    const label = ariaLabel ?? controller.messages.stopAriaLabel ?? "Stop";
+    const label = ariaLabel ?? controller.messages.stopAriaLabel ?? t("composer.stop");
     const tip = title ?? controller.messages.stopTitle ?? label;
     return (
       <ComposerTip tip={tip}>
@@ -1321,6 +1356,85 @@ export type ComposerSendButtonProps = Omit<
   OwnedButtonProps
 >;
 
+export type ComposerAlternateSendButtonProps = ComposerSendButtonProps;
+
+/**
+ * The other way to send while the agent works, beside Send: Steer when Send
+ * queues, Queue when Send steers. It appears once there is something to send,
+ * so touch users (who have no Cmd/Ctrl+Enter) always have both choices.
+ * It is shown exactly when Send takes its busy path (`alternateSend`), and
+ * keeps its word on every width; on narrow composers Pause steps aside while
+ * there is a draft to make room, as on phones.
+ */
+export const AlternateSendButton = forwardRef<HTMLButtonElement, ComposerAlternateSendButtonProps>(
+  function ComposerAlternateSendButton(
+    { className, "aria-label": ariaLabel, title, children, ...props },
+    ref,
+  ) {
+    const t = useOpenGeniText();
+    const controller = useComposerController();
+    if (
+      controller.alternateSend === null ||
+      controller.paused ||
+      controller.submitBlocker === "empty" ||
+      controller.submitBlocker === "disabled"
+    )
+      return null;
+    const queues = controller.alternateSend === "queue";
+    const label = queues
+      ? (controller.messages.queueLabel ?? t("composerMessages.queue"))
+      : (controller.messages.steerLabel ?? t("composerMessages.steer"));
+    const tip =
+      title ??
+      (controller.submitBlocker === "annotations"
+        ? controller.messages.annotationNotesRequired
+        : queues
+          ? (controller.messages.queueTitle ?? t("composerMessages.queueRunsAfterCurrentWork"))
+          : (controller.messages.steerTitle ?? t("composerMessages.steerReadsItSoon")));
+    const inFlight = controller.sending && controller.submittingMode === "steer";
+    return (
+      <ComposerTip tip={tip}>
+        <button
+          data-analytics-action={queues ? "queue" : "steer"}
+          data-og-composer-alternate-send=""
+          {...props}
+          ref={ref}
+          type="button"
+          onClick={(event) => {
+            // This button goes away once the draft is sent. Return keyboard
+            // and screen-reader focus to the message box instead of the page.
+            const hadFocus = event.currentTarget === document.activeElement;
+            void controller.submit("steer").then((sent) => {
+              if (sent && hadFocus) controller.focusInput();
+            });
+          }}
+          disabled={!controller.canSubmit}
+          aria-label={ariaLabel ?? label}
+          aria-keyshortcuts="Meta+Enter Control+Enter"
+          className={cn(
+            "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-og-md px-2.5 pointer-coarse:h-11 pointer-coarse:px-3.5",
+            "border border-og-border bg-og-surface-1 text-og-control font-medium text-og-fg",
+            "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
+            "hover:bg-og-surface-2 active:scale-95",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+            className,
+          )}
+        >
+          {children ??
+            (inFlight ? (
+              <>
+                <LoaderCircleIcon aria-hidden="true" className="size-3.5 animate-og-spin" />
+                <span>{label}</span>
+              </>
+            ) : (
+              label
+            ))}
+        </button>
+      </ComposerTip>
+    );
+  },
+);
+
 export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>(
   function ComposerSendButton(
     { className, "aria-label": ariaLabel, title, children, ...props },
@@ -1333,7 +1447,9 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
         ? controller.messages.annotationNotesRequired
         : controller.paused
           ? controller.messages.sendAndResumeTitle
-          : controller.messages.sendTitle);
+          : controller.busySend === "steer"
+            ? (controller.messages.steerSendTitle ?? controller.messages.sendTitle)
+            : controller.messages.sendTitle);
     return (
       <ComposerTip tip={tip}>
         <button
@@ -1341,7 +1457,14 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
           {...props}
           ref={ref}
           type="button"
-          onClick={() => void controller.submit("queue")}
+          onClick={(event) => {
+            // Send is disabled once the draft is sent; keep keyboard and
+            // screen-reader focus in the message box.
+            const hadFocus = event.currentTarget === document.activeElement;
+            void controller.submit("queue").then((sent) => {
+              if (sent && hadFocus) controller.focusInput();
+            });
+          }}
           disabled={!controller.canSubmit}
           data-og-tip={tip}
           aria-label={
@@ -1360,7 +1483,7 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
           )}
         >
           {children ??
-            (controller.sending ? (
+            (controller.sending && controller.submittingMode !== "steer" ? (
               <LoaderCircleIcon className="size-4 animate-og-spin" />
             ) : (
               <ArrowUpIcon className="size-4" />
@@ -1726,6 +1849,7 @@ function AttachmentChips({
   onRetainPreview: UseFileAttachmentsResult["retainPreview"];
   onLoadPreview: UseFileAttachmentsResult["loadPreview"];
 }) {
+  const t = useOpenGeniText();
   const lightbox = useLightboxOptional();
   const previewRequest = useRef<AbortController | null>(null);
   const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
@@ -1847,7 +1971,7 @@ function AttachmentChips({
           attachment.contentType.startsWith("image/"),
         );
         const statusText = previewFailed
-          ? (messages.previewUnavailable ?? "Preview unavailable")
+          ? (messages.previewUnavailable ?? t("composer.previewUnavailable"))
           : attachment.status === "uploading"
             ? messages.uploading
             : failed

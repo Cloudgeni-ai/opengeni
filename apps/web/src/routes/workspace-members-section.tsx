@@ -1,5 +1,6 @@
 // Settings > Access: who can use this workspace, with one role each. The same
 // AccessList rows and verbs as every other place access is edited.
+import { t } from "@/lib/console-text";
 import { Link } from "@tanstack/react-router";
 import { SearchIcon, UserPlusIcon } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
@@ -600,7 +601,7 @@ function MembersSectionContent({
   const activeWorkspace = context.workspaces?.find((workspace) => workspace.id === workspaceId);
   const workspaceName = activeWorkspace?.name ?? "this workspace";
   const organizationName = activeWorkspace
-    ? orgLabel(activeWorkspace.accountId, context.accessContext.accountGrants ?? [])
+    ? orgLabel(t, activeWorkspace.accountId, context.accessContext.accountGrants ?? [])
     : "your organization";
   // A local install has one person: nobody else to add, and no People page.
   const singleUser = context.clientConfig?.productAccessMode === "local";

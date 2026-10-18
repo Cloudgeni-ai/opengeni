@@ -1,5 +1,6 @@
-// Console chrome around the shared chat composer. Enter queues; Cmd/Ctrl+Enter
-// steers, so there is no persistent delivery-mode switch to get out of sync.
+// Console chrome around the shared chat composer. While the agent works, Send
+// follows the workspace's choice (queue or steer) and the other choice sits
+// beside it (also Cmd/Ctrl+Enter), so there is no per-message mode to track.
 import {
   ChatComposer,
   useFileAttachments,

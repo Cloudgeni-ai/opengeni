@@ -12,9 +12,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import libnpmpublish from "libnpmpublish";
+import { admitCanarySource, canaryGit, verifyCanaryController } from "./canary-source-admission";
+import { signCanarySource, type SuppliedCanaryProvenance } from "./canary-source-provenance";
 
 import {
   boundedCanaryBody,
@@ -136,6 +139,9 @@ const registry = "https://registry.npmjs.org";
 // acknowledgement while the rest of the cohort is already visible.
 const CANARY_RECEIPT_TIMEOUT_MS = 600_000;
 const CANARY_RECEIPT_REQUEST_TIMEOUT_MS = 10_000;
+// npm tags a brand-new package `latest: 0.0.0-stage` while its first version
+// waits in the staged-publishing queue for a maintainer's 2FA approval.
+const NPM_STAGED_PLACEHOLDER_VERSION = "0.0.0-stage";
 const CANARY_RECEIPT_POLL_INTERVAL_MS = 1_000;
 // Each receipt costs two GETs. The default budget scales with the cohort so
 // the first pass and the final complete-cohort reserve never consume the whole
@@ -174,7 +180,9 @@ export function verifyCanarySourceBinding(
   actualHead: string,
   sourceRoot: string,
   scriptRoot: string,
+  controllerHead = actualHead,
 ): void {
+  verifyCanaryController(env, controllerHead);
   const sha = env.GITHUB_SHA;
   if (
     env.GITHUB_ACTIONS !== "true" ||
@@ -187,9 +195,8 @@ export function verifyCanarySourceBinding(
     !sha ||
     !/^[0-9a-f]{40}$/.test(sha) ||
     sha !== env.GITHUB_WORKFLOW_SHA ||
-    sha !== env.SOURCE_SHA ||
-    sha !== actualHead ||
-    resolve(sourceRoot) !== resolve(scriptRoot) ||
+    env.SOURCE_SHA !== actualHead ||
+    (sha !== actualHead && resolve(sourceRoot) === resolve(scriptRoot)) ||
     !env.GITHUB_RUN_ID ||
     !env.GITHUB_RUN_ATTEMPT ||
     !env.ACTIONS_ID_TOKEN_REQUEST_URL ||
@@ -352,6 +359,7 @@ export async function publishCanaryArtifact(
   publish: typeof libnpmpublish.publish = libnpmpublish.publish,
   targetRegistry = registry,
   timeoutMs = 120_000,
+  supplied?: SuppliedCanaryProvenance,
 ): Promise<{ status: number; transparencyLogUrl: string; headers: Record<string, string> }> {
   assertCanaryManifest(manifest);
   if (
@@ -379,7 +387,8 @@ export async function publishCanaryArtifact(
         forceAuth: { token },
         defaultTag: "canary",
         access: "public",
-        provenance: true,
+        provenance: !supplied,
+        ...(supplied ? { provenanceFile: supplied.file } : {}),
         retry: { retries: 0 },
         timeout: Math.min(30_000, timeoutMs),
         signal: controller.signal,
@@ -394,13 +403,15 @@ export async function publishCanaryArtifact(
     !Number.isInteger(response.status) ||
     response.status < 200 ||
     response.status >= 300 ||
-    !/^https:\/\/search\.sigstore\.dev\/\?logIndex=\d+$/.test(response.transparencyLogUrl ?? "")
+    !/^https:\/\/search\.sigstore\.dev\/\?logIndex=\d+$/.test(
+      supplied?.transparencyLogUrl ?? response.transparencyLogUrl ?? "",
+    )
   ) {
     throw new Error(`Canary provenance publication was not confirmed for ${manifest.name}`);
   }
   return {
     status: response.status,
-    transparencyLogUrl: response.transparencyLogUrl!,
+    transparencyLogUrl: supplied?.transparencyLogUrl ?? response.transparencyLogUrl!,
     headers: canaryResponseHeaders(response.headers),
   };
 }
@@ -484,6 +495,34 @@ export function freezeCanaryCohort(
   return Object.freeze(frozen);
 }
 
+/** Diagnostic only: never converts an unknown write into proof of no write. */
+export function canaryWriteFailureDiagnostic(error: unknown): { category: string; code?: string } {
+  if (error instanceof Error && /^root was signed by \d+\/\d+ keys$/.test(error.message)) {
+    return { category: "tuf_root_signature_verification_failed" };
+  }
+  const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+  if (
+    typeof code === "string" &&
+    [
+      "E400",
+      "E401",
+      "E403",
+      "E404",
+      "E409",
+      "E429",
+      "E500",
+      "E503",
+      "ECONNRESET",
+      "ETIMEDOUT",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+    ].includes(code)
+  ) {
+    return { category: "registry_or_transport_error", code };
+  }
+  return { category: "publication_or_acknowledgement_failed" };
+}
+
 export async function publishPreparedCanaries(
   packages: readonly FrozenCanaryArtifact[],
   custody: CanaryCustody,
@@ -491,6 +530,7 @@ export async function publishPreparedCanaries(
   read: typeof readRegistryPackage = readRegistryPackage,
   publish: typeof libnpmpublish.publish = libnpmpublish.publish,
   timeoutMs = 120_000,
+  provenance?: (pkg: FrozenCanaryArtifact) => Promise<SuppliedCanaryProvenance>,
 ): Promise<void> {
   for (const pkg of packages) {
     if (
@@ -518,6 +558,15 @@ export async function publishPreparedCanaries(
       archiveBytes: pkg.archiveBytes,
       manifestSha256: pkg.manifestSha256,
     };
+    const supplied = await provenance?.(pkg);
+    if (supplied?.evidence)
+      custody.record("PROVENANCE_PREPARED", {
+        ...binding,
+        provenance: supplied.evidence,
+        transparencyLogUrl: supplied.transparencyLogUrl,
+        artifact: `canary-source-provenance-${process.env.SOURCE_SHA}`,
+        meaning: "SIGNED_INPUT_NOT_REGISTRY_WRITE_ACCEPTANCE",
+      });
     const intent = custody.record("WRITE_INTENT", binding);
     try {
       const acknowledgement = await publishCanaryArtifact(
@@ -527,6 +576,7 @@ export async function publishPreparedCanaries(
         publish,
         registry,
         timeoutMs,
+        supplied,
       );
       custody.record("WRITE_ACKNOWLEDGED", {
         ...binding,
@@ -534,13 +584,21 @@ export async function publishPreparedCanaries(
         ...acknowledgement,
         meaning: "POSITIVE_LIBRARY_HTTP_RESPONSE_NOT_SIGNED_BYTE_ACCEPTANCE",
       });
-    } catch {
+    } catch (error) {
       // The original intent is already durable; storage failure cannot establish no write.
       try {
-        custody.record("WRITE_UNKNOWN", { ...binding, intent, noReplay: true });
+        custody.record("WRITE_UNKNOWN", {
+          ...binding,
+          intent,
+          noReplay: true,
+          diagnostic: canaryWriteFailureDiagnostic(error),
+        });
       } catch {
         // Retain INTENT without a trusted acknowledgement; never continue or infer idle.
       }
+      // Raw provider errors may include credential-bearing request details;
+      // retain only the allowlisted diagnostic above, never the original cause.
+      // eslint-disable-next-line preserve-caught-error
       throw new Error(`Canary write outcome is unknown for ${pkg.name}; no retry was attempted`);
     }
   }
@@ -550,13 +608,17 @@ export async function publishPreparedCanaries(
 function receiptObservation(pkg: CanaryArchive, current: RegistryPackage): string {
   // npm always points `latest` at a package's first published version, whatever
   // tag the publish asked for. For a package with no stable release yet that is
-  // this canary, and nothing else may have moved the tag.
+  // this canary, or npm's staged-publishing placeholder when the registry holds
+  // the new package for maintainer approval. Nothing else may have moved the tag.
   const latest = current["dist-tags"].latest;
-  const firstPublication = pkg.previousLatest === undefined && latest === pkg.version;
+  const staged = pkg.previousLatest === undefined && latest === NPM_STAGED_PLACEHOLDER_VERSION;
+  const firstPublication = pkg.previousLatest === undefined && (latest === pkg.version || staged);
   if (latest !== pkg.previousLatest && !firstPublication) {
     throw new Error(`Stable tag changed during canary publication for ${pkg.name}`);
   }
-  if (!Object.hasOwn(current.versions, pkg.version)) return "version_pending";
+  if (!Object.hasOwn(current.versions, pkg.version)) {
+    return staged ? "staged_approval_pending" : "version_pending";
+  }
   if (current["dist-tags"].canary !== pkg.version) return "canary_tag_pending";
   const dist = current.versions[pkg.version]?.dist;
   if (dist?.integrity && dist.integrity !== pkg.integrity) {
@@ -576,7 +638,7 @@ export async function confirmCanaryCohort(
   options: ReceiptPollOptions = {},
 ): Promise<void> {
   const now = options.now ?? performance.now.bind(performance);
-  const sleep = options.sleep ?? Bun.sleep;
+  const waitForNextPoll = options.sleep ?? sleep;
   const timeoutMs = options.timeoutMs ?? CANARY_RECEIPT_TIMEOUT_MS;
   const pollIntervalMs = options.pollIntervalMs ?? CANARY_RECEIPT_POLL_INTERVAL_MS;
   const maxReads = options.maxReads ?? defaultCanaryReceiptReads(packages.length);
@@ -656,15 +718,27 @@ export async function confirmCanaryCohort(
         }),
       );
       let failure: unknown;
+      const staged: string[] = [];
       for (const result of results) {
         if (result.status === "rejected") {
           failure ??= result.reason;
         } else {
           lastObservation = result.value.observation;
           if (lastObservation === "matched") pending.delete(result.value.pkg.name);
+          if (lastObservation === "staged_approval_pending") {
+            staged.push(`${result.value.pkg.name}@${result.value.pkg.version}`);
+          }
         }
       }
       if (failure) throw failure;
+      // Polling cannot clear a staged first publication; only a maintainer can.
+      if (staged.length) {
+        throw new Error(
+          `npm staged publishing holds the first publication of ${staged.join(", ")}. ` +
+            "A maintainer must approve it with 2FA (npm stage list, then npm stage approve <id>, " +
+            "or the Staged Packages tab on npmjs.com); then reconcile this publication run.",
+        );
+      }
       if (pending.size === 0) {
         if (packages.length > maxReads - reads || now() >= deadline) {
           throw new Error("Final canary cohort cannot fit the remaining read bounds");
@@ -735,7 +809,7 @@ export async function confirmCanaryCohort(
       remaining,
       Math.max(pollIntervalMs, (remaining - completionTime) / remainingPolls),
     );
-    if (wait > 0 && reads < maxReads) await sleep(wait);
+    if (wait > 0 && reads < maxReads) await waitForNextPoll(wait);
   }
   const category = reads >= maxReads && now() < deadline ? "read_limit" : lastObservation;
   throw new Error(
@@ -774,6 +848,7 @@ export async function publishAndVerifyCanaryCohort(
     read?: typeof readRegistryPackage;
     publish?: typeof libnpmpublish.publish;
     writeTimeoutMs?: number;
+    provenance?: (pkg: FrozenCanaryArtifact) => Promise<SuppliedCanaryProvenance>;
   } = {},
 ): Promise<Record<string, string>> {
   const read = options.read ?? readRegistryPackage;
@@ -784,6 +859,7 @@ export async function publishAndVerifyCanaryCohort(
     read,
     options.publish,
     options.writeTimeoutMs,
+    options.provenance,
   );
   await confirmCanaryCohort(packages, read, { ...options, custody });
   const pins = Object.fromEntries(
@@ -813,17 +889,30 @@ function run(command: string, args: string[], cwd?: string): void {
 }
 
 export async function main(): Promise<void> {
+  if (process.versions.bun) {
+    throw new Error("Canary publication requires native Node for Sigstore/TUF verification");
+  }
   const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const head = spawnSync("git", ["rev-parse", "HEAD"], {
     cwd: repoRoot,
     encoding: "utf8",
   });
   if (head.status !== 0) throw new Error("Canary source HEAD cannot be resolved");
-  verifyCanarySourceBinding(process.env, head.stdout.trim(), repoRoot, scriptRoot);
-  mkdirSync(join(repoRoot, ".release"), { recursive: true });
-  const pinsPath = join(repoRoot, ".release/site-package-versions.json");
+  verifyCanarySourceBinding(
+    process.env,
+    head.stdout.trim(),
+    repoRoot,
+    scriptRoot,
+    canaryGit(scriptRoot, ["rev-parse", "HEAD"]),
+  );
+  await admitCanarySource(scriptRoot);
+  mkdirSync(join(scriptRoot, ".release"), { recursive: true });
+  const pinsPath = join(scriptRoot, ".release/site-package-versions.json");
+  const provenanceDirectory = join(scriptRoot, ".release/canary-provenance");
+  if (process.env.SOURCE_SHA !== process.env.GITHUB_SHA)
+    mkdirSync(provenanceDirectory, { mode: 0o700 });
   if (existsSync(pinsPath)) throw new Error("Canary Site pins already exist; no replay is allowed");
-  const custody = new CanaryReceiptStore(join(repoRoot, ".release/canary-receipts"), {
+  const custody = new CanaryReceiptStore(join(scriptRoot, ".release/canary-receipts"), {
     source: process.env.SOURCE_SHA!,
     workflowSource: process.env.GITHUB_WORKFLOW_SHA!,
     runId: process.env.GITHUB_RUN_ID!,
@@ -912,7 +1001,14 @@ export async function main(): Promise<void> {
     }
     const frozen = freezeCanaryCohort(prepared, custody);
     phase = "publication_and_receipts";
-    const pins = await publishAndVerifyCanaryCohort(frozen, custody, process.env.NODE_AUTH_TOKEN!);
+    const pins = await publishAndVerifyCanaryCohort(frozen, custody, process.env.NODE_AUTH_TOKEN!, {
+      ...(process.env.SOURCE_SHA !== process.env.GITHUB_SHA
+        ? {
+            provenance: (pkg: FrozenCanaryArtifact) =>
+              signCanarySource(pkg.manifest, pkg.packed, provenanceDirectory),
+          }
+        : {}),
+    });
     phase = "site_pins";
     writeFileSync(pinsPath, JSON.stringify(pins, null, 2), { flag: "wx", mode: 0o600 });
     custody.record("SITE_PINS_WRITTEN", {

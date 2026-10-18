@@ -1,21 +1,25 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_FREE_SITE_LIMITS, type SitePublication } from "@opengeni/contracts";
+import { DEFAULT_SITE_LIMITS, type SitePublication } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
 import {
   availabilityMessage,
   domainFromHostname,
   draftFromPublication,
+  formatLimitAmount,
+  formatPlatformAmount,
   formatUsdMicros,
-  knownLimits,
   labelProblemMessage,
-  limitSummary,
   normalizeLabelInput,
+  outsideUsageLine,
   parseLimitField,
+  platformRefusal,
   publicationRequest,
+  readinessTitle,
   sitePublicationLoadFromError,
   sitesClientConfig,
   suggestedLabel,
+  viewAsVisitorUrl,
 } from "./site-publishing";
 
 const saved: SitePublication = {
@@ -28,11 +32,13 @@ const saved: SitePublication = {
   status: "active",
   noindex: true,
   agent: { enabled: false, model: null, instructions: null, tools: null, guestTools: false },
-  limitProfile: { kind: "free", overrides: null },
-  effectiveLimits: { ...DEFAULT_FREE_SITE_LIMITS },
+  limitProfile: { kind: "standard", overrides: null },
+  effectiveLimits: { ...DEFAULT_SITE_LIMITS },
   invitedEmails: [],
   moderation: { openReports: 0, suspendedAt: null, suspendedBy: null, suspendedReason: null },
-  usage: { agentMicrosThisMonth: 0, conversationsToday: 0 },
+  usage: { agentMicrosThisMonth: 0, agentMicrosToday: 0, conversationsToday: 0 },
+  warnings: [],
+  outsideAgentModel: null,
   createdAt: "2026-10-14T09:00:00.000Z",
   updatedAt: "2026-10-14T09:00:00.000Z",
 };
@@ -85,7 +91,6 @@ describe("Site publishing helpers", () => {
       label: "team-crm-4k9x",
       access: "members",
       agent: { enabled: false },
-      limitProfile: { kind: "free", overrides: null },
       noindex: true,
       status: "active",
     });
@@ -119,65 +124,143 @@ describe("Site publishing helpers", () => {
     ).toEqual({ status: "active" });
   });
 
-  test("sends guest tools only when they change, and limits only from admins", () => {
-    const withTools = {
-      ...saved,
-      agent: { ...saved.agent, enabled: true, tools: ["linear"], guestTools: false },
-    };
-    const draft = { ...draftFromPublication(withTools, "x"), guestTools: true };
-    expect(publicationRequest(draft, withTools, { publish: false })).toEqual({
-      agent: { enabled: true, model: null, guestTools: true },
+  test("outside limits start at $10 a month with no per-person limit", () => {
+    const draft = draftFromPublication({ ...saved, access: "public" }, "x");
+    expect(draft).toMatchObject({
+      outsideAgent: true,
+      siteLimit: "10",
+      sitePeriod: "month",
+      personLimitOn: false,
     });
-    const first = draftFromPublication(null, "team-crm-4k9x");
-    expect(
-      publicationRequest(first, null, { publish: true, canChangeLimits: false }),
-    ).not.toHaveProperty("limitProfile");
-    const custom = { ...draftFromPublication(saved, "x"), profile: "custom" as const };
-    expect(publicationRequest(custom, saved, { publish: false, canChangeLimits: false })).toEqual(
+    // Unchanged defaults send no limits.
+    expect(publicationRequest(draft, { ...saved, access: "public" }, { publish: false })).toEqual(
       {},
     );
   });
 
-  test("custom limits parse dollars to micro-USD and empty to no limit", () => {
+  test("changed outside limits are saved as overrides on the Site's profile, by admins only", () => {
+    const invited = { ...saved, access: "invited" as const };
+    const draft = {
+      ...draftFromPublication(invited, "x"),
+      siteLimit: "25",
+      sitePeriod: "day" as const,
+      personLimitOn: true,
+      personLimit: "1",
+      personPeriod: "day" as const,
+    };
+    expect(publicationRequest(draft, invited, { publish: false })).toEqual({
+      limitProfile: {
+        // The profile keeps its kind; only the limit fields change.
+        kind: "standard",
+        overrides: {
+          agentsEnabled: true,
+          agentMicrosPerSitePerMonth: null,
+          agentMicrosPerSitePerDay: 25_000_000,
+          agentMicrosPerVisitorPerDay: 1_000_000,
+          agentMicrosPerVisitorPerMonth: null,
+        },
+      },
+    });
+    expect(publicationRequest(draft, invited, { publish: false, canChangeLimits: false })).toEqual(
+      {},
+    );
+    // Other custom values are kept; turning the outside agent off is a limit change too.
+    const custom = {
+      ...invited,
+      limitProfile: { kind: "custom" as const, overrides: { requestsPerMinutePerVisitor: 60 } },
+    };
+    expect(
+      publicationRequest({ ...draftFromPublication(custom, "x"), outsideAgent: false }, custom, {
+        publish: false,
+      }).limitProfile?.overrides,
+    ).toMatchObject({ requestsPerMinutePerVisitor: 60, agentsEnabled: false });
+    // A credits profile stays credits: its multiplied guards are not lost.
+    const credits = {
+      ...invited,
+      limitProfile: { kind: "credits" as const, overrides: null },
+    };
+    expect(
+      publicationRequest({ ...draftFromPublication(credits, "x"), siteLimit: "40" }, credits, {
+        publish: false,
+      }).limitProfile,
+    ).toMatchObject({ kind: "credits", overrides: { agentMicrosPerSitePerMonth: 40_000_000 } });
+    // Members-only Sites have no outside limits to send.
+    expect(
+      publicationRequest({ ...draftFromPublication(saved, "x"), siteLimit: "3" }, saved, {
+        publish: false,
+      }),
+    ).toEqual({});
+  });
+
+  test("the usage line follows the Site limit's period", () => {
+    const usage = {
+      agentMicrosThisMonth: 1_200_000,
+      agentMicrosToday: 400_000,
+      conversationsToday: 3,
+    };
+    expect(outsideUsageLine({ ...saved, usage })).toBe("$1.20 of $10 used this month");
+    expect(
+      outsideUsageLine({
+        ...saved,
+        usage,
+        effectiveLimits: {
+          ...saved.effectiveLimits,
+          agentMicrosPerSitePerMonth: null,
+          agentMicrosPerSitePerDay: 2_000_000,
+        },
+      }),
+    ).toBe("$0.40 of $2 used today");
+    expect(
+      outsideUsageLine({
+        ...saved,
+        usage,
+        effectiveLimits: { ...saved.effectiveLimits, agentMicrosPerSitePerMonth: null },
+      }),
+    ).toBe("$1.20 used this month");
+    expect(formatLimitAmount(10_000_000)).toBe("$10");
+    expect(formatUsdMicros(430_000)).toBe("$0.43");
+  });
+
+  test("dollar fields parse to micro-USD and empty to no limit", () => {
     expect(parseLimitField("0.05", true)).toBe(50_000);
     expect(parseLimitField("$2", true)).toBe(2_000_000);
     expect(parseLimitField("", true)).toBeNull();
-    expect(parseLimitField("12", false)).toBe(12);
-    expect(parseLimitField("1.5", false)).toBeUndefined();
-    expect(parseLimitField("ten", false)).toBeUndefined();
-    const draft = {
-      ...draftFromPublication(saved, "x"),
-      profile: "custom" as const,
-    };
-    draft.custom = { ...draft.custom, turnsPerConversation: "5", agentMicrosPerSitePerMonth: "" };
-    expect(publicationRequest(draft, saved, { publish: false }).limitProfile).toEqual({
-      kind: "custom",
-      overrides: {
-        conversationsPerVisitorPerDay: 10,
-        conversationsPerSitePerDay: 50,
-        turnsPerConversation: 5,
-        agentMicrosPerConversation: 20_000,
-        agentMicrosPerVisitorPerDay: 200_000,
-        agentMicrosPerSitePerMonth: null,
-      },
-    });
+    expect(parseLimitField("ten", true)).toBeUndefined();
   });
 
-  test("shows the key numbers of a profile", () => {
-    expect(limitSummary(knownLimits("free", null, {})!)).toEqual([
-      { label: "Conversations", value: "10 per visitor a day, 50 per Site a day" },
-      { label: "Messages", value: "20 per conversation" },
-      {
-        label: "Agent spend",
-        value: "$0.02 per conversation, $0.20 per visitor a day, $2.00 per month",
-      },
-    ]);
-    expect(knownLimits("credits", null, {})).toBeNull();
+  test("readiness, view as visitor, platform amounts and refusals in words", () => {
+    const warning = {
+      code: "site_data_guest_write" as const,
+      message: "Visitors can't add votes.",
+      suggestion: "Let guests append to votes.",
+      fix: null,
+    };
+    expect(readinessTitle([warning, warning], "public")).toBe(
+      "2 things won't work for public visitors",
+    );
+    expect(readinessTitle([warning], "invited")).toBe("1 thing won't work for invited people");
+    expect(viewAsVisitorUrl({ ...saved, access: "public" })).toBe(
+      "https://team-crm-4k9x.sites.example.test/?og_view_as=public",
+    );
+    expect(viewAsVisitorUrl({ ...saved, access: "invited" })).toBe(
+      "https://team-crm-4k9x.sites.example.test/?og_view_as=invited",
+    );
+    expect(viewAsVisitorUrl(saved)).toBeNull();
+    expect(formatPlatformAmount("requests", 1_234_567)).toBe("1.2M");
+    expect(formatPlatformAmount("storage_bytes", 1_400_000_000)).toBe("1.4 GB");
+    const refusal = (status: number, code: string, detail: string) =>
+      new OpenGeniApiError(
+        status,
+        JSON.stringify({ error: { code, message: code, details: { code: detail } } }),
+        { mutation: true },
+      );
     expect(
-      knownLimits("credits", { ...saved, limitProfile: { kind: "credits", overrides: null } }, {}),
-    ).toEqual(saved.effectiveLimits);
-    expect(knownLimits("unlimited", null, {})!.agentMicrosPerSitePerMonth).toBeNull();
-    expect(formatUsdMicros(430_000)).toBe("$0.43");
+      platformRefusal(refusal(402, "payment_required", "site_platform_quota_exhausted"))?.title,
+    ).toBe("Sites allowance used up");
+    expect(
+      platformRefusal(refusal(503, "limit_exceeded", "site_platform_brake_engaged"))?.title,
+    ).toBe("Publishing is paused");
+    expect(platformRefusal(apiError(500, "internal"))).toBeNull();
   });
 
   test("forced noindex wins over the saved choice and reads deployment facts safely", () => {

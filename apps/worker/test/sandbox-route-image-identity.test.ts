@@ -20,6 +20,7 @@ describe("managed sandbox logical image identity", () => {
     const media: Record<string, unknown> = {};
 
     const route = await resolveSandboxRoute({
+      turn: { id: "turn-1", executionGeneration: 1 } as never,
       input: {
         accountId: "11111111-1111-4111-8111-111111111111",
         workspaceId: "22222222-2222-4222-8222-222222222222",
@@ -55,6 +56,7 @@ describe("managed sandbox logical image identity", () => {
     const eventing = { modelRunSettings };
 
     const route = await resolveSandboxRoute({
+      turn: { id: "turn-1", executionGeneration: 1 } as never,
       input: {
         accountId: "11111111-1111-4111-8111-111111111111",
         workspaceId: "22222222-2222-4222-8222-222222222222",

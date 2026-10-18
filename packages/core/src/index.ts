@@ -2,6 +2,7 @@ export { readSessionAttachmentFiles } from "./domain/session-file-access";
 export { verifyDirectModelAccess } from "./domain/direct-model-provider";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
+export * from "./domain/mcp-streamable-http-client";
 export * from "./domain/mcp-account-routes";
 export * from "./domain/session-connection-accounts";
 export * from "./domain/organization-integration-catalog";
@@ -40,6 +41,8 @@ export * from "./domain/realtime-voice-billing";
 // SessionWorkflowClient, DocumentIndexClient, ObjectStorageDependency).
 export * from "./dependencies";
 export * from "./domain/vaults/provider-registry";
+export * from "./domain/vaults/external-provider-connections";
+export * from "./domain/vaults/remote-provider-runtime";
 export * from "./domain/vaults/provider-sync";
 export * from "./workflow-wake-contract";
 export * from "./user-presence";
@@ -51,6 +54,7 @@ export * from "./product-usage-metrics";
 // structural TYPES live here.
 export * from "./sandbox-types";
 export * from "./managed-auth-type";
+export { siteMayAccessSession, withConsoleSiteSessionAccess } from "./site-session-access";
 export {
   getManagedAuthRequestActorAbortSignal,
   getManagedAuthRequestActorAdmissionStamp,
@@ -98,6 +102,7 @@ export * from "./session-authorization";
 
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).
 export * from "./billing/limits";
+export * from "./domain/browser-retained-downloads";
 export * from "./billing/agent-run-admission";
 export * from "./billing/model-usage-settlement";
 export * from "./billing/model-call-admission";
@@ -147,6 +152,7 @@ export * from "./domain/organization-membership-lifecycle";
 export * from "./application/new-session-drafts";
 export * from "./application/composer-submit";
 export * from "./application/session-commands";
+export * from "./application/site-session-cancellation";
 export * from "./application/archived-session-imports";
 export * from "./application/session-tenancy";
 export * from "./application/organization-privacy";

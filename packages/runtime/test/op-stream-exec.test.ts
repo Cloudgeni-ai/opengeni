@@ -792,6 +792,7 @@ describe("op-stream exec (fake runner)", () => {
         outcome: "exited",
         exitCode: -1,
         reason: "op_exit",
+        backgroundChildrenStopped: false,
       },
     ]);
   });

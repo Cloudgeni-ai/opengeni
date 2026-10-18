@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useOpenGeniText } from "../../messages/runtime";
 
 export type SpreadsheetCommandTarget = {
   top: number;
@@ -34,6 +35,7 @@ export function useSpreadsheetCommandQueue({
   enabled: boolean;
   onCommandError?: ((error: Error) => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const [pendingCount, setPendingCount] = useState(0);
   const [failures, setFailures] = useState<readonly Command[]>([]);
   const commandsRef = useRef(new Map<number, Command>());
@@ -107,7 +109,8 @@ export function useSpreadsheetCommandQueue({
           return;
         }
         const error = cause instanceof Error ? cause : new Error(String(cause));
-        command.message = error.message || "Spreadsheet change failed";
+        command.message =
+          error.message || t("artifacts.spreadsheetCommandQueue.spreadsheetChangeFailed");
         command.retry = () => {
           if (!current() || !optionsRef.current.enabled || command.overlapped) return;
           commandsRef.current.delete(id);
@@ -163,7 +166,7 @@ export function useSpreadsheetCommandQueue({
         },
       );
     },
-    [clearPreflightFailure, refreshFailures],
+    [clearPreflightFailure, refreshFailures, t],
   );
 
   const first = failures[0];
@@ -175,7 +178,10 @@ export function useSpreadsheetCommandQueue({
       ? {
           message:
             failures.length > 1
-              ? `${first.message} (${failures.length} changes not saved)`
+              ? t("artifacts.spreadsheetCommandQueue.messageLengthChangesNotSaved", {
+                  message: first.message,
+                  length: failures.length,
+                })
               : first.message!,
           retry: enabled && !first.overlapped ? first.retry : undefined,
         }

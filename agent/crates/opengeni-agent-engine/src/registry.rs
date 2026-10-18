@@ -321,6 +321,19 @@ impl<T> OpRegistry<T> {
         }
     }
 
+    /// Terminal records still awaiting custody acknowledgement. The existing
+    /// retention lifecycle owns their lifetime; notification retries add no log.
+    pub fn unacknowledged_completed(&self) -> impl Iterator<Item = (&OpId, &T)> {
+        self.ops.iter().filter_map(|(id, entry)| match entry {
+            OpEntry::Complete {
+                state,
+                final_acked: false,
+                ..
+            } => Some((id, state)),
+            _ => None,
+        })
+    }
+
     /// One GC pass: drop final-acked + TTL-expired completed ops, LRU-evict
     /// past the completed cap (LOUDLY when un-final-acked), expire
     /// tombstones, bound lost markers.
@@ -460,6 +473,23 @@ mod tests {
             }) => {}
             other => panic!("expected Known(Complete), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn completion_retry_inventory_ends_only_at_final_ack() {
+        let mut r = registry();
+        let op = id("retained");
+        r.begin(&op, 7, 100);
+        assert_eq!(r.unacknowledged_completed().count(), 0);
+        r.complete(&op, 2, 200);
+        assert_eq!(
+            r.unacknowledged_completed()
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>(),
+            vec![7]
+        );
+        r.final_ack(&op);
+        assert_eq!(r.unacknowledged_completed().count(), 0);
     }
 
     #[test]

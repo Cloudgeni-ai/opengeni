@@ -288,6 +288,7 @@ function defaultEcho(req: ExecRequest, hostname: string): ExecResponse {
     stderr: new Uint8Array(0),
     timedOut: false,
     durationMs: "1",
+    backgroundChildrenStopped: false,
   };
 }
 

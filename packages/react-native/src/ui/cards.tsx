@@ -1,6 +1,7 @@
 import type { PendingApproval, PendingHumanInputRequest } from "@opengeni/react/session";
 import { toolDisplayName } from "@opengeni/react/session";
 import type { HumanInputAnswer } from "@opengeni/sdk";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { AgentIcon } from "./icons";
@@ -116,14 +117,15 @@ export function ApprovalCard(props: {
   theme: AgentTheme;
   onDecision(decision: "approve" | "reject"): void;
 }) {
+  const t = useOpenGeniText();
   const { approval, theme } = props;
   const rows = argumentRows(approval.arguments);
   return (
     <CardShell
-      eyebrow="Needs your approval"
+      eyebrow={t("native.ui.cards.needsYourApproval")}
       icon="alert"
       theme={theme}
-      title={toolDisplayName(approval.name, approval.display)}
+      title={toolDisplayName(t, approval.name, approval.display)}
     >
       {rows.length ? (
         <View
@@ -163,14 +165,14 @@ export function ApprovalCard(props: {
       <View style={{ flexDirection: "row", gap: 10 }}>
         <ActionButton
           flex
-          label="Deny"
+          label={t("native.ui.cards.deny")}
           onPress={() => props.onDecision("reject")}
           theme={theme}
           variant="secondary"
         />
         <ActionButton
           flex
-          label="Approve"
+          label={t("native.ui.cards.approve")}
           onPress={() => props.onDecision("approve")}
           theme={theme}
           variant="primary"
@@ -185,6 +187,7 @@ export function QuestionCard(props: {
   theme: AgentTheme;
   onAnswer(answers: HumanInputAnswer[] | null): void;
 }) {
+  const t = useOpenGeniText();
   const { request, theme } = props;
   const question = request.questions[0];
   const [selected, setSelected] = useState<string[]>([]);
@@ -199,7 +202,12 @@ export function QuestionCard(props: {
         : [id],
     );
   return (
-    <CardShell eyebrow="Question for you" icon="question" theme={theme} title={question.prompt}>
+    <CardShell
+      eyebrow={t("native.ui.cards.questionForYou")}
+      icon="question"
+      theme={theme}
+      title={question.prompt}
+    >
       <View style={{ gap: 8 }}>
         {question.options.map((option) => {
           const active = selected.includes(option.id);
@@ -247,7 +255,7 @@ export function QuestionCard(props: {
         {request.allowSkip ? (
           <ActionButton
             flex
-            label="Skip"
+            label={t("native.ui.cards.skip")}
             onPress={() => props.onAnswer(null)}
             theme={theme}
             variant="secondary"
@@ -256,7 +264,7 @@ export function QuestionCard(props: {
         <ActionButton
           disabled={selected.length === 0}
           flex
-          label="Send answer"
+          label={t("native.ui.cards.sendAnswer")}
           onPress={() => props.onAnswer([{ questionId: question.id, values: selected }])}
           theme={theme}
           variant="primary"

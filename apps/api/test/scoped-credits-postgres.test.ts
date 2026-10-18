@@ -57,6 +57,12 @@ test("scoped checkout through first use, policy changes and paid top-ups stays c
       })),
     );
     restores.push(
+      spyOn(Object.getPrototypeOf(fakeStripe.customers), "update").mockImplementation(async () => ({
+        id: "cus_review",
+        email: null,
+      })),
+    );
+    restores.push(
       spyOn(Object.getPrototypeOf(fakeStripe.checkout.sessions), "create").mockImplementation(
         async (params: any) => {
           createdParams.push(params);

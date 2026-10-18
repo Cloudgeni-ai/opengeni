@@ -23,6 +23,7 @@ writeSessionBrowsePreferences(sessionBrowsePreferenceStorageId(subjectId, worksp
       : "project",
   sortBy: "updatedAt",
   status: "active",
+  mineOnly: false,
   showEmptyGroups: false,
 });
 Object.assign(window, { sessionSidebarQa: evidence });

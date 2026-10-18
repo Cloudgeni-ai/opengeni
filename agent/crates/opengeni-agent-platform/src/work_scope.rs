@@ -5,6 +5,53 @@ use std::future::Future;
 
 use crate::WorkReservation;
 
+/// Retains a cleanup fault independently from its original request. Only a
+/// positive completion redeems it; a cancelled or panicking reaper stays visible.
+pub(crate) struct CleanupWitness {
+    reservation: Option<WorkReservation>,
+    producer: String,
+    failure: Option<opengeni_agent_engine::update_drain::UnsettledWork>,
+    settled: bool,
+}
+
+impl CleanupWitness {
+    pub(crate) fn new(reservation: Option<WorkReservation>, producer: String) -> Self {
+        if let Some(reservation) = &reservation {
+            reservation.require_settlement();
+        }
+        Self {
+            reservation,
+            producer,
+            failure: None,
+            settled: false,
+        }
+    }
+
+    pub(crate) fn failed(&mut self, error: &dyn std::fmt::Display) {
+        if self.failure.is_none() {
+            if let Some(reservation) = &self.reservation {
+                self.failure =
+                    Some(reservation.mark_unsettled(format!("{}: {error}", self.producer)));
+            }
+        }
+    }
+
+    pub(crate) fn settle(mut self) {
+        self.settled = true;
+        if let Some(failure) = self.failure.take() {
+            failure.resolve();
+        }
+    }
+}
+
+impl Drop for CleanupWitness {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.failed(&"cleanup owner ended before confirming exit");
+        }
+    }
+}
+
 tokio::task_local! {
     static WORK: Option<WorkReservation>;
 }
@@ -15,7 +62,10 @@ impl Drop for PanicWitness {
     fn drop(&mut self) {
         if std::thread::panicking() {
             if let Some(reservation) = &self.0 {
-                reservation.mark_unsettled();
+                tracing::warn!(
+                    ?reservation,
+                    "producer panicked; owned resources retain their cleanup reservations"
+                );
             }
         }
     }
@@ -131,17 +181,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn physical_worker_panic_is_not_idle_proof() {
+    async fn completed_worker_panic_does_not_poison_updates() {
         let drain = Arc::new(UpdateDrain::default());
         let work = drain.reserve_work(None).unwrap();
         let worker = with_work_reservation_sync(Some(work), || {
             spawn_blocking_reserved(|| panic!("synthetic worker failure"))
         });
         assert!(worker.await.unwrap_err().is_panic());
-        assert_eq!(drain.snapshot(), None);
-        assert_eq!(
-            drain.reserve_update("update"),
-            UpdateReservation::Unavailable
-        );
+        assert_eq!(drain.snapshot().unwrap().routed, 0);
+        assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn panicking_worker_keeps_its_exec_cleanup_owned() {
+        let drain = Arc::new(UpdateDrain::default());
+        let work = drain.reserve_work(None).unwrap();
+        let worker = tokio::spawn(with_work_reservation(Some(work), async {
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.args(["-c", "sleep 30"]);
+            let _group = crate::spawn_contained(command, None).unwrap();
+            panic!("synthetic command owner panic");
+        }));
+        assert!(worker.await.unwrap_err().is_panic());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while drain.snapshot().is_none_or(|state| state.routed != 0) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
+        assert!(drain.seal_update("update"));
     }
 }

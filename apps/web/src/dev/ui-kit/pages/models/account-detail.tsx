@@ -150,6 +150,8 @@ export function accountInUse(
   context: Pick<ReturnType<typeof useModels>, "data" | "questions" | "scenario">,
 ): boolean {
   if (account.scope === "organization" && context.scenario.scope === "organization") return true;
+  // Picked automatically, this workspace's accounts and the organization's are used together.
+  if (context.data.legacySource === "automatic") return true;
   return effectiveSource(context.data, context.questions, context.scenario) === account.scope;
 }
 

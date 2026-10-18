@@ -23,6 +23,21 @@ and a `hint`. Fix the reference and retry the same action.
 
 ## Save and vault errors
 
+Connected providers advertise their supported operations. Do not work around a
+read-only or unsupported operation by exposing values in logs or process
+arguments. A move requires recoverable removal at the source; a copy may still
+be supported without it. Ask cards save to hosted vaults only.
+
+An offline, locked, rate-limited or incomplete source is not proof that a secret
+is missing. Check search `complete` and source freshness, preserve filters while
+paging, and request `refresh: true` deliberately. It respects rate limits. Report
+the reconnect or unlock action rather than asking for the secret again.
+
+For `provider_outcome_unknown`, inspect the provider before retrying: a write
+may already have succeeded. `provider_inventory_incomplete` with `saved: true`
+means the write succeeded but the subsequent inventory refresh failed. Refresh
+the inventory; never automatically repeat the create.
+
 | Error | What to do |
 |---|---|
 | `vault_read_only` | A connected vault is read-only. Save to an Opengeni vault (`saveTo` without `vault`) or ask the user to make it writable. |

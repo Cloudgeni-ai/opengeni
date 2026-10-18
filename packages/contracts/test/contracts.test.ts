@@ -38,6 +38,7 @@ import {
   mergeToolRefs,
   MODEL_CONTEXT_LABEL,
   SESSION_GOAL_CONTEXT_LABEL,
+  SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE,
   SCHEDULED_OCCURRENCE_TASK_LABEL,
   ModelContextContributionSummaries,
   McpServerConnectionRef,
@@ -1774,6 +1775,11 @@ describe("contracts", () => {
     );
     expect(scheduled.content).toContain("Earlier completed goals");
     expect(scheduled.content).toContain("query that state during this occurrence");
+    // A blocked occurrence tells the owner once under the schedule's notice key and
+    // pauses the schedule when no later occurrence can succeed.
+    expect(scheduled.content).toContain(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE);
+    expect(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE).toContain("schedule-<scheduled task ID>");
+    expect(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE).toContain("pause this schedule");
     expect(scheduled.content).not.toContain("[Opengeni internal updates]");
     expect(scheduled.content).not.toContain("They are not human prompts");
     expect(scheduled.content).not.toContain("Unavailable in this occurrence");
@@ -2587,6 +2593,32 @@ describe("contracts", () => {
       note: "remember",
     };
     expect(SubmittedTimelineAnnotations.safeParse([annotation, annotation]).success).toBe(false);
+  });
+
+  test("accepts any number of annotations within the total size bound", () => {
+    const annotation = (index: number) => ({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      source: {
+        kind: "user_message" as const,
+        eventId: "00000000-0000-4000-8000-000000000212",
+        eventType: "user.message" as const,
+        sequence: 1,
+        turnId: null,
+        startOffset: 0,
+        endOffset: 2,
+        contextBefore: "",
+        contextAfter: "",
+      },
+      quote: "hi",
+      note: `note ${index}`,
+    });
+    const many = Array.from({ length: 200 }, (_, index) => annotation(index + 1));
+    expect(SubmittedTimelineAnnotations.safeParse(many).success).toBe(true);
+    const oversized = Array.from({ length: 80 }, (_, index) => ({
+      ...annotation(index + 1),
+      quote: "q".repeat(16 * 1024),
+    }));
+    expect(SubmittedTimelineAnnotations.safeParse(oversized).success).toBe(false);
   });
 
   test("accepts null skill review for ordinary questions without accepting malformed review references", () => {

@@ -20,6 +20,8 @@ import {
   configuredAllowedReasoningEfforts,
   environmentsEncryptionKeyBytes,
   getSettings,
+  calculateVoiceInputCost,
+  defaultVoiceInputPricing,
   parseStaticEntitlementsJson,
   parseStaticUsageLimitsJson,
   parseMcpServers,
@@ -115,6 +117,52 @@ describe("optional resource credits and verified signup trial", () => {
         getSettings(),
       ),
     ).toThrow("paid rates must be safe integers");
+  });
+});
+
+describe("deployment credit margin override", () => {
+  test("is unset by default and accepts the inclusive basis-point range", () => {
+    expect(withEnv({}, () => getSettings()).creditMarginBpsOverride).toBeUndefined();
+    expect(
+      withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "0" }, () => getSettings())
+        .creditMarginBpsOverride,
+    ).toBe(0);
+    expect(
+      withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "10000" }, () => getSettings())
+        .creditMarginBpsOverride,
+    ).toBe(10_000);
+  });
+
+  test("rejects non-integer and out-of-range margins", () => {
+    for (const value of ["-1", "10001", "1.5", "not-a-number"]) {
+      expect(() =>
+        withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: value }, () => getSettings()),
+      ).toThrow();
+    }
+  });
+
+  test("overrides transcription list margins while preserving provider cost", () => {
+    const pricing = defaultVoiceInputPricing["gpt-transcribe"]!;
+    const usage = { kind: "duration" as const, seconds: 60 };
+    const unset = withEnv({}, () => getSettings());
+    const zero = withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "0" }, () => getSettings());
+    const nonDefault = withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "1000" }, () =>
+      getSettings(),
+    );
+
+    expect(calculateVoiceInputCost(pricing, usage)).toEqual({
+      providerCostMicros: 4_500,
+      creditCostMicros: 4_725,
+    });
+    expect(calculateVoiceInputCost(pricing, usage, zero.creditMarginBpsOverride)).toEqual({
+      providerCostMicros: 4_500,
+      creditCostMicros: 4_500,
+    });
+    expect(calculateVoiceInputCost(pricing, usage, nonDefault.creditMarginBpsOverride)).toEqual({
+      providerCostMicros: 4_500,
+      creditCostMicros: 4_950,
+    });
+    expect(unset.creditMarginBpsOverride).toBeUndefined();
   });
 });
 
@@ -2468,6 +2516,34 @@ describe("backend-gated sandbox required-credential validation", () => {
         () => getSettings(),
       ),
     ).not.toThrow();
+  });
+
+  test("e2b connection: the domain is a host name, the addresses are URLs", () => {
+    const base = { OPENGENI_SANDBOX_BACKEND: "e2b", OPENGENI_E2B_API_KEY: "ek" };
+    const settings = withEnv(
+      {
+        ...base,
+        OPENGENI_E2B_DOMAIN: "sandboxes.example.com:8443",
+        OPENGENI_E2B_API_URL: "https://api.example.com",
+        OPENGENI_E2B_SANDBOX_URL: "https://envd.example.com",
+      },
+      () => getSettings(),
+    );
+    expect(settings.e2bDomain).toBe("sandboxes.example.com:8443");
+    expect(settings.e2bApiUrl).toBe("https://api.example.com");
+    expect(settings.e2bSandboxUrl).toBe("https://envd.example.com");
+    for (const domain of [
+      "https://sandboxes.example.com",
+      "sandboxes.example.com/x",
+      ".example.com",
+    ]) {
+      expect(() => withEnv({ ...base, OPENGENI_E2B_DOMAIN: domain }, () => getSettings())).toThrow(
+        "e2bDomain",
+      );
+    }
+    expect(() =>
+      withEnv({ ...base, OPENGENI_E2B_API_URL: "api.example.com" }, () => getSettings()),
+    ).toThrow("e2bApiUrl");
   });
 
   test("runloop/e2b/blaxel/cloudflare each gate their own single credential", () => {

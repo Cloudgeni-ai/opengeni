@@ -43,6 +43,12 @@ describe("lockstep package versioning", () => {
     expect(nextFreeLockstepVersion("1.4.2", taken)).toBe("1.4.3");
     expect(nextFreeLockstepVersion("2.0.0", taken)).toBe("2.0.0");
     expect(lockstepCanaryBase("1.0.0", taken)).toBe("1.0.2");
+    // The retired line also burned 3.x and later (sdk/react 3.1.0, config 3.1.1).
+    expect(nextFreeLockstepVersion("3.0.0", taken)).toBe("3.0.0");
+    expect(nextFreeLockstepVersion("3.0.1", taken)).toBe("3.0.2");
+    expect(nextFreeLockstepVersion("3.1.0", taken)).toBe("3.1.2");
+    expect(nextFreeLockstepVersion("4.0.0", taken)).toBe("4.0.4");
+    expect(lockstepCanaryBase("3.0.0", taken)).toBe("3.0.2");
     expect(() => nextFreeLockstepVersion("1.0.1-canary.1", taken)).toThrow("stable semver");
     expect(() =>
       sharedLockstepVersion([

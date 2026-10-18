@@ -1,4 +1,5 @@
 import {
+  type AccessContext,
   type PersonalResourceAttachmentIntent,
   type ResourceAuthorityScope,
   type SendMessageInput,
@@ -10,6 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AuthSession } from "@/types";
 import type { ManagedSelfContext } from "./managed-self-context";
+import { hasWorkspacePermission } from "./permissions";
 import {
   buildPersonalResourceAttachmentIntent,
   isPersonalAttachmentConflict,
@@ -101,6 +103,7 @@ export function usePersonalResourceAttachment(input: {
   authMode: string;
   authSession: AuthSession | null;
   accessSubjectId: string;
+  accessContext: AccessContext | null;
   managedSelfContext: ManagedSelfContext | null;
   workspace: Pick<Workspace, "id" | "accountId"> | null;
   session?: Pick<Session, "id" | "tenancy"> | null;
@@ -153,7 +156,18 @@ export function usePersonalResourceAttachment(input: {
       resolvedTargetWorkspaceId,
     ],
   );
-  const scopeKey = scope?.identityKey ?? "ineligible";
+  const canReadRigs = hasWorkspacePermission(
+    input.accessContext,
+    input.workspace?.id ?? "",
+    "rigs:use",
+  );
+  const canReadMachines = hasWorkspacePermission(
+    input.accessContext,
+    input.workspace?.id ?? "",
+    "enrollments:read",
+  );
+  // A permission change is a catalog identity change, including in-flight reads.
+  const scopeKey = `${scope?.identityKey ?? "ineligible"}:${canReadRigs}:${canReadMachines}`;
   const recoveryIdentityKey = [
     resolvedSubjectId ?? "ineligible",
     resolvedTargetWorkspaceId ?? "ineligible",
@@ -187,7 +201,10 @@ export function usePersonalResourceAttachment(input: {
       if (refresh) setRefreshing(true);
       else setLoading(true);
       try {
-        const next = await loadPersonalResourceCatalog(input.client, scope);
+        const next = await loadPersonalResourceCatalog(input.client, scope, {
+          rigs: canReadRigs,
+          connectedMachines: canReadMachines,
+        });
         if (generation !== loadGeneration.current || acceptedScopeKey.current !== scopeKey) return;
         setCatalog(next);
         setError(null);
@@ -206,7 +223,7 @@ export function usePersonalResourceAttachment(input: {
         }
       }
     },
-    [input.client, scope, scopeKey],
+    [input.client, scope, scopeKey, canReadRigs, canReadMachines],
   );
 
   useEffect(() => {
@@ -229,7 +246,8 @@ export function usePersonalResourceAttachment(input: {
 
   // Eligibility is a synchronous fence. Do not wait for the transition effect
   // to clear prior owner state before hiding it from a connected-machine send.
-  const selected = personalSelection(scope ? catalog : null, input.fixed);
+  const currentCatalog = scope && acceptedScopeKey.current === scopeKey ? catalog : null;
+  const selected = personalSelection(currentCatalog, input.fixed);
   const fixedIdentity = [
     input.fixed.rigId ?? "",
     input.fixed.rigScope ?? "unknown",
@@ -273,6 +291,8 @@ export function usePersonalResourceAttachment(input: {
     Number(input.fixed.rigId !== null) + Number(input.fixed.connectedMachine !== null);
   const positivelyPersonal =
     sourceLost ||
+    (sessionAuthorityRecovery?.identityKey === recoveryIdentityKey &&
+      sessionAuthorityRecovery.selectedResourceCount > 0) ||
     selected.personalResourceCount > 0 ||
     (input.fixed.rigId !== null && input.fixed.rigScope === "user") ||
     input.fixed.connectedMachine !== null;
@@ -454,8 +474,8 @@ export function usePersonalResourceAttachment(input: {
     error: positivelyPersonal && fixedResourceCount > 0 ? effectiveError : null,
     notice,
     sourceLost,
-    truncated: positivelyPersonal && fixedResourceCount > 0 && (catalog?.truncated ?? false),
-    catalog,
+    truncated: positivelyPersonal && fixedResourceCount > 0 && (currentCatalog?.truncated ?? false),
+    catalog: currentCatalog,
     selected,
     mode,
     visibility,

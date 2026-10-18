@@ -24,8 +24,10 @@ import {
   getLiveEnrollmentConnection,
   getRetainedProcess,
   getSandbox,
+  getSandboxForAttempt,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
+  resolvePersonalMachineConnectionForAttempt,
   retainWorkspaceMutationProcess,
   SandboxRetainedProcessPromotionFencedError,
   SandboxWorkspaceMutationOutputRejectedError,
@@ -34,12 +36,14 @@ import {
   verifyDirectWorkspaceMutationSettlement,
   verifyRetainedProcessMutationSettlement,
   type Database,
+  type EnrollmentRecord,
   type SandboxRetainedProcess,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
   isProviderSandboxGoneDuringRoutedOperation,
+  isInSandboxSupervisedProcess,
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -136,6 +140,101 @@ export type ChannelARoutingServices = {
   waitSignal?: AbortSignal;
 };
 
+/**
+ * Whose access a Channel-A request uses to reach a Connected Machine. A person
+ * uses their own. An agent acts for the person who started its turn, never as
+ * itself, so it reaches the same machines that person can; a personal (Only me)
+ * machine additionally needs that exact running attempt's per-chat permission,
+ * rechecked before every routed operation like the worker's turn path.
+ */
+export type ChannelAMachineAuthority = {
+  subjectId: string | null;
+  /** Only browser.end/computer.end: preserve the owner's existing cleanup access. */
+  ownerCleanup?: boolean;
+  personalMachineAttempt: {
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+  } | null;
+};
+
+/**
+ * Resolve a Connected Machine's live runner for one Channel-A request. The
+ * machine's audience can change in place, so its current scope is read from the
+ * enrollment itself. An agent attempt reaches a personal machine only through
+ * the same attempt admission as swap and run_on; everything else keeps the
+ * caller-scoped lookup.
+ */
+export async function resolveChannelAMachineConnection(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    machineWorkspaceId: string;
+    enrollmentId: string;
+  },
+  authority: ChannelAMachineAuthority,
+): Promise<EnrollmentRecord | null> {
+  const attempt = authority.personalMachineAttempt;
+  const ownAccess = authority.subjectId
+    ? {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: authority.subjectId,
+      }
+    : null;
+  if (authority.ownerCleanup && ownAccess) {
+    const owned = await getLiveEnrollmentConnection(db, ownAccess, input.enrollmentId);
+    if (owned) return owned;
+  }
+  if (attempt) {
+    const current = await getLiveEnrollmentConnection(
+      db,
+      input.machineWorkspaceId,
+      input.enrollmentId,
+    );
+    if (!current || current.scope === "user") {
+      return await resolvePersonalMachineConnectionForAttempt(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: authority.subjectId,
+        sessionId: input.sessionId,
+        turnId: attempt.turnId,
+        attemptId: attempt.attemptId,
+        executionGeneration: attempt.executionGeneration,
+        enrollmentId: input.enrollmentId,
+        requireActiveSandbox: !authority.ownerCleanup,
+      });
+    }
+    if (!ownAccess) return current;
+  }
+  if (!ownAccess) return null;
+  return await getLiveEnrollmentConnection(db, ownAccess, input.enrollmentId);
+}
+
+/** Agent requests see only the exact consented route, not the owner's fleet. */
+export async function getChannelAMachineSandbox(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+  authority: ChannelAMachineAuthority,
+  sandboxId: string,
+) {
+  if (authority.personalMachineAttempt) {
+    return await getSandboxForAttempt(
+      db,
+      {
+        ...input,
+        ...authority.personalMachineAttempt,
+        subjectId: authority.subjectId,
+      },
+      sandboxId,
+    );
+  }
+  if (!authority.subjectId) return null;
+  return await getSandbox(db, { ...input, subjectId: authority.subjectId }, sandboxId);
+}
+
 /** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape. The
  *  relay URL (`OPENGENI_SELFHOSTED_RELAY_URL`) may carry a path (the relay's wss
  *  route); a path-less URL defaults to the relay's `/stream` route (M8b). */
@@ -192,11 +291,22 @@ function controlRpcFactory(bus: EventBus | undefined): () => ControlRpc {
 
 async function resolveSelfhostedConnection(
   services: ChannelARoutingServices,
-  access: string | { accountId: string; workspaceId: string; subjectId: string },
+  ids: { accountId: string; workspaceId: string; sessionId: string },
+  authority: ChannelAMachineAuthority,
   sandbox: RoutableSandbox,
 ): Promise<SelfhostedConnectionBinding | null> {
   if (!sandbox.enrollmentId) return null;
-  const enrollment = await getLiveEnrollmentConnection(services.db, access, sandbox.enrollmentId);
+  const enrollment = await resolveChannelAMachineConnection(
+    services.db,
+    {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      machineWorkspaceId: sandbox.workspaceId,
+      enrollmentId: sandbox.enrollmentId,
+    },
+    authority,
+  );
   if (!enrollment?.connectionInstanceId) return null;
   const opStream: SelfhostedOpStreamDeps | undefined =
     services.settings.agentOpStreamEnabled === true &&
@@ -237,6 +347,10 @@ export function wrapChannelABoxWithRouting(
     workspaceId: string;
     sessionId: string;
     resourceSubjectId: string;
+    /** Whose access reaches Connected Machines (see ChannelAMachineAuthority).
+     * Resolved lazily, once, only when a request routes to a machine. Omitted,
+     * the request uses `resourceSubjectId`'s own access. */
+    machineAuthority?: () => Promise<ChannelAMachineAuthority>;
     homeLease?: {
       sandboxGroupId: string;
       leaseEpoch: number;
@@ -259,6 +373,16 @@ export function wrapChannelABoxWithRouting(
 ): EstablishedSandboxSession {
   const { db, settings, bus } = services;
   const homeLease = ids.homeLease;
+  let machineAuthority: Promise<ChannelAMachineAuthority> | undefined;
+  const resolveMachineAuthority = (): Promise<ChannelAMachineAuthority> => {
+    machineAuthority ??= ids.machineAuthority
+      ? ids.machineAuthority()
+      : Promise.resolve({
+          subjectId: ids.resourceSubjectId,
+          personalMachineAttempt: null,
+        });
+    return machineAuthority;
+  };
   const beforeMutation = homeLease
     ? async ({
         op,
@@ -358,6 +482,10 @@ export function wrapChannelABoxWithRouting(
             admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
             operation: op,
             providerBinding: boundAdmission.providerBinding ?? null,
+            inSandboxSupervisor: isInSandboxSupervisedProcess(
+              backend.session,
+              retainedProcess.providerSessionId,
+            ),
             ...(backgroundCommand ? { backgroundCommand } : {}),
             owner: {
               kind: "direct",
@@ -531,13 +659,15 @@ export function wrapChannelABoxWithRouting(
     defaultBackend: established.session as RoutableBackendSession,
     defaultKind: established.backendId,
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
-      const sandbox = await getSandbox(
+      const authority = await resolveMachineAuthority();
+      const sandbox = await getChannelAMachineSandbox(
         db,
         {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
-          subjectId: ids.resourceSubjectId,
+          sessionId: ids.sessionId,
         },
+        authority,
         sandboxId,
       );
       return sandbox
@@ -551,14 +681,15 @@ export function wrapChannelABoxWithRouting(
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),
-    resolveSelfhostedConnection: (sandbox) =>
+    resolveSelfhostedConnection: async (sandbox) =>
       resolveSelfhostedConnection(
         services,
         {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
-          subjectId: ids.resourceSubjectId,
+          sessionId: ids.sessionId,
         },
+        await resolveMachineAuthority(),
         sandbox,
       ),
     relay: relayConfigFromSettings(settings),

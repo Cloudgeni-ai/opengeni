@@ -243,6 +243,91 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
+/** A running turn with an exact live agent attempt and its session-scoped MCP server. */
+async function createLiveAttempt(message: string) {
+  const claimSessionId = await newSession(workspaceId, message);
+  // The attempt's frozen initiating human is a different person than the
+  // workspace member who will own the private session below.
+  const otherHuman = `session-wait-other-human-${crypto.randomUUID()}`;
+  const executionGeneration = 1;
+  const [turn] = await shared.admin<Array<{ id: string }>>`
+    insert into session_turns (
+      account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+      status, position, prompt, model, reasoning_effort, sandbox_backend,
+      execution_generation, initiator_kind, initiator_subject_id,
+      initiating_human_subject_id, initiator_context
+    ) values (
+      ${accountId}, ${workspaceId}, ${claimSessionId}, gen_random_uuid(),
+      ${`session-wait-${crypto.randomUUID()}`}, 'running', 0, 'wait for the child',
+      'test-model', 'medium', 'none', ${executionGeneration}, 'subject', ${otherHuman},
+      ${otherHuman}, '{"accepted":true}'::jsonb
+    ) returning id
+  `;
+  const [authority] = await shared.admin<
+    Array<{
+      authorityEpoch: number;
+      visibility: string;
+      ownerOrganizationMembershipId: string | null;
+    }>
+  >`
+    select authority_epoch as "authorityEpoch", visibility,
+      owner_organization_membership_id as "ownerOrganizationMembershipId"
+    from sessions where id = ${claimSessionId}
+  `;
+  const attemptId = crypto.randomUUID();
+  await shared.admin.begin(async (tx) => {
+    await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+    await tx`
+      update sessions set active_turn_id = ${turn!.id}, status = 'running'
+      where id = ${claimSessionId}
+    `;
+    await tx`
+      update session_turns set active_attempt_id = ${attemptId}, status = 'running'
+      where id = ${turn!.id}
+    `;
+    await tx`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, authority_epoch, authority_visibility,
+        authority_owner_organization_membership_id, mcp_approval_policies,
+        connector_action_policies
+      ) values (
+        ${attemptId}, ${accountId}, ${workspaceId}, ${claimSessionId}, ${turn!.id},
+        ${executionGeneration}, 'running', 'session-wait', ${`run-${attemptId}`},
+        ${`activity-${attemptId}`}, 0, ${authority!.authorityEpoch},
+        ${authority!.visibility}, ${authority!.ownerOrganizationMembershipId},
+        '{}'::jsonb, '[]'::jsonb
+      )
+    `;
+  });
+  const attemptGrant: AccessGrant = {
+    accountId,
+    workspaceId,
+    subjectId: "worker:first-party-mcp",
+    principalKind: "agent_attempt",
+    permissions: ["sessions:read"],
+    metadata: {
+      sessionId: claimSessionId,
+      turnId: turn!.id,
+      attemptId,
+      executionGeneration,
+      firstPartyMcpTools: ["session_wait", "command_read", "command_wait"],
+    },
+  };
+  const attemptBus = new MemoryEventBus();
+  const attemptServer = buildOpenGeniMcpServer(fakeDeps(attemptBus), attemptGrant);
+  return {
+    claimSessionId,
+    turnId: turn!.id,
+    attemptId,
+    executionGeneration,
+    attemptGrant,
+    attemptBus,
+    attemptServer,
+  };
+}
+
 describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory event bus)", () => {
   test("registers only for session-scoped grants holding sessions:read", () => {
     const sessionScoped = buildOpenGeniMcpServer(fakeDeps(new MemoryEventBus()), grant);
@@ -702,80 +787,17 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
   }, 30_000);
 
   test("an exact live agent attempt can wait on a child and on its own pending input", async () => {
-    const claimSessionId = await newSession(workspaceId, "claimed manager fixture");
+    const {
+      claimSessionId,
+      turnId,
+      attemptId,
+      executionGeneration,
+      attemptGrant,
+      attemptBus,
+      attemptServer,
+    } = await createLiveAttempt("claimed manager fixture");
     const childOfClaim = await newSession(workspaceId, "claimed child fixture");
     const humanSubjectId = grant.subjectId;
-    // The attempt's frozen initiating human is a different person than the
-    // workspace member who will own the private session below.
-    const otherHuman = `session-wait-other-human-${crypto.randomUUID()}`;
-    const executionGeneration = 1;
-    const [turn] = await shared.admin<Array<{ id: string }>>`
-      insert into session_turns (
-        account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
-        status, position, prompt, model, reasoning_effort, sandbox_backend,
-        execution_generation, initiator_kind, initiator_subject_id,
-        initiating_human_subject_id, initiator_context
-      ) values (
-        ${accountId}, ${workspaceId}, ${claimSessionId}, gen_random_uuid(),
-        ${`session-wait-${crypto.randomUUID()}`}, 'running', 0, 'wait for the child',
-        'test-model', 'medium', 'none', ${executionGeneration}, 'subject', ${otherHuman},
-        ${otherHuman}, '{"accepted":true}'::jsonb
-      ) returning id
-    `;
-    const [authority] = await shared.admin<
-      Array<{
-        authorityEpoch: number;
-        visibility: string;
-        ownerOrganizationMembershipId: string | null;
-      }>
-    >`
-      select authority_epoch as "authorityEpoch", visibility,
-        owner_organization_membership_id as "ownerOrganizationMembershipId"
-      from sessions where id = ${claimSessionId}
-    `;
-    const attemptId = crypto.randomUUID();
-    await shared.admin.begin(async (tx) => {
-      await tx.unsafe("set local opengeni.session_inference_claim = '1'");
-      await tx`
-        update sessions set active_turn_id = ${turn!.id}, status = 'running'
-        where id = ${claimSessionId}
-      `;
-      await tx`
-        update session_turns set active_attempt_id = ${attemptId}, status = 'running'
-        where id = ${turn!.id}
-      `;
-      await tx`
-        insert into session_turn_attempts (
-          id, account_id, workspace_id, session_id, turn_id, execution_generation,
-          state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
-          verified_control_revision, authority_epoch, authority_visibility,
-          authority_owner_organization_membership_id, mcp_approval_policies,
-          connector_action_policies
-        ) values (
-          ${attemptId}, ${accountId}, ${workspaceId}, ${claimSessionId}, ${turn!.id},
-          ${executionGeneration}, 'running', 'session-wait', ${`run-${attemptId}`},
-          ${`activity-${attemptId}`}, 0, ${authority!.authorityEpoch},
-          ${authority!.visibility}, ${authority!.ownerOrganizationMembershipId},
-          '{}'::jsonb, '[]'::jsonb
-        )
-      `;
-    });
-    const attemptGrant: AccessGrant = {
-      accountId,
-      workspaceId,
-      subjectId: "worker:first-party-mcp",
-      principalKind: "agent_attempt",
-      permissions: ["sessions:read"],
-      metadata: {
-        sessionId: claimSessionId,
-        turnId: turn!.id,
-        attemptId,
-        executionGeneration,
-        firstPartyMcpTools: ["session_wait", "command_read", "command_wait"],
-      },
-    };
-    const attemptBus = new MemoryEventBus();
-    const attemptServer = buildOpenGeniMcpServer(fakeDeps(attemptBus), attemptGrant);
     expect(registeredToolNames(attemptServer)).toEqual([
       "session_wait",
       "command_read",
@@ -805,7 +827,7 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
       accountId,
       workspaceId,
       sessionId: claimSessionId,
-      turnId: turn!.id,
+      turnId: turnId,
       executionGeneration,
       attemptId,
       commandId,
@@ -887,7 +909,7 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
       accountId,
       workspaceId,
       sessionId: claimSessionId,
-      turnId: turn!.id,
+      turnId: turnId,
       executionGeneration,
       attemptId,
       commandId: revokedCommandId,
@@ -974,5 +996,64 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
       ),
     ).rejects.toThrow();
     expect(subscribeCalls).toBe(before);
+  }, 60_000);
+  test("a Steer for the caller's turn ends its session and command waits early", async () => {
+    const { claimSessionId, turnId, attemptId, executionGeneration, attemptBus, attemptServer } =
+      await createLiveAttempt("steered manager fixture");
+    const childOfClaim = await newSession(workspaceId, "steered child fixture");
+    const commandId = crypto.randomUUID();
+    await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: claimSessionId,
+      turnId,
+      executionGeneration,
+      attemptId,
+      commandId,
+      controlWorkspaceId: workspaceId,
+      enrollmentId: crypto.randomUUID(),
+      connectionInstanceId: "steer-wait-command-instance",
+      opId: "steer-wait-command-op",
+      command: "sleep 600",
+    });
+
+    const sessionWait = callSessionWait(
+      { targets: [{ sessionId: childOfClaim, afterSequence: 0 }], maxWaitSeconds: 40 },
+      {},
+      attemptServer,
+    );
+    const commandWait = callCommandWait({ commandId, waitSeconds: 40 }, {}, attemptServer);
+    await Bun.sleep(400);
+    // A queued Steer prompt for the running turn, then its live notice.
+    await shared.admin`
+      insert into session_turns (
+        account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, position, prompt, model, reasoning_effort, sandbox_backend,
+        execution_generation, initiator_kind, initiator_subject_id, metadata
+      ) values (
+        ${accountId}, ${workspaceId}, ${claimSessionId}, gen_random_uuid(),
+        ${`steer-wait-${crypto.randomUUID()}`}, 'queued', 1, 'what is the status?',
+        'test-model', 'medium', 'none', 0, 'subject', ${grant.subjectId},
+        '{"delivery":"steer"}'::jsonb
+      )
+    `;
+    const notice = await appendSessionEvents(client.db, workspaceId, claimSessionId, [
+      { type: "session.control.steer_requested", turnId, payload: { targetTurnId: turnId } },
+    ]);
+    const steeredAt = Date.now();
+    await attemptBus.publish(workspaceId, claimSessionId, notice);
+
+    const [waited, read] = await Promise.all([sessionWait, commandWait]);
+    expect(Date.now() - steeredAt).toBeLessThan(5_000);
+    expect(waited).toMatchObject({ timedOut: false, changed: [], ownPendingUpdates: 1 });
+    expect(waited.ownPendingUpdateKinds).toEqual(["steer"]);
+    // The command keeps running; the wait only returned its current state.
+    expect(read).toMatchObject({ commandId, state: "running", terminal: false, timedOut: false });
+    expect(read.waitedMs).toBeLessThan(5_000);
+
+    // While the Steer still waits, a new wait returns at once.
+    const again = await callCommandWait({ commandId, waitSeconds: 40 }, {}, attemptServer);
+    expect(again).toMatchObject({ state: "running", timedOut: false });
+    expect(again.waitedMs).toBeLessThan(1_000);
   }, 60_000);
 });

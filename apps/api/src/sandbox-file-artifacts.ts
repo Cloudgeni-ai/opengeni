@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { posix } from "node:path";
 
 import {
+  SANDBOX_FILE_ARTIFACT_INLINE_MAX_BYTES,
   SANDBOX_FILE_ARTIFACT_MAX_BYTES,
   SandboxFileArtifactReceipt,
   retainedArtifactReferenceFromFile,
@@ -34,11 +35,13 @@ import {
   type SandboxChannelAService,
 } from "@opengeni/runtime/sandbox";
 
-import { withChannelARead } from "./sandbox/channel-a";
+import { withChannelA, withChannelARead } from "./sandbox/channel-a";
 import { sanitizeFilename } from "./routes/files";
 
 const FILE_READ_SENTINEL_BYTES = 1;
 const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
+/** Covers the longest box upload (three hours at the 1 MB/s floor) plus margin. */
+const SANDBOX_EXPORT_URL_TTL_SECONDS = 4 * 60 * 60;
 const SANDBOX_ARTIFACT_ABSOLUTE_PATH_MAX_CHARS = 4_096;
 const SANDBOX_ARTIFACT_SAFE_FILENAME_MAX_CHARS = 200;
 
@@ -104,44 +107,59 @@ async function publishSandboxFileArtifactInScope(
     });
   }
 
+  const maxReadBytes = Math.min(
+    SANDBOX_FILE_ARTIFACT_INLINE_MAX_BYTES,
+    storage.maxSinglePutSizeBytes,
+  );
   const maxArtifactBytes = Math.min(SANDBOX_FILE_ARTIFACT_MAX_BYTES, storage.maxSinglePutSizeBytes);
-  if (maxArtifactBytes < 1) {
+  if (maxReadBytes < 1) {
     throw new HTTPException(503, { message: "object storage cannot accept artifact files" });
   }
-  const readLimit = Math.min(25 * 1024 * 1024, maxArtifactBytes + FILE_READ_SENTINEL_BYTES);
-  const { path, sandboxPath, read } = await withChannelARead(
-    {
-      db: deps.db,
-      settings: deps.settings,
-      bus: deps.bus,
-      ...(deps.observability ? { observability: deps.observability } : {}),
+  const readLimit = Math.min(25 * 1024 * 1024, maxReadBytes + FILE_READ_SENTINEL_BYTES);
+  const channelServices = {
+    db: deps.db,
+    settings: deps.settings,
+    bus: deps.bus,
+    ...(deps.observability ? { observability: deps.observability } : {}),
+  };
+  const channelContext = {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    session: input.session,
+    subjectId: input.grant.subjectId,
+    grant: input.grant,
+    ...(input.signal ? { waitSignal: input.signal } : {}),
+    operation: "artifact.publish" as const,
+  };
+  // Small files come through the API in one read. A larger file is hashed
+  // where it lives and uploaded from there straight to object storage, so its
+  // bytes never cross the control plane.
+  const { path, sandboxPath, content } = await withChannelARead(
+    channelServices,
+    channelContext,
+    async ({ service }) => {
+      const small = await readSandboxArtifactFile(service, input.path, readLimit);
+      if (!small.read.truncated && small.read.sizeBytes <= maxReadBytes) {
+        return { ...small, content: sandboxArtifactBytes(small.read) };
+      }
+      const digest = await service.digestWorkspaceFile(small.path);
+      return {
+        path: small.path,
+        sandboxPath: small.sandboxPath,
+        content: { kind: "box" as const, sizeBytes: digest.sizeBytes, sha256: digest.sha256 },
+      };
     },
-    {
-      accountId: input.grant.accountId,
-      workspaceId: input.grant.workspaceId,
-      session: input.session,
-      subjectId: input.grant.subjectId,
-      grant: input.grant,
-      ...(input.signal ? { waitSignal: input.signal } : {}),
-      operation: "artifact.publish",
-    },
-    ({ service }) => readSandboxArtifactFile(service, input.path, readLimit),
   );
-  if (read.truncated || read.sizeBytes > maxArtifactBytes) {
+  if (content.sizeBytes > maxArtifactBytes) {
     throw new HTTPException(413, {
       message: `sandbox file exceeds the ${maxArtifactBytes}-byte artifact publication limit`,
     });
   }
-  if (read.sizeBytes === 0) {
+  if (content.sizeBytes === 0) {
     throw new HTTPException(422, { message: "sandbox artifact file is empty" });
   }
-  if (read.encoding !== "base64") {
-    throw new HTTPException(502, { message: "sandbox returned an invalid binary file response" });
-  }
-  const bytes = Buffer.from(read.content, "base64");
-  if (bytes.byteLength !== read.sizeBytes) {
-    throw new HTTPException(502, { message: "sandbox returned an invalid file length" });
-  }
+  const sizeBytes = content.sizeBytes;
+  const sha256 = content.sha256;
 
   const filename = posix.basename(path);
   if (filename.length > 1_024) {
@@ -149,7 +167,6 @@ async function publishSandboxFileArtifactInScope(
   }
   const safeFilename = sandboxArtifactSafeFilename(filename);
   const contentType = sandboxFileContentType(filename);
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
   const identity = sandboxArtifactIdentity({
     workspaceId: input.grant.workspaceId,
     sessionId: input.session.id,
@@ -165,7 +182,7 @@ async function publishSandboxFileArtifactInScope(
       accountId: input.grant.accountId,
       workspaceId: input.grant.workspaceId,
       action: "file:upload",
-      quantity: bytes.byteLength,
+      quantity: sizeBytes,
     });
     const prepared = await prepareGeneratedWorkspaceFile(deps.db, {
       accountId: input.grant.accountId,
@@ -175,11 +192,14 @@ async function publishSandboxFileArtifactInScope(
       filename,
       safeFilename,
       contentType,
-      sizeBytes: bytes.byteLength,
+      sizeBytes,
       sha256,
       bucket: storage.bucket,
       objectKey,
-      expiresAt: new Date(Date.now() + UPLOAD_INTENT_TTL_MS),
+      expiresAt: new Date(
+        Date.now() +
+          (content.kind === "box" ? SANDBOX_EXPORT_URL_TTL_SECONDS * 1_000 : UPLOAD_INTENT_TTL_MS),
+      ),
     });
     file = prepared.file;
   }
@@ -188,12 +208,39 @@ async function publishSandboxFileArtifactInScope(
     filename,
     safeFilename,
     contentType,
-    sizeBytes: bytes.byteLength,
+    sizeBytes,
     sha256,
     bucket: storage.bucket,
     objectKey,
   });
-  if (file.status !== "ready") {
+  if (file.status !== "ready" && content.kind === "box") {
+    // Always upload again: an object left by an earlier attempt whose file
+    // changed mid-upload carries this digest's metadata but not its bytes.
+    const target = file;
+    await withChannelA(channelServices, channelContext, async ({ service, lease }) => {
+      // A Connected Machine reaches storage on its public endpoint; a leased
+      // managed sandbox uses the sandbox-facing one.
+      const put = await storage.createPutUrl({
+        key: target.objectKey,
+        contentType: target.contentType,
+        sha256,
+        expiresInSeconds: SANDBOX_EXPORT_URL_TTL_SECONDS,
+        audience: lease ? "sandbox" : "public",
+      });
+      await service.exportWorkspaceFile({
+        path,
+        sizeBytes,
+        sha256,
+        upload: {
+          url: put.url,
+          requiredHeaders: put.requiredHeaders,
+          expiresAt: put.expiresAt.toISOString(),
+        },
+      });
+    });
+    await assertVisibleSandboxArtifact(storage, file);
+    file = await completeFileUpload(deps.db, input.grant.workspaceId, identity.uploadId);
+  } else if (file.status !== "ready" && content.kind === "bytes") {
     const existingObject = await storage.headObject(file.objectKey);
     if (existingObject) {
       assertStoredSandboxArtifact(existingObject, file);
@@ -201,7 +248,7 @@ async function publishSandboxFileArtifactInScope(
       const put = {
         key: file.objectKey,
         contentType: file.contentType,
-        body: bytes,
+        body: content.bytes,
         sha256,
       };
       if (storage.putObjectIfAbsent) {
@@ -244,6 +291,27 @@ async function publishSandboxFileArtifactInScope(
     filename,
     artifact,
   });
+}
+
+function sandboxArtifactBytes(read: { encoding: string; content: string; sizeBytes: number }): {
+  kind: "bytes";
+  bytes: Buffer;
+  sizeBytes: number;
+  sha256: string;
+} {
+  if (read.encoding !== "base64") {
+    throw new HTTPException(502, { message: "sandbox returned an invalid binary file response" });
+  }
+  const bytes = Buffer.from(read.content, "base64");
+  if (bytes.byteLength !== read.sizeBytes) {
+    throw new HTTPException(502, { message: "sandbox returned an invalid file length" });
+  }
+  return {
+    kind: "bytes",
+    bytes,
+    sizeBytes: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
 }
 
 /** Use the root captured by the same fenced Channel-A service that reads bytes,

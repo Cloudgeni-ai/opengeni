@@ -2250,7 +2250,8 @@ async function seedConversations(
         where workspace_id = ${ws} and id = ${id} and vault_policy = '{"mode":"all"}'::jsonb`;
     }
 
-    // Finalize the session-activity gate exactly as the API does.
+    // This seed script retains the legacy writer protocol during the expand
+    // release. The stamp trigger also assigns activity_xid to these rows.
     await tx`select set_config('opengeni.session_activity_gate_state', 'preparing', true)`;
     await tx.unsafe("SET CONSTRAINTS ALL IMMEDIATE");
     await tx.unsafe(

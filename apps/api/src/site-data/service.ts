@@ -9,6 +9,7 @@ import {
   getSiteDataSite,
   parseSiteDataPath,
   readSiteDataPath,
+  recordSitePlatformUsageInTransaction,
   recordUsageEvent,
   SiteDataError,
   type Database,
@@ -925,7 +926,11 @@ export async function resolveSiteDataAccess(
 /**
  * Usage metering in `usage_only` mode (docs/credit-boundaries-rollout.md): the
  * workspace pays for viewer-triggered usage; events are recorded in the write
- * transaction and never debit credits until a reviewed rate is enabled.
+ * transaction and never debit credits until a reviewed rate is enabled. The
+ * workspace's Site storage level (Site SQL plus Site Data) is refreshed in
+ * its platform usage in the same transaction; any charge for it settles with
+ * the next platform usage the API meters (a Site SQL call or a gateway
+ * request report).
  */
 export async function meterSiteData(
   tx: Database,
@@ -943,6 +948,11 @@ export async function meterSiteData(
     sourceResourceType: "site",
     sourceResourceId: caller.siteId,
   };
+  await recordSitePlatformUsageInTransaction(
+    tx,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    { refreshStorage: true },
+  );
   if (kind === "upload") {
     await recordUsageEvent(tx, {
       ...common,

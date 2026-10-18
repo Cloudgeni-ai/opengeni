@@ -29,6 +29,8 @@ import {
   getAllMcpTools,
   getLogger,
   invalidateServerToolsCache,
+  run as runAgent,
+  type Model,
 } from "@openai/agents";
 import {
   Agent,
@@ -49,6 +51,7 @@ import {
   CLEARED_RUN_STATE_BLOB,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+  MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY,
   MODEL_ATTACHMENT_REFS_FIELD,
   OPEN_SUFFIX_RUN_STATE_BLOB,
   sessionSystemUpdateBatchHistoryItem,
@@ -148,6 +151,7 @@ import {
   withSandboxSessionReady,
   withSandboxLifecycleHooks,
   sessionMcpApprovalConnectionId,
+  interactionRequestArgumentsProblem,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
   type ConnectorActionPolicyHooks,
@@ -273,6 +277,72 @@ test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle
       connectTimeoutMs: 5,
     }),
   ).rejects.toThrow("MCP server connect timed out after 5ms");
+});
+
+function delayedConnectServer(
+  id: string,
+  delayMs: number,
+  events: string[],
+  fail = false,
+): PrefixedMcpServer {
+  return new PrefixedMcpServer(
+    {
+      name: `inner-${id}`,
+      cacheToolsList: false,
+      connect: async () => {
+        events.push(`start:${id}`);
+        await Bun.sleep(delayMs);
+        if (fail) throw new Error(`connect failed ${id}`);
+        events.push(`connected:${id}`);
+      },
+      close: async () => {
+        events.push(`close:${id}`);
+      },
+      listTools: async () => [],
+      callTool: async () => [],
+      invalidateToolsCache: async () => {},
+    } as MCPServer,
+    id,
+  );
+}
+
+test("connects MCP servers concurrently and keeps their input order", async () => {
+  const events: string[] = [];
+  const servers = [
+    delayedConnectServer("slow", 120, events),
+    delayedConnectServer("fast-a", 20, events),
+    delayedConnectServer("fast-b", 20, events),
+    delayedConnectServer("medium", 60, events),
+  ];
+  const startedAt = performance.now();
+  const connected = await connectMcpServersInBatches(servers, { strict: false });
+  const elapsedMs = performance.now() - startedAt;
+  // Serial connects would take at least 220 ms; concurrent ones about 120 ms.
+  expect(elapsedMs).toBeLessThan(200);
+  expect(events.slice(0, 4).every((event) => event.startsWith("start:"))).toBe(true);
+  expect(connected.active.map(runtimeMcpServerId)).toEqual(["slow", "fast-a", "fast-b", "medium"]);
+  await connected.close();
+});
+
+test("a strict MCP connect failure closes every server that already connected", async () => {
+  const events: string[] = [];
+  const servers = [
+    delayedConnectServer("ok-a", 10, events),
+    delayedConnectServer("broken", 30, events, true),
+    delayedConnectServer("ok-b", 10, events),
+  ];
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  console.warn = () => {};
+  console.error = () => {};
+  try {
+    await expect(connectMcpServersInBatches(servers, { strict: true })).rejects.toThrow();
+  } finally {
+    console.warn = originalWarn;
+    console.error = originalError;
+  }
+  expect(events).toContain("close:ok-a");
+  expect(events).toContain("close:ok-b");
 });
 
 test("preserves nested MCP connectivity diagnostics while adding a typed retry marker", () => {
@@ -2427,17 +2497,19 @@ describe("runtime event normalization", () => {
     async function mcpToolApprovalMap(
       requireApproval: boolean | string[] | undefined,
       connectionBacked = false,
+      toolMeta?: Record<string, Record<string, unknown>>,
+      serverId = "docs",
     ): Promise<Record<string, boolean>> {
-      const mcp = startTestMcpServer();
+      const mcp = startTestMcpServer(toolMeta ? { toolMeta } : {});
       const serverConfig = {
-        id: "docs",
+        id: serverId,
         name: "Document Search",
         url: mcp.url,
         cacheToolsList: false,
         ...(requireApproval !== undefined ? { requireApproval } : {}),
       };
       const prepared = await prepareAgentTools(testSettings({ mcpServers: [serverConfig] }), [
-        { kind: "mcp", id: "docs" },
+        { kind: "mcp", id: serverId },
       ]);
       try {
         const agent = buildOpenGeniAgent(
@@ -2491,6 +2563,74 @@ describe("runtime event normalization", () => {
       });
     });
 
+    test("a tool's recommendedPermission _meta makes Ask its default", async () => {
+      const map = await mcpToolApprovalMap(
+        undefined,
+        false,
+        {
+          fetch_document: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" },
+          search_documents: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "allow" },
+        },
+        "host",
+      );
+      expect(map).toEqual({
+        host__search_documents: false,
+        host__fetch_document: true,
+      });
+    });
+
+    test("a tool's Allow recommendation never removes requireApproval", async () => {
+      const map = await mcpToolApprovalMap(
+        ["search_documents"],
+        false,
+        {
+          search_documents: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "allow" },
+          fetch_document: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" },
+        },
+        "host",
+      );
+      expect(map).toEqual({
+        host__search_documents: true,
+        host__fetch_document: true,
+      });
+    });
+
+    test("a recommendation added to a server's tools/list applies from the session's next attempt", async () => {
+      // The host changes its tools/list between attempts of one session, as when
+      // it ships a new Ask tool; nothing about the session is re-created or patched.
+      const toolMeta: Record<string, Record<string, unknown>> = {};
+      const mcp = startTestMcpServer({ toolMeta });
+      const serverConfig = { id: "host", name: "Host", url: mcp.url, cacheToolsList: true };
+      const settings = testSettings({ sandboxBackend: "none", mcpServers: [serverConfig] });
+      const attempt = async () => {
+        const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "host" }]);
+        const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
+        return { prepared, agent };
+      };
+      const first = await attempt();
+      try {
+        expect(await approvalMapForAgent(first.agent)).toEqual({
+          host__search_documents: false,
+          host__fetch_document: false,
+        });
+        toolMeta.fetch_document = { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" };
+        // A running attempt keeps the list it started with.
+        expect((await approvalMapForAgent(first.agent)).host__fetch_document).toBe(false);
+        const second = await attempt();
+        try {
+          expect(await approvalMapForAgent(second.agent)).toEqual({
+            host__search_documents: false,
+            host__fetch_document: true,
+          });
+        } finally {
+          await second.prepared.close();
+        }
+      } finally {
+        await first.prepared.close();
+        mcp.close();
+      }
+    });
+
     test("connection-backed MCP with requireApproval false builds without requesting approval", async () => {
       const map = await mcpToolApprovalMap(false, true);
       expect(map).toEqual({
@@ -2536,6 +2676,122 @@ describe("runtime event normalization", () => {
           [INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME]: true,
         });
       }
+    });
+
+    test("invalid interaction arguments return to the model before the approval pause", async () => {
+      const interactionServer: MCPServer = {
+        name: "interaction",
+        cacheToolsList: false,
+        async connect() {},
+        async close() {},
+        async listTools() {
+          return [
+            {
+              name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+              description: "Wait for exact human interaction",
+              inputSchema: {
+                type: "object" as const,
+                properties: {},
+                required: [],
+                additionalProperties: true,
+              },
+            },
+          ];
+        },
+        async callTool() {
+          return [];
+        },
+        async invalidateToolsCache() {},
+      };
+      const request = {
+        operation: "request",
+        resourceKind: "browser_session",
+        resourceId: "32ea5a16-5f91-427e-b7a4-15cb7b7c2657",
+        targetId: "TARGET-1",
+        expectedControllerGeneration: "controller-1",
+        expectedTargetGeneration: "target-1",
+        expectedDocumentGeneration: "document-1",
+        kind: "mfa",
+        reason: "Approve the sign-in on your phone.",
+      };
+      const runWith = async (argumentsJson: string) => {
+        const requests: Array<{ input: unknown }> = [];
+        const model: Model = {
+          async getResponse(modelRequest) {
+            requests.push(modelRequest as { input: unknown });
+            return requests.length === 1
+              ? {
+                  usage: new Usage(),
+                  responseId: "response-1",
+                  output: [
+                    {
+                      type: "function_call",
+                      callId: "handoff-call",
+                      name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+                      arguments: argumentsJson,
+                      status: "completed",
+                    },
+                  ],
+                }
+              : {
+                  usage: new Usage(),
+                  responseId: "response-2",
+                  output: [
+                    {
+                      type: "message",
+                      role: "assistant",
+                      status: "completed",
+                      content: [{ type: "output_text", text: "corrected" }],
+                    },
+                  ],
+                };
+          },
+          // oxlint-disable-next-line require-yield
+          async *getStreamedResponse() {
+            throw new Error("not streamed");
+          },
+        };
+        const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+          mcpServers: [interactionServer],
+        }) as unknown as { clone: (config: unknown) => Agent };
+        const result = await runAgent(agent.clone({ model }), "hand the sign-in over", {
+          toolExecution: { preApprovalInputGuardrails: true },
+        });
+        return { result, requests };
+      };
+
+      // A string where a number belongs: the turn continues and the model
+      // sees what to correct, instead of the turn failing at the pause.
+      const invalid = await runWith(JSON.stringify({ ...request, expiresInSeconds: "1200" }));
+      expect(invalid.result.interruptions).toHaveLength(0);
+      expect(invalid.result.finalOutput).toBe("corrected");
+      const fed = JSON.stringify(invalid.requests[1]!.input);
+      expect(fed).toContain("Invalid interaction_request_human arguments: expiresInSeconds");
+      expect(fed).toContain("Nothing was requested");
+
+      // Valid arguments still pause for the person, and the recorded request
+      // is exactly what the model sent.
+      const valid = await runWith(JSON.stringify({ ...request, expiresInSeconds: 1200 }));
+      expect(valid.result.interruptions).toHaveLength(1);
+      expect(valid.requests).toHaveLength(1);
+      expect(serializeInteractionInterventionRequests(valid.result.interruptions)).toMatchObject([
+        { toolCallId: "handoff-call", input: { ...request, expiresInSeconds: 1200 } },
+      ]);
+    });
+
+    test("describes invalid interaction arguments without echoing their values", () => {
+      expect(interactionRequestArgumentsProblem("{")).toContain("not valid JSON");
+      expect(interactionRequestArgumentsProblem(JSON.stringify({ operation: "wait" }))).toContain(
+        "interventionId",
+      );
+      expect(
+        interactionRequestArgumentsProblem(
+          JSON.stringify({
+            operation: "wait",
+            interventionId: "32ea5a16-5f91-427e-b7a4-15cb7b7c2657",
+          }),
+        ),
+      ).toBeNull();
     });
 
     test("only the exact SDK-approved interaction call can cross the attempt gateway", async () => {
@@ -2926,6 +3182,42 @@ describe("runtime event normalization", () => {
       },
     );
 
+    test.each([
+      ["one account", undefined, false],
+      ["several accounts", "alice@example.test", true],
+    ] as const)(
+      "connector tool descriptions name the account only to tell several apart (%s)",
+      async (_case, account, named) => {
+        const serverId = `account-${"b".repeat(64)}`;
+        const accountLabel: McpAccountRouteLabel = {
+          model: "Documents — Personal: alice@example.test",
+          connector: "Documents",
+          providerDomain: "docs.example.test",
+          ...(account ? { account } : {}),
+        };
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "allow",
+          serverId,
+          accountLabel,
+        });
+        try {
+          const tools = await fixture.prepared.mcpServers[0]!.listTools();
+          expect(tools.length).toBeGreaterThan(0);
+          for (const tool of tools) {
+            expect((tool.description ?? "").startsWith("Account: ")).toBe(named);
+          }
+          if (named) {
+            expect(tools[0]!.description).toStartWith(
+              "Account: Documents — Personal: alice@example.test. Use only this account; if the intended account for a write is unclear, ask before calling.\n",
+            );
+          }
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      },
+    );
+
     test("prepared account display facts enrich event copies without changing catalog authority", async () => {
       const serverId = `account-${"a".repeat(64)}`;
       const accountLabel: McpAccountRouteLabel = {
@@ -3116,6 +3408,94 @@ describe("runtime event normalization", () => {
           connectionId: expectedId,
           defaultDecision: "allow",
         });
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    });
+
+    test("a host tool's _meta recommendation is the default on model and Codemode calls", async () => {
+      const mcp = startTestMcpServer({
+        toolMeta: { fetch_document: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" } },
+      });
+      const serverId = "cloudgeni";
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [{ id: serverId, name: "CloudGeni", url: mcp.url, cacheToolsList: false }],
+      });
+      const seen: Array<{ toolName: string; defaultDecision?: string; approvalMode?: string }> = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        // No saved rule: the recommendation decides.
+        prepare: async (call) => {
+          seen.push({
+            toolName: call.toolName,
+            defaultDecision: call.defaultDecision,
+            approvalMode: call.approvalMode,
+          });
+          return { managed: true, decision: call.defaultDecision ?? "allow" };
+        },
+        begin: async (call) =>
+          call.defaultDecision === "ask"
+            ? { allowed: false, managed: true, requestId: "request-ask", reason: "approval" }
+            : { allowed: true, managed: true, requestId: "request-allow" },
+        complete: async () => undefined,
+      };
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: serverId }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        connectorActionPolicy: hooks,
+      });
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+      try {
+        const tools = await agent.getMcpTools(new RunContext());
+        const byName = (name: string) => {
+          const tool = tools.find(
+            (candidate) => candidate.type === "function" && candidate.name === name,
+          );
+          if (!tool || tool.type !== "function") throw new Error(`${name} missing`);
+          return tool;
+        };
+        expect(
+          await byName(`${serverId}__fetch_document`).needsApproval(
+            new RunContext(),
+            { id: "doc-1" },
+            "call-fetch",
+          ),
+        ).toBe(true);
+        expect(
+          await byName(`${serverId}__search_documents`).needsApproval(
+            new RunContext(),
+            { query: "n" },
+            "call-search",
+          ),
+        ).toBe(false);
+        expect(seen).toEqual([
+          { toolName: "fetch_document", defaultDecision: "ask", approvalMode: "session_mcp" },
+          { toolName: "search_documents", defaultDecision: "allow", approvalMode: undefined },
+        ]);
+
+        // Codemode reaches the same tool through the attempt gateway with the same default.
+        seen.length = 0;
+        const environment = prepared.attemptToolEnvironment!;
+        const result = await environment
+          .call({
+            catalogDigest: environment.catalog.digest,
+            operationId: crypto.randomUUID(),
+            identity: { serverId, toolName: "fetch_document" },
+            arguments: { id: "doc-1" },
+            caller: { kind: "codemode", subjectId: "worker:test" },
+          })
+          .catch((error: unknown) => error);
+        expect(seen[0]).toMatchObject({ toolName: "fetch_document", defaultDecision: "ask" });
+        expect(result).toBeDefined();
+        expect(mcp.calls).toEqual([]);
       } finally {
         await prepared.close();
         mcp.close();
@@ -13030,6 +13410,12 @@ describe("runtime Skill activation", () => {
       attemptToolCatalog: catalog,
     });
     expect(indexedSkillNames(agent)).toContain("opengeni-documents");
+    const rehydratedAgent = buildOpenGeniAgent(settings, [], {
+      attemptToolCatalog: JSON.parse(JSON.stringify(catalog)),
+    });
+    expect(typeof agent.instructions).toBe("string");
+    expect(agent.instructions).toBe(rehydratedAgent.instructions);
+    expect(indexedSkillNames(agent)).toEqual(indexedSkillNames(rehydratedAgent));
 
     const incompleteCatalog = {
       ...catalog,

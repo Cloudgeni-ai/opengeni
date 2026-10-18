@@ -195,9 +195,10 @@ The plan, for an agent-turn task (connector-source tasks are excluded):
   a person pins another account or unpins it. A refresh never adds, replaces or
   removes pins, because a pin is a person's explicit choice. Unpinned connectors
   need nothing: each run already uses the owner's current accounts.
-- **Opengeni tools** (agent-created tasks only). A human- or API-created task
-  has no creator policy and already follows the deployment default at each run.
-  For a frozen creator policy, the default tools it lacks are reported
+- **Opengeni tools** (explicit selections only). Default-following creators
+  store no resolved list: each fresh run resolves current workspace/deployment
+  defaults, as an ordinary chat does. Explicit creator selections remain fixed.
+  For an explicit creator policy, the default tools it lacks are reported
   (`missingOpenGeniTools`) and added. Permissions stay least-privilege: a
   frozen permission is kept only while the refreshing person holds it, and the
   only permissions added are the ones the newly added tools need
@@ -270,10 +271,12 @@ page's `expectedExecutionDigest`; a working pin changes only in the editor.
 - Runs already admitted keep their accepted execution. Recovery re-reads only
   the creator session policy, which the refresh never changes.
 
-This is the one writer of the creator policy's tools and permissions after
-create. Opengeni tools do not follow the workspace defaults at each run: that
-would conflict with the creator-policy freeze. Connectors do (see below); they
-carry no permissions of their own and each run resolves the owner's accounts.
+This is the human writer of explicit creator selections and permissions after
+create. Default-following schedules need no tool-list refresh; their permission
+ceiling is still retained. Generated reusable chats keep normal session default
+intent, and a later explicit edit to the chat remains authoritative. The legacy
+repair only restores default intent established by the server-recorded creator;
+unknown intent stays pinned. Accepted occurrences keep their original catalog.
 
 The optional `leaveOut` (`{ connectors?, openGeniTools? }`) names workspace
 default connectors and Opengeni tools the person wants kept off this schedule.

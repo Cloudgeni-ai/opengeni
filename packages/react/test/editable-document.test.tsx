@@ -15,6 +15,9 @@ import {
   minimalUtf16TextEdit,
 } from "../src/components/artifacts/editable-document";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -213,6 +216,7 @@ describe("SDK-backed editable document", () => {
   test("composes bounded public projections without snapshots", async () => {
     const fake = new FakeDocumentSession();
     const editorProjection = await composeDocumentEditorProjection(
+      englishText,
       fake as unknown as EditableArtifactSession,
     );
     expect(editorProjection.revision).toBe("1");

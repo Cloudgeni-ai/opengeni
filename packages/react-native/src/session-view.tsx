@@ -1,3 +1,4 @@
+import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -100,10 +101,17 @@ export interface NativeComposerActionContext {
   canSubmit: boolean;
   draftSaving: boolean;
   submitLabel: string;
+  /**
+   * The other way to send while the agent works: Queue when Send steers,
+   * Steer when Send queues. `null` when it is not offered: Send is not taking
+   * its busy path, or there is nothing to send yet.
+   */
+  alternateSubmitLabel: string | null;
   onAttachDocument(): void;
   onAttachImage(): void;
   onTogglePause(): void;
   onSubmit(): void;
+  onAlternateSubmit(): void;
 }
 
 export type NativeComposerActionRenderer = (context: NativeComposerActionContext) => ReactNode;
@@ -141,7 +149,16 @@ export interface OpenGeniNativeSessionViewProps {
   testID?: string | undefined;
 }
 
-export function OpenGeniNativeSessionView({
+/** One Send (`busySend: "steer"` without `offerQueue`) reads as waiting messages, with no Steer. */
+export function OpenGeniNativeSessionView(props: OpenGeniNativeSessionViewProps) {
+  return (
+    <SingleSendWording enabled={props.controller.composer.singleSend === true}>
+      <NativeSessionViewBody {...props} />
+    </SingleSendWording>
+  );
+}
+
+function NativeSessionViewBody({
   controller,
   theme = DEFAULT_OPENGENI_NATIVE_THEME,
   labels: labelOverrides,
@@ -158,9 +175,10 @@ export function OpenGeniNativeSessionView({
   keyboardVerticalOffset = 0,
   testID,
 }: OpenGeniNativeSessionViewProps) {
+  const t = useOpenGeniText();
   const labels = useMemo(
-    () => ({ ...DEFAULT_OPENGENI_NATIVE_LABELS, ...labelOverrides }),
-    [labelOverrides],
+    () => ({ ...DEFAULT_OPENGENI_NATIVE_LABELS(t), ...labelOverrides }),
+    [t, labelOverrides],
   );
   const listRef = useRef<FlatList<TimelineGroup>>(null);
   const followTail = useRef(true);
@@ -1322,14 +1340,16 @@ function QueueSurface({
                   variant="quiet"
                   disabled={controller.composer.hasDraftContent() || controller.queue.mutating}
                 />
-                <ActionButton
-                  compact
-                  label={labels.runNext}
-                  onPress={() => void controller.queue.steerTurn(turn.id)}
-                  theme={theme}
-                  variant="quiet"
-                  disabled={controller.queue.mutating}
-                />
+                {controller.composer.singleSend ? null : (
+                  <ActionButton
+                    compact
+                    label={labels.runNext}
+                    onPress={() => void controller.queue.steerTurn(turn.id)}
+                    theme={theme}
+                    variant="quiet"
+                    disabled={controller.queue.mutating}
+                  />
+                )}
                 <ActionButton
                   compact
                   label={labels.remove}
@@ -1776,10 +1796,19 @@ function Composer({
     canSubmit: controller.composer.canSend && !busy,
     draftSaving: controller.composer.draftSaving,
     submitLabel: labels.send,
+    alternateSubmitLabel:
+      !controller.composer.sendAlternate || !controller.composer.canSend
+        ? null
+        : controller.composer.alternateSend === "queue"
+          ? labels.queue
+          : controller.composer.alternateSend === "steer"
+            ? labels.steer
+            : null,
     onAttachDocument: () => void controller.attachments.pickDocuments(),
     onAttachImage: () => void controller.attachments.pickImages(),
     onTogglePause: () => void (paused ? controller.composer.resume() : controller.composer.pause()),
     onSubmit: () => void controller.composer.send(),
+    onAlternateSubmit: () => void controller.composer.sendAlternate?.(),
   };
   const composerContext: NativeComposerRenderContext = {
     ...actionContext,
@@ -1885,6 +1914,15 @@ function DefaultComposerActions(context: NativeComposerActionContext) {
           variant="quiet"
           disabled={context.busy}
         />
+        {context.alternateSubmitLabel !== null ? (
+          <ActionButton
+            label={context.alternateSubmitLabel}
+            onPress={() => context.onAlternateSubmit()}
+            theme={context.theme}
+            variant="quiet"
+            disabled={!context.canSubmit}
+          />
+        ) : null}
         <ActionButton
           label={context.submitLabel}
           onPress={() => context.onSubmit()}

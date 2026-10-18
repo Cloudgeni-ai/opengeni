@@ -24,7 +24,10 @@ import {
   settleConnectedMachineSessionBackgroundCommand,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
 } from "../src/index";
-import { listSessionBackgroundCommands } from "../src/session-background-commands";
+import {
+  listSessionBackgroundCommands,
+  UNREACHABLE_MACHINE_STOP_REQUESTER,
+} from "../src/session-background-commands";
 import * as schema from "../src/schema";
 
 let shared: SharedTestDatabase;
@@ -122,6 +125,83 @@ async function control(
 }
 
 describe("recursive session control algebra", () => {
+  test("an operation abandoned on an unreachable machine is recorded for stopping without new model input", async () => {
+    const value = await fixture();
+    const attempt = await claimAttempt(value, value.root.id);
+    const enrollmentId = crypto.randomUUID();
+    const connectionInstanceId = "launch-instance-unreachable";
+    const base = {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.root.id,
+      turnId: attempt.turn.id,
+      executionGeneration: attempt.turn.executionGeneration,
+      attemptId: attempt.attemptId,
+      controlWorkspaceId: value.grant.workspaceId!,
+      enrollmentId,
+      connectionInstanceId,
+      command: "sleep 600",
+    };
+    // Pause fences ordinary adoption, but must not leave a stop obligation with
+    // a turn that can no longer stop it.
+    await control(value, value.root.id, "pause");
+    await expect(
+      adoptConnectedMachineSessionBackgroundCommand(client.db, {
+        ...base,
+        commandId: crypto.randomUUID(),
+        opId: "background-op-paused",
+      }),
+    ).rejects.toBeInstanceOf(SessionBackgroundCommandAdoptionFencedError);
+    const commandId = crypto.randomUUID();
+    const opId = "background-op-unreachable";
+    const abandoned = await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      ...base,
+      commandId,
+      opId,
+      abandoned: true,
+    });
+    expect(abandoned).toMatchObject({ id: commandId, state: "stopping" });
+    expect(abandoned.cancelRequestedAt).not.toBeNull();
+    const [row] = await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) =>
+      db
+        .select()
+        .from(schema.sessionBackgroundCommands)
+        .where(eq(schema.sessionBackgroundCommands.id, commandId)),
+    );
+    expect(row?.cancelRequestedBy).toBe(UNREACHABLE_MACHINE_STOP_REQUESTER);
+
+    // Only proof that this exact attempt launched the operation is accepted.
+    await expect(
+      adoptConnectedMachineSessionBackgroundCommand(client.db, {
+        ...base,
+        attemptId: crypto.randomUUID(),
+        commandId: crypto.randomUUID(),
+        opId: "background-op-foreign",
+        abandoned: true,
+      }),
+    ).rejects.toBeInstanceOf(SessionBackgroundCommandAdoptionFencedError);
+
+    // The model already saw this action fail; the stop result is audit only.
+    const settled = await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.root.id,
+      commandId,
+      controlWorkspaceId: value.grant.workspaceId!,
+      enrollmentId,
+      connectionInstanceId,
+      opId,
+      outcome: "exited",
+      exitCode: 130,
+      reason: "op_cancelled",
+    });
+    expect(settled?.command).toMatchObject({ id: commandId, state: "exited" });
+    expect(settled?.events.map((event) => event.type)).toEqual(["session.command.finished"]);
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, value.grant.workspaceId!, value.root.id),
+    ).toEqual([]);
+  });
+
   test("terminal command proof atomically retains one input without waking an idle session", async () => {
     const value = await fixture();
     const attempt = await claimAttempt(value, value.root.id);

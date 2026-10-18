@@ -50,6 +50,7 @@ import {
 } from "@/lib/organization-admin";
 import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
+import { PlanSeats, SeatLimitNotice } from "./plan-seats";
 import type {
   OrganizationInvitation,
   OrganizationMember,
@@ -467,6 +468,7 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
   const total = shownMembers.length + shownInvitations.length;
   return (
     <div className="flex min-w-0 flex-col gap-4">
+      <PlanSeats plan={directory.plan} />
       <Toolbar>
         <ToolbarSearch
           value={query}
@@ -1064,6 +1066,7 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
   const [role, setRole] = useState<OrganizationMembershipRole>("member");
   const [workspaceIds, setWorkspaceIds] = useState<string[]>([]);
   const [showErrors, setShowErrors] = useState(false);
+  const [seatLimitError, setSeatLimitError] = useState<string | null>(null);
   const organizationName = directory.overview.value?.organization.name ?? "the organization";
   const workspaces = directory.overview.value?.workspaces ?? [];
 
@@ -1108,6 +1111,7 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
       pendingLabel="Sending…"
       footerStart="Invitations expire in 7 days."
       onSubmit={async () => {
+        setSeatLimitError(null);
         setShowErrors(true);
         if (emails.length === 0 || problems.length > 0) return false;
         if (!canInviteOrganizationRole(directory.actorRole, role)) {
@@ -1126,6 +1130,11 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
         }
         if (result.failed.length > 0) {
           setEmails(result.failed.map((each) => each.email));
+          const seatFailure = result.failed.find((each) => each.seatLimitReached);
+          if (seatFailure) {
+            setSeatLimitError(seatFailure.message);
+            return false;
+          }
           throw new Error(
             result.failed.length === 1
               ? `Couldn't invite ${result.failed[0]!.email}. ${result.failed[0]!.message}`
@@ -1137,6 +1146,17 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
       }}
     >
       <FieldStack>
+        <PlanSeats plan={directory.plan} />
+        {seatLimitError && directory.plan ? (
+          <SeatLimitNotice
+            canManage={directory.actorRole === "owner"}
+            onUpgrade={() => nav.openSection("billing")}
+          />
+        ) : seatLimitError ? (
+          <Notice tone="waiting" title="Couldn't send the invitation" live="assertive">
+            {seatLimitError}
+          </Notice>
+        ) : null}
         <Field
           label="Email addresses"
           hint="Separate with commas, or press Enter after each one."

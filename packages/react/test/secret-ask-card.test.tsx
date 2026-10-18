@@ -6,6 +6,9 @@ import type {
   SessionEvent,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 import { act, type ReactNode } from "react";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
@@ -381,8 +384,10 @@ describe("secret ask card: browser and password-manager attributes", () => {
     expect(secretInputMode({ item: "a", fieldKind: "totp" })).toBe("numeric");
     expect(secretInputMode({ item: "a", autocomplete: "one-time-code" })).toBe("numeric");
     expect(secretCanGenerate({ item: "a", fieldKind: "totp", allowGenerate: true })).toBe(false);
-    expect(secretFieldLabel({ item: "a", field: "client-secret" })).toBe("Client secret");
-    expect(secretFieldLabel({ item: "a", itemType: "note" })).toBe("Note");
+    expect(secretFieldLabel(englishText, { item: "a", field: "client-secret" })).toBe(
+      "Client secret",
+    );
+    expect(secretFieldLabel(englishText, { item: "a", itemType: "note" })).toBe("Note");
   });
 
   test("username comes first, prefilled, paired for password managers inside the form", async () => {
@@ -601,7 +606,7 @@ describe("secret ask card: Save to", () => {
   test("secretAnswerFromReading builds the write-only answer", () => {
     const question = secretQuestion({ item: "GitHub" });
     expect(
-      secretAnswerFromReading(question, {
+      secretAnswerFromReading(englishText, question, {
         value: SECRET,
         generate: null,
         username: "  octo  ",
@@ -612,7 +617,7 @@ describe("secret ask card: Save to", () => {
       secretAnswer: { questionId: "github", value: SECRET, username: "octo", saveTo: "task" },
     });
     expect(
-      secretAnswerFromReading(question, {
+      secretAnswerFromReading(englishText, question, {
         value: null,
         generate: null,
         username: null,

@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 import {
   groupTimeline,
@@ -12,6 +13,7 @@ import {
   useSessionLineage,
   useSessionMcpApprovalPolicy,
   useTurnQueue,
+  type ComposerBusySend,
   type FileAttachmentClientLike,
   type GoalClientLike,
   type HumanInputSessionClientLike,
@@ -24,7 +26,11 @@ import {
   type TimelineItem,
 } from "@opengeni/react/session";
 import { sessionAdmissionBlocked, type SessionDisplayStatus } from "@opengeni/react/timeline-model";
-import { useNativeFileAttachments, type NativeFileAttachmentsResult } from "./attachments";
+import {
+  nativeComposerAttachmentCallbacks,
+  useNativeFileAttachments,
+  type NativeFileAttachmentsResult,
+} from "./attachments";
 import { useOpenGeniReactNativeEnvironment } from "./environment";
 import {
   useNativeReadAcknowledgement,
@@ -107,6 +113,18 @@ export function useOpenGeniNativeSession(input: {
   workspaceId: string;
   sessionId: string;
   mcpApprovalPolicyServerId?: string;
+  /**
+   * What an ordinary Send does while the agent is working: `queue` (default)
+   * runs it after the current turn; `steer` has the agent read it within
+   * seconds (a reply still being written stops; running tools are not cut off).
+   *
+   * Under `steer` the screen has one Send and nothing to learn: no Queue
+   * choice beside it and no Queue or Steer words. Set `offerQueue` to also
+   * offer Queue beside Send.
+   */
+  busySend?: ComposerBusySend;
+  /** Under `busySend: "steer"`, also offer Queue beside Send while the agent works. */
+  offerQueue?: boolean;
 }): OpenGeniNativeSessionController {
   const environment = useOpenGeniReactNativeEnvironment();
   const events = useSessionEvents(input.sessionId, {
@@ -142,9 +160,11 @@ export function useOpenGeniNativeSession(input: {
     // at once instead of flashing as a chat bubble before it is queued.
     sendDestination: () =>
       (session.session?.activeTurnId ?? null) !== null || queue.queue.length > 0 ? "queue" : "chat",
+    busySend: input.busySend,
+    offerQueue: input.offerQueue,
     sendExtras: () => ({ resources: attachments.readyResources }),
     sendBlocked: () => attachments.hasUnresolved,
-    onSent: () => attachments.clear(),
+    ...nativeComposerAttachmentCallbacks(attachments),
   });
   const control = useSessionControl(input.sessionId, {
     client: input.client,
@@ -172,7 +192,8 @@ export function useOpenGeniNativeSession(input: {
     pollIntervalMs: 30_000,
   });
   const approvals = useMemo(() => projectPendingApprovals(events.events), [events.events]);
-  const timelineGroups = useMemo(() => groupTimeline(events.timeline), [events.timeline]);
+  const t = useOpenGeniText();
+  const timelineGroups = useMemo(() => groupTimeline(t, events.timeline), [t, events.timeline]);
   useNativeReadAcknowledgement({
     client: input.client,
     workspaceId: input.workspaceId,

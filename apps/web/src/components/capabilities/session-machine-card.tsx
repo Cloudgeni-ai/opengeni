@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import type { AuthNeededItem } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import { machineDisplayName, machineScopeLabel } from "@opengeni/react/sandbox-label-model";
@@ -29,9 +30,11 @@ import { RowButton } from "@/components/ui/page-actions";
 import { useAppContext } from "@/context";
 import { userErrorText } from "@/lib/api-error";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
+import { useDesktopThisComputer } from "@/components/desktop/this-computer";
 import { moveChatToMachine } from "@/lib/move-chat-to-machine";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
+import { thisComputerReady, thisComputerNeedsPermissions } from "@opengeni/react/this-computer";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 import type { ChatSendContext } from "./session-github-repositories";
 
@@ -89,8 +92,7 @@ function focusIfIdle(card: HTMLElement | null, target: HTMLElement | null = card
 
 /**
  * The Connected Machine card in a conversation. The agent can post it, but only
- * the person can connect a machine (the command is minted in their browser and
- * never enters the transcript) or move this chat onto one. Once a machine with a
+ * the person can connect a machine or move this chat onto one. Once a machine with a
  * screen is reachable, the card offers the Opengeni Browser extension for it.
  */
 export function SessionMachineCapabilityCard({
@@ -170,14 +172,14 @@ export function SessionMachineCapabilityCard({
     return [...machines].sort(
       (left, right) =>
         rank(left) - rank(right) ||
-        machineDisplayName(left).localeCompare(machineDisplayName(right)),
+        machineDisplayName(t, left).localeCompare(machineDisplayName(t, right)),
     );
   }, [justConnected, machines]);
 
   const use = useCallback(
     async (machine: MachineView) => {
       if (using !== null) return;
-      const name = machineDisplayName(machine);
+      const name = machineDisplayName(t, machine);
       setUseError(null);
       setOutcome(null);
       const chat = sendContext?.() ?? { blocked: null, awaitingHuman: false, extras: {} };
@@ -234,7 +236,7 @@ export function SessionMachineCapabilityCard({
     : !fleet.canRead
       ? "You don't have access to this workspace's machines."
       : fresh && fleet.canAttach && !fresh.active
-        ? `${machineDisplayName(fresh)} connected. Choose it below to use it here.`
+        ? `${machineDisplayName(t, fresh)} connected. Choose it below to use it here.`
         : reachable.length > 0 && fleet.canAttach
           ? "Choose where this chat runs."
           : reachable.length > 0
@@ -244,6 +246,17 @@ export function SessionMachineCapabilityCard({
               : machines.length > 0
                 ? "Turn on one of the machines below to use it here."
                 : "Ask a workspace admin to connect a machine.";
+  // Inside the desktop app, the computer it runs on is one click away.
+  const desktop = useDesktopThisComputer();
+  const desktopReady =
+    thisComputerReady(desktop?.computer.status ?? null) && !desktop?.computer.status?.reconnecting;
+  const offerThisComputer =
+    desktop !== null &&
+    desktop.computer.status !== null &&
+    desktop.computer.status.state !== "unavailable" &&
+    !thisComputerReady(desktop.computer.status) &&
+    !unavailableOnDeployment &&
+    fleet.canRead;
   const connectAnother = fleet.canManage && (reachable.length > 0 || activeMachine !== null);
   const visibleDetails =
     useError !== null || ordered.length > 0 || chromeMachine !== null || connectAnother;
@@ -258,25 +271,58 @@ export function SessionMachineCapabilityCard({
         description={recommendation.rationale}
         skill={false}
         expanded={false}
-        complete={activeMachine !== null}
+        complete={activeMachine !== null || desktopReady}
         completeLabel={
           activeMachine
             ? outcome?.sandboxId === activeMachine.sandboxId
               ? outcome.text
-              : `This chat runs on ${machineDisplayName(activeMachine)}`
-            : undefined
+              : `This chat runs on ${machineDisplayName(t, activeMachine)}`
+            : desktopReady
+              ? `Your agents can use ${desktop?.computer.status?.machineName || "this computer"}.`
+              : undefined
         }
-        actionLabel="Connect a machine"
-        actionUnavailable={actionUnavailable}
+        actionLabel={
+          offerThisComputer
+            ? desktop.computer.acting
+              ? "Connecting…"
+              : "Use this computer"
+            : "Connect a computer"
+        }
+        busy={offerThisComputer && desktop.computer.acting}
+        actionUnavailable={offerThisComputer ? null : actionUnavailable}
         opensDialog={false}
-        note={fleet.canManage ? "You can remove a connected machine anytime from Machines." : ""}
-        onOpen={() => openSetup()}
+        note={
+          offerThisComputer
+            ? "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app."
+            : fleet.canManage
+              ? "You can remove a connected machine anytime from Machines."
+              : ""
+        }
+        onOpen={() => {
+          if (!offerThisComputer) return openSetup();
+          if (desktop.computer.acting) return;
+          if (thisComputerNeedsPermissions(desktop.computer.status)) return desktop.openSetup();
+          void (
+            desktop.computer.status?.state === "paused"
+              ? desktop.computer.resume().then(() => desktop.computer.status)
+              : desktop.computer.connect({ screenControl: true })
+          ).then((next) => {
+            if (thisComputerNeedsPermissions(next)) desktop.openSetup();
+            void fleet.refresh();
+          });
+        }}
         onClose={closeSetup}
         opener={opener}
         cardRef={cardRef}
         details={
           unavailableOnDeployment || !fleet.canRead ? null : (
             <>
+              {desktop?.computer.actionError !== null &&
+              desktop?.computer.actionError !== undefined ? (
+                <Notice tone="failed" live="assertive" className="mx-4 mb-3 text-xs">
+                  Couldn't connect this computer. {desktop.computer.actionError || "Try again."}
+                </Notice>
+              ) : null}
               {/* Always mounted, so moves and new machines are announced. */}
               <span className="sr-only" role="status" aria-live="polite">
                 {announcement}
@@ -322,7 +368,10 @@ export function SessionMachineCapabilityCard({
                     />
                   ) : null}
                   {chromeMachine ? (
-                    <ChromeStep chrome={chrome} machineName={machineDisplayName(chromeMachine)} />
+                    <ChromeStep
+                      chrome={chrome}
+                      machineName={machineDisplayName(t, chromeMachine)}
+                    />
                   ) : null}
                   {connectAnother ? (
                     <Button
@@ -349,6 +398,7 @@ export function SessionMachineCapabilityCard({
             if (!open) closeSetup();
           }}
           workspaceId={workspaceId}
+          sessionId={sessionId}
           origin={origin}
           machines={fleet.machines}
           machinesLoading={fleet.loading}
@@ -358,7 +408,7 @@ export function SessionMachineCapabilityCard({
           defaultAllowScreenControl={setupScreenControl}
           onConnected={(machine) => {
             setJustConnected(machine.sandboxId);
-            setAnnouncement(`${machineDisplayName(machine)} connected.`);
+            setAnnouncement(`${machineDisplayName(t, machine)} connected.`);
           }}
           useInChat={{ canUse: fleet.canAttach, onUse: (machine) => void use(machine) }}
         />
@@ -382,13 +432,13 @@ function MachineRow({
   locked: boolean;
   onUse: () => void;
 }) {
-  const name = machineDisplayName(machine);
+  const name = machineDisplayName(t, machine);
   const selectable = isMachineComputeSelectable(machine.state);
   const Icon = machine.os === "linux" && !machine.hasDisplay ? ServerIcon : LaptopIcon;
   const common = {
     leading: <LogoTile icon={<Icon />} />,
     title: name,
-    meta: [stateLabel(machine), machineScopeLabel(machine.scope)],
+    meta: [stateLabel(machine), machineScopeLabel(t, machine.scope)],
   };
   if (machine.active) {
     return (

@@ -181,6 +181,37 @@ END $patch$;`;
       analyze(patch.replace("EXECUTE replace", "definition := 'SELECT 1'; EXECUTE replace")),
     ).toHaveLength(1);
   });
+  test("treats a replacement initialised in DECLARE as the same catalog routine patch", () => {
+    const patch = `DO $patch$ DECLARE definition text;
+  anchor text := $old$ RETURN NULL; $old$;
+  replacement text := $new$ SELECT id INTO v_row FROM widgets WHERE id = NEW.id; RETURN NULL; $new$;
+BEGIN
+definition := pg_get_functiondef('example()'::regprocedure);
+IF cardinality(string_to_array(definition, anchor)) <> 2 THEN RAISE EXCEPTION 'anchor drifted'; END IF;
+EXECUTE replace(definition, anchor, replacement);
+END $patch$;`;
+    const analyze = (sql: string) =>
+      analyzeMigrationRlsBackfills(
+        fixture({
+          "0001_base.sql": FORCED_TABLE,
+          "0002_patch.sql": sql,
+        }),
+      );
+    expect(analyze(patch)).toHaveLength(0);
+    expect(
+      analyze(
+        patch.replace(
+          "END $patch$",
+          "IF EXISTS (SELECT 1 FROM widgets) THEN RAISE EXCEPTION 'real guard'; END IF; END $patch$",
+        ),
+      ),
+    ).toHaveLength(1);
+    expect(
+      analyze(
+        patch.replace("EXECUTE replace(definition, anchor, replacement);", "EXECUTE replacement;"),
+      ),
+    ).toHaveLength(1);
+  });
   test("ignores chained pg_get_functiondef replacements but still sees independent writes", () => {
     const patch = `DO $patch$ DECLARE definition text;
 BEGIN

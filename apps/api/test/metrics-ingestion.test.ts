@@ -168,6 +168,43 @@ describe("Connected Machine event ingestion scheduling", () => {
     expect(coalesced).toBe(197);
   });
 
+  test("a terminal output collector does not block its runner's liveness or other completions", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let progressed!: () => void;
+    const progress = new Promise<void>((resolve) => {
+      progressed = resolve;
+    });
+    const seen: string[] = [];
+    const scheduler = createAgentEventIngestionScheduler(async (payload, subject) => {
+      expect(subject).toBe(subjectA);
+      const event = AgentEvent.decode(payload).event;
+      if (event?.$case === "operationCompleted") {
+        seen.push(event.operationCompleted.opId);
+        if (event.operationCompleted.opId === "slow") await gate;
+        else progressed();
+      } else if (event?.$case === "heartbeat") seen.push("heartbeat");
+    });
+    const completed = (opId: string) =>
+      AgentEvent.encode({
+        event: {
+          $case: "operationCompleted",
+          operationCompleted: { opId },
+        },
+      }).finish();
+    scheduler.enqueue(completed("slow"), subjectA);
+    for (let retry = 0; retry < 100; retry++) scheduler.enqueue(completed("slow"), subjectA);
+    scheduler.enqueue(heartbeat(1), subjectA);
+    scheduler.enqueue(completed("fast"), subjectA);
+    await progress;
+    expect(seen).toEqual(["slow", "heartbeat", "fast"]);
+    release();
+    await scheduler.whenIdle();
+    expect(seen).toEqual(["slow", "heartbeat", "fast", "slow"]);
+  });
+
   test("a rejected event does not strand later liveness for the same runner", async () => {
     const handled: string[] = [];
     const scheduler = createAgentEventIngestionScheduler(async (payload) => {
@@ -179,6 +216,41 @@ describe("Connected Machine event ingestion scheduling", () => {
     scheduler.enqueue(heartbeat(2), subjectA);
     await scheduler.whenIdle();
     expect(handled).toEqual(["2"]);
+  });
+
+  test("saturating all completion slots never consumes heartbeat/control capacity", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let renew!: () => void;
+    const renewed = new Promise<void>((resolve) => {
+      renew = resolve;
+    });
+    let active = 0;
+    const scheduler = createAgentEventIngestionScheduler(async (payload) => {
+      const event = AgentEvent.decode(payload).event;
+      if (event?.$case === "operationCompleted") {
+        active++;
+        await held;
+      } else if (event?.$case === "heartbeat") renew();
+    });
+    for (let index = 0; index < 33; index++)
+      scheduler.enqueue(
+        AgentEvent.encode({
+          event: {
+            $case: "operationCompleted",
+            operationCompleted: { opId: String(index) },
+          },
+        }).finish(),
+        subjectA,
+      );
+    scheduler.enqueue(heartbeat(1), subjectB);
+    await renewed;
+    expect(active).toBe(32);
+    release();
+    await scheduler.whenIdle();
+    expect(active).toBe(33);
   });
 
   test("bounds cross-runner database concurrency without serializing every runner", async () => {

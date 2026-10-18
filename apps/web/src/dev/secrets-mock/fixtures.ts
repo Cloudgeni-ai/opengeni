@@ -1,8 +1,8 @@
 // DEV-only fixtures shaped like the §13B seed, for building and screenshotting
 // the Secrets UI before the vault API exists (and for transient states after).
 // Every value is fake.
+import type { VaultProviderConnectionSummary, VaultProviderOperations } from "@opengeni/sdk";
 import type {
-  OnePasswordConnectionSummary,
   PasskeySummary,
   VaultFieldKind,
   VaultFieldVersionMeta,
@@ -35,14 +35,19 @@ export type MockField = VaultItemField & {
   versions: { value: string; createdAt: string; by: VaultFieldVersionMeta["createdByKind"] }[];
 };
 export type MockItem = Omit<VaultItem, "fields"> & { fields: MockField[] };
-/** A 1Password vault a mock service account can see. */
-export type MockProviderVault = { externalVaultId: string; name: string; itemCount: number };
+/** A vault (or Keeper shared folder) a mock connection can see. */
+export type MockProviderVault = {
+  externalVaultId: string;
+  name: string;
+  itemCount: number;
+  writeAccess?: "read_only" | "read_write" | "unknown";
+};
 export type MockState = {
   workspaceId: string;
   vaults: VaultSummary[];
   items: MockItem[];
-  connections: OnePasswordConnectionSummary[];
-  /** What each connection's service account can see in 1Password. */
+  connections: VaultProviderConnectionSummary[];
+  /** What each connection can see in its password manager. */
   providerVaults: Record<string, MockProviderVault[]>;
   /** `${connectionId}/${externalVaultId}` → linked Opengeni vault id. */
   links: Record<string, string>;
@@ -95,6 +100,79 @@ type FieldSpec = {
   values: string[];
   fileName?: string;
   fileSize?: number;
+};
+
+/* What each first-wave provider lets Opengeni do, per the external-vaults design. */
+export const NO_OPERATIONS: VaultProviderOperations = {
+  createItemTypes: [],
+  updateItem: false,
+  removeField: false,
+  archiveItem: false,
+  archiveKind: "none",
+  deleteItem: false,
+  restoreItem: false,
+  readFiles: true,
+  writeFiles: false,
+  createTotp: false,
+  updateTotp: false,
+  createVault: false,
+  restoreFieldHistory: false,
+};
+const NONE = NO_OPERATIONS;
+export const MOCK_OPERATIONS: Record<
+  VaultProviderConnectionSummary["provider"],
+  VaultProviderOperations
+> = {
+  onepassword: {
+    ...NONE,
+    createItemTypes: ["login", "api_key", "note"],
+    updateItem: true,
+    removeField: true,
+    archiveItem: true,
+    archiveKind: "archive",
+    createTotp: true,
+    updateTotp: true,
+    createVault: true,
+  },
+  // pass-cli: create and recoverable trash; no update, no file writes, TOTP create only.
+  protonpass: {
+    ...NONE,
+    createItemTypes: ["login", "note"],
+    archiveItem: true,
+    archiveKind: "trash",
+    readFiles: false,
+    createTotp: true,
+  },
+  // Secrets Manager: login and note records; no archive; write grant unknown per folder.
+  keeper: {
+    ...NONE,
+    createItemTypes: ["login", "note"],
+    updateItem: true,
+    removeField: true,
+    createTotp: true,
+    updateTotp: true,
+  },
+  // Bridge: edits with revision checks, trash for removal, no attachment writes.
+  bitwarden: {
+    ...NONE,
+    createItemTypes: ["login", "note"],
+    updateItem: true,
+    removeField: true,
+    archiveItem: true,
+    archiveKind: "trash",
+    createTotp: true,
+    updateTotp: true,
+  },
+  external: {
+    ...NONE,
+    createItemTypes: ["login", "api_key", "note"],
+    updateItem: true,
+    removeField: true,
+    archiveItem: true,
+    archiveKind: "archive",
+    createTotp: true,
+    updateTotp: true,
+  },
 };
 
 function refPath(vaultName: string, itemName: string, field?: string): string {
@@ -267,6 +345,64 @@ export function buildMockState(workspaceId: string): MockState {
     providerConnectionId: personalConnectionId,
     lastSyncedAt: iso(-9 * 60_000),
   });
+  const protonConnectionId = mockId("protonpass-connection");
+  const keeperConnectionId = mockId("keeper-connection");
+  const bitwardenConnectionId = mockId("bitwarden-connection");
+  const externalConnectionId = mockId("external-connection");
+  const protonOps = vault(workspaceId, {
+    name: "Proton Ops",
+    ownerKind: "workspace",
+    source: "protonpass",
+    mode: "read_write",
+    providerConnectionId: protonConnectionId,
+    providerOperations: MOCK_OPERATIONS.protonpass,
+    freshness: {
+      state: "current",
+      lastCheckedAt: iso(-6 * 60_000),
+      sourceSyncedAt: null,
+      source: "live",
+      errorCode: null,
+      retryAt: null,
+    },
+    lastSyncedAt: iso(-6 * 60_000),
+  });
+  const keeperProduction = vault(workspaceId, {
+    name: "Keeper Production",
+    ownerKind: "organization",
+    availability: { allowedWorkspaceIds: null, allowPersonalWorkspaces: false },
+    source: "keeper",
+    mode: "read_write",
+    providerConnectionId: keeperConnectionId,
+    providerOperations: MOCK_OPERATIONS.keeper,
+    lastSyncedAt: iso(-12 * 60_000),
+  });
+  const bitwardenPersonal = vault(workspaceId, {
+    name: "Bitwarden Personal",
+    ownerKind: "user",
+    availability: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
+    source: "bitwarden",
+    mode: "read_write",
+    providerConnectionId: bitwardenConnectionId,
+    providerOperations: MOCK_OPERATIONS.bitwarden,
+    freshness: {
+      state: "current",
+      lastCheckedAt: iso(-2 * 60_000),
+      sourceSyncedAt: iso(-47 * 60_000),
+      source: "cache",
+      errorCode: null,
+      retryAt: null,
+    },
+    lastSyncedAt: iso(-2 * 60_000),
+  });
+  const serviceCredentials = vault(workspaceId, {
+    name: "Service credentials",
+    ownerKind: "workspace",
+    source: "external",
+    mode: "read_only",
+    providerConnectionId: externalConnectionId,
+    providerOperations: NONE,
+    lastSyncedAt: iso(-3 * 60_000),
+  });
   const taskSessionId = mockId("task-session");
   const childSessionId = mockId("child-session");
   const narrowedSessionId = mockId("narrowed-session");
@@ -409,6 +545,64 @@ export function buildMockState(workspaceId: string): MockState {
         lastUsedAgo: null,
       }),
     ),
+    item(protonOps, {
+      name: "Grafana",
+      type: "login",
+      websites: ["https://grafana.acme.dev"],
+      fields: login("ops@acme.dev", "fake-grafana", [
+        { name: "one-time password", kind: "totp", values: ["JBSWY3DPEHPK3PXP"] },
+      ]),
+      lastUsedAgo: 2 * HOUR,
+    }),
+    ...["PagerDuty", "Sentry"].map((name) =>
+      item(protonOps, {
+        name,
+        type: "login",
+        websites: [`https://${name.toLowerCase()}.com`],
+        fields: login("ops@acme.dev", `fake-${name}`),
+        lastUsedAgo: null,
+      }),
+    ),
+    item(protonOps, { name: "Runbook notes", type: "note", fields: note("fake-runbook") }),
+    ...["Stripe live", "Postgres primary", "Twilio"].map((name) =>
+      item(keeperProduction, {
+        name,
+        type: name === "Twilio" ? "note" : "login",
+        fields: name === "Twilio" ? note("fake-twilio") : login("prod@acme.dev", `fake-${name}`),
+        lastUsedAgo: 30 * 60_000,
+      }),
+    ),
+    item(keeperProduction, {
+      name: "Signing certificate",
+      type: "login",
+      fields: [
+        { name: "username", kind: "text", values: ["release@acme.dev"] },
+        { name: "password", kind: "concealed", values: ["fake-cert-pw"] },
+        {
+          name: "certificate",
+          kind: "file",
+          values: ["fake-cert"],
+          fileName: "release-signing.p12",
+          fileSize: 4_812,
+        },
+      ],
+    }),
+    ...["Home router", "Bank"].map((name) =>
+      item(bitwardenPersonal, {
+        name,
+        type: "login",
+        fields: login("ola@example.com", `fake-${name}`),
+        lastUsedAgo: null,
+      }),
+    ),
+    ...["Billing API", "Search index"].map((name) =>
+      item(serviceCredentials, {
+        name,
+        type: "api_key",
+        fields: apiKey(`fake-${name}`),
+        lastUsedAgo: HOUR,
+      }),
+    ),
     item(taskVault, {
       name: "Temp signup",
       type: "login",
@@ -472,14 +666,19 @@ export function buildMockState(workspaceId: string): MockState {
     opEngineering,
     opShared,
     opPersonal,
+    protonOps,
+    keeperProduction,
+    bitwardenPersonal,
+    serviceCredentials,
     taskVault,
   ];
   for (const each of vaults) {
     each.itemCount = items.filter((entry) => entry.vaultId === each.id && !entry.archivedAt).length;
   }
-  const connections: OnePasswordConnectionSummary[] = [
+  const connections: VaultProviderConnectionSummary[] = [
     {
       id: connectionId,
+      provider: "onepassword",
       ownership: "workspace",
       accountName: "acme.1password.com",
       label: null,
@@ -488,9 +687,12 @@ export function buildMockState(workspaceId: string): MockState {
       createdAt: iso(-12 * DAY),
       createdBySubjectId: null,
       canManage: true,
+      operations: MOCK_OPERATIONS.onepassword,
+      available: true,
     },
     {
       id: personalConnectionId,
+      provider: "onepassword",
       ownership: "user",
       accountName: "my.1password.com",
       label: null,
@@ -499,6 +701,60 @@ export function buildMockState(workspaceId: string): MockState {
       createdAt: iso(-2 * DAY),
       createdBySubjectId: null,
       canManage: true,
+      operations: MOCK_OPERATIONS.onepassword,
+      available: true,
+    },
+    {
+      id: protonConnectionId,
+      provider: "protonpass",
+      ownership: "workspace",
+      accountName: "ops@acme.dev",
+      label: null,
+      verifiedAt: iso(-6 * 60_000),
+      createdAt: iso(-5 * DAY),
+      createdBySubjectId: null,
+      canManage: true,
+      operations: MOCK_OPERATIONS.protonpass,
+      available: true,
+    },
+    {
+      id: keeperConnectionId,
+      provider: "keeper",
+      ownership: "organization",
+      accountName: "Opengeni agents",
+      label: null,
+      verifiedAt: iso(-12 * 60_000),
+      createdAt: iso(-20 * DAY),
+      createdBySubjectId: null,
+      canManage: true,
+      operations: MOCK_OPERATIONS.keeper,
+      available: true,
+    },
+    {
+      id: bitwardenConnectionId,
+      provider: "bitwarden",
+      ownership: "user",
+      accountName: "ola@example.com",
+      label: "Laptop bridge",
+      verifiedAt: iso(-2 * 60_000),
+      createdAt: iso(-1 * DAY),
+      createdBySubjectId: null,
+      canManage: true,
+      operations: MOCK_OPERATIONS.bitwarden,
+      available: true,
+    },
+    {
+      id: externalConnectionId,
+      provider: "external",
+      ownership: "workspace",
+      accountName: "vaults.acme.internal",
+      label: "Acme vault service",
+      verifiedAt: iso(-3 * 60_000),
+      createdAt: iso(-30 * DAY),
+      createdBySubjectId: null,
+      canManage: true,
+      operations: MOCK_OPERATIONS.external,
+      available: true,
     },
   ];
   return {
@@ -517,11 +773,55 @@ export function buildMockState(workspaceId: string): MockState {
         { externalVaultId: "op-personal", name: "Personal", itemCount: 2 },
         { externalVaultId: "op-family", name: "Family", itemCount: 31 },
       ],
+      [protonConnectionId]: [
+        { externalVaultId: "pp-ops", name: "Proton Ops", itemCount: 4, writeAccess: "read_write" },
+        {
+          externalVaultId: "pp-infra",
+          name: "Infrastructure",
+          itemCount: 18,
+          writeAccess: "read_only",
+        },
+      ],
+      [keeperConnectionId]: [
+        {
+          externalVaultId: "kp-prod",
+          name: "Keeper Production",
+          itemCount: 4,
+          writeAccess: "unknown",
+        },
+        { externalVaultId: "kp-staging", name: "Staging", itemCount: 9, writeAccess: "unknown" },
+      ],
+      [bitwardenConnectionId]: [
+        {
+          externalVaultId: "bw-personal",
+          name: "Bitwarden Personal",
+          itemCount: 2,
+          writeAccess: "read_write",
+        },
+        {
+          externalVaultId: "bw-family",
+          name: "Family organization",
+          itemCount: 14,
+          writeAccess: "read_only",
+        },
+      ],
+      [externalConnectionId]: [
+        {
+          externalVaultId: "ext-svc",
+          name: "Service credentials",
+          itemCount: 2,
+          writeAccess: "read_only",
+        },
+      ],
     },
     links: {
       [`${connectionId}/op-eng`]: opEngineering.id,
       [`${connectionId}/op-shared`]: opShared.id,
       [`${personalConnectionId}/op-personal`]: opPersonal.id,
+      [`${protonConnectionId}/pp-ops`]: protonOps.id,
+      [`${keeperConnectionId}/kp-prod`]: keeperProduction.id,
+      [`${bitwardenConnectionId}/bw-personal`]: bitwardenPersonal.id,
+      [`${externalConnectionId}/ext-svc`]: serviceCredentials.id,
     },
     taskSessionId,
     childSessionId,

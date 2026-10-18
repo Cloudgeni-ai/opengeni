@@ -2,6 +2,43 @@ import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { scheduledRunErrorText } from "@/lib/scheduled-run-error";
+import type { ScheduledTask } from "@/types";
+
+/**
+ * Why the schedule paused itself, or why its owner was told its runs keep
+ * failing. The message already says what would unblock it.
+ */
+export function ScheduleBlockerNotice({
+  blocker,
+  onOpenChat,
+}: {
+  blocker: NonNullable<ScheduledTask["blocker"]>;
+  onOpenChat?: (() => void) | undefined;
+}) {
+  return (
+    <Notice
+      tone={blocker.state === "paused" ? "failed" : "waiting"}
+      title={blocker.state === "paused" ? "Paused itself" : "Needs attention"}
+      className="mb-4"
+      actionLayout="responsive"
+      action={
+        onOpenChat ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="pointer-coarse:h-11"
+            onClick={onOpenChat}
+          >
+            Open chat
+          </Button>
+        ) : null
+      }
+    >
+      {blocker.message}
+    </Notice>
+  );
+}
 
 export function PausedChatRunBadge() {
   return (

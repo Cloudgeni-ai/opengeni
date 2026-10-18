@@ -152,7 +152,7 @@ async function recordConnectionOperation(
   });
 }
 
-function mapModel(
+export function mapOrganizationModelProviderCustomModel(
   row: typeof schema.organizationModelProviderCustomModels.$inferSelect,
 ): OrganizationModelProviderCustomModel {
   return {
@@ -167,6 +167,8 @@ function mapModel(
     updatedAt: row.updatedAt,
   };
 }
+
+const mapModel = mapOrganizationModelProviderCustomModel;
 
 export async function getOrganizationModelProviderConnection(
   db: Database,
@@ -373,9 +375,20 @@ export async function loadOrganizationModelProviderApiKey(
   db: Database,
   settings: Settings,
   input: { accountId: string; workspaceId: string; providerKind: OrganizationModelProviderKind },
+  prepared?: {
+    loadOrganizationCredentials: boolean;
+    encryptedCredentials: Partial<Record<OrganizationModelProviderKind, string>>;
+  },
 ): Promise<string | null> {
   const key = environmentsEncryptionKeyBytes(settings);
+  if (prepared && prepared.loadOrganizationCredentials !== (key !== null)) {
+    throw new Error("Prepared provider credentials do not match encryption settings");
+  }
   if (!key) return null;
+  if (prepared) {
+    const encrypted = prepared.encryptedCredentials[input.providerKind];
+    return encrypted === undefined ? null : decryptEnvironmentValue(key, encrypted);
+  }
   return await withRlsContext(db, input, async (scopedDb) => {
     const [row] = await scopedDb
       .select({

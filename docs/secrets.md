@@ -16,7 +16,7 @@ each hosted field keeps encrypted **versions**.
 | Concept | Values |
 |---|---|
 | Vault owner kind | `user` (shown as **Only me**), `workspace`, `organization`, `task` |
-| Vault source | `opengeni` (hosted), `onepassword`, `host` (embedder provider) |
+| Vault source | `opengeni` (hosted), `onepassword`, `host` (in-process embedder), `external` (remote embedder), `protonpass`, `keeper`, `bitwarden` |
 | Vault mode | `read_write`, `read_only` (hosted vaults are always read-write) |
 | Item type | `login`, `api_key`, `note`, `file`, `passkey` |
 | Field kind | `text`, `concealed`, `totp`, `file` |
@@ -38,7 +38,7 @@ each hosted field keeps encrypted **versions**.
   session, and it is deleted with that session.
 - Default hosted vaults are created on first use: **Private** (Only me),
   **Shared** (workspace) and **Task**.
-- Every value is encrypted with the deployment's environment encryption key,
+- Every hosted value is encrypted with the deployment's environment encryption key,
   including plain text fields. Ten versions are kept per field; older versions
   can be restored. Changing a field's kind needs a new value and starts its
   history over (hiding a text field as concealed keeps it). Deleting an item
@@ -125,7 +125,9 @@ literally.
   through.
 - A tool call resolves all of its references or none. On any failure nothing is
   dispatched and the tool returns a typed error naming the references, never
-  values. A missing secret's error includes a ready `request_human_input` call.
+  values. A missing secret's error includes a ready `request_human_input` call
+  only when the relevant provider inventory could be checked. A provider
+  outage or incomplete inventory is not proof that a secret is missing.
 - TOTP codes are computed at dispatch and never stored.
 
 The grammar, resolver, splicer, generator and TOTP each have one
@@ -189,6 +191,14 @@ With the `secrets` capability on, agents get:
 | `secret_move` | Move or copy an item between vaults. | `secrets:write` |
 | `secret_delete` | Archive an item. | `secrets:write` |
 
+Discovery with no filters lists items; an empty query is not required. Keep
+the same filters when following `nextCursor`. Provider freshness is reported
+separately from pagination: `complete: false` means a relevant source could
+not be checked, not that the caller should guess a different spelling. Use
+`refresh: true` deliberately to recheck metadata and invalidate cached values;
+it does not bypass provider rate limits. Check each source's `freshness` and
+retry time before concluding that an empty list proves absence.
+
 The always-on prompt block teaches the reference syntax and the login ladder
 (reuse a session, sign in with the saved login and `/otp`, enroll your own 2FA,
 read email or SMS codes through connectors, create accounts with generated
@@ -205,6 +215,18 @@ vaults with `POST /v1/workspaces/:workspaceId/vaults/link` (read-only or
 read-write) or create a managed vault with
 `POST /v1/workspaces/:workspaceId/connections/:connectionId/managed-vaults`.
 
+- Managed creation checks the exact local link policy before creating upstream:
+  name conflicts, quota and authority refusals leave no upstream vault. The
+  preflight reserves nothing, so a racing change may still refuse the link.
+  If creation succeeded but a later step fails, the error carries
+  `details.created: true`, `connectionId`, `externalVaultId`, and `linked`
+  (true, false for a known refusal, null when the link outcome is uncertain),
+  plus `vaultId` when known. Link that existing vault under an available name,
+  or refresh its existing link; do not create it again. A failed optional group
+  grant still links the created vault and reports `groupGrantConfirmed: false`;
+  check sharing in 1Password. Neither failure triggers automatic retries or
+  upstream deletion. If the create itself has an unknown outcome, inspect the
+  provider vault list first; a lost response cannot guarantee exactly-once creation.
 - A connection belongs to one person (Only me), the workspace or the
   organization, and the vaults linked through it carry the same owner. In the
   web app, Settings › Secrets lists each connection under 1Password; its page
@@ -229,6 +251,11 @@ read-write) or create a managed vault with
   `vaults.list` call and lists items only when the vault changed; a vault that
   failed to sync is retried at most once per period, and a rate limit is waited
   out.
+- Concurrent refreshes compare the cache epoch captured before provider I/O.
+  Mirror and status/freshness settle together; a late result cannot overwrite
+  another completed refresh, even an unchanged check or a failure. The first
+  settlement wins without comparing opaque provider versions. A superseded
+  refresh does not retry automatically; subsequent checks use the settled state.
 - A personal (Only me) connection's token is used for its owner in every
   workspace their Only-me vaults reach, and an organization connection serves
   its organization vaults in every workspace they are available in, whichever
@@ -240,13 +267,41 @@ read-write) or create a managed vault with
   and worker. Their images keep `@1password/sdk` as an installed package
   rather than bundling it, because its core loads a WASM file from beside its
   own module.
-- Not yet supported in linked vaults: `secret_move` into or out of them,
-  restoring field history, and file fields.
+- Copying between hosted and linked vaults is supported when the destination
+  can create the item type. Moving additionally requires recoverable removal
+  at the source. Provider field-history restoration and unsupported file
+  operations are not offered. Provider removal never means permanent deletion.
+  Moves are not atomic across providers; see the [source-version check and
+  recovery guidance](external-vaults.md#moving-and-copying).
 
 **Host provider (embedders).** Products that embed Opengeni can supply a
 `vaultProvider` implementing `VaultProvider` from `@opengeni/vaults`; link its
 vaults with `provider: "host"`. This replaces the removed `sandboxSecrets` port.
 See [embedding.md](embedding.md).
+
+**Additional providers and remote hosts.** Proton Pass, Keeper Secrets Manager,
+Bitwarden Password Manager through a customer-controlled bridge, and generic
+remote vaults use the same native ownership, references and discovery. Their
+write capabilities differ; a connected vault is not automatically fully
+editable. See [external-vaults.md](external-vaults.md) for setup, the supported
+operations, freshness, and the distinction from renewable run credentials.
+
+**Remote vaults (signed protocol).** A password manager can also be served
+from the customer's own server over `opengeni.vault.v1`: Opengeni signs each
+request (`OpenGeni-Signature` over the exact body) with the connection's
+secret, and the server signs its response with a key derived from the same
+secret. Embedders build the server with `createExternalVaultReceiver` from
+`@opengeni/sdk/external-vault-receiver` (server-only). It checks the
+signature, request age and replay, then calls the host's `authorize` to map
+Opengeni's account, workspace and user to its own tenant and user on every
+request; a valid signature alone authorizes nothing. Writes are claimed in a
+caller-owned durable store under their idempotency key and never retried; an
+uncertain write returns `provider_outcome_unknown`. Listings carry metadata
+only, in bounded pages from one snapshot. Bitwarden Password Manager uses the
+same protocol through the customer-run `packages/vaults-bitwarden-bridge`,
+which talks to an already-unlocked `bw serve` on a private Unix socket; the
+master password and unlocked session never leave the customer's machine. The
+ask card still saves answers into Opengeni-hosted vaults only.
 
 For local development, `OPENGENI_ONEPASSWORD_FAKE_TOKENS=1` enables the
 in-memory fake provider tokens `ops_fake_healthy` and `ops_fake_sync_error`.
@@ -266,6 +321,10 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `POST /connections/1password/install`; `GET /connections/1password/service-accounts`; `GET /connections/:connectionId/provider-vaults` | 1Password connections |
 | `PUT /connections/:connectionId/1password/token`; `DELETE /connections/:connectionId/1password` | Replace a 1Password token; disconnect (unlinks its vaults) |
 | `POST /vaults/link`; `POST /vaults/:vaultId/sync` | Provider vaults |
+| `GET, POST /vault-providers/connections` | Unified connection metadata; install a first-wave provider |
+| `PUT /vault-providers/connections/:connectionId/credentials` | Reconnect without changing linked vault identities |
+| `POST /vault-providers/connections/:connectionId/verify` | Finish pending setup using saved credentials, without replaying a bootstrap token |
+| `DELETE /vault-providers/connections/:connectionId` | Unlink locally and revoke stored access; never delete upstream items |
 
 Errors use `{error, message, details?}` with the codes in `VaultErrorCode`
 (`packages/contracts/src/vaults.ts`).

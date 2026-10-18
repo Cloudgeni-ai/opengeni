@@ -7,6 +7,7 @@ import {
 import type { ReactNode } from "react";
 
 import { cn } from "../../lib/cn";
+import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 
 export type ArtifactModality = "spreadsheet" | "document" | "presentation";
 
@@ -23,11 +24,11 @@ export type ArtifactSurfaceProps = {
   className?: string | undefined;
 };
 
-const MODALITY_LABEL: Record<ArtifactModality, string> = {
-  spreadsheet: "Spreadsheet",
-  document: "Document",
-  presentation: "Presentation",
-};
+const MODALITY_LABEL = (t: OpenGeniText): Record<ArtifactModality, string> => ({
+  spreadsheet: t("artifacts.artifactSurface.spreadsheet"),
+  document: t("artifacts.artifactSurface.document"),
+  presentation: t("artifacts.artifactSurface.presentation"),
+});
 
 function ModalityIcon({ modality }: { modality: ArtifactModality }) {
   switch (modality) {
@@ -56,9 +57,10 @@ export function ArtifactSurface({
   busy = false,
   className,
 }: ArtifactSurfaceProps) {
+  const t = useOpenGeniText();
   return (
     <section
-      aria-label={`${MODALITY_LABEL[modality]}: ${title}`}
+      aria-label={`${MODALITY_LABEL(t)[modality]}: ${title}`}
       aria-busy={busy || undefined}
       data-og-artifact-modality={modality}
       className={cn(
@@ -82,7 +84,7 @@ export function ArtifactSurface({
           </div>
           {busy ? (
             <LoaderCircleIcon
-              aria-label="Updating artifact"
+              aria-label={t("artifacts.artifactSurface.updatingArtifact")}
               className="size-4 shrink-0 animate-spin text-og-fg-muted"
             />
           ) : null}

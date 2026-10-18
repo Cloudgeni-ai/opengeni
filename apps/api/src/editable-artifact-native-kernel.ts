@@ -585,6 +585,21 @@ async function readVerifiedSnapshot(
   snapshot: NonNullable<EditableArtifactKernelState["snapshot"]>,
   signal?: AbortSignal,
 ): Promise<Uint8Array> {
+  const bytes = await readSnapshotObjectBytes(objects, snapshot, signal);
+  const contentHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+  if (contentHash !== snapshot.contentHash) throw new Error("Snapshot content hash mismatch");
+  return bytes;
+}
+
+/**
+ * Bounded, provider-pinned read of the exact snapshot object. The content hash
+ * is checked by the kernel adapter that consumes the bytes.
+ */
+export async function readSnapshotObjectBytes(
+  objects: BoundedObjectReadPort,
+  snapshot: NonNullable<EditableArtifactKernelState["snapshot"]>,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
   const object = await objects.open({
     opaqueReference: snapshot.blobReference,
     maxBytes: MAX_EDITABLE_ARTIFACT_SNAPSHOT_BYTES,
@@ -600,8 +615,6 @@ async function readVerifiedSnapshot(
       snapshot.byteSize,
       signal,
     );
-    const contentHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-    if (contentHash !== snapshot.contentHash) throw new Error("Snapshot content hash mismatch");
     await object.assertUnchanged(signal);
     return bytes;
   } finally {
@@ -609,7 +622,7 @@ async function readVerifiedSnapshot(
   }
 }
 
-async function collectExact(
+export async function collectExact(
   chunks: AsyncIterable<Uint8Array>,
   expectedBytes: number,
   signal?: AbortSignal,
@@ -635,7 +648,10 @@ async function collectExact(
   return result;
 }
 
-async function* fixedChunks(bytes: Uint8Array, signal?: AbortSignal): AsyncIterable<Uint8Array> {
+export async function* fixedChunks(
+  bytes: Uint8Array,
+  signal?: AbortSignal,
+): AsyncIterable<Uint8Array> {
   for (let offset = 0; offset < bytes.byteLength; offset += SNAPSHOT_CHUNK_BYTES) {
     throwIfAborted(signal);
     yield bytes.subarray(offset, Math.min(bytes.byteLength, offset + SNAPSHOT_CHUNK_BYTES));

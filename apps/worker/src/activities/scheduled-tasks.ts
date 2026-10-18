@@ -13,6 +13,7 @@ import {
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   resolveWorkspaceCodexCompactionDefault,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
+  SCHEDULED_SLACK_BOT_POSTING_TOOLS,
   ScheduledTaskRunAcceptedExecution,
   SessionAgentAccess,
   SessionMemoryScope,
@@ -592,18 +593,26 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           })
         : task.agentConfig.tools;
       let taskTools = withFirstPartyTools(settings, runTools);
-      // A task created by a live agent attempt froze its creator's effective
-      // first-party selection, permission set, and session access policy;
-      // its generated sessions inherit that boundary under today's
-      // deployment ceiling. A human/API-created task (null policy) keeps the
-      // deployment default exactly as before.
+      // Preserve explicit creator choices and permissions. Default-following
+      // schedules resolve today's defaults, just like ordinary chats.
       const creatorPolicy = await getScheduledTaskCreatorPolicy(db, task.workspaceId, task.id);
       // A person-chosen Slack channel adds only the two bot posting tools;
       // they post nowhere else, whatever the creator's own selection was.
       let firstPartyMcpTools = withScheduledSlackBotPostingTools(
         creatorPolicy?.firstPartyMcpTools
           ? allowedFirstPartyMcpToolsForSession(settings, creatorPolicy.firstPartyMcpTools)
-          : resolveFirstPartyMcpToolPolicy(settings).default,
+          : resolveSessionFirstPartyMcpTools(
+              settings,
+              {
+                firstPartyMcpTools: [],
+                toolPolicy: {
+                  mode: "explicit",
+                  inheritedFromSessionId: null,
+                  firstPartyMode: "workspace_default",
+                },
+              },
+              (await requireWorkspace(db, task.workspaceId)).settings,
+            ),
         task.agentConfig,
         resolveFirstPartyMcpToolPolicy(settings).allowed,
       );
@@ -1271,6 +1280,18 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         const admittedRunId = crypto.randomUUID();
         const generatedSessionBinding = generatedTarget
           ? {
+              toolPolicy: {
+                mode: "explicit" as const,
+                inheritedFromSessionId: null,
+                ...(!creatorPolicy?.firstPartyMcpTools
+                  ? {
+                      firstPartyMode: "workspace_default" as const,
+                      ...(scheduledSlackBotConnectionId(task.agentConfig)
+                        ? { firstPartyAdditions: [...SCHEDULED_SLACK_BOT_POSTING_TOOLS] }
+                        : {}),
+                    }
+                  : {}),
+              },
               createIdempotencyKey:
                 alertResponderSessionCreateIdempotencyKey ??
                 (task.runMode === "reusable_session"
@@ -1510,6 +1531,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 resources: task.agentConfig.resources,
                 bundledSkillIds: task.agentConfig.bundledSkillIds,
                 tools: taskTools,
+                toolPolicy: generatedSessionBinding!.toolPolicy,
                 firstPartyMcpTools,
                 firstPartyMcpPermissions,
                 ...(resolvedAgentConfig ? { agentConfig: resolvedAgentConfig } : {}),
@@ -2678,6 +2700,10 @@ async function recoverBoundScheduledTaskDispatch(input: {
       resources: task.agentConfig.resources,
       bundledSkillIds: task.agentConfig.bundledSkillIds,
       tools: input.acceptedExecution.resolvedTools,
+      toolPolicy: input.acceptedExecution.generatedSessionBinding?.toolPolicy ?? {
+        mode: "explicit",
+        inheritedFromSessionId: null,
+      },
       firstPartyMcpTools: input.acceptedExecution.resolvedFirstPartyMcpTools,
       firstPartyMcpPermissions: input.acceptedExecution.resolvedFirstPartyMcpPermissions,
       ...(input.acceptedExecution.resolvedAgentConfig
@@ -2856,7 +2882,9 @@ async function recoverBoundScheduledTaskDispatch(input: {
       session.policyRole !== null ||
       stableJson(session.skills) !== "[]" ||
       stableJson(session.toolPolicy) !==
-        stableJson({ mode: "explicit", inheritedFromSessionId: null }) ||
+        stableJson(
+          generatedBinding.toolPolicy ?? { mode: "explicit", inheritedFromSessionId: null },
+        ) ||
       session.toolPolicyVersion !== 1 ||
       session.mcpServers.length !== 0 ||
       session.parentSessionId !== null ||

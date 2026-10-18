@@ -12,7 +12,9 @@ import type { TimelineItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import type { LatestQuestionOptions } from "./latest-question";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type SessionEventsConnectionState = StreamConnectionState | "idle" | "ended" | "error";
 
@@ -144,6 +146,7 @@ export function useSessionEvents(
   sessionId: string | null | undefined,
   options: UseSessionEventsOptions = {},
 ): UseSessionEventsResult {
+  const t = useOpenGeniText();
   const { client, workspaceId, reconcileSession } = useEmbeddedSession(options);
   const enabled = options.enabled ?? true;
   const pageLive = usePageLiveActivity();
@@ -208,6 +211,8 @@ export function useSessionEvents(
   const loadingLatestRef = useRef(false);
   const viewModeRef = useRef<"live" | "history">("live");
   const initialWindowLoadedRef = useRef(false);
+  // The stream key whose live stream has opened at least once in this mount.
+  const openedStreamKeyRef = useRef<string | null>(null);
   const reconcileAfterPageResumeRef = useRef(false);
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamKeyRef = useRef<string | null>(null);
@@ -393,7 +398,7 @@ export function useSessionEvents(
           const cursor = streamResumeSequenceRef.current;
           let plan: ForegroundCatchupPlan = { kind: "resume" };
           try {
-            plan = await planForegroundCatchup(client, workspaceId, sessionId, cursor, {
+            plan = await planForegroundCatchup(t, client, workspaceId, sessionId, cursor, {
               signal: controller.signal,
             });
           } catch {
@@ -443,7 +448,7 @@ export function useSessionEvents(
           // First paint is ONE compact fetch — the newest window, revealed at
           // the bottom in a few hundred ms. Deeper history loads only when the
           // reader actually scrolls up (the sentinel drives loadOlder).
-          const window = await loadEventWindow(client, workspaceId, sessionId, {
+          const window = await loadEventWindow(t, client, workspaceId, sessionId, {
             before: Number.MAX_SAFE_INTEGER,
             pageSize: SESSION_HISTORY_PAGE_SIZE,
             targetGroups: Number.POSITIVE_INFINITY,
@@ -492,11 +497,17 @@ export function useSessionEvents(
           after: streamResumeSequenceRef.current,
           signal: controller.signal,
           onOpen: () => {
+            // The first open after this mount's initial tail: every read hook
+            // read its projection alongside that tail, and the shared feed
+            // re-reads one only for a later event. Later opens (reconnects,
+            // foreground resumes) repair every projection.
+            const initialOpen = openedStreamKeyRef.current !== streamKey;
+            openedStreamKeyRef.current = streamKey;
             // Reconciliation repairs projections, but it must not block reading
             // the already-open SSE body. Otherwise live events accumulate in the
             // browser and appear as one delayed burst after every reconciler ends.
             void Promise.resolve()
-              .then(() => reconcileSession(sessionId))
+              .then(() => reconcileSession(sessionId, { initialOpen }))
               .catch((cause) => {
                 if (isCurrent()) {
                   setError(normalizeError(cause));
@@ -575,6 +586,7 @@ export function useSessionEvents(
     streamEpoch,
     viewMode,
     reconcileSession,
+    t,
   ]);
 
   const navigationBusy = (): boolean =>
@@ -603,7 +615,7 @@ export function useSessionEvents(
         setLoadingOlder(true);
         let published = false;
         try {
-          const window = await loadEventWindow(client, workspaceId, sessionId, {
+          const window = await loadEventWindow(t, client, workspaceId, sessionId, {
             before,
             pageSize: SESSION_HISTORY_PAGE_SIZE,
             targetGroups: OLDER_GROUP_TARGET,
@@ -709,7 +721,7 @@ export function useSessionEvents(
           }
         }
       }),
-    [client, workspaceId, sessionId, ownsNavigation],
+    [client, workspaceId, sessionId, ownsNavigation, t],
   );
 
   const loadOldest = useCallback(async (): Promise<boolean> => {
@@ -724,7 +736,7 @@ export function useSessionEvents(
     setLoadingOldest(true);
     let published = false;
     try {
-      const window = await loadForwardEventWindow(client, workspaceId, sessionId, {
+      const window = await loadForwardEventWindow(t, client, workspaceId, sessionId, {
         after: 0,
         pageSize: SESSION_HISTORY_PAGE_SIZE,
         targetGroups: OLDEST_GROUP_TARGET,
@@ -783,7 +795,7 @@ export function useSessionEvents(
         setLoadingOldest(false);
       }
     }
-  }, [client, workspaceId, sessionId, ownsNavigation]);
+  }, [client, workspaceId, sessionId, ownsNavigation, t]);
 
   const loadNewer = useCallback(async (): Promise<boolean> => {
     if (!ownsNavigation() || !sessionId || navigationBusy() || !hasNewerRef.current) {
@@ -801,7 +813,7 @@ export function useSessionEvents(
     setLoadingNewer(true);
     let published = false;
     try {
-      const window = await loadForwardEventWindow(client, workspaceId, sessionId, {
+      const window = await loadForwardEventWindow(t, client, workspaceId, sessionId, {
         after: afterSequence,
         pageSize: SESSION_HISTORY_PAGE_SIZE,
         targetGroups: NEWER_GROUP_TARGET,
@@ -895,7 +907,7 @@ export function useSessionEvents(
         setLoadingNewer(false);
       }
     }
-  }, [client, workspaceId, sessionId, ownsNavigation]);
+  }, [client, workspaceId, sessionId, ownsNavigation, t]);
 
   const jumpToSequence = useCallback(
     async (sequence: number, navigationOptions?: { signal?: AbortSignal }): Promise<boolean> => {
@@ -997,7 +1009,7 @@ export function useSessionEvents(
         // before the import and fence its completion just like network reads.
         const { resolveLatestQuestion } = await import("./latest-question");
         if (!current()) return null;
-        const destination = await resolveLatestQuestion({
+        const destination = await resolveLatestQuestion(t, {
           client,
           workspaceId,
           sessionId,
@@ -1023,7 +1035,7 @@ export function useSessionEvents(
         throw reason;
       }
     },
-    [client, workspaceId, sessionId, streamKey, ownsNavigation, jumpToSequence],
+    [client, workspaceId, sessionId, streamKey, ownsNavigation, jumpToSequence, t],
   );
 
   const jumpToLatest = useCallback(async (): Promise<void> => {
@@ -1077,7 +1089,32 @@ export function useSessionEvents(
   }, [after, sessionId, ownsNavigation]);
 
   const identityMatches = stateStreamKey === streamKey;
-  const visibleEvents = identityMatches ? eventWindow.events : EMPTY_EVENTS;
+  const freshTail =
+    identityMatches && initialHistoryReady && viewMode === "live" && !fullReplay
+      ? {
+          events: eventWindow.events,
+          hasOlder,
+          truncated: eventWindow.truncated,
+          bytes: eventWindow.bytes,
+          sessionStatus: sessionStatusProjection,
+        }
+      : null;
+  // Reopening a conversation draws the tail it showed when it was left (only
+  // when the host retains reads for `client`) until its own fresh tail lands.
+  const retainedTail = useRetainedSessionView(client, workspaceId, sessionId, "events", freshTail, {
+    enabled: !fullReplay,
+    bytes: (tail) => tail.bytes,
+    budgetBytes: SESSION_EVENT_BROWSER_MAX_BYTES,
+    discard: identityMatches && deniesRetainedView(error),
+  });
+  const showRetained = retainedTail !== null && !(identityMatches && initialHistoryReady);
+  const visibleEvents = showRetained
+    ? retainedTail.events
+    : identityMatches
+      ? eventWindow.events
+      : EMPTY_EVENTS;
+  const visibleHasOlder = showRetained ? retainedTail.hasOlder : identityMatches && hasOlder;
+  const visibleTruncated = showRetained ? retainedTail.truncated : eventWindow.truncated;
   const timeline = useMemo(() => {
     const witness =
       questionEvidence?.client === client &&
@@ -1085,27 +1122,41 @@ export function useSessionEvents(
       visibleEvents.some((event) => event.sequence === questionEvidence.anchor)
         ? questionEvidence.events
         : EMPTY_EVENTS;
-    const timelineOptions = { partialStart: hasOlder || eventWindow.truncated || after > 0 };
-    if (witness.length === 0) return buildTimeline(visibleEvents, timelineOptions);
+    const timelineOptions = { partialStart: visibleHasOlder || visibleTruncated || after > 0 };
+    if (witness.length === 0) return buildTimeline(t, visibleEvents, timelineOptions);
     const ids = new Set(visibleEvents.map((event) => event.id));
     return buildTimeline(
+      t,
       [...visibleEvents, ...witness.filter((event) => !ids.has(event.id))],
       timelineOptions,
     );
-  }, [visibleEvents, hasOlder, eventWindow.truncated, after, questionEvidence, client, streamKey]);
+  }, [
+    visibleEvents,
+    visibleHasOlder,
+    visibleTruncated,
+    after,
+    questionEvidence,
+    client,
+    streamKey,
+    t,
+  ]);
 
   return {
     events: visibleEvents,
     timeline,
-    sessionStatus: identityMatches ? sessionStatusProjection : null,
+    sessionStatus: showRetained
+      ? retainedTail.sessionStatus
+      : identityMatches
+        ? sessionStatusProjection
+        : null,
     sessionStatusSequence: identityMatches ? sessionStatusRef.current.sequence : 0,
     connectionState: identityMatches ? connectionState : "idle",
     lastSequence: identityMatches ? lastSequenceRef.current : after,
     windowBytes: identityMatches ? eventWindow.bytes : 2,
     windowTruncated: identityMatches ? eventWindow.truncated : false,
-    initialLoading: fullReplay ? false : identityMatches ? initialLoading : true,
+    initialLoading: fullReplay || showRetained ? false : identityMatches ? initialLoading : true,
     initialHistoryReady: identityMatches && initialHistoryReady,
-    hasOlder: !identityMatches ? false : hasOlder,
+    hasOlder: visibleHasOlder,
     loadingOlder: !identityMatches ? false : loadingOlder,
     loadOlder,
     hasNewer: !identityMatches ? false : hasNewer,
@@ -1228,6 +1279,7 @@ type ForegroundCatchupPlan =
  * many rows/groups/bytes, reloads the latest tail instead.
  */
 async function planForegroundCatchup(
+  t: OpenGeniText,
   client: EmbeddedSessionClientLike,
   workspaceId: string,
   sessionId: string,
@@ -1266,7 +1318,7 @@ async function planForegroundCatchup(
   }
   if (
     events.length > FOREGROUND_COMPACT_CATCHUP_MAX_EVENTS ||
-    groupCount(events) > FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS ||
+    groupCount(t, events) > FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS ||
     browserJsonBytes(events) > FOREGROUND_COMPACT_CATCHUP_MAX_BYTES
   ) {
     return { kind: "reload" };
@@ -1289,6 +1341,7 @@ type LoadedForwardEventWindow = {
 };
 
 async function loadEventWindow(
+  t: OpenGeniText,
   client: EmbeddedSessionClientLike,
   workspaceId: string,
   sessionId: string,
@@ -1308,7 +1361,7 @@ async function loadEventWindow(
   let fetches = 0;
 
   while (fetches < options.maxFetches) {
-    if (buffer.length > 0 && groupCount(buffer) >= options.targetGroups) {
+    if (buffer.length > 0 && groupCount(t, buffer) >= options.targetGroups) {
       break;
     }
     const page = await loadPreviousPage(client, workspaceId, sessionId, cursor, {
@@ -1367,7 +1420,7 @@ async function loadEventWindow(
       buffer = buffer.slice(boundary);
     }
   }
-  const densityWindow = trimBackwardToGroupTarget(buffer, options.targetGroups);
+  const densityWindow = trimBackwardToGroupTarget(t, buffer, options.targetGroups);
   buffer = densityWindow.events;
 
   const oldest = buffer[0] ?? null;
@@ -1401,6 +1454,7 @@ function isTurnBoundary(event: SessionEvent): boolean {
  * loadNewer so the browser never walks the whole middle gap.
  */
 async function loadForwardEventWindow(
+  t: OpenGeniText,
   client: EmbeddedSessionClientLike,
   workspaceId: string,
   sessionId: string,
@@ -1419,7 +1473,7 @@ async function loadForwardEventWindow(
   let reachedEnd = false;
 
   while (fetches < options.maxFetches) {
-    if (buffer.length > 0 && groupCount(buffer) >= options.targetGroups) {
+    if (buffer.length > 0 && groupCount(t, buffer) >= options.targetGroups) {
       break;
     }
     const page = await loadNextPage(client, workspaceId, sessionId, cursor, {
@@ -1441,7 +1495,7 @@ async function loadForwardEventWindow(
     // events may legitimately collapse into one returned event.
     cursor = maxResumeSequence(page);
   }
-  const densityWindow = trimForwardToGroupTarget(buffer, options.targetGroups);
+  const densityWindow = trimForwardToGroupTarget(t, buffer, options.targetGroups);
   buffer = densityWindow.events;
 
   const oldest = buffer[0] ?? null;
@@ -1460,14 +1514,18 @@ type DensityWindow = {
 };
 
 /** Keep the newest complete turn groups near an older-history seam. */
-function trimBackwardToGroupTarget(events: SessionEvent[], targetGroups: number): DensityWindow {
+function trimBackwardToGroupTarget(
+  t: OpenGeniText,
+  events: SessionEvent[],
+  targetGroups: number,
+): DensityWindow {
   if (!Number.isFinite(targetGroups) || targetGroups <= 0 || events.length === 0) {
     return { events, trimmed: false };
   }
   for (let index = events.length - 1; index > 0; index -= 1) {
     if (!isTurnBoundary(events[index]!)) continue;
     const candidate = events.slice(index);
-    if (groupCount(candidate) >= targetGroups) {
+    if (groupCount(t, candidate) >= targetGroups) {
       return { events: candidate, trimmed: true };
     }
   }
@@ -1475,14 +1533,18 @@ function trimBackwardToGroupTarget(events: SessionEvent[], targetGroups: number)
 }
 
 /** Keep the oldest complete turn groups near a forward-history seam. */
-function trimForwardToGroupTarget(events: SessionEvent[], targetGroups: number): DensityWindow {
+function trimForwardToGroupTarget(
+  t: OpenGeniText,
+  events: SessionEvent[],
+  targetGroups: number,
+): DensityWindow {
   if (!Number.isFinite(targetGroups) || targetGroups <= 0 || events.length === 0) {
     return { events, trimmed: false };
   }
   for (let index = 1; index < events.length; index += 1) {
     if (!isTurnBoundary(events[index]!)) continue;
     const candidate = events.slice(0, index);
-    if (groupCount(candidate) >= targetGroups) {
+    if (groupCount(t, candidate) >= targetGroups) {
       return { events: candidate, trimmed: true };
     }
   }
@@ -1554,11 +1616,11 @@ async function loadNextPage(
   return Object.assign(page, { requested });
 }
 
-function groupCount(events: SessionEvent[]): number {
+function groupCount(t: OpenGeniText, events: SessionEvent[]): number {
   if (events.length === 0) {
     return 0;
   }
-  return groupTimeline(buildTimeline(events)).length;
+  return groupTimeline(t, buildTimeline(t, events)).length;
 }
 
 function isLogStart(event: SessionEvent): boolean {

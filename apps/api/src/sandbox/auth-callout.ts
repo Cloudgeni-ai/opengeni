@@ -36,7 +36,12 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { verifyEnrollmentBearer } from "@opengeni/contracts";
-import { claimEnrollmentConnection, getEnrollment, type Database } from "@opengeni/db";
+import {
+  claimEnrollmentConnection,
+  getEnrollment,
+  recordEnrollmentExpiredCredentials,
+  type Database,
+} from "@opengeni/db";
 import {
   createResponderConnection,
   decodeAuthRequest,
@@ -178,6 +183,27 @@ export async function handleAuthorizationRequest(
 
   const claims = await verifyEnrollmentBearer(secret, bearer);
   if (!claims) {
+    // Only a signature-verified expired bearer may identify a machine for the
+    // dashboard. Never trust identifiers from an invalid token's payload.
+    const expired = await verifyEnrollmentBearer(secret, bearer, 0);
+    if (
+      expired &&
+      expired.exp <= Math.floor(Date.now() / 1000) &&
+      expired.agentId === expired.enrollmentId
+    ) {
+      const enrollment = await getEnrollment(deps.db, expired.workspaceId, expired.enrollmentId);
+      if (
+        enrollment?.status === "active" &&
+        enrollment.credentialGeneration === expired.credentialGeneration
+      ) {
+        await recordEnrollmentExpiredCredentials(deps.db, {
+          accountId: enrollment.accountId,
+          workspaceId: expired.workspaceId,
+          enrollmentId: expired.enrollmentId,
+          credentialGeneration: expired.credentialGeneration,
+        });
+      }
+    }
     // Invalid signature / malformed / expired bearer. NEVER log the bearer value.
     warnDenial(
       deps,

@@ -103,6 +103,15 @@ export type RegisteredRoute = { method: string; path: string };
  */
 export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: string }> = [
   {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vault-providers\/connections$/,
+    request: "InstallVaultProviderRequest",
+  },
+  {
+    pattern:
+      /^PUT \/v1\/workspaces\/:workspaceId\/vault-providers\/connections\/:connectionId\/credentials$/,
+    request: "ReplaceVaultProviderCredentialsRequest",
+  },
+  {
     pattern:
       /^PUT \/v1\/(organizations|workspaces)\/:scopeId\/model-connections\/:kind\/:connectionId\/access$/,
     request: "ModelConnectionAccessPolicy",
@@ -151,6 +160,11 @@ export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: s
   {
     pattern: /^PUT \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication$/,
     request: "UpsertSitePublicationRequest",
+  },
+  {
+    pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication\/fixes$/,
+    request: "SitePublishWarningFix",
   },
   {
     pattern:

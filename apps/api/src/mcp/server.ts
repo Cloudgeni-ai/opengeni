@@ -178,6 +178,7 @@ import { registerSiteDataTools } from "./site-data-tools";
 import { registerSitePublicationTools } from "./site-publication-tools";
 import { registerSiteSqlTools } from "./site-sql-tools";
 import { siteSqlGatewayConfig } from "../site-sql/gateway";
+import { resolveSiteAgentDataContext } from "../site-publishing/agent-data-tools";
 import {
   resolveScheduledTaskCreateInput,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
@@ -332,6 +333,7 @@ import {
 } from "./session-event-errors";
 import {
   acknowledgeConsumedChildEvents,
+  hasPendingSteerForTurn,
   listOutstandingSessionSystemUpdatesForAttempt,
   recordConsumedChildAnswers,
 } from "@opengeni/db";
@@ -381,9 +383,11 @@ import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnost
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
 import {
   afterSiteArtifactMutation,
+  requireSiteVersionPublishOpen,
   SITE_AGENT_OTHER_SITE_MESSAGE,
   siteAgentMayChangeArtifact,
 } from "../site-publishing/service";
+import { sitePlatformBrakeToolRefusal } from "../site-publishing/platform-usage";
 import {
   siteAgentClampRefusal,
   siteAgentClampedToolResult,
@@ -973,6 +977,34 @@ export function slackBotFileContentResult(
   };
 }
 
+/**
+ * The first-party server as seen by MCP protocol messages that touch no tool:
+ * `initialize`, `ping` and notifications. It advertises exactly what the full
+ * server does (the same name, version and tools capability) without the
+ * workspace, catalog, Memory and admin reads that registering tools needs.
+ * Never route `tools/*` here: it lists no tools.
+ */
+export function buildOpenGeniMcpProtocolServer(grant: AccessGrant): McpServer {
+  const sessionId =
+    typeof grant.metadata?.["sessionId"] === "string"
+      ? (grant.metadata["sessionId"] as string)
+      : null;
+  const server = new PolicyMcpServer(grant, sessionId, new Set());
+  server.ensureToolsListHandler();
+  return server;
+}
+
+/** JSON-RPC methods {@link buildOpenGeniMcpProtocolServer} answers like the full server. */
+export function isOpenGeniMcpProtocolOnlyMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+  const method = (message as { method?: unknown }).method;
+  if (typeof method !== "string") return false;
+  if (method === "initialize" || method === "ping") return true;
+  // Notifications carry no id and get no response. The stateless transport
+  // holds no in-flight request a cancellation could reach.
+  return method.startsWith("notifications/") && !("id" in message);
+}
+
 export function buildOpenGeniMcpServer(
   deps: ApiRouteDeps,
   grant: AccessGrant,
@@ -1155,6 +1187,15 @@ export function buildOpenGeniMcpServer(
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
+    // A published Site's own agent: its Site Data and Site SQL tools are
+    // pinned to that Site and act as the conversation's viewer. Resolve on
+    // every call: a long-lived MCP server must observe audience revocations.
+    const siteAgent = () =>
+      resolveSiteAgentDataContext(
+        deps,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        sessionId,
+      );
     registerSiteDataTools(
       server,
       deps,
@@ -1163,6 +1204,7 @@ export function buildOpenGeniMcpServer(
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
       json,
+      siteAgent,
     );
     // Site SQL tools need a configured gateway (they also reach databases
     // that already exist after the deployment stops offering Site SQL).
@@ -1175,6 +1217,7 @@ export function buildOpenGeniMcpServer(
           await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
         },
         json,
+        siteAgent,
       );
     registerSitePublicationTools(
       server,
@@ -3619,6 +3662,14 @@ function registerWorkspaceArtifactTools(
       await authorize();
       const refused = await otherSiteRefusal(artifactId);
       if (refused) return refused;
+      const braked = await sitePlatformBrakeToolRefusal(() =>
+        requireSiteVersionPublishOpen(
+          deps,
+          { accountId: grant.accountId, workspaceId: grant.workspaceId },
+          artifactId,
+        ),
+      );
+      if (braked) return braked;
       return json(
         await siteMutation(
           await publishWorkspaceArtifactVersion(deps.db, {
@@ -4998,6 +5049,33 @@ function registerWorkspaceOrchestrationTools(
         )
       : await listOutstandingSessionSystemUpdates(deps.db, grant.workspaceId, ownSessionId);
   };
+  // Whether a Steer is waiting for the caller's own running turn. A foreground
+  // wait then returns early so the turn reaches its next model step, where the
+  // Steer is read; whatever was waited on keeps running.
+  const callerTurnSteerPending = async (ownSessionId: string): Promise<boolean> => {
+    const claims = exactAgentAttemptClaims(grant);
+    if (!claims || claims.sessionId !== ownSessionId) return false;
+    try {
+      return await hasPendingSteerForTurn(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: ownSessionId,
+        turnId: claims.turnId,
+      });
+    } catch {
+      // The next model step checks on its own; a failed read only delays it.
+      return false;
+    }
+  };
+  const listOwnPendingKinds = async (ownSessionId: string): Promise<string[]> => {
+    const [updates, steer] = await Promise.all([
+      listOwnPendingUpdates(ownSessionId),
+      callerTurnSteerPending(ownSessionId),
+    ]);
+    const kinds = updates.map((update) => update.kind);
+    // An agent Steer is already listed as its own pending update.
+    return steer && !kinds.includes("agent_steer_instruction") ? [...kinds, "steer"] : kinds;
+  };
   if (callerSessionId && can("sessions:read")) {
     server.registerTool(
       "session_target_get",
@@ -5753,10 +5831,7 @@ function registerWorkspaceOrchestrationTools(
               return { events: page.events, hasMore: page.hasMore };
             },
             readOwnPendingUpdateKinds:
-              ownSessionId === null
-                ? null
-                : async () =>
-                    (await listOwnPendingUpdates(ownSessionId)).map((update) => update.kind),
+              ownSessionId === null ? null : async () => await listOwnPendingKinds(ownSessionId),
             subscribe: (targetSessionId, onEvents) =>
               deps.bus.subscribe(workspaceId, targetSessionId, onEvents),
           },
@@ -5774,14 +5849,9 @@ function registerWorkspaceOrchestrationTools(
             // The returned answer may be the pending input this result
             // counted; report what is still pending so the caller is not told
             // to end its turn only to receive the answer it already has.
-            const pending = await listOwnPendingUpdates(ownSessionId);
+            const pending = await listOwnPendingKinds(ownSessionId);
             if (pending.length !== result.ownPendingUpdates) {
-              return json(
-                withOwnPendingUpdateKinds(
-                  result,
-                  pending.map((update) => update.kind),
-                ),
-              );
+              return json(withOwnPendingUpdateKinds(result, pending));
             }
           }
         }
@@ -5832,6 +5902,7 @@ function registerWorkspaceOrchestrationTools(
                 },
                 subscribe: (onEvents) =>
                   deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
+                yieldTo: async () => await callerTurnSteerPending(callerSessionId),
               }),
             );
           },
@@ -7231,6 +7302,26 @@ function boundedSessionDiscoveryLimit(limit: number | undefined): number {
 }
 
 export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): string {
+  if (BigInt(cursor.snapshotRevision) >= 1n << 64n) {
+    // Compact positional envelope keeps even relevance/Site cursors inside the
+    // existing 512-character tool input. No PostgreSQL snapshot is embedded.
+    return Buffer.from(
+      JSON.stringify([
+        5,
+        cursor.orderBy,
+        cursor.sortRank,
+        cursor.sortRevision,
+        cursor.sortAt,
+        cursor.id,
+        cursor.snapshotAt,
+        cursor.snapshotRevision,
+        cursor.updatedAfter,
+        cursor.filterHash,
+        cursor.originSiteId ?? null,
+      ]),
+      "utf8",
+    ).toString("base64url");
+  }
   const relevance = cursor.orderBy === "relevance";
   return Buffer.from(
     JSON.stringify({
@@ -7251,7 +7342,7 @@ export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): st
 
 const SESSION_DISCOVERY_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
 const SESSION_DISCOVERY_REVISION = /^(?:0|[1-9]\d*)$/;
-const SESSION_DISCOVERY_REVISION_MAX = 9_223_372_036_854_775_807n;
+const SESSION_DISCOVERY_REVISION_MAX = (1n << 65n) - 1n;
 const SESSION_DISCOVERY_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -7277,7 +7368,42 @@ function normalizeSessionDiscoveryRevision(value: string, label: string): string
 
 export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCursor {
   try {
-    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
+    let decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (Array.isArray(decoded) && decoded[0] === 5 && decoded.length === 11) {
+      const [
+        ,
+        orderBy,
+        sortRank,
+        sortRevision,
+        sortAt,
+        id,
+        snapshotAt,
+        snapshotRevision,
+        updatedAfter,
+        filterHash,
+        originSiteId,
+      ] = decoded;
+      if (
+        (orderBy !== "relevance" && (sortRank !== null || filterHash !== null)) ||
+        (originSiteId !== null &&
+          (typeof originSiteId !== "string" || !SESSION_DISCOVERY_UUID.test(originSiteId)))
+      ) {
+        throw new Error("invalid cursor fields");
+      }
+      decoded = {
+        v: originSiteId ? 4 : orderBy === "relevance" ? 3 : 2,
+        orderBy,
+        sortRevision,
+        sortAt,
+        id,
+        snapshotAt,
+        snapshotRevision,
+        updatedAfter,
+        ...(orderBy === "relevance" ? { sortRank, filterHash } : {}),
+        ...(originSiteId ? { originSiteId } : {}),
+      };
+    }
+    const parsed = decoded as {
       v?: unknown;
       orderBy?: unknown;
       sortRevision?: unknown;
@@ -7377,6 +7503,9 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       parsed.sortRevision,
       "cursor sortRevision",
     );
+    if (BigInt(sortRevision) >= 1n << 64n) {
+      throw new Error("cursor sortRevision exceeds the database activity revision range");
+    }
     const snapshotRevision = normalizeSessionDiscoveryRevision(
       parsed.snapshotRevision,
       "cursor snapshotRevision",

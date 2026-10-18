@@ -125,6 +125,13 @@ pub fn request_desktop_grants() {
     macffi::request_grants();
 }
 
+/// Fires one permission's consent prompt, for a desktop app that asks for them
+/// one at a time.
+#[cfg(feature = "macos-desktop")]
+pub fn request_desktop_permission(permission: macffi::DesktopPermission) {
+    macffi::request_permission(permission);
+}
+
 /// How many times [`MacosDesktop::capture`] retries a TRANSIENT capture miss (a
 /// null image / timeout on a warming ScreenCaptureKit stream) before giving up.
 /// Small: a real capture lands on the first or second frame; more attempts just
@@ -185,7 +192,9 @@ impl DesktopBackend for MacosDesktop {
                             // SCK retains its completion callback after our
                             // bounded wait. Timeout is not native completion.
                             if let Some(reservation) = crate::current_work_reservation() {
-                                reservation.mark_unsettled();
+                                reservation.mark_unsettled(format!(
+                                    "ScreenCaptureKit callback still pending: {err}"
+                                ));
                             }
                         }
                         let terminal = !macffi::screen_capture_granted();

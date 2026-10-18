@@ -29,6 +29,16 @@ test("live voice pricing: strict JSON, margin rounds up, every started minute", 
     providerCostMicros: 50_000,
     creditCostMicros: 52_500,
   });
+  expect(realtimeVoiceMinuteCreditMicros({ microsPerMinute: 50_000, marginBps: 500 }, 0)).toEqual({
+    providerCostMicros: 50_000,
+    creditCostMicros: 50_000,
+  });
+  expect(
+    realtimeVoiceMinuteCreditMicros({ microsPerMinute: 50_000, marginBps: 500 }, 1_000),
+  ).toEqual({
+    providerCostMicros: 50_000,
+    creditCostMicros: 55_000,
+  });
   expect(realtimeVoiceMinuteCreditMicros({ microsPerMinute: 3, marginBps: 1 })).toEqual({
     providerCostMicros: 3,
     creditCostMicros: 4,

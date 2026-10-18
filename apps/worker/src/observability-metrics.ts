@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ResponsesTransportDiagnostic } from "@opengeni/network/responses-websocket";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
 import {
   BundledSkillId,
@@ -13,6 +14,7 @@ import {
   type ActiveUserWindow,
   type CreditGrantTotals,
   type IdleInteractionInspection,
+  type ModelCallTiming,
   type SessionEventAppendPhaseObservation,
 } from "@opengeni/db";
 import {
@@ -2194,28 +2196,113 @@ const MODEL_REQUEST_PHASE_BUCKETS = [
  * Provider ids come from the resolved provider registry; phase/outcome are closed
  * enums. This function never performs I/O outside the in-memory metrics registry.
  */
+/**
+ * How a model request reached its provider, where the provider has more than
+ * one transport (Codex: a new or reused Responses WebSocket, a reused one
+ * continuing the previous response with only new input, or HTTP). Empty for
+ * providers with a single transport.
+ */
+export type ModelRequestTransportLabel =
+  | ""
+  | "websocket_new"
+  | "websocket_reused"
+  | "websocket_incremental"
+  | "http";
+
+/** The bounded metric label for how a Codex request was carried. */
+export function codexRequestTransportLabel(
+  transport:
+    | { kind: "websocket"; connection: "new" | "reused"; input: "full" | "incremental" }
+    | { kind: "http" },
+): ModelRequestTransportLabel {
+  if (transport.kind === "http") return "http";
+  if (transport.input === "incremental") return "websocket_incremental";
+  return transport.connection === "reused" ? "websocket_reused" : "websocket_new";
+}
+
 export function recordModelRequestPhase(
   observability: Observability,
   input: {
     provider: string;
-    phase: "headers" | "first_byte" | "terminal";
+    /** `handshake`: the time a request waited for its new WebSocket to open. */
+    phase: "handshake" | "headers" | "first_byte" | "terminal";
     outcome?: "completed" | "failed" | "timed_out";
     durationSeconds: number;
+    transport?: ModelRequestTransportLabel;
   },
 ): void {
   const outcome = input.outcome ?? "";
+  const transport = input.transport ?? "";
   observability.incrementCounter({
     name: "opengeni_model_request_phases_total",
-    help: "Provider model-request lifecycle phases by bounded phase and outcome.",
-    labels: { provider: input.provider, phase: input.phase, outcome },
+    help: "Provider model-request lifecycle phases by bounded phase, outcome and transport.",
+    labels: { provider: input.provider, phase: input.phase, outcome, transport },
   });
   observability.observeHistogram({
     name: "opengeni_model_request_phase_duration_seconds",
     help: "Monotonic seconds from provider dispatch to a model-request lifecycle phase.",
     buckets: MODEL_REQUEST_PHASE_BUCKETS,
-    labels: { provider: input.provider, phase: input.phase },
+    labels: { provider: input.provider, phase: input.phase, transport },
     value: Math.max(0, input.durationSeconds),
   });
+}
+
+/** One bounded metric family shared by every persistent Responses provider. */
+export function recordResponsesTransportDiagnostic(
+  observability: Observability,
+  provider: string,
+  event: ResponsesTransportDiagnostic,
+): void {
+  const labels = {
+    provider,
+    phase: event.phase,
+    position: event.position,
+    transport: codexRequestTransportLabel(event.transport),
+  };
+  observability.observeHistogram({
+    name: "opengeni_model_transport_phase_seconds",
+    help: "Persistent model transport phase duration, including final-prefix startup overlap.",
+    buckets: MODEL_REQUEST_PHASE_BUCKETS,
+    labels,
+    value: Math.max(0, event.durationMs / 1000),
+  });
+  if (event.phase === "terminal") {
+    observability.incrementCounter({
+      name: "opengeni_model_transport_requests_total",
+      help: "Persistent model transport request outcomes.",
+      labels: {
+        ...labels,
+        outcome: event.outcome ?? "completed",
+        reason: event.transport.kind === "http" ? event.transport.reason : "",
+      },
+    });
+    if (
+      event.promptTokens !== undefined &&
+      event.promptTokens > 0 &&
+      event.cachedTokens !== undefined
+    ) {
+      observability.observeHistogram({
+        name: "opengeni_model_transport_cache_ratio",
+        help: "Provider-reported cache ratio on completed persistent requests, first versus later in a turn.",
+        labels: { provider, position: event.position },
+        buckets: MODEL_CACHE_HIT_RATIO_BUCKETS,
+        value: Math.min(1, event.cachedTokens / event.promptTokens),
+      });
+    }
+  }
+  if (event.inputBytes !== undefined && event.fullInputBytes !== undefined) {
+    for (const [kind, value] of [
+      ["wire", event.inputBytes],
+      ["full", event.fullInputBytes],
+    ] as const) {
+      observability.incrementCounter({
+        name: "opengeni_model_transport_input_bytes_total",
+        help: "Wire and equivalent full request bytes for persistent model transport.",
+        labels: { provider, kind },
+        amount: value,
+      });
+    }
+  }
 }
 
 export type TurnStartupPhase =
@@ -2224,11 +2311,17 @@ export type TurnStartupPhase =
   | "claim_atomic"
   | "claim_session_read"
   | "claim_capability_settings"
+  | "claim_provider_settings"
   | "learning_policy_freeze"
   | "attachment_authority_projection"
   | "claim_and_policy"
   | "turn_start_settlement"
   | "credential_selection"
+  | "credential_identity_read"
+  | "credential_entitlements"
+  | "credential_health_recovery"
+  | "credential_placement"
+  | "credential_selection_receipt"
   | "runtime_preparation"
   | "session_mcp_settings"
   | "sandbox_establish"
@@ -2765,6 +2858,15 @@ export type ProviderFirstContent = "any" | "text";
  * still be persisting the previous response's tool results when the producer
  * dispatches the next request, but the next request's first delta always
  * follows its own dispatch. Purely observational and clock-injectable.
+ *
+ * `completeResponse` also returns the same measurements for one model call,
+ * which the worker stores on its usage event and Insights fact. The next model
+ * entry waits until the consumer has settled the previous response, so a
+ * response's terminal event is always read before the next dispatch.
+ * A call that needs several requests before its one terminal response (a
+ * transport retry, or a provider continuation such as Claude's `pause_turn`)
+ * is measured from its first dispatch and keeps that request's pre-dispatch
+ * work, so its duration and first token cover the whole response.
  */
 export class StreamTimingMetrics {
   private readonly now: () => number;
@@ -2774,6 +2876,13 @@ export class StreamTimingMetrics {
   private modelEntryAt: number | null = null;
   private dispatchedAt: number | null = null;
   private readonly providerFirstRecorded = new Set<ProviderFirstContent>();
+  /** The model call awaiting its terminal response, if one was dispatched. */
+  private openCall: {
+    dispatchedAt: number;
+    preDispatchMs: number | null;
+    firstContentAt: number | null;
+    firstTextAt: number | null;
+  } | null = null;
 
   constructor(
     private readonly observability: Observability,
@@ -2792,13 +2901,15 @@ export class StreamTimingMetrics {
   /** Producer side: request bytes are about to leave this process. */
   onProviderDispatch(): void {
     const at = this.now();
+    let preDispatchMs: number | null = null;
     if (this.modelEntryAt !== null) {
+      preDispatchMs = Math.max(0, at - this.modelEntryAt);
       this.observability.observeHistogram({
         name: "opengeni_model_request_pre_dispatch_seconds",
         help: "Seconds of Opengeni work from SDK model-request entry to literal provider dispatch.",
         buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
         labels: { provider: this.options.provider },
-        value: Math.max(0, (at - this.modelEntryAt) / 1000),
+        value: preDispatchMs / 1000,
       });
       this.modelEntryAt = null;
     }
@@ -2806,6 +2917,8 @@ export class StreamTimingMetrics {
     // belongs to the latest dispatch.
     this.dispatchedAt = at;
     this.providerFirstRecorded.clear();
+    // Later dispatches before the terminal response belong to the same call.
+    this.openCall ??= { dispatchedAt: at, preDispatchMs, firstContentAt: null, firstTextAt: null };
   }
 
   onEvent(type: SessionEventType): void {
@@ -2820,6 +2933,10 @@ export class StreamTimingMetrics {
       return;
     }
     const at = this.now();
+    if (this.openCall) {
+      this.openCall.firstContentAt ??= at;
+      if (deltaClass === "message") this.openCall.firstTextAt ??= at;
+    }
     if (this.ttftArmed) {
       this.observability.observeHistogram({
         name: "opengeni_stream_ttft_seconds",
@@ -2845,6 +2962,26 @@ export class StreamTimingMetrics {
       });
     }
     this.lastDeltaAt.set(deltaClass, at);
+  }
+
+  /**
+   * Consumer side: the dispatched call's terminal response was read. Returns its
+   * timing once, measured from the call's first dispatch, or null when no call
+   * is open (for example a mirrored terminal event, or a provider that reports
+   * no dispatch).
+   */
+  completeResponse(): ModelCallTiming | null {
+    const call = this.openCall;
+    if (!call) return null;
+    this.openCall = null;
+    const since = (at: number | null) =>
+      at === null ? null : Math.round(Math.max(0, at - call.dispatchedAt));
+    return {
+      preDispatchMs: call.preDispatchMs === null ? null : Math.round(call.preDispatchMs),
+      timeToFirstTokenMs: since(call.firstContentAt),
+      timeToFirstTextMs: since(call.firstTextAt),
+      durationMs: since(this.now()),
+    };
   }
 
   private observeProviderFirst(content: ProviderFirstContent, at: number): void {
@@ -2883,6 +3020,50 @@ export function recordBatchFlush(
     buckets: STREAM_IO_BUCKETS,
     value: input.durationSeconds,
   });
+}
+
+const MODEL_STEP_PHASE_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30];
+
+/**
+ * Opengeni work between two model requests of one stream, measured with local
+ * clocks on the side that does it:
+ *
+ *   - `response_settlement` — consumer: a terminal model response arrived to
+ *     the moment the next model request is allowed to proceed (`settle`).
+ *   - `response_usage` — the part of settlement that meters the response
+ *     (lease renewal, usage and credit recording, the usage event).
+ *   - `response_history` — the part that retains media and reconciles history.
+ *   - `settlement_wait` — producer: a model request entered and waited this
+ *     long for the previous response's settlement.
+ *   - `admission` — producer: the per-request admission revalidation (durable
+ *     history checkpoint, subscription source, usage limits).
+ *
+ * Tool execution runs between a response and the next model entry, in parallel
+ * with settlement; only `settlement_wait` and `admission` delay the next
+ * request beyond the tools themselves.
+ */
+export type ModelStepPhase =
+  | "response_settlement"
+  | "response_usage"
+  | "response_history"
+  | "settlement_wait"
+  | "admission";
+
+export function recordModelStepPhase(
+  observability: Observability,
+  input: { provider: string; phase: ModelStepPhase; durationSeconds: number },
+): void {
+  try {
+    observability.observeHistogram({
+      name: "opengeni_model_step_phase_duration_seconds",
+      help: "Seconds of Opengeni work between model requests of one stream, by phase.",
+      buckets: MODEL_STEP_PHASE_BUCKETS,
+      labels: { provider: input.provider, phase: input.phase },
+      value: Math.max(0, input.durationSeconds),
+    });
+  } catch {
+    // Metrics emission must never affect a model call.
+  }
 }
 
 /** Latency of the durable `appendSessionEvents` DB write — the write path. A p99

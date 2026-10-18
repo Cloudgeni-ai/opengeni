@@ -6,7 +6,19 @@ import {
 } from "@opengeni/config";
 import OpenAI from "openai";
 import { createHash } from "node:crypto";
-import { CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS, codexSubscriptionFetch } from "@opengeni/codex";
+import {
+  CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
+  CODEX_PROVIDER_BASE_URL,
+  codexResponsesTransport,
+  codexSubscriptionFetch,
+  warmCodexResponsesConnection,
+  type CodexResponsesTransport,
+} from "@opengeni/codex";
+import {
+  responsesTransport,
+  OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+  withResponsesContinuationAdmission,
+} from "@opengeni/network/responses-websocket";
 import {
   XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
   xaiSubscriptionFetch,
@@ -80,12 +92,20 @@ export function recordRuntimeMcpLifecycleMetric(
   }
 }
 
+function azureApiKeyHeaders(apiKey: string, headers?: Record<string, string>) {
+  // An explicitly configured bearer credential may be an Entra token. Do not
+  // infer its kind from its contents or replace caller-owned authentication.
+  if (Object.keys(headers ?? {}).some((name) => name.toLowerCase() === "authorization"))
+    return headers;
+  // Azure accepts this for HTTP and WebSocket upgrades. Bearer API keys can
+  // redirect an upgrade to a URL containing the key instead of accepting it.
+  return { Authorization: null, "api-key": apiKey, ...headers };
+}
+
 /**
  * Build an OpenAI client from settings for the configured provider. Mirrors the
  * client construction in configureOpenAI so a direct API call (the compaction
- * summarizer) uses the same Azure/OpenAI auth and base URL. Returns null when
- * the OpenAI-platform path has only a key (the SDK default client is used via
- * setDefaultOpenAIKey there); the caller then constructs a key-only client.
+ * summarizer) uses the same Azure/OpenAI auth and base URL.
  */
 export function buildOpenAIClientFromSettings(
   settings: Settings,
@@ -100,8 +120,9 @@ export function buildOpenAIClientFromSettings(
         baseURL,
         maxRetries: settings.openaiMaxRetries,
         defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
-        defaultHeaders:
-          settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
+        defaultHeaders: settings.azureOpenaiApiKey
+          ? azureApiKeyHeaders(settings.azureOpenaiApiKey)
+          : settings.azureOpenaiAdToken
             ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
             : undefined,
         fetch: sdkRetryingModelFetch(
@@ -109,7 +130,7 @@ export function buildOpenAIClientFromSettings(
           streamIdleTimeoutModelFetch(
             providerId,
             modelStreamIdlePolicy(settings),
-            instrumentedModelFetch(providerId, globalThis.fetch),
+            instrumentedModelFetch(providerId, openAIResponsesFetch(settings)),
           ),
         ),
       },
@@ -129,7 +150,7 @@ export function buildOpenAIClientFromSettings(
         streamIdleTimeoutModelFetch(
           providerId,
           modelStreamIdlePolicy(settings),
-          instrumentedModelFetch(providerId, globalThis.fetch),
+          instrumentedModelFetch(providerId, openAIResponsesFetch(settings)),
         ),
       ),
     },
@@ -175,6 +196,39 @@ function sdkRetryingModelFetch(maxRetries: number, inner: typeof fetch): typeof 
  * unchanged concurrent turns still share one connection pool.
  */
 const providerClientCache = new Map<string, OpenAI>();
+// One process-wide pool of warm Codex Responses WebSockets, shared by every
+// client that serves the subscription so a conversation keeps its connection.
+let codexWebSocketTransport: CodexResponsesTransport | undefined;
+function sharedCodexWebSocketTransport(): CodexResponsesTransport {
+  codexWebSocketTransport ??= codexResponsesTransport((input, init) =>
+    globalThis.fetch(input, init),
+  );
+  return codexWebSocketTransport;
+}
+
+// The same pool for the OpenAI API and Azure OpenAI's v1 API. Requests run
+// inside withResponsesConversation get one connection per conversation; any
+// other request, and any other host, goes over HTTP.
+let openaiWebSocketTransport: CodexResponsesTransport | undefined;
+function openAIResponsesFetch(settings: Settings): typeof globalThis.fetch {
+  if (!settings.openaiResponsesWebSocketEnabled) return globalThis.fetch;
+  openaiWebSocketTransport ??= responsesTransport((input, init) => globalThis.fetch(input, init), {
+    endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+  });
+  return openaiWebSocketTransport as unknown as typeof globalThis.fetch;
+}
+
+/**
+ * Opens the current Codex conversation's Responses WebSocket in the shared
+ * pool ahead of its first model request. Call inside the turn's Codex request
+ * context, only when the Codex WebSocket transport is enabled. Never throws.
+ */
+export async function warmCodexResponsesWebSocket(baseUrl?: string): Promise<void> {
+  await warmCodexResponsesConnection(
+    sharedCodexWebSocketTransport(),
+    baseUrl ?? CODEX_PROVIDER_BASE_URL,
+  );
+}
 
 function canonicalCacheJson(value: unknown): string {
   const normalize = (input: unknown): unknown => {
@@ -235,6 +289,9 @@ function providerClientCacheKey(
           : {}),
         openaiMaxRetries: settings.openaiMaxRetries,
         streamIdlePolicy: modelStreamIdlePolicy(settings, provider),
+        ...(provider.kind === "codex-subscription"
+          ? { codexResponsesWebSocket: settings.codexResponsesWebSocketEnabled }
+          : { openaiResponsesWebSocket: settings.openaiResponsesWebSocketEnabled }),
         builtin:
           provider.builtin && settings.openaiProvider === "azure"
             ? {
@@ -413,7 +470,14 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             // Codex transport owns finer headers/idle/whole deadlines and emits
             // typed durable evidence. Keep the SDK envelope beyond that budget.
             timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
-            fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
+            fetch: codexSubscriptionFetch(
+              instrumentedModelFetch(
+                provider.id,
+                settings.codexResponsesWebSocketEnabled
+                  ? (sharedCodexWebSocketTransport() as unknown as typeof globalThis.fetch)
+                  : globalThis.fetch,
+              ),
+            ),
           },
           {
             modelRequestPolicy: modelRequestPolicyForProvider(
@@ -467,7 +531,10 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
               maxRetries: registryMaxRetries,
               ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
-              ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
+              defaultHeaders:
+                provider.wireProfile === "azure-openai" && provider.apiKey
+                  ? azureApiKeyHeaders(provider.apiKey, provider.defaultHeaders)
+                  : provider.defaultHeaders,
               fetch: sdkRetryingModelFetch(
                 registryMaxRetries,
                 streamIdleTimeoutModelFetch(
@@ -483,7 +550,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                           instrumentedModelFetch(provider.id, globalThis.fetch),
                           gatewayPolicies,
                         )
-                      : instrumentedModelFetch(provider.id, globalThis.fetch),
+                      : instrumentedModelFetch(provider.id, openAIResponsesFetch(settings)),
                 ),
               ),
             },
@@ -522,7 +589,19 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
       await current.admit();
       let response: Response;
       try {
-        response = await inner(input, requestInit);
+        response = await withResponsesContinuationAdmission(
+          async (replacementSignal) => {
+            replacementSignal.throwIfAborted();
+            requestInit?.signal?.throwIfAborted();
+            // OpenAI/Azure have no subscription custody lane, but every physical
+            // continuation retry still crosses the ordinary dispatch checkpoint.
+            await recordModelTransportStarted();
+            replacementSignal.throwIfAborted();
+            requestInit?.signal?.throwIfAborted();
+            recordModelTransportDispatched(performance.now());
+          },
+          () => inner(input, requestInit),
+        );
       } catch (error) {
         await current.failed();
         throw error;

@@ -6,6 +6,9 @@ import {
   PREVIEW_LOADING_PAINT_SCRIPT,
   previewLoadingDocument,
 } from "../src/native-previews";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 /** A 2D context that records every call and property write, in order. */
 function recordingContext() {
@@ -47,7 +50,7 @@ describe("native previews", () => {
   });
 
   test("the loading document escapes its label and honours reduced motion", () => {
-    const page = previewLoadingDocument({
+    const page = previewLoadingDocument(englishText, {
       scheme: "light",
       label: "<b>Lager</b>",
       reducedMotion: true,
@@ -55,7 +58,7 @@ describe("native previews", () => {
     expect(page).toContain("&lt;b&gt;Lager&lt;/b&gt;");
     expect(page).toContain("const still=true");
     expect(page).toContain("#f9f9f9");
-    expect(previewLoadingDocument({ scheme: "dark" })).toContain("Preparing preview…");
+    expect(previewLoadingDocument(englishText, { scheme: "dark" })).toContain("Preparing preview…");
   });
 
   test("recognizes preview fences and validates Site references", () => {

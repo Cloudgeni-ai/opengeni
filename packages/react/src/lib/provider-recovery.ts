@@ -1,4 +1,5 @@
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
+import { type OpenGeniText } from "../messages/runtime";
 
 /**
  * Finite same-turn provider recovery, projected for people. Presentation only:
@@ -58,6 +59,7 @@ const RECOVERY_CODES: ReadonlySet<string> = new Set([
   "mcp_transport_timeout",
   "mcp_transport_unavailable",
   "sandbox_command_start_unavailable",
+  "retained_attachment_unavailable",
   "turn_execution_policy_definition_mismatch",
 ]);
 
@@ -130,66 +132,79 @@ export function parseProviderRecovery(payload: unknown): ProviderRecoveryFacts |
 }
 
 /** One present-tense clause naming what is unavailable, without a trailing period. */
-export function providerRecoverySubject(facts: ProviderRecoveryFacts): string {
-  const model = facts.modelLabel ?? "The model";
-  const at = facts.providerLabel ? ` at the provider (${facts.providerLabel})` : " at the provider";
+export function providerRecoverySubject(t: OpenGeniText, facts: ProviderRecoveryFacts): string {
+  const model = facts.modelLabel ?? t("lib.providerRecovery.theModel");
+  const at = facts.providerLabel
+    ? ` ${t("lib.providerRecovery.atTheProviderProviderlabel", { providerLabel: facts.providerLabel })}`
+    : ` ${t("lib.providerRecovery.atTheProvider")}`;
   switch (facts.code) {
     case "provider_rate_limited":
-      return `${model} is rate limited${at}`;
+      return t("lib.providerRecovery.modelIsRateLimitedAt", { model, at });
     case "provider_unavailable":
       return facts.condition === "overloaded"
-        ? `${model} is overloaded${at}`
+        ? t("lib.providerRecovery.modelIsOverloadedAt", { model, at })
         : facts.condition === "unresponsive"
-          ? `${model} stopped responding${at}`
-          : `${model} is temporarily unavailable${at}`;
+          ? t("lib.providerRecovery.modelStoppedRespondingAt", { model, at })
+          : t("lib.providerRecovery.modelIsTemporarilyUnavailableAt", { model, at });
     case "provider_unknown_finish_reason":
-      return `${model} ended its response unexpectedly`;
+      return t("lib.providerRecovery.modelEndedItsResponseUnexpectedly", { model });
     case "post_compaction_continuation_empty":
-      return `${model} stopped right after compacting the conversation`;
+      return t("lib.providerRecovery.modelStoppedRightAfterCompacting", { model });
     case "upstream_connectivity_unavailable":
-      return "Opengeni can't reach an upstream service";
+      return t("lib.providerRecovery.opengeniCanTReachAn");
     case "mcp_transport_timeout":
-      return "A required MCP server isn't responding";
+      return t("lib.providerRecovery.aRequiredMcpServerIsn");
     case "mcp_transport_unavailable":
-      return "A required MCP server is unreachable";
+      return t("lib.providerRecovery.aRequiredMcpServerIs");
     case "sandbox_command_start_unavailable":
-      return "The sandbox isn't ready yet";
+      return t("lib.providerRecovery.theSandboxIsnTReady");
+    case "retained_attachment_unavailable":
+      return t("lib.providerRecovery.anImageFromEarlierIn");
     case "turn_execution_policy_definition_mismatch":
-      return "Opengeni is applying a configuration update";
+      return t("lib.providerRecovery.opengeniIsApplyingAConfiguration");
     case "sandbox_deadline_rotation":
-      return "The sandbox reached its maximum lifetime, so Opengeni is moving the workspace to a fresh sandbox";
+      return t("lib.providerRecovery.theSandboxReachedItsMaximum");
     case "sandbox_lifecycle_transition":
     case "sandbox_lease_superseded":
       return facts.sandboxTransition === "capture_in_progress"
-        ? "Opengeni is saving the sandbox workspace"
+        ? t("lib.providerRecovery.opengeniIsSavingTheSandbox")
         : facts.sandboxTransition === "provider_recovery_in_progress"
-          ? "Opengeni is recovering the sandbox"
+          ? t("lib.providerRecovery.opengeniIsRecoveringTheSandbox")
           : facts.sandboxTransition === "rotation_in_progress"
-            ? "Opengeni is moving the workspace to a fresh sandbox"
-            : "Opengeni is preparing the sandbox";
+            ? t("lib.providerRecovery.opengeniIsMovingTheWorkspace")
+            : t("lib.providerRecovery.opengeniIsPreparingTheSandbox");
     default:
-      return "A service this turn depends on is temporarily unavailable";
+      return t("lib.providerRecovery.aServiceThisTurnDepends");
   }
 }
 
 /** Live status while the same turn waits for its next automatic retry. */
-export function providerRecoveryRetryingText(facts: ProviderRecoveryFacts): string {
-  if (facts.sandboxWait) return `${providerRecoverySubject(facts)}…`;
-  const progress =
-    facts.attempt !== null && facts.maxAttempts !== null
-      ? ` (attempt ${Math.min(facts.attempt, facts.maxAttempts)} of ${facts.maxAttempts})`
-      : " automatically";
-  return `${providerRecoverySubject(facts)} — retrying${progress}…`;
+export function providerRecoveryRetryingText(
+  t: OpenGeniText,
+  facts: ProviderRecoveryFacts,
+): string {
+  if (facts.sandboxWait) return `${providerRecoverySubject(t, facts)}…`;
+  const subject = providerRecoverySubject(t, facts);
+  return facts.attempt !== null && facts.maxAttempts !== null
+    ? t("lib.providerRecovery.subjectRetryingAttempt", {
+        subject,
+        attempt: Math.min(facts.attempt, facts.maxAttempts),
+        maxAttempts: facts.maxAttempts,
+      })
+    : t("lib.providerRecovery.subjectRetryingAutomatically", { subject });
 }
 
 /** Terminal sentence once the automatic budget is spent. */
-export function providerRecoveryExhaustedText(facts: ProviderRecoveryFacts): string {
+export function providerRecoveryExhaustedText(
+  t: OpenGeniText,
+  facts: ProviderRecoveryFacts,
+): string {
   const spent = facts.attempt ?? facts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-  const retried = `Opengeni retried ${spent} ${spent === 1 ? "time" : "times"} without success.`;
+  const retried = t("lib.providerRecovery.opengeniRetriedTimesWithoutSuccess", { count: spent });
   const remedy = facts.modelRoute
-    ? "Try again in a few minutes, or switch to another model."
-    : "Try again in a few minutes.";
-  return `${providerRecoverySubject(facts)}. ${retried} ${remedy}`;
+    ? t("lib.providerRecovery.tryAgainInAFew")
+    : t("lib.providerRecovery.tryAgainInAFew2");
+  return `${providerRecoverySubject(t, facts)}. ${retried} ${remedy}`;
 }
 
 const BOUNDARY_TYPES: ReadonlySet<string> = new Set([

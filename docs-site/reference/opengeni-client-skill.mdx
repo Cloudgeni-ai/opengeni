@@ -783,6 +783,57 @@ README's Workspace tools section for approval and migration details.
 Never put tokens in prompts, Skills, `modelContext`, tool URLs, browser code,
 or logs. Opengeni stores Connection and MCP header secrets encrypted and keeps
 them out of the model's context.
+
+### Your product as a vault provider
+
+Use native vaults when the agent needs to discover and use stored credentials.
+An embedding product can expose multiple remote vaults through a signed
+`external` connection; an in-process host can keep using
+`connectionCredentials.vaultProvider`. Keep the simple chat/tool integration
+above unchanged unless the product actually needs this optional capability.
+
+Configure remote connections on the server with `vaultsApi(client, workspaceId)`
+from `@opengeni/sdk`: `installVaultProvider`, `getVaultProviderCatalog`,
+`listProviderVaults`, and `linkProviderVault`. Never put provider tokens or the
+signing secret in browser code, model context, or URL parameters. Verify each
+request's raw-body signature and map its native account/workspace/subject to
+the host's actual tenant/user before authorizing it. A shared connection must
+not return a different user's inventory into the same metadata mirror; use
+separate user-owned connections for user-specific stores.
+
+Connection setup uses the existing `connections:write` and `secrets:write`
+permissions and native owner checks, including authorized agent attempts for
+shared connections. Personal setup requires the verified owner, and
+organization setup requires its admin. List/read/write operations always use
+the registered connection endpoint, not a per-call URL chosen by a tool caller.
+
+`getVaultProviderCatalog` includes deployment availability even before anyone
+connects; disable unavailable setup choices instead of collecting credentials
+that this deployment cannot use. `listVaultProviderConnections` remains a
+metadata-only convenience when only existing connections are needed.
+
+For a remote host, use `createExternalVaultReceiver` from the server-only
+`@opengeni/sdk/external-vault-receiver` subpath and a durable atomic replay and
+mutation store. The in-memory store is only for local tests. Its
+`resolveConnection` binds the native connection to one fixed host inventory;
+`authorize` checks the mapped person on every operation. If the host must
+register the native connection ID first, install returns saved/pending setup;
+register that ID, then verify. Never accept all unknown connections into one
+default tenant to avoid this registration step.
+
+Provider capabilities are granular: do not assume every read-write vault can
+update TOTP, upload files, restore history or archive items. Distinguish cached
+metadata from live value reads. Incomplete discovery or an unavailable source
+is not proof that the user has no matching secret. For a saved-but-pending
+setup (`discoveryPending: true`), use `verifyVaultProviderConnection` with the
+connection ID rather than resubmitting a consumed bootstrap token.
+
+The native secret ask card still saves to hosted vaults only. If the host must
+own collection, collect in the host UI and expose the saved item via its
+provider. Keep short-lived per-attempt credentials on the existing renewable
+credential callback: a stored item does not replace expiry/renewal, Git/MCP
+transport bindings or cleanup. See the product's external-vault and credential
+provider documentation before implementing either path.
 ````
 
 ## `references/website-widget.md`

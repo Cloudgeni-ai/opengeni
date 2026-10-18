@@ -31,8 +31,8 @@ use image::{
     ExtendedColorType, ImageEncoder as _, RgbaImage,
 };
 use opengeni_agent_platform::{
-    validate_linux_named_key_chord, DesktopBackend as _, LinuxDesktop, LinuxRgbaFrame, LinuxWindow,
-    LinuxWindowRect, PlatformError,
+    validate_linux_named_key_chord, CapturedFrame, DesktopBackend as _, LinuxDesktop,
+    LinuxRgbaFrame, LinuxWindow, LinuxWindowRect, PlatformError,
 };
 use opengeni_agent_proto::v1;
 use serde_json::json;
@@ -45,6 +45,7 @@ use crate::captured_frames::{
     dispatch_with_frame_invalidation, dispatch_with_mutation_invalidation, CapturedFrames,
 };
 use crate::clipboard::NativeClipboardController;
+use crate::linux_gnome::{self, GnomeScreen, WaylandScreen};
 use crate::tree::semantic_roots_equivalent;
 use crate::window_input_fences::{WindowInputFences, WindowInputIdentity};
 use crate::{
@@ -65,6 +66,19 @@ const MAX_CACHE_ITEMS: usize = 50_000;
 const MAX_ENRICH_CONCURRENCY: usize = 32;
 const MAX_DETAILED_ENRICHMENT_NODES: usize = 64;
 const MAX_APPLICATION_SNAPSHOTS: usize = 128;
+/// Chromium and Electron register an AT-SPI root with empty top-level frames
+/// and build the rest of their tree only after an assistive client queries a
+/// frame. These delays bound how long one observation waits for that build.
+const TREE_ACTIVATION_SETTLE_DELAYS: [Duration; 2] =
+    [Duration::from_millis(150), Duration::from_millis(350)];
+/// Environment that makes toolkits which otherwise wait for an assistive
+/// client (Chromium/Electron, Firefox and GTK2, Qt) expose their tree from
+/// startup when launched through computer use.
+const LINUX_APPLICATION_ACCESSIBILITY_ENVIRONMENT: [(&str, &str); 3] = [
+    ("ACCESSIBILITY_ENABLED", "1"),
+    ("GNOME_ACCESSIBILITY", "1"),
+    ("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1"),
+];
 const WINDOW_CAPTURE_RESIZE_ERROR: &str = "X11 window resized during capture";
 const WINDOW_CAPTURE_RETRY_DELAYS: [Duration; 4] = [
     Duration::ZERO,
@@ -299,6 +313,7 @@ impl LinuxApplicationLauncher {
         let mut command = Command::new(&self.executable);
         command
             .arg(application_id)
+            .envs(LINUX_APPLICATION_ACCESSIBILITY_ENVIRONMENT)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -340,8 +355,13 @@ impl LinuxApplicationLauncher {
 
 /// Linux semantic adapter over the modern AT-SPI cache and typed interfaces.
 /// All object handles remain private; observations contain only short refs.
+/// Without an AT-SPI bus (for example an Xvfb virtual desktop on a headless
+/// host) it still sees and drives the screen with pixel input.
 pub(crate) struct AtspiComputerAdapter {
-    connection: AccessibilityConnection,
+    /// `None` when the session has no reachable AT-SPI bus.
+    connection: Option<AccessibilityConnection>,
+    /// Why `connection` is `None`.
+    accessibility_unavailable: Option<String>,
     incarnation: Uuid,
     sequence: AtomicU64,
     frame_sequence: AtomicU64,
@@ -349,6 +369,10 @@ pub(crate) struct AtspiComputerAdapter {
     window_input_fences: RwLock<WindowInputFences<WindowFocusFence>>,
     target_locators: RwLock<BTreeMap<String, TargetLocator>>,
     desktop: Option<LinuxDesktop>,
+    /// GNOME Wayland whole-screen control; X11 window control is then absent.
+    gnome: Option<Arc<GnomeScreen>>,
+    /// Why no screen backend is available, when neither is.
+    screen_unavailable: Option<String>,
     application_launcher: Option<LinuxApplicationLauncher>,
     clipboard: Option<NativeClipboardController>,
     captured_frames: RwLock<CapturedFrames<FrameFence>>,
@@ -356,29 +380,54 @@ pub(crate) struct AtspiComputerAdapter {
     semantic_generation: Arc<AtomicU64>,
     application_snapshots: RwLock<BTreeMap<String, CachedApplicationSnapshot>>,
     semantic_event_cache: Arc<AtomicBool>,
+    /// Applications whose dormant tree this adapter already tried to wake.
+    activated_applications: Mutex<BTreeSet<String>>,
 }
 
 impl AtspiComputerAdapter {
     pub(crate) async fn open() -> NativeAdapterResult<Self> {
-        let connection = tokio::time::timeout(CACHE_TIMEOUT, AccessibilityConnection::new())
+        // Toolkits only register with AT-SPI while the session reports
+        // accessibility as enabled. This is the IsEnabled flag alone; the
+        // screen-reader flag stays untouched so no screen reader starts.
+        let _ = tokio::time::timeout(
+            CACHE_TIMEOUT,
+            atspi::connection::set_session_accessibility(true),
+        )
+        .await;
+        let accessibility = tokio::time::timeout(CACHE_TIMEOUT, AccessibilityConnection::new())
             .await
-            .map_err(|_| {
-                NativeAdapterError::unavailable(
-                    "Linux AT-SPI accessibility bus connection timed out",
-                    true,
-                )
-            })?
-            .map_err(|error| {
-                NativeAdapterError::unavailable(
-                    format!("Linux AT-SPI accessibility bus is unavailable: {error}"),
-                    true,
-                )
-            })?;
+            .map_err(|_| "Linux AT-SPI accessibility bus connection timed out".to_string())
+            .and_then(|connection| {
+                connection.map_err(|error| {
+                    format!("Linux AT-SPI accessibility bus is unavailable: {error}")
+                })
+            });
+        let (desktop, gnome, screen_unavailable) = match linux_gnome::detect().await {
+            WaylandScreen::NotWayland => match LinuxDesktop::open_default() {
+                Ok(desktop) => (Some(desktop), None, None),
+                Err(reason) => (None, None, Some(reason)),
+            },
+            WaylandScreen::Gnome(screen) => (None, Some(screen), None),
+            WaylandScreen::Unsupported(reason) => (None, None, Some(reason)),
+        };
+        // The screen is an independent control plane: without AT-SPI the
+        // adapter still captures and drives it, and only fails when neither
+        // semantic nor screen control is reachable.
+        let (connection, accessibility_unavailable) = match accessibility {
+            Ok(connection) => (Some(connection), None),
+            Err(reason) if desktop.is_some() || gnome.is_some() => (None, Some(reason)),
+            Err(reason) => return Err(NativeAdapterError::unavailable(reason, true)),
+        };
         let semantic_generation = Arc::new(AtomicU64::new(0));
-        let semantic_event_cache =
-            Arc::new(AtomicBool::new(register_semantic_events(&connection).await));
-        if semantic_event_cache.load(Ordering::Acquire) {
-            let event_connection = connection.clone();
+        let semantic_event_cache = Arc::new(AtomicBool::new(match &connection {
+            Some(connection) => register_semantic_events(connection).await,
+            None => false,
+        }));
+        if let Some(event_connection) = connection
+            .as_ref()
+            .filter(|_| semantic_event_cache.load(Ordering::Acquire))
+            .cloned()
+        {
             let event_generation = Arc::clone(&semantic_generation);
             let event_cache_enabled = Arc::clone(&semantic_event_cache);
             tokio::spawn(async move {
@@ -393,13 +442,16 @@ impl AtspiComputerAdapter {
         }
         Ok(Self {
             connection,
+            accessibility_unavailable,
             incarnation: Uuid::new_v4(),
             sequence: AtomicU64::new(0),
             frame_sequence: AtomicU64::new(0),
             latest: RwLock::new(BTreeMap::new()),
             window_input_fences: RwLock::new(WindowInputFences::new()),
             target_locators: RwLock::new(BTreeMap::new()),
-            desktop: LinuxDesktop::open_default().ok(),
+            desktop,
+            gnome,
+            screen_unavailable,
             application_launcher: LinuxApplicationLauncher::discover(),
             clipboard: NativeClipboardController::open().ok(),
             captured_frames: RwLock::new(CapturedFrames::new()),
@@ -407,11 +459,51 @@ impl AtspiComputerAdapter {
             semantic_generation,
             application_snapshots: RwLock::new(BTreeMap::new()),
             semantic_event_cache,
+            activated_applications: Mutex::new(BTreeSet::new()),
         })
     }
 
+    /// The AT-SPI connection, or why semantic access is unavailable.
+    fn accessibility(&self) -> NativeAdapterResult<&AccessibilityConnection> {
+        self.connection.as_ref().ok_or_else(|| {
+            NativeAdapterError::unavailable(
+                self.accessibility_unavailable
+                    .clone()
+                    .unwrap_or_else(|| "Linux AT-SPI accessibility is unavailable".to_string()),
+                true,
+            )
+        })
+    }
+
+    fn screen_device(&self) -> NativeAdapterResult<ScreenDevice<'_>> {
+        if let Some(screen) = &self.gnome {
+            return Ok(ScreenDevice::Gnome(screen));
+        }
+        self.desktop.as_ref().map(ScreenDevice::X11).ok_or_else(|| {
+            NativeAdapterError::unavailable(
+                format!(
+                    "this Linux desktop cannot be seen or controlled: {}",
+                    self.screen_unavailable
+                        .as_deref()
+                        .unwrap_or("no graphical display is reachable")
+                ),
+                true,
+            )
+        })
+    }
+
+    fn window_control_unavailable(&self, what: &str) -> NativeAdapterError {
+        if self.gnome.is_some() {
+            NativeAdapterError::unsupported(format!(
+                "Linux {what} is not available on GNOME Wayland; use the screen target for pointer, keyboard and screenshots, and semantic actions for windows"
+            ))
+        } else {
+            NativeAdapterError::unavailable(format!("Linux X11 {what} is unavailable"), true)
+        }
+    }
+
     fn screen_target(&self) -> Option<NativeTarget> {
-        let display = self.desktop.as_ref()?.probe()?;
+        let display = self.screen_device().ok()?.probe()?;
         let key = format!("{}\0{}\0{}", display.id, display.width, display.height);
         Some(NativeTarget {
             id: format!("screen:{}", stable_digest(&display.id)),
@@ -452,7 +544,7 @@ impl AtspiComputerAdapter {
 
     async fn cache_items(&self) -> NativeAdapterResult<Vec<CacheItem>> {
         let registry_root = self
-            .connection
+            .accessibility()?
             .root_accessible_on_registry()
             .await
             .map_err(|error| driver_error("construct AT-SPI registry root", error))?;
@@ -503,27 +595,19 @@ impl AtspiComputerAdapter {
                 return Ok(snapshot.items.clone());
             }
         }
-        let proxy = CacheProxy::builder(self.connection.connection())
-            .destination(root.name().ok_or_else(null_object)?.clone())
-            .map_err(|error| driver_error("construct application cache destination", error))?
-            .build()
-            .await
-            .map_err(|error| driver_error("construct application cache proxy", error));
-        let cached = match proxy {
-            Ok(proxy) => match cache_call(proxy.get_items()).await {
-                Ok(items) => Ok(items),
-                Err(error) if is_signature_mismatch(&error) => cache_call(proxy.get_legacy_items())
-                    .await
-                    .map_err(|error| driver_error("read legacy application AT-SPI cache", error))
-                    .and_then(convert_legacy_cache),
-                Err(error) => Err(driver_error("read application AT-SPI cache", error)),
-            },
-            Err(error) => Err(error),
-        };
-        let items = match cached {
-            Ok(items) if !items.is_empty() && cache_snapshot_complete(&items) => Ok(items),
-            Ok(_) | Err(_) => self.crawl_application(root).await,
-        }?;
+        let mut items = self.read_application_items(root).await?;
+        if dormant_application_tree(&items) && self.claim_tree_activation(&cache_key).await {
+            self.wake_application_tree(&items).await;
+            for delay in TREE_ACTIVATION_SETTLE_DELAYS {
+                tokio::time::sleep(delay).await;
+                if let Ok(woken) = self.read_application_items(root).await {
+                    items = woken;
+                    if !dormant_application_tree(&items) {
+                        break;
+                    }
+                }
+            }
+        }
         if self.semantic_event_cache.load(Ordering::Acquire)
             && self.semantic_generation.load(Ordering::Acquire) == start_generation
         {
@@ -541,6 +625,59 @@ impl AtspiComputerAdapter {
             );
         }
         Ok(items)
+    }
+
+    async fn read_application_items(
+        &self,
+        root: &ObjectRefOwned,
+    ) -> NativeAdapterResult<Vec<CacheItem>> {
+        let proxy = CacheProxy::builder(self.accessibility()?.connection())
+            .destination(root.name().ok_or_else(null_object)?.clone())
+            .map_err(|error| driver_error("construct application cache destination", error))?
+            .build()
+            .await
+            .map_err(|error| driver_error("construct application cache proxy", error));
+        let cached = match proxy {
+            Ok(proxy) => match cache_call(proxy.get_items()).await {
+                Ok(items) => Ok(items),
+                Err(error) if is_signature_mismatch(&error) => cache_call(proxy.get_legacy_items())
+                    .await
+                    .map_err(|error| driver_error("read legacy application AT-SPI cache", error))
+                    .and_then(convert_legacy_cache),
+                Err(error) => Err(driver_error("read application AT-SPI cache", error)),
+            },
+            Err(error) => Err(error),
+        };
+        match cached {
+            Ok(items) if !items.is_empty() && cache_snapshot_complete(&items) => Ok(items),
+            Ok(_) | Err(_) => self.crawl_application(root).await,
+        }
+    }
+
+    /// Records one wake attempt per application root, so a genuinely empty
+    /// window costs the settle delay once rather than on every observation.
+    async fn claim_tree_activation(&self, cache_key: &str) -> bool {
+        let mut activated = self.activated_applications.lock().await;
+        if activated.len() >= MAX_APPLICATION_SNAPSHOTS {
+            activated.clear();
+        }
+        activated.insert(cache_key.to_owned())
+    }
+
+    /// Querying a top-level frame's attributes is the assistive-client
+    /// signal that makes Chromium and Electron build their accessibility tree.
+    async fn wake_application_tree(&self, items: &[CacheItem]) {
+        let mut frames = Vec::new();
+        for item in items {
+            if is_top_level_window_role(item.role) {
+                frames.push(item.object.clone());
+            }
+        }
+        for frame in frames {
+            if let Ok(proxy) = self.accessible_proxy(&frame).await {
+                let _ = timed(proxy.get_attributes()).await;
+            }
+        }
     }
 
     fn invalidate_semantic_cache(&self) {
@@ -1077,7 +1214,7 @@ impl AtspiComputerAdapter {
 
     async fn process_id(&self, object: &ObjectRefOwned) -> Option<u32> {
         let name = object.name()?.clone();
-        let proxy = atspi::zbus::fdo::DBusProxy::new(self.connection.connection())
+        let proxy = atspi::zbus::fdo::DBusProxy::new(self.accessibility().ok()?.connection())
             .await
             .ok()?;
         timed(proxy.get_connection_unix_process_id(name.into()))
@@ -1089,7 +1226,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<AccessibleProxy<'a>> {
-        AccessibleProxy::builder(self.connection.connection())
+        AccessibleProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct accessible destination", error))?
             .path(object.path().clone())
@@ -1103,7 +1240,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<ComponentProxy<'a>> {
-        ComponentProxy::builder(self.connection.connection())
+        ComponentProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct component destination", error))?
             .path(object.path().clone())
@@ -1117,7 +1254,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<ActionProxy<'a>> {
-        ActionProxy::builder(self.connection.connection())
+        ActionProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct action destination", error))?
             .path(object.path().clone())
@@ -1131,7 +1268,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<EditableTextProxy<'a>> {
-        EditableTextProxy::builder(self.connection.connection())
+        EditableTextProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct editable-text destination", error))?
             .path(object.path().clone())
@@ -1145,7 +1282,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<SelectionProxy<'a>> {
-        SelectionProxy::builder(self.connection.connection())
+        SelectionProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct selection destination", error))?
             .path(object.path().clone())
@@ -1159,7 +1296,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<TextProxy<'a>> {
-        TextProxy::builder(self.connection.connection())
+        TextProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct text destination", error))?
             .path(object.path().clone())
@@ -1173,7 +1310,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<ValueProxy<'a>> {
-        ValueProxy::builder(self.connection.connection())
+        ValueProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct value destination", error))?
             .path(object.path().clone())
@@ -1298,9 +1435,10 @@ impl AtspiComputerAdapter {
             ));
         }
         self.revalidate_window_focus(&fence).await?;
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window activation is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window activation"))?;
         let window = fence.target.x11_window.clone().ok_or_else(|| {
             NativeAdapterError::unsupported("observed window has no exact X11 client identity")
         })?;
@@ -1662,9 +1800,7 @@ impl AtspiComputerAdapter {
         target: &NativeTarget,
         frame: Option<&ScreenFrameFence>,
     ) -> NativeAdapterResult<()> {
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 input is unavailable", true)
-        })?;
+        let desktop = self.screen_device()?;
         let inputs = screen_inputs(&command.action, target, frame)?;
         for (index, input) in inputs.into_iter().enumerate() {
             desktop
@@ -1679,9 +1815,10 @@ impl AtspiComputerAdapter {
         &self,
         record: TargetRecord,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window capture is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window capture"))?;
         let window = record.x11_window.clone().ok_or_else(|| {
             NativeAdapterError::definite(
                 NativeAdapterErrorCode::TargetNotFound,
@@ -1719,9 +1856,10 @@ impl AtspiComputerAdapter {
         record: TargetRecord,
         options: crate::NativeCaptureOptions,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window capture is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window capture"))?;
         let window = record.x11_window.clone().ok_or_else(|| {
             NativeAdapterError::definite(
                 NativeAdapterErrorCode::TargetNotFound,
@@ -1767,9 +1905,10 @@ impl AtspiComputerAdapter {
         mime_type: &str,
         bytes: Vec<u8>,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window capture is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window capture"))?;
         let current = desktop
             .windows()
             .await
@@ -1928,9 +2067,10 @@ impl AtspiComputerAdapter {
                 "window input requires matching accessibility and X11 process identity",
             ));
         }
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window input is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window input"))?;
         // Raw input never substitutes screen authority or implicitly focuses
         // another client. Explicit window focus must precede input.
         let activation = desktop
@@ -2018,9 +2158,10 @@ impl AtspiComputerAdapter {
         self.validate(command).await?;
         let fence = self.window_keyboard_fence(command).await?;
         self.revalidate_window_focus(&fence).await?;
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window input is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window input"))?;
         let window = fence.target.x11_window.clone().ok_or_else(|| {
             NativeAdapterError::unsupported("window input has no exact X11 client identity")
         })?;
@@ -2072,23 +2213,27 @@ impl AtspiComputerAdapter {
 #[async_trait]
 impl ComputerAdapter for AtspiComputerAdapter {
     fn capabilities(&self) -> NativeCapabilities {
-        let desktop = self.desktop.is_some();
+        let desktop = self.desktop.is_some() || self.gnome.is_some();
+        // App and window targets come from AT-SPI; without it only the
+        // whole screen is a target.
+        let semantic = self.connection.is_some();
         NativeCapabilities {
-            semantic_observation: true,
-            app_discovery: true,
+            semantic_observation: semantic,
+            app_discovery: semantic,
             app_launch: desktop && self.application_launcher.is_some(),
-            window_capture: self
-                .desktop
-                .as_ref()
-                .is_some_and(LinuxDesktop::supports_window_capture),
+            window_capture: semantic
+                && self
+                    .desktop
+                    .as_ref()
+                    .is_some_and(LinuxDesktop::supports_window_capture),
             screen_capture: desktop,
-            semantic_actions: true,
+            semantic_actions: semantic,
             pointer_input: desktop,
             pointer_click_continuation: desktop,
             keyboard_input: desktop,
             clipboard: self.clipboard.is_some(),
-            background_actions: true,
-            parallel_apps: true,
+            background_actions: semantic,
+            parallel_apps: semantic,
         }
     }
 
@@ -2126,13 +2271,11 @@ impl ComputerAdapter for AtspiComputerAdapter {
     async fn capture(&self, target_id: &str) -> NativeAdapterResult<NativeCapturedFrame> {
         if let Some(target) = self.screen_target() {
             if target.id == target_id {
-                let desktop = self.desktop.as_ref().ok_or_else(|| {
-                    NativeAdapterError::unavailable("Linux X11 screen capture is unavailable", true)
-                })?;
+                let desktop = self.screen_device()?;
                 let captured = desktop.capture().await.map_err(|error| {
                     NativeAdapterError::definite(
                         NativeAdapterErrorCode::DriverFailed,
-                        format!("capture Linux X11 screen: {error}"),
+                        format!("capture Linux screen: {error}"),
                         true,
                     )
                 })?;
@@ -2180,13 +2323,11 @@ impl ComputerAdapter for AtspiComputerAdapter {
     ) -> NativeAdapterResult<NativeCapturedFrame> {
         if let Some(target) = self.screen_target() {
             if target.id == target_id {
-                let desktop = self.desktop.as_ref().ok_or_else(|| {
-                    NativeAdapterError::unavailable("Linux X11 screen capture is unavailable", true)
-                })?;
+                let desktop = self.screen_device()?;
                 let captured = desktop.capture_rgba().await.map_err(|error| {
                     NativeAdapterError::definite(
                         NativeAdapterErrorCode::DriverFailed,
-                        format!("capture Linux X11 live screen: {error}"),
+                        format!("capture Linux live screen: {error}"),
                         true,
                     )
                 })?;
@@ -2525,12 +2666,10 @@ impl AtspiComputerAdapter {
                     .get(&command.target_id)
                     .cloned();
                 if let Some(window) = locator.and_then(|locator| locator.record.x11_window) {
-                    let desktop = self.desktop.as_ref().ok_or_else(|| {
-                        NativeAdapterError::unavailable(
-                            "Linux X11 window focus is unavailable",
-                            true,
-                        )
-                    })?;
+                    let desktop = self
+                        .desktop
+                        .as_ref()
+                        .ok_or_else(|| self.window_control_unavailable("window focus"))?;
                     desktop
                         .focus_window(window.id, window.bounds)
                         .await
@@ -2575,8 +2714,45 @@ fn screen_input_error(error: PlatformError, first_input: bool) -> NativeAdapterE
             NativeAdapterError::unsupported(message)
         }
         error => NativeAdapterError::outcome_unknown(format!(
-            "Linux XTEST delivery could not be confirmed: {error}"
+            "Linux input delivery could not be confirmed: {error}"
         )),
+    }
+}
+
+/// The whole-screen backend: X11 (a real display, Xvfb or another X server) or
+/// GNOME on Wayland through Mutter.
+enum ScreenDevice<'a> {
+    X11(&'a LinuxDesktop),
+    Gnome(&'a GnomeScreen),
+}
+
+impl ScreenDevice<'_> {
+    fn probe(&self) -> Option<v1::Display> {
+        match self {
+            Self::X11(desktop) => desktop.probe(),
+            Self::Gnome(screen) => screen.probe(),
+        }
+    }
+
+    async fn capture(&self) -> Result<CapturedFrame, PlatformError> {
+        match self {
+            Self::X11(desktop) => desktop.capture().await,
+            Self::Gnome(screen) => screen.capture().await,
+        }
+    }
+
+    async fn capture_rgba(&self) -> Result<LinuxRgbaFrame, PlatformError> {
+        match self {
+            Self::X11(desktop) => desktop.capture_rgba().await,
+            Self::Gnome(screen) => screen.capture_rgba().await,
+        }
+    }
+
+    async fn inject(&self, input: &v1::DesktopInput) -> Result<(), PlatformError> {
+        match self {
+            Self::X11(desktop) => desktop.inject(input).await,
+            Self::Gnome(screen) => screen.inject(input).await,
+        }
     }
 }
 
@@ -2842,6 +3018,28 @@ fn is_target_role(role: Role) -> bool {
         role,
         Role::Application | Role::Frame | Role::Window | Role::Dialog
     )
+}
+
+fn is_top_level_window_role(role: Role) -> bool {
+    matches!(role, Role::Frame | Role::Window | Role::Dialog)
+}
+
+fn dormant_application_tree(items: &[CacheItem]) -> bool {
+    dormant_tree_shape(items.iter().map(|item| (item.role, item.children)))
+}
+
+/// An application whose snapshot is only its root plus top-level windows
+/// without any children has registered with AT-SPI but not built its tree.
+fn dormant_tree_shape(nodes: impl IntoIterator<Item = (Role, i32)>) -> bool {
+    let mut windows = 0_usize;
+    for (role, children) in nodes {
+        if is_top_level_window_role(role) && children == 0 {
+            windows += 1;
+        } else if role != Role::Application {
+            return false;
+        }
+    }
+    windows > 0
 }
 
 const fn target_kind_rank(kind: NativeTargetKind) -> u8 {
@@ -3338,6 +3536,33 @@ mod live_tests {
 
     use super::*;
 
+    #[tokio::test]
+    #[ignore = "requires DISPLAY on an X11 server and a session bus without AT-SPI (e.g. DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent)"]
+    async fn drives_the_screen_without_an_accessibility_bus() {
+        let adapter = AtspiComputerAdapter::open()
+            .await
+            .expect("a reachable screen is enough to open the adapter");
+        assert!(
+            adapter.connection.is_none(),
+            "this test needs a session without AT-SPI"
+        );
+        let capabilities = adapter.capabilities();
+        assert!(capabilities.screen_capture && capabilities.pointer_input);
+        assert!(!capabilities.semantic_observation && !capabilities.app_discovery);
+        let targets = adapter.targets().await.expect("targets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].kind, NativeTargetKind::Screen);
+        let observation = adapter
+            .observe(&targets[0].id)
+            .await
+            .expect("observe screen");
+        assert_eq!(observation.target.id, targets[0].id);
+        adapter
+            .capture(&targets[0].id)
+            .await
+            .expect("capture the screen without AT-SPI");
+    }
+
     #[test]
     fn only_a_refused_first_screen_input_is_a_definite_failure() {
         let glyph = || {
@@ -3447,6 +3672,56 @@ mod live_tests {
         .await
         .expect("launch returns after startup grace")
         .expect("long-running launcher accepted");
+    }
+
+    #[tokio::test]
+    async fn application_launch_requests_toolkit_accessibility() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let executable = directory.path().join("gtk-launch");
+        let environment = directory.path().join("environment");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s %s %s' \"$ACCESSIBILITY_ENABLED\" \"$GNOME_ACCESSIBILITY\" \"$QT_LINUX_ACCESSIBILITY_ALWAYS_ON\" > '{}'\n",
+                environment.display()
+            ),
+        )
+        .expect("write launcher");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("make launcher executable");
+        let launcher = LinuxApplicationLauncher { executable };
+
+        launcher
+            .launch("opengeni-browser.desktop")
+            .await
+            .expect("launcher accepted");
+        assert_eq!(
+            fs::read_to_string(&environment).expect("launcher environment"),
+            "1 1 1"
+        );
+    }
+
+    #[test]
+    fn only_empty_top_level_windows_mark_a_dormant_tree() {
+        assert!(dormant_tree_shape([
+            (Role::Application, 1),
+            (Role::Frame, 0)
+        ]));
+        assert!(dormant_tree_shape([
+            (Role::Application, 2),
+            (Role::Frame, 0),
+            (Role::Dialog, 0),
+        ]));
+        assert!(!dormant_tree_shape([(Role::Application, 0)]));
+        assert!(!dormant_tree_shape([
+            (Role::Application, 1),
+            (Role::Frame, 1)
+        ]));
+        assert!(!dormant_tree_shape([
+            (Role::Application, 1),
+            (Role::Frame, 1),
+            (Role::Button, 0),
+        ]));
     }
 
     #[tokio::test]

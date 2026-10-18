@@ -1,4 +1,14 @@
+import {
+  copyObservedSessionSequence,
+  recordObservedSessionSequence,
+  SESSION_SEQUENCE_HEADER,
+} from "./session-sequence";
 import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+import type { WorkspaceBackgroundCommandListResponse } from "./types";
+import type {
+  InsightsSiteUsageQuery,
+  InsightsSiteUsageResponse,
+} from "@opengeni/contracts/insights-usage";
 import type {
   ClaudeSubscriptionAccountsResponse,
   ClaudeSubscriptionAccount,
@@ -58,7 +68,9 @@ import type {
   SiteAuthAuthorizeResponse,
   SiteHostnameAvailability,
   SiteLimitProfile,
+  SitePlatformUsage,
   SitePublication,
+  SitePublishWarningFix,
   SiteTakedownRequest,
   UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
@@ -196,6 +208,9 @@ import {
   type BrowserSessionMutationResponse,
   type BrowserTargetState,
   type BrowserTargetListResponse,
+  type BrowserWorkingCopyAdoptionRequest,
+  type BrowserWorkingCopyAdoptionResponse,
+  type BrowserWorkingCopyInspection,
   type BrowserRevisionListResponse,
   type ComputerActionReceipt,
   type ComputerActionRequest,
@@ -409,6 +424,12 @@ import type {
   InstalledSkill,
   ListInstalledSkillsResponse,
   CreateBillingPortalRequest,
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
   BillingCheckoutStatus,
@@ -760,6 +781,7 @@ import {
 } from "./types";
 
 function sessionListQuery(options: {
+  siteAccessId?: string;
   originSiteId?: string;
   limit?: number;
   parentSessionId?: string | null;
@@ -768,6 +790,7 @@ function sessionListQuery(options: {
   const { limit, parentSessionId, scopeSubjectId } = options;
   const query: Record<string, string> = {};
   if (options.originSiteId) query.originSiteId = options.originSiteId;
+  if (options.siteAccessId) query.siteAccessId = options.siteAccessId;
   if (limit !== undefined) query.limit = String(limit);
   if (parentSessionId !== undefined) query.parentSessionId = parentSessionId ?? "null";
   if (scopeSubjectId !== undefined) query.scopeSubjectId = scopeSubjectId;
@@ -775,12 +798,19 @@ function sessionListQuery(options: {
 }
 
 export type SessionListPageOptions = {
+  /** Chats available to this viewer in a private console Site; "current" inside its frame. */
+  siteAccessId?: string;
   /** Complete content-free totals for an authorized root page. */
   includeTotals?: boolean;
   /** Filter attention rows before pagination. */
   needsYouOnly?: boolean;
   /** Only read-only sessions moved to the idle-session archive. */
   contentArchivedOnly?: boolean;
+  /**
+   * Only workstreams the caller started or messaged directly (any session in
+   * the tree). Agent-relayed messages do not count.
+   */
+  mineOnly?: boolean;
   /** Created through this Site. In a Site-bound client, "current" resolves to its own Site. */
   originSiteId?: string;
   limit?: number;
@@ -814,6 +844,7 @@ export type SessionListPageOptions = {
 };
 
 const SESSION_PAGE_FILTER_KEYS = [
+  "siteAccessId",
   "originSiteId",
   "channelId",
   "createdBy",
@@ -835,6 +866,7 @@ function hasSessionPageFilters(options: SessionListPageOptions): boolean {
   return (
     Boolean(options.needsYouOnly) ||
     Boolean(options.contentArchivedOnly) ||
+    Boolean(options.mineOnly) ||
     SESSION_PAGE_FILTER_KEYS.some((key) => options[key] !== undefined)
   );
 }
@@ -925,6 +957,29 @@ export type OpenGeniRequestOptions = {
   /** Opt-in void response handling for focused helpers using the shared transport. */
   responseType?: "json" | "void";
 };
+
+/** Narrowing filters for BrowserSession/ComputerSession inventories. Filters
+ *  never grant access; omitted filters return the complete workspace history. */
+export type InteractionSessionListOptions = OpenGeniRequestOptions & {
+  /** Only sessions associated with this agent session. */
+  associatedSessionId?: string | undefined;
+  /** false omits ended and failed sessions. */
+  includeTerminal?: boolean | undefined;
+};
+
+function interactionSessionListQuery(options: InteractionSessionListOptions): {
+  query: Record<string, string>;
+  request: OpenGeniRequestOptions;
+} {
+  const { associatedSessionId, includeTerminal, ...request } = options;
+  return {
+    query: {
+      ...(associatedSessionId ? { associatedSessionId } : {}),
+      ...(includeTerminal !== undefined ? { includeTerminal: String(includeTerminal) } : {}),
+    },
+    request,
+  };
+}
 
 export type SharedSessionReadOptions = {
   /**
@@ -1841,6 +1896,25 @@ export class OpenGeniClient {
     );
   }
 
+  /** @internal Console-only workspace projection; cancellation uses the ordinary session path. */
+  async listWorkspaceBackgroundCommands(
+    workspaceId: string,
+    options: OpenGeniRequestOptions & { cursor?: string } = {},
+  ): Promise<WorkspaceBackgroundCommandListResponse> {
+    const response = await this.requestJson<WorkspaceBackgroundCommandListResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
+      undefined,
+      { view: "running_commands", ...(options.cursor ? { cursor: options.cursor } : {}) },
+      options,
+    );
+    // An older server ignores the view and returns ordinary sessions. Never
+    // present that incompatible response as a plausible empty command list.
+    if (!response || !Array.isArray(response.commands) || !("nextCursor" in response))
+      throw new Error("This server does not support the workspace running commands view.");
+    return response;
+  }
+
   async cancelSessionBackgroundCommand(
     workspaceId: string,
     sessionId: string,
@@ -1910,6 +1984,7 @@ export class OpenGeniClient {
       if (options.includeTotals) query.includeTotals = "true";
       if (options.needsYouOnly) query.needsYouOnly = "true";
       if (options.contentArchivedOnly) query.contentArchivedOnly = "true";
+      if (options.mineOnly) query.mineOnly = "true";
       if (options.includePinned === false) query.includePinned = "false";
       if (options.archivedOnly) query.archivedOnly = "true";
       result = await this.requestJson<SessionListResponse | SessionListEntryResponse | Session[]>(
@@ -1971,6 +2046,8 @@ export class OpenGeniClient {
       throw unsupportedSessionPage("attention session filtering");
     if (options.contentArchivedOnly && response.contentArchivedOnly !== true)
       throw unsupportedSessionPage("read-only session filtering");
+    if (options.mineOnly && response.mineOnly !== true)
+      throw unsupportedSessionPage("your-sessions filtering");
     if (filtered && response.filtersApplied !== true) {
       throw unsupportedSessionPage("filtered session lists");
     }
@@ -1981,7 +2058,36 @@ export class OpenGeniClient {
     ) {
       throw unsupportedSessionPage("Site-filtered session lists");
     }
+    if (
+      options.siteAccessId &&
+      (!response.siteAccessId ||
+        (options.siteAccessId !== "current" && options.siteAccessId !== response.siteAccessId))
+    )
+      throw unsupportedSessionPage("Site access-filtered session lists");
     return response;
+  }
+
+  /** Console/owner-authorized agent only. Never available through the Site frame bridge. */
+  async listSiteSessionAccess(
+    workspaceId: string,
+    siteId: string,
+  ): Promise<{ sessionIds: string[] }> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/session-access`,
+    );
+  }
+
+  async setSiteSessionAccess(
+    workspaceId: string,
+    siteId: string,
+    sessionId: string,
+    allowed: boolean,
+  ): Promise<{ siteId: string; sessionId: string; allowed: boolean }> {
+    return this.requestJson(
+      allowed ? "PUT" : "DELETE",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/session-access/${encodeURIComponent(sessionId)}`,
+    );
   }
 
   /** Compact, bounded workspace agent hierarchy page. */
@@ -2934,6 +3040,7 @@ export class OpenGeniClient {
       undefined,
       options.status ? { status: options.status } : undefined,
     );
+    copyObservedSessionSequence(result, result.requests);
     return result.requests;
   }
 
@@ -4378,14 +4485,15 @@ export class OpenGeniClient {
    *  not access: peers and child agents intentionally remain discoverable. */
   async listBrowserSessions(
     workspaceId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions | InteractionSessionListOptions = {},
   ): Promise<BrowserSessionListResponse> {
+    const { query, request } = interactionSessionListQuery(options);
     return await this.requestJson<BrowserSessionListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/browser-sessions`,
       undefined,
-      {},
-      options,
+      query,
+      request,
     );
   }
 
@@ -4817,18 +4925,88 @@ export class OpenGeniClient {
     );
   }
 
+  /** Inspect an active browser's preserved working copy after its controller
+   * lost it, for example when its machine's disk was restored from a copy.
+   * Read-only; returns the exact manifest digest an adoption must name. */
+  async inspectBrowserSessionWorkingCopy(
+    workspaceId: string,
+    browserSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserWorkingCopyInspection> {
+    return await this.requestJson<BrowserWorkingCopyInspection>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/working-copy/inspection`,
+      {},
+      {},
+      options,
+    );
+  }
+
+  /** Adopt the exact inspected bytes of a preserved working copy as the
+   * browser's state. If the reply is lost, read the recorded outcome of the
+   * same operationId instead of sending again. */
+  async adoptBrowserSessionWorkingCopy(
+    workspaceId: string,
+    browserSessionId: string,
+    request: BrowserWorkingCopyAdoptionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserWorkingCopyAdoptionResponse> {
+    return await this.requestJson<BrowserWorkingCopyAdoptionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/working-copy/adoptions`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async getBrowserSessionWorkingCopyAdoption(
+    workspaceId: string,
+    browserSessionId: string,
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserWorkingCopyAdoptionResponse> {
+    return await this.requestJson<BrowserWorkingCopyAdoptionResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/working-copy/adoptions/${encodeURIComponent(operationId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /** Revert an unfinished adoption: the browser's own directory goes back in
+   * place and the staged copy is kept, never used. The supported way out of
+   * a collision or of an adoption nobody wants finished. Retrying the same
+   * revert finishes one that stopped part way. */
+  async revertBrowserSessionWorkingCopyAdoption(
+    workspaceId: string,
+    browserSessionId: string,
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserWorkingCopyAdoptionResponse> {
+    return await this.requestJson<BrowserWorkingCopyAdoptionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/working-copy/adoptions/${encodeURIComponent(operationId)}/revert`,
+      {},
+      {},
+      options,
+    );
+  }
+
   /** Workspace-wide ComputerSession inventory. Associations express
    * relevance, not access; peer sessions intentionally remain discoverable. */
   async listComputerSessions(
     workspaceId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions | InteractionSessionListOptions = {},
   ): Promise<ComputerSessionListResponse> {
+    const { query, request } = interactionSessionListQuery(options);
     return await this.requestJson<ComputerSessionListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/computer-sessions`,
       undefined,
-      {},
-      options,
+      query,
+      request,
     );
   }
 
@@ -8713,6 +8891,46 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Apply a readiness warning's one-click fix (`publication.warnings[].fix`):
+   * a Site Data collection's guest access or a Site SQL query's audience.
+   * Answers the publication with fresh warnings. 404
+   * `site_fix_target_missing` when the collection or query no longer exists.
+   */
+  async applySitePublicationFix(
+    workspaceId: string,
+    siteId: string,
+    fix: SitePublishWarningFix,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "POST",
+      `${sitePublicationPath(workspaceId, siteId)}/fixes`,
+      fix,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * This month's Site platform usage of the workspace (gateway requests,
+   * Site SQL rows read and written, Site SQL and Site Data storage) against
+   * its monthly allowance, with the billing mode and the Opengeni-wide
+   * brake state.
+   */
+  async getSitePlatformUsage(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePlatformUsage> {
+    return await this.requestJson<SitePlatformUsage>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/site-platform-usage`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
   /** Whether a hostname label is valid and free for a Site in this workspace. */
   async checkSiteHostname(
     workspaceId: string,
@@ -9829,9 +10047,11 @@ export class OpenGeniClient {
     organizationId: string,
     connectionId: string,
   ): Promise<void> {
+    // JSON even without fields: the route admits browsers only as same-origin JSON.
     await this.requestVoid(
       "DELETE",
       `/v1/organizations/${organizationId}/mcp-connections/${connectionId}`,
+      {},
     );
   }
 
@@ -9863,9 +10083,11 @@ export class OpenGeniClient {
 
   /** Revoke a personal key: its next request is refused. Its person, or an admin. */
   async revokePersonalApiKey(organizationId: string, apiKeyId: string): Promise<void> {
+    // JSON even without fields: the route admits browsers only as same-origin JSON.
     await this.requestVoid(
       "DELETE",
       `/v1/organizations/${organizationId}/personal-api-keys/${apiKeyId}`,
+      {},
     );
   }
 
@@ -10262,6 +10484,21 @@ export class OpenGeniClient {
   }
 
   /** Shared usage under the existing workspace access gate. */
+  async getWorkspaceInsightsSiteUsage(
+    workspaceId: string,
+    options: Partial<InsightsSiteUsageQuery> = {},
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<InsightsSiteUsageResponse> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/insights/sites`,
+      undefined,
+      { range: options.range ?? "month" },
+      requestOptions,
+    );
+  }
+
+  /** Shared usage under the existing workspace access gate. */
   async getWorkspaceInsightsUsage(
     workspaceId: string,
     options: WorkspaceInsightsUsageOptions = {},
@@ -10365,6 +10602,45 @@ export class OpenGeniClient {
       "/v1/billing/portal",
       request,
     );
+  }
+
+  /** Current runtime catalog, USD prices, self-service availability and plan balance. */
+  async getBillingSubscriptionPlans(
+    options: { accountId?: string } = {},
+  ): Promise<BillingSubscriptionCatalog> {
+    return await this.requestJson("GET", "/v1/billing/subscription/plans", undefined, options);
+  }
+
+  async createSubscriptionCheckout(
+    request: CreateSubscriptionCheckoutRequest,
+  ): Promise<CreateSubscriptionCheckoutResponse> {
+    return await this.requestJson("POST", "/v1/billing/subscription/checkout", request);
+  }
+
+  /** Charge immediately, reset the monthly anchor and replace plan credit after payment. */
+  async upgradeBillingSubscription(
+    request: ChangeBillingSubscriptionRequest,
+  ): Promise<BillingSubscriptionChange> {
+    return await this.requestJson("POST", "/v1/billing/subscription/upgrade", request);
+  }
+
+  /** Schedule a lower-priced plan at the end of the already-paid period. */
+  async changeBillingSubscription(
+    request: ChangeBillingSubscriptionRequest,
+  ): Promise<BillingSubscriptionChange> {
+    return await this.requestJson("POST", "/v1/billing/subscription/change", request);
+  }
+
+  async cancelBillingSubscription(
+    request: CancelBillingSubscriptionRequest,
+  ): Promise<BillingSubscriptionChange> {
+    return await this.requestJson("POST", "/v1/billing/subscription/cancel", request);
+  }
+
+  async createSubscriptionPortalSession(
+    request: CreateBillingPortalRequest = {},
+  ): Promise<CreateBillingPortalResponse> {
+    return await this.requestJson("POST", "/v1/billing/subscription/portal", request);
   }
 
   // --- Embedding transport -----------------------------------------------------
@@ -10473,9 +10749,12 @@ export class OpenGeniClient {
 
   /** Begin device-code login: show `userCode` at `verificationUri`, then poll with `state`. */
   async codexConnectStart(workspaceId: string): Promise<CodexConnectStart> {
+    // A JSON body even though the route reads none: signed-in browsers are
+    // admitted to subscription mutations only as same-origin JSON requests.
     return await this.requestJson<CodexConnectStart>(
       "POST",
       `/v1/workspaces/${workspaceId}/codex/connect/start`,
+      {},
     );
   }
 
@@ -10972,7 +11251,9 @@ export class OpenGeniClient {
           return undefined as T;
         }
         await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), abort.signal);
-        return (await awaitWithAbort(response.json(), abort.signal)) as T;
+        const value = await awaitWithAbort(response.json(), abort.signal);
+        recordObservedSessionSequence(value, response.headers.get(SESSION_SEQUENCE_HEADER));
+        return value as T;
       } catch (error) {
         if (options.signal?.aborted) throw error;
         if (error instanceof OpenGeniApiError) throw error;

@@ -23,6 +23,7 @@ import {
 } from "react";
 
 import { cn } from "../../lib/cn";
+import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 
 /**
  * Shared chrome for artifact surfaces: the Opengeni console and embedding hosts
@@ -108,11 +109,14 @@ export function artifactKindIcon(kind: ArtifactKind): ReactNode {
   return <GalleryHorizontalEndIcon className="size-4" />;
 }
 
-export function artifactKindSubtitle(kind: ArtifactKind): string {
-  if (kind === "site") return "Site · published preview";
-  if (kind === "image") return "Image · retained file";
-  if (kind === "file") return "File · retained file";
-  return `${kind[0]!.toUpperCase()}${kind.slice(1)} · shared editor`;
+export function artifactKindSubtitle(t: OpenGeniText, kind: ArtifactKind): string {
+  if (kind === "site") return t("artifacts.artifactChrome.sitePublishedPreview");
+  if (kind === "image") return t("artifacts.artifactChrome.imageRetainedFile");
+  if (kind === "file") return t("artifacts.artifactChrome.fileRetainedFile");
+  return t("artifacts.artifactChrome.uppercaseSliceSharedEditor", {
+    upperCase: kind[0]!.toUpperCase(),
+    slice: kind.slice(1),
+  });
 }
 
 type LoadErrorCopy = Readonly<
@@ -168,75 +172,78 @@ export type ArtifactLabels = Readonly<{
   reference: (id: string) => string;
 }>;
 
-export const DEFAULT_ARTIFACT_LABELS: ArtifactLabels = Object.freeze({
-  back: "Back",
-  close: "Close",
-  opening: "Opening artifact…",
-  artifact: "Artifact",
-  startingEditor: "Starting the secure editing session…",
-  kindSubtitle: (kind: ArtifactKind) => artifactKindSubtitle(kind),
-  live: "Live",
-  reloadSite: "Reload Site",
-  openFullScreen: "Open Site full screen",
-  editWithAgent: "Edit with Opengeni",
-  editShort: "Edit",
-  preview: "Preview",
-  loadPreview: "Load preview",
-  loadSitePreview: "Load Site preview",
-  siteVersion: "Site version",
-  savedVersion: "Saved version",
-  version: (revision: number) => `Version ${revision}`,
-  openSite: "Open Site",
-  loadingSite: "Loading Site…",
-  siteArchived: "This Site is archived.",
-  siteUnpublished: "This Site is archived or unpublished.",
-  siteReferenceInvalid: "This Site reference is invalid.",
-  siteLoadFailed: "Couldn’t load this Site.",
-  retry: "Retry",
-  tryAgain: "Try again",
-  toolCount: (count: number) => `${count} ${count === 1 ? "tool" : "tools"}`,
-  toolsAvailable: (count: number) => `${count} workspace tools available to this Site`,
-  sourceFileCount: (count: number) => `${count} source ${count === 1 ? "file" : "files"}`,
-  viewingDisabled: {
-    title: "Artifact viewing isn't enabled",
-    message: "This app doesn't serve editable artifacts yet.",
-  },
-  editorsMissing: {
-    title: "This artifact can't open here",
-    message: "This app hasn't installed the document, spreadsheet, and presentation editors.",
-  },
-  siteErrors: {
-    unavailable: {
-      title: "This Site isn't available",
-      message: "It may have been removed, or you may not have access.",
+export const DEFAULT_ARTIFACT_LABELS = (t: OpenGeniText): ArtifactLabels =>
+  Object.freeze({
+    back: t("artifacts.artifactChrome.back"),
+    close: t("artifacts.artifactChrome.close"),
+    opening: t("artifacts.artifactChrome.openingArtifact"),
+    artifact: t("artifacts.artifactChrome.artifact"),
+    startingEditor: t("artifacts.artifactChrome.startingTheSecureEditingSession"),
+    kindSubtitle: (kind: ArtifactKind) => artifactKindSubtitle(t, kind),
+    live: t("artifacts.artifactChrome.live"),
+    reloadSite: t("artifacts.artifactChrome.reloadSite"),
+    openFullScreen: t("artifacts.artifactChrome.openSiteFullScreen"),
+    editWithAgent: t("artifacts.artifactChrome.editWithOpengeni"),
+    editShort: t("artifacts.artifactChrome.edit"),
+    preview: t("artifacts.artifactChrome.preview"),
+    loadPreview: t("artifacts.artifactChrome.loadPreview"),
+    loadSitePreview: t("artifacts.artifactChrome.loadSitePreview"),
+    siteVersion: t("artifacts.artifactChrome.siteVersion"),
+    savedVersion: t("artifacts.artifactChrome.savedVersion"),
+    version: (revision: number) => t("artifacts.artifactChrome.versionRevision", { revision }),
+    openSite: t("artifacts.artifactChrome.openSite"),
+    loadingSite: t("artifacts.artifactChrome.loadingSite"),
+    siteArchived: t("artifacts.artifactChrome.thisSiteIsArchived"),
+    siteUnpublished: t("artifacts.artifactChrome.thisSiteIsArchivedOr"),
+    siteReferenceInvalid: t("artifacts.artifactChrome.thisSiteReferenceIsInvalid"),
+    siteLoadFailed: t("artifacts.artifactChrome.couldnTLoadThisSite"),
+    retry: t("artifacts.artifactChrome.retry"),
+    tryAgain: t("artifacts.artifactChrome.tryAgain"),
+    toolCount: (count: number) => t("counts.tools", { count }),
+    toolsAvailable: (count: number) =>
+      t("artifacts.artifactChrome.countvalueWorkspaceToolsAvailableTo", { countValue: count }),
+    sourceFileCount: (count: number) => t("counts.sourceFiles", { count }),
+    viewingDisabled: {
+      title: t("artifacts.artifactChrome.artifactViewingIsnTEnabled"),
+      message: t("artifacts.artifactChrome.thisAppDoesnTServe"),
     },
-    invalid: {
-      title: "This Site link isn't valid",
-      message: "Check the address and open a Site from your workspace library.",
+    editorsMissing: {
+      title: t("artifacts.artifactChrome.thisArtifactCanTOpen"),
+      message: t("artifacts.artifactChrome.thisAppHasnTInstalled"),
     },
-    transient: {
-      title: "Couldn't load this Site",
-      message: "A temporary problem prevented this Site from loading. Try again.",
+    siteErrors: {
+      unavailable: {
+        title: t("artifacts.artifactChrome.thisSiteIsnTAvailable"),
+        message: t("artifacts.artifactChrome.itMayHaveBeenRemoved"),
+      },
+      invalid: {
+        title: t("artifacts.artifactChrome.thisSiteLinkIsnT"),
+        message: t("artifacts.artifactChrome.checkTheAddressAndOpen"),
+      },
+      transient: {
+        title: t("artifacts.artifactChrome.couldnTLoadThisSite2"),
+        message: t("artifacts.artifactChrome.aTemporaryProblemPreventedThis"),
+      },
     },
-  },
-  editableErrors: {
-    unavailable: {
-      title: "This artifact isn't available",
-      message: "It may have been removed, or you may not have access.",
+    editableErrors: {
+      unavailable: {
+        title: t("artifacts.artifactChrome.thisArtifactIsnTAvailable"),
+        message: t("artifacts.artifactChrome.itMayHaveBeenRemoved"),
+      },
+      invalid: {
+        title: t("artifacts.artifactChrome.thisArtifactLinkIsnT"),
+        message: t("artifacts.artifactChrome.checkTheAddressAndOpen2"),
+      },
+      transient: {
+        title: t("artifacts.artifactChrome.couldNotOpenThisArtifact"),
+        message: t("artifacts.artifactChrome.aTemporaryProblemPreventedThis2"),
+      },
     },
-    invalid: {
-      title: "This artifact link isn't valid",
-      message: "Check the address and open the artifact from your workspace library.",
-    },
-    transient: {
-      title: "Could not open this artifact",
-      message: "A temporary problem prevented this artifact from opening. Try again.",
-    },
-  },
-  reference: (id: string) => `Reference: ${id}`,
-});
+    reference: (id: string) => t("artifacts.artifactChrome.referenceId", { id }),
+  });
 
-const ArtifactLabelsContext = createContext<ArtifactLabels>(DEFAULT_ARTIFACT_LABELS);
+// Host overrides only; the defaults come from the active message catalog.
+const ArtifactLabelsContext = createContext<Partial<ArtifactLabels>>({});
 
 /** Translate every artifact surface below; nested providers override outer ones. */
 export function ArtifactLabelsProvider({
@@ -252,7 +259,9 @@ export function ArtifactLabelsProvider({
 }
 
 export function useArtifactLabels(): ArtifactLabels {
-  return useContext(ArtifactLabelsContext);
+  const t = useOpenGeniText();
+  const overrides = useContext(ArtifactLabelsContext);
+  return useMemo(() => ({ ...DEFAULT_ARTIFACT_LABELS(t), ...overrides }), [t, overrides]);
 }
 
 /**
@@ -346,6 +355,7 @@ export function ArtifactProblem({
   view: ArtifactLoadErrorView;
   onRetry?: (() => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const labels = useArtifactLabels();
   return (
     <section
@@ -356,7 +366,7 @@ export function ArtifactProblem({
         <AlertTriangleIcon aria-hidden className="mx-auto mb-3 size-5 text-status-waiting" />
         <h2 className="m-0 text-base font-semibold">{view.title}</h2>
         <p className="mb-0 mt-2 text-sm leading-5 text-fg-muted">
-          {artifactLoadErrorMessage(view, labels)}
+          {artifactLoadErrorMessage(t, view, labels)}
         </p>
         {view.retryable && onRetry ? (
           <div className="mt-4 flex justify-center">
@@ -382,9 +392,10 @@ export type ArtifactLoadErrorView = Readonly<{
 
 /** Site/editor load copy. Never surfaces raw Opengeni API status text. */
 export function artifactLoadErrorView(
+  t: OpenGeniText,
   error: unknown,
   kind: ArtifactLoadErrorKind,
-  labels: ArtifactLabels = DEFAULT_ARTIFACT_LABELS,
+  labels: ArtifactLabels = DEFAULT_ARTIFACT_LABELS(t),
 ): ArtifactLoadErrorView {
   const copy = kind === "site" ? labels.siteErrors : labels.editableErrors;
   const correlationId = error instanceof OpenGeniApiError ? error.correlationId : undefined;
@@ -404,8 +415,9 @@ export function artifactLoadErrorView(
 }
 
 export function artifactLoadErrorMessage(
+  t: OpenGeniText,
   view: ArtifactLoadErrorView,
-  labels: ArtifactLabels = DEFAULT_ARTIFACT_LABELS,
+  labels: ArtifactLabels = DEFAULT_ARTIFACT_LABELS(t),
 ): string {
   return view.correlationId
     ? `${view.message} ${labels.reference(view.correlationId)}`

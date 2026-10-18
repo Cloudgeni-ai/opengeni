@@ -4,6 +4,7 @@ import { alias } from "drizzle-orm/pg-core";
 import type { Database } from "./database";
 import { rlsContextForWorkspace, withRlsContext } from "./database";
 import * as schema from "./schema";
+import { modelCallTimingColumns, modelCallTimingOrNull } from "./model-call-timing";
 
 export const INSIGHTS_WARM_GROUP_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -1314,6 +1315,7 @@ async function insertModelCallFactFromUsageEvent(
       listCacheWriteCostMicros: capturedClasses ? classValues[2]! : null,
       listOutputCostMicros: capturedClasses ? classValues[3]! : null,
       listCostIsApprox: capturedClasses ? payload.listByClassApprox === true : null,
+      ...modelCallTimingColumns(modelCallTimingOrNull(payload.timing)),
       occurredAt: event.occurredAt,
       connectionId:
         provider === "codex-subscription"
@@ -1486,23 +1488,32 @@ export async function reconcileModelCallFacts(
       session_id: string;
       source_key: string;
     }>(sql`
-      select usage_row.turn_id, usage_row.session_id,
-        substr(usage_row.source_resource_id, 38) as source_key
-      from ${schema.usageEvents} usage_row
-      where usage_row.workspace_id = ${input.workspaceId}::uuid
-        and usage_row.event_type = 'model.cost'
-        and usage_row.source_resource_type = 'model_response'
-        and usage_row.occurred_at >= ${input.since.toISOString()}::timestamp with time zone
-        and usage_row.occurred_at < ${input.until.toISOString()}::timestamp with time zone
-        and usage_row.turn_id is not null
-        and usage_row.session_id is not null
-        and left(usage_row.source_resource_id, 37) = usage_row.turn_id::text || ':'
-        and not exists (
+      -- The source key is materialized first so the fact lookup compares plain
+      -- columns. Under forced RLS a comparison with substr() (not leakproof)
+      -- cannot enter the index condition, so every fact of the turn was
+      -- policy-checked per ledger row: seconds per workspace instead of ms.
+      with usage_row as materialized (
+        select usage_event.id, usage_event.workspace_id, usage_event.turn_id,
+          usage_event.session_id, usage_event.occurred_at,
+          substr(usage_event.source_resource_id, 38) as source_key
+        from ${schema.usageEvents} usage_event
+        where usage_event.workspace_id = ${input.workspaceId}::uuid
+          and usage_event.event_type = 'model.cost'
+          and usage_event.source_resource_type = 'model_response'
+          and usage_event.occurred_at >= ${input.since.toISOString()}::timestamp with time zone
+          and usage_event.occurred_at < ${input.until.toISOString()}::timestamp with time zone
+          and usage_event.turn_id is not null
+          and usage_event.session_id is not null
+          and left(usage_event.source_resource_id, 37) = usage_event.turn_id::text || ':'
+      )
+      select usage_row.turn_id, usage_row.session_id, usage_row.source_key
+      from usage_row
+      where not exists (
           select 1
           from ${schema.modelCallFacts} fact
           where fact.workspace_id = usage_row.workspace_id
             and fact.turn_id = usage_row.turn_id
-            and fact.source_key = substr(usage_row.source_resource_id, 38)
+            and fact.source_key = usage_row.source_key
         )
       -- Rows with no usage event stay missing on every pass; rank them last so
       -- they cannot starve repairable rows out of the bounded page.
@@ -1515,7 +1526,7 @@ export async function reconcileModelCallFacts(
             and event.turn_id = usage_row.turn_id
             and event.type = 'agent.model.usage'
             and event.turn_association = 'current'
-            and event.payload->>'sourceKey' = substr(usage_row.source_resource_id, 38)
+            and event.payload->>'sourceKey' = usage_row.source_key
         ),
         usage_row.occurred_at,
         usage_row.id

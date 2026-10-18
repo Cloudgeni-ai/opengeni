@@ -311,7 +311,11 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
       const payload = await parseRequestJson(c, MoveVaultItemRequest);
       const itemId = c.req.param("itemId")!;
       await itemInVault(actor, workspaceId, c.req.param("vaultId")!, itemId);
-      return c.json(await vaults().moveItem(actor, workspaceId, itemId, payload));
+      // A connected source or target is read, written and archived through this
+      // request's providers, like every other connected read and write.
+      return c.json(
+        await vaultsWithProviders(actor, workspaceId).moveItem(actor, workspaceId, itemId, payload),
+      );
     }),
   );
 

@@ -575,6 +575,17 @@ export async function resolveCallerWorkspaceModelSelections(
   );
 }
 
+/**
+ * Catalog membership only: true while the workspace still lists the model,
+ * selectable or not. Retired and removed models are not listed.
+ */
+export function workspaceCatalogListsModel(
+  selections: readonly WorkspaceModelSelection[],
+  modelId: string,
+): boolean {
+  return findSelection(selections, modelId) !== undefined;
+}
+
 /** Transient selectability for existing consumers; not fresh-create admission. */
 export function selectableWorkspaceModel(
   selections: readonly WorkspaceModelSelection[],

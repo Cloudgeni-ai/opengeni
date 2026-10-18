@@ -25,6 +25,7 @@ import {
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import {
   createObservability,
+  installCpuSamplingSignal,
   logStartupDependencyRetry,
   type Observability,
 } from "@opengeni/observability";
@@ -52,6 +53,7 @@ import { createAutomaticAgentUpdater } from "./sandbox/agent-update";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
+import { closeNativeExternalVaultProviders } from "./integrations/external-vault-providers";
 import { startScheduledTaskLifecyclePump } from "./scheduled-task-lifecycle";
 import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
 import { startNativePushDispatchPump } from "./native-push-dispatch";
@@ -73,6 +75,7 @@ import {
   type StandaloneEditableArtifactApplication,
 } from "./editable-artifact-production";
 import { installApiFatalProcessBoundary } from "./fatal-process-boundary";
+import { installApiShutdownHandlers } from "./shutdown";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -341,6 +344,9 @@ export async function startApi(
     max: settings.apiDatabasePoolMax,
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
+    ...(settings.databasePreparedStatements === undefined
+      ? {}
+      : { preparedStatements: settings.databasePreparedStatements }),
   });
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;
@@ -522,6 +528,7 @@ export async function startApi(
   const stopScheduledTaskLifecyclePump = startScheduledTaskLifecyclePump({
     db: dbClient.db,
     sync: (task) => workflowClient.client.syncScheduledTask({ task }),
+    bus,
     observability,
   });
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
@@ -589,6 +596,8 @@ export async function startApi(
     server,
     close: async () => {
       server.stop(true);
+      // Start private CLI session cleanup even if another service's drain stalls.
+      const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
       metricsServer?.stop(true);
       stopSlackInteractionPump?.();
       await stopMemorySlackPublicationPump();
@@ -601,6 +610,7 @@ export async function startApi(
       // Write queued presence before the database pool closes.
       await routeDeps.userPresence?.close().catch(() => undefined);
       await Promise.allSettled([
+        vaultProvidersClosed,
         Promise.resolve(editableArtifactComposition?.close()),
         authCalloutResponder?.close(),
         bus.close(),
@@ -617,7 +627,18 @@ if (import.meta.main) {
     const settings = getSettings();
     const observability = createObservability(settings, { component: "api" });
     fatalBoundary.attachObservability(observability);
-    await startApi({ settings, observability });
+    // `kill -USR2 <pid>` samples the API for 30 s and logs where the event loop was busy.
+    installCpuSamplingSignal({
+      log: (message, attributes) => observability.info(message, attributes),
+    });
+    const api = await startApi({ settings, observability });
+    installApiShutdownHandlers({
+      close: api.close,
+      onFailure: () =>
+        observability.warn("Opengeni API shutdown did not finish cleanly", {
+          errorCode: "api_shutdown_failed",
+        }),
+    });
     fatalBoundary.markRunning();
   } catch (error) {
     await fatalBoundary.reportStartupFailure(error);

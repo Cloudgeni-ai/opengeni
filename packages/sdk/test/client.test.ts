@@ -2547,6 +2547,39 @@ describe("OpenGeniClient", () => {
     ).resolves.toMatchObject({ originSiteId: SESSION_ID });
   });
 
+  test("Site access lists fail closed on older servers and owner management uses native routes", async () => {
+    const old = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
+    );
+    await expect(
+      old.client.listSessionPage(WORKSPACE_ID, { siteAccessId: SESSION_ID }),
+    ).rejects.toThrow("Site access-filtered");
+    const modern = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        filtersApplied: true,
+        siteAccessId: SESSION_ID,
+      }),
+    );
+    await expect(
+      modern.client.listSessionPage(WORKSPACE_ID, { siteAccessId: "current" }),
+    ).resolves.toMatchObject({ siteAccessId: SESSION_ID });
+    expect(modern.requests[0]!.url).toContain("siteAccessId=current");
+    await modern.client.setSiteSessionAccess(WORKSPACE_ID, SESSION_ID, SESSION_ID, true);
+    await modern.client.setSiteSessionAccess(WORKSPACE_ID, SESSION_ID, SESSION_ID, false);
+    await modern.client.listSiteSessionAccess(WORKSPACE_ID, SESSION_ID);
+    expect(modern.requests.slice(1).map((request) => request.method)).toEqual([
+      "PUT",
+      "DELETE",
+      "GET",
+    ]);
+    expect(modern.requests[1]!.url).toContain(
+      `/published-artifacts/${SESSION_ID}/session-access/${SESSION_ID}`,
+    );
+  });
+
   test("listSessionPage types only an expired snapshot cursor as recoverable", async () => {
     const expired = makeClient(() => new Response("snapshot expired", { status: 410 })).client;
     const unavailable = makeClient(
@@ -2822,6 +2855,31 @@ test("Claude account disconnects send JSON for scoped browser mutation guards", 
   expect(requests).toHaveLength(2);
   for (const request of requests) {
     expect(request.method).toBe("DELETE");
+    expect(request.headers["content-type"]).toBe("application/json");
+    expect(request.body).toBe("{}");
+  }
+});
+
+test("bodiless browser-guarded mutations still send JSON", async () => {
+  const organizationId = "22222222-2222-4222-8222-222222222222";
+  const { client, requests } = makeClient((request) =>
+    request.method === "POST"
+      ? jsonResponse({
+          userCode: "ABCD-EFGH",
+          verificationUri: "https://auth.example.test/codex/device",
+          intervalSeconds: 5,
+          state: "signed",
+        })
+      : new Response(null, { status: 204 }),
+  );
+  await client.codexConnectStart(WORKSPACE_ID);
+  await client.deleteOrganizationMcpConnection(
+    organizationId,
+    "11111111-1111-4111-8111-111111111111",
+  );
+  await client.revokePersonalApiKey(organizationId, "33333333-3333-4333-8333-333333333333");
+  expect(requests.map((request) => request.method)).toEqual(["POST", "DELETE", "DELETE"]);
+  for (const request of requests) {
     expect(request.headers["content-type"]).toBe("application/json");
     expect(request.body).toBe("{}");
   }

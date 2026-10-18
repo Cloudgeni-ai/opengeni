@@ -279,8 +279,8 @@ describe("unified Insights route discipline", () => {
       expect(result.headers.get("cache-control")).toBe("private, no-store");
     }
     expect(actors).toEqual([
-      JSON.stringify(["user:verified-billing", null, null, null]),
-      JSON.stringify(["user:verified-billing", null, null, null]),
+      JSON.stringify(["user:verified-billing", null, null, null, null, null]),
+      JSON.stringify(["user:verified-billing", null, null, null, null, null]),
     ]);
     expect(usage.mock.calls[0]![1]).toMatchObject({
       accountId,

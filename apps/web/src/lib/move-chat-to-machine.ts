@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import type { MachineView } from "@opengeni/react/machines";
 import { machineDisplayName } from "@opengeni/react/sandbox-label-model";
 import type { SendMessageInput } from "@opengeni/sdk";
@@ -54,7 +55,7 @@ export async function moveChatToMachine(input: {
   sendMessage: (message: SendMessageInput) => Promise<{ payload?: unknown }>;
 }): Promise<MoveChatToMachineResult> {
   const { machine, chat } = input;
-  const name = machineDisplayName(machine);
+  const name = machineDisplayName(t, machine);
   // Like a composer Send: a chat that can't take input isn't moved either.
   if (chat.blocked) return { moved: false, reason: chat.blocked };
   const personal = isPersonalMachine(machine);

@@ -422,13 +422,29 @@ fn legacy_opengeni_control_dropin(name: &str, contents: &str) -> bool {
 
 #[cfg(any(target_os = "linux", test))]
 fn managed_systemd_definition(existing: &str, spec: &ServiceSpec) -> ManagedSystemdDefinition {
-    if existing == service::render_legacy_systemd_unit_before_supervisor_subgroup(spec)
-        || existing == service::render_legacy_systemd_unit_before_browser_shutdown(spec)
+    // Earlier releases generated the same units with a different product-name
+    // spelling. Accept that exact historical description, not arbitrary marker-
+    // bearing units or changes to service policy, commands, or environment.
+    let matches = |generated: String| {
+        existing == generated
+            || existing
+                == generated.replacen(
+                    "\nDescription=Opengeni self-hosted agent\n",
+                    "\nDescription=OpenGeni self-hosted agent\n",
+                    1,
+                )
+    };
+    if matches(service::render_legacy_systemd_unit_before_supervisor_subgroup(spec))
+        || matches(service::render_legacy_systemd_unit_before_browser_shutdown(
+            spec,
+        ))
     {
         ManagedSystemdDefinition::LegacyOwned
-    } else if existing == service::render_systemd_unit(spec) {
+    } else if matches(service::render_systemd_unit(spec)) {
         ManagedSystemdDefinition::CurrentOwned
-    } else if existing == service::render_systemd_unit_without_supervisor_subgroup(spec) {
+    } else if matches(service::render_systemd_unit_without_supervisor_subgroup(
+        spec,
+    )) {
         ManagedSystemdDefinition::CompatibleOwned
     } else {
         ManagedSystemdDefinition::Unowned
@@ -1427,6 +1443,52 @@ mod tests {
             ManagedSystemdDefinition::Unowned,
             "a marker alone must never adopt a custom unit"
         );
+    }
+
+    #[test]
+    fn generated_systemd_units_before_branding_change_remain_owned() {
+        let spec = ServiceSpec {
+            binary_path: PathBuf::from("/home/u/.local/bin/opengeni-agent"),
+            args: vec!["run".into()],
+            scope: ServiceScope::User,
+            environment_path: Some("/usr/bin:/bin".into()),
+        };
+        for (generated, expected) in [
+            (
+                service::render_systemd_unit(&spec),
+                ManagedSystemdDefinition::CurrentOwned,
+            ),
+            (
+                service::render_systemd_unit_without_supervisor_subgroup(&spec),
+                ManagedSystemdDefinition::CompatibleOwned,
+            ),
+            (
+                service::render_legacy_systemd_unit_before_supervisor_subgroup(&spec),
+                ManagedSystemdDefinition::LegacyOwned,
+            ),
+            (
+                service::render_legacy_systemd_unit_before_browser_shutdown(&spec),
+                ManagedSystemdDefinition::LegacyOwned,
+            ),
+        ] {
+            let previous = generated.replace(
+                "\nDescription=Opengeni self-hosted agent\n",
+                "\nDescription=OpenGeni self-hosted agent\n",
+            );
+            assert_ne!(previous, generated);
+            assert_eq!(managed_systemd_definition(&previous, &spec), expected);
+            for custom in [
+                previous.replace("MemoryMax=infinity", "MemoryMax=8G"),
+                previous.replace("TimeoutStopSec=", "TimeoutStopSec=1"),
+                previous.replace("Description=OpenGeni", "Description=Custom"),
+                previous.replace("ExecStart=", "ExecStart=/other "),
+            ] {
+                assert_eq!(
+                    managed_systemd_definition(&custom, &spec),
+                    ManagedSystemdDefinition::Unowned
+                );
+            }
+        }
     }
 
     #[test]

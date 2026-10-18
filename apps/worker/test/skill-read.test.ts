@@ -144,6 +144,7 @@ describe("skill_read gateway definition", () => {
     ["opengeni-projects", "bundled_project_skills"],
     ["opengeni-visualize", "bundled_default_skills"],
     ["document-parsing", "bundled_default_skills"],
+    ["opengeni-sites", "bundled_site_skills"],
   ] as const)
     test(`selected ${name} reads exact packaged guidance without sandbox access; host [] excludes it`, async () => {
       const markdown = await Bun.file(
@@ -151,7 +152,8 @@ describe("skill_read gateway definition", () => {
       ).text();
       for (const bundledSkillIds of [undefined, [`builtin:${name}`] as const, []] as const) {
         const selected = loadConfiguredBundledSkills({
-          firstPartyTools: [],
+          firstPartyTools:
+            name === "opengeni-sites" ? ["artifacts_create", "artifacts_publish"] : [],
           videoGenerationEnabled: false,
           bundledSkillIds,
           get sandboxBackend(): never {
@@ -182,10 +184,43 @@ describe("skill_read gateway definition", () => {
           });
           if (bundledSkillIds?.length === 0)
             await expect(output).rejects.toThrow("excluded by source selection");
-          else
-            expect((await output).structuredContent).toEqual({
+          else {
+            const result = await output;
+            expect(result.structuredContent).toEqual({
               files: [{ path: "SKILL.md", content: markdown }],
             });
+            if (name === "opengeni-sites") {
+              // Assert the actual model-facing tool text, not only the source file.
+              const text = result.content.find((part) => part.type === "text");
+              if (text?.type !== "text") throw new Error("missing Skill text");
+              const rendered = JSON.parse(text.text).files[0].content as string;
+              expect(rendered).toBe(markdown);
+              const start = rendered.indexOf("## Make new Sites readable by default");
+              const build = rendered.indexOf("## Use normal Bun + React");
+              expect(start).toBeGreaterThan(-1);
+              expect(start).toBeLessThan(build);
+              const guidance = rendered.slice(start, build).replace(/\s+/gu, " ");
+              for (const rule of [
+                "16–18px",
+                "14–16px",
+                "genuinely secondary metadata",
+                "1.5–1.7 for prose",
+                "keep the browser's root font size",
+                "Do not shrink primary copy on mobile",
+                "Honor a user's deliberate design",
+                "retain an existing app's type system",
+                "SessionConversation",
+                "not a mandatory theme or runtime CSS override",
+                "frontend-design",
+                "text enlarged to 200%",
+              ])
+                expect(guidance).toContain(rule);
+              expect(guidance).toContain(".site-copy { font-size: 1.0625rem;");
+              expect(guidance).toContain(".site-control { font: inherit; font-size: 1rem;");
+              expect(guidance).toContain(".site-table { font-size: 0.9375rem;");
+              expect(guidance).toContain(".site-meta { font-size: 0.8125rem;");
+            }
+          }
         }
       }
     });

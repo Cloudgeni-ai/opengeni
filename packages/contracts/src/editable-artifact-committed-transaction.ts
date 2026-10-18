@@ -8,6 +8,7 @@
  */
 
 import { COMMITTED_TRANSACTION_PROTOCOL_VERSION } from "./editable-artifact-versions";
+import { fnv1a64Limbs } from "./editable-artifact-binary";
 import {
   SPREADSHEET_DEFAULT_ROW_HEIGHT,
   SPREADSHEET_DEFAULT_COLUMN_WIDTH,
@@ -30,9 +31,6 @@ const MAX_SAFE_U64_HIGH = 0x1f_ffff;
 const U32_SIZE = 0x1_0000_0000;
 const U32_MAX = 0xffff_ffff;
 const MAX_DATE_MILLISECONDS = 8_640_000_000_000_000n;
-const FNV_OFFSET_LOW = 0x8422_2325;
-const FNV_OFFSET_HIGH = 0xcbf2_9ce4;
-const FNV_PRIME_LOW = 0x01b3;
 
 const HEX = Array.from({ length: 256 }, (_, value) => value.toString(16).padStart(2, "0"));
 
@@ -96,7 +94,7 @@ export function decodeCommittedTransactionSummary(bytes: Uint8Array): CommittedT
     );
   }
 
-  const [checksumLow, checksumHigh] = fnv1a64(bytes, payloadEnd);
+  const [checksumLow, checksumHigh] = fnv1a64Limbs(bytes, payloadEnd);
   if (
     view.getUint32(payloadEnd, true) !== checksumLow ||
     view.getUint32(payloadEnd + 4, true) !== checksumHigh
@@ -491,18 +489,4 @@ function hexBytes(bytes: Uint8Array): string {
   let result = "";
   for (const byte of bytes) result += HEX[byte];
   return result;
-}
-
-/** FNV-1a-64 using exact 32-bit limbs; avoids a BigInt allocation per byte. */
-function fnv1a64(bytes: Uint8Array, end: number): readonly [low: number, high: number] {
-  let low = FNV_OFFSET_LOW;
-  let high = FNV_OFFSET_HIGH;
-  for (let index = 0; index < end; index += 1) {
-    low = (low ^ bytes[index]!) >>> 0;
-    const lowProduct = low * FNV_PRIME_LOW;
-    const carry = Math.floor(lowProduct / U32_SIZE);
-    high = (high * FNV_PRIME_LOW + carry + low * 0x100) >>> 0;
-    low = lowProduct >>> 0;
-  }
-  return [low, high];
 }

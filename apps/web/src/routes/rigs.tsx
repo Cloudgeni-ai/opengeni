@@ -3,6 +3,7 @@
 // image, versioned and verified. This page lists
 // them and creates new ones (?view=new); each environment's own page owns
 // versions, changes and promotion.
+import { t } from "@/lib/console-text";
 import { useOpenGeni } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
 import { ContainerIcon, PlusIcon } from "lucide-react";
@@ -66,7 +67,7 @@ export function RigsRoute({ workspaceId, view }: { workspaceId: string; view?: "
     ),
   );
   const organizationName = workspace
-    ? orgLabel(workspace.accountId, context.accessContext.accountGrants)
+    ? orgLabel(t, workspace.accountId, context.accessContext.accountGrants)
     : "your organization";
   const rigs = useWorkspaceRigs({ enabled: canView });
   const defaultRigId = workspace?.defaultRigId ?? null;

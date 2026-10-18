@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { act } from "react";
+import { act, Profiler } from "react";
 import { ActivityRail } from "../src/timeline/activity-rail";
 import { GenieLoading, GenieLoadingOptionsContext } from "../src/timeline/genie-loading";
 import { MessageTimeline } from "../src/components/message-timeline";
@@ -48,6 +48,32 @@ test("native messages localize normal, slow, and expanded states without replaci
   }
 });
 afterEach(() => setStartupDetails(false));
+test("a parent re-render does not re-pick the phrase or chain more renders", async () => {
+  // Alternate random picks so every re-pick changes state: a phrase effect that
+  // restarted on each render would keep committing instead of settling.
+  const originalRandom = Math.random;
+  let picks = 0;
+  Math.random = () => (picks++ % 2 === 0 ? 0 : 0.5);
+  try {
+    const startedAt = new Date().toISOString();
+    let commits = 0;
+    const view = (label: string) => (
+      <Profiler id={label} onRender={() => commits++}>
+        <GenieLoading startedAt={startedAt} onShowDetails={() => undefined} />
+      </Profiler>
+    );
+    const r = await renderComponent(view("first"));
+    const picksAfterMount = picks;
+    commits = 0;
+    await r.rerender(view("second"));
+    await flush();
+    expect(picks).toBe(picksAfterMount);
+    expect(commits).toBe(1);
+    await r.unmount();
+  } finally {
+    Math.random = originalRandom;
+  }
+});
 function phase(overrides: Partial<StartupPhaseItem> = {}): StartupPhaseItem {
   return {
     kind: "startup-phase",

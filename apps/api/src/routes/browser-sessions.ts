@@ -40,8 +40,12 @@ import {
   BrowserSessionLifecycleRequest,
   BrowserSessionListResponse,
   BrowserSessionMutationResponse,
+  type BrowserTarget,
   BrowserTargetListResponse,
   BrowserTargetState,
+  BrowserWorkingCopyAdoptionRequest,
+  BrowserWorkingCopyAdoptionResponse,
+  BrowserWorkingCopyInspection,
   CreateBrowserSessionRequest,
   ExternalAuthInteractiveRequest,
   ExternalAuthInteractiveResponse,
@@ -57,6 +61,8 @@ import {
   type BrowserActionRequest as BrowserActionRequestValue,
   type BrowserDownload as BrowserDownloadValue,
   type BrowserSession as BrowserSessionValue,
+  type BrowserWorkingCopyAdoption as BrowserWorkingCopyAdoptionValue,
+  type BrowserWorkingCopyRefusal as BrowserWorkingCopyRefusalValue,
   type FileAsset,
   type CreateBrowserSessionRequest as CreateBrowserSessionRequestValue,
   type InteractionPlacement,
@@ -104,6 +110,8 @@ import {
   findBrowserSessionControlRecordByOperation,
   findBrowserDownloadSave,
   getBrowserSessionControlRecord,
+  getRetainedBrowserDownload,
+  listRetainedBrowserDownloads,
   getComputerSessionControlRecord,
   getBrowserIdentity,
   getBrowserPrivateCheckpointAuthority,
@@ -130,6 +138,7 @@ import {
   prepareBrowserSessionEnd,
   prepareBrowserSessionResume,
   settleExpiredBrowserSessionResume,
+  continueExpiredBrowserSessionResume,
   prepareBrowserSessionSuspend,
   prepareBrowserRevisionPublication,
   reportAuthRun,
@@ -141,7 +150,9 @@ import {
   touchBrowserSessionController,
   verifyAuthRun,
   settleBrowserDownloadSaveFailure,
+  readActiveSandbox,
   terminalizeStaleConnectedInteractionPlacement,
+  recordAuditEvent,
   type BrowserSessionControlRecord,
   type BrowserPrivateCheckpointAuthority,
   type BrowserRevisionArtifactAuthority,
@@ -150,6 +161,7 @@ import {
 import {
   requireAccessGrant,
   requireSessionAuthorization,
+  withSessionAuthorizationReadReuse,
   recordWorkspaceUsage,
   requireLimit,
   relayConfigFromSettings,
@@ -158,6 +170,7 @@ import {
   SessionAuthorizationUnavailableError,
   type ApiRouteDeps,
   type ResolvedSessionAuthorization,
+  retainCompletedBrowserDownloads,
 } from "@opengeni/core";
 import {
   BrowserControlProtocolError,
@@ -180,6 +193,9 @@ import {
   type BrowserControlScreenshotOptions,
   type BrowserControlFrame,
   type PlacementBrowserStateCaptureReceipt,
+  type PlacementBrowserWorkingCopyAdoption,
+  type PlacementBrowserWorkingCopyAuthority,
+  type PlacementBrowserWorkingCopyInspection,
   type PlacementBrowserNetworkRoute,
   type PlacementBrowserTransport,
   type RestorePlacementBrowserStateInput,
@@ -203,7 +219,10 @@ import {
   withCachedController,
   withControllerTransportRecovery,
 } from "../controller-data-plane";
-import { filterInteractionSessionsForGrant } from "../interaction-agent-access";
+import {
+  filterInteractionSessionsForGrant,
+  parseInteractionSessionListQuery,
+} from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import {
   browserStateArtifactAad,
@@ -214,10 +233,19 @@ import {
   wrapBrowserStateDataKey,
 } from "../browser-state-authority";
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
-import { endBrowserDiscardingLostRuntime } from "../browser-lost-runtime-end";
+import {
+  endBrowserDiscardingLostRuntime,
+  endExpiredResumeSettingAsideInterruptedLaunch,
+} from "../browser-lost-runtime-end";
+import { resolveBrowserActionFences, type BrowserActionFences } from "../browser-action-fences";
+import { InteractionRouteStages, reportInteractionRouteStages } from "../interaction-route-stages";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { ApiHttpError } from "../http/api-error";
-import { interactionControlApiError } from "../http/interaction-control-error";
+import {
+  interactionControlApiError,
+  legacyInteractionCapacityError,
+  legacyInteractionCapacityFailure,
+} from "../http/interaction-control-error";
 import {
   createInteractionFrameProxyAttachment,
   placementUsesInteractionFrameProxy,
@@ -229,9 +257,16 @@ import {
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
+import {
+  retireFormerPlacementControllers,
+  retireSourceFormerPlacements,
+} from "../former-placement-retirement";
 import { sanitizeFilename } from "./files";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
-import { wrongInteractionPlacementMessage } from "./interaction-placement-message";
+import {
+  wrongInteractionPlacementMessage,
+  wrongPlacementInsteadOfOffline,
+} from "./interaction-placement-message";
 import {
   releaseBrowserPasskeys,
   resolveInteractionSecretValues,
@@ -309,6 +344,7 @@ export function registerBrowserSessionRoutes(
     const listed = await listBrowserSessions(deps.db, {
       accountId: grant.accountId,
       workspaceId,
+      ...parseInteractionSessionListQuery(context.req.query()),
     });
     return context.json(
       BrowserSessionListResponse.parse({
@@ -340,27 +376,44 @@ export function registerBrowserSessionRoutes(
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
     const request = await parseJsonBody(context, CreateBrowserSessionRequest);
     const startedAtMs = performance.now();
-    await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
+    const stages = new InteractionRouteStages("create");
+    // The replay lookup and the source session are read alongside the
+    // authorization check. A denial still wins, and neither read is used
+    // until the request is authorized; each failure surfaces where it did.
+    const [authorized, existingRead, sourceRead] = await Promise.allSettled([
+      authorizeSourceSession(deps, grant, request.sessionId, "session.control"),
+      findBrowserSessionControlRecordByOperation(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        operationId: request.operationId,
+      }),
+      requireSourceSession(deps, workspaceId, request.sessionId),
+    ]);
+    if (authorized.status === "rejected") throw authorized.reason;
+    stages.mark("authorize");
     const origin = requestOrigin(context, deps.settings);
     const authority = browserAuthorityRoot(deps);
     let prepared: Awaited<ReturnType<typeof prepareBrowserSessionCreate>> | null = null;
+    // What the controller showed when it launched this browser, returned so
+    // the caller can present the opened tab without two more reads.
+    const launch: { result: Awaited<ReturnType<BrowserControlClient["createSession"]>> | null } = {
+      result: null,
+    };
 
     try {
       assertEphemeralBrowserCreateEnabled(
         request,
         deps.settings.experimentalBrowserContextPoolEnabled,
       );
-      const existing = await findBrowserSessionControlRecordByOperation(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        operationId: request.operationId,
-      });
+      if (existingRead.status === "rejected") throw existingRead.reason;
+      const existing = existingRead.value;
       if (existing && existing.sourceSessionId !== request.sessionId) {
         throw new BrowserSessionOperationConflictError(
           "BrowserSession create operation belongs to another source session",
         );
       }
       if (existing) assertCreateReplay(request, existing.session);
+      stages.mark("replay_check");
       prepared = existing
         ? await prepareBrowserSessionCreate(
             deps.db,
@@ -387,7 +440,9 @@ export function registerBrowserSessionRoutes(
         }
       }
 
-      const sourceSession = await requireSourceSession(deps, workspaceId, request.sessionId);
+      if (sourceRead.status === "rejected") throw sourceRead.reason;
+      const sourceSession = sourceRead.value;
+      stages.mark("source_session");
       const response = await withBrowserPlacement(
         sourceSession,
         grant,
@@ -396,6 +451,7 @@ export function registerBrowserSessionRoutes(
         "browser.create",
         context.req.raw.signal,
         async (placement) => {
+          stages.mark("placement_resolve");
           let revisionAuthority: BrowserRevisionArtifactAuthority | null = null;
           if (!prepared) {
             prepared = await prepareBrowserSessionCreate(
@@ -403,6 +459,7 @@ export function registerBrowserSessionRoutes(
               browserCreateInput(grant, workspaceId, request, placement.placement),
             );
           }
+          stages.mark("prepare");
           if (isTerminalOperation(prepared.operation.state)) return prepared;
 
           if (prepared.session.baseRevisionId && !revisionAuthority) {
@@ -423,6 +480,7 @@ export function registerBrowserSessionRoutes(
             placement.placement,
             revisionAuthority,
           );
+          stages.mark("restore");
 
           try {
             const networkRoute = await resolveBrowserNetworkRouteLaunch({
@@ -434,6 +492,7 @@ export function registerBrowserSessionRoutes(
               rootSecret: authority,
               placement: placement.placement,
             });
+            stages.mark("network_route");
             const interactionHeld = await ensureInteractionHolder(
               deps,
               grant,
@@ -442,6 +501,7 @@ export function registerBrowserSessionRoutes(
               placement,
               context.req.raw.signal,
             );
+            stages.mark("holder");
             const record = await ensureDispatchedGeneration(
               deps,
               grant,
@@ -461,6 +521,7 @@ export function registerBrowserSessionRoutes(
               }
               throw error;
             });
+            stages.mark("generation");
             const preparedSession = prepared.session;
             const controllerGeneration = requireOperationGeneration(record);
             const adminToken = deriveBrowserControllerAdminToken({
@@ -508,12 +569,14 @@ export function registerBrowserSessionRoutes(
                       controllerGeneration,
                     },
                     async () => {
+                      stages.mark("provision");
                       await ensureHeadedBrowserDisplayStack(
                         placement.session,
                         preparedSession.headless,
                         linkedComputer !== null,
                       );
-                      return await client.createSession({
+                      stages.mark("display");
+                      launch.result = await client.createSession({
                         browserSessionId: preparedSession.id,
                         controllerGeneration,
                         tokenGeneration: record.tokenGeneration,
@@ -530,17 +593,25 @@ export function registerBrowserSessionRoutes(
                         ...(request.initialUrl ? { initialUrl: request.initialUrl } : {}),
                         ...(restore ? { restore } : {}),
                       });
+                      return launch.result;
                     },
                   );
                 },
               );
+              stages.mark("launch");
               await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
                 () => placement,
               );
+              stages.mark("placement_cache_write");
             } catch (error) {
+              // A full supervisor from an older agent claims to be retryable,
+              // but nothing frees capacity on its own: fail the create so it
+              // does not sit in "starting" until the transition expires.
               if (
                 error instanceof BrowserControlTransportError ||
-                (error instanceof BrowserControlRequestError && error.retryable) ||
+                (error instanceof BrowserControlRequestError &&
+                  error.retryable &&
+                  !legacyInteractionCapacityError(error, "browser")) ||
                 isAbort(error)
               )
                 throw error;
@@ -569,7 +640,7 @@ export function registerBrowserSessionRoutes(
             // Once the controller has accepted the exact binding, a persistence
             // failure is retried against that same idempotent physical session.
             // Never terminalize or release its placement authority here.
-            return await activateBrowserSession(deps.db, {
+            const activated = await activateBrowserSession(deps.db, {
               accountId: grant.accountId,
               workspaceId,
               operationId: request.operationId,
@@ -581,14 +652,17 @@ export function registerBrowserSessionRoutes(
               },
               engineVersion: null,
             });
+            stages.mark("activate");
+            return activated;
           } finally {
             restore?.dataKey.fill(0);
             restore?.aad.fill(0);
           }
         },
       );
-      const parsed = BrowserSessionMutationResponse.parse(response);
+      const parsed = BrowserSessionMutationResponse.parse(withInitialView(response, launch.result));
       observeLifecycleResult(deps.observability, startedAtMs, parsed);
+      reportInteractionRouteStages(context, deps.observability, stages);
       return context.json(
         parsed,
         parsed.operation.state === "completed" && !parsed.operation.replayed ? 201 : 200,
@@ -735,6 +809,19 @@ export function registerBrowserSessionRoutes(
         context,
         "sessions:read",
       );
+      const retained = await retainedDownloadsFor(grant, workspaceId, browserSessionId);
+      if (retained.notRunning) {
+        if (retained.downloads.length === 0) {
+          throw new BrowserSessionStateError("BrowserSession is not active");
+        }
+        return context.json(
+          BrowserDownloadListResponse.parse({
+            browserSessionId,
+            controllerGeneration: retained.downloads.at(-1)!.download.controllerGeneration,
+            downloads: retained.downloads.map((entry) => entry.download),
+          }),
+        );
+      }
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -744,7 +831,18 @@ export function registerBrowserSessionRoutes(
         "browser.read",
         async ({ sessionClient }) => await sessionClient.listDownloads(),
       );
-      return context.json(BrowserDownloadListResponse.parse(result));
+      // Downloads kept from before an earlier suspension stay listed after
+      // the browser resumed; the running controller only knows its own.
+      const live = new Set(result.downloads.map((download) => download.id));
+      const earlier = retained.downloads
+        .map((entry) => entry.download)
+        .filter((download) => !live.has(download.id));
+      return context.json(
+        BrowserDownloadListResponse.parse({
+          ...result,
+          downloads: [...earlier, ...result.downloads],
+        }),
+      );
     },
   );
 
@@ -756,6 +854,12 @@ export function registerBrowserSessionRoutes(
         "sessions:read",
       );
       const downloadId = requireUuidParam(context, "downloadId");
+      const retained = await retainedDownloadsFor(grant, workspaceId, browserSessionId, downloadId);
+      const kept = retained.downloads[0];
+      if (kept && (retained.notRunning || kept.download.status === "completed")) {
+        return context.json(BrowserDownload.parse(kept.download));
+      }
+      if (retained.notRunning) throw new BrowserSessionStateError("BrowserSession is not active");
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -802,6 +906,43 @@ export function registerBrowserSessionRoutes(
           );
         }
 
+        if (!save) {
+          // A download kept as a workspace file before its browser stopped
+          // running is saved from that file, wherever the task runs now.
+          const kept = await getRetainedBrowserDownload(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+            downloadId,
+          });
+          if (kept) {
+            const keptRecord = await getBrowserSessionControlRecord(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              browserSessionId,
+            });
+            await authorizeSourceSession(
+              deps,
+              grant,
+              keptRecord.sourceSessionId,
+              "session.control",
+            );
+            save = await prepareBrowserDownloadSave(deps.db, {
+              ...identity,
+              sourceSessionId: keptRecord.sourceSessionId,
+              download: kept.download,
+              fileId: kept.fileId,
+              safeFilename: kept.safeFilename,
+              contentType: kept.contentType,
+              bucket: objectStorage.bucket,
+              objectKey: kept.objectKey,
+              uploadExpiresAt: new Date(
+                Date.now() + BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS * 1_000,
+              ),
+              retained: { fileId: kept.fileId, uploadId: kept.uploadId },
+            });
+          }
+        }
         if (!save) {
           const source = await withActiveBrowserController(
             context,
@@ -939,12 +1080,17 @@ export function registerBrowserSessionRoutes(
         if (upload.file.status !== "ready") {
           throw new InteractionResourceStateError("Browser download file is not ready");
         }
+        const sourceSession = await requireSourceSession(deps, workspaceId, save.sourceSessionId);
+        // The task's current placement imports the file: a Connected Machine
+        // the task moved to reads a public URL even when the browser ran in
+        // a sandbox.
         const get = await objectStorage.createGetUrl({
           key: upload.file.objectKey,
           expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
-          audience: signedUrlAudienceForPlacement(controllerRecord.session.placement),
+          audience: sourceSession.activeSandboxId
+            ? "public"
+            : signedUrlAudienceForPlacement(controllerRecord.session.placement),
         });
-        const sourceSession = await requireSourceSession(deps, workspaceId, save.sourceSessionId);
         await authorizeSourceSession(deps, grant, save.sourceSessionId, "session.control");
         const dispatched = await dispatchBrowserDownloadSave(deps.db, identity);
         const imported = await withChannelA(
@@ -1003,11 +1149,13 @@ export function registerBrowserSessionRoutes(
   app.get(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/observation",
     async (context) => {
+      const stages = new InteractionRouteStages("observe");
       const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
         context,
         "sessions:read",
       );
       const targetId = requireOpaqueParam(context, "targetId");
+      stages.mark("auth");
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -1015,8 +1163,18 @@ export function registerBrowserSessionRoutes(
         browserSessionId,
         "session.read",
         "browser.read",
-        async ({ sessionClient }) => await sessionClient.observe(targetId),
+        async ({ sessionClient }) => {
+          stages.mark("placement");
+          try {
+            return await sessionClient.observe(targetId);
+          } finally {
+            stages.mark("dispatch");
+          }
+        },
+        true,
+        stages,
       );
+      reportInteractionRouteStages(context, deps.observability, stages);
       return context.json(result);
     },
   );
@@ -1024,11 +1182,13 @@ export function registerBrowserSessionRoutes(
   app.get(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/state",
     async (context) => {
+      const stages = new InteractionRouteStages("target_state");
       const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
         context,
         "sessions:read",
       );
       const targetId = requireOpaqueParam(context, "targetId");
+      stages.mark("auth");
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -1036,8 +1196,18 @@ export function registerBrowserSessionRoutes(
         browserSessionId,
         "session.read",
         "browser.read",
-        async ({ sessionClient }) => await sessionClient.targetState(targetId),
+        async ({ sessionClient }) => {
+          stages.mark("placement");
+          try {
+            return await sessionClient.targetState(targetId);
+          } finally {
+            stages.mark("dispatch");
+          }
+        },
+        true,
+        stages,
       );
+      reportInteractionRouteStages(context, deps.observability, stages);
       return context.json(BrowserTargetState.parse(result));
     },
   );
@@ -1100,6 +1270,7 @@ export function registerBrowserSessionRoutes(
   app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions",
     async (context) => {
+      const stages = new InteractionRouteStages("act");
       const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
         context,
         "sessions:control",
@@ -1109,7 +1280,12 @@ export function registerBrowserSessionRoutes(
       if (workspaceFileIds.length > 0) {
         await requireAccessGrant(context, deps, workspaceId, "files:read");
       }
+      stages.mark("auth");
       const startedAtMs = performance.now();
+      // Omitted fences mean the target's current state. Read them once from the
+      // live controller in this request (a recovery retry of the callback must
+      // replay the same command digest, so it reuses the first read).
+      let resolvedFences: BrowserActionFences | null = null;
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -1118,15 +1294,32 @@ export function registerBrowserSessionRoutes(
         "session.control",
         "browser.action",
         async ({ sessionClient, binding, record, sourceAuthorization }) => {
+          stages.mark("placement");
+          const passkeySync = (refresh: boolean) =>
+            syncBrowserPasskeys({
+              port: interactionSecrets,
+              grant,
+              browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              client: sessionClient,
+              refresh,
+              log: (event, fields) => console.warn(event, { browserSessionId, ...fields }),
+            });
+          // Before the action this browser takes over the principal's passkeys.
+          // It is independent of the fence read, so both run together; the
+          // action is dispatched only after the takeover settles.
+          const passkeyTakeover = passkeySync(true);
+          resolvedFences ??= await resolveBrowserActionFences(request, () =>
+            sessionClient.targetState(request.targetId),
+          );
+          stages.mark("fences");
           const commandFields = {
             protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
             operationId: request.operationId,
             browserSessionId,
             controllerGeneration: binding.controllerGeneration,
             targetId: request.targetId,
-            expectedTargetGeneration: request.expectedTargetGeneration,
-            expectedDocumentGeneration: request.expectedDocumentGeneration,
-            expectedFrameId: request.expectedFrameId,
+            ...resolvedFences,
             actor: interactionActorForGrant(grant),
             observationMode: request.observationMode,
             action: request.action,
@@ -1181,18 +1374,8 @@ export function registerBrowserSessionRoutes(
               });
             }
           }
-          const passkeySync = (refresh: boolean) =>
-            syncBrowserPasskeys({
-              port: interactionSecrets,
-              grant,
-              browserSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              client: sessionClient,
-              refresh,
-              log: (event, fields) => console.warn(event, { browserSessionId, ...fields }),
-            });
-          // Before the action this browser takes over the principal's passkeys.
-          await passkeySync(true);
+          await passkeyTakeover;
+          stages.mark("passkey_pre");
           // Resolved last, right before dispatch, so TOTP codes are fresh (Q-33).
           const secretValues = await resolveInteractionSecretValues({
             port: interactionSecrets,
@@ -1210,6 +1393,7 @@ export function registerBrowserSessionRoutes(
               record.session.placement,
             ),
           });
+          stages.mark("secrets");
           try {
             return await sessionClient.action(
               BrowserActionCommand.parse({
@@ -1218,11 +1402,18 @@ export function registerBrowserSessionRoutes(
               }),
             );
           } finally {
-            await passkeySync(false);
+            stages.mark("dispatch");
+            // Write back what the action did (new registrations, sign counts)
+            // without holding the response: unacknowledged events stay in
+            // browserd, and the session's next sync waits for this one.
+            void passkeySync(false);
           }
         },
+        true,
+        stages,
       );
       observeBrowserActionResult(deps.observability, startedAtMs, request, result);
+      reportInteractionRouteStages(context, deps.observability, stages);
       return context.json(result);
     },
   );
@@ -2052,6 +2243,7 @@ export function registerBrowserSessionRoutes(
             message: "browser state storage is not configured",
           });
         }
+        await recoverRestartedBrowserControllerBeforeSuspend(context, grant, workspaceId, before);
         const prepared = await prepareBrowserSessionSuspend(deps.db, {
           accountId: grant.accountId,
           workspaceId,
@@ -2139,6 +2331,9 @@ export function registerBrowserSessionRoutes(
                 audience: signedUrlAudienceForPlacement(record.session.placement),
               });
               const client = await provisionController(deps, grant, record, placement, origin);
+              // Suspension removes the browser's working directory, and with
+              // it every download. Keep completed ones as workspace files.
+              await retainBrowserDownloads(grant, workspaceId, record, binding, placement, client);
               let receipt: PlacementBrowserStateCaptureReceipt;
               try {
                 receipt = await withInteractionHolderHeartbeat(
@@ -2272,6 +2467,7 @@ export function registerBrowserSessionRoutes(
       const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings);
       let restore: RestorePlacementBrowserStateInput | null = null;
+      let preparedForDispatch = false;
       try {
         let before = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -2281,11 +2477,35 @@ export function registerBrowserSessionRoutes(
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
         if (
           before.session.lifecycle === "lost" &&
-          before.session.failureCode === "controller_transition_expired"
+          (before.session.failureCode === "controller_transition_expired" ||
+            before.session.failureCode === "controller_resource_missing")
         ) {
-          // A resume whose transition expired never activated: end its retained
-          // controller generation, then resume normally from the same durable state.
-          await settleExpiredBrowserResume(context, grant, workspaceId, browserSessionId);
+          // A resume whose transition expired never activated; a browser whose
+          // suspension found its controller restarted kept running past its
+          // checkpoint. When the controller still holds that generation's
+          // working copy, continue the same browser from it; nothing is
+          // restored over it or discarded.
+          const continued = await continueExpiredBrowserResume(
+            context,
+            grant,
+            workspaceId,
+            browserSessionId,
+            request.operationId,
+          );
+          if ("continued" in continued) {
+            const parsed = BrowserSessionMutationResponse.parse(continued.continued);
+            observeLifecycleResult(deps.observability, startedAtMs, parsed);
+            return context.json(parsed, 200);
+          }
+          // Otherwise end an expired resume's retained controller generation,
+          // then resume normally from the same durable state.
+          await settleExpiredBrowserResume(
+            context,
+            grant,
+            workspaceId,
+            browserSessionId,
+            continued.unavailable,
+          );
           before = await getBrowserSessionControlRecord(deps.db, {
             accountId: grant.accountId,
             workspaceId,
@@ -2318,6 +2538,10 @@ export function registerBrowserSessionRoutes(
           observeLifecycleResult(deps.observability, startedAtMs, parsed);
           return context.json(parsed, 200);
         }
+        // From here until controller dispatch, any failure (state restore,
+        // an offline or moved placement, dispatch itself) returns the browser
+        // to suspended in the catch below, so a later resume can start over.
+        preparedForDispatch = true;
 
         const privateCheckpoint = await getBrowserPrivateCheckpointAuthority(deps.db, {
           accountId: grant.accountId,
@@ -2327,31 +2551,20 @@ export function registerBrowserSessionRoutes(
         const revisionAuthority = privateCheckpoint
           ? null
           : await requireBrowserRevisionRestoreAuthority(deps, grant, prepared.session);
-        try {
-          restore = privateCheckpoint
-            ? await prepareBrowserPrivateCheckpointRestore(
-                deps,
-                grant,
-                prepared.session,
-                privateCheckpoint,
-              )
-            : await prepareBrowserStateRestore(
-                deps,
-                grant,
-                prepared.session,
-                prepared.session.placement,
-                revisionAuthority,
-              );
-        } catch (error) {
-          await failBrowserSessionResumePreparation(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            operationId: request.operationId,
-            browserSessionId,
-            error: interactionFailure(error),
-          });
-          throw error;
-        }
+        restore = privateCheckpoint
+          ? await prepareBrowserPrivateCheckpointRestore(
+              deps,
+              grant,
+              prepared.session,
+              privateCheckpoint,
+            )
+          : await prepareBrowserStateRestore(
+              deps,
+              grant,
+              prepared.session,
+              prepared.session.placement,
+              revisionAuthority,
+            );
         if (!restore) {
           throw new BrowserSessionStateError("BrowserSession has no restorable durable state");
         }
@@ -2516,11 +2729,358 @@ export function registerBrowserSessionRoutes(
         observeLifecycleResult(deps.observability, startedAtMs, parsed);
         return context.json(parsed, 200);
       } catch (error) {
+        if (preparedForDispatch) {
+          // A no-op once the operation was dispatched: that path settles
+          // through the controller result or the transition reaper instead.
+          await failBrowserSessionResumePreparation(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            operationId: request.operationId,
+            browserSessionId,
+            error: interactionFailure(error),
+          }).catch(() => undefined);
+        }
         throw browserRouteError(error);
       } finally {
         restore?.dataKey.fill(0);
         restore?.aad.fill(0);
       }
+    },
+  );
+
+  /** Run one working-copy request against the controller generation that owns
+   * the browser's working copy, with the same session.control and placement
+   * authority as any browser control: an active browser's own generation, or
+   * for a lost browser the retained generation a resume would continue from.
+   * The controller binds every request to the exact controller authority the
+   * copy was launched under. Never replayed. */
+  async function withPreservedWorkingCopy<T>(
+    context: Context,
+    callback: PreservedWorkingCopyCallback<T>,
+  ): Promise<T> {
+    const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+      context,
+      "sessions:control",
+    );
+    const current = await getBrowserSessionControlRecord(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    }).catch((error: unknown) => {
+      throw browserRouteError(error);
+    });
+    if (current.session.lifecycle === "lost") {
+      return await withLostBrowserWorkingCopy(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        callback,
+      );
+    }
+    return await withActiveBrowserController(
+      context,
+      grant,
+      workspaceId,
+      browserSessionId,
+      "session.control",
+      "browser.control",
+      async ({ client, record, binding, placement }) => {
+        const transport = browserRuntimeTransport(record.session, placement.transport);
+        if (
+          transport.kind !== "managed" ||
+          transport.engine !== "chromium" ||
+          transport.ephemeralPartition ||
+          browserSessionStorageMode(record.session) !== "private_profile"
+        ) {
+          throw new BrowserSessionStateError(WORKING_COPY_REFUSAL_EXPLANATIONS.unsupported_browser);
+        }
+        const tokens = deriveBrowserSessionControllerTokens({
+          rootSecret: browserAuthorityRoot(deps),
+          accountId: grant.accountId,
+          workspaceId,
+          placement: record.session.placement,
+          placementInstanceId: placement.placementInstanceId,
+          browserSessionId,
+          controllerGeneration: binding.controllerGeneration,
+          tokenGeneration: record.tokenGeneration,
+        });
+        return await callback({
+          grant,
+          workspaceId,
+          browserSessionId,
+          client,
+          authority: {
+            browserSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            tokenGeneration: record.tokenGeneration,
+            ...tokens,
+          },
+        });
+      },
+      // A missing controller session is the state being inspected; never
+      // launch anything to "recover" it here.
+      false,
+    );
+  }
+
+  /** A lost browser has no active controller binding, but the controller
+   * generation of its last launch still owns its working copy, exactly as
+   * resume uses it. Inspecting, adopting or reverting that copy goes to the
+   * same generation; nothing is launched here. */
+  async function withLostBrowserWorkingCopy<T>(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    browserSessionId: string,
+    callback: PreservedWorkingCopyCallback<T>,
+  ): Promise<T> {
+    try {
+      return await reachLostBrowserWorkingCopy(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        callback,
+      );
+    } catch (error) {
+      throw browserRouteError(error);
+    }
+  }
+
+  async function reachLostBrowserWorkingCopy<T>(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    browserSessionId: string,
+    callback: PreservedWorkingCopyCallback<T>,
+  ): Promise<T> {
+    const record = await getBrowserSessionControlRecord(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    await authorizeSourceSession(deps, grant, record.sourceSessionId, "session.control");
+    const expired = await getExpiredBrowserSessionResume(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    if (!expired?.controllerGeneration) {
+      throw new BrowserSessionStateError(
+        "This browser was lost without a working copy that its controller still keeps, so there is nothing to inspect or adopt. Resume it to restore its last saved state.",
+      );
+    }
+    const retained = record.session.controller;
+    if (
+      retained ? retained.controllerGeneration !== expired.controllerGeneration : expired.settleable
+    ) {
+      throw new BrowserSessionStateError("BrowserSession controller authority changed");
+    }
+    const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+    if (
+      record.session.placement.kind === "connected_machine" &&
+      sourceSession.activeSandboxId !== record.session.placement.sandboxId
+    ) {
+      throw new BrowserSessionStateError(
+        "The chat that created this browser is no longer attached to the machine the browser ran on, so its working copy cannot be reached. Attach the chat to that machine again first.",
+      );
+    }
+    return await withBrowserPlacement(
+      sourceSession,
+      grant,
+      record.session.placement,
+      retained?.placementInstanceId ?? null,
+      "browser.control",
+      context.req.raw.signal,
+      async (placement) => {
+        const transport = browserRuntimeTransport(record.session, placement.transport);
+        if (
+          transport.kind !== "managed" ||
+          transport.engine !== "chromium" ||
+          transport.ephemeralPartition ||
+          browserSessionStorageMode(record.session) !== "private_profile"
+        ) {
+          throw new BrowserSessionStateError(WORKING_COPY_REFUSAL_EXPLANATIONS.unsupported_browser);
+        }
+        const client = await provisionController(
+          deps,
+          grant,
+          record,
+          placement,
+          requestOrigin(context, deps.settings),
+        );
+        const tokens = deriveBrowserSessionControllerTokens({
+          rootSecret: browserAuthorityRoot(deps),
+          accountId: grant.accountId,
+          workspaceId,
+          placement: record.session.placement,
+          placementInstanceId: placement.placementInstanceId,
+          browserSessionId,
+          controllerGeneration: expired.controllerGeneration!,
+          tokenGeneration: record.tokenGeneration,
+        });
+        return await callback({
+          grant,
+          workspaceId,
+          browserSessionId,
+          client,
+          authority: {
+            browserSessionId,
+            controllerGeneration: expired.controllerGeneration!,
+            tokenGeneration: record.tokenGeneration,
+            ...tokens,
+          },
+        });
+      },
+      false,
+    );
+  }
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/inspection",
+    async (context) => {
+      await parseEmptyJsonBody(context);
+      const result = await withPreservedWorkingCopy(
+        context,
+        async ({ grant, workspaceId, browserSessionId, client, authority }) => {
+          const inspection = await client.inspectWorkingCopy(authority);
+          const checkpoint = await getBrowserPrivateCheckpointAuthority(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+          }).catch(() => null);
+          return BrowserWorkingCopyInspection.parse({
+            browserSessionId,
+            controllerGeneration: authority.controllerGeneration,
+            adoptable: inspection.refusal === null && inspection.manifest !== null,
+            refusal: inspection.refusal,
+            explanation: workingCopyInspectionExplanation(
+              inspection,
+              checkpoint?.createdAt ?? null,
+            ),
+            manifest: inspection.manifest,
+            platformSupported: inspection.platformSupported,
+            profileIdentityMatches: inspection.profileIdentityMatches,
+            profileInUse: inspection.profileInUse,
+            receipt: inspection.receipt,
+            freshness: { status: "unknown", latestCheckpointAt: checkpoint?.createdAt ?? null },
+            activeAdoption: inspection.activeAdoption,
+          });
+        },
+      );
+      return context.json(result);
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions",
+    async (context) => {
+      const request = await parseJsonBody(context, BrowserWorkingCopyAdoptionRequest);
+      const result = await withPreservedWorkingCopy(
+        context,
+        async ({ grant, workspaceId, browserSessionId, client, authority }) => {
+          // Durable attribution before any effect: who selected which exact
+          // bytes as this browser's state. Freshness stays unproven.
+          await recordAuditEvent(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            action: "browserSession.working_copy.adoption_requested",
+            targetType: "browser_session",
+            targetId: browserSessionId,
+            metadata: {
+              operationId: request.operationId,
+              manifestDigest: request.manifestDigest,
+              controllerGeneration: authority.controllerGeneration,
+            },
+          });
+          const adoption = await client.adoptWorkingCopy({
+            ...authority,
+            operationId: request.operationId,
+            manifestDigest: request.manifestDigest,
+          });
+          await recordAuditEvent(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            action: "browserSession.working_copy.adoption_settled",
+            targetType: "browser_session",
+            targetId: browserSessionId,
+            metadata: {
+              operationId: adoption.operationId,
+              manifestDigest: adoption.manifestDigest,
+              controllerGeneration: adoption.controllerGeneration,
+              phase: adoption.phase,
+              failureCode: adoption.failureCode,
+            },
+          }).catch(() => undefined);
+          return BrowserWorkingCopyAdoptionResponse.parse({
+            inFlight: false,
+            adoption: publicWorkingCopyAdoption(adoption),
+            explanation: workingCopyAdoptionExplanation(false, adoption),
+          });
+        },
+      );
+      return context.json(result);
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId",
+    async (context) => {
+      const operationId = requireUuidParam(context, "operationId");
+      const result = await withPreservedWorkingCopy(context, async ({ client, authority }) => {
+        const status = await client.workingCopyAdoption(authority, operationId);
+        return BrowserWorkingCopyAdoptionResponse.parse({
+          inFlight: status.inFlight,
+          adoption: status.adoption ? publicWorkingCopyAdoption(status.adoption) : null,
+          explanation: workingCopyAdoptionExplanation(status.inFlight, status.adoption),
+        });
+      });
+      return context.json(result);
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId/revert",
+    async (context) => {
+      const operationId = requireUuidParam(context, "operationId");
+      const result = await withPreservedWorkingCopy(
+        context,
+        async ({ grant, workspaceId, browserSessionId, client, authority }) => {
+          await recordAuditEvent(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            action: "browserSession.working_copy.revert_requested",
+            targetType: "browser_session",
+            targetId: browserSessionId,
+            metadata: { operationId, controllerGeneration: authority.controllerGeneration },
+          });
+          const status = await client.revertWorkingCopyAdoption({ ...authority, operationId });
+          await recordAuditEvent(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            action: "browserSession.working_copy.revert_settled",
+            targetType: "browser_session",
+            targetId: browserSessionId,
+            metadata: {
+              operationId,
+              controllerGeneration: authority.controllerGeneration,
+              phase: status.adoption?.phase ?? null,
+              failureCode: status.adoption?.failureCode ?? null,
+            },
+          }).catch(() => undefined);
+          return BrowserWorkingCopyAdoptionResponse.parse({
+            inFlight: status.inFlight,
+            adoption: status.adoption ? publicWorkingCopyAdoption(status.adoption) : null,
+            explanation: workingCopyAdoptionExplanation(status.inFlight, status.adoption),
+          });
+        },
+      );
+      return context.json(result);
     },
   );
 
@@ -2539,12 +3099,41 @@ export function registerBrowserSessionRoutes(
         expectedControllerGeneration: string | null;
       } | null = null;
       try {
-        const before = await getBrowserSessionControlRecord(deps.db, {
+        let before = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
           workspaceId,
           browserSessionId,
         });
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
+        if (
+          before.session.lifecycle === "lost" &&
+          before.session.failureCode === "source_placement_changed" &&
+          before.session.controller &&
+          before.session.placement?.kind === "connected_machine"
+        ) {
+          // The task moved away, so its route no longer reaches the machine
+          // this browser still runs on. Stop it there first; the end below
+          // then has no controller left to reach.
+          const retirement = await retireFormerPlacementControllers(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            connectedSandboxId: before.session.placement.sandboxId,
+            browserSessionIds: [browserSessionId],
+            computerSessionIds: [],
+            origin,
+            waitSignal: context.req.raw.signal,
+          });
+          if (retirement.remaining.length > 0) {
+            throw new BrowserSessionStateError(
+              "This browser still runs on the Connected Machine its task moved away from, and that machine could not stop it now. Try again when the machine is online.",
+            );
+          }
+          before = await getBrowserSessionControlRecord(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+          });
+        }
         if (before.session.controller) browserAuthorityRoot(deps);
         const prepared = await prepareBrowserSessionEnd(deps.db, {
           accountId: grant.accountId,
@@ -2747,6 +3336,9 @@ export function registerBrowserSessionRoutes(
           enrollment.agentCapabilities.operationResourcePolicy === true,
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+        transactionalFsWriteMachineSupported:
+          enrollment.agentCapabilities.transactionalFsWriteMachine === true,
+        browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection
@@ -2782,129 +3374,141 @@ export function registerBrowserSessionRoutes(
       operation === "browser.attach"
         ? withChannelARead
         : withChannelA;
-    return await runWithChannelA(
-      channelServices,
-      {
-        accountId: grant.accountId,
-        workspaceId: sourceSession.workspaceId,
-        session: sourceSession,
-        subjectId: grant.subjectId,
-        grant,
-        waitSignal,
-        operation,
-        retryControllerTransport: operation === "browser.read" || operation === "browser.action",
-        allowOperationReplay,
-        ...(expectedPlacementInstanceId &&
-        (expectedPlacement?.kind === "sandbox_group" ||
-          expectedPlacement?.kind === "external_provider")
-          ? { retainedInstanceId: expectedPlacementInstanceId }
-          : {}),
-      },
-      async (handle) => {
-        if (expectedPlacement?.kind === "sandbox_group") {
-          if (
-            sourceSession.sandboxGroupId !== expectedPlacement.sandboxGroupId ||
-            !handle.lease?.instanceId
-          ) {
-            throw new BrowserSessionStateError("BrowserSession home placement is unavailable");
-          }
-          assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
-          return await callback({
-            placement: expectedPlacement,
-            controllerHostSandboxGroupId: expectedPlacement.sandboxGroupId,
-            placementInstanceId: handle.lease.instanceId,
-            session: handle.homeSession,
-            lease: handle.lease,
-            transport: { kind: "managed" },
-          });
-        }
-
-        if (expectedPlacement?.kind === "external_provider") {
-          if (!handle.lease?.instanceId) {
-            throw new BrowserSessionStateError(
-              "Remote BrowserSession controller placement is unavailable",
-            );
-          }
-          assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
-          return await callback({
-            placement: expectedPlacement,
-            controllerHostSandboxGroupId: sourceSession.sandboxGroupId,
-            placementInstanceId: handle.lease.instanceId,
-            session: handle.homeSession,
-            lease: handle.lease,
-            transport: externalBrowserTransport(deps, expectedPlacement),
-          });
-        }
-
-        const resolved = await handle.routingSession.prime();
-        if (expectedPlacement?.kind === "connected_machine") {
-          if (
-            resolved.kind !== "selfhosted" ||
-            resolved.sandboxId !== expectedPlacement.sandboxId
-          ) {
-            if (operation === "browser.create") {
-              throw new HTTPException(422, {
-                message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
-              });
+    try {
+      return await runWithChannelA(
+        channelServices,
+        {
+          accountId: grant.accountId,
+          workspaceId: sourceSession.workspaceId,
+          session: sourceSession,
+          subjectId: grant.subjectId,
+          grant,
+          waitSignal,
+          operation,
+          retryControllerTransport: operation === "browser.read" || operation === "browser.action",
+          allowOperationReplay,
+          ...(expectedPlacementInstanceId &&
+          (expectedPlacement?.kind === "sandbox_group" ||
+            expectedPlacement?.kind === "external_provider")
+            ? { retainedInstanceId: expectedPlacementInstanceId }
+            : {}),
+        },
+        async (handle) => {
+          if (expectedPlacement?.kind === "sandbox_group") {
+            if (
+              sourceSession.sandboxGroupId !== expectedPlacement.sandboxGroupId ||
+              !handle.lease?.instanceId
+            ) {
+              throw new BrowserSessionStateError("BrowserSession home placement is unavailable");
             }
-            return await throwBrowserSourcePlacementChanged(
-              grant,
-              sourceSession.id,
-              expectedPlacement.sandboxId,
-            );
+            assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
+            return await callback({
+              placement: expectedPlacement,
+              controllerHostSandboxGroupId: expectedPlacement.sandboxGroupId,
+              placementInstanceId: handle.lease.instanceId,
+              session: handle.homeSession,
+              lease: handle.lease,
+              transport: { kind: "managed" },
+            });
           }
-          const placementInstanceId = resolved.providerInstanceId ?? expectedPlacement.sandboxId;
-          assertPlacementInstance(expectedPlacementInstanceId, placementInstanceId);
-          return await callback({
-            placement: expectedPlacement,
-            controllerHostSandboxGroupId: null,
-            placementInstanceId,
-            session: resolved.session as unknown as BrowserControlPlacementSession,
-            lease: null,
-            transport: { kind: "managed" },
-          });
-        }
-        if (resolved.sandboxId === null) {
-          if (!handle.lease?.instanceId) {
-            throw new BrowserSessionStateError("BrowserSession home placement is unavailable");
+
+          if (expectedPlacement?.kind === "external_provider") {
+            if (!handle.lease?.instanceId) {
+              throw new BrowserSessionStateError(
+                "Remote BrowserSession controller placement is unavailable",
+              );
+            }
+            assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
+            return await callback({
+              placement: expectedPlacement,
+              controllerHostSandboxGroupId: sourceSession.sandboxGroupId,
+              placementInstanceId: handle.lease.instanceId,
+              session: handle.homeSession,
+              lease: handle.lease,
+              transport: externalBrowserTransport(deps, expectedPlacement),
+            });
           }
-          if (
-            resolved.providerInstanceId &&
-            resolved.providerInstanceId !== handle.lease.instanceId
-          ) {
-            throw new BrowserSessionStateError("BrowserSession home placement fence changed");
+
+          const resolved = await handle.routingSession.prime();
+          if (expectedPlacement?.kind === "connected_machine") {
+            if (
+              resolved.kind !== "selfhosted" ||
+              resolved.sandboxId !== expectedPlacement.sandboxId
+            ) {
+              if (operation === "browser.create") {
+                throw new HTTPException(422, {
+                  message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
+                });
+              }
+              return await throwBrowserSourcePlacementChanged(
+                grant,
+                sourceSession.id,
+                expectedPlacement.sandboxId,
+              );
+            }
+            const placementInstanceId = resolved.providerInstanceId ?? expectedPlacement.sandboxId;
+            assertPlacementInstance(expectedPlacementInstanceId, placementInstanceId);
+            return await callback({
+              placement: expectedPlacement,
+              controllerHostSandboxGroupId: null,
+              placementInstanceId,
+              session: resolved.session as unknown as BrowserControlPlacementSession,
+              lease: null,
+              transport: { kind: "managed" },
+            });
           }
-          return await callback({
-            placement: {
-              kind: "sandbox_group",
-              sandboxGroupId: sourceSession.sandboxGroupId,
-            },
-            controllerHostSandboxGroupId: sourceSession.sandboxGroupId,
-            placementInstanceId: handle.lease.instanceId,
-            session: handle.homeSession,
-            lease: handle.lease,
-            transport: { kind: "managed" },
-          });
-        }
-        if (resolved.kind === "selfhosted") {
-          const placement = {
-            kind: "connected_machine" as const,
-            sandboxId: resolved.sandboxId,
-          };
-          return await callback({
-            placement,
-            controllerHostSandboxGroupId: null,
-            placementInstanceId: resolved.providerInstanceId ?? resolved.sandboxId,
-            session: resolved.session as unknown as BrowserControlPlacementSession,
-            lease: null,
-            transport: { kind: "managed" },
-          });
-        }
-        throw new BrowserControlUnsupportedError(
-          "browser creation on a non-home provider sandbox is not supported",
-        );
-      },
-    );
+          if (resolved.sandboxId === null) {
+            if (!handle.lease?.instanceId) {
+              throw new BrowserSessionStateError("BrowserSession home placement is unavailable");
+            }
+            if (
+              resolved.providerInstanceId &&
+              resolved.providerInstanceId !== handle.lease.instanceId
+            ) {
+              throw new BrowserSessionStateError("BrowserSession home placement fence changed");
+            }
+            return await callback({
+              placement: {
+                kind: "sandbox_group",
+                sandboxGroupId: sourceSession.sandboxGroupId,
+              },
+              controllerHostSandboxGroupId: sourceSession.sandboxGroupId,
+              placementInstanceId: handle.lease.instanceId,
+              session: handle.homeSession,
+              lease: handle.lease,
+              transport: { kind: "managed" },
+            });
+          }
+          if (resolved.kind === "selfhosted") {
+            const placement = {
+              kind: "connected_machine" as const,
+              sandboxId: resolved.sandboxId,
+            };
+            return await callback({
+              placement,
+              controllerHostSandboxGroupId: null,
+              placementInstanceId: resolved.providerInstanceId ?? resolved.sandboxId,
+              session: resolved.session as unknown as BrowserControlPlacementSession,
+              lease: null,
+              transport: { kind: "managed" },
+            });
+          }
+          throw new BrowserControlUnsupportedError(
+            "browser creation on a non-home provider sandbox is not supported",
+          );
+        },
+      );
+    } catch (error) {
+      if (operation !== "browser.create" || expectedPlacement?.kind !== "connected_machine")
+        throw error;
+      throw await wrongPlacementInsteadOfOffline(
+        error,
+        expectedPlacement.sandboxId,
+        async () =>
+          (await readActiveSandbox(deps.db, sourceSession.workspaceId, sourceSession.id))
+            ?.activeSandboxId ?? null,
+      );
+    }
   }
 
   async function browserRoutePreamble(
@@ -3063,6 +3667,87 @@ export function registerBrowserSessionRoutes(
     });
   }
 
+  /** Downloads kept as workspace files for this browser, and whether no
+   * controller runs it now (so only kept downloads can be read). */
+  async function retainedDownloadsFor(
+    grant: AccessGrant,
+    workspaceId: string,
+    browserSessionId: string,
+    downloadId?: string,
+  ) {
+    const record = await getBrowserSessionControlRecord(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    const notRunning = record.session.lifecycle !== "active" || !record.session.controller;
+    if (notRunning) {
+      await authorizeSourceSession(deps, grant, record.sourceSessionId, "session.read");
+    }
+    const scope = { accountId: grant.accountId, workspaceId, browserSessionId };
+    const downloads = downloadId
+      ? [await getRetainedBrowserDownload(deps.db, { ...scope, downloadId })].filter(
+          (entry) => entry !== null,
+        )
+      : await listRetainedBrowserDownloads(deps.db, scope);
+    return { notRunning, downloads };
+  }
+
+  /** Keep a running browser's completed downloads as workspace files before
+   * suspension removes its working directory. Never blocks the suspension. */
+  async function retainBrowserDownloads(
+    grant: AccessGrant,
+    workspaceId: string,
+    record: BrowserSessionControlRecord,
+    binding: NonNullable<BrowserSessionControlRecord["session"]["controller"]>,
+    placement: BrowserPlacement,
+    client: BrowserControlClient,
+  ): Promise<void> {
+    const objectStorage = deps.objectStorage;
+    if (!objectStorage || !record.session.capabilities.downloads) return;
+    const browserSessionId = record.session.id;
+    try {
+      const source = client.sessionClient({
+        reference: { browserSessionId, controllerGeneration: binding.controllerGeneration },
+        ...deriveBrowserSessionControllerTokens({
+          rootSecret: browserAuthorityRoot(deps),
+          accountId: grant.accountId,
+          workspaceId,
+          placement: record.session.placement,
+          placementInstanceId: placement.placementInstanceId,
+          browserSessionId,
+          controllerGeneration: binding.controllerGeneration,
+          tokenGeneration: record.tokenGeneration,
+        }),
+      });
+      const result = await retainCompletedBrowserDownloads(
+        { db: deps.db, settings: deps.settings, objectStorage },
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          browserSessionId,
+          source,
+          uploadAudience: signedUrlAudienceForPlacement(record.session.placement),
+        },
+      );
+      for (const failure of result.failed) {
+        console.warn("browser.download_retention_failed", {
+          workspaceId,
+          browserSessionId,
+          ...failure,
+        });
+      }
+    } catch (error) {
+      console.warn("browser.download_retention_failed", {
+        workspaceId,
+        browserSessionId,
+        downloadId: null,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   async function withActiveBrowserController<T>(
     context: Context,
     grant: AccessGrant,
@@ -3070,15 +3755,40 @@ export function registerBrowserSessionRoutes(
     browserSessionId: string,
     authorizationOperation: SessionAuthorizationOperation,
     channelOperation: ChannelAOperation,
-    callback: (input: {
-      client: BrowserControlClient;
-      sessionClient: ReturnType<BrowserControlClient["sessionClient"]>;
-      record: BrowserSessionControlRecord;
-      binding: NonNullable<BrowserSessionControlRecord["session"]["controller"]>;
-      placement: BrowserPlacement;
-      sourceAuthorization: ResolvedSessionAuthorization | null;
-    }) => Promise<T>,
+    callback: ActiveBrowserControllerCallback<T>,
     recoverMissing = true,
+    stages?: InteractionRouteStages,
+  ): Promise<T> {
+    // The source-session check and the machine-route check that follows it
+    // prove the same live agent attempt; they share those reads. Everything
+    // from the controller call onward reads fresh.
+    return await withSessionAuthorizationReadReuse((authorizationReads) =>
+      withActiveBrowserControllerReads(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        authorizationOperation,
+        channelOperation,
+        callback,
+        recoverMissing,
+        stages,
+        authorizationReads,
+      ),
+    );
+  }
+
+  async function withActiveBrowserControllerReads<T>(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    browserSessionId: string,
+    authorizationOperation: SessionAuthorizationOperation,
+    channelOperation: ChannelAOperation,
+    callback: ActiveBrowserControllerCallback<T>,
+    recoverMissing: boolean,
+    stages: InteractionRouteStages | undefined,
+    authorizationReads: { handOffToToolDispatch(): void },
   ): Promise<T> {
     try {
       const record = await getBrowserSessionControlRecord(deps.db, {
@@ -3086,16 +3796,26 @@ export function registerBrowserSessionRoutes(
         workspaceId,
         browserSessionId,
       });
-      const sourceAuthorization = await authorizeSourceSession(
-        deps,
-        grant,
-        record.sourceSessionId,
-        authorizationOperation,
-      );
-      let sourceSession: Session | null = null;
+      stages?.mark("record");
+      // A Connected Machine (or any placement without a cached controller URL)
+      // always needs the source session; read it alongside authorization. A
+      // denial still wins, and the session is only used once authorized.
+      const sourceSessionNeeded =
+        record.session.placement?.kind === "connected_machine" ||
+        !record.controllerHostSandboxGroupId;
+      const [authorized, sourceRead] = await Promise.allSettled([
+        authorizeSourceSession(deps, grant, record.sourceSessionId, authorizationOperation),
+        sourceSessionNeeded
+          ? requireSourceSession(deps, workspaceId, record.sourceSessionId)
+          : Promise.resolve(null),
+      ]);
+      if (authorized.status === "rejected") throw authorized.reason;
+      if (sourceRead.status === "rejected") throw sourceRead.reason;
+      const sourceAuthorization = authorized.value;
+      stages?.mark("authorize");
+      let sourceSession: Session | null = sourceRead.value;
       if (record.session.placement?.kind === "connected_machine") {
-        sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
-        if (sourceSession.activeSandboxId !== record.session.placement.sandboxId) {
+        if (sourceSession?.activeSandboxId !== record.session.placement.sandboxId) {
           return await throwBrowserSourcePlacementChanged(
             grant,
             record.sourceSessionId,
@@ -3103,6 +3823,7 @@ export function registerBrowserSessionRoutes(
           );
         }
       }
+      stages?.mark("source_session");
       if (record.session.lifecycle !== "active" || !record.session.controller) {
         throw new BrowserSessionStateError("BrowserSession is not active");
       }
@@ -3116,6 +3837,7 @@ export function registerBrowserSessionRoutes(
       if (!admitted) {
         throw new BrowserSessionStateError("BrowserSession controller authority changed");
       }
+      stages?.mark("control");
       const safelyReplayable =
         browserSessionStorageMode(record.session) !== "ephemeral_context" &&
         (channelOperation === "browser.read" || channelOperation === "browser.action");
@@ -3125,6 +3847,7 @@ export function registerBrowserSessionRoutes(
         placement: BrowserPlacement,
         provisionedClient?: BrowserControlClient,
       ): Promise<T> => {
+        authorizationReads.handOffToToolDispatch();
         // An active binding already proves browserd was provisioned. Reusing
         // it avoids restarting/checking the sidecar on every live input.
         const client = provisionedClient ?? connectController(deps, grant, record, placement);
@@ -3196,6 +3919,7 @@ export function registerBrowserSessionRoutes(
         return result;
       };
       const cached = await cachedBrowserPlacement(record);
+      stages?.mark("placement_cache");
       if (cached) {
         try {
           return await run(cached);
@@ -3224,12 +3948,16 @@ export function registerBrowserSessionRoutes(
         channelOperation,
         context.req.raw.signal,
         async (placement) => {
-          const use = async () =>
-            await run(
-              await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
-                () => placement,
-              ),
-            );
+          stages?.mark("placement_resolve");
+          const use = async () => {
+            const cachedPlacement = await cacheBrowserControllerPlacement(
+              grant,
+              workspaceId,
+              placement,
+            ).catch(() => placement);
+            stages?.mark("placement_cache_write");
+            return await run(cachedPlacement);
+          };
           if (browserSessionStorageMode(record.session) === "ephemeral_context") return await use();
           return await withControllerTransportRecovery({
             channelOperation,
@@ -3285,6 +4013,14 @@ export function registerBrowserSessionRoutes(
       connectedSandboxId,
     });
     if (reconciliation.sourcePlacementChanged) {
+      // End what the move left running on its former machines without making
+      // this request wait for it. Earlier failed retirements of this task's
+      // resources are retried too; a failure leaves the binding for later.
+      void retireSourceFormerPlacements(channelServices, {
+        grant,
+        sourceSessionId,
+        origin: null,
+      });
       throw sourcePlacementChangedApiError("browser_session");
     }
     throw new BrowserSessionStateError(
@@ -3307,6 +4043,50 @@ export function registerBrowserSessionRoutes(
       await attachedBrowserViewer(deps, grant, workspaceId),
       placement,
     );
+  }
+
+  /**
+   * A controller restart (an agent update, a crash) forgets its live browsers
+   * while their private profiles stay on disk. Every use relaunches such a
+   * browser from that working copy, but suspension captures through the
+   * controller and would otherwise record the browser as lost, discarding a
+   * profile that was intact. Reach the controller the way a use does first,
+   * so suspension saves what the browser actually had. A browser that cannot
+   * be recovered falls through to suspension, which records the loss as
+   * before.
+   */
+  async function recoverRestartedBrowserControllerBeforeSuspend(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    before: BrowserSessionControlRecord,
+  ): Promise<void> {
+    if (
+      before.session.lifecycle !== "active" ||
+      !before.session.controller ||
+      browserSessionStorageMode(before.session) !== "private_profile"
+    ) {
+      return;
+    }
+    try {
+      await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        before.session.id,
+        "session.control",
+        "browser.read",
+        async ({ sessionClient }) => {
+          await sessionClient.listTargets();
+        },
+      );
+    } catch (error) {
+      console.warn("browser.suspend_controller_recovery_failed", {
+        workspaceId,
+        browserSessionId: before.session.id,
+        failure: interactionFailure(error),
+      });
+    }
   }
 
   async function recoverActiveBrowserController(
@@ -3428,6 +4208,199 @@ export function registerBrowserSessionRoutes(
     }
   }
 
+  /** Continue an expired resume on its retained controller generation when the
+   * controller still holds that generation's own working copy (a resident
+   * browser, or its preserved profile and launch receipt after the controller
+   * restarted). The controller's existing same-generation recovery adopts or
+   * relaunches it from that directory, so the record, its history and the
+   * possibly newer working profile all survive. When the browser cannot be
+   * continued this way it returns why, leaving the record unchanged for the
+   * settle-and-restore path. */
+  async function continueExpiredBrowserResume(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    browserSessionId: string,
+    operationId: string,
+  ): Promise<ExpiredBrowserResumeContinuation> {
+    const expired = await getExpiredBrowserSessionResume(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    if (!expired?.controllerGeneration) return { unavailable: null };
+    const controllerGeneration = expired.controllerGeneration;
+    const record = await getBrowserSessionControlRecord(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    const retained = record.session.controller;
+    // A restarted controller's binding was cleared when its suspension failed;
+    // the generation of that suspension still owns the working copy.
+    if (retained ? retained.controllerGeneration !== controllerGeneration : expired.settleable) {
+      throw new BrowserSessionStateError("BrowserSession controller authority changed");
+    }
+    // Only a private profile has a working copy the controller can adopt.
+    if (browserSessionStorageMode(record.session) !== "private_profile") {
+      return { unavailable: "It kept no private profile to continue" };
+    }
+    const rootSecret = browserAuthorityRoot(deps);
+    const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+    if (
+      record.session.placement.kind === "connected_machine" &&
+      sourceSession.activeSandboxId !== record.session.placement.sandboxId
+    ) {
+      return {
+        unavailable:
+          "The chat that created it is no longer attached to the machine the browser ran on",
+      };
+    }
+    return await withBrowserPlacement(
+      sourceSession,
+      grant,
+      record.session.placement,
+      retained?.placementInstanceId ?? null,
+      "browser.resume",
+      context.req.raw.signal,
+      async (placement): Promise<ExpiredBrowserResumeContinuation> => {
+        const binding = retained ?? {
+          controllerId: "opengeni-browserd",
+          controllerGeneration,
+          placementInstanceId: placement.placementInstanceId,
+        };
+        const transport = browserRuntimeTransport(record.session, placement.transport);
+        if (
+          transport.kind !== "managed" ||
+          transport.engine !== "chromium" ||
+          transport.ephemeralPartition
+        ) {
+          return { unavailable: "Its browser keeps no working copy that can be continued" };
+        }
+        const client = await provisionController(
+          deps,
+          grant,
+          record,
+          placement,
+          requestOrigin(context, deps.settings),
+        );
+        let linkedComputer: Awaited<ReturnType<typeof ensureLinkedComputerController>>;
+        try {
+          linkedComputer = await ensureLinkedComputerController(
+            deps,
+            grant,
+            record.session,
+            placement,
+            client,
+          );
+        } catch (error) {
+          // Its working copy was launched on a desktop that is gone.
+          if (error instanceof BrowserSessionStateError) {
+            return { unavailable: "The desktop it was launched on is gone" };
+          }
+          throw error;
+        }
+        const networkRoute = await resolveActiveBrowserNetworkRouteLaunch({
+          deps,
+          grant,
+          record,
+          placement: placement.placement,
+        });
+        const tokens = deriveBrowserSessionControllerTokens({
+          rootSecret,
+          accountId: grant.accountId,
+          workspaceId,
+          browserSessionId,
+          placement: placement.placement,
+          placementInstanceId: placement.placementInstanceId,
+          controllerGeneration: binding.controllerGeneration,
+          tokenGeneration: record.tokenGeneration,
+        });
+        const interactionHeld = await ensureInteractionHolder(
+          deps,
+          grant,
+          sourceSession,
+          browserSessionId,
+          placement,
+          context.req.raw.signal,
+        );
+        const release = async () => {
+          if (!interactionHeld) return;
+          await releaseInteractionHolder(
+            deps,
+            grant,
+            workspaceId,
+            browserSessionId,
+            placement.controllerHostSandboxGroupId,
+          ).catch(() => undefined);
+        };
+        try {
+          await withInteractionHolderHeartbeat(
+            deps,
+            {
+              grant,
+              workspaceId,
+              sandboxGroupId: placement.controllerHostSandboxGroupId,
+              holderId: interactionHolderId(browserSessionId),
+              operationId,
+              // This operation is recorded only after the controller adopts
+              // the working copy; until then the expired resume holds authority.
+              continuesExpiredBrowserResume: true,
+              resourceId: browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+            },
+            async () => {
+              await ensureHeadedBrowserDisplayStack(
+                placement.session,
+                record.session.headless,
+                linkedComputer !== null,
+              );
+              await client.createSession({
+                browserSessionId,
+                controllerGeneration: binding.controllerGeneration,
+                tokenGeneration: record.tokenGeneration,
+                ...tokens,
+                headed: !record.session.headless,
+                transport,
+                recoverExistingWorkingDirectory: true,
+                ...(linkedComputer ? { linkedComputer } : {}),
+                ...(networkRoute ? { networkRoute } : {}),
+              });
+            },
+          );
+        } catch (error) {
+          // The controller proves no adoptable working copy for this generation
+          // (none was completed, or its authority or profile changed): leave
+          // the record for the settle-and-restore path.
+          if (
+            isDefiniteBrowserControllerFailure(error) &&
+            error instanceof BrowserControlRequestError &&
+            error.error.code === "resource_unavailable"
+          ) {
+            await release();
+            console.warn("browser working copy could not be continued", {
+              browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              failure: interactionFailure(error),
+            });
+            return { unavailable: error.error.message };
+          }
+          throw error;
+        }
+        return {
+          continued: await continueExpiredBrowserSessionResume(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+            operationId,
+            actorSubjectId: grant.subjectId,
+            controller: binding,
+          }),
+        };
+      },
+    );
+  }
+
   /** End the retained controller generation of an expired resume and return
    * the browser to suspended. Other lost browsers are left unchanged so the
    * normal resume preparation refuses them. */
@@ -3436,6 +4409,7 @@ export function registerBrowserSessionRoutes(
     grant: AccessGrant,
     workspaceId: string,
     browserSessionId: string,
+    unavailable: string | null,
   ): Promise<void> {
     const expired = await getExpiredBrowserSessionResume(deps.db, {
       accountId: grant.accountId,
@@ -3443,6 +4417,15 @@ export function registerBrowserSessionRoutes(
       browserSessionId,
     });
     if (!expired) return;
+    if (!expired.settleable) {
+      // It ran past its checkpoint, so returning it to that checkpoint would
+      // silently discard newer state.
+      throw new BrowserSessionStateError(
+        unavailable
+          ? `BrowserSession was lost when its controller restarted, and its working copy could not be recovered. ${unavailable}`
+          : "BrowserSession was lost when its controller restarted, and its working copy could not be recovered",
+      );
+    }
     const record = await getBrowserSessionControlRecord(deps.db, {
       accountId: grant.accountId,
       workspaceId,
@@ -3470,9 +4453,14 @@ export function registerBrowserSessionRoutes(
             placement,
             requestOrigin(context, deps.settings),
           );
-          // A resident or provably never-completed launch is ended exactly; a
-          // possibly accepted launch stays preserved and refuses this resume.
-          await endCapturedBrowserController(client, browserSessionId, binding);
+          // A resident or provably never-completed launch is ended exactly; an
+          // interrupted launch whose profile no browser runs is set aside
+          // intact; a launch that completed (adoptable) or whose profile may
+          // be in use stays preserved and refuses this resume.
+          await endExpiredResumeSettingAsideInterruptedLaunch(client, {
+            browserSessionId,
+            controllerGeneration: binding.controllerGeneration,
+          });
         },
       );
     }
@@ -4149,6 +5137,34 @@ function requireOperationGeneration(record: BrowserSessionControlRecord): string
   return generation;
 }
 
+/** Attach the controller's launch view to a create that activated exactly that
+ * launch in this request. Replays, failures and other bindings get nothing, so
+ * a caller then reads the targets and observes as before. */
+export function withInitialView<
+  T extends {
+    session: { id: string; lifecycle: string; controller: { controllerGeneration: string } | null };
+    operation: { state: string; replayed: boolean };
+  },
+>(
+  response: T,
+  launched: Awaited<ReturnType<BrowserControlClient["createSession"]>> | null,
+): T | (T & { initialView: { targets: BrowserTarget[]; observation: BrowserObservation } }) {
+  if (
+    !launched?.targets ||
+    response.operation.state !== "completed" ||
+    response.operation.replayed ||
+    response.session.lifecycle !== "active" ||
+    response.session.id !== launched.browserSessionId ||
+    response.session.controller?.controllerGeneration !== launched.controllerGeneration
+  ) {
+    return response;
+  }
+  return {
+    ...response,
+    initialView: { targets: launched.targets, observation: launched.observation },
+  };
+}
+
 async function provisionController(
   deps: ApiRouteDeps,
   grant: AccessGrant,
@@ -4297,6 +5313,12 @@ async function endCapturedBrowserController(
   }
 }
 
+/** A lost browser continued from its retained working copy, or why it could
+ * not be (null when it has no such copy at all). */
+type ExpiredBrowserResumeContinuation =
+  | { continued: Awaited<ReturnType<typeof continueExpiredBrowserSessionResume>> }
+  | { unavailable: string | null };
+
 function isDefiniteBrowserControllerFailure(error: unknown): boolean {
   return (
     error instanceof BrowserControlRequestError &&
@@ -4357,6 +5379,15 @@ async function settleBrowserRevisionCaptureFailure(
     error: error.error,
   });
 }
+
+type ActiveBrowserControllerCallback<T> = (input: {
+  client: BrowserControlClient;
+  sessionClient: ReturnType<BrowserControlClient["sessionClient"]>;
+  record: BrowserSessionControlRecord;
+  binding: NonNullable<BrowserSessionControlRecord["session"]["controller"]>;
+  placement: BrowserPlacement;
+  sourceAuthorization: ResolvedSessionAuthorization | null;
+}) => Promise<T>;
 
 async function requireSourceSession(
   deps: ApiRouteDeps,
@@ -4927,7 +5958,9 @@ function browserUploadSha256(value: string | null): string | null {
 }
 
 function interactionFailure(error: unknown) {
-  if (error instanceof BrowserControlRequestError) return error.error;
+  if (error instanceof BrowserControlRequestError) {
+    return legacyInteractionCapacityFailure(error, "browser") ?? error.error;
+  }
   if (
     error instanceof BrowserControlUnsupportedError ||
     error instanceof BrowserControlServerUnsupportedError
@@ -5059,6 +6092,99 @@ function recordAttachedBrowserUnavailable(
   }
 }
 
+const WORKING_COPY_REFUSAL_EXPLANATIONS: Record<BrowserWorkingCopyRefusalValue, string> = {
+  unsupported_platform:
+    "Adopting a working copy is supported only for browsers on Linux machines, where the controller can prove no process uses the copy. Nothing was changed.",
+  unsupported_browser:
+    "Only a managed Chromium browser with a private profile keeps a working copy that can be adopted. Nothing was changed.",
+  browser_running:
+    "The browser is running, starting or being ended on its controller, so there is no stopped working copy to adopt now. If it is running, use it normally; otherwise inspect again once it has stopped.",
+  working_copy_invalid:
+    "The browser's working directory on its machine is missing, incomplete or not a plain directory, so it cannot be adopted. Nothing was changed.",
+  receipt_not_adoptable:
+    "The working copy has no completed record of a browser launch, so it cannot be adopted. Its record and recovery state are preserved.",
+  authority_changed:
+    "The working copy was launched under a different controller authority than this browser now has, so it cannot be adopted for it. Nothing was changed.",
+  process_state_unknown:
+    "It cannot be proven that no process uses the copy's browser profile. Close any browser using it, then inspect again. Nothing was changed.",
+  adoption_not_needed:
+    "The working copy is the same directory the browser was launched in, so it needs no adoption; the browser continues from it when it is next used.",
+  adoption_unresolved:
+    "An earlier adoption for this browser has not finished. Check it with getBrowserSessionWorkingCopyAdoption and its operation id (see activeAdoption). Inspecting and checking never change it; retrying that same adoption with the same operationId and manifestDigest settles it. Do not start another.",
+};
+
+function workingCopyInspectionExplanation(
+  inspection: PlacementBrowserWorkingCopyInspection,
+  latestCheckpointAt: string | null,
+): string {
+  if (inspection.refusal) return WORKING_COPY_REFUSAL_EXPLANATIONS[inspection.refusal];
+  const manifest = inspection.manifest!;
+  return [
+    `This working copy can be adopted: ${manifest.entries} entries, ${manifest.bytes} bytes, manifest digest ${manifest.digest}.`,
+    manifest.excluded.length > 0
+      ? `Left out because the controller rebuilds them: ${manifest.excluded.join(", ")}. Everything else is in the digest.`
+      : "Every entry is in the digest.",
+    "It is not the directory the browser was launched in (it was moved, copied or restored), so the browser refuses to continue from it until it is adopted.",
+    latestCheckpointAt
+      ? `How recent its contents are is not proven; the browser's latest saved checkpoint is from ${latestCheckpointAt}.`
+      : "How recent its contents are is not proven.",
+    "Adopting selects exactly these bytes as the browser's state and is never replaced by an older checkpoint afterwards; the directory it replaces is kept.",
+    "To adopt, call adoptBrowserSessionWorkingCopy with this manifestDigest and a new operationId. If the bytes change first, the adoption is refused.",
+  ].join(" ");
+}
+
+function publicWorkingCopyAdoption(
+  adoption: PlacementBrowserWorkingCopyAdoption,
+): BrowserWorkingCopyAdoptionValue {
+  return {
+    operationId: adoption.operationId,
+    browserSessionId: adoption.browserSessionId,
+    controllerGeneration: adoption.controllerGeneration,
+    manifestDigest: adoption.manifestDigest,
+    phase: adoption.phase,
+    failureCode: adoption.failureCode,
+    retainedDirectories: adoption.retainedDirectories,
+    createdAt: adoption.createdAt,
+    updatedAt: adoption.updatedAt,
+  };
+}
+
+function workingCopyAdoptionExplanation(
+  inFlight: boolean,
+  adoption: PlacementBrowserWorkingCopyAdoption | null,
+): string {
+  const kept = adoption?.retainedDirectories.length
+    ? ` Kept on the machine for separate cleanup: ${adoption.retainedDirectories.join(", ")}.`
+    : "";
+  if (inFlight)
+    return "The adoption is still running on the controller. Check again with getBrowserSessionWorkingCopyAdoption; do not start another.";
+  if (!adoption)
+    return "The controller has no record of this adoption, which proves it changed nothing there.";
+  switch (adoption.phase) {
+    case "adopted":
+      return `Adopted. The browser continues from the copy with manifest digest ${adoption.manifestDigest} the next time it is used, and is never replaced by an older checkpoint.${kept}`;
+    case "interrupted":
+    case "failed":
+      return `The adoption stopped before the copy took the browser's place${adoption.failureCode ? ` (${adoption.failureCode})` : ""}; the browser's own directory is unchanged.${kept}`;
+    case "collision":
+      return `The adoption found the browser's directories in an unexpected state (${adoption.failureCode ?? "unknown"}) and stopped without moving or removing anything more. The browser stays unavailable until this adoption is reverted with revertBrowserSessionWorkingCopyAdoption, which puts the browser's own directory back and keeps the staged copy. If the revert refuses, the directories need a person on that machine.${kept}`;
+    case "reverting":
+      return "A revert of this adoption stopped part way and is not running. Retry revertBrowserSessionWorkingCopyAdoption with the same operationId to finish it; a retry repeats nothing already done.";
+    case "reverted":
+      return `Reverted. The browser's own directory is back in place and the staged copy was not used.${kept}`;
+    default:
+      return "The adoption stopped part way and is not running. Checking it never changes it. To finish it, retry the same adoption with the same operationId and manifestDigest under the authority that approved it; a retry repeats nothing already done. To undo it instead, revert it with revertBrowserSessionWorkingCopyAdoption. Do not start another.";
+  }
+}
+
+type PreservedWorkingCopyCallback<T> = (input: {
+  grant: AccessGrant;
+  workspaceId: string;
+  browserSessionId: string;
+  client: BrowserControlClient;
+  authority: PlacementBrowserWorkingCopyAuthority;
+}) => Promise<T>;
+
 function browserRouteError(error: unknown): HTTPException {
   const tabDiagnosis = browserTabDiagnosisError(error);
   if (tabDiagnosis instanceof ApiHttpError) return tabDiagnosis;
@@ -5091,6 +6217,8 @@ function browserRouteError(error: unknown): HTTPException {
   ) {
     return new HTTPException(409, { message: error.message, cause: error });
   }
+  const legacyCapacity = legacyInteractionCapacityError(error, "browser");
+  if (legacyCapacity) return legacyCapacity;
   if (error instanceof BrowserControlRequestError) {
     return new HTTPException(error.status as ContentfulStatusCode, {
       message: error.error.message,

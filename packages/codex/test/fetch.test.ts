@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   CODEX_TRANSPORT_ERROR_HEADER,
+  CODEX_TRANSPORT_HEADER,
   CODEX_REQUEST_BODY_NORMALIZED_HEADER,
   CODEX_REQUEST_MODEL_HEADER,
   CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
@@ -14,6 +15,7 @@ import {
   classifyCodexResponseTimeoutError,
   codexRequestStorage,
   codexSubscriptionFetch,
+  warmCodexResponsesConnection,
   isCodexTransportError,
   opaqueProviderArtifactFingerprint,
   parseCodexUsageHeaders,
@@ -367,9 +369,7 @@ describe("codexSubscriptionFetch", () => {
   });
 
   test("sends the session_id affinity header when the context carries a sessionId", async () => {
-    // The backend's sticky cache-routing key: without it, byte-identical
-    // resends miss the prompt cache ~50% (measured shard lottery); with it
-    // they pin to the warm shard. Must ride EVERY request of the session.
+    // Existing library callers retain their per-session affinity fallback.
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
     await codexRequestStorage.run(ctx({ sessionId: "11111111-2222-4333-8444-555555555555" }), () =>
@@ -382,6 +382,33 @@ describe("codexSubscriptionFetch", () => {
     expect(headers.get("session_id")).toBe("11111111-2222-4333-8444-555555555555");
   });
 
+  test("shared affinity changes only the header, including the credential-refresh retry", async () => {
+    const { base, captures } = baseRecorder([401, 200, 200]);
+    const fetchImpl = codexSubscriptionFetch(base);
+    const input = [{ role: "user", content: "Keep this exact prefix." }];
+    for (const sessionId of ["session-a", "session-b"]) {
+      await codexRequestStorage.run(ctx({ sessionId, cacheAffinityKey: "shared-cohort" }), () =>
+        fetchImpl("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "m",
+            instructions: "Unchanged",
+            input,
+            prompt_cache_key: sessionId,
+          }),
+        }),
+      );
+    }
+    expect(captures).toHaveLength(3);
+    for (const [index, capture] of captures.entries()) {
+      expect(new Headers(capture.init?.headers).get("session_id")).toBe("shared-cohort");
+      const body = JSON.parse(String(capture.init?.body));
+      expect(body.prompt_cache_key).toBe(index < 2 ? "session-a" : "session-b");
+      expect(body.instructions).toBe("Unchanged");
+      expect(body.input).toEqual(input);
+    }
+  });
+
   test("omits the session_id header when the context has none (legacy behavior)", async () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
@@ -392,6 +419,28 @@ describe("codexSubscriptionFetch", () => {
       }),
     );
     expect(new Headers(captures[0]?.init?.headers).get("session_id")).toBeNull();
+  });
+
+  test("WebSocket pre-open uses the same shared affinity as dispatch", async () => {
+    const { base, captures } = baseRecorder();
+    const warmed: Headers[] = [];
+    const transport = Object.assign(base, {
+      warm: (_url: string, headers: HeadersInit) => warmed.push(new Headers(headers)),
+    });
+    await codexRequestStorage.run(
+      ctx({ sessionId: "session-a", cacheAffinityKey: "cohort" }),
+      async () => {
+        await warmCodexResponsesConnection(transport, "https://chatgpt.com/backend-api");
+        expect(captures).toHaveLength(0);
+        await codexSubscriptionFetch(transport)("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: "{}",
+        });
+      },
+    );
+    expect(warmed).toHaveLength(1);
+    expect(warmed[0]!.get("session_id")).toBe("cohort");
+    expect(new Headers(captures[0]!.init?.headers).get("session_id")).toBe("cohort");
   });
 
   test("advertises remote compaction v2 beta features and turn metadata", async () => {
@@ -780,7 +829,8 @@ describe("codexSubscriptionFetch", () => {
     } catch (error) {
       observed = error;
     }
-    expect(String(observed)).toContain("injected partial stream failure");
+    expect(observed).toMatchObject({ code: "invalid_sse_terminal" });
+    expect(String((observed as Error).cause)).toContain("injected partial stream failure");
     expect(calls).toBe(1);
   });
 
@@ -1047,6 +1097,57 @@ describe("codexSubscriptionFetch", () => {
       "first_byte",
       "completed",
     ]);
+  });
+
+  test("the headers event reports how the request was carried", async () => {
+    const carried = async (transportHeader: string | null) => {
+      const events: CodexModelRequestEvent[] = [];
+      const response = await codexRequestStorage.run(
+        ctx({
+          onModelRequestEvent: (event) => {
+            events.push(event);
+          },
+        }),
+        () =>
+          codexSubscriptionFetch(
+            async () =>
+              new Response(
+                'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}\n\n',
+                {
+                  status: 200,
+                  headers: transportHeader ? { [CODEX_TRANSPORT_HEADER]: transportHeader } : {},
+                },
+              ),
+          )("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ stream: true }),
+          }),
+      );
+      await response.text();
+      return events.find((event) => event.phase === "headers")?.transport;
+    };
+    expect(await carried("websocket; connection=reused")).toEqual({
+      kind: "websocket",
+      connection: "reused",
+      input: "full",
+    });
+    expect(await carried("websocket; connection=reused; input=incremental")).toEqual({
+      kind: "websocket",
+      connection: "reused",
+      input: "incremental",
+    });
+    expect(await carried("websocket; connection=new; handshake_ms=180")).toEqual({
+      kind: "websocket",
+      connection: "new",
+      input: "full",
+      handshakeMs: 180,
+    });
+    expect(await carried("http; reason=connection_busy")).toEqual({
+      kind: "http",
+      reason: "connection_busy",
+    });
+    // A response the socket transport never labelled did not pass through it.
+    expect(await carried(null)).toEqual({ kind: "http", reason: "unavailable" });
   });
 
   test("whole-request deadline wins over a longer stream-idle deadline", async () => {
@@ -1875,6 +1976,51 @@ describe("codexSubscriptionFetch", () => {
       code: "invalid_sse_terminal",
     });
     expect(isCodexTransportError(observed)).toBe(true);
+    expect(calls).toBe(1);
+  });
+
+  test("streaming caller: a connection lost mid-response fails as invalid_sse_terminal", async () => {
+    const lost = new Error("Codex response WebSocket closed before the response finished (1006)");
+    let calls = 0;
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(async () => {
+        calls += 1;
+        const encoder = new TextEncoder();
+        let sent = false;
+        const body = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (!sent) {
+              sent = true;
+              controller.enqueue(
+                encoder.encode('data: {"type":"response.created","response":{"id":"r1"}}\n\n'),
+              );
+              return;
+            }
+            controller.error(lost);
+          },
+        });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      })("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] }),
+      }),
+    );
+
+    let observed: unknown;
+    try {
+      await response.text();
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toMatchObject({
+      status: 502,
+      code: "invalid_sse_terminal",
+    });
+    expect(isCodexTransportError(observed)).toBe(true);
+    expect((observed as Error).cause).toBe(lost);
     expect(calls).toBe(1);
   });
 

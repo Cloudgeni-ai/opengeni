@@ -59,6 +59,9 @@ pub enum Command {
     Status(ServiceScopeArgs),
     /// Advanced service management (install/uninstall/start/stop/status).
     Service(ServiceArgs),
+    /// Print the operating-system permissions this agent holds for screen
+    /// control, as one JSON line. `--request` first asks for one of them.
+    Permissions(PermissionsArgs),
     /// Check for and apply a signed self-update for this channel + target.
     Update(UpdateArgs),
     /// Call the active attempt's programmatic tool catalog. This is a native,
@@ -361,7 +364,8 @@ pub struct CodemodeCallArgs {
     /// Generated path, model name, or `server.tool` identity from `codemode list`.
     pub tool: String,
 
-    /// Tool arguments as one JSON object. Defaults to `{}`.
+    /// Tool arguments as a JSON object, `-` to read stdin, or `@path` to read a
+    /// UTF-8 JSON file. Defaults to `{}`; stdin is read only when requested.
     #[arg(default_value = "{}")]
     pub arguments: String,
 
@@ -369,6 +373,23 @@ pub struct CodemodeCallArgs {
     /// `structuredContent` as JSON is omitted.
     #[arg(long)]
     pub full: bool,
+}
+
+/// Arguments for the `permissions` subcommand.
+#[derive(Debug, Default, clap::Args)]
+pub struct PermissionsArgs {
+    /// Show the system prompt for one permission before printing them. A
+    /// desktop app runs this as its own helper, so the prompt names the app.
+    #[arg(long, value_enum)]
+    pub request: Option<PermissionRequest>,
+}
+
+/// A screen-control permission a desktop app can ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum PermissionRequest {
+    ScreenRecording,
+    Accessibility,
+    InputMonitoring,
 }
 
 /// Arguments for the `uninstall` subcommand.
@@ -740,11 +761,62 @@ mod tests {
     }
 
     #[test]
+    fn codemode_call_accepts_explicit_input_sources_and_keeps_default_arguments() {
+        for source in ["-", "@arguments with spaces.json"] {
+            let cli = Cli::parse_from([
+                "opengeni-agent",
+                "codemode",
+                "call",
+                "demo.write",
+                source,
+                "--full",
+            ]);
+            let Some(Command::Codemode(CodemodeArgs {
+                action: CodemodeAction::Call(args),
+            })) = cli.command
+            else {
+                panic!("codemode call")
+            };
+            assert_eq!(args.arguments, source);
+            assert!(args.full);
+        }
+        let cli = Cli::parse_from(["opengeni-agent", "codemode", "call", "demo.write"]);
+        let Some(Command::Codemode(CodemodeArgs {
+            action: CodemodeAction::Call(args),
+        })) = cli.command
+        else {
+            panic!("codemode call")
+        };
+        assert_eq!(args.arguments, "{}");
+    }
+
+    #[test]
     fn uninstall_parses_purge() {
         let cli = Cli::parse_from(["opengeni-agent", "uninstall", "--purge"]);
         match cli.command {
             Some(Command::Uninstall(args)) => assert!(args.purge),
             other => panic!("expected uninstall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn permissions_reads_or_requests_one_permission() {
+        let cli = Cli::parse_from(["opengeni-agent", "permissions"]);
+        match cli.command {
+            Some(Command::Permissions(args)) => assert_eq!(args.request, None),
+            other => panic!("expected permissions, got {other:?}"),
+        }
+        let cli = Cli::parse_from([
+            "opengeni-agent",
+            "permissions",
+            "--request",
+            "input-monitoring",
+        ]);
+        match cli.command {
+            Some(Command::Permissions(args)) => {
+                assert_eq!(args.request, Some(PermissionRequest::InputMonitoring));
+            }
+            other => panic!("expected permissions, got {other:?}"),
         }
     }
 

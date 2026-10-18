@@ -7,12 +7,14 @@ import {
 } from "@opengeni/contracts";
 import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import {
-  AttachedBrowserBridge,
-  AttachedBrowserDevice,
+  AttachedBrowserDeviceListResponse,
   AuthRun,
   AuthRunListResponse,
   AuthRunMutationResponse,
   BrowserAction,
+  BrowserLocator,
+  INTERACTION_MAX_ACTIONS_PER_BATCH,
+  INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND,
   BrowserActionBatch,
   BrowserActionReceipt,
   BrowserClipboard,
@@ -29,6 +31,13 @@ import {
   BrowserIdentityListResponse,
   BrowserIdentityMutationResponse,
   BrowserObservation,
+  BrowserActionResolvedTarget,
+  BrowserDialog,
+  InteractionDiagnosticSummary,
+  InteractionError,
+  InteractionOperationState,
+  InteractionRect,
+  RetainedArtifactReferenceSchema,
   InteractionSemanticNode,
   BrowserRevisionListResponse,
   BrowserSession,
@@ -84,8 +93,33 @@ import {
   type InteractionTransport,
 } from "@opengeni/sdk";
 import { z } from "zod";
-import { browserActionInputJsonSchema } from "./browser-action-json-schema";
+import {
+  BrowserTargetResolutionError,
+  CurrentBrowserTab,
+  expandRefShorthand,
+  type ResolvedBrowserSession,
+  type ResolvedBrowserTarget,
+} from "./browser-current-tab";
+import {
+  describeInvalidToolArguments,
+  interactionToolInputJsonSchema,
+  browserActModelInputSchema,
+} from "./interaction-tool-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
+import { compactComputerImage, compactComputerImageContent } from "./computer-image-encoding";
+import {
+  browserActionText,
+  browserObservationText,
+  browserOpenText,
+  browserReadText,
+  browserTabsText,
+} from "./browser-model-text";
+import {
+  computerActionText,
+  computerObservationText,
+  computerOpenText,
+  computerTargetsText,
+} from "./computer-model-text";
 
 export const INTERACTION_ATTEMPT_TOOL_NAMES = FIRST_PARTY_IN_PROCESS_TOOL_NAMES;
 
@@ -101,6 +135,10 @@ class InteractionExecutionResult<T> {
 const BROWSER_AGENT_MAX_NODES = 60;
 const BROWSER_AGENT_MAX_NODE_BYTES = 12_000;
 const BROWSER_AGENT_MAX_FIELD_LENGTH = 180;
+const BROWSER_AGENT_MAX_OMITTED_REGIONS = 4;
+/** The focused or acted-on element is shown with its nearest enclosing group
+ * (a toolbar, form section, row or card) up to this many elements. */
+const BROWSER_AGENT_FOCUS_GROUP_MAX_NODES = 24;
 const BROWSER_READ_MAX_NODES = 80;
 // A base64 image is journaled inside a 16 MiB Code Mode result. Leave room
 // for JSON framing, metadata, and other content instead of failing after capture.
@@ -119,35 +157,101 @@ const BrowserAgentNode = z
         z.object({ redacted: z.literal(true), reason: z.string().max(32) }).strict(),
       ])
       .optional(),
-    states: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).max(6),
-    actions: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).max(6),
+    // Omitted when empty: most nodes have no states or actions, and repeating
+    // empty arrays on every node only costs the model tokens.
+    states: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).min(1).max(6).optional(),
+    actions: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).min(1).max(6).optional(),
   })
   .strict();
+/** The model-facing view keeps only what a next call can use: what is on the
+ * page, the refs to act on, the fences an action may pass, and explicit budget
+ * omissions. Zero counts and constant limits are left out. */
 const BrowserAgentView = z
   .object({
-    kind: z.literal("compact"),
     sourceKind: z.enum(["snapshot", "diff", "none"]),
     nodes: z.array(BrowserAgentNode).max(BROWSER_AGENT_MAX_NODES),
-    sourceNodeCount: z.number().int().nonnegative(),
-    omittedNodeCount: z.number().int().nonnegative(),
-    removedRefCount: z.number().int().nonnegative(),
-    clippedFieldCount: z.number().int().nonnegative(),
-    maxNodes: z.number().int().positive(),
-    maxNodeBytes: z.number().int().positive(),
+    omittedNodeCount: z.number().int().positive().optional(),
+    /** Where the left-out elements are, largest first, so the model knows
+     * which part of the page a fuller read would add. */
+    omittedRegions: z
+      .array(
+        z
+          .object({
+            role: z.string().max(256),
+            name: z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH).optional(),
+            count: z.number().int().positive(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(BROWSER_AGENT_MAX_OMITTED_REGIONS)
+      .optional(),
+    removedRefCount: z.number().int().positive().optional(),
+    clippedFieldCount: z.number().int().positive().optional(),
   })
   .strict();
-const CompactBrowserObservation = BrowserObservation.safeExtend({
-  semantic: z.null(),
-  agentView: BrowserAgentView,
-});
+/** A tab as the model needs it: identity, page, selection and the generations
+ * an action or human request may pass as fences. Timestamps stay out. */
+const AgentBrowserTarget = z
+  .object({
+    id: z.string().max(512),
+    kind: z.enum(["page", "popup", "background_page", "worker"]),
+    title: z.string().max(4_096),
+    url: z.string().max(16_384),
+    selected: z.boolean(),
+    controllerGeneration: z.string().max(256),
+    targetGeneration: z.string().max(256),
+    documentGeneration: z.string().max(256).nullable(),
+  })
+  .strict();
+const CompactBrowserObservation = z
+  .object({
+    target: AgentBrowserTarget,
+    frameId: z.string().max(256).optional(),
+    viewport: z
+      .object({
+        width: z.number().int().positive(),
+        height: z.number().int().positive(),
+        deviceScaleFactor: z.number().positive().optional(),
+        maxTouchPoints: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    focusedRef: z.string().max(512).optional(),
+    changedRegions: z.array(InteractionRect).min(1).optional(),
+    diagnostics: InteractionDiagnosticSummary.optional(),
+    dialog: BrowserDialog.optional(),
+    screenshot: RetainedArtifactReferenceSchema.optional(),
+    agentView: BrowserAgentView,
+  })
+  .strict();
 const BrowserAgentObservation = z.union([BrowserObservation, CompactBrowserObservation]);
-const BrowserAgentActionReceipt = BrowserActionReceipt.safeExtend({
-  observation: BrowserAgentObservation.nullable(),
-});
+const CompactBrowserActionReceipt = z
+  .object({
+    targetId: z.string().max(512),
+    state: InteractionOperationState,
+    error: InteractionError.optional(),
+    targets: z.array(BrowserActionResolvedTarget).optional(),
+    observation: CompactBrowserObservation.optional(),
+  })
+  .strict();
+const BrowserAgentActionReceipt = z.union([BrowserActionReceipt, CompactBrowserActionReceipt]);
+/** Browser tools default to the browser and tab the agent used last. */
+const CurrentBrowserSessionId = z
+  .string()
+  .uuid()
+  .optional()
+  .describe("Omit to use the browser you used last.");
+const CurrentBrowserTargetId = z
+  .string()
+  .min(1)
+  .max(512)
+  .optional()
+  .describe("Omit to use the tab you used last.");
 const BrowserScreenshotInput = z
   .object({
-    browserSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    browserSessionId: CurrentBrowserSessionId,
+    targetId: CurrentBrowserTargetId,
     fullPage: z.boolean().optional(),
     quality: z.number().int().min(1).max(100).optional(),
   })
@@ -172,8 +276,8 @@ const BrowserScreenshotOutput = z
   .strict();
 const BrowserReadInput = z
   .object({
-    browserSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    browserSessionId: CurrentBrowserSessionId,
+    targetId: CurrentBrowserTargetId,
     mode: z.enum(["matches", "count", "subtree", "dom"]).optional(),
     dom: z
       .discriminatedUnion("kind", [
@@ -283,6 +387,7 @@ type FlatBrowserNode = {
   depth: number;
   index: number;
   withinScope: boolean;
+  parentName?: string;
 };
 
 const TOOL_PERMISSION = {
@@ -318,6 +423,28 @@ const DiscoveryInput = z
     includeDisconnectedDevices: z.boolean().optional(),
   })
   .strict();
+/** An attached Chrome profile as the model needs it to choose one: identity,
+ * labels, state and any capability it lacks. Enrollment, generation and
+ * timestamp bookkeeping stay out. */
+const AgentAttachedBrowser = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string().max(200),
+    profileLabel: z.string().max(200).optional(),
+    browserName: z.string().max(100),
+    platform: z.enum(["linux", "macos", "windows"]),
+    state: z.enum(["connected", "disconnected"]),
+    tabCount: z.number().int().nonnegative(),
+    unsupported: z.array(z.string().max(64)).min(1).optional(),
+  })
+  .strict();
+/** An online machine that can host the extension but has no attached profile. */
+const AgentAttachedBrowserBridge = z
+  .object({
+    enrollmentId: z.string().uuid(),
+    connectedProfileCount: z.number().int().nonnegative(),
+  })
+  .strict();
 const DiscoveryOutput = z
   .object({
     browserRevision: z.number().int().nonnegative(),
@@ -327,8 +454,23 @@ const DiscoveryOutput = z
     browsers: z.array(BrowserSession),
     computers: z.array(ComputerSession),
     identities: z.array(BrowserIdentity),
-    attachedBrowserBridges: z.array(AttachedBrowserBridge),
-    attachedBrowsers: z.array(AttachedBrowserDevice),
+    attachedBrowserBridges: z.array(AgentAttachedBrowserBridge),
+    attachedBrowsers: z.array(AgentAttachedBrowser),
+  })
+  .strict();
+
+/** browser_open may name the person's connected Chrome without a profile id;
+ * the tool then resolves it (see chooseAttachedProfile). */
+const BrowserOpenPlacement = z.union([
+  InteractionPlacement,
+  z.object({ kind: z.literal("attached_device") }).strict(),
+]);
+/** The Chrome profile browser_open chose when the request named none. */
+const AgentAttachedProfile = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string(),
+    profileLabel: z.string().optional(),
   })
   .strict();
 
@@ -340,11 +482,12 @@ const BrowserOpenInput = z
     initialUrl: z.string().url().max(16_384).optional(),
     headless: z.boolean().optional(),
     storageMode: BrowserStorageMode.optional(),
-    placement: InteractionPlacement.optional(),
+    placement: BrowserOpenPlacement.optional(),
     identityId: z.string().uuid().optional(),
     baseRevisionId: z.string().uuid().optional(),
     networkRouteId: z.string().uuid().optional(),
     linkedComputerSessionId: z.string().uuid().optional(),
+    includeScreenshot: z.boolean().optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -384,61 +527,120 @@ const BrowserOpenInput = z
     }
   });
 const BrowserOpenOutput = z
-  .object({ session: BrowserSession, targets: z.array(BrowserTarget) })
+  .object({
+    session: BrowserSession,
+    targets: z.array(AgentBrowserTarget),
+    otherTabCount: z.number().int().nonnegative().optional(),
+    observation: CompactBrowserObservation.optional(),
+    attachedProfile: AgentAttachedProfile.optional(),
+    otherAttachedProfiles: z.array(AgentAttachedProfile).optional(),
+  })
   .strict();
 
 const BrowserTabsInput = z.discriminatedUnion("operation", [
-  z.object({ operation: z.literal("list"), browserSessionId: z.string().uuid() }).strict(),
+  z.object({ operation: z.literal("list"), browserSessionId: CurrentBrowserSessionId }).strict(),
   z
     .object({
       operation: z.literal("open"),
-      browserSessionId: z.string().uuid(),
+      browserSessionId: CurrentBrowserSessionId,
       url: z.string().url().max(16_384).optional(),
     })
     .strict(),
   z
     .object({
       operation: z.literal("select"),
-      browserSessionId: z.string().uuid(),
+      browserSessionId: CurrentBrowserSessionId,
       targetId: z.string().min(1).max(512),
     })
     .strict(),
   z
     .object({
       operation: z.literal("close"),
-      browserSessionId: z.string().uuid(),
+      browserSessionId: CurrentBrowserSessionId,
       targetId: z.string().min(1).max(512),
     })
     .strict(),
 ]);
-const BrowserTabsOutput = BrowserTargetListResponse.safeExtend({
-  mutationObservation: CompactBrowserObservation.optional(),
-});
+const BrowserTabsOutput = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    targets: z.array(AgentBrowserTarget),
+    mutationObservation: CompactBrowserObservation.optional(),
+  })
+  .strict();
 
 const BrowserObserveInput = z
   .object({
-    browserSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    browserSessionId: CurrentBrowserSessionId,
+    targetId: CurrentBrowserTargetId,
     view: z.enum(["compact", "full"]).optional(),
     includeScreenshot: z.boolean().optional(),
   })
   .strict();
+/**
+ * An upload that names files in this session's workspace instead of workspace
+ * File IDs. The tool publishes each path exactly as sandbox_file_publish does
+ * and dispatches the ordinary upload with the resulting IDs, so a file the
+ * agent just wrote needs no separate publish call.
+ */
+const BrowserUploadPathsAction = z
+  .object({
+    type: z.literal("upload"),
+    locator: BrowserLocator,
+    paths: z
+      .array(z.string().min(1).max(4_096))
+      .min(1)
+      .max(INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND),
+  })
+  .strict();
+const AgentBrowserAction = z.union([...BrowserAction.options, BrowserUploadPathsAction]);
+type AgentBrowserAction = z.infer<typeof AgentBrowserAction>;
+const AgentBrowserActionBatch = z
+  .object({
+    type: z.literal("batch"),
+    actions: z.array(AgentBrowserAction).min(1).max(INTERACTION_MAX_ACTIONS_PER_BATCH),
+    fenceEachAction: z.literal(true).optional(),
+  })
+  .strict();
+type AgentBrowserActionBatch = z.infer<typeof AgentBrowserActionBatch>;
+
+/** Publish every upload path once and return the action with File IDs only. */
+async function withPublishedUploadPaths(
+  action: AgentBrowserAction | AgentBrowserActionBatch,
+  publish: (path: string) => Promise<string>,
+): Promise<BrowserAction | BrowserActionBatch> {
+  const resolve = async (item: AgentBrowserAction): Promise<BrowserAction> => {
+    if (item.type !== "upload" || !("paths" in item)) return item as BrowserAction;
+    const workspaceFileIds: string[] = [];
+    for (const path of item.paths) workspaceFileIds.push(await publish(path));
+    return { type: "upload", locator: item.locator, workspaceFileIds };
+  };
+  if (action.type !== "batch") return await resolve(action);
+  const actions: BrowserAction[] = [];
+  for (const item of action.actions) actions.push(await resolve(item));
+  return BrowserActionBatch.parse({ ...action, actions });
+}
+
 const BrowserActInput = z
   .object({
-    browserSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    browserSessionId: CurrentBrowserSessionId,
+    targetId: CurrentBrowserTargetId,
     expectedTargetGeneration: z.string().min(1).max(256).optional(),
     expectedDocumentGeneration: z.string().min(1).max(256).nullable().optional(),
     expectedFrameId: z.string().min(1).max(256).nullable().optional(),
     view: z.enum(["compact", "full", "none"]).optional(),
-    action: z.union([BrowserAction, BrowserActionBatch]),
+    includeScreenshot: z.boolean().optional(),
+    action: z.preprocess(
+      expandRefShorthand,
+      z.union([AgentBrowserAction, AgentBrowserActionBatch]),
+    ),
   })
   .strict();
 const BrowserClipboardInput = z.object({ browserSessionId: z.string().uuid() }).strict();
 const BrowserDebugInput = z
   .object({
-    browserSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    browserSessionId: CurrentBrowserSessionId,
+    targetId: CurrentBrowserTargetId,
     kinds: z
       .array(z.enum(["console", "page_error", "failed_request", "download"]))
       .max(4)
@@ -608,7 +810,8 @@ const ComputerObserveInput = z
 const ComputerObserveOutput = ComputerObservation.extend({
   capturedFrame: z
     .object({ width: z.number().int().positive(), height: z.number().int().positive() })
-    .strict(),
+    .strict()
+    .optional(),
 }).strict();
 const ComputerClipboardInput = z.object({ computerSessionId: z.string().uuid() }).strict();
 const ComputerActInput = z
@@ -651,7 +854,9 @@ const BrowserDownloadSaveInput = BrowserDownloadSaveRequest.omit({ operationId: 
   .strict();
 
 export type CreateInteractionAttemptToolsInput = {
-  transport: InteractionTransport;
+  /** The session's API client. Publishing is optional so narrower transports
+   * still work; an upload by path then reports that it is unavailable. */
+  transport: InteractionTransport & Partial<Pick<OpenGeniClient, "publishSandboxFileArtifact">>;
   workspaceId: string;
   sessionId: string;
   selectedTools?: readonly FirstPartyMcpToolName[];
@@ -665,16 +870,88 @@ export function createInteractionAttemptToolDefinitions(
   const selected = new Set(input.selectedTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS);
   const permissions = input.permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
   const definitions: AttemptToolDefinition[] = [];
+  // A retried browser_act (same operation) must dispatch the same File IDs, so
+  // each operation publishes a given path at most once.
+  const publishedUploads = new Map<string, Promise<string>>();
+  const publishUploadPath = (operationId: string, path: string): Promise<string> => {
+    const key = `${operationId}\u0000${path}`;
+    let published = publishedUploads.get(key);
+    if (!published) {
+      const transport = input.transport;
+      if (!transport.publishSandboxFileArtifact) {
+        throw new Error(
+          "upload by path is unavailable here; publish the file with sandbox_file_publish and pass its artifactId in workspaceFileIds",
+        );
+      }
+      published = transport
+        .publishSandboxFileArtifact(input.workspaceId, input.sessionId, { path })
+        .then((receipt) => receipt.artifact.artifactId);
+      published.catch(() => publishedUploads.delete(key));
+      publishedUploads.set(key, published);
+    }
+    return published;
+  };
+  const currentTab = new CurrentBrowserTab({
+    listLiveSessions: async () =>
+      filterDiscoveredSessions(
+        (
+          await input.transport.listBrowserSessions(input.workspaceId, {
+            associatedSessionId: input.sessionId,
+            includeTerminal: false,
+          })
+        ).sessions,
+        input.sessionId,
+        "current_session",
+        false,
+      ),
+    listTargets: async (browserSessionId) =>
+      (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
+  });
+  /** Run one call on the requested or current tab and remember it on success. */
+  const onTab = async <T>(
+    value: { browserSessionId?: string | undefined; targetId?: string | undefined },
+    run: (tab: ResolvedBrowserTarget) => Promise<T>,
+  ): Promise<T> => {
+    const tab = await currentTab.target(value);
+    try {
+      const output = await run(tab);
+      currentTab.use(tab.browserSessionId, tab.targetId);
+      return output;
+    } catch (error) {
+      if (isGoneBrowserError(error)) currentTab.failed(tab);
+      throw error;
+    }
+  };
+  /** Run one call on the requested or current browser and remember it on success. */
+  const onBrowser = async <T>(
+    browserSessionId: string | undefined,
+    run: (browser: ResolvedBrowserSession) => Promise<T>,
+  ): Promise<T> => {
+    const browser = await currentTab.session(browserSessionId);
+    try {
+      const output = await run(browser);
+      currentTab.use(browser.browserSessionId);
+      return output;
+    } catch (error) {
+      if (isGoneBrowserError(error)) currentTab.failed(browser);
+      throw error;
+    }
+  };
   const add = <TInput extends z.ZodType, TOutput extends z.ZodType>(options: {
     name: InteractionAttemptToolName;
     codemodePath: readonly string[];
     title: string;
     description: string;
     input: TInput;
+    /** Adjusts the model's view of the input schema; validation is unchanged. */
+    modelInputSchema?: (schema: AttemptToolJsonSchema) => AttemptToolJsonSchema;
     output: TOutput;
     readOnly: boolean;
     idempotent: boolean;
     approval?: "none" | "human" | "policy";
+    /** The model's text view of a successful result. The complete typed value
+     * stays in structuredContent; without this the text is that value as JSON. */
+    modelText?: (output: z.output<TOutput>) => string;
     execute: (
       value: z.output<TInput>,
       context: AttemptToolExecutionContext,
@@ -692,10 +969,9 @@ export function createInteractionAttemptToolDefinitions(
       codemodePath: options.codemodePath,
       title: options.title,
       description: options.description,
-      inputSchema:
-        options.name === "browser_act"
-          ? browserActionInputJsonSchema(options.input)
-          : jsonSchema(options.input),
+      inputSchema: (options.modelInputSchema ?? ((schema) => schema))(
+        interactionToolInputJsonSchema(options.input),
+      ),
       outputSchema: jsonSchema(options.output),
       annotations: {
         title: options.title,
@@ -714,6 +990,7 @@ export function createInteractionAttemptToolDefinitions(
           context,
           options.execute,
           options.readOnly,
+          options.modelText,
         ),
     });
   };
@@ -722,7 +999,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "interaction_discover",
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
-    description: `Discover browsers and computers. For the user's existing/current/personal Chrome, use scope=attached_browsers before browser_open and select an actual attachedBrowsers device. This reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. If none exist, the person needs a Connected Machine first (post the Connected Machine card with capability_authorization_request api:connected-machine) and then the Opengeni Browser Chrome extension: ${OPENGENI_BROWSER_EXTENSION_URL}. Leave includeTerminal=false unless ended history is specifically required.`,
+    description: `Discover browsers and computers. To use the user's existing/current/personal Chrome, call browser_open with placement={kind:'attached_device'} directly; use scope=attached_browsers only to pick a specific Chrome profile or to see why none is connected. That scope reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. If none exist, the person needs a Connected Machine first (post the Connected Machine card with capability_authorization_request api:connected-machine) and then the Opengeni Browser Chrome extension: ${OPENGENI_BROWSER_EXTENSION_URL}. Leave includeTerminal=false unless ended history is specifically required.`,
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
@@ -743,13 +1020,18 @@ export function createInteractionAttemptToolDefinitions(
           browsers: [],
           computers: [],
           identities: [],
-          attachedBrowserBridges: attached.bridges,
-          attachedBrowsers: attached.devices,
+          ...agentAttachedInventory(attached),
         };
       }
+      // Narrow in SQL: a workspace can retain thousands of ended sessions, and
+      // current_session discovery only ever returns this session's own.
+      const listFilter = {
+        ...(scope === "current_session" ? { associatedSessionId: input.sessionId } : {}),
+        ...((value.includeTerminal ?? false) ? {} : { includeTerminal: false }),
+      };
       const [browsers, computers, identities, attached] = await Promise.all([
-        input.transport.listBrowserSessions(input.workspaceId),
-        input.transport.listComputerSessions(input.workspaceId),
+        input.transport.listBrowserSessions(input.workspaceId, listFilter),
+        input.transport.listComputerSessions(input.workspaceId, listFilter),
         input.transport.listBrowserIdentities(input.workspaceId, {
           includeArchived: value.includeArchivedIdentities ?? false,
         }),
@@ -775,8 +1057,9 @@ export function createInteractionAttemptToolDefinitions(
           value.includeTerminal ?? false,
         ),
         identities: scope === "workspace" ? identities.identities : [],
-        attachedBrowserBridges: scope === "workspace" ? attached.bridges : [],
-        attachedBrowsers: scope === "workspace" ? attached.devices : [],
+        ...(scope === "workspace"
+          ? agentAttachedInventory(attached)
+          : { attachedBrowserBridges: [], attachedBrowsers: [] }),
       };
     },
   });
@@ -785,13 +1068,53 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
     idempotent: true,
-    execute: async (value, context) =>
-      await openBrowser(input.transport, input.workspaceId, input.sessionId, value, context),
+    modelText: browserOpenText,
+    execute: async (value, context) => {
+      const opened = await openBrowser(
+        input.transport,
+        input.workspaceId,
+        input.sessionId,
+        value,
+        context,
+      );
+      const openedTargetId =
+        opened.observation?.target.id ??
+        opened.targets.find((target) => target.selected)?.id ??
+        null;
+      currentTab.use(opened.session.id, openedTargetId);
+      if (!value.includeScreenshot) return opened;
+      // The browser is already open. A failed capture must not turn its result
+      // into an error the model could answer by opening another browser.
+      if (!openedTargetId)
+        return new InteractionExecutionResult(opened, [
+          {
+            type: "text" as const,
+            text: "The browser opened, but it has no tab to capture a screenshot of.",
+          },
+        ]);
+      try {
+        const frame = await input.transport.captureBrowserTarget(
+          input.workspaceId,
+          opened.session.id,
+          openedTargetId,
+        );
+        return new InteractionExecutionResult(opened, [
+          browserToolImageContent(frame.data, frame.mediaType),
+        ]);
+      } catch (error) {
+        return new InteractionExecutionResult(opened, [
+          {
+            type: "text" as const,
+            text: `The browser opened, but its screenshot could not be captured: ${screenshotFailureReason(error)}`,
+          },
+        ]);
+      }
+    },
   });
 
   add({
@@ -799,43 +1122,46 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "tabs"],
     title: "Manage browser tabs",
     description:
-      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation. Open/select also return mutationObservation, the operation's compact page snapshot. Reuse its refs and generations for immediate actions; refresh after later page changes.",
+      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation. Open/select also return the page outline. Act on its elements directly; observe again after later page changes.",
     input: BrowserTabsInput,
     output: BrowserTabsOutput,
     readOnly: false,
     idempotent: false,
-    execute: async (value) => {
-      let mutationObservation: z.infer<typeof BrowserObservation> | undefined;
-      if (value.operation === "open") {
-        mutationObservation = await input.transport.openBrowserTarget(
-          input.workspaceId,
-          value.browserSessionId,
-          { ...(value.url ? { url: value.url } : {}) },
-        );
-      } else if (value.operation === "select") {
-        mutationObservation = await input.transport.selectBrowserTarget(
-          input.workspaceId,
-          value.browserSessionId,
-          value.targetId,
-        );
-      } else if (value.operation === "close") {
-        return await input.transport.closeBrowserTarget(
-          input.workspaceId,
-          value.browserSessionId,
-          value.targetId,
-        );
-      }
-      const tabs = await input.transport.listBrowserTargets(
-        input.workspaceId,
-        value.browserSessionId,
-      );
-      return mutationObservation
-        ? {
-            ...tabs,
+    modelText: browserTabsText,
+    execute: async (value) =>
+      await onBrowser(value.browserSessionId, async ({ browserSessionId }) => {
+        let mutationObservation: z.infer<typeof BrowserObservation> | undefined;
+        if (value.operation === "open") {
+          mutationObservation = await input.transport.openBrowserTarget(
+            input.workspaceId,
+            browserSessionId,
+            { ...(value.url ? { url: value.url } : {}) },
+          );
+        } else if (value.operation === "select") {
+          mutationObservation = await input.transport.selectBrowserTarget(
+            input.workspaceId,
+            browserSessionId,
+            value.targetId,
+          );
+        } else if (value.operation === "close") {
+          const closed = await input.transport.closeBrowserTarget(
+            input.workspaceId,
+            browserSessionId,
+            value.targetId,
+          );
+          currentTab.forgetTarget(browserSessionId, value.targetId);
+          return agentTargetList(closed);
+        }
+        const tabs = await input.transport.listBrowserTargets(input.workspaceId, browserSessionId);
+        if (mutationObservation) {
+          currentTab.use(browserSessionId, mutationObservation.target.id);
+          return {
+            ...agentTargetList(tabs),
             mutationObservation: projectBrowserObservation(mutationObservation, "compact"),
-          }
-        : tabs;
-    },
+          };
+        }
+        return agentTargetList(tabs);
+      }),
   });
 
   add({
@@ -843,56 +1169,54 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "observe"],
     title: "Observe browser tab",
     description:
-      "Read one tab's URL, title, viewport, causal generations, and a bounded accessibility view. Compact view is the default: agentView lists selected refs and reports omitted nodes and clipped fields; it is not a complete page tree. Set view=full for the complete accessibility snapshot. Set includeScreenshot=true to add a current still image as tool image content; browser_screenshot is faster when only pixels are needed.",
+      "Read one tab's URL, title, viewport and accessibility outline: one line per element, role \"name\" [ref] value and states, indented by nesting. Locate an element by role and name, or by ref ({kind:'ref',ref}); refs are listed on controls and other actionable elements, not on text and layout lines. The default view is selective and says how many elements it left out; it is not a complete page tree. Set view=full for every element with its ref. Set includeScreenshot=true to add a current still image as tool image content; browser_screenshot is faster when only pixels are needed.",
     input: BrowserObserveInput,
     output: BrowserAgentObservation,
     readOnly: true,
     idempotent: true,
-    execute: async (value) => {
-      const observationRequest = input.transport.observeBrowserTarget(
-        input.workspaceId,
-        value.browserSessionId,
-        value.targetId,
-      );
-      if (!value.includeScreenshot)
-        return projectBrowserObservation(await observationRequest, value.view ?? "compact");
-      // These are independent reads. Settle both before returning an error so
-      // the tool never leaves an outstanding capture behind after a failed read.
-      const [observed, captured] = await Promise.allSettled([
-        observationRequest,
-        Promise.resolve().then(() =>
-          input.transport.captureBrowserTarget(
-            input.workspaceId,
-            value.browserSessionId,
-            value.targetId,
-          ),
-        ),
-      ]);
-      if (observed.status === "rejected") throw observed.reason;
-      if (captured.status === "rejected") throw captured.reason;
-      let observation = observed.value;
-      const frame = captured.value;
-      if (
-        observation.target.targetGeneration !== frame.targetGeneration ||
-        observation.target.documentGeneration !== frame.documentGeneration
-      ) {
-        observation = await input.transport.observeBrowserTarget(
+    modelText: agentObservationText,
+    execute: async (value) =>
+      await onTab(value, async ({ browserSessionId, targetId }) => {
+        const observationRequest = input.transport.observeBrowserTarget(
           input.workspaceId,
-          value.browserSessionId,
-          value.targetId,
+          browserSessionId,
+          targetId,
         );
-      }
-      if (
-        observation.target.targetGeneration !== frame.targetGeneration ||
-        observation.target.documentGeneration !== frame.documentGeneration
-      ) {
-        throw new Error("browser target changed while its visual observation was captured");
-      }
-      return new InteractionExecutionResult(
-        projectBrowserObservation(observation, value.view ?? "compact"),
-        [browserToolImageContent(frame.data, frame.mediaType)],
-      );
-    },
+        if (!value.includeScreenshot)
+          return projectBrowserObservation(await observationRequest, value.view ?? "compact");
+        // These are independent reads. Settle both before returning an error so
+        // the tool never leaves an outstanding capture behind after a failed read.
+        const [observed, captured] = await Promise.allSettled([
+          observationRequest,
+          Promise.resolve().then(() =>
+            input.transport.captureBrowserTarget(input.workspaceId, browserSessionId, targetId),
+          ),
+        ]);
+        if (observed.status === "rejected") throw observed.reason;
+        if (captured.status === "rejected") throw captured.reason;
+        let observation = observed.value;
+        const frame = captured.value;
+        if (
+          observation.target.targetGeneration !== frame.targetGeneration ||
+          observation.target.documentGeneration !== frame.documentGeneration
+        ) {
+          observation = await input.transport.observeBrowserTarget(
+            input.workspaceId,
+            browserSessionId,
+            targetId,
+          );
+        }
+        if (
+          observation.target.targetGeneration !== frame.targetGeneration ||
+          observation.target.documentGeneration !== frame.documentGeneration
+        ) {
+          throw new Error("browser target changed while its visual observation was captured");
+        }
+        return new InteractionExecutionResult(
+          projectBrowserObservation(observation, value.view ?? "compact"),
+          [browserToolImageContent(frame.data, frame.mediaType)],
+        );
+      }),
   });
 
   add({
@@ -905,70 +1229,69 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserReadToolOutput,
     readOnly: true,
     idempotent: true,
-    execute: async (value) => {
-      if (value.mode === "dom") {
-        const state =
-          value.expectedTargetGeneration !== undefined &&
-          value.expectedDocumentGeneration !== undefined &&
-          value.expectedFrameId !== undefined
-            ? null
-            : await input.transport.getBrowserTargetState(
-                input.workspaceId,
-                value.browserSessionId,
-                value.targetId,
-              );
-        const fences = {
-          expectedTargetGeneration: value.expectedTargetGeneration ?? state!.targetGeneration,
-          expectedDocumentGeneration:
-            value.expectedDocumentGeneration === undefined
-              ? state!.documentGeneration
-              : value.expectedDocumentGeneration,
-          expectedFrameId:
-            value.expectedFrameId === undefined ? state!.frameId : value.expectedFrameId,
-        };
-        const documentGeneration = fences.expectedDocumentGeneration;
-        const frameId = fences.expectedFrameId;
-        if (documentGeneration === null || frameId === null) {
-          throw new OpenGeniApiError(409, "browser target has no inspectable document", {
-            code: "document_unavailable",
-            retryable: true,
-          });
+    modelText: (output) =>
+      output.source === "accessibility" ? browserReadText(output) : JSON.stringify(output),
+    execute: async (value) =>
+      await onTab(value, async ({ browserSessionId, targetId }) => {
+        if (value.mode === "dom") {
+          const state =
+            value.expectedTargetGeneration !== undefined &&
+            value.expectedDocumentGeneration !== undefined &&
+            value.expectedFrameId !== undefined
+              ? null
+              : await input.transport.getBrowserTargetState(
+                  input.workspaceId,
+                  browserSessionId,
+                  targetId,
+                );
+          const fences = {
+            expectedTargetGeneration: value.expectedTargetGeneration ?? state!.targetGeneration,
+            expectedDocumentGeneration:
+              value.expectedDocumentGeneration === undefined
+                ? state!.documentGeneration
+                : value.expectedDocumentGeneration,
+            expectedFrameId:
+              value.expectedFrameId === undefined ? state!.frameId : value.expectedFrameId,
+          };
+          const documentGeneration = fences.expectedDocumentGeneration;
+          const frameId = fences.expectedFrameId;
+          if (documentGeneration === null || frameId === null) {
+            throw new OpenGeniApiError(409, "browser target has no inspectable document", {
+              code: "document_unavailable",
+              retryable: true,
+            });
+          }
+          const inspectedFences = {
+            expectedTargetGeneration: fences.expectedTargetGeneration,
+            expectedDocumentGeneration: documentGeneration,
+            expectedFrameId: frameId,
+          };
+          const dom = value.dom!;
+          const request =
+            dom.kind === "element"
+              ? {
+                  ...inspectedFences,
+                  kind: "element" as const,
+                  locator: dom.locator,
+                  ...(dom.attributes ? { attributes: dom.attributes } : {}),
+                  maxChars: dom.maxChars ?? 4_096,
+                }
+              : { ...inspectedFences, kind: "count" as const, selector: dom.selector };
+          return {
+            ...(await input.transport.readBrowserDom(
+              input.workspaceId,
+              browserSessionId,
+              targetId,
+              request,
+            )),
+            source: "dom" as const,
+          };
         }
-        const inspectedFences = {
-          expectedTargetGeneration: fences.expectedTargetGeneration,
-          expectedDocumentGeneration: documentGeneration,
-          expectedFrameId: frameId,
-        };
-        const dom = value.dom!;
-        const request =
-          dom.kind === "element"
-            ? {
-                ...inspectedFences,
-                kind: "element" as const,
-                locator: dom.locator,
-                ...(dom.attributes ? { attributes: dom.attributes } : {}),
-                maxChars: dom.maxChars ?? 4_096,
-              }
-            : { ...inspectedFences, kind: "count" as const, selector: dom.selector };
-        return {
-          ...(await input.transport.readBrowserDom(
-            input.workspaceId,
-            value.browserSessionId,
-            value.targetId,
-            request,
-          )),
-          source: "dom" as const,
-        };
-      }
-      return readBrowserObservation(
-        await input.transport.observeBrowserTarget(
-          input.workspaceId,
-          value.browserSessionId,
-          value.targetId,
-        ),
-        value,
-      );
-    },
+        return readBrowserObservation(
+          await input.transport.observeBrowserTarget(input.workspaceId, browserSessionId, targetId),
+          value,
+        );
+      }),
   });
 
   add({
@@ -981,34 +1304,38 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserScreenshotOutput,
     readOnly: true,
     idempotent: true,
-    execute: async (value) => {
-      const frame = await input.transport.captureBrowserTarget(
-        input.workspaceId,
-        value.browserSessionId,
-        value.targetId,
-        {},
-        { fullPage: value.fullPage ?? false, ...(value.quality ? { quality: value.quality } : {}) },
-      );
-      return new InteractionExecutionResult(
-        {
-          kind: "browser_screenshot" as const,
-          browserSessionId: frame.browserSessionId,
-          targetId: frame.targetId,
-          frameId: frame.frameId,
-          targetGeneration: frame.targetGeneration,
-          documentGeneration: frame.documentGeneration,
-          mediaType: frame.mediaType,
-          width: frame.width,
-          height: frame.height,
-          deviceScaleFactor: frame.deviceScaleFactor,
-          scrollX: frame.scrollX,
-          scrollY: frame.scrollY,
-          capturedAt: frame.capturedAt,
-          fullPage: value.fullPage ?? false,
-        },
-        [browserToolImageContent(frame.data, frame.mediaType)],
-      );
-    },
+    execute: async (value) =>
+      await onTab(value, async ({ browserSessionId, targetId }) => {
+        const frame = await input.transport.captureBrowserTarget(
+          input.workspaceId,
+          browserSessionId,
+          targetId,
+          {},
+          {
+            fullPage: value.fullPage ?? false,
+            ...(value.quality ? { quality: value.quality } : {}),
+          },
+        );
+        return new InteractionExecutionResult(
+          {
+            kind: "browser_screenshot" as const,
+            browserSessionId: frame.browserSessionId,
+            targetId: frame.targetId,
+            frameId: frame.frameId,
+            targetGeneration: frame.targetGeneration,
+            documentGeneration: frame.documentGeneration,
+            mediaType: frame.mediaType,
+            width: frame.width,
+            height: frame.height,
+            deviceScaleFactor: frame.deviceScaleFactor,
+            scrollX: frame.scrollX,
+            scrollY: frame.scrollY,
+            capturedAt: frame.capturedAt,
+            fullPage: value.fullPage ?? false,
+          },
+          [browserToolImageContent(frame.data, frame.mediaType)],
+        );
+      }),
   });
 
   add({
@@ -1016,43 +1343,57 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from tab open/select or a prior action; browser_open returns only session/tab metadata, so observe when page content is needed. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; set view=full for every element, or view=none when no post-action outline is needed. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
+    modelInputSchema: browserActModelInputSchema,
     output: BrowserAgentActionReceipt,
     readOnly: false,
     idempotent: true,
-    execute: async (value, context) => {
-      const current =
-        value.expectedTargetGeneration !== undefined &&
-        value.expectedDocumentGeneration !== undefined &&
-        value.expectedFrameId !== undefined
-          ? null
-          : await input.transport.getBrowserTargetState(
-              input.workspaceId,
-              value.browserSessionId,
-              value.targetId,
-            );
-      const receipt = await input.transport.actInBrowser(
-        input.workspaceId,
-        value.browserSessionId,
-        {
+    modelText: agentActionText,
+    execute: async (value, context) =>
+      await onTab(value, async ({ browserSessionId, targetId }) => {
+        const action = await withPublishedUploadPaths(value.action, (path) =>
+          publishUploadPath(context.operationId, path),
+        );
+        // Omitted fences are resolved by the API from the live target in the same
+        // request, so acting on the current document costs one round trip.
+        const receipt = await input.transport.actInBrowser(input.workspaceId, browserSessionId, {
           operationId: context.operationId,
-          targetId: value.targetId,
-          expectedTargetGeneration: value.expectedTargetGeneration ?? current!.targetGeneration,
-          expectedDocumentGeneration:
-            value.expectedDocumentGeneration === undefined
-              ? current!.documentGeneration
-              : value.expectedDocumentGeneration,
-          expectedFrameId:
-            value.expectedFrameId === undefined ? current!.frameId : value.expectedFrameId,
+          targetId,
+          ...(value.expectedTargetGeneration === undefined
+            ? {}
+            : { expectedTargetGeneration: value.expectedTargetGeneration }),
+          ...(value.expectedDocumentGeneration === undefined
+            ? {}
+            : { expectedDocumentGeneration: value.expectedDocumentGeneration }),
+          ...(value.expectedFrameId === undefined
+            ? {}
+            : { expectedFrameId: value.expectedFrameId }),
           ...(value.view === "none" ? { observationMode: "none" as const } : {}),
-          action: value.action,
-        },
-      );
-      return receipt.observation && (value.view ?? "compact") === "compact"
-        ? { ...receipt, observation: projectBrowserObservation(receipt.observation, "compact") }
-        : receipt;
-    },
+          action,
+        });
+        const projected = value.view === "full" ? receipt : compactActionReceipt(receipt);
+        if (!value.includeScreenshot) return projected;
+        // The action has already run. A failed capture must not turn its
+        // receipt into an error the model could answer by replaying the action.
+        try {
+          const frame = await input.transport.captureBrowserTarget(
+            input.workspaceId,
+            browserSessionId,
+            targetId,
+          );
+          return new InteractionExecutionResult(projected, [
+            browserToolImageContent(frame.data, frame.mediaType),
+          ]);
+        } catch (error) {
+          return new InteractionExecutionResult(projected, [
+            {
+              type: "text" as const,
+              text: `The action ran, but its screenshot could not be captured: ${screenshotFailureReason(error)}`,
+            },
+          ]);
+        }
+      }),
   });
 
   add({
@@ -1080,15 +1421,19 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: true,
     idempotent: true,
     execute: async (value) =>
-      await input.transport.listBrowserDiagnostics(
-        input.workspaceId,
-        value.browserSessionId,
-        value.targetId,
-        {
-          ...(value.kinds ? { kinds: value.kinds } : {}),
-          ...(value.after !== undefined ? { after: value.after } : {}),
-          ...(value.limit !== undefined ? { limit: value.limit } : {}),
-        },
+      await onTab(
+        value,
+        async ({ browserSessionId, targetId }) =>
+          await input.transport.listBrowserDiagnostics(
+            input.workspaceId,
+            browserSessionId,
+            targetId,
+            {
+              ...(value.kinds ? { kinds: value.kinds } : {}),
+              ...(value.after !== undefined ? { after: value.after } : {}),
+              ...(value.limit !== undefined ? { limit: value.limit } : {}),
+            },
+          ),
       ),
   });
 
@@ -1121,13 +1466,11 @@ export function createInteractionAttemptToolDefinitions(
         input.workspaceId,
         value.browserSessionId,
       );
+      // Downloads kept from before a suspension keep the controller generation
+      // that fetched them, so only the browser binding must match.
       if (
         response.browserSessionId !== value.browserSessionId ||
-        response.downloads.some(
-          (download) =>
-            download.browserSessionId !== value.browserSessionId ||
-            download.controllerGeneration !== response.controllerGeneration,
-        )
+        response.downloads.some((download) => download.browserSessionId !== value.browserSessionId)
       ) {
         throw new Error("Browser downloads belong to another session binding");
       }
@@ -1409,6 +1752,7 @@ export function createInteractionAttemptToolDefinitions(
           request,
         );
       }
+      currentTab.forgetSession(value.browserSessionId);
       return await input.transport.endBrowserSession(
         input.workspaceId,
         value.browserSessionId,
@@ -1422,11 +1766,12 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "open"],
     title: "Open or reuse computer",
     description:
-      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. Returns exact apps/windows/screens.",
+      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. Returns exact apps/windows/screens. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
     input: ComputerOpenInput,
     output: ComputerOpenOutput,
     readOnly: false,
     idempotent: true,
+    modelText: computerOpenText,
     execute: async (value, context) =>
       await openComputer(input.transport, input.workspaceId, input.sessionId, value, context),
   });
@@ -1441,6 +1786,7 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerTargetListResponse,
     readOnly: true,
     idempotent: true,
+    modelText: (output) => computerTargetsText(output.targets),
     execute: async (value) =>
       await input.transport.listComputerTargets(input.workspaceId, value.computerSessionId),
   });
@@ -1450,22 +1796,36 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "observe"],
     title: "Observe app or window",
     description:
-      "Read one ComputerSession app/window/screen target, causal generation, semantic accessibility tree, focus, frame identity, and a bounded current screenshot without taking control. capturedFrame gives the screenshot's exact pixel dimensions; use those pixels for pointer coordinates, not the target's native bounds or an image-preview size.",
+      "Read one ComputerSession app/window/screen target, causal generation, semantic accessibility tree, focus, frame identity, and a bounded current screenshot without taking control. capturedFrame gives the screenshot's exact pixel dimensions; use those pixels for pointer coordinates, not the target's native bounds or an image-preview size. An app target may return only its accessibility tree; observe one of its windows or the screen for pixels.",
     input: ComputerObserveInput,
     output: ComputerObserveOutput,
     readOnly: true,
     idempotent: true,
+    modelText: (output) =>
+      output.capturedFrame
+        ? computerObservationText(output)
+        : `${computerObservationText(output)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`,
     execute: async (value) => {
+      // The tree and the pixels are independent reads of the same target;
+      // a generation mismatch below re-reads the tree once. An app target
+      // spans several windows, so most adapters cannot photograph it; its
+      // tree is then the whole observation instead of a failed read.
+      const capture = input.transport
+        .captureComputerTarget(input.workspaceId, value.computerSessionId, value.targetId)
+        .then(
+          (frame) => ({ frame, error: null as unknown }),
+          (error: unknown) => ({ frame: null, error }),
+        );
       let observation = await input.transport.observeComputerTarget(
         input.workspaceId,
         value.computerSessionId,
         value.targetId,
       );
-      const frame = await input.transport.captureComputerTarget(
-        input.workspaceId,
-        value.computerSessionId,
-        value.targetId,
-      );
+      const { frame, error } = await capture;
+      if (frame === null) {
+        if (observation.target.kind === "app") return observation;
+        throw error;
+      }
       if (observation.target.targetGeneration !== frame.targetGeneration) {
         observation = await input.transport.observeComputerTarget(
           input.workspaceId,
@@ -1476,6 +1836,7 @@ export function createInteractionAttemptToolDefinitions(
       if (observation.target.targetGeneration !== frame.targetGeneration) {
         throw new Error("computer target changed while its visual observation was captured");
       }
+      const image = await compactComputerImage(frame.data, frame.mediaType);
       return new InteractionExecutionResult(
         {
           ...observation,
@@ -1485,8 +1846,8 @@ export function createInteractionAttemptToolDefinitions(
         [
           {
             type: "image",
-            data: Buffer.from(frame.data).toString("base64"),
-            mimeType: frame.mediaType,
+            data: Buffer.from(image.data).toString("base64"),
+            mimeType: image.mimeType,
           },
         ],
       );
@@ -1517,6 +1878,7 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerActionReceipt,
     readOnly: false,
     idempotent: true,
+    modelText: computerActionText,
     execute: async (value, context) => {
       const current =
         value.expectedTargetGeneration !== undefined &&
@@ -1615,15 +1977,23 @@ export function createInteractionAttemptToolDefinitions(
         execute: async (raw, context) => {
           const { computerSessionId, ...args } = raw;
           const id = z.string().uuid().parse(computerSessionId);
-          const receipt = boundComputerNativeReceipt(
-            ComputerNativeReceipt.parse(
-              await input.transport.callNativeComputerTool!(input.workspaceId, id, {
-                operationId: context.operationId,
-                tool: tool.name,
-                arguments: args,
-              }),
-            ),
-          );
+          let response: unknown;
+          try {
+            response = await input.transport.callNativeComputerTool!(input.workspaceId, id, {
+              operationId: context.operationId,
+              tool: tool.name,
+              arguments: args,
+            });
+          } catch (error) {
+            // The API refused the call before dispatching it (a retired or
+            // ended ComputerSession, a missing permission, invalid
+            // arguments): a definite failure the model can act on, not an
+            // operation of unknown outcome or a failure worth retrying.
+            const refused = refusedNativeCallResult(error);
+            if (refused) return refused;
+            throw error;
+          }
+          const receipt = boundComputerNativeReceipt(ComputerNativeReceipt.parse(response));
           const evidence = {
             operationId: receipt.operationId,
             state: receipt.state,
@@ -1635,6 +2005,7 @@ export function createInteractionAttemptToolDefinitions(
                 receipt.error?.code ?? "driver_failed",
                 receipt.error?.message ?? "Native CUA result is unavailable",
               );
+          result.content = await compactComputerImageContent(result.content);
           if (receipt.state !== "completed") {
             result.isError = true;
             result.content.push({
@@ -1659,12 +2030,66 @@ export function createInteractionAttemptToolDefinitions(
   return definitions;
 }
 
-/** Preserve exact platform alternatives instead of flattening away constraints. */
-function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToolJsonSchema {
+/**
+ * One top-level object schema for every platform variant of a native CUA tool.
+ * Model providers require a plain object at the top level of a function schema
+ * (a top-level anyOf is rejected or ignored, so the model loses every argument
+ * type). Properties are the union across platforms; a property whose platform
+ * schemas differ in more than wording keeps those alternatives at property
+ * level. Only properties every platform requires stay required. The session's
+ * CUA worker still validates arguments against its own exact platform schema.
+ */
+export function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToolJsonSchema {
   const unique = [...new Map(variants.map((schema) => [JSON.stringify(schema), schema])).values()];
-  return (
-    unique.length === 1 ? unique[0] : { type: "object", anyOf: unique }
-  ) as AttemptToolJsonSchema;
+  if (unique.length === 1) return unique[0] as AttemptToolJsonSchema;
+  const properties: Record<string, unknown> = {};
+  const names = [...new Set(unique.flatMap((schema) => Object.keys(objectProperties(schema))))];
+  for (const name of names) {
+    const alternatives = unique
+      .map((schema) => objectProperties(schema)[name])
+      .filter((value): value is Record<string, unknown> => isJsonObject(value));
+    // The first platform's wording wins for constraint-identical schemas.
+    const distinct = new Map<string, Record<string, unknown>>();
+    for (const schema of alternatives) {
+      const key = JSON.stringify(withoutWording(schema));
+      if (!distinct.has(key)) distinct.set(key, schema);
+    }
+    const options = [...distinct.values()];
+    properties[name] = options.length === 1 ? options[0] : { anyOf: options };
+  }
+  const required = names.filter((name) =>
+    unique.every((schema) =>
+      Array.isArray(schema.required) ? schema.required.includes(name) : false,
+    ),
+  );
+  return {
+    type: "object",
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+    ...(unique.every((schema) => schema.additionalProperties === false)
+      ? { additionalProperties: false }
+      : {}),
+  } as AttemptToolJsonSchema;
+}
+
+function objectProperties(schema: Record<string, unknown>): Record<string, unknown> {
+  return isJsonObject(schema.properties) ? schema.properties : {};
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Compare platform property schemas by constraint, not by explanatory text. */
+function withoutWording(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutWording);
+  if (!isJsonObject(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "description" && key !== "title" && key !== "default")
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => [key, withoutWording(entry)]),
+  );
 }
 
 function filterDiscoveredSessions<
@@ -1764,13 +2189,31 @@ async function openBrowser(
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
   let created = false;
+  // A create that launched the browser in this call returns its tabs and the
+  // opened tab's observation, which replaces the two reads below.
+  let initialView: Awaited<ReturnType<InteractionTransport["createBrowserSession"]>>["initialView"];
+  let profileChoice: AttachedProfileChoice | undefined;
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
     if (value.storageMode && browserSessionStorageMode(session) !== value.storageMode)
       throw new Error("existing BrowserSession storage mode does not match request");
   } else {
-    const listed =
-      value.mode === "new" ? { sessions: [] } : await transport.listBrowserSessions(workspaceId);
+    // placement={kind:'attached_device'} without a deviceId means "the person's
+    // own Chrome". Read the profile inventory alongside the reuse lookup so the
+    // resolution adds no sequential round trip.
+    const resolveProfile =
+      value.placement?.kind === "attached_device" && !("deviceId" in value.placement);
+    const [listed, attachedInventory] = await Promise.all([
+      value.mode === "new"
+        ? { sessions: [] }
+        : transport.listBrowserSessions(workspaceId, {
+            associatedSessionId: sourceSessionId,
+            includeTerminal: false,
+          }),
+      resolveProfile
+        ? transport.listAttachedBrowsers(workspaceId, { includeDisconnected: false })
+        : null,
+    ]);
     // The agent-facing browser is human-capable by default. A headless session
     // is a deliberately narrower execution mode and must never be silently
     // reused for an omitted/default headed request: OAuth providers such as
@@ -1799,23 +2242,38 @@ async function openBrowser(
       session = reusable;
     } else {
       created = true;
-      session = (
-        await transport.createBrowserSession(workspaceId, {
-          operationId: context.operationId,
-          sessionId: sourceSessionId,
-          ...(value.name ? { name: value.name } : {}),
-          ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
-          headless: requestedHeadless,
-          ...(value.storageMode ? { storageMode: value.storageMode } : {}),
-          ...(value.placement ? { placement: value.placement } : {}),
-          ...(value.identityId ? { identityId: value.identityId } : {}),
-          ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),
-          ...(value.networkRouteId ? { networkRouteId: value.networkRouteId } : {}),
-          ...(value.linkedComputerSessionId
-            ? { linkedComputerSessionId: value.linkedComputerSessionId }
-            : {}),
-        })
-      ).session;
+      if (attachedInventory) profileChoice = chooseAttachedProfile(attachedInventory);
+      // Without a deviceId, chooseAttachedProfile has resolved one (or thrown).
+      const placement = profileChoice
+        ? { kind: "attached_device" as const, deviceId: profileChoice.chosen.id }
+        : (value.placement as z.infer<typeof InteractionPlacement> | undefined);
+      const createdResponse = await transport.createBrowserSession(workspaceId, {
+        operationId: context.operationId,
+        sessionId: sourceSessionId,
+        ...(value.name ? { name: value.name } : {}),
+        ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
+        headless: requestedHeadless,
+        ...(value.storageMode ? { storageMode: value.storageMode } : {}),
+        ...(placement ? { placement } : {}),
+        ...(value.identityId ? { identityId: value.identityId } : {}),
+        ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),
+        ...(value.networkRouteId ? { networkRouteId: value.networkRouteId } : {}),
+        ...(value.linkedComputerSessionId
+          ? { linkedComputerSessionId: value.linkedComputerSessionId }
+          : {}),
+      });
+      session = createdResponse.session;
+      initialView = createdResponse.initialView;
+      // A browser that failed to start is not a result to act on: report why,
+      // so the caller fixes the cause instead of retrying an opaque failure.
+      const launchError = createdResponse.operation?.error;
+      if (launchError && session.lifecycle === "failed") {
+        throw new OpenGeniApiError(
+          launchError.code === "unsupported" ? 422 : 502,
+          `BrowserSession ${session.id} did not start: ${launchError.message}`,
+          { code: launchError.code, retryable: launchError.retryable },
+        );
+      }
     }
   }
   if (session.lifecycle === "suspended") {
@@ -1825,8 +2283,17 @@ async function openBrowser(
       })
     ).session;
   }
-  if (session.lifecycle !== "active") return { session, targets: [] };
-  let targets = (await transport.listBrowserTargets(workspaceId, session.id)).targets;
+  const chosenProfile = profileChoice
+    ? {
+        attachedProfile: agentAttachedProfile(profileChoice.chosen),
+        ...(profileChoice.others.length > 0
+          ? { otherAttachedProfiles: profileChoice.others.map(agentAttachedProfile) }
+          : {}),
+      }
+    : {};
+  if (session.lifecycle !== "active") return { session, targets: [], ...chosenProfile };
+  let targets =
+    initialView?.targets ?? (await transport.listBrowserTargets(workspaceId, session.id)).targets;
   if (
     value.initialUrl &&
     !created &&
@@ -1854,7 +2321,103 @@ async function openBrowser(
     }
     targets = inventory.targets;
   }
-  return { session, targets };
+  const primary = openedBrowserTarget(targets, value.initialUrl);
+  const observation = !primary
+    ? undefined
+    : initialView?.observation.target.id === primary.id
+      ? projectBrowserObservation(initialView.observation, "compact")
+      : await observeOpenedBrowserTarget(transport, workspaceId, session.id, primary);
+  // A browser opened on a URL is about that tab. A person's own Chrome profile
+  // can hold dozens of unrelated tabs; listing them all costs context on every
+  // later step, so only the opened tab is returned with a count of the rest
+  // (browser_tabs list shows them).
+  const opened =
+    value.initialUrl && primary && sameBrowserUrl(primary.url, value.initialUrl)
+      ? primary
+      : undefined;
+  const shown = opened && targets.length > 1 ? [opened] : targets;
+  return {
+    session,
+    targets: shown.map(agentBrowserTarget),
+    ...(shown.length < targets.length ? { otherTabCount: targets.length - shown.length } : {}),
+    ...(observation ? { observation } : {}),
+    ...chosenProfile,
+  };
+}
+
+type AttachedProfileChoice = {
+  chosen: z.infer<typeof AttachedBrowserDeviceListResponse>["devices"][number];
+  others: z.infer<typeof AttachedBrowserDeviceListResponse>["devices"];
+};
+
+/** The person's own Chrome when browser_open names no profile: the only
+ * connected profile, else the one whose tabs changed most recently (a device's
+ * updatedAt moves with its tab inventory, not with heartbeats). */
+function chooseAttachedProfile(
+  inventory: z.infer<typeof AttachedBrowserDeviceListResponse>,
+): AttachedProfileChoice {
+  const usable = inventory.devices
+    .filter((device) => device.state === "connected" && device.capabilities.debuggerAttachment)
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  const [chosen, ...others] = usable;
+  if (!chosen) {
+    throw new OpenGeniApiError(
+      409,
+      `No Chrome profile is connected through the Opengeni Browser extension. The person needs a Connected Machine, then the extension: ${OPENGENI_BROWSER_EXTENSION_URL}`,
+      { code: "attached_browser_unavailable", retryable: false },
+    );
+  }
+  return { chosen, others };
+}
+
+function agentAttachedProfile(
+  device: AttachedProfileChoice["chosen"],
+): z.infer<typeof AgentAttachedProfile> {
+  return {
+    id: device.id,
+    name: device.name,
+    ...(device.profileLabel && device.profileLabel !== device.name
+      ? { profileLabel: device.profileLabel }
+      : {}),
+  };
+}
+
+/**
+ * The tab the agent most likely acts on next: the tab showing the requested
+ * URL, else the selected page.
+ */
+function openedBrowserTarget(
+  targets: z.infer<typeof BrowserTarget>[],
+  initialUrl: string | undefined,
+): z.infer<typeof BrowserTarget> | undefined {
+  const pages = targets.filter((target) => target.kind === "page");
+  return (
+    (initialUrl ? pages.find((target) => sameBrowserUrl(target.url, initialUrl)) : undefined) ??
+    pages.find((target) => target.selected) ??
+    (pages.length === 1 ? pages[0] : undefined)
+  );
+}
+
+/**
+ * A compact observation of the opened tab. Opening a browser is almost always
+ * followed by reading it, so this saves that model round trip. It is a
+ * read-only convenience: if it fails, the open still succeeds and the agent can
+ * observe explicitly.
+ */
+async function observeOpenedBrowserTarget(
+  transport: InteractionTransport,
+  workspaceId: string,
+  browserSessionId: string,
+  primary: z.infer<typeof BrowserTarget>,
+): Promise<z.infer<typeof CompactBrowserObservation> | undefined> {
+  try {
+    return projectBrowserObservation(
+      await transport.observeBrowserTarget(workspaceId, browserSessionId, primary.id),
+      "compact",
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 function sameBrowserUrl(left: string, right: string): boolean {
@@ -1877,7 +2440,12 @@ async function openComputer(
     session = await transport.getComputerSession(workspaceId, value.computerSessionId);
   } else {
     const listed =
-      value.mode === "new" ? { sessions: [] } : await transport.listComputerSessions(workspaceId);
+      value.mode === "new"
+        ? { sessions: [] }
+        : await transport.listComputerSessions(workspaceId, {
+            associatedSessionId: sourceSessionId,
+            includeTerminal: false,
+          });
     const reusable = newestRelevant(
       listed.sessions.filter((candidate) =>
         compatibleInteractionPlacement(candidate.placement, value.placement),
@@ -1906,7 +2474,7 @@ async function openComputer(
 
 function compatibleInteractionPlacement(
   candidate: z.infer<typeof InteractionPlacement>,
-  requested: z.infer<typeof InteractionPlacement> | undefined,
+  requested: z.infer<typeof BrowserOpenPlacement> | undefined,
 ): boolean {
   if (!requested) return candidate.kind !== "attached_device";
   return Object.entries(requested).every(
@@ -1962,7 +2530,12 @@ function flattenBrowserNodes(
   scopeRef?: string,
 ): FlatBrowserNode[] {
   const flattened: FlatBrowserNode[] = [];
-  const stack = [...roots].reverse().map((node) => ({ node, depth: 0, withinScope: !scopeRef }));
+  const stack: Array<{
+    node: BrowserSemanticNodeValue;
+    depth: number;
+    withinScope: boolean;
+    parentName?: string;
+  }> = [...roots].reverse().map((node) => ({ node, depth: 0, withinScope: !scopeRef }));
   while (stack.length > 0) {
     const next = stack.pop()!;
     const withinScope = next.withinScope || next.node.ref === scopeRef;
@@ -1971,12 +2544,51 @@ function flattenBrowserNodes(
       depth: next.depth,
       index: flattened.length,
       withinScope,
+      ...(next.parentName !== undefined ? { parentName: next.parentName } : {}),
     });
     for (const child of [...(next.node.children ?? [])].reverse()) {
-      stack.push({ node: child, depth: next.depth + 1, withinScope });
+      stack.push({
+        node: child,
+        depth: next.depth + 1,
+        withinScope,
+        ...(next.node.name !== undefined ? { parentName: next.node.name } : {}),
+      });
     }
   }
   return flattened;
+}
+
+/** Container roles that help the model orient even without a name. */
+const BROWSER_AGENT_STRUCTURAL_ROLES = new Set([
+  "dialog",
+  "alertdialog",
+  "alert",
+  "status",
+  "navigation",
+  "main",
+  "form",
+  "table",
+  "grid",
+  "list",
+  "listbox",
+  "menu",
+  "menubar",
+  "tablist",
+  "radiogroup",
+]);
+
+/** Nodes that add nothing to the compact view: static text repeating its
+ * parent's accessible name, and unnamed, stateless, non-actionable containers.
+ * Their children keep their own depth, so the outline stays readable. */
+function redundantAgentNode(flat: FlatBrowserNode): boolean {
+  const { node } = flat;
+  if (node.actions.length > 0 || node.states.length > 0) return false;
+  const hasValue = node.value !== undefined && node.value !== null && node.value !== "";
+  if (node.role === "text" || node.role === "StaticText") {
+    return !hasValue && !node.description && (!node.name || node.name === flat.parentName);
+  }
+  if (BROWSER_AGENT_STRUCTURAL_ROLES.has(node.role)) return false;
+  return !node.name && !node.description && !hasValue;
 }
 
 function boundedAgentField(value: string, onClip: () => void): string {
@@ -2008,8 +2620,12 @@ function projectAgentNode(flat: FlatBrowserNode): {
             typeof source.value === "string" ? boundedAgentField(source.value, clip) : source.value,
         }
       : {}),
-    states: source.states.slice(0, 6).map((state) => boundedAgentField(state, clip)),
-    actions: source.actions.slice(0, 6).map((action) => boundedAgentField(action, clip)),
+    ...(source.states.length > 0
+      ? { states: source.states.slice(0, 6).map((state) => boundedAgentField(state, clip)) }
+      : {}),
+    ...(source.actions.length > 0
+      ? { actions: source.actions.slice(0, 6).map((action) => boundedAgentField(action, clip)) }
+      : {}),
   };
   if (source.states.length > 6) clippedFieldCount += source.states.length - 6;
   if (source.actions.length > 6) clippedFieldCount += source.actions.length - 6;
@@ -2020,19 +2636,13 @@ function selectAgentNodes(
   flattened: readonly FlatBrowserNode[],
   maxNodes: number,
   maxBytes: number,
-  prioritize = true,
+  rank: ((flat: FlatBrowserNode) => readonly number[]) | null = browserNodeRank,
 ): { nodes: z.infer<typeof BrowserAgentNode>[]; clippedFieldCount: number } {
-  const priority = (flat: FlatBrowserNode): number => {
-    const { node } = flat;
-    if (node.actions.length > 0) return 0;
-    if (["heading", "dialog", "alert", "status", "navigation", "main"].includes(node.role))
-      return 1;
-    if (["text", "paragraph", "listitem"].includes(node.role) && node.name) return 2;
-    if (node.name || node.value || node.description) return 3;
-    return 4;
-  };
-  const candidates = prioritize
-    ? [...flattened].sort((a, b) => priority(a) - priority(b) || a.index - b.index)
+  const candidates = rank
+    ? flattened
+        .map((flat) => ({ flat, key: [...rank(flat), flat.index] }))
+        .sort((a, b) => compareRank(a.key, b.key))
+        .map((entry) => entry.flat)
     : flattened;
   const selected: Array<{ index: number; node: z.infer<typeof BrowserAgentNode> }> = [];
   let usedBytes = 0;
@@ -2052,17 +2662,219 @@ function selectAgentNodes(
   };
 }
 
+function compareRank(a: readonly number[], b: readonly number[]): number {
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+/** Without page context: controls first, then orientation, then content. */
+function browserNodeRank(flat: FlatBrowserNode): readonly number[] {
+  const { node } = flat;
+  if (node.actions.length > 0) return [0];
+  if (["heading", "dialog", "alert", "status", "navigation", "main"].includes(node.role))
+    return [1];
+  if (["text", "paragraph", "listitem"].includes(node.role) && node.name) return [2];
+  if (node.name || node.value || node.description) return [3];
+  return [4];
+}
+
+/** Open popups and modal surfaces: where a person's attention is after they
+ * open a menu, dialog, listbox or tooltip. */
+const BROWSER_ATTENTION_SURFACE_ROLES = new Set([
+  "dialog",
+  "alertdialog",
+  "menu",
+  "listbox",
+  "tooltip",
+]);
+/** Live regions announce results such as toasts, errors and status text. */
+const BROWSER_LIVE_REGION_ROLES = new Set(["alert", "status", "log", "marquee", "timer"]);
+/** Site-wide chrome that rarely holds what a task is about. */
+const BROWSER_PAGE_CHROME_ROLES = new Set(["navigation", "banner", "contentinfo"]);
+/** A focus group never grows past a landmark or the document. */
+const BROWSER_FOCUS_GROUP_STOP_ROLES = new Set([
+  "main",
+  "navigation",
+  "banner",
+  "contentinfo",
+  "complementary",
+  "region",
+  "document",
+  "RootWebArea",
+  "WebArea",
+]);
+/** Regions named in the omitted-element summary. */
+const BROWSER_SUMMARY_REGION_ROLES = new Set([
+  "main",
+  "navigation",
+  "banner",
+  "complementary",
+  "contentinfo",
+  "region",
+  "search",
+  "form",
+  "dialog",
+  "alertdialog",
+  "menu",
+]);
+
+type RankedBrowserView = {
+  /** Non-redundant nodes in document order. */
+  visible: FlatBrowserNode[];
+  rank: (flat: FlatBrowserNode) => readonly number[];
+  regionOf: (flat: FlatBrowserNode) => { role: string; name?: string } | null;
+};
+
+/**
+ * A dense application page has far more elements than one compact view can
+ * hold. Document order puts site navigation and the top of a long grid first,
+ * while the menu, dialog or popover a click just opened is usually rendered at
+ * the end of the document, and result text (a total, a toast, an error) is not
+ * a control at all. Rank by where attention is instead: open surfaces and live
+ * messages, then the focused or acted-on element with its small enclosing
+ * group, then the page's own content, and site chrome last.
+ */
+function rankBrowserView(
+  flattened: readonly FlatBrowserNode[],
+  anchorRefs: readonly string[],
+): RankedBrowserView {
+  const count = flattened.length;
+  const parent = new Int32Array(count).fill(-1);
+  const end = new Int32Array(count);
+  const ancestors: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const depth = flattened[index]!.depth;
+    while (ancestors.length > 0 && flattened[ancestors.at(-1)!]!.depth >= depth) {
+      end[ancestors.pop()!] = index;
+    }
+    parent[index] = ancestors.at(-1) ?? -1;
+    ancestors.push(index);
+  }
+  for (const index of ancestors) end[index] = count;
+
+  const redundant = flattened.map(redundantAgentNode);
+  const keptBefore = new Int32Array(count + 1);
+  for (let index = 0; index < count; index += 1)
+    keptBefore[index + 1] = keptBefore[index]! + (redundant[index] ? 0 : 1);
+  const keptDescendants = (index: number): number =>
+    keptBefore[end[index]!]! - keptBefore[index + 1]!;
+  // An empty live region is page plumbing, not a message.
+  for (let index = 0; index < count; index += 1) {
+    const { node } = flattened[index]!;
+    if (
+      BROWSER_LIVE_REGION_ROLES.has(node.role) &&
+      !node.name &&
+      (node.value === undefined || node.value === null || node.value === "") &&
+      keptDescendants(index) === 0
+    )
+      redundant[index] = true;
+  }
+  const subtreeSize = (index: number): number =>
+    (redundant[index] ? 0 : 1) + keptDescendants(index);
+
+  const attention = new Uint8Array(count);
+  const markSubtree = (index: number) => attention.fill(1, index, end[index]!);
+  for (let index = 0; index < count; index += 1) {
+    const { node } = flattened[index]!;
+    if (
+      BROWSER_ATTENTION_SURFACE_ROLES.has(node.role) ||
+      node.states.includes("modal") ||
+      (BROWSER_LIVE_REGION_ROLES.has(node.role) && !redundant[index])
+    )
+      markSubtree(index);
+  }
+  const indexByRef = new Map<string, number>();
+  for (let index = 0; index < count; index += 1) {
+    const ref = flattened[index]!.node.ref;
+    if (ref && !indexByRef.has(ref)) indexByRef.set(ref, index);
+  }
+  for (const ref of anchorRefs) {
+    const anchor = indexByRef.get(ref);
+    if (anchor === undefined) continue;
+    if (subtreeSize(anchor) > BROWSER_AGENT_FOCUS_GROUP_MAX_NODES) {
+      attention[anchor] = 1;
+      continue;
+    }
+    let group = anchor;
+    for (
+      let next = parent[group]!;
+      next >= 0 &&
+      !BROWSER_FOCUS_GROUP_STOP_ROLES.has(flattened[next]!.node.role) &&
+      subtreeSize(next) <= BROWSER_AGENT_FOCUS_GROUP_MAX_NODES;
+      next = parent[next]!
+    )
+      group = next;
+    markSubtree(group);
+  }
+
+  const chrome = new Uint8Array(count);
+  const region = new Int32Array(count).fill(-1);
+  for (let index = 0; index < count; index += 1) {
+    const { node } = flattened[index]!;
+    const up = parent[index]!;
+    chrome[index] =
+      BROWSER_PAGE_CHROME_ROLES.has(node.role) || (up >= 0 && chrome[up] === 1) ? 1 : 0;
+    region[index] =
+      BROWSER_SUMMARY_REGION_ROLES.has(node.role) && (node.role !== "region" || node.name)
+        ? index
+        : up >= 0
+          ? region[up]!
+          : -1;
+  }
+
+  return {
+    visible: flattened.filter((_, index) => !redundant[index]),
+    rank: (flat) => {
+      if (attention[flat.index] === 1) return [0];
+      return [chrome[flat.index] === 1 ? 2 : 1, ...browserNodeRank(flat)];
+    },
+    regionOf: (flat) => {
+      const owner = region[flat.index]!;
+      if (owner < 0) return null;
+      const { node } = flattened[owner]!;
+      return {
+        role: node.role,
+        ...(node.name ? { name: boundedAgentField(node.name, () => {}) } : {}),
+      };
+    },
+  };
+}
+
+function omittedBrowserRegions(
+  ranked: RankedBrowserView,
+  shownRefs: ReadonlySet<string>,
+): Array<{ role: string; name?: string; count: number }> {
+  const regions = new Map<string, { role: string; name?: string; count: number }>();
+  for (const flat of ranked.visible) {
+    if (shownRefs.has(flat.node.ref)) continue;
+    const owner = ranked.regionOf(flat) ?? { role: "page" };
+    const key = `${owner.role}\0${owner.name ?? ""}`;
+    const entry = regions.get(key) ?? { ...owner, count: 0 };
+    entry.count += 1;
+    regions.set(key, entry);
+  }
+  return [...regions.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, BROWSER_AGENT_MAX_OMITTED_REGIONS);
+}
+
 function projectBrowserObservation(
   observation: z.infer<typeof BrowserObservation>,
   view: "compact",
+  anchorRefs?: readonly string[],
 ): z.infer<typeof CompactBrowserObservation>;
 function projectBrowserObservation(
   observation: z.infer<typeof BrowserObservation>,
   view: "compact" | "full",
+  anchorRefs?: readonly string[],
 ): z.infer<typeof BrowserAgentObservation>;
 function projectBrowserObservation(
   observation: z.infer<typeof BrowserObservation>,
   view: "compact" | "full",
+  anchorRefs: readonly string[] = [],
 ): z.infer<typeof BrowserAgentObservation> {
   if (view === "full") return observation;
   const semantic = observation.semantic;
@@ -2072,26 +2884,138 @@ function projectBrowserObservation(
       : semantic?.kind === "diff"
         ? semantic.changed
         : [];
-  const flattened = flattenBrowserNodes(roots);
+  const ranked = rankBrowserView(flattenBrowserNodes(roots), [
+    ...(observation.focusedRef ? [observation.focusedRef] : []),
+    ...anchorRefs,
+  ]);
   const projected = selectAgentNodes(
-    flattened,
+    ranked.visible,
     BROWSER_AGENT_MAX_NODES,
     BROWSER_AGENT_MAX_NODE_BYTES,
+    ranked.rank,
   );
+  const omittedNodeCount = ranked.visible.length - projected.nodes.length;
+  const omittedRegions =
+    omittedNodeCount > 0
+      ? omittedBrowserRegions(ranked, new Set(projected.nodes.map((node) => node.ref)))
+      : [];
+  const removedRefCount = semantic?.kind === "diff" ? semantic.removedRefs.length : 0;
+  const viewport = observation.viewport;
+  const diagnostics = observation.diagnostics;
+  const hasDiagnostics =
+    diagnostics.consoleErrorCount > 0 ||
+    diagnostics.failedRequestCount > 0 ||
+    diagnostics.downloadCount > 0 ||
+    diagnostics.pageErrorCount > 0;
   return {
-    ...observation,
-    semantic: null,
+    target: agentBrowserTarget(observation.target),
+    ...(observation.frameId ? { frameId: observation.frameId } : {}),
+    ...(viewport
+      ? {
+          viewport: {
+            width: viewport.width,
+            height: viewport.height,
+            ...(viewport.deviceScaleFactor !== 1
+              ? { deviceScaleFactor: viewport.deviceScaleFactor }
+              : {}),
+            ...(viewport.maxTouchPoints > 0 ? { maxTouchPoints: viewport.maxTouchPoints } : {}),
+          },
+        }
+      : {}),
+    ...(observation.focusedRef ? { focusedRef: observation.focusedRef } : {}),
+    ...(observation.changedRegions.length > 0
+      ? { changedRegions: observation.changedRegions }
+      : {}),
+    ...(hasDiagnostics ? { diagnostics } : {}),
+    ...(observation.dialog ? { dialog: observation.dialog } : {}),
+    ...(observation.screenshot ? { screenshot: observation.screenshot } : {}),
     agentView: {
-      kind: "compact",
       sourceKind: semantic?.kind ?? "none",
       nodes: projected.nodes,
-      sourceNodeCount: flattened.length,
-      omittedNodeCount: flattened.length - projected.nodes.length,
-      removedRefCount: semantic?.kind === "diff" ? semantic.removedRefs.length : 0,
-      clippedFieldCount: projected.clippedFieldCount,
-      maxNodes: BROWSER_AGENT_MAX_NODES,
-      maxNodeBytes: BROWSER_AGENT_MAX_NODE_BYTES,
+      ...(omittedNodeCount > 0 ? { omittedNodeCount } : {}),
+      ...(omittedRegions.length > 0 ? { omittedRegions } : {}),
+      ...(removedRefCount > 0 ? { removedRefCount } : {}),
+      ...(projected.clippedFieldCount > 0
+        ? { clippedFieldCount: projected.clippedFieldCount }
+        : {}),
     },
+  };
+}
+
+function agentBrowserTarget(
+  target: z.infer<typeof BrowserTarget>,
+): z.infer<typeof AgentBrowserTarget> {
+  return {
+    id: target.id,
+    kind: target.kind,
+    title: target.title,
+    url: target.url,
+    selected: target.selected,
+    controllerGeneration: target.controllerGeneration,
+    targetGeneration: target.targetGeneration,
+    documentGeneration: target.documentGeneration,
+  };
+}
+
+/** Attached profiles are what the model selects. Bridges only explain why
+ * none is available, so they are listed (online only) when no profile is. */
+function agentAttachedInventory(inventory: z.infer<typeof AttachedBrowserDeviceListResponse>): {
+  attachedBrowserBridges: z.infer<typeof AgentAttachedBrowserBridge>[];
+  attachedBrowsers: z.infer<typeof AgentAttachedBrowser>[];
+} {
+  const attachedBrowsers = inventory.devices.map((device) => {
+    const unsupported = Object.entries(device.capabilities)
+      .filter(([, supported]) => !supported)
+      .map(([capability]) => capability);
+    return {
+      id: device.id,
+      name: device.name,
+      ...(device.profileLabel ? { profileLabel: device.profileLabel } : {}),
+      browserName: device.browserName,
+      platform: device.platform,
+      state: device.state,
+      tabCount: device.tabCount,
+      ...(unsupported.length > 0 ? { unsupported } : {}),
+    };
+  });
+  const anyConnected = inventory.devices.some((device) => device.state === "connected");
+  const attachedBrowserBridges = anyConnected
+    ? []
+    : inventory.bridges
+        .filter((bridge) => bridge.state === "online")
+        .map((bridge) => ({
+          enrollmentId: bridge.enrollmentId,
+          connectedProfileCount: bridge.connectedProfileCount,
+        }));
+  return { attachedBrowserBridges, attachedBrowsers };
+}
+
+function agentTargetList(
+  list: z.infer<typeof BrowserTargetListResponse>,
+): z.infer<typeof BrowserTabsOutput> {
+  return {
+    browserSessionId: list.browserSessionId,
+    targets: list.targets.map(agentBrowserTarget),
+  };
+}
+
+function compactActionReceipt(
+  receipt: z.infer<typeof BrowserActionReceipt>,
+): z.infer<typeof CompactBrowserActionReceipt> {
+  return {
+    targetId: receipt.targetId,
+    state: receipt.state,
+    ...(receipt.error ? { error: receipt.error } : {}),
+    ...(receipt.targets && receipt.targets.length > 0 ? { targets: receipt.targets } : {}),
+    ...(receipt.observation
+      ? {
+          observation: projectBrowserObservation(
+            receipt.observation,
+            "compact",
+            (receipt.targets ?? []).flatMap((target) => (target.ref ? [target.ref] : [])),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -2135,7 +3059,7 @@ function readBrowserObservation(
   const projected =
     mode === "count"
       ? { nodes: [] as z.infer<typeof BrowserAgentNode>[], clippedFieldCount: 0 }
-      : selectAgentNodes(matches, input.limit ?? 40, BROWSER_AGENT_MAX_NODE_BYTES, false);
+      : selectAgentNodes(matches, input.limit ?? 40, BROWSER_AGENT_MAX_NODE_BYTES, null);
   return {
     browserSessionId: observation.browserSessionId,
     targetId: observation.target.id,
@@ -2154,6 +3078,79 @@ function readBrowserObservation(
   };
 }
 
+/** A tool's model text, or its JSON when it has none. Rendering is a pure view
+ * of a value that already passed its output schema; should it ever fail, the
+ * model still gets the complete value rather than an error for a call that
+ * succeeded. */
+function resultModelText<T>(output: T, modelText: ((output: T) => string) | undefined): string {
+  if (modelText) {
+    try {
+      return modelText(output);
+    } catch {
+      // Fall through to the complete value.
+    }
+  }
+  return JSON.stringify(output);
+}
+
+/** The text view of a complete observation (view=full): every node, every ref. */
+function fullObservationText(observation: z.infer<typeof BrowserObservation>): string {
+  const semantic = observation.semantic;
+  const roots =
+    semantic?.kind === "snapshot"
+      ? semantic.roots
+      : semantic?.kind === "diff"
+        ? semantic.changed
+        : [];
+  return browserObservationText(
+    {
+      target: observation.target,
+      viewport: observation.viewport,
+      focusedRef: observation.focusedRef,
+      changedRegions: observation.changedRegions,
+      diagnostics: observation.diagnostics,
+      dialog: observation.dialog,
+      screenshot: observation.screenshot ?? undefined,
+      agentView: {
+        sourceKind: semantic?.kind ?? "none",
+        nodes: flattenBrowserNodes(roots).map(({ node, depth }) => ({
+          ref: node.ref,
+          role: node.role,
+          depth,
+          ...(node.name !== undefined ? { name: node.name } : {}),
+          ...(node.description !== undefined ? { description: node.description } : {}),
+          ...(node.value !== undefined ? { value: node.value } : {}),
+          states: node.states,
+          actions: node.actions,
+        })),
+        ...(semantic?.kind === "diff" && semantic.removedRefs.length > 0
+          ? { removedRefCount: semantic.removedRefs.length }
+          : {}),
+      },
+    },
+    { allRefs: true },
+  );
+}
+
+function agentObservationText(observation: z.infer<typeof BrowserAgentObservation>): string {
+  return "agentView" in observation
+    ? browserObservationText(observation)
+    : fullObservationText(observation);
+}
+
+function agentActionText(receipt: z.infer<typeof BrowserAgentActionReceipt>): string {
+  if ("protocolVersion" in receipt) {
+    const text = browserActionText({
+      targetId: receipt.targetId,
+      state: receipt.state,
+      error: receipt.error,
+      ...(receipt.targets ? { targets: receipt.targets } : {}),
+    });
+    return receipt.observation ? `${text}\n${fullObservationText(receipt.observation)}` : text;
+  }
+  return browserActionText(receipt);
+}
+
 async function safeInteractionExecution<TInput extends z.ZodType, TOutput extends z.ZodType>(
   inputSchema: TInput,
   outputSchema: TOutput,
@@ -2164,6 +3161,7 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     context: AttemptToolExecutionContext,
   ) => Promise<z.input<TOutput> | InteractionExecutionResult<z.input<TOutput>>>,
   readOnly: boolean,
+  modelText?: (output: z.output<TOutput>) => string,
 ): Promise<AttemptToolResultValue> {
   try {
     const value = inputSchema.parse(raw);
@@ -2173,7 +3171,7 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     );
     const result = {
       content: [
-        { type: "text" as const, text: JSON.stringify(structuredContent) },
+        { type: "text" as const, text: resultModelText(structuredContent, modelText) },
         ...(executed instanceof InteractionExecutionResult ? executed.additionalContent : []),
       ],
       structuredContent: structuredContent as NonNullable<
@@ -2183,7 +3181,10 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     return result;
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return interactionErrorResult("invalid_arguments", "Interaction tool arguments are invalid.");
+      return interactionErrorResult("invalid_arguments", describeInvalidToolArguments(error));
+    }
+    if (error instanceof BrowserTargetResolutionError) {
+      return interactionErrorResult(error.code, error.message);
     }
     // A failed read is still a useful tool result. Preserve the API's public
     // explanation; mutations and uncertain outcomes retain their failure path.
@@ -2275,6 +3276,11 @@ export function interactionToolErrorOutput(error: unknown): InteractionToolError
   }
 }
 
+function screenshotFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\s+/gu, " ").trim().slice(0, 300) || "unknown error";
+}
+
 function browserToolImageContent(
   data: Uint8Array,
   mimeType: string,
@@ -2289,6 +3295,11 @@ function browserToolImageContent(
   return { type: "image", data: Buffer.from(data).toString("base64"), mimeType };
 }
 
+/** The remembered browser or tab no longer exists. */
+function isGoneBrowserError(error: unknown): boolean {
+  return error instanceof OpenGeniApiError && (error.status === 404 || error.status === 410);
+}
+
 function interactionErrorResult(
   code: string,
   message: string,
@@ -2301,6 +3312,24 @@ function interactionErrorResult(
     content: [{ type: "text" as const, text: JSON.stringify({ error }) }],
     structuredContent: { error },
   };
+}
+
+/** A native computer call the API rejected with a definite client error. */
+function refusedNativeCallResult(error: unknown): AttemptToolResultValue | null {
+  const secretReferenceFailure = secretReferenceToolResult(error);
+  if (secretReferenceFailure) return secretReferenceFailure;
+  if (!(error instanceof OpenGeniApiError) || error.outcomeUnknown || error.status >= 500) {
+    return null;
+  }
+  return (
+    interactionToolErrorOutput(error) ??
+    interactionErrorResult(
+      error.code ?? `http_${error.status}`,
+      boundedErrorMessage(error.message),
+      error.retryable,
+      error.correlationId,
+    )
+  );
 }
 
 /** The API refused a Browser or Computer action before dispatch because a

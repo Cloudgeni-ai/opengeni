@@ -1,6 +1,7 @@
 import OpenAI, { type APIError } from "openai";
 import type { APIPromise } from "openai/core/api-promise";
 import { types as utilTypes } from "node:util";
+import { hasResponsesTurn, markResponsesPrefixReady } from "@opengeni/network/responses-websocket";
 import {
   rethrowModelTransportAdmissionRefusal,
   sdkModelTransportAdmissionFetch,
@@ -138,6 +139,12 @@ export class ReplayableJsonOpenAI extends OpenAI {
               : {}),
           };
         }
+      }
+      if (path.split("?", 1)[0]?.endsWith("/responses")) {
+        markResponsesPrefixReady();
+        // The durable worker owns one step budget for sockets and HTTP alike.
+        // SDK retries must not silently multiply that budget, even on attempt one.
+        if (hasResponsesTurn()) prepared = { ...prepared, maxRetries: 0 };
       }
       return wrapJsonRequestOptions(prepared);
     });

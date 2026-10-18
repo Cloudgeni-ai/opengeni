@@ -3,6 +3,7 @@ import {
   canonicalSpreadsheetDateMilliseconds,
 } from "./spreadsheet-artifact-date";
 import { SPREADSHEET_ARTIFACT_COMMAND_VERSION } from "./editable-artifact-versions";
+import { fnv1a64 } from "./editable-artifact-binary";
 
 /**
  * Canonical, identity-free spreadsheet mutation commands nested inside
@@ -29,8 +30,6 @@ const textDecoder = new TextDecoder("utf-8", { fatal: true });
 const LOWER_HEX_ID = /^[0-9a-f]{32}$/u;
 const UINT64_HEX_ZERO = "0".repeat(16);
 const UINT32_MAX = 0xffff_ffff;
-const FNV_OFFSET = 0xcbf29ce484222325n;
-const FNV_PRIME = 0x100000001b3n;
 
 declare const stableIdBrand: unique symbol;
 
@@ -720,15 +719,6 @@ function strictUtf8(value: string, label: string): Uint8Array {
 
 function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function fnv1a64(bytes: Uint8Array): bigint {
-  let hash = FNV_OFFSET;
-  for (const byte of bytes) {
-    hash ^= BigInt(byte);
-    hash = BigInt.asUintN(64, hash * FNV_PRIME);
-  }
-  return hash;
 }
 
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean {

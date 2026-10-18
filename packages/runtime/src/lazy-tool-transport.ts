@@ -12,15 +12,20 @@ import {
 } from "@openai/agents";
 import {
   isHarnessControlMcpFunctionTool,
+  interactionEntryCompanions,
+  isInteractionEntryFunctionTool,
+  isInteractionEntryToolName,
   isSearchableMcpFunctionTool,
   searchToolPool,
 } from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
+import { toolDisclosureItem } from "./provider-history-adapter";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
 import {
   beforeModelRequest,
   modelResponseSettlement,
   notifyModelRequestCapture,
+  streamPreemptibleModelRequest,
 } from "./model-request-capture";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
@@ -58,6 +63,8 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
 ]);
 const DISPATCH_MARKER_KEY = "opengeni.lazy_dispatch.v1";
 const SEARCH_MARKER_KEY = "opengeni.lazy_search.v1";
+/** Frozen companion schemas an entry-tool call disclosed, kept on the call itself. */
+const FAMILY_DISCLOSURE_MARKER_KEY = "opengeni.family_disclosure.v1";
 const INTERNAL_REGISTRATION_TOOL_MARKER_KEY = "opengeni.internal_lazy_registration.v1";
 const INTERNAL_DISPATCH_REGISTRATION_CALL_PREFIX = "opengeni:lazy-dispatch:register:";
 
@@ -122,6 +129,22 @@ type GenericDispatchMarker = {
 type GenericSearchMarker = {
   version: 1;
   output: string;
+};
+
+/**
+ * Written once when the model calls an interaction entry tool (browser_open,
+ * computer_open). The schemas are frozen at that moment so the disclosure the
+ * provider sees after the step's results never changes on later requests,
+ * even after a deploy changes the live catalog.
+ */
+type FamilyDisclosureMarker = {
+  version: 1;
+  tools: Record<string, unknown>[];
+  /**
+   * The turn's transport has tool_invoke (generic dispatch). Otherwise a text
+   * declaration asks the model to load the tools with native tool_search.
+   */
+  viaToolInvoke: boolean;
 };
 
 type FunctionCallItem = {
@@ -207,6 +230,7 @@ export class LazyToolRuntime {
     private readonly modelMcpServerIds: () => ReadonlyMap<string, string> = () => new Map(),
     private readonly conditionalRouter = false,
     routerInHistory = false,
+    private readonly startToolPreparation?: () => void,
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -248,7 +272,12 @@ export class LazyToolRuntime {
     return this.routerWasExposed ? this.controlTools : [];
   }
 
+  startPreparation(): void {
+    this.startToolPreparation?.();
+  }
+
   async ensurePrepared(): Promise<void> {
+    this.startPreparation();
     await this.toolPreparationReady;
     this.preparationSettled = true;
     if (!this.preparedToolsLoaded && this.activeAgent) {
@@ -339,6 +368,10 @@ export class LazyToolRuntime {
       // polling, wait_for_input) stay visible on every transport when the
       // authorized opengeni server listed them; its other tools stay deferred.
       if (isHarnessControlMcpFunctionTool(tool, this.mcpServerIds, modelServerIds)) continue;
+      // Each interaction family's entry tool (browser_open, computer_open)
+      // stays visible so a browser or computer task starts without a search
+      // round trip; calling it discloses the rest of the family.
+      if (isInteractionEntryFunctionTool(tool, this.mcpServerIds, modelServerIds)) continue;
       // Origin, not transport: deferred MCP plus every non-MCP function tool
       // outside the base set. ToolRef.eager still decides the MCP arm.
       const lazy =
@@ -348,9 +381,10 @@ export class LazyToolRuntime {
         // After the preparation fence, deferred tools stay off the Agent
         // list. Search teaches names; a remembered raw name binds later
         // through resolveMissingFunctionTool. Do not use the SDK's
-        // deferLoading gate — installLazyToolRuntime clears it. Browser,
-        // Computer, and image/video schemas hide behind search on every
-        // transport; the base set stays in the first request.
+        // deferLoading gate — installLazyToolRuntime clears it. Browser and
+        // Computer tools other than their entry tools, and image/video
+        // schemas, hide behind search on every transport; the base set stays
+        // in the first request.
         tool.deferLoading = false;
         this.searchableToolNames.add(tool.name);
       }
@@ -443,6 +477,14 @@ export class LazyToolRuntime {
 
   search(rawArguments: unknown): Tool[] {
     return searchToolPool(this.searchableTools(this.currentTools), rawArguments);
+  }
+
+  /** Model-visible schemas an entry-tool call discloses, or [] for any other tool. */
+  familyDisclosure(toolName: string): Record<string, unknown>[] {
+    if (!isInteractionEntryToolName(toolName)) return [];
+    return interactionEntryCompanions(toolName, this.searchableTools(this.currentTools))
+      .map((tool) => modelVisibleToolDefinition(tool))
+      .filter((definition): definition is Record<string, unknown> => definition !== null);
   }
 
   genericSearchOutput(rawArguments: unknown): string {
@@ -658,6 +700,7 @@ export function installLazyToolRuntime(
   modelMcpServerIds?: () => ReadonlyMap<string, string>,
   conditionalRouter = false,
   routerInHistory = false,
+  startToolPreparation?: () => void,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -668,6 +711,7 @@ export function installLazyToolRuntime(
     modelMcpServerIds,
     conditionalRouter,
     routerInHistory,
+    startToolPreparation,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
@@ -720,6 +764,7 @@ function restoredProviderData(providerData: unknown): Record<string, unknown> | 
   const restored = { ...providerData };
   delete restored[DISPATCH_MARKER_KEY];
   delete restored[SEARCH_MARKER_KEY];
+  delete restored[FAMILY_DISCLOSURE_MARKER_KEY];
   return Object.keys(restored).length > 0 ? restored : undefined;
 }
 
@@ -750,7 +795,9 @@ export function restoreGenericDispatchHistoryItem<T>(candidate: T): T {
   const searchMarker = providerData?.[SEARCH_MARKER_KEY];
   const hasSearchMarker =
     isRecord(searchMarker) && searchMarker.version === 1 && typeof searchMarker.output === "string";
-  if (!hasDispatchMarker && !hasSearchMarker) {
+  const hasFamilyMarker =
+    providerData !== undefined && FAMILY_DISCLOSURE_MARKER_KEY in providerData;
+  if (!hasDispatchMarker && !hasSearchMarker && !hasFamilyMarker) {
     return candidate;
   }
   const restored = { ...candidate } as Record<string, unknown>;
@@ -896,6 +943,175 @@ export function transformGenericDispatchResponse(
   };
 }
 
+/** Apply the transport's response rewrites to one model output item. */
+function transformResponseItem(item: unknown, runtime: LazyToolRuntime): unknown[] {
+  const items =
+    runtime.transport === "generic_dispatch" ? transformGenericDispatchCall(item, runtime) : [item];
+  return items.map((candidate) => withFamilyDisclosure(candidate, runtime));
+}
+
+function transformResponseOutput(
+  output: ModelResponse["output"],
+  runtime: LazyToolRuntime,
+): ModelResponse["output"] {
+  const transformed = output.flatMap((item) => transformResponseItem(item, runtime));
+  const unchanged =
+    transformed.length === output.length &&
+    transformed.every((item, index) => item === output[index]);
+  return unchanged ? output : (transformed as ModelResponse["output"]);
+}
+
+/**
+ * Freeze the family an entry-tool call discloses onto the call. The provider
+ * sees the disclosure after that step's results (see
+ * expandInteractionFamilyDisclosures), so the model's next step can observe
+ * and act without first searching for the tools.
+ */
+function withFamilyDisclosure(candidate: unknown, runtime: LazyToolRuntime): unknown {
+  if (!isRecord(candidate) || candidate.type !== "function_call") return candidate;
+  if (typeof candidate.name !== "string" || !isInteractionEntryToolName(candidate.name)) {
+    return candidate;
+  }
+  const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
+  if (FAMILY_DISCLOSURE_MARKER_KEY in providerData) return candidate;
+  const tools = runtime.familyDisclosure(candidate.name);
+  if (tools.length === 0) return candidate;
+  return {
+    ...candidate,
+    providerData: {
+      ...providerData,
+      [FAMILY_DISCLOSURE_MARKER_KEY]: {
+        version: 1,
+        tools,
+        viaToolInvoke: runtime.transport === "generic_dispatch",
+      } satisfies FamilyDisclosureMarker,
+    },
+  };
+}
+
+function familyDisclosure(
+  candidate: Record<string, unknown>,
+): { tools: Record<string, unknown>[]; viaToolInvoke: boolean } | null {
+  const providerData = isRecord(candidate.providerData) ? candidate.providerData : null;
+  const marker = providerData?.[FAMILY_DISCLOSURE_MARKER_KEY];
+  if (!isRecord(marker) || marker.version !== 1 || !Array.isArray(marker.tools)) return null;
+  const tools = marker.tools.filter(
+    (tool): tool is Record<string, unknown> => isRecord(tool) && typeof tool.name === "string",
+  );
+  return tools.length > 0 ? { tools, viaToolInvoke: marker.viaToolInvoke === true } : null;
+}
+
+function disclosedToolNames(tools: unknown): string[] {
+  if (!Array.isArray(tools)) return [];
+  return tools.flatMap((tool) =>
+    isRecord(tool) && typeof tool.name === "string" ? [tool.name] : [],
+  );
+}
+
+function genericSearchOutputNames(output: string): string[] {
+  const parsed = parseJsonObject(output);
+  return parsed ? disclosedToolNames(parsed.tools) : [];
+}
+
+/** Items that answer a call of the model's previous step. */
+const STEP_RESULT_ITEM_TYPES = new Set([
+  "function_call_result",
+  "computer_call_result",
+  "shell_call_output",
+  "apply_patch_call_output",
+  "tool_search_output",
+]);
+
+/**
+ * Declare the tools an entry call (browser_open, computer_open) made available
+ * as one tool-disclosure item placed after that step's results, where a
+ * developer message would go. Each provider projection renders it in its own
+ * standard form (see projectHistoryForProvider). Tools the history already
+ * disclosed are not repeated. The item depends only on earlier items, so every
+ * later request reproduces the identical prefix.
+ */
+export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
+  const pending = new Map<string, { tools: Record<string, unknown>[]; viaToolInvoke: boolean }>();
+  const disclosed = new Set<string>();
+  let ready: Record<string, unknown>[] = [];
+  let readyViaToolInvoke = false;
+  let readyAfter: object | null = null;
+  let expanded = null as T[] | null;
+  const flush = (index: number) => {
+    if (!readyAfter || ready.length === 0) return;
+    expanded ??= input.slice(0, index);
+    expanded.push(cachedToolDisclosureItem(readyAfter, ready, readyViaToolInvoke) as T);
+    ready = [];
+    readyViaToolInvoke = false;
+    readyAfter = null;
+  };
+  for (let index = 0; index < input.length; index += 1) {
+    const original = input[index]!;
+    const candidate: unknown = original;
+    const result = isRecord(candidate) && STEP_RESULT_ITEM_TYPES.has(String(candidate.type));
+    if (!result) flush(index);
+    expanded?.push(original);
+    if (!isRecord(candidate)) continue;
+    if (candidate.type === "tool_search_output") {
+      for (const name of disclosedToolNames(candidate.tools)) disclosed.add(name);
+      continue;
+    }
+    if (candidate.type === "function_call") {
+      const providerData = isRecord(candidate.providerData) ? candidate.providerData : null;
+      const searchMarker = providerData?.[SEARCH_MARKER_KEY];
+      if (isRecord(searchMarker) && typeof searchMarker.output === "string") {
+        for (const name of genericSearchOutputNames(searchMarker.output)) disclosed.add(name);
+      }
+      const id = callId(candidate);
+      const disclosure = familyDisclosure(candidate);
+      if (id && disclosure) pending.set(id, disclosure);
+      continue;
+    }
+    if (candidate.type !== "function_call_result") continue;
+    if (candidate.name === TOOL_SEARCH_NAME && typeof candidate.output === "string") {
+      for (const name of genericSearchOutputNames(candidate.output)) disclosed.add(name);
+      continue;
+    }
+    const id = callId(candidate);
+    const disclosure = id ? pending.get(id) : undefined;
+    if (!id || !disclosure) continue;
+    pending.delete(id);
+    for (const tool of disclosure.tools) {
+      const name = String(tool.name);
+      if (disclosed.has(name)) continue;
+      disclosed.add(name);
+      ready.push(tool);
+      readyViaToolInvoke ||= disclosure.viaToolInvoke;
+    }
+    readyAfter = candidate;
+  }
+  flush(input.length);
+  return expanded ?? input;
+}
+
+/**
+ * The SDK reuses item identities between requests. Returning the same item for
+ * the same step keeps later identity-memoized projections and their
+ * append-only prefix reuse effective.
+ */
+const toolDisclosureItemCache = new WeakMap<
+  object,
+  { key: string; item: Record<string, unknown> }
+>();
+
+function cachedToolDisclosureItem(
+  after: object,
+  tools: Record<string, unknown>[],
+  viaToolInvoke: boolean,
+): Record<string, unknown> {
+  const key = `${viaToolInvoke}\u0000${tools.map((tool) => String(tool.name)).join("\u0000")}`;
+  const cached = toolDisclosureItemCache.get(after);
+  if (cached?.key === key) return cached.item;
+  const item = toolDisclosureItem(tools, { viaToolInvoke });
+  toolDisclosureItemCache.set(after, { key, item });
+  return item;
+}
+
 function prepareLazyToolRequest(request: ModelRequest, runtime: LazyToolRuntime): ModelRequest {
   const input = restoreGenericSearchResults(request.input);
   return {
@@ -914,38 +1130,47 @@ class LazyToolModel implements Model {
   ) {}
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    await beforeModelRequest();
+    await beforeModelRequest("model_entry");
     const prepared = prepareLazyToolRequest(request, this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     const response = await this.inner.getResponse(prepared);
+    this.runtime.startPreparation();
     if (responseRequiresToolPreparation(response, this.runtime)) {
       await this.runtime.ensurePrepared();
     }
-    return this.runtime.transport === "generic_dispatch"
-      ? transformGenericDispatchResponse(response, this.runtime)
-      : response;
+    return { ...response, output: transformResponseOutput(response.output, this.runtime) };
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
-    await beforeModelRequest();
+    await beforeModelRequest("model_entry");
     const prepared = prepareLazyToolRequest(request, this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
-    for await (const event of this.inner.getStreamedResponse(prepared)) {
+    let responseStartedPreparation = false;
+    for await (const event of streamPreemptibleModelRequest(prepared, (preemptible) =>
+      this.inner.getStreamedResponse(preemptible),
+    )) {
+      // Some transports synthesize response_started before network I/O. A
+      // substantive response is the provider-neutral fallback, not that marker.
+      if (!responseStartedPreparation && event.type !== "response_started") {
+        responseStartedPreparation = true;
+        this.runtime.startPreparation();
+      }
       if (event.type === "response_done") {
         if (responseRequiresToolPreparation(event.response, this.runtime)) {
           await this.runtime.ensurePrepared();
         }
       }
       const delivered =
-        this.runtime.transport === "generic_dispatch" && event.type === "response_done"
+        event.type === "response_done"
           ? ({
               ...event,
               response: {
                 ...event.response,
-                output: event.response.output.flatMap((item) =>
-                  transformGenericDispatchCall(item, this.runtime),
+                output: transformResponseOutput(
+                  event.response.output as ModelResponse["output"],
+                  this.runtime,
                 ) as typeof event.response.output,
               },
             } as StreamEvent)

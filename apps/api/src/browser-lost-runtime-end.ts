@@ -28,6 +28,39 @@ export async function endBrowserDiscardingLostRuntime(
   }
 }
 
+/** Return an expired resume to its checkpoint. A plain end of the expired
+ * generation succeeds when its launch provably never happened (or is already
+ * gone). When the controller instead preserves an interrupted launch (one that
+ * never recorded completion, so it can't be adopted), it is asked to move that
+ * launch's directory aside intact; nothing is discarded, and a launch that did
+ * complete, or whose profile may still be in use, keeps refusing. Controllers
+ * older than the set-aside flag reject it and keep their original refusal. */
+export async function endExpiredResumeSettingAsideInterruptedLaunch(
+  client: BrowserEndClient,
+  reference: { browserSessionId: string; controllerGeneration: string },
+): Promise<void> {
+  try {
+    await client.endSession(reference, { removeState: true });
+    return;
+  } catch (error) {
+    if (isMissingControllerSession(error)) return;
+    if (!isPreservedLostBrowserRuntime(error)) throw error;
+    try {
+      await client.endSession(reference, { removeState: true, setAsideInterruptedLaunch: true });
+    } catch (setAsideError) {
+      if (isMissingControllerSession(setAsideError)) return;
+      if (setAsideError instanceof BrowserControlRequestError && setAsideError.status === 400) {
+        throw error;
+      }
+      throw setAsideError;
+    }
+  }
+}
+
+function isMissingControllerSession(error: unknown): boolean {
+  return error instanceof BrowserControlRequestError && error.status === 404;
+}
+
 function isPreservedLostBrowserRuntime(error: unknown): boolean {
   return (
     error instanceof BrowserControlRequestError &&

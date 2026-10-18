@@ -12,6 +12,9 @@ import {
 import { buildTimeline } from "../src/timeline";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { flush, registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -77,7 +80,7 @@ test("live retry status names the model, provider condition and attempt", () => 
     maxAttempts: 5,
     modelRoute: true,
   });
-  expect(providerRecoveryRetryingText(facts!)).toBe(
+  expect(providerRecoveryRetryingText(englishText, facts!)).toBe(
     "Claude Opus 5.5 is overloaded at the provider (Amazon Bedrock) — retrying (attempt 2 of 5)…",
   );
 });
@@ -91,11 +94,12 @@ test("a turn parked behind a sandbox rotation says why it is waiting", () => {
     transitionReason: "rotation_in_progress",
   });
   expect(facts).toMatchObject({ sandboxWait: true, modelRoute: false });
-  expect(providerRecoveryRetryingText(facts!)).toBe(
+  expect(providerRecoveryRetryingText(englishText, facts!)).toBe(
     "The sandbox reached its maximum lifetime, so Opengeni is moving the workspace to a fresh sandbox…",
   );
   const lifecycle = (detail: Record<string, unknown>) =>
     providerRecoveryRetryingText(
+      englishText,
       parseProviderRecovery({ reason: "sandbox_lifecycle_transition", ...detail })!,
     );
   expect(lifecycle({ transitionReason: "capture_in_progress" })).toBe(
@@ -109,6 +113,7 @@ test("a turn parked behind a sandbox rotation says why it is waiting", () => {
   );
   expect(
     providerRecoveryRetryingText(
+      englishText,
       parseProviderRecovery({ reason: "sandbox_lease_superseded", rotationReason: "operator" })!,
     ),
   ).toBe("Opengeni is moving the workspace to a fresh sandbox…");
@@ -162,8 +167,8 @@ test("only the active turn's newest boundary drives the live status", () => {
 });
 
 test("an exhausted failure reads as one plain sentence in the timeline, not raw provider text", () => {
-  expect(presentFailure(exhaustedPayload).reason).toBe(exhaustedPayload.error);
-  const items = buildTimeline([
+  expect(presentFailure(englishText, exhaustedPayload).reason).toBe(exhaustedPayload.error);
+  const items = buildTimeline(englishText, [
     event("turn.recovery.requested", recoveryPayload(5)),
     event("turn.failed", exhaustedPayload),
   ]);
@@ -188,11 +193,12 @@ test("legacy exhausted payloads lose the internal wrapper wording", () => {
     maxProviderRecoveryCount: 5,
     lastRetryableError: "503 Service Unavailable: model overloaded",
   };
-  expect(presentFailure(legacy).reason).toBe(
+  expect(presentFailure(englishText, legacy).reason).toBe(
     "The model is overloaded at the provider. Opengeni retried 5 times without success. Try again in a few minutes, or switch to another model.",
   );
   expect(
     providerRecoveryExhaustedText(
+      englishText,
       parseProviderRecovery({ ...legacy, code: "mcp_transport_timeout", lastRetryableError: "x" })!,
     ),
   ).toBe(

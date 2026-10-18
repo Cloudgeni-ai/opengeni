@@ -1,9 +1,9 @@
 //! Process-wide reservation boundary shared by routed work and self-update.
 //! Reserve before spawning: an unpolled task must already prevent an idle proof.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Default)]
 /// One host-wide admission boundary shared by every ingress connection.
@@ -35,7 +35,8 @@ struct State {
     /// fence admission; each idle attempt fences through `reserve_update`.
     waiting: Option<String>,
     sealed: bool,
-    unsettled: bool,
+    unsettled: BTreeMap<u64, String>,
+    next_failure: u64,
     routed: usize,
     /// Routed reservations owned by jobs an in-place update can hand to its
     /// successor process image.
@@ -75,10 +76,47 @@ impl UpdateDrain {
             .map_or(true, |state| state.operation.is_some())
     }
 
-    /// Preserve lost physical settlement even after its controller is retired.
-    pub fn mark_unsettled(&self) {
+    /// Retain one exact lost settlement until its owner proves completion.
+    /// Dropping the returned witness never clears the failure.
+    #[track_caller]
+    pub fn mark_unsettled(self: &Arc<Self>, reason: impl Into<String>) -> UnsettledWork {
+        let reason = reason.into();
+        let location = std::panic::Location::caller();
+        tracing::warn!(%reason, %location, "producer settlement unavailable; self-update waits for recovery");
+        let mut id = None;
         if let Ok(mut state) = self.state.lock() {
-            state.unsettled = true;
+            state.next_failure += 1;
+            id = Some(state.next_failure);
+            let key = state.next_failure;
+            state.unsettled.insert(key, reason);
+        }
+        UnsettledWork {
+            drain: Arc::downgrade(self),
+            id,
+        }
+    }
+
+    /// Actionable diagnostic without confusing failed reply delivery with live work.
+    pub fn unavailable_reason(&self) -> Option<String> {
+        match self.state.lock() {
+            Ok(state) => state.unsettled.values().next().map(|reason| format!(
+                "Cannot confirm cleanup of {reason} ({} unresolved producer(s)). Check the agent log; retry after cleanup. If cleanup cannot recover, stop or finish active commands and restart the agent service before retrying the update.",
+                state.unsettled.len()
+            )),
+            Err(_) => Some("The agent's update state lock failed. Stop or finish active commands, restart the agent service, then retry the update.".into()),
+        }
+    }
+
+    /// Separate a known cleanup failure from an unreadable admission boundary.
+    pub fn unavailable_code(&self) -> &'static str {
+        if self
+            .state
+            .lock()
+            .is_ok_and(|state| !state.unsettled.is_empty())
+        {
+            "update_cleanup_unconfirmed"
+        } else {
+            "update_state_unavailable"
         }
     }
     /// Accept the sole host update without fencing work. The update waits for
@@ -95,7 +133,7 @@ impl UpdateDrain {
         if state.waiting.is_some() || state.operation.is_some() {
             return UpdateReservation::Busy;
         }
-        if state.unsettled {
+        if !state.unsettled.is_empty() {
             return UpdateReservation::Unavailable;
         }
         state.waiting = Some(operation.to_owned());
@@ -130,7 +168,7 @@ impl UpdateDrain {
         let Ok(mut state) = self.state.lock() else {
             return UpdateReservation::Unavailable;
         };
-        if state.unsettled {
+        if !state.unsettled.is_empty() {
             return UpdateReservation::Unavailable;
         }
         if state.waiting.as_deref() != Some(operation) {
@@ -156,7 +194,7 @@ impl UpdateDrain {
             Some(current) if current == operation => UpdateReservation::AlreadyAccepted,
             Some(_) => UpdateReservation::Busy,
             None => {
-                if state.unsettled {
+                if !state.unsettled.is_empty() {
                     return UpdateReservation::Unavailable;
                 }
                 if state
@@ -202,15 +240,34 @@ impl UpdateDrain {
             upload: false,
             identity,
             handover: AtomicBool::new(false),
+            cleanup: AtomicBool::new(false),
+            producer: Mutex::new("routed work".into()),
         })))
     }
 
-    /// Return no idle evidence after a lost physical/transport settlement.
+    /// Restore an already-admitted job's ownership during successor startup or
+    /// handover rollback. This is not admission for new work: it must also work
+    /// behind the updater's existing fence. A poisoned boundary remains closed.
+    pub fn reserve_adopted_work(self: &Arc<Self>) -> Option<WorkReservation> {
+        let mut state = self.state.lock().ok()?;
+        state.routed += 1;
+        state.handover += 1;
+        Some(WorkReservation(Arc::new(Reservation {
+            drain: self.clone(),
+            upload: false,
+            identity: None,
+            handover: AtomicBool::new(true),
+            cleanup: AtomicBool::new(false),
+            producer: Mutex::new("adopted command".into()),
+        })))
+    }
+
+    /// Return no idle evidence while physical settlement is unconfirmed.
     pub fn snapshot(&self) -> Option<Snapshot> {
         self.state
             .lock()
             .ok()
-            .filter(|state| !state.unsettled)
+            .filter(|state| state.unsettled.is_empty())
             .map(|state| Snapshot {
                 routed: state.routed,
                 handover: state.handover,
@@ -231,6 +288,8 @@ impl UpdateDrain {
             upload: false,
             identity: None,
             handover: AtomicBool::new(false),
+            cleanup: AtomicBool::new(false),
+            producer: Mutex::new("operation control".into()),
         })))
     }
 
@@ -253,7 +312,7 @@ impl UpdateDrain {
         };
         let excused = if handover { state.handover } else { 0 };
         if state.operation.as_deref() != Some(operation)
-            || state.unsettled
+            || !state.unsettled.is_empty()
             || state.routed != excused
             || !state.uploads.is_empty()
         {
@@ -264,31 +323,82 @@ impl UpdateDrain {
     }
 }
 
+/// Only the owner of this exact failed producer may redeem its exit evidence.
+/// There is deliberately no global reset and no clear-on-drop behavior.
+pub struct UnsettledWork {
+    drain: Weak<UpdateDrain>,
+    id: Option<u64>,
+}
+
+impl UnsettledWork {
+    /// Call only after positive physical completion, never after merely signaling.
+    pub fn resolve(self) {
+        if let (Some(drain), Some(id)) = (self.drain.upgrade(), self.id) {
+            if let Ok(mut state) = drain.state.lock() {
+                if let Some(reason) = state.unsettled.remove(&id) {
+                    tracing::info!(%reason, "producer settlement recovered");
+                }
+            }
+        }
+    }
+}
+
 /// Cloning retains one reservation; it does not mint new accepted work.
 #[derive(Clone)]
 pub struct WorkReservation(Arc<Reservation>);
 
 impl std::fmt::Debug for WorkReservation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkReservation").finish_non_exhaustive()
+        f.debug_struct("WorkReservation")
+            .field("producer", &self.0.producer)
+            .finish_non_exhaustive()
     }
 }
 
 impl WorkReservation {
     /// A lost transport/cleanup receipt is not proof that physical work ended.
-    /// Keep updates unavailable for this process; ordinary work can continue.
-    pub fn mark_unsettled(&self) {
-        self.0.drain.mark_unsettled();
+    /// Only the exact owner can clear this failure after obtaining exit evidence.
+    #[track_caller]
+    pub fn mark_unsettled(&self, reason: impl Into<String>) -> UnsettledWork {
+        let producer = self
+            .0
+            .producer
+            .lock()
+            .map_or_else(|_| "unknown producer".into(), |name| name.clone());
+        self.0
+            .drain
+            .mark_unsettled(format!("{producer}: {}", reason.into()))
+    }
+
+    /// Identify the admitted request before spawning its producers. Never stores
+    /// command content, arguments, credentials, or file bytes.
+    pub fn describe(&self, producer: String) {
+        if let Ok(mut name) = self.0.producer.lock() {
+            *name = producer;
+        }
     }
 
     /// Marks this routed reservation as owned by a job an in-place update can
     /// hand to its successor, so it no longer holds such an update back.
     pub fn mark_handover(&self) {
-        if self.0.upload || self.0.handover.swap(true, Ordering::AcqRel) {
-            return;
-        }
         if let Ok(mut state) = self.0.drain.state.lock() {
-            state.handover += 1;
+            if !self.0.upload
+                && !self.0.cleanup.load(Ordering::Acquire)
+                && !self.0.handover.swap(true, Ordering::AcqRel)
+            {
+                state.handover += 1;
+            }
+        }
+    }
+
+    /// Cleanup is not a running job the successor can adopt. Revoke any prior
+    /// handover exemption before transferring this reservation to a reaper.
+    pub fn require_settlement(&self) {
+        if let Ok(mut state) = self.0.drain.state.lock() {
+            self.0.cleanup.store(true, Ordering::Release);
+            if !self.0.upload && self.0.handover.swap(false, Ordering::AcqRel) {
+                state.handover -= 1;
+            }
         }
     }
 
@@ -311,8 +421,10 @@ impl WorkReservation {
         Self(Arc::new(Reservation {
             drain: self.0.drain.clone(),
             handover: AtomicBool::new(false),
+            cleanup: AtomicBool::new(false),
             upload: true,
             identity: Some(identity),
+            producer: Mutex::new("upload transaction".into()),
         }))
     }
 }
@@ -322,6 +434,8 @@ struct Reservation {
     upload: bool,
     identity: Option<UploadIdentity>,
     handover: AtomicBool,
+    cleanup: AtomicBool,
+    producer: Mutex<String>,
 }
 
 impl Drop for Reservation {
@@ -343,6 +457,58 @@ impl Drop for Reservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_clears_only_the_exact_producer_and_reenables_update() {
+        let drain = Arc::new(UpdateDrain::default());
+        let first = drain.mark_unsettled("exec group 11: temporary wait failure");
+        let second = drain.mark_unsettled("PTY child 22: temporary wait failure");
+        assert_eq!(drain.accept_update("one"), UpdateReservation::Unavailable);
+        assert!(drain
+            .unavailable_reason()
+            .unwrap()
+            .contains("exec group 11"));
+        first.resolve();
+        assert_eq!(drain.reserve_update("one"), UpdateReservation::Unavailable);
+        assert!(drain.unavailable_reason().unwrap().contains("PTY child 22"));
+        second.resolve();
+        assert!(drain.unavailable_reason().is_none());
+        assert_eq!(drain.accept_update("one"), UpdateReservation::Started);
+        assert_eq!(drain.fence_update("one"), UpdateReservation::Started);
+        assert!(drain.seal_update_with_handover("one"));
+    }
+
+    #[test]
+    fn adopted_work_keeps_cleanup_owned_behind_an_existing_update_fence() {
+        let drain = Arc::new(UpdateDrain::default());
+        assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
+        assert!(drain.seal_update("update"));
+        assert!(drain.reserve_work(None).is_none());
+        let adopted = drain.reserve_adopted_work().unwrap();
+        assert!(drain.seal_update_with_handover("update"));
+        adopted.require_settlement();
+        assert!(!drain.seal_update_with_handover("update"));
+        drop(adopted);
+        assert!(drain.seal_update("update"));
+    }
+
+    #[test]
+    fn cleanup_revokes_handover_exemption_until_its_last_owner_finishes() {
+        let drain = Arc::new(UpdateDrain::default());
+        let job = drain.reserve_work(None).unwrap();
+        job.mark_handover();
+        assert_eq!(drain.reserve_update("one"), UpdateReservation::Started);
+        assert!(drain.seal_update_with_handover("one"));
+        let cleanup = job.clone();
+        cleanup.require_settlement();
+        cleanup.require_settlement();
+        job.mark_handover();
+        drop(job);
+        assert_eq!(drain.snapshot().unwrap().handover, 0);
+        assert!(!drain.seal_update_with_handover("one"));
+        drop(cleanup);
+        assert!(drain.seal_update_with_handover("one"));
+    }
 
     #[test]
     fn controls_invalidate_the_final_seal_and_remain_usable_while_draining() {
@@ -391,7 +557,7 @@ mod tests {
     fn lost_settlement_prevents_update_without_disabling_ordinary_work() {
         let drain = Arc::new(UpdateDrain::default());
         let work = drain.reserve_work(None).unwrap();
-        work.mark_unsettled();
+        work.mark_unsettled("synthetic lost worker");
         drop(work);
         assert_eq!(drain.snapshot(), None);
         assert_eq!(drain.reserve_update("one"), UpdateReservation::Unavailable);
@@ -447,7 +613,7 @@ mod tests {
         assert!(drain.reserve_control().is_some());
         assert_eq!(drain.accept_update("two"), UpdateReservation::Started);
         drain.finish_update("two");
-        drain.mark_unsettled();
+        drain.mark_unsettled("synthetic lost worker");
         assert_eq!(drain.accept_update("three"), UpdateReservation::Unavailable);
     }
 

@@ -48,6 +48,10 @@ mac:
   entitlements: resources/entitlements.mac.plist
   entitlementsInherit: resources/entitlements.mac.plist
   minimumSystemVersion: "12.0"
+  # The launch agent that opens the app hidden at login (scripts/build.ts).
+  extraFiles:
+    - from: build/LaunchAgents
+      to: Library/LaunchAgents
   extendInfo:
     NSMicrophoneUsageDescription: Opengeni uses the microphone when you dictate or talk to an agent.
     NSCameraUsageDescription: Opengeni uses the camera when you share a photo with an agent.

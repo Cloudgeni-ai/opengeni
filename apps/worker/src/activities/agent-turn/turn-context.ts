@@ -39,7 +39,7 @@ export type ClaimedResult = (
   >,
 ) => RunAgentTurnResult;
 
-export type TurnSettleFn = (input: {
+export type TurnSettleInput = {
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>;
   turnStatus:
     | "queued"
@@ -56,7 +56,19 @@ export type TurnSettleFn = (input: {
   consumeRequestedCompactionFailure?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
   notStartedToolCallIds?: readonly string[];
-}) => Promise<boolean>;
+};
+
+/**
+ * Durable turn settlement. `false` means this attempt lost ownership. With
+ * `requirePendingSteer`, `"pending_steer_withdrawn"` means the precondition
+ * failed under the session lock and nothing was written.
+ */
+export type TurnSettleFn = {
+  (
+    input: TurnSettleInput & { requirePendingSteer: true },
+  ): Promise<boolean | "pending_steer_withdrawn">;
+  (input: TurnSettleInput): Promise<boolean>;
+};
 
 export type TurnControlState = {
   cancellationRequestedAt: number | null;
@@ -216,6 +228,8 @@ export type SubscriptionCoreTurn = {
 export type CodexSubscriptionCoreTurn = SubscriptionCoreTurn;
 
 export type ProviderTurnState = {
+  /** Survives step progress and is persisted on recovery, never inherited by another turn. */
+  persistentModelTransportHttpOnly?: boolean;
   // The Codex account this turn runs on (pin > workspace active), resolved once
   // a codex-billed turn is confirmed and threaded into the token resolver.
   effectiveCodexCredentialId: string | null;

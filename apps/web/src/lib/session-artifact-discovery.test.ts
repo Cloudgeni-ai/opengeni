@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
-import { discoverSessionArtifacts } from "./session-artifact-discovery";
+import {
+  discoverSessionArtifacts,
+  type SessionArtifactSourceCache,
+} from "./session-artifact-discovery";
 const item: ArtifactCatalogItem = {
   id: "same",
   kind: "image",
@@ -164,5 +167,104 @@ describe("session catalog discovery", () => {
     });
     expect(reconcile([]).artifacts.map((artifact) => artifact.id)).toEqual(["same"]);
     expect(new Set(sources)).toEqual(new Set(["parent"]));
+  });
+  test("re-reads only the chat and sub-sessions whose activity advanced", async () => {
+    const versions: Record<string, number> = { quiet: 4, busy: 7, flaky: 2 };
+    const node = (id: string) => ({
+      session: {
+        id,
+        status: "idle",
+        lastSequence: versions[id],
+        updatedAt: "2026-09-01T00:00:00Z",
+      },
+      children: [],
+    });
+    let failFlaky = true;
+    const reads: string[] = [];
+    const client = {
+      getSessionLineage: async () =>
+        ({
+          ancestors: [],
+          truncated: false,
+          children: [node("quiet"), node("busy"), node("flaky")],
+        }) as never,
+      listArtifactCatalog: async (
+        _workspaceId: string,
+        options: { sourceSessionId?: string; status?: string } = {},
+      ) => {
+        const source = options.sourceSessionId!;
+        reads.push(`${source}:${options.status}`);
+        if (source === "flaky" && failFlaky)
+          throw Object.assign(new Error("busy"), { status: 503 });
+        return options.status === "active"
+          ? { items: [{ ...item, id: `${source}-${versions[source] ?? 0}` }], nextCursor: null }
+          : { items: [], nextCursor: null };
+      },
+    };
+    const cache: SessionArtifactSourceCache = new Map();
+    await discoverSessionArtifacts("workspace", "parent", () => true, client, cache);
+    expect(reads).toHaveLength(8);
+    // The unreadable source is not cached; the readable ones are.
+    expect([...cache.keys()].sort()).toEqual(["busy", "quiet"]);
+
+    reads.length = 0;
+    versions.busy = 9;
+    failFlaky = false;
+    const reconcile = await discoverSessionArtifacts(
+      "workspace",
+      "parent",
+      () => true,
+      client,
+      cache,
+    );
+    expect(reads.sort()).toEqual(
+      [
+        "busy:active",
+        "busy:archived",
+        "flaky:active",
+        "flaky:archived",
+        "parent:active",
+        "parent:archived",
+      ].sort(),
+    );
+    expect(
+      reconcile([])
+        .artifacts.map((artifact) => artifact.id)
+        .sort(),
+    ).toEqual(["busy-9", "flaky-2", "parent-0", "quiet-4"]);
+  });
+  test("forgets sub-sessions that left the lineage and never caches a stale read", async () => {
+    const cache: SessionArtifactSourceCache = new Map([
+      ["gone", { version: "idle:1:2026-09-01T00:00:00Z", active: [item], archived: [] }],
+    ]);
+    const child = {
+      session: { id: "child", status: "idle", lastSequence: 1, updatedAt: "2026-09-01T00:00:00Z" },
+      children: [],
+    };
+    await discoverSessionArtifacts(
+      "workspace",
+      "parent",
+      () => false,
+      {
+        getSessionLineage: async () =>
+          ({ ancestors: [], truncated: false, children: [child] }) as never,
+        listArtifactCatalog: async () => ({ items: [item], nextCursor: null }),
+      },
+      cache,
+    );
+    // A superseded discovery leaves the cache untouched.
+    expect([...cache.keys()]).toEqual(["gone"]);
+    await discoverSessionArtifacts(
+      "workspace",
+      "parent",
+      () => true,
+      {
+        getSessionLineage: async () =>
+          ({ ancestors: [], truncated: false, children: [child] }) as never,
+        listArtifactCatalog: async () => ({ items: [item], nextCursor: null }),
+      },
+      cache,
+    );
+    expect([...cache.keys()]).toEqual(["child"]);
   });
 });

@@ -33,8 +33,13 @@ import {
 } from "../domain/resources";
 import { hasVerifiedOwningUserAuthorization, type AccessGrantAuthorization } from "../access";
 import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "../domain/sessions";
-import { resolveDefaultSessionModel } from "../default-session-model";
+import {
+  resolveCallerWorkspaceModelSelections,
+  resolveDefaultSessionModel,
+  workspaceCatalogListsModel,
+} from "../default-session-model";
 import { canonicalizeConfiguredModelId, type Settings } from "@opengeni/config";
+import { prepareDraftModel } from "./draft-model-preparation";
 
 type NewSessionDraftDependencies = Pick<AppDependencies, "settings" | "db" | "objectStorage">;
 
@@ -98,6 +103,32 @@ async function actorDefaultModel(
   });
 }
 
+/**
+ * False only when this workspace's catalog demonstrably no longer lists the
+ * model. A catalog read failure is not proof of removal, so it keeps the
+ * saved choice.
+ */
+async function workspaceCatalogMayHaveModel(
+  deps: Pick<NewSessionDraftDependencies, "db" | "settings">,
+  grant: AccessGrant,
+  workspaceId: string,
+  modelId: string,
+): Promise<boolean> {
+  try {
+    const selections = await resolveCallerWorkspaceModelSelections(deps.db, deps.settings, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+    });
+    return workspaceCatalogListsModel(
+      selections,
+      canonicalizeConfiguredModelId(deps.settings, modelId),
+    );
+  } catch {
+    return true;
+  }
+}
+
 type NewSessionDraftReadOptions = {
   /**
    * Project a draft that follows the default onto today's resolved default.
@@ -120,7 +151,18 @@ async function hydrateNewSessionDraft(
   // A draft that follows the default is projected onto today's default, so a
   // later subscription connect or credit purchase replaces an untouched free
   // model. The stored row is unchanged until the person saves again.
-  const modelProvided = draftModelProvided(deps.settings, stored);
+  let modelProvided = draftModelProvided(deps.settings, stored);
+  if (
+    modelProvided &&
+    readOptions.projectDefaultModel !== false &&
+    !(await workspaceCatalogMayHaveModel(deps, grant, workspaceId, stored.model))
+  ) {
+    // The saved choice left this workspace's catalog (a removed provider or a
+    // retired model). A new chat must not start on a model that cannot run, so
+    // the draft follows today's default until the person picks again. A model
+    // that is listed but temporarily unavailable keeps the person's choice.
+    modelProvided = false;
+  }
   let mapped: NewSessionDraftValue = { ...stored, modelProvided };
   if (!modelProvided && readOptions.projectDefaultModel !== false) {
     const resolved = await actorDefaultModel(deps, grant, workspaceId);
@@ -372,11 +414,19 @@ export async function getActorNewSessionDraft(
 export async function saveActorNewSessionDraft(
   ...args: Parameters<typeof saveActorNewSessionDraftInFileScope>
 ): Promise<NewSessionDraftValue> {
-  const [deps, grant, , , , authorization] = args;
+  const [deps, grant, workspaceId, , , authorization] = args;
   const actor = authorization
     ? await fileOwnerContextForAccess(deps, authorization, "sessions:create")
     : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
-  return withSessionRlsActorContext(actor, () => saveActorNewSessionDraftInFileScope(...args));
+  const saved = await withSessionRlsActorContext(actor, () =>
+    saveActorNewSessionDraftInFileScope(...args),
+  );
+  prepareDraftModel(
+    deps,
+    { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+    saved,
+  );
+  return saved;
 }
 
 /**

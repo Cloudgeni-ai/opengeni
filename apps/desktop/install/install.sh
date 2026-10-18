@@ -213,4 +213,17 @@ install_linux() {
 }
 
 resolve_release
+
+# Installed from a server: the app offers that server when you first sign in.
+remember_server() {
+  [ -n "$BASE_URL" ] && [ "$(id -u)" -ne 0 ] || return 0
+  if [ "$system" = mac ]; then
+    data_dir="$HOME/Library/Application Support/Opengeni"
+  else
+    data_dir="${XDG_CONFIG_HOME:-$HOME/.config}/Opengeni"
+  fi
+  mkdir -p "$data_dir" 2>/dev/null && printf '%s\n' "${BASE_URL%/}" >"$data_dir/default-server" 2>/dev/null || true
+}
+remember_server
+
 if [ "$system" = mac ]; then install_mac; else install_linux; fi

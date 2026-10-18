@@ -1,8 +1,10 @@
 import { useEffect, useRef } from "react";
 import { paintPreviewLoading } from "../preview-loading-paint";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** Private loading surface: never receives or executes the unfinished fence. */
 export function PreviewLoading() {
+  const t = useOpenGeniText();
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     const canvas = ref.current;
@@ -103,7 +105,7 @@ export function PreviewLoading() {
   return (
     <div className="og-preview-loading">
       <canvas ref={ref} aria-hidden="true" />
-      <span className="og-preview-loading-label">Preparing preview…</span>
+      <span className="og-preview-loading-label">{t("previewLoading.preparingPreview")}</span>
     </div>
   );
 }

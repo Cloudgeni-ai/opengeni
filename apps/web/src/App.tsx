@@ -157,6 +157,10 @@ const LazyOnboardingPreviewRoute = lazyRouteComponent(
   () => import("@/routes/onboarding-preview"),
   "OnboardingPreviewRoute",
 );
+const LazySubscriptionPlansPreview = lazyRouteComponent(
+  () => import("@/dev/subscription-plans-preview"),
+  "SubscriptionPlansPreview",
+);
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyReadOnlyChatsRoute = lazyRouteComponent(
   () => import("@/routes/read-only-chats"),
@@ -363,6 +367,11 @@ const onboardingPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/onboarding",
   component: LazyOnboardingPreviewRoute,
+});
+const subscriptionPlansPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/subscription-plans",
+  component: LazySubscriptionPlansPreview,
 });
 // DEV-only: production MessageTimeline replaying deterministic scenarios (native parity reference).
 const devSessionTimelineRoute = createRoute({
@@ -735,7 +744,14 @@ const workspaceOrganizationRoute = createRoute({
     const checkout = parseCheckoutOutcome(search);
     const checkoutSession =
       checkout === "success" ? parseCheckoutSessionId(search.checkoutSession) : null;
-    const section = parseOrganizationSection(search.section);
+    const requestedSection = parseOrganizationSection(search.section);
+    // Connected agents moved from Developer to their own page; older links
+    // (Connect an agent, an agent's page) still land on it.
+    const section =
+      requestedSection === "developer" &&
+      (search.view === "connect-agent" || parseAgentParam(search.agent))
+        ? ("agents" as const)
+        : requestedSection;
     const account = section === "models" ? parseModelsAccount(search.account) : undefined;
     const view =
       section === "models"
@@ -746,7 +762,7 @@ const workspaceOrganizationRoute = createRoute({
             ? (parseOrganizationView(search.view) ?? parseDeveloperView(search.view))
             : undefined;
     const webhook = section === "developer" ? parseWebhookParam(search.webhook) : undefined;
-    const agent = section === "developer" ? parseAgentParam(search.agent) : undefined;
+    const agent = section === "agents" ? parseAgentParam(search.agent) : undefined;
     const serviceAccount =
       section === "developer" ? parseServiceAccountParam(search.serviceAccount) : undefined;
     const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
@@ -809,7 +825,12 @@ const routeTree = rootRoute.addChildren([
   nativeSignInRoute,
   siteAuthorizeRoute,
   ...(import.meta.env.DEV
-    ? [composerChromeGalleryRoute, onboardingPreviewRoute, devSessionTimelineRoute]
+    ? [
+        composerChromeGalleryRoute,
+        onboardingPreviewRoute,
+        subscriptionPlansPreviewRoute,
+        devSessionTimelineRoute,
+      ]
     : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
   workspaceRoute.addChildren([
@@ -1234,11 +1255,11 @@ function Organization() {
           ? {
               ...(parseDeveloperView(view) ? { view: parseDeveloperView(view)! } : {}),
               ...(webhook ? { webhook } : {}),
-              ...(agent ? { agent } : {}),
               ...(serviceAccount ? { serviceAccount } : {}),
             }
           : undefined
       }
+      connectedAgent={page === "agents" ? agent : undefined}
       person={person}
       invitation={invitation}
       workspace={workspace}

@@ -21,6 +21,7 @@
   "type": "module",
   "scripts": {
     "credits:policy": "bun scripts/operator/credit-promotion-policy.ts",
+    "plans:catalog": "bun scripts/operator/subscription-plan-catalog.ts",
     "dev": "bun scripts/run-development-stack.ts",
     "dev:stack": "bun scripts/run-development-stack.ts",
     "dev:check": "bun scripts/run-development-stack.ts --check",
@@ -133,7 +134,7 @@
     "artifact-runtime:build-target": "bun scripts/build-artifact-runtime-target.ts",
     "test:runtime-embedding-consumer": "bun scripts/test-runtime-embedding-consumer.ts",
     "test:ogtool-package": "bun scripts/test-ogtool-package.ts",
-    "changeset:version": "changeset version && bun scripts/release/lockstep-version.ts && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities && bun scripts/public-api/refresh-sdk-major.ts",
+    "changeset:version": "changeset version && bun scripts/release/drop-ignored-changesets.ts && bun scripts/release/lockstep-version.ts && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities && bun scripts/public-api/refresh-sdk-major.ts",
     "release:rewrite-deps": "bun scripts/rewrite-workspace-deps.ts",
     "release:rewrite-entry-points": "bun scripts/rewrite-entry-points.ts",
     "release:publish": "bash scripts/release-publish.sh",
@@ -153,6 +154,7 @@
     "check:migration-ordinals": "bun scripts/check-migration-ordinals.ts",
     "check:migration-rls-backfills": "bun scripts/check-migration-rls-backfills.ts",
     "check:migration-lock-order": "bun scripts/check-migration-lock-order.ts",
+    "check:migration-deployment-mode": "bun scripts/check-migration-deployment-mode.ts",
     "check:migration-schema-contract": "bun scripts/check-migration-schema-contract.ts",
     "check:migration-test-budgets": "bun scripts/check-migration-test-budgets.ts",
     "check:public-api": "bun scripts/public-api/check.ts",
@@ -219,6 +221,7 @@
     "playwright": "^1.61.1",
     "postgres": "^3.4.9",
     "sharp": "0.34.5",
+    "sigstore": "5.0.0",
     "typescript": "7.0.2",
     "yaml": "2.9.0",
     "zod": "^4.2.1"

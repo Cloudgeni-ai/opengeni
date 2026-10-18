@@ -14,6 +14,9 @@ import type {
   ToolRegistry,
   TimelineItem,
 } from "../src/timeline";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 /* ----------------------------------------------------------------------------
    Renderer integration tests for Issue-2 (multi-file apply_patch count) and
@@ -174,7 +177,7 @@ describe("allowance refusal rendering", () => {
           ? "An organization admin can raise the workspace budget."
           : "A workspace admin can raise this limit.",
       );
-      expect(text).toContain(`Resets ${formatAllowanceDate(refusal.resetsAt)}.`);
+      expect(text).toContain(`Resets ${formatAllowanceDate(englishText, refusal.resetsAt)}.`);
       expect(r.container.querySelectorAll("[data-og-allowance-exhausted]")).toHaveLength(1);
       expect(r.container.querySelector("[data-og-allowance-exhausted]")?.getAttribute("role")).toBe(
         "status",
@@ -371,6 +374,47 @@ describe("context compaction rendering", () => {
 });
 
 describe("structured human-input history", () => {
+  test("an answered question keeps its link clickable and wrapped inside the card", async () => {
+    timelineSequence = 0;
+    const url = `https://example.com/oauth/authorize?client_id=${"x".repeat(120)}&scope=a+b`;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("session.humanInput.requested", {
+            request: {
+              id: "request-link",
+              questions: [
+                {
+                  id: "code",
+                  kind: "text",
+                  label: "Sign-in code",
+                  prompt: `Open this link and approve: ${url}. Then paste the code.`,
+                  options: [],
+                },
+              ],
+            },
+          }),
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-link",
+            response: { outcome: "answered", answers: [{ questionId: "code", values: ["ok"] }] },
+          }),
+          timelineEvent("turn.completed", {}),
+        ]}
+      />,
+    );
+    await flush();
+    try {
+      const history = r.container.querySelector('[data-human-input-history="request-link"]');
+      const anchor = history?.querySelector<HTMLAnchorElement>(`a[href="${url}"]`);
+      expect(anchor).not.toBeNull();
+      expect(anchor?.getAttribute("target")).toBe("_blank");
+      expect(anchor?.parentElement?.className).toContain("[overflow-wrap:anywhere]");
+      expect(history?.textContent).toContain(`${url}. Then paste the code.`);
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("keeps an answered request visible outside the collapsed steps", async () => {
     timelineSequence = 0;
     const r = await renderComponent(
@@ -1954,6 +1998,30 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
 }
 
 describe("TimelineRow — connection recovery", () => {
+  test("unconfigured computer offers never turn event URLs or variables into a terminal setup fallback", async () => {
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          authoritySource: "host",
+          authorizationUrl: "https://example.test/install?command=curl",
+          capability: {
+            id: "api:connected-machine",
+            name: "Connected Machine",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Use my computer",
+            requiredVariables: ["OPENGENI_ENROLL_TOKEN"],
+          },
+        })}
+      />,
+    );
+    expect(r.container.textContent).toContain("This app hasn't enabled computer setup here");
+    expect(r.container.querySelector("a")).toBeNull();
+    expect(r.container.textContent).not.toContain("OPENGENI_ENROLL_TOKEN");
+    await r.unmount();
+  });
+
   test("lets the authenticated host render setup inline and preserves the fallback", async () => {
     const row = authNeededItem();
     const custom = await renderComponent(

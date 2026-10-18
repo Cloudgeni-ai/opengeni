@@ -231,10 +231,11 @@ test("guard leaves other models, providers, APIs and non-assistant messages unch
   }
   const body = { model: "anthropic/claude-fixture", messages };
   expect(policy()({ path: "/responses", body })).toBeUndefined();
-  expect(
-    policy()({
-      path: "/chat/completions",
-      body: { ...body, messages: [{ ...messages[0], role: "user" }] },
-    }),
-  ).toBeUndefined();
+  const userMessages = [{ ...messages[0], role: "user" }];
+  const projected = policy()({
+    path: "/chat/completions",
+    body: { ...body, messages: userMessages },
+  })!.body!;
+  expect(projected.messages).toBe(userMessages);
+  expect(projected.cache_control).toEqual({ type: "ephemeral" });
 });

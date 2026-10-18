@@ -6,21 +6,20 @@ import { toast } from "sonner";
 import { RowButton } from "@/components/ui/page-actions";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
 import { ErrorMessage } from "@/components/ui/error-message";
-import { TextInput } from "@/components/ui/field";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { CouponRedeem } from "@/components/credits/coupon-redeem";
 import { useAppContext } from "@/context";
 import { billingCheckoutReturnUrl } from "@/lib/credit-checkout";
-import { CREDIT_BALANCE_CHANGED } from "@/lib/credit-balance-events";
-import { analyticsAction } from "@/lib/analytics-actions";
+import { CREDIT_BALANCE_CHANGED, notifyCreditBalanceChanged } from "@/lib/credit-balance-events";
 import {
   apiErrorAdvice,
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
 } from "@/lib/api-error";
-import { entitlementEntries, validTopupAmount } from "@/lib/format";
+import { entitlementEntries } from "@/lib/format";
+import { CreditTopupRow } from "@/components/credits/credit-topup-row";
 import {
   beginOrganizationAdminOperation,
   organizationAdminIdentityKey,
@@ -33,6 +32,8 @@ import {
 } from "@/lib/organization-admin";
 import type { BillingEntitlementsResponse, BillingSummary } from "@/types";
 import type { BillingCheckoutStatus } from "@opengeni/sdk";
+import { SubscriptionPlans } from "./subscription-plans";
+import { useSubscriptionCatalog } from "./use-subscription-catalog";
 
 // Budgets load only on this page: they never join the session or rail graphs.
 const CreditsCelebrationDialog = lazy(() =>
@@ -103,7 +104,7 @@ function BillingOverview({
   canManageBilling: boolean;
   onOpenBudget: (workspaceId: string) => void;
 }) {
-  const client = useAppContext().client;
+  const { client, clientConfig } = useAppContext();
   const navigate = useNavigate();
   const accountId = identity.organizationId;
   const workspaceId = identity.workspaceId;
@@ -170,7 +171,6 @@ function BillingOverview({
     }
     const operation = claimBillingOperation("billing", "read");
     setBillingOwnerKey(identityKey);
-    setBilling(null);
     setBillingLoading(true);
     try {
       const result = await client.getBilling({ accountId });
@@ -268,12 +268,19 @@ function BillingOverview({
     }
   }
 
-  const visibleBilling = billingOwnerKey === identityKey ? billing : null;
+  const visibleBilling = canReadBilling && billingOwnerKey === identityKey ? billing : null;
   const visibleBillingError = billingOwnerKey === identityKey ? billingError : null;
   const visibleBillingLoading = billingOwnerKey === identityKey ? billingLoading : true;
   const visibleEntitlements = entitlementsOwnerKey === identityKey ? entitlements : null;
   const visibleEntitlementsError = entitlementsOwnerKey === identityKey ? entitlementsError : null;
   const visibleBusy = busyOwnerKey === identityKey && busy;
+  const subscriptions = useSubscriptionCatalog(
+    client,
+    accountId,
+    identityKey,
+    visibleBilling?.balance.plan,
+  );
+  const showPlans = Boolean(subscriptions.catalog && visibleBilling?.balance.plan);
 
   const stripe = visibleBilling?.mode === "stripe";
   return (
@@ -289,8 +296,33 @@ function BillingOverview({
           />
         </Suspense>
       ) : null}
+      {subscriptions.catalog && visibleBilling?.balance.plan ? (
+        <SubscriptionPlans
+          key={identityKey}
+          client={client}
+          accountId={accountId}
+          returnUrl={`${window.location.origin}/workspaces/${encodeURIComponent(workspaceId)}/organization?section=billing`}
+          catalog={subscriptions.catalog}
+          plan={visibleBilling.balance.plan}
+          canManage={canManageBilling}
+          supportEmail={clientConfig.supportEmail}
+          onChanged={() => notifyCreditBalanceChanged(accountId)}
+        />
+      ) : null}
+      {subscriptions.error ? (
+        <BillingLoadFailure
+          title="Couldn't load subscription options"
+          denied="Ask an organization owner to manage subscriptions."
+          error={
+            subscriptions.error instanceof Error
+              ? subscriptions.error
+              : new Error(String(subscriptions.error))
+          }
+          onRetry={subscriptions.retry}
+        />
+      ) : null}
       <section aria-label="Credits and payments" className="min-w-0">
-        <Section title="Credits">
+        <Section title={showPlans ? "Credit balance and top-ups" : "Credits"}>
           <div className="mt-1 flex min-w-0 flex-col gap-4">
             <OrganizationCreditBalance
               billing={visibleBilling}
@@ -298,6 +330,7 @@ function BillingOverview({
               hasAccount={Boolean(accountId)}
               loading={visibleBillingLoading}
               hasError={Boolean(visibleBillingError)}
+              showPlanCredit={showPlans}
             />
             {visibleBillingError ? (
               <BillingLoadFailure
@@ -309,43 +342,12 @@ function BillingOverview({
             ) : null}
             {stripe && canManageBilling ? (
               <SettingRowGroup>
-                <SettingRow
-                  label="Add credits"
-                  description="For models and platform usage. Minimum $5."
-                  controlWidth="auto"
-                  control={
-                    <div className="flex items-center gap-2">
-                      <div className="relative">
-                        <span
-                          aria-hidden="true"
-                          className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm text-fg-subtle"
-                        >
-                          $
-                        </span>
-                        <TextInput
-                          aria-label="Amount to add (USD)"
-                          type="number"
-                          name="credit-amount"
-                          autoComplete="off"
-                          inputMode="decimal"
-                          min="5"
-                          max="10000"
-                          step="0.01"
-                          value={topupAmount}
-                          onChange={(event) => setTopupAmount(event.target.value)}
-                          className="h-8 w-28 pl-6 tabular-nums pointer-coarse:h-11"
-                        />
-                      </div>
-                      <RowButton
-                        variant="default"
-                        {...analyticsAction("buy_credits")}
-                        disabled={visibleBusy || !validTopupAmount(topupAmount)}
-                        onClick={() => void startCheckout(Number(topupAmount))}
-                      >
-                        Add credits
-                      </RowButton>
-                    </div>
-                  }
+                <CreditTopupRow
+                  amount={topupAmount}
+                  onAmountChange={setTopupAmount}
+                  onCheckout={(amount) => void startCheckout(amount)}
+                  busy={visibleBusy}
+                  hasPlan={showPlans}
                 />
                 {accountId ? (
                   <SettingRow
@@ -366,16 +368,18 @@ function BillingOverview({
                     }
                   />
                 ) : null}
-                <SettingRow
-                  label="Invoices and payment details"
-                  controlWidth="auto"
-                  control={
-                    <RowButton disabled={visibleBusy} onClick={() => void openBillingPortal()}>
-                      Open Stripe billing
-                      <ArrowUpRightIcon aria-hidden="true" />
-                    </RowButton>
-                  }
-                />
+                {!showPlans ? (
+                  <SettingRow
+                    label="Invoices and payment details"
+                    controlWidth="auto"
+                    control={
+                      <RowButton disabled={visibleBusy} onClick={() => void openBillingPortal()}>
+                        Open Stripe billing
+                        <ArrowUpRightIcon aria-hidden="true" />
+                      </RowButton>
+                    }
+                  />
+                ) : null}
               </SettingRowGroup>
             ) : stripe ? (
               <p className="text-xs leading-[18px] text-fg-muted">

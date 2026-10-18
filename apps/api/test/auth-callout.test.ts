@@ -40,8 +40,17 @@ const realDb = await import("@opengeni/db");
 // here avoids infinite self-delegation.
 const realGetEnrollment = realDb.getEnrollment;
 const realClaimEnrollmentConnection = realDb.claimEnrollmentConnection;
+const realRecordExpired = realDb.recordEnrollmentExpiredCredentials;
+const expiredDiagnostics: string[] = [];
 mock.module("@opengeni/db", () => ({
   ...realDb,
+  recordEnrollmentExpiredCredentials: async (
+    db: never,
+    input: Parameters<typeof realRecordExpired>[1],
+  ) => {
+    if (input.workspaceId !== WS) return realRecordExpired(db, input);
+    expiredDiagnostics.push(input.enrollmentId);
+  },
   getEnrollment: async (db: never, workspaceId: string, enrollmentId: string) => {
     // Only intercept this test's synthetic workspace; everyone else gets the
     // real DAO so unrelated, process-shared test files are unaffected.
@@ -247,6 +256,7 @@ describe("handleAuthorizationRequest", () => {
   });
 
   test("an EXPIRED bearer is denied", async () => {
+    expiredDiagnostics.length = 0;
     const expired = await signEnrollmentBearer(SECRET, {
       workspaceId: WS,
       agentId: AGENT,
@@ -259,6 +269,10 @@ describe("handleAuthorizationRequest", () => {
     const res = readResponse(out);
     expect(res.granted).toBe(false);
     expect(res.error).toMatch(/invalid|expired/i);
+    expect(expiredDiagnostics).toEqual([AGENT]);
+    expiredDiagnostics.length = 0;
+    await handleAuthorizationRequest(deps(), authRequest("oge_forged.invalid"));
+    expect(expiredDiagnostics).toEqual([]);
   });
 
   test("a REVOKED enrollment (not active) is denied even with a valid bearer", async () => {

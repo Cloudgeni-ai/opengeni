@@ -12,9 +12,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-#[cfg(windows)]
-use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use opengeni_agent_proto::v1;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::cgroup::{OpCgroupConfig, OpCgroups};
@@ -274,6 +273,7 @@ struct ExecOutput {
 /// is issued. Tokio's direct-child waits are cancel-safe; Drop only signals while
 /// the still-unreaped anchor fences the numeric PGID against reuse.
 #[cfg(unix)]
+#[allow(clippy::struct_excessive_bools)] // Cleanup progress, cancellation intent and observed evidence are independent.
 struct ExecProcessGroup {
     anchor: crate::exec_handover::UnixProc,
     /// The sole writer for the anchor's kernel-close death lease. Tokio creates
@@ -296,6 +296,9 @@ struct ExecProcessGroup {
     /// fork-race window (a descendant forked between a cancel's kill scan and
     /// the direct child's exit).
     wait_killed_group: bool,
+    /// Positive pre-cleanup evidence, retained across cancelled wait futures.
+    background_children_stopped: bool,
+    termination_requested: bool,
     /// The per-op resource-accounting leaf this exec's processes were placed in (issue #345),
     /// or `None` when isolation is unavailable. Torn down once the process tree is
     /// reaped. Always `None` off Linux (no manager is ever wired there).
@@ -343,50 +346,44 @@ impl ExecProcessGroup {
         if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
             cgroups.configure_process_cgroup_before_exec(prepared, &mut anchor_command)?;
         }
-        let mut anchor = anchor_command.spawn()?;
-        let Some(runner_lease) = anchor.stdin.take() else {
-            mark_unsettled_work();
-            let _ = anchor.start_kill();
-            return Err(std::io::Error::other(
-                "exec anchor did not expose its runner-death lease",
-            ));
+        let anchor = anchor_command.spawn()?;
+        let pgid = i32::try_from(anchor.id().expect("new anchor must have a pid"))
+            .expect("a Unix PID fits pid_t");
+        // Own cleanup as soon as the first child exists, including every later
+        // setup/spawn error. Signaling a child is not an exit receipt.
+        let mut group = Self {
+            anchor: crate::exec_handover::UnixProc::Owned(anchor),
+            runner_lease: None,
+            child: crate::exec_handover::UnixProc::released(),
+            pgid,
+            running: true,
+            reservation: crate::current_work_reservation(),
+            wait_killed_group: false,
+            background_children_stopped: false,
+            termination_requested: false,
+            op_cgroup: None,
         };
-        let runner_lease = match runner_lease.into_owned_fd() {
-            Ok(lease) => lease,
-            Err(error) => {
-                mark_unsettled_work();
-                let _ = anchor.start_kill();
-                return Err(error);
-            }
+        let crate::exec_handover::UnixProc::Owned(anchor) = &mut group.anchor else {
+            unreachable!("new anchor is owned");
         };
-        let pgid =
-            i32::try_from(anchor.id().expect("new anchor must have a pid")).map_err(|_| {
-                mark_unsettled_work();
-                std::io::Error::other("exec anchor PID exceeds i32")
-            })?;
+        group.runner_lease = Some(
+            anchor
+                .stdin
+                .take()
+                .ok_or_else(|| {
+                    std::io::Error::other("exec anchor did not expose its runner-death lease")
+                })?
+                .into_owned_fd()?,
+        );
 
         command.process_group(pgid);
         #[cfg(target_os = "linux")]
         let child_oom_score = crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut command);
         #[cfg(target_os = "linux")]
         if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
-            if let Err(error) = cgroups.configure_process_cgroup_before_exec(prepared, &mut command)
-            {
-                mark_unsettled_work();
-                let _ = terminate_unix_process_group(pgid);
-                let _ = anchor.start_kill();
-                return Err(error);
-            }
+            cgroups.configure_process_cgroup_before_exec(prepared, &mut command)?;
         }
-        let child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                mark_unsettled_work();
-                let _ = terminate_unix_process_group(pgid);
-                let _ = anchor.start_kill();
-                return Err(error);
-            }
-        };
+        group.child = crate::exec_handover::UnixProc::Owned(command.spawn()?);
 
         // Give this child (and its inheriting descendants) the smallest higher
         // global OOM victim bias when the kernel ABI can represent one. A
@@ -394,7 +391,7 @@ impl ExecProcessGroup {
         // independent of, and composing with, the per-op cgroup below (which
         // bounds systemd-oomd's scope).
         #[cfg(target_os = "linux")]
-        if let Some(child_pid) = child.id() {
+        if let Some(child_pid) = group.child.id() {
             crate::cgroup::raise_exec_oom_score_adj(child_pid, child_oom_score);
         }
 
@@ -404,37 +401,27 @@ impl ExecProcessGroup {
         // returns an error. This is a no-op when isolation is unavailable/off Linux.
         #[cfg(target_os = "linux")]
         let op_cgroup = if let (Some(cg), Some(prepared)) = (cgroups, prepared_op) {
-            let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
-            match cg.place_process_group(pgid, &pids, prepared) {
-                Ok(handle) => Some(handle),
-                Err(error) => {
-                    mark_unsettled_work();
-                    let _ = terminate_unix_process_group(pgid);
-                    let _ = anchor.start_kill();
-                    return Err(error);
-                }
-            }
+            let pids: Vec<u32> = [group.anchor.id(), group.child.id()]
+                .into_iter()
+                .flatten()
+                .collect();
+            Some(cg.place_process_group(pgid, &pids, prepared)?)
         } else {
             None
         };
         #[cfg(not(target_os = "linux"))]
         let op_cgroup = if let Some(cg) = cgroups {
-            let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
+            let pids: Vec<u32> = [group.anchor.id(), group.child.id()]
+                .into_iter()
+                .flatten()
+                .collect();
             cg.place_op(&pids, requested_policy)?
         } else {
             None
         };
 
-        Ok(Self {
-            anchor: crate::exec_handover::UnixProc::Owned(anchor),
-            runner_lease: Some(runner_lease),
-            child: crate::exec_handover::UnixProc::Owned(child),
-            pgid,
-            running: true,
-            reservation: crate::current_work_reservation(),
-            wait_killed_group: false,
-            op_cgroup,
-        })
+        group.op_cgroup = op_cgroup;
+        Ok(group)
     }
 
     /// Removes the child's stdio handles for the streaming [`ContainedExec`]; after
@@ -449,6 +436,7 @@ impl ExecProcessGroup {
     }
 
     fn terminate(&mut self) -> std::io::Result<()> {
+        self.termination_requested = true;
         let group_result = terminate_unix_process_group(self.pgid);
         let cgroup_result = self
             .op_cgroup
@@ -477,8 +465,29 @@ impl ExecProcessGroup {
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child.wait().await?;
         if !self.wait_killed_group {
+            let had_children = if self.termination_requested {
+                false
+            } else {
+                #[cfg(target_os = "linux")]
+                {
+                    self.op_cgroup.as_ref().map_or_else(
+                        || crate::process_cleanup::group_has_live_children(self.pgid),
+                        |group| group.has_live_children(self.pgid),
+                    )?
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    crate::process_cleanup::group_has_live_children(self.pgid)?
+                }
+            };
             self.terminate()?;
+            self.background_children_stopped = had_children;
             self.wait_killed_group = true;
+        }
+        // A successful signal (including macOS EPERM for a zombie) is not a
+        // completed tree. Keep the anchor unreaped while observing descendants.
+        while crate::process_cleanup::group_has_live_children(self.pgid)? {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         // Reap the fence only after the group kill. Tokio wait is cancel-safe; if
         // this future is dropped after reaping, anchor.id() is None and Drop will
@@ -499,13 +508,10 @@ impl ExecProcessGroup {
 #[cfg(unix)]
 impl Drop for ExecProcessGroup {
     fn drop(&mut self) {
-        if self.running {
-            if let Some(reservation) = &self.reservation {
-                // Drop signals cleanup but cannot await its exit receipt.
-                reservation.mark_unsettled();
-            }
+        if !self.running {
+            return;
         }
-        if self.running && self.anchor.id().is_some() {
+        if self.anchor.id().is_some() {
             if let Err(error) = self.terminate() {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!(
@@ -516,12 +522,39 @@ impl Drop for ExecProcessGroup {
                 }
             }
         }
-        // A cancelled/timed-out/task-aborted exec drops here with its op leaf still
-        // present. Dropping the handle schedules event-driven removal after the
-        // group becomes unpopulated. On the normal path the handle was already
-        // taken and torn down in wait(), so this is a no-op there.
-        if let Some(handle) = self.op_cgroup.take() {
-            drop(handle);
+        let reservation = self.reservation.take();
+        let mut cleanup = Self {
+            anchor: std::mem::replace(&mut self.anchor, crate::exec_handover::UnixProc::released()),
+            child: std::mem::replace(&mut self.child, crate::exec_handover::UnixProc::released()),
+            runner_lease: self.runner_lease.take(),
+            pgid: self.pgid,
+            // This cleanup owner must not recursively schedule itself on drop.
+            running: false,
+            reservation: None,
+            wait_killed_group: self.wait_killed_group,
+            background_children_stopped: self.background_children_stopped,
+            termination_requested: true,
+            op_cgroup: self.op_cgroup.take(),
+        };
+        self.running = false;
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("exec process group {}", self.pgid),
+        );
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(crate::with_work_reservation(reservation, async move {
+                let mut witness = witness;
+                loop {
+                    match cleanup.wait().await {
+                        Ok(_) => {
+                            witness.settle();
+                            break;
+                        }
+                        Err(error) => witness.failed(&error),
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }));
         }
     }
 }
@@ -554,6 +587,8 @@ impl ExecProcessGroup {
             pgid: self.pgid,
             running,
             wait_killed_group: self.wait_killed_group,
+            background_children_stopped: self.background_children_stopped,
+            termination_requested: self.termination_requested,
             lease_fd: self.runner_lease.take().map(release_fd),
             stdin_fd: stdin.map(release_fd),
             stdout_fd: stdout.map(release_fd),
@@ -617,6 +652,8 @@ impl ExecProcessGroup {
                 running: handover.running,
                 reservation: crate::current_work_reservation(),
                 wait_killed_group: handover.wait_killed_group,
+                background_children_stopped: handover.background_children_stopped,
+                termination_requested: handover.termination_requested,
                 op_cgroup,
             },
             (stdin, stdout, stderr),
@@ -644,7 +681,6 @@ fn terminate_unix_process_group(pgid: i32) -> std::io::Result<()> {
             // A successful command result does not establish that every member
             // exited. Keep ordinary exec behavior, but refuse an update whose
             // process-tree cleanup could not be proved.
-            mark_unsettled_work();
             tracing::debug!(
                 group_id = pgid,
                 "group kill reported EPERM (unsignalable member); owned members were signaled"
@@ -660,65 +696,91 @@ fn terminate_unix_process_group(pgid: i32) -> std::io::Result<()> {
 /// can terminate the complete job even after its direct leader exits.
 #[cfg(windows)]
 struct ExecProcessGroup {
-    child: AsyncGroupChild,
+    child: tokio::process::Child,
+    job: opengeni_agent_windows_ffi::ProcessJob,
+    cleanup_wait: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     running: bool,
     reservation: Option<crate::WorkReservation>,
+    background_children_stopped: bool,
+    termination_requested: bool,
 }
 
 #[cfg(windows)]
 impl ExecProcessGroup {
     fn spawn(mut command: tokio::process::Command) -> std::io::Result<Self> {
-        // `command_group` wraps the spawn in a Job Object; kill-on-drop terminates
-        // the whole job (the direct child + every descendant) on cancel.
-        let child = command
-            .group()
+        let job = opengeni_agent_windows_ffi::ProcessJob::new()?;
+        // As before, no user code runs until the suspended child joins its job.
+        let mut child = command
+            .creation_flags(opengeni_agent_windows_ffi::ProcessJob::SUSPENDED)
             .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| {
-                // The opaque dependency can fail after creating/assigning a child.
-                // It exposes no same-job settlement handle for that partial spawn.
-                mark_unsettled_work();
-                error
-            })?;
+            .spawn()?;
+        if let Err(error) = job.assign_and_resume(child.id().expect("new child has a pid")) {
+            let _ = child.start_kill();
+            let reservation = crate::current_work_reservation();
+            let witness = crate::work_scope::CleanupWitness::new(
+                reservation.clone(),
+                format!("Windows suspended child {:?}", child.id()),
+            );
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(crate::with_work_reservation(reservation, async move {
+                    let mut witness = witness;
+                    loop {
+                        match child.wait().await {
+                            Ok(_) => {
+                                witness.settle();
+                                break;
+                            }
+                            Err(error) => witness.failed(&error),
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }));
+            }
+            return Err(error);
+        }
         Ok(Self {
             child,
+            job,
+            cleanup_wait: None,
             running: true,
             reservation: crate::current_work_reservation(),
+            background_children_stopped: false,
+            termination_requested: false,
         })
     }
 
     /// Removes the child's stdio handles for the streaming [`ContainedExec`].
     fn take_pipes(&mut self) -> ContainedPipes {
-        let child = self.child.inner();
+        let child = &mut self.child;
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     }
 
-    /// Terminates the whole Job Object (idempotent — a repeat kill, or a kill after
-    /// the job already exited, is InvalidInput/NotFound and treated as success).
+    /// Terminates the exact owned Job Object, including any remaining children.
     fn terminate(&mut self) -> std::io::Result<()> {
-        match self.child.start_kill() {
-            Ok(()) => Ok(()),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
-                ) =>
-            {
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
+        self.termination_requested = true;
+        self.job.terminate()
     }
 
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child.wait().await?;
-        // command-group 5.0.1 treats any job completion notification as exit;
-        // it exposes neither that notification nor the job's active count.
-        // Preserve normal command results, but never use this ambiguous receipt
-        // to authorize replacing a runner that may still own descendants.
-        if let Some(reservation) = &self.reservation {
-            reservation.mark_unsettled();
+        if !self.running {
+            return Ok(status);
         }
+        if self.cleanup_wait.is_none() {
+            let had_children = !self.termination_requested && self.job.active_processes()? > 0;
+            self.terminate()?;
+            self.background_children_stopped = had_children;
+            let job = self.job.clone();
+            self.cleanup_wait = Some(crate::spawn_blocking_reserved(move || job.wait_empty()));
+        }
+        // Keep one producer across cancel-safe select polls. Only the kernel's
+        // actual active-process count, not any job-port packet, proves cleanup.
+        self.cleanup_wait
+            .as_mut()
+            .expect("cleanup waiter")
+            .await
+            .map_err(std::io::Error::other)??;
+        self.cleanup_wait = None;
         self.running = false;
         Ok(status)
     }
@@ -730,11 +792,8 @@ impl Drop for ExecProcessGroup {
         if !self.running {
             return;
         }
-        if let Some(reservation) = &self.reservation {
-            reservation.mark_unsettled();
-        }
         let group_id = self.child.id();
-        if let Err(error) = self.child.start_kill() {
+        if let Err(error) = self.job.terminate() {
             if !matches!(
                 error.kind(),
                 std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
@@ -742,13 +801,27 @@ impl Drop for ExecProcessGroup {
                 tracing::warn!(?group_id, %error, "failed to terminate cancelled exec process group");
             }
         }
-    }
-}
-
-#[cfg(any(unix, windows))]
-fn mark_unsettled_work() {
-    if let Some(reservation) = crate::current_work_reservation() {
-        reservation.mark_unsettled();
+        let job = self.job.clone();
+        let reservation = self.reservation.take();
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("Windows exec job for {group_id:?}"),
+        );
+        let _ = std::thread::Builder::new()
+            .name("exec-job-cleanup".into())
+            .spawn(move || {
+                let mut witness = witness;
+                loop {
+                    match job.wait_empty() {
+                        Ok(()) => {
+                            witness.settle();
+                            break;
+                        }
+                        Err(error) => witness.failed(&error),
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            });
     }
 }
 
@@ -794,6 +867,13 @@ pub struct ContainedExec {
 }
 
 impl ContainedExec {
+    /// Whether normal shell-exit teardown stopped observed remaining children.
+    /// Explicit cancellation/deadline and unknown cleanup never claim this.
+    #[must_use]
+    pub fn background_children_stopped(&self) -> bool {
+        !self.group.running && self.group.background_children_stopped
+    }
+
     /// Waits for the direct command to exit, then tears the contained group down
     /// (Unix: SIGKILL the process group, then reap the stopped anchor fence;
     /// Windows: the Job Object is reaped on drop). Returns the command's exit status.
@@ -1102,6 +1182,7 @@ impl Platform for NativePlatform {
                         stderr: prost::bytes::Bytes::from_static(b"timed out"),
                         timed_out: true,
                         duration_ms: elapsed_millis(started),
+                        background_children_stopped: false,
                     });
                 }
             }
@@ -1117,6 +1198,7 @@ impl Platform for NativePlatform {
             stderr: prost::bytes::Bytes::from(output.stderr),
             timed_out: false,
             duration_ms: elapsed_millis(started),
+            background_children_stopped: contained.background_children_stopped(),
         })
     }
 
@@ -1577,28 +1659,34 @@ mod tests {
 
     #[test]
     fn workspace_root_keeps_a_chosen_directory_and_replaces_a_filesystem_root() {
-        let home = Path::new("/Users/me");
+        // Host-native absolute paths: a Windows path needs its drive.
+        let (root, home, work) = if cfg!(windows) {
+            (r"C:\", r"C:\Users\me", r"C:\srv\work")
+        } else {
+            ("/", "/Users/me", "/srv/work")
+        };
+        let home = Path::new(home);
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from("/srv/work")), Some(home)),
-            PathBuf::from("/srv/work")
+            resolve_workspace_root(Some(PathBuf::from(work)), Some(home)),
+            PathBuf::from(work)
         );
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from("/")), Some(home)),
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(home)),
             home.to_path_buf()
         );
         assert_eq!(resolve_workspace_root(None, Some(home)), home.to_path_buf());
         // Without a usable home there is nothing better than the directory we have.
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from("/")), None),
-            PathBuf::from("/")
+            resolve_workspace_root(Some(PathBuf::from(root)), None),
+            PathBuf::from(root)
         );
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from("/")), Some(Path::new("/"))),
-            PathBuf::from("/")
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(Path::new(root))),
+            PathBuf::from(root)
         );
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from("/")), Some(Path::new("relative"))),
-            PathBuf::from("/")
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(Path::new("relative"))),
+            PathBuf::from(root)
         );
     }
 
@@ -2060,6 +2148,72 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn failed_spawn_does_not_permanently_disable_updates() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        let drain = Arc::new(UpdateDrain::default());
+        let (platform, _dir) = rooted();
+        crate::with_work_reservation(Some(drain.reserve_work(None).unwrap()), async {
+            let error = platform
+                .exec(&ExecRequest {
+                    command: vec!["opengeni-command-that-does-not-exist".into()],
+                    shell: false,
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(error, PlatformError::NotFound(_)));
+        })
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if drain.snapshot().is_some_and(|state| state.routed == 0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("failed spawn cleanup must settle without restarting the agent");
+        assert_eq!(
+            drain.reserve_update("after-failed-spawn"),
+            UpdateReservation::Started
+        );
+        assert!(drain.seal_update("after-failed-spawn"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropped_exec_retains_cleanup_until_updates_can_safely_resume() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        let drain = Arc::new(UpdateDrain::default());
+        let work = drain.reserve_work(None).unwrap();
+        work.mark_handover();
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 30"]);
+        let group = crate::with_work_reservation_sync(Some(work), || {
+            spawn_contained(command, None).unwrap()
+        });
+        drop(group);
+        assert_eq!(
+            drain.reserve_update("after-drop"),
+            UpdateReservation::Started
+        );
+        assert!(!drain.seal_update_with_handover("after-drop"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if drain.snapshot().is_some_and(|state| state.routed == 0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("owned cancellation cleanup must settle");
+        assert!(drain.seal_update_with_handover("after-drop"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn exec_missing_direct_command_is_not_found() {
         let (platform, _dir) = rooted();
         let err = platform
@@ -2140,6 +2294,10 @@ mod tests {
             resp.exit_code, resp.stdout, resp.stderr
         );
         assert_eq!(resp.exit_code, -1);
+        assert!(
+            !resp.background_children_stopped,
+            "explicit deadlines need no shell-exit notice"
+        );
         let descendant_pid = recorded_pid(&pid_file).await;
         assert_process_exits(descendant_pid, "timed-out exec").await;
     }
@@ -2163,7 +2321,39 @@ mod tests {
         assert!(!resp.timed_out, "early leader exit must complete normally");
         assert_eq!(resp.exit_code, 0);
         let descendant_pid = recorded_pid(&pid_file).await;
+        assert!(
+            resp.background_children_stopped,
+            "observed live descendants must be reported"
+        );
         assert_process_exits(descendant_pid, "early-exit exec").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_cleanup_reports_only_live_background_children() {
+        let (platform, _dir) = rooted();
+        for (shell, expected) in [
+            ("sleep 60 >/dev/null 2>&1 & printf done", true),
+            ("(sleep 60) >/dev/null 2>&1 & printf done", true),
+            ("nohup sleep 60 >/dev/null 2>&1 & printf done", true),
+            ("sleep 0.01 & wait; printf done", false),
+            ("printf done", false),
+        ] {
+            let request = ExecRequest {
+                command: vec![shell.into()],
+                shell: true,
+                ..Default::default()
+            };
+            let response = retry_transient_spawn(|| platform.exec(&request))
+                .await
+                .expect("shell fixture");
+            assert_eq!(response.background_children_stopped, expected, "{shell}");
+            assert_eq!(response.stdout.as_ref(), b"done");
+            assert!(
+                response.stderr.is_empty(),
+                "cleanup evidence must not contaminate stderr"
+            );
+        }
     }
 
     #[cfg(any(unix, windows))]

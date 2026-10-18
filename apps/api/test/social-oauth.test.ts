@@ -4,6 +4,7 @@ import type { Settings } from "@opengeni/config";
 import type { Database } from "@opengeni/db";
 import { readSignedState } from "@opengeni/github";
 import { testSettings } from "@opengeni/testing";
+import { isRlsScopeSetup } from "@opengeni/testing/rls-scope-fake";
 import { HTTPException } from "hono/http-exception";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
@@ -37,6 +38,15 @@ const policyDb = {
   transaction: async (run: (tx: Database) => Promise<unknown>) => run(policyDb),
   execute: async (query: SQL) => {
     const text = new PgDialect().sqlToQuery(query).sql;
+    // The RLS scope's one setup statement reads the applied tenant back.
+    if (isRlsScopeSetup(text))
+      return [
+        {
+          resolved_account_id: startContext.accountId,
+          account_id: startContext.accountId,
+          workspace_id: startContext.workspaceId,
+        },
+      ];
     if (text.includes("set_config(")) return [];
     if (text.includes("as account_id"))
       return [{ account_id: startContext.accountId, workspace_id: startContext.workspaceId }];

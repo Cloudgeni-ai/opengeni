@@ -242,9 +242,10 @@ function claimInput(
 
 async function activityRevision(workspaceId: string): Promise<bigint> {
   const [row] = await shared!.admin<Array<{ revision: string }>>`
-    select revision::text as revision
-    from workspace_session_activity_revisions
-    where workspace_id = ${workspaceId}`;
+    select activity_xid::text as revision
+    from sessions
+    where workspace_id = ${workspaceId}
+    order by activity_xid desc limit 1`;
   if (!row) throw new Error(`missing activity revision for ${workspaceId}`);
   return BigInt(row.revision);
 }
@@ -423,7 +424,8 @@ describe("durable advisory work claims", () => {
       { claimId: created.claim.id, mutationKind: "released", resultingRevision: 3 },
       { claimId: recreated.claim.id, mutationKind: "created", resultingRevision: 1 },
     ]);
-    expect(await activityRevision(f.grant.workspaceId)).toBe(before + 4n);
+    // The database-global xid clock is not a consecutive per-workspace counter.
+    expect(await activityRevision(f.grant.workspaceId)).toBeGreaterThan(before);
   });
 
   test("replacement attempts replay the same logical-turn receipt while stale attempts fail closed", async () => {

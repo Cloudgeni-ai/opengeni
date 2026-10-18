@@ -83,17 +83,19 @@ export function WorkspaceUsagePage({
   }
   if (summary.state === "unlimited") {
     return (
-      <EmptyState
-        variant="page"
-        icon={<GaugeIcon />}
-        title="No usage limits here"
-        description={`Work in ${workspaceName} uses the organization's credits with no monthly budget. ${
-          isOwner
-            ? "Set a budget to cap what this workspace spends each month."
-            : "Organization owners can set a monthly budget."
-        }`}
-        action={manageBudget}
-      />
+      <SectionStack>
+        <EmptyState
+          variant="page"
+          icon={<GaugeIcon />}
+          title="No usage limits here"
+          description={`Work in ${workspaceName} uses the organization's credits with no monthly budget. ${
+            isOwner
+              ? "Set a budget to cap what this workspace spends each month."
+              : "Organization owners can set a monthly budget."
+          }`}
+          action={manageBudget}
+        />
+      </SectionStack>
     );
   }
   const own = summary.member;

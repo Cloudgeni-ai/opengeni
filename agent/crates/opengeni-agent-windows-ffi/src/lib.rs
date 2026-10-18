@@ -28,6 +28,12 @@
 #[allow(unsafe_code)]
 mod ffi;
 
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod process_job;
+#[cfg(windows)]
+pub use process_job::ProcessJob;
+
 /// The primary display of the interactive session, in physical pixels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayInfo {

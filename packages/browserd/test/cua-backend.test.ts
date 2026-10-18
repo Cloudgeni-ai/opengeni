@@ -56,8 +56,9 @@ class Fixture implements CuaDesktopRuntime {
         window_bounds: { x: 50, y: 50, width: 200, height: 100 },
       };
       if (args.include_accessibility_tree) {
-        // New worker defaults to Markdown; the Mac adapter needs structured elements.
-        if (!(this instanceof WindowsFixture)) expect(args.tree_format).toBe("elements");
+        // New worker defaults to Markdown; the Mac adapter needs structured
+        // elements and the Markdown rows' unindexed text.
+        if (!(this instanceof WindowsFixture)) expect(args.tree_format).toBe("both");
         const snapshot = ++this.snapshot;
         Object.assign(data, {
           snapshot_id: `s${snapshot}`,
@@ -220,6 +221,19 @@ describe("CUA desktop boundary", () => {
         (await backend.callNative({ ...native, operationId: crypto.randomUUID() })).outcome,
       ).toBe("completed");
       expect(fixture.calls.filter((call) => call.name === "get_cursor_position")).toHaveLength(2);
+      // Quick cursor motion once per session, and again after CUA revives it.
+      const motions = fixture.calls.filter((call) => call.name === "set_agent_cursor_motion");
+      expect(motions.map((call) => call.args.session)).toEqual([
+        viewerSession,
+        viewerSession,
+        nativeSession,
+        nativeSession,
+      ]);
+      expect(motions[0]!.args).toMatchObject({
+        timing: "fixed",
+        glide_duration_ms: 150,
+        dwell_after_click_ms: 0,
+      });
       refusedSession = nativeSession;
       const computerSessionId = crypto.randomUUID();
       const controllerGeneration = "controller-fixture";
@@ -502,6 +516,38 @@ describe("CUA desktop boundary", () => {
       } finally {
         await backend.close();
       }
+    }
+  });
+
+  test("reports a walk that ran out of time as an incomplete observation", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    let partial = true;
+    fixture.callTool = async (name, argumentsJson) => {
+      const response = await original(name, argumentsJson);
+      const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+      if (name === "get_window_state" && args.include_accessibility_tree && partial) {
+        const state = JSON.parse(response.structuredJson!);
+        Object.assign(state, {
+          truncated: true,
+          truncation_reason: "timeout",
+          nodes_visited: 296,
+          nodes_pending: 567,
+        });
+        response.structuredJson = JSON.stringify(state);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const cut = await backend.observe(target.id);
+      expect(cut.incomplete).toEqual({ reason: "time_budget", unreadCount: 567 });
+      expect(cut.roots.length).toBeGreaterThan(0);
+      partial = false;
+      expect((await backend.observe(target.id)).incomplete).toBeUndefined();
+    } finally {
+      await backend.close();
     }
   });
 

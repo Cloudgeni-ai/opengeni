@@ -33,7 +33,7 @@ export type PrerequisiteHost = {
 
 const nativeInstall = {
   postgres:
-    "Install PostgreSQL 17 server/client and matching pgvector (Debian/Ubuntu with PGDG: sudo apt-get install postgresql-17 postgresql-client-17 postgresql-17-pgvector). Put its bin directory on PATH and verify pg_config --version. Extension files must belong to that same installation. On macOS use the Docker backend; the native infrastructure launcher is Linux-only.",
+    "Install PostgreSQL 18 server/client and matching pgvector (Debian/Ubuntu with PGDG: sudo apt-get install postgresql-18 postgresql-client-18 postgresql-18-pgvector); an existing PostgreSQL 17 installation also works. Put its bin directory on PATH and verify pg_config --version. Extension files must belong to that same installation. On macOS use the Docker backend; the native infrastructure launcher is Linux-only.",
   nats: "Install pinned NATS server 2.11.8 and Temporal CLI 1.4.1 with: bun scripts/install-development-tools.ts --install --tools=nats,temporal. Add the reported binDirectory to PATH. The verified project-local installer provides nats-server, not the nats client; preflight itself installs nothing.",
   temporal:
     "Install pinned Temporal CLI 1.4.1 with: bun scripts/install-development-tools.ts --install --tools=nats,temporal. Add the reported binDirectory to PATH. The CLI must provide server start-dev; tctl is not a substitute.",
@@ -204,8 +204,8 @@ export async function collectDevelopmentPrerequisites(
       await requireProbe(
         "pg_config",
         ["--version"],
-        `Native PostgreSQL must be version 17 for the local fixture. ${nativeInstall.postgres}`,
-        /^PostgreSQL 17(?:\.|\s|$)/u,
+        `Native PostgreSQL must be version 18 or 17 for the local fixture. ${nativeInstall.postgres}`,
+        /^PostgreSQL 1[78](?:\.|\s|$)/u,
       );
       const bindir = await host.probe("pg_config", ["--bindir"]);
       const sharedir = await host.probe("pg_config", ["--sharedir"]);
@@ -252,8 +252,8 @@ export async function collectDevelopmentPrerequisites(
         await requireProbe(
           command,
           ["--version"],
-          `${command} must resolve to PostgreSQL 17 on PATH. ${nativeInstall.postgres}`,
-          /\(PostgreSQL\) 17(?:\.|\s|$)/u,
+          `${command} must resolve to PostgreSQL 18 or 17 on PATH. ${nativeInstall.postgres}`,
+          /\(PostgreSQL\) 1[78](?:\.|\s|$)/u,
         );
     }
     if (requireCommand("nats-server", nativeInstall.nats))

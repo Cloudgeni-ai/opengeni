@@ -21,6 +21,9 @@ const COMPUTER_NATIVE: &[u8] = include_bytes!(env!("OPENGENI_EMBEDDED_COMPUTER_N
 #[cfg(opengeni_embedded_cua)]
 const CUA_RUNTIME: &[(&str, &[u8])] = &include!(env!("OPENGENI_EMBEDDED_CUA_RUNTIME"));
 
+/// The helper generation this process materialized, once it has.
+static CURRENT_GENERATION: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 /// Materializes the release-contained runtime and returns its browserd path.
 /// Development builds carry no payload and return `None`, preserving explicit
 /// local/operator sidecar discovery.
@@ -51,8 +54,61 @@ pub fn materialize(config_dir: &Path) -> PlatformResult<Option<PathBuf>> {
             create_private_directory(path.parent().expect("CUA asset parent"))?;
             materialize_executable(&path, bytes)?;
         }
+        let _ = CURRENT_GENERATION.set(directory.clone());
         Ok(Some(directory.join(companion_name("opengeni-browserd"))))
     }
+}
+
+/// Removes the helper generations earlier agent releases materialized beside
+/// this process's own. Each release adds one (about 100-170 MB) and nothing
+/// else ever removes them.
+///
+/// Only the single running agent calls this, while it holds the instance lock
+/// and after materializing its own generation, so no agent uses the others.
+/// Processes an earlier agent left behind keep their already-open executables
+/// on Unix. Windows refuses to delete a running executable; that generation
+/// stays partly removed, and the next start retries it. Returns the number of
+/// generations removed.
+pub fn prune_stale_generations() -> usize {
+    let Some(current) = CURRENT_GENERATION.get() else {
+        return 0;
+    };
+    prune_generations_except(current)
+}
+
+fn prune_generations_except(current: &Path) -> usize {
+    let (Some(root), Some(current_name)) = (current.parent(), current.file_name()) else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == current_name || !is_generation_name(&name) {
+            continue;
+        }
+        // Never follow a link out of the runtime directory.
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        match std::fs::remove_dir_all(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(error) => tracing::warn!(
+                %error,
+                generation = %name.to_string_lossy(),
+                "could not remove an earlier interaction runtime generation"
+            ),
+        }
+    }
+    removed
+}
+
+/// Generation directories are the first 24 hex digits of the runtime digest.
+fn is_generation_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.len() == 24 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 #[cfg(opengeni_embedded_runtime)]
@@ -121,6 +177,34 @@ fn materialize_executable(path: &Path, expected: &[u8]) -> PlatformResult<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    #[test]
+    fn removes_only_earlier_generation_directories() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let current = root.path().join("aaaaaaaaaaaaaaaaaaaaaaaa");
+        let earlier = root.path().join("0123456789abcdef01234567");
+        let older = root.path().join("fedcba9876543210fedcba98");
+        let unrelated = root.path().join("notes");
+        let hex_file = root.path().join("bbbbbbbbbbbbbbbbbbbbbbbb");
+        for directory in [&current, &earlier, &older, &unrelated] {
+            std::fs::create_dir_all(directory.join("node_modules")).expect("directory");
+            std::fs::write(directory.join("opengeni-browserd"), b"helper").expect("helper");
+        }
+        std::fs::write(&hex_file, b"file").expect("file");
+
+        assert_eq!(prune_generations_except(&current), 2);
+        assert!(current.join("opengeni-browserd").is_file());
+        assert!(!earlier.exists());
+        assert!(!older.exists());
+        assert!(unrelated.join("opengeni-browserd").is_file());
+        assert!(hex_file.is_file());
+        assert_eq!(prune_generations_except(&current), 0);
+    }
 }
 
 #[cfg(all(test, opengeni_embedded_runtime))]

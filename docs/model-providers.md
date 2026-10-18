@@ -730,6 +730,40 @@ reasoning details and leaves stored history unchanged. This also handles older
 non-streamed replies whose reasoning was nested inside text metadata. Other
 Chat targets retain their native reasoning fields.
 
+These explicit Anthropic Chat targets also default to request-level
+`cache_control: { "type": "ephemeral" }` on all three OpenRouter rails. OpenRouter
+requires this opt-in; merely repeating a long prefix does not enable Claude
+caching. Automatic caching advances upstream over the growing history without
+rewriting earlier messages, instructions, tools, or their cache markers locally.
+An explicit request-level control (including `null`) or message/content/tool
+breakpoint remains authoritative; the adapter does not add another breakpoint
+or override its TTL. Other model families and APIs keep their existing cache
+behavior. Session cache keys and provider routing are unchanged.
+
+The default TTL is five minutes; repeated prefixes can be read on later steps
+and later turns while warm, not indefinitely. The first write costs more than
+ordinary input, so one-off or frequently changing prompts can cost more. A cache
+hit still depends on the upstream provider, minimum prompt length, expiry, and
+an identical prefix. The shared Chat adapter preserves the raw provider's
+`prompt_tokens_details` through streamed and non-streamed SDK conversion, including
+`cached_tokens` and `cache_write_tokens`; absent write counts stay unknown. The
+shared usage normalizer still validates counts before telemetry/billing.
+
+A synthetic streamed probe on October 18, 2026 (`anthropic/claude-sonnet-5.5`)
+confirmed two identical 5,179-token requests without the opt-in each read/wrote
+zero cache tokens. With automatic caching, the first request wrote 5,175 tokens;
+two appended-history requests then read 5,175 and 5,192 tokens and wrote 17 each.
+Total request costs were $0.010398 uncached, $0.0129855 for the initial write,
+then $0.000608 and $0.0006097 for the appended requests. This is a small protocol
+probe, not a production performance guarantee.
+The patched SDK adapter was separately exercised with fresh clients and
+JSON-round-tripped assistant history: its three requests reported write/read
+counts of 5,258/0, 17/5,258, and 17/5,275. Normalized telemetry matched the raw
+provider counts exactly, and every earlier message and tool prefix was unchanged.
+
+Sources: [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching)
+and [usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting).
+
 The reviewed code catalog currently ships one v1 starter:
 
 ```text
@@ -1639,6 +1673,113 @@ A compaction request built from the turn's prepared request carries the same
 model settings, so the portable checkpoint summary is also requested at low
 verbosity. `reasoning.summary` stays `detailed`.
 
+Streaming Codex subscription requests travel over a pooled Responses
+WebSocket (`packages/network/src/responses-websocket.ts`), with the Codex
+endpoint and metadata adapter in `packages/codex/src/responses-websocket.ts`.
+The Codex Responses `session_id` header is a cache-affinity hint, not the
+conversation identifier. The worker supplies a deterministic hash of workspace
+and frozen initiating human identity so a new session can reuse a familiar
+prefix. Unknown human identity keeps the session UUID fallback. The body
+`prompt_cache_key` remains the actual session UUID. HTTP requests, WebSocket
+pre-open and authentication retries use the same affinity; session-scoped
+connections and continuation remain separate. Other providers are unchanged.
+See [design and live measurements](design/codex-cache-affinity.md).
+Each worker process keeps one socket per conversation and handshake identity;
+concurrent cold callers share one handshake and credential changes retire the
+old idle connection. Only explicitly scoped main-turn requests own that pool,
+including on Codex: a session-affinity header alone is not socket ownership.
+Titles explicitly leave the main conversation scope and use HTTP with unchanged
+authentication, affinity, request content and custody. They cannot retire a
+warmed main connection or replace its continuation chain.
+A busy socket, a refused handshake, a non-streaming request, or any non-Responses URL uses
+ordinary HTTP instead. Rate-limit and response-metadata events are mapped back
+to the same `x-codex-*` response headers the HTTP path returns, so usage
+accounting is unchanged. `OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED=false`
+turns the transport off.
+
+A socket that closes mid-response fails that model request, and the turn
+recovers from durable history within its existing model-step recovery budget;
+partial response events are never concatenated with a replacement response.
+The final existing recovery slot uses HTTP after the socket allowance is spent,
+without granting an extra retry. A server refusal selects HTTP immediately.
+That selection lasts for the logical turn, survives worker recovery, and is
+not reset by successful model steps. A new turn tries WebSocket again. There
+are no cooldown timers, and SDK retries cannot multiply the worker's budget.
+
+When a request extends the last completed response on its connection exactly
+(same request fields, the same earlier input, then that response's output),
+the transport sends `previous_response_id` and only the new input items, as
+the Codex CLI does; otherwise, or when the provider no longer holds that
+response, it sends the full request.
+The transport fingerprints rather than retains full prompt bodies. It recognizes
+only proven SDK round-trip equivalences, preserves phase and hosted-call status,
+and leaves explicit caller-owned continuation untouched. A rejected continuation
+settles the old physical request and crosses custody admission again before the
+full-input resend, retaining the original deadline.
+
+The same transport serves the OpenAI API (`https://api.openai.com/v1/responses`)
+and Azure OpenAI's v1 API (`https://<resource>.openai.azure.com/openai/v1/responses`).
+For all three providers, each agent turn's model requests run as one conversation
+with its own connection; requests outside a conversation (titles, summaries) and every other
+OpenAI-compatible host use HTTP. Azure's legacy deployment URLs
+(`/openai/deployments/...`) stay on HTTP. `OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED=false`
+turns this off.
+
+The explicit JavaScript `ws` implementation bypasses Bun's native compatibility
+shim, which retains each socket's largest sent frame. `perMessageDeflate` is off
+so compression state does not replace that retained memory. Reproduce the
+isolated client-memory comparison with
+`bun packages/network/bench/persistent-socket-memory.ts native` and `js` in
+fresh processes; the echo server runs separately.
+
+`opengeni_model_transport_*` metrics use the same bounded labels for every
+Responses provider: connection/input mode, first/later request, outcome and
+fallback reason. They include wire versus full-input bytes, provider-reported
+first-request cache ratio, and the interval from final normalized prefix to send.
+Transport outcomes are not semantic model outcomes: HTTP reader cancellation is
+`cancelled`, including when an SDK stops after `response.completed` before wire
+EOF. Use the provider model-request lifecycle for semantic success or failure;
+HTTP transport `completed` means a successful-status body reached EOF, not that
+the model succeeded. The transport does not parse HTTP SSE a second time just
+for telemetry.
+Codex model-request receipts also separate `dispatchDelayMs` (audit start to
+transport dispatch) from `transport.timing.transportPreparationMs` (transport
+entry through body preparation/handshake to socket send) and
+`transport.timing.sendToFirstEventMs` (socket send to the first protocol response
+event). These intervals overlap; do not sum them. Receipts snapshot timing at
+their own phase, so later metadata never changes a previously emitted receipt.
+For a refused-continuation replacement, preparation restarts after fresh custody
+admission; the rejected request's provider wait and settlement are not preparation.
+`transport.timing.server` retains only finite, nonnegative, allowlisted fields
+from `responsesapi.websocket_timing.timing_metrics.critical_path` with
+`scope: "response"` and a matching response ID. Logical-turn cumulative totals
+are not per-response latency and are excluded. Missing fields are unknown, not
+zero. Timing frames remain out of the model/SSE stream and never affect dispatch
+or retry policy.
+Handshake-only warming sends no model request. Speculative `generate:false`
+prewarm is not enabled: final tools/instructions emerge at request construction,
+after startup preparation, and the remaining credential and custody checks
+cannot be bypassed. These measurements keep that decision testable without
+blocking a turn or sending a different prefix to the provider.
+The October 18, 2026 comparison trace's `generate:false` warmup completed in
+413 ms with no engine calls, no output tokens, and no cache read/write tokens.
+That establishes request-state preparation, not inference prefill or a net
+latency saving. The measured title/main contention is fixed without adding a
+warmup request. Compare physical send-to-first-event clocks after that correction
+before attributing a residual gap to client overhead or introducing speculation.
+
+Azure API-key credentials use the `api-key` header for both HTTP and WebSocket
+requests; Entra tokens retain bearer authentication and explicit caller-owned
+Authorization headers remain unchanged. This avoids Azure deployments redirecting
+bearer-key upgrades to a credential-bearing query URL. The socket transport never follows
+redirects: a 3xx upgrade refusal selects the existing HTTP path for that turn,
+just like a 4xx refusal other than 429. Rate limits, server errors, and connection
+failures retain the existing retry budget. A new turn can try WebSocket again.
+Azure documents Responses WebSocket support for API keys and Entra ID in its
+[WebSocket guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/websockets);
+HTTP API-key header authentication is shown in its
+[Responses guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses).
+
 Pricing is keyed by product model ID. A tiered schedule selects the greatest
 `minimumInputTokens` threshold not exceeding the current input count. Billing
 classification comes from the accepted policy: `external` usage must not spend
@@ -1658,6 +1799,13 @@ keeps three amounts separate for every authoritative model call:
   including a comparison for externally billed Codex-subscription calls;
 - Opengeni credit price is the actual credits-path price and remains zero for
   externally billed calls.
+
+`OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE` optionally replaces the margin for every
+provider-rate model credit calculation, including explicit
+`OPENGENI_MODEL_PRICING_JSON` and registry rates that declare their own
+`marginBps`. Those rates remain provider costs, not fixed customer tariffs.
+Unset preserves existing per-price behavior; direct fixed credit prices are
+not margin-derived and are unchanged.
 
 GPT-5.6 Sol uses OpenAI's current promotional list price ($4 input, $0.40
 cached input, $5 cache write, and $20 output per million tokens), guaranteed
