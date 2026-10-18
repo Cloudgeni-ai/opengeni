@@ -1146,11 +1146,18 @@ foreground waits return early with their live handle: an `exec_command` or
 `write_stdin` wait leaves the tool-cancellation fence's loop and takes the
 normal adopt or running-banner path, and `command_wait`, `command_read` and
 `session_wait` return their current result (`session_wait` reports kind
-`steer` in `ownPendingUpdateKinds`). Short tool calls simply finish. Processes
-adopted as session background commands keep running after the handover; a
-turn-scoped process (a worker-local handle on local, Docker or OpenSandbox, or
-a bare interactive shell) cannot outlive the turn and stops at the handover,
-which its tool result already says. The SDK routes it through its run error handlers like a turn cap, so the
+`steer` in `ownPendingUpdateKinds`). Short tool calls simply finish. A Steer
+stops nothing that outlives a turn: processes adopted as session background
+commands (servers, builds and long commands on Modal, Connected Machines and
+other remote backends) keep running after the handover. A turn-scoped process
+stops at the handover exactly as it stops at the end of any turn, which its
+tool result already says: a worker-local handle on local, Docker or
+OpenSandbox (an in-memory table on one worker, while the next turn may run on
+another) or a bare interactive shell on a managed backend (it never exits on
+its own, so adopting it would keep the box warm). Making those outlive a turn
+is a process-lifetime change for every turn end, not a Steer rule; see
+`docs/run-lifecycle.md`. The SDK routes the handover through its run error
+handlers like a turn cap, so the
 run finishes normally and every event of the completed step, including all of
 its tool results, reaches the consumer. The worker then settles the turn
 `superseded` (`turn.superseded{reason:"steer", atModelStep:true}`) under the
@@ -1162,10 +1169,14 @@ withdrawn in between, nothing is written and the turn rebuilds its input from
 durable history and keeps sampling. Steers that wait on the same boundary keep
 their send order, and a Steer turn that finds another waiting Steer at its own
 first admission hands over before any inference, so the next model request
-reads them together. The timeline closes a handed-over turn quietly. A queued
-Send is unaffected and still runs after the whole turn. `steerQueueItem` with
-`interrupt: true` (an API option on the waiting Steer, exposed as the queue
-snapshot's `pendingSteer`; the web and React Native surfaces no longer offer it)
+reads them together. The session screens show a Steer only as the person's
+message: the timeline draws it where it was sent, closes the handed-over turn
+quietly and continues with the Steer turn's work, and the queue surfaces list
+nothing for a waiting Steer (it is not a queued message the person can
+reorder). A queued Send is unaffected and still runs after the whole turn.
+`steerQueueItem` with `interrupt: true` (an API option on the waiting Steer
+turn, `metadata.delivery: "steer"`; the web and React Native surfaces no longer
+offer it)
 keeps the earlier behaviour: it inserts the interruption row, moves the row to
 the head and stops the live attempt now, including tool calls in flight. The
 workspace setting `busySend` (`queue` by default) and the composer's `busySend`

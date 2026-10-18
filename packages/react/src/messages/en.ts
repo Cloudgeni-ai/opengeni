@@ -2362,8 +2362,6 @@ export const englishMessages = {
   "queueSurfaceState.queuedWorkStaysSavedUntil": "Queued work stays saved until you resume.",
   "queueSurfaceState.queueErrorDetails": "Queue error details",
   "queueSurfaceState.retryLoadingTheQueue": "Retry loading the queue",
-  "queueSurfaceState.steerNothingCutOff": "Nothing in progress is cut off.",
-  "queueSurfaceState.steerDelivering": "Sending your message to the agent.",
   "queueSurfaceState.stoppingCurrentAttempt": "Stopping current attempt…",
   "queueSurfaceState.stoppingPreviousAttempt": "Stopping previous attempt…",
   "realtime.realtimeControl.audioMuted": "audio muted",
@@ -2695,7 +2693,6 @@ export const englishMessages = {
   "sessionChrome.queueNeedsAttention": "Queue needs attention",
   "sessionChrome.queueUnavailable": "Queue unavailable.",
   "sessionChrome.queueUnavailable2": "Queue unavailable",
-  "sessionChrome.steerDelivering": "Sending your message to the agent",
   "sessionChrome.removeQueuedPromptIndex": "Remove queued prompt {index}",
   "sessionChrome.resolveTheSessionFailureThen":
     "Resolve the session failure, then use Continue or send a message to continue this active goal.",

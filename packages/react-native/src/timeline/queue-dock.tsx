@@ -58,11 +58,8 @@ export function QueueDock({
     () => queue.queue.filter((turn) => isAuthoritativeQueuedTurn(turn, queue.mutationFor)),
     [queue.mutationFor, queue.queue],
   );
-  // The compact signal chip text (goal, agents and the queue share one row).
-  const small = { ...fontStyle(theme, 500), fontSize: 13, color: c.fg };
-  const pendingSteer = queue.pendingSteer ? <PendingSteerRow /> : null;
-  // A failed queue action stays visible until tapped,
-  // whether or not prompts are queued.
+  // A failed queue action stays visible until tapped, whether or not prompts
+  // are queued (a Steer is never a queue row).
   const mutationError = queue.mutationError ? (
     <Pressable accessibilityRole="alert" onPress={queue.clearMutationError}>
       <Text style={{ ...fontStyle(theme), fontSize: theme.size.xs, color: c["status-failed"] }}>
@@ -71,18 +68,19 @@ export function QueueDock({
     </Pressable>
   ) : null;
   if (turns.length === 0) {
-    if (!pendingSteer && !mutationError) {
+    if (!mutationError) {
       return leading ? <View style={{ flexDirection: "row" }}>{leading}</View> : null;
     }
     return (
       <View style={{ gap: 6 }}>
         {leading ? <View style={{ flexDirection: "row" }}>{leading}</View> : null}
-        {pendingSteer}
         {mutationError}
       </View>
     );
   }
   const first = turns[0]!;
+  // The compact signal chip text (goal, agents and the queue share one row).
+  const small = { ...fontStyle(theme, 500), fontSize: 13, color: c.fg };
   const canEdit = composer !== undefined && composer.draftPersistence !== "disabled";
   const checkout = async (turnId: string, replaceDraft: boolean) => {
     if (!composer) return;
@@ -102,7 +100,6 @@ export function QueueDock({
   };
   return (
     <View style={{ gap: 6 }}>
-      {pendingSteer}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
         <CompactSignalsContext.Provider value={true}>{leading}</CompactSignalsContext.Provider>
         <View
@@ -346,35 +343,5 @@ function RowAction(props: {
         </Text>
       ) : null}
     </Pressable>
-  );
-}
-
-/**
- * A Steer on its way to the running agent, which reads it within moments.
- * Matches the web queue surface's status line.
- */
-function PendingSteerRow() {
-  const theme = useNativeTimelineTheme();
-  const t = useOpenGeniText();
-  const c = theme.colors;
-  return (
-    <View
-      accessibilityRole="summary"
-      accessibilityLiveRegion="polite"
-      style={{
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 8,
-        minHeight: 44,
-        paddingHorizontal: 12,
-        borderRadius: theme.radius.lg,
-        backgroundColor: c["surface-2"],
-      }}
-    >
-      <ActivityIndicator size="small" color={c["fg-muted"]} />
-      <Text style={{ ...fontStyle(theme, 500), flex: 1, fontSize: 13, color: c.fg }}>
-        {t("queueSurfaceState.steerDelivering")}
-      </Text>
-    </View>
   );
 }

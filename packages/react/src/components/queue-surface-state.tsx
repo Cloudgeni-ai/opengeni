@@ -16,45 +16,11 @@ export function EmptyQueueStateSurface({ queue }: QueueStateProps) {
       data-testid="queue-surface"
     >
       <div className="overflow-hidden rounded-lg border border-border bg-surface/80 shadow-sm">
-        {queue.pendingSteer && !queue.stoppingPreviousAttempt ? (
-          <QueuePendingSteerStatus queue={queue} dividerAfter={hasError} />
-        ) : null}
         {queue.stoppingPreviousAttempt ? (
           <QueueStoppingStatus queue={queue} dividerAfter={hasError} />
         ) : null}
         {hasError ? <QueueErrorAlert queue={queue} /> : null}
       </div>
-    </div>
-  );
-}
-
-/**
- * A Steer on its way to the running agent, which reads it within moments.
- * Nothing in progress is cut off: running tools finish or keep running.
- */
-export function QueuePendingSteerStatus({
-  queue,
-  dividerAfter = false,
-}: QueueStateProps & { dividerAfter?: boolean }) {
-  const t = useOpenGeniText();
-  if (!queue.pendingSteer) return null;
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      className={`flex min-h-11 items-center gap-2.5 px-3 py-1.5 text-og-control text-fg ${
-        dividerAfter ? "border-b border-border" : ""
-      }`}
-      data-testid="pending-steer"
-    >
-      <Loader2Icon
-        aria-hidden="true"
-        className="size-3.5 shrink-0 animate-spin text-fg-muted motion-reduce:animate-none"
-      />
-      <span className="min-w-0 flex-1">
-        <span className="font-medium">{t("queueSurfaceState.steerDelivering")}</span>{" "}
-        <span className="text-fg-muted">{t("queueSurfaceState.steerNothingCutOff")}</span>
-      </span>
     </div>
   );
 }

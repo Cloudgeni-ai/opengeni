@@ -4312,8 +4312,10 @@ describe("clean session control plane", () => {
         ?.item,
     ).toMatchObject({ type: "function_call_result", callId: "waiting-steer-approval-call" });
     expect(
-      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.pendingSteer,
-    ).toBeNull();
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items.some(
+        (item) => item.metadata.delivery === "steer",
+      ),
+    ).toBe(false);
     expect(
       await resolveWaitingSteer(client.db, {
         accountId: grant.accountId,

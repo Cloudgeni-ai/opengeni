@@ -80759,18 +80759,6 @@ export async function getSessionQueueSnapshot(
         queuedSteerPredecessorIds,
       ));
 
-    // A Steer that the running turn reads at its next model step. Only the
-    // Steer that replaces the exact current turn is still waiting for it.
-    const pendingSteerTurn =
-      session.activeTurnId === null
-        ? undefined
-        : physicalItems.find(
-            (turn) =>
-              turn.metadata.delivery === "steer" &&
-              turn.metadata.deferredUntilModelStep === true &&
-              turn.metadata.replacedTurnId === session.activeTurnId,
-          );
-
     const hasPendingAgentSteer = pendingInputs.some(
       (update) => update.kind === "agent_steer_instruction",
     );
@@ -80819,9 +80807,6 @@ export async function getSessionQueueSnapshot(
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
       activePersonalConnections,
       stoppingPreviousAttempt,
-      pendingSteer: pendingSteerTurn
-        ? { turnId: pendingSteerTurn.id, turnVersion: pendingSteerTurn.version }
-        : null,
       items,
       pendingInputs: pendingInputs.map((update) => {
         // Queue labels do not expose the payload. A malformed payload remains

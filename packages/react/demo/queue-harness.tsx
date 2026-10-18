@@ -177,8 +177,6 @@ function QueueHarness() {
     errorSource === "mutation" && initialErrorMessage ? new Error(initialErrorMessage) : null,
   );
   const [refreshCount, setRefreshCount] = useState(0);
-  // `pendingSteer=1`: the first row is a Steer on its way to the running agent.
-  const pendingSteerTurn = params.get("pendingSteer") === "1" ? (turns[0] ?? null) : null;
   const [clearMutationErrorCount, setClearMutationErrorCount] = useState(0);
 
   useEffect(() => {
@@ -201,11 +199,6 @@ function QueueHarness() {
       activePersonalConnections: [],
       effectiveControl: null,
       stoppingPreviousAttempt: false,
-      ...(pendingSteerTurn
-        ? {
-            pendingSteer: { turnId: pendingSteerTurn.id, turnVersion: pendingSteerTurn.version },
-          }
-        : {}),
       loading,
       error: queueError,
       refresh: async () => {
@@ -225,7 +218,7 @@ function QueueHarness() {
         setMutationError(null);
       },
     }),
-    [loading, mutationError, pendingSteerTurn, queueError, turns],
+    [loading, mutationError, queueError, turns],
   );
 
   return (

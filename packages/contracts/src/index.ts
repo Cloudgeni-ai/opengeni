@@ -10241,19 +10241,6 @@ export const SessionQueueSnapshot = /* @__PURE__ */ defineSchema(() =>
      * visible queue, and is independent of Steer-row metadata or withdrawal.
      */
     stoppingPreviousAttempt: z.boolean(),
-    /**
-     * The Steer that the running turn reads at its next model step: after the
-     * current step's tool calls finish, before the next model request. Null
-     * when no Steer is waiting. `turnVersion` lets a client interrupt now
-     * through the queue-row Steer with `interrupt: true`.
-     */
-    pendingSteer: z
-      .object({
-        turnId: z.string().uuid(),
-        turnVersion: z.number().int().positive(),
-      })
-      .nullable()
-      .default(null),
     items: z.array(SessionTurn),
     /** Canonical bounded previews; never reconstructed from session events. */
     pendingInputs: z.array(SessionPendingInputPreview),

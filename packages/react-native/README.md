@@ -39,8 +39,8 @@ function SignedIn({ client, children }) {
 If the people using your app should not have to choose between queueing and
 steering, pass `busySend: "steer"` to `useOpenGeniNativeSession`. A normal Send
 while the agent works is then read within seconds, without stopping work in
-progress, instead of waiting for the whole turn. The queue dock shows the
-message as on its way until the agent picks it up.
+progress, instead of waiting for the whole turn. The message simply appears in
+the conversation and the agent carries on with it in mind.
 
 ### Labels and languages
 

@@ -1418,7 +1418,9 @@ tool calls finish, and long command or session waits return early while the
 work keeps running. The turn then hands over (`turn.superseded` with reason
 `steer`, `atModelStep: true` and, when an answer was cut short, `cutOffText`)
 and the Steer runs next with the full history. While it waits, the queue
-snapshot reports it as `pendingSteer`; `steerQueueItem` with `interrupt: true`
+snapshot lists it as a queued turn with `metadata.delivery: "steer"`; the
+session screens show it only as the person's message. `steerQueueItem` with
+`interrupt: true`
 stops the running attempt now instead, including tool calls in flight.
 
 ```ts
@@ -1438,9 +1440,10 @@ await client.steerMessage(workspaceId, sessionId, {
 const queue = await client.getQueue(workspaceId, sessionId);
 
 // Hard interrupt: stop the running attempt for the waiting Steer.
-if (queue.pendingSteer) {
-  await client.steerQueueItem(workspaceId, sessionId, queue.pendingSteer.turnId, {
-    expectedTurnVersion: queue.pendingSteer.turnVersion,
+const waitingSteer = queue.items.find((turn) => turn.metadata.delivery === "steer");
+if (waitingSteer) {
+  await client.steerQueueItem(workspaceId, sessionId, waitingSteer.id, {
+    expectedTurnVersion: waitingSteer.version,
     interrupt: true,
     clientEventId: crypto.randomUUID(),
   });

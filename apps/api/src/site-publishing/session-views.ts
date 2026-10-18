@@ -124,7 +124,6 @@ export function siteQueueView(value: unknown): Fields | null {
     effectiveControl: siteControlView(queue.effectiveControl),
     activePersonalConnections: [],
     stoppingPreviousAttempt: queue.stoppingPreviousAttempt === true,
-    pendingSteer: null,
     items: list(queue.items).map(siteTurnView).filter(present),
     pendingInputs: [],
     pendingInputAttachment: null,

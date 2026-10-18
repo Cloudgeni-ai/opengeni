@@ -75,11 +75,6 @@ export type UseTurnQueueResult = {
   effectiveControl: EffectiveSessionControl | null;
   /** The latest interrupted attempt has not yet durably proved physical quiescence. */
   stoppingPreviousAttempt: boolean;
-  /**
-   * A Steer on its way to the running turn, which reads it within moments
-   * without cutting off work in progress. Null when none is waiting.
-   */
-  pendingSteer?: { turnId: string; turnVersion: number } | null | undefined;
   loading: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
@@ -465,7 +460,6 @@ export function useTurnQueue(
     activePersonalConnections: visibleSnapshot?.activePersonalConnections ?? [],
     effectiveControl: visibleSnapshot?.effectiveControl ?? null,
     stoppingPreviousAttempt: visibleSnapshot?.stoppingPreviousAttempt ?? false,
-    pendingSteer: visibleSnapshot?.pendingSteer ?? null,
     loading: freshLoading && retainedSnapshot === null,
     error: identityMatches ? error : null,
     refresh: load,

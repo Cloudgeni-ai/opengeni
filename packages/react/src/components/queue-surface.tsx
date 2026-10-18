@@ -28,13 +28,7 @@ function createQueueSurface(loadImplementation: QueueSurfaceLoader) {
   return function QueueSurfaceBoundary(props: QueueSurfaceProps) {
     const { queue } = props;
     if (queue.queue.length + queue.pendingInputs.length === 0) {
-      if (
-        !queue.stoppingPreviousAttempt &&
-        !queue.pendingSteer &&
-        !queue.error &&
-        !queue.mutationError
-      )
-        return null;
+      if (!queue.stoppingPreviousAttempt && !queue.error && !queue.mutationError) return null;
       return <EmptyQueueStateSurface queue={queue} />;
     }
 

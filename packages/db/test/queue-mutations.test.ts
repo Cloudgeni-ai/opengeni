@@ -1008,7 +1008,6 @@ describe("canonical queue commands", () => {
       await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
     ).toMatchObject({
       stoppingPreviousAttempt: false,
-      pendingSteer: { turnId: target.id, turnVersion: target.version + 1 },
     });
     const [noInterruption] = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
       db
@@ -1033,10 +1032,6 @@ describe("canonical queue commands", () => {
       },
     });
     expect(steered.items[0]!.metadata).not.toHaveProperty("deferredUntilModelStep");
-    expect(
-      (await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id))
-        ?.pendingSteer,
-    ).toBeNull();
     expect(steered.interruptionCount).toBe(1);
     expect(steered.eventIds.length).toBeGreaterThan(0);
     const validSteerMetadata = steered.items[0]!.metadata;

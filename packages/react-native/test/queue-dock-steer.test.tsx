@@ -114,7 +114,7 @@ const { QueueDock } = (await import("../src/timeline/queue-dock")) as {
   QueueDock: ComponentType<{ queue: TurnQueue }>;
 };
 
-function pendingSteerQueue(overrides: Partial<TurnQueue>): TurnQueue {
+function steerQueue(overrides: Partial<TurnQueue>): TurnQueue {
   return {
     snapshot: null,
     queue: [],
@@ -123,7 +123,6 @@ function pendingSteerQueue(overrides: Partial<TurnQueue>): TurnQueue {
     activePersonalConnections: [],
     effectiveControl: null,
     stoppingPreviousAttempt: false,
-    pendingSteer: { turnId: "steer-1", turnVersion: 2 },
     loading: false,
     error: null,
     refresh: async () => {},
@@ -140,16 +139,27 @@ function pendingSteerQueue(overrides: Partial<TurnQueue>): TurnQueue {
   } as TurnQueue;
 }
 
-test("a waiting Steer with no queued prompts shows its delivery and a failure, with no Send now", async () => {
+test("a waiting Steer shows nothing in the queue dock, only a failed action, and no Send now", async () => {
+  const steer = {
+    id: "steer-1",
+    version: 2,
+    status: "queued",
+    prompt: "What is the status?",
+    metadata: { delivery: "steer" },
+  } as unknown as TurnQueue["queue"][number];
+  const quiet = await renderComponent(<QueueDock queue={steerQueue({ queue: [steer] })} />);
+  // The Steer is already a message in the timeline; the dock adds nothing.
+  expect(quiet.container.textContent).toBe("");
+  await quiet.unmount();
+
   const view = await renderComponent(
     <QueueDock
-      queue={pendingSteerQueue({
+      queue={steerQueue({
+        queue: [steer],
         mutationError: new Error("The message could not be sent."),
       })}
     />,
   );
-  expect(view.container.textContent).toContain("Sending your message to the agent.");
-  // Delivery is already immediate; there is no separate interrupting action.
   const buttons = [...view.container.querySelectorAll("button")];
   expect(buttons.every((button) => button.getAttribute("data-role") === "alert")).toBe(true);
   expect(view.container.textContent).not.toContain("Send now");

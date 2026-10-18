@@ -6779,12 +6779,6 @@ export type SessionQueueSnapshot = {
   activePersonalConnections: McpPersonalConnectionSummary[];
   /** The latest interrupted attempt has not yet durably proved physical quiescence. */
   stoppingPreviousAttempt: boolean;
-  /**
-   * The Steer the running turn reads at its next model step (after the current
-   * step's tool calls finish). Null or absent when none is waiting; older
-   * servers omit it.
-   */
-  pendingSteer?: { turnId: string; turnVersion: number } | null;
   items: SessionTurn[];
   /** Canonical pending machine inputs. Events only invalidate this snapshot. */
   pendingInputs: SessionPendingInputPreview[];

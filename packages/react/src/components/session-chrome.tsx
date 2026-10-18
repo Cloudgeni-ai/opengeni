@@ -492,8 +492,6 @@ export function SessionChrome({
       : null);
   const stopping = stoppingKind !== null;
   const canMutateQueue = !readOnly && composer !== undefined;
-  // A Steer on its way to the running agent, which reads it within moments.
-  const pendingSteer = !stopping ? (queue.pendingSteer ?? null) : null;
 
   const elapsed = useLiveElapsed(record?.createdAt, Boolean(record));
   const goalState = record
@@ -831,7 +829,7 @@ export function SessionChrome({
             }
           : null;
 
-  if (signals.length === 0 && !stopping && !pendingSteer) return null;
+  if (signals.length === 0 && !stopping) return null;
 
   const shellDuration = reduceMotion ? 0 : 0.22;
   const crossfadeDuration = reduceMotion ? 0 : 0.18;
@@ -1227,20 +1225,6 @@ export function SessionChrome({
                   {stoppingKind === "current"
                     ? t("sessionChrome.currentWorkStopping")
                     : t("sessionChrome.previousWorkStopping")}
-                </span>
-              ) : null}
-              {pendingSteer ? (
-                <span
-                  role="status"
-                  aria-live="polite"
-                  className="inline-flex min-h-[var(--og-session-chrome-chip-min-height)] items-center gap-1.5 px-1.5 text-og-xs text-og-fg-muted"
-                  data-testid="session-chrome-pending-steer"
-                >
-                  <Loader2Icon
-                    aria-hidden="true"
-                    className="size-3 animate-og-spin motion-reduce:animate-none"
-                  />
-                  {t("sessionChrome.steerDelivering")}
                 </span>
               ) : null}
             </div>

@@ -1457,7 +1457,7 @@ describe("attempt-fenced Agent session commands", () => {
     expect(steered.interruptionCount).toBe(0);
     expect(
       await getSessionQueueSnapshot(client.db, grant.workspaceId!, target.session.id),
-    ).toMatchObject({ items: [], stoppingPreviousAttempt: false, pendingSteer: null });
+    ).toMatchObject({ items: [], stoppingPreviousAttempt: false });
     expect(
       await hasPendingSteerForTurn(client.db, {
         accountId: grant.accountId,
@@ -1798,7 +1798,6 @@ describe("attempt-fenced Agent session commands", () => {
     expect(steered.interruptionCount).toBe(0);
     expect(await getSessionQueueSnapshot(client.db, grant.workspaceId!, target.id)).toMatchObject({
       stoppingPreviousAttempt: false,
-      pendingSteer: null,
     });
     expect(
       await hasPendingSteerForTurn(client.db, {
