@@ -622,3 +622,46 @@ test("an ignored version request cannot renew the tags request's timeout", async
   ).rejects.toThrow("timed out");
   expect(requests).toBe(2);
 });
+
+function stagedRead(state: { approved: boolean; requests: number }): typeof readRegistryPackage {
+  return (name, _request, _base, options) =>
+    readRegistryPackage(
+      name,
+      async (url) => {
+        state.requests++;
+        const path = new URL(String(url)).pathname;
+        if (path.endsWith("/dist-tags")) {
+          return Response.json(
+            state.approved ? { latest: "0.0.0-stage", canary: version } : { latest: "0.0.0-stage" },
+          );
+        }
+        return state.approved
+          ? Response.json({ name, version, dist })
+          : new Response(null, { status: 404 });
+      },
+      "https://registry.example.test",
+      options,
+    );
+}
+
+test("a first publication held in npm staged publishing asks for maintainer approval at once", async () => {
+  const state = { approved: false, requests: 0 };
+  const first = { ...archive("@example/new-package"), previousLatest: undefined };
+  await expect(confirmCanaryCohort([first], stagedRead(state))).rejects.toThrow(
+    "npm staged publishing holds the first publication of @example/new-package@1.0.1-canary.7",
+  );
+  expect(state.requests).toBe(2);
+});
+
+test("an approved staged first publication confirms under npm's placeholder latest tag", async () => {
+  const state = { approved: true, requests: 0 };
+  const first = { ...archive("@example/new-package"), previousLatest: undefined };
+  await confirmCanaryCohort([first], stagedRead(state));
+});
+
+test("the staged placeholder never excuses a moved stable tag on an existing package", async () => {
+  const state = { approved: true, requests: 0 };
+  await expect(confirmCanaryCohort([archive()], stagedRead(state))).rejects.toThrow(
+    "Stable tag changed",
+  );
+});
