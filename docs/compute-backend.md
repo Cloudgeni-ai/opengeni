@@ -73,9 +73,17 @@ skips sandbox enrollments, and machine routes list machines only.
   The fabric's own inventory is the record, so nothing is lost when Opengeni's
   rows go: a failed revoke deletes nothing, and a failed delete leaves a listed
   sandbox for the next pass. The sweep handles eight orphans at a time and
-  ends within one minute (its fabric listing included) or when the activity
-  is cancelled, so one stalled delete never holds up the others or the rest
-  of maintenance; whatever it does not reach is the next pass's. It never
+  ends within one minute or when the activity is cancelled. That budget
+  starts before the stale-enrollment reconcile below and covers everything:
+  each fabric request until its body is read, and each database check and
+  revoke under a statement timeout that also ends lock waits (a stopped call
+  returns at once and its transaction rolls back). One stalled delete or lock
+  therefore never holds up the others or the rest of maintenance. Each pass
+  resumes after the last sandbox the previous one reached, and a sandbox whose
+  cleanup failed sits out ten minutes, doubling up to an hour, so failures at
+  the front of the list never starve the sandboxes behind them. This progress
+  lives in the worker's memory; a restarted worker starts again at the oldest
+  sandbox. It never
   messages an agent, so it wakes nothing. One fabric team serves one Opengeni
   deployment's gateway; the gateway tag keeps a misconfigured second
   deployment's sandboxes out of the sweep.

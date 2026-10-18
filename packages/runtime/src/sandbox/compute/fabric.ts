@@ -173,10 +173,13 @@ function kindFor(status: number, code: string | undefined): ComputeFabricErrorKi
 }
 
 /** The `code` and a bounded, secret-free message of an error body. */
-async function errorBody(response: Response): Promise<{ code?: string; message: string }> {
+async function errorBody(
+  response: Response,
+  readText: (response: Response) => Promise<string>,
+): Promise<{ code?: string; message: string }> {
   let text = "";
   try {
-    text = await response.text();
+    text = await readText(response);
   } catch {
     return { message: `HTTP ${response.status}` };
   }
@@ -326,50 +329,73 @@ export class ComputeFabricClient {
     const abandon = (): void => controller.abort();
     this.signal?.addEventListener("abort", abandon, { once: true });
     if (this.signal?.aborted) controller.abort();
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-        method,
-        headers: {
-          "x-api-key": this.apiKey,
-          accept: "application/json",
-          ...(body === undefined ? {} : { "content-type": "application/json" }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: controller.signal,
-      });
-    } catch (error) {
-      // No answer: the request may or may not have taken effect. Callers only
-      // repeat idempotent requests (a create carries its request_id).
-      throw new ComputeFabricError({
+    // The timeout and the caller's signal bound the whole exchange, body
+    // included: a peer that sends headers and then stalls must not outlive
+    // either deadline.
+    const unanswered = (cause?: unknown): ComputeFabricError =>
+      new ComputeFabricError({
         kind: "transport",
         status: null,
         message: `compute fabric ${method} ${route} did not answer`,
-        cause: error,
+        ...(cause === undefined ? {} : { cause }),
       });
+    const ended = new Promise<never>((_, reject) => {
+      const fail = (): void => reject(unanswered());
+      if (controller.signal.aborted) fail();
+      else controller.signal.addEventListener("abort", fail, { once: true });
+    });
+    ended.catch(() => {});
+    const readText = (response: Response): Promise<string> =>
+      Promise.race([response.text(), ended]);
+    try {
+      let response: Response;
+      try {
+        response = await Promise.race([
+          this.fetchImpl(`${this.baseUrl}${path}`, {
+            method,
+            headers: {
+              "x-api-key": this.apiKey,
+              accept: "application/json",
+              ...(body === undefined ? {} : { "content-type": "application/json" }),
+            },
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+            signal: controller.signal,
+          }),
+          ended,
+        ]);
+      } catch (error) {
+        // No answer: the request may or may not have taken effect. Callers only
+        // repeat idempotent requests (a create carries its request_id).
+        throw error instanceof ComputeFabricError ? error : unanswered(error);
+      }
+      if (!response.ok) {
+        const { code, message } = await errorBody(response, readText);
+        throw new ComputeFabricError({
+          kind: kindFor(response.status, code),
+          status: response.status,
+          message: `compute fabric ${method} ${route}: ${message}`,
+        });
+      }
+      let text: string;
+      try {
+        text = await readText(response);
+      } catch (error) {
+        throw error instanceof ComputeFabricError ? error : unanswered(error);
+      }
+      if (!text) return undefined as T;
+      try {
+        return JSON.parse(text) as T;
+      } catch (error) {
+        throw new ComputeFabricError({
+          kind: "internal",
+          status: response.status,
+          message: `compute fabric ${method} ${route} returned a non-JSON body`,
+          cause: error,
+        });
+      }
     } finally {
       clearTimeout(timer);
       this.signal?.removeEventListener("abort", abandon);
-    }
-    if (!response.ok) {
-      const { code, message } = await errorBody(response);
-      throw new ComputeFabricError({
-        kind: kindFor(response.status, code),
-        status: response.status,
-        message: `compute fabric ${method} ${route}: ${message}`,
-      });
-    }
-    const text = await response.text();
-    if (!text) return undefined as T;
-    try {
-      return JSON.parse(text) as T;
-    } catch (error) {
-      throw new ComputeFabricError({
-        kind: "internal",
-        status: response.status,
-        message: `compute fabric ${method} ${route} returned a non-JSON body`,
-        cause: error,
-      });
     }
   }
 }

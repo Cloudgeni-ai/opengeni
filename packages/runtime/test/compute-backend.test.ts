@@ -27,7 +27,9 @@ import {
   type ControlRpc,
   type NatsRequestConnection,
   sweepComputeOrphans,
+  createComputeOrphanSweepProgress,
 } from "../src/sandbox";
+import { COMPUTE_ORPHAN_SWEEP_LIMIT } from "../src/sandbox/compute/orphans";
 import { applyDiff } from "@openai/agents";
 import { Manifest } from "@openai/agents/sandbox";
 import { setSelfhostedApplyDiff } from "../src/sandbox/selfhosted/session";
@@ -62,6 +64,8 @@ class FakeFabric {
   failCleanup = false;
   /** Sandboxes whose delete never answers until the client gives up. */
   readonly stallDeletes = new Set<string>();
+  /** Sandboxes whose delete always fails. */
+  readonly failDeletes = new Set<string>();
   private readonly stalls = new Set<() => void>();
   private readonly server: ReturnType<typeof Bun.serve>;
   /** Called when the fabric wakes a sandbox. */
@@ -154,7 +158,7 @@ class FakeFabric {
             });
             return Response.json({ code: "unavailable", message: "stalled" }, { status: 503 });
           }
-          if (this.failCleanup) {
+          if (this.failCleanup || this.failDeletes.has(box.id)) {
             return Response.json({ code: "unavailable", message: "down" }, { status: 503 });
           }
           this.boxes.delete(box.id);
@@ -760,7 +764,8 @@ describe("compute sandbox client", () => {
     const result = await sweeping;
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(result.deleted.map((d) => d.sandboxId).sort()).toEqual(["sbx-a", "sbx-b", "sbx-c"]);
-    expect(result.failed).toBe(1);
+    // The stop abandoned the stuck delete; it is not a failure to defer.
+    expect(result.failed).toBe(0);
     // An aborted signal starts nothing new.
     fabric.stallDeletes.clear();
     const after = await sweepComputeOrphans({
@@ -772,6 +777,102 @@ describe("compute sandbox client", () => {
     });
     expect(after).toEqual({ examined: 0, deleted: [], failed: 0 });
     expect(fabric.boxes.has("sbx-stuck")).toBe(true);
+  });
+
+  test("a prefix of failing orphans never starves the healthy ones behind it", async () => {
+    const { fabric } = setup();
+    const ids = Array.from({ length: 57 }, (_, i) => `sbx-${String(i).padStart(3, "0")}`);
+    for (const id of ids) fabric.addOrphan(id);
+    // With the production limit, 56 failing deletes ahead of one healthy one.
+    for (const id of ids.slice(0, 56)) fabric.failDeletes.add(id);
+    const progress = createComputeOrphanSweepProgress();
+    const startedAt = Date.now();
+    const sweep = (nowMs: number) =>
+      sweepComputeOrphans({
+        fabric: new ComputeFabricClient({
+          baseUrl: fabric.url,
+          apiKey: "fabric-key",
+          maxAttempts: 1,
+        }),
+        gateway: GATEWAY,
+        named: async () => false,
+        revokeEnrollment: async () => {},
+        nowMs,
+        progress,
+      });
+    const first = await sweep(startedAt);
+    expect(first.failed).toBe(COMPUTE_ORPHAN_SWEEP_LIMIT);
+    expect(first.deleted).toEqual([]);
+    // The next pass (one sweep interval later) reaches the rest.
+    const second = await sweep(startedAt + 5 * 60_000);
+    expect(second.deleted.map((d) => d.sandboxId)).toEqual(["sbx-056"]);
+    expect(second.failed).toBe(6);
+    // Failed candidates come back once their retry time has passed.
+    fabric.failDeletes.clear();
+    expect((await sweep(startedAt + 5 * 60_000 + 1)).deleted).toEqual([]);
+    const later = await sweep(startedAt + 30 * 60_000);
+    expect(later.deleted).toHaveLength(COMPUTE_ORPHAN_SWEEP_LIMIT);
+    expect(fabric.boxes.size).toBe(6);
+    // Only the six not reached yet still carry their earlier failure.
+    expect(progress.failures.size).toBe(6);
+  });
+
+  test("each pass resumes after the last orphan the previous one reached", async () => {
+    const { fabric } = setup();
+    for (const id of ["sbx-a", "sbx-b", "sbx-c"]) fabric.addOrphan(id);
+    const progress = createComputeOrphanSweepProgress();
+    const reached: string[] = [];
+    const sweep = () =>
+      sweepComputeOrphans({
+        fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+        gateway: GATEWAY,
+        named: async (orphan) => {
+          reached.push(orphan.sandboxId);
+          return true;
+        },
+        revokeEnrollment: async () => {},
+        concurrency: 1,
+        maxDeletions: 1,
+        progress,
+      });
+    const stop = new AbortController();
+    // A pass stopped after its first check leaves the rest to the next one.
+    await sweepComputeOrphans({
+      fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+      gateway: GATEWAY,
+      named: async (orphan) => {
+        reached.push(orphan.sandboxId);
+        stop.abort();
+        return true;
+      },
+      revokeEnrollment: async () => {},
+      concurrency: 1,
+      signal: stop.signal,
+      progress,
+    });
+    expect(reached).toEqual(["sbx-a"]);
+    await sweep();
+    expect(reached).toEqual(["sbx-a", "sbx-b", "sbx-c", "sbx-a"]);
+    await sweep();
+    expect(reached.slice(4)).toEqual(["sbx-b", "sbx-c", "sbx-a"]);
+  });
+
+  test("a stopped sweep abandons a database check that waits", async () => {
+    const { fabric } = setup();
+    fabric.addOrphan("sbx-waiting");
+    const stop = new AbortController();
+    const started = Date.now();
+    const sweeping = sweepComputeOrphans({
+      fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+      gateway: GATEWAY,
+      named: () => new Promise<boolean>(() => {}),
+      revokeEnrollment: async () => {},
+      signal: stop.signal,
+    });
+    setTimeout(() => stop.abort(), 50);
+    expect(await sweeping).toEqual({ examined: 1, deleted: [], failed: 0 });
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(fabric.boxes.has("sbx-waiting")).toBe(true);
   });
 
   test("deleting a sandbox revokes its enrollment only after the fabric delete", async () => {
@@ -1119,6 +1220,68 @@ describe("compute fabric client", () => {
     await client.delete(view.id);
     const gone = await client.create(body).catch((e: unknown) => e);
     expect((gone as ComputeFabricError).kind).toBe("request_gone");
+  });
+
+  test("a body that stalls after the headers ends with the timeout or the caller's signal", async () => {
+    let status = 200;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              // Headers and a first byte, then nothing more.
+              controller.enqueue(new TextEncoder().encode(status === 200 ? "[" : "{"));
+            },
+          }),
+          { status, headers: { "content-type": "application/json" } },
+        ),
+    });
+    try {
+      const baseUrl = `http://127.0.0.1:${server.port}`;
+      let started = Date.now();
+      const timedOut = await new ComputeFabricClient({
+        baseUrl,
+        apiKey: "fabric-key",
+        requestTimeoutMs: 200,
+        maxAttempts: 1,
+      })
+        .list({})
+        .catch((e: unknown) => e);
+      expect(timedOut).toBeInstanceOf(ComputeFabricError);
+      expect((timedOut as ComputeFabricError).kind).toBe("transport");
+      expect(Date.now() - started).toBeLessThan(3_000);
+
+      const stop = new AbortController();
+      setTimeout(() => stop.abort(), 100);
+      started = Date.now();
+      const stopped = await new ComputeFabricClient({
+        baseUrl,
+        apiKey: "fabric-key",
+        requestTimeoutMs: 60_000,
+        signal: stop.signal,
+      })
+        .list({})
+        .catch((e: unknown) => e);
+      expect(stopped).toBeInstanceOf(ComputeFabricError);
+      expect(Date.now() - started).toBeLessThan(3_000);
+
+      // An error answer whose body stalls still ends, with its status.
+      status = 503;
+      started = Date.now();
+      const failed = await new ComputeFabricClient({
+        baseUrl,
+        apiKey: "fabric-key",
+        requestTimeoutMs: 200,
+        maxAttempts: 1,
+      })
+        .delete("sbx")
+        .catch((e: unknown) => e);
+      expect((failed as ComputeFabricError).status).toBe(503);
+      expect(Date.now() - started).toBeLessThan(3_000);
+    } finally {
+      await server.stop(true);
+    }
   });
 
   test("delete of an absent sandbox succeeds; request lookups and link keys", async () => {

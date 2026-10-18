@@ -644,7 +644,9 @@ export {
 } from "./compute/session";
 export {
   COMPUTE_METADATA,
+  createComputeOrphanSweepProgress,
   sweepComputeOrphans,
+  type ComputeOrphanSweepProgress,
   type ComputeOrphanSweepResult,
   type ComputeSandboxIdentity,
 } from "./compute/orphans";

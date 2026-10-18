@@ -63,6 +63,49 @@ function identityOf(view: ComputeSandboxView): ComputeSandboxIdentity | null {
 /** Orphans handled at once, so one stalled delete never holds up the rest. */
 export const COMPUTE_ORPHAN_SWEEP_CONCURRENCY = 8;
 
+/** How long a candidate whose cleanup failed sits out, doubling per failure. */
+export const COMPUTE_ORPHAN_RETRY_BASE_MS = 10 * 60_000;
+export const COMPUTE_ORPHAN_RETRY_MAX_MS = 60 * 60_000;
+
+/**
+ * What one sweeper carries from pass to pass, so every listed sandbox is
+ * reached in turn: each pass resumes after the last candidate the previous one
+ * reached (wrapping around), and a candidate whose cleanup failed sits out a
+ * growing interval instead of using up the next pass. Kept in memory; a fresh
+ * sweeper simply starts at the oldest sandbox.
+ */
+export type ComputeOrphanSweepProgress = {
+  cursor: string | undefined;
+  failures: Map<string, { count: number; retryAtMs: number }>;
+};
+
+export function createComputeOrphanSweepProgress(): ComputeOrphanSweepProgress {
+  return { cursor: undefined, failures: new Map() };
+}
+
+/** A stable traversal order: oldest first, the sandbox id breaking ties. */
+function traversalKey(view: Pick<ComputeSandboxView, "id" | "created_ms">): string {
+  return `${String(Math.max(0, Math.floor(view.created_ms))).padStart(16, "0")}:${view.id}`;
+}
+
+/** Wait for `work`, or end as soon as `signal` aborts. */
+async function untilStopped<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return await work;
+  work.catch(() => {});
+  let onAbort: (() => void) | undefined;
+  const stopped = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new Error("The compute orphan sweep was stopped."));
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  stopped.catch(() => {});
+  try {
+    return await Promise.race([work, stopped]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
 /**
  * Delete every sandbox of this deployment that nothing durable names. Its
  * enrollment is revoked first and the sandbox deleted after, so the fabric's
@@ -77,7 +120,9 @@ export const COMPUTE_ORPHAN_SWEEP_CONCURRENCY = 8;
  * sandbox younger than the settle window is left alone, because its create may
  * not have committed yet. Orphans are handled a few at a time; once `signal`
  * aborts (the caller's budget or cancellation) no new one starts and the
- * requests in flight end. Failures are counted and left for the next sweep.
+ * checks and requests in flight are abandoned at once. Failures are counted
+ * and, with `progress`, sit out a while so the candidates behind them are
+ * reached.
  */
 export async function sweepComputeOrphans(input: {
   fabric: Pick<ComputeFabricClient, "list" | "delete">;
@@ -91,39 +136,82 @@ export async function sweepComputeOrphans(input: {
   /** Stops the sweep: no new orphan starts after it aborts. Pass the same
    * signal to the fabric client so the requests in flight end too. */
   signal?: AbortSignal;
+  /** Carried between passes by one sweeper (see ComputeOrphanSweepProgress). */
+  progress?: ComputeOrphanSweepProgress;
 }): Promise<ComputeOrphanSweepResult> {
   const nowMs = input.nowMs ?? Date.now();
   const maxDeletions = input.maxDeletions ?? COMPUTE_ORPHAN_SWEEP_LIMIT;
   const concurrency = Math.max(1, input.concurrency ?? COMPUTE_ORPHAN_SWEEP_CONCURRENCY);
+  const signal = input.signal;
+  const progress = input.progress;
   const result: ComputeOrphanSweepResult = { examined: 0, deleted: [], failed: 0 };
-  if (input.signal?.aborted) return result;
-  const views = await input.fabric.list({ [COMPUTE_METADATA.gateway]: input.gateway });
-  const candidates: ComputeSandboxIdentity[] = [];
+  if (signal?.aborted) return result;
+  const views = await untilStopped(
+    input.fabric.list({ [COMPUTE_METADATA.gateway]: input.gateway }),
+    signal,
+  );
+  const ordered: { key: string; identity: ComputeSandboxIdentity }[] = [];
+  const listed = new Set<string>();
   for (const view of views) {
     const identity = identityOf(view);
     if (!identity) continue;
     result.examined += 1;
+    listed.add(identity.sandboxId);
     if (nowMs - view.created_ms < UNSEEN_CREATE_SETTLE_MS) continue;
-    candidates.push(identity);
+    const failure = progress?.failures.get(identity.sandboxId);
+    if (failure && failure.retryAtMs > nowMs) continue;
+    ordered.push({ key: traversalKey(view), identity });
   }
+  if (progress) {
+    // A sandbox the fabric no longer lists needs nothing more.
+    for (const sandboxId of progress.failures.keys()) {
+      if (!listed.has(sandboxId)) progress.failures.delete(sandboxId);
+    }
+  }
+  ordered.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  // Resume after the last candidate the previous pass reached, wrapping around.
+  const cursor = progress?.cursor;
+  const resumeAt = cursor === undefined ? 0 : ordered.findIndex((entry) => entry.key > cursor);
+  const candidates =
+    resumeAt <= 0 ? ordered : [...ordered.slice(resumeAt), ...ordered.slice(0, resumeAt)];
+  const recordFailure = (sandboxId: string): void => {
+    result.failed += 1;
+    if (!progress) return;
+    const count = (progress.failures.get(sandboxId)?.count ?? 0) + 1;
+    const delay = Math.min(
+      COMPUTE_ORPHAN_RETRY_MAX_MS,
+      COMPUTE_ORPHAN_RETRY_BASE_MS * 2 ** Math.min(count - 1, 16),
+    );
+    progress.failures.set(sandboxId, { count, retryAtMs: nowMs + delay });
+  };
   let next = 0;
   let started = 0;
   const work = async (): Promise<void> => {
     while (next < candidates.length && started < maxDeletions && !input.signal?.aborted) {
-      const identity = candidates[next]!;
+      const { key, identity } = candidates[next]!;
       next += 1;
+      if (progress) progress.cursor = key;
       try {
-        if (await input.named(identity)) continue;
-        if (input.signal?.aborted) return;
+        if (await untilStopped(input.named(identity), signal)) {
+          progress?.failures.delete(identity.sandboxId);
+          continue;
+        }
+        if (signal?.aborted) return;
         started += 1;
-        await input.revokeEnrollment({
-          workspaceId: identity.workspaceId,
-          enrollmentId: identity.enrollmentId,
-        });
+        await untilStopped(
+          input.revokeEnrollment({
+            workspaceId: identity.workspaceId,
+            enrollmentId: identity.enrollmentId,
+          }),
+          signal,
+        );
         await input.fabric.delete(identity.sandboxId);
         result.deleted.push(identity);
+        progress?.failures.delete(identity.sandboxId);
       } catch {
-        result.failed += 1;
+        // A stopped sweep did not fail this candidate; the next pass retries it.
+        if (signal?.aborted) return;
+        recordFailure(identity.sandboxId);
       }
     }
   };

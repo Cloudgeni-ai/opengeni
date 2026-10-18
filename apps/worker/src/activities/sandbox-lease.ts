@@ -162,6 +162,7 @@ import {
   modalAppHasRunningSandboxes,
   sweepModalOrphanSandboxes,
   ComputeFabricClient,
+  createComputeOrphanSweepProgress,
   sweepComputeOrphans,
   terminateManagedSandboxSession,
   terminateModalSandboxById,
@@ -3703,10 +3704,13 @@ export function modalOrphanCandidateStillUnowned(
  * delay costs little and keeps the fabric list off every 30 s maintenance tick. */
 export const COMPUTE_ORPHAN_SWEEP_INTERVAL_MS = 5 * 60_000;
 let lastComputeOrphanSweepAtMs = Number.NEGATIVE_INFINITY;
+/** This worker's traversal of the fabric inventory, carried between passes. */
+const computeOrphanSweepProgress = createComputeOrphanSweepProgress();
 
-/** The most one compute orphan sweep may take, its fabric listing included.
- * It shares a five-minute maintenance activity with the other sweeps; what it
- * does not reach is the next sweep's. */
+/** The most one compute orphan sweep may take: the stale-enrollment reconcile,
+ * the fabric listing, every database check and revoke (lock waits included)
+ * and every delete. It shares a five-minute maintenance activity with the
+ * other sweeps; what it does not reach is the next sweep's. */
 export const COMPUTE_ORPHAN_SWEEP_BUDGET_MS = 60_000;
 
 /** The activity's cancellation, when this runs inside a Temporal activity. */
@@ -3726,11 +3730,15 @@ async function sweepComputeOrphansForConfiguredBackend(
   const nowMs = Date.now();
   if (nowMs - lastComputeOrphanSweepAtMs < COMPUTE_ORPHAN_SWEEP_INTERVAL_MS) return 0;
   lastComputeOrphanSweepAtMs = nowMs;
+  const cancellation = activityCancellationSignal();
+  const budget = AbortSignal.timeout(COMPUTE_ORPHAN_SWEEP_BUDGET_MS);
+  const signal = cancellation ? AbortSignal.any([budget, cancellation]) : budget;
+  const bound = { deadlineAtMs: nowMs + COMPUTE_ORPHAN_SWEEP_BUDGET_MS, signal };
   // Enrollments whose sandbox is already gone are not in any fabric listing:
   // revoke them from Opengeni's own records, whether or not compute is still
   // configured.
   try {
-    const stale = await revokeStaleComputeSandboxEnrollments(db);
+    const stale = await revokeStaleComputeSandboxEnrollments(db, bound);
     for (const revoked of stale.revoked) {
       observability.warn("sandbox reaper: revoked stale compute sandbox enrollment", {
         ...revoked,
@@ -3747,9 +3755,7 @@ async function sweepComputeOrphansForConfiguredBackend(
     });
   }
   if (!settings.computeApiUrl || !settings.computeApiKey || !settings.computeLinkUrl) return 0;
-  const cancellation = activityCancellationSignal();
-  const budget = AbortSignal.timeout(COMPUTE_ORPHAN_SWEEP_BUDGET_MS);
-  const signal = cancellation ? AbortSignal.any([budget, cancellation]) : budget;
+  if (signal.aborted) return 0;
   const result = await sweepComputeOrphans({
     // Short requests that all end with the budget: an unreachable fabric or a
     // stalled delete must not hold up the rest of the maintenance pass.
@@ -3761,12 +3767,13 @@ async function sweepComputeOrphansForConfiguredBackend(
       signal,
     }),
     gateway: settings.computeLinkUrl,
-    named: async (identity) => await computeSandboxNamed(db, identity),
+    named: async (identity) => await computeSandboxNamed(db, identity, bound),
     revokeEnrollment: async (input) => {
-      await revokeSandboxEnrollment(db, input);
+      await revokeSandboxEnrollment(db, input, bound);
     },
     nowMs,
     signal,
+    progress: computeOrphanSweepProgress,
   });
   for (const deleted of result.deleted) {
     observability.warn("sandbox reaper: deleted compute orphan sandbox", { ...deleted });

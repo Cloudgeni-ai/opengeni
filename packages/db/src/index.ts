@@ -62852,35 +62852,78 @@ export async function releaseSandboxAgentLink(
   });
 }
 
+/**
+ * A deadline (and optional stop signal) for maintenance work such as the
+ * compute orphan sweep. Every bounded database call runs under a statement
+ * timeout that ends at the deadline, so lock waits (the workspace tenancy lock
+ * included) end with it; a stopped call returns at once and its transaction
+ * rolls back instead of committing late.
+ */
+export type DatabaseWorkBound = { deadlineAtMs: number; signal?: AbortSignal | undefined };
+
+async function withinWorkBound<T>(
+  db: Database,
+  bound: DatabaseWorkBound | undefined,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  if (!bound) return await fn(db);
+  const signal = bound.signal;
+  signal?.throwIfAborted();
+  const remainingMs = bound.deadlineAtMs - Date.now();
+  if (remainingMs <= 0) throw new Error("The maintenance deadline passed before the query.");
+  const work = withDatabaseStatementTimeout(db, remainingMs, async (bounded) => {
+    const value = await fn(bounded);
+    // A stopped caller has moved on: roll back rather than commit late.
+    signal?.throwIfAborted();
+    return value;
+  });
+  if (!signal) return await work;
+  work.catch(() => {});
+  let onAbort: (() => void) | undefined;
+  const stopped = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason ?? new Error("The maintenance work was stopped."));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  stopped.catch(() => {});
+  try {
+    return await Promise.race([work, stopped]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
 // REVOKE a compute sandbox's enrollment when the sandbox is deleted, which
 // ends its link session at the gateway. Idempotent; never touches a machine.
 // A deleted workspace took the enrollment with it, which is success too.
 export async function revokeSandboxEnrollment(
   db: Database,
   input: { workspaceId: string; enrollmentId: string; now?: Date },
+  bound?: DatabaseWorkBound,
 ): Promise<{ revoked: boolean }> {
   const now = input.now ?? new Date();
-  const scoped = withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .update(schema.enrollments)
-      .set({
-        status: "revoked",
-        revokedAt: now,
-        connectionInstanceId: null,
-        connectionLeaseExpiresAt: null,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(schema.enrollments.workspaceId, input.workspaceId),
-          eq(schema.enrollments.id, input.enrollmentId),
-          eq(schema.enrollments.kind, "sandbox"),
-          eq(schema.enrollments.status, "active"),
-        ),
-      )
-      .returning({ id: schema.enrollments.id });
-    return { revoked: rows.length > 0 };
-  });
+  const scoped = withinWorkBound(db, bound, (boundedDb) =>
+    withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          status: "revoked",
+          revokedAt: now,
+          connectionInstanceId: null,
+          connectionLeaseExpiresAt: null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.kind, "sandbox"),
+            eq(schema.enrollments.status, "active"),
+          ),
+        )
+        .returning({ id: schema.enrollments.id });
+      return { revoked: rows.length > 0 };
+    }),
+  );
   try {
     return await scoped;
   } catch (error) {
@@ -62901,11 +62944,13 @@ export async function revokeSandboxEnrollment(
 export async function computeSandboxNamed(
   db: Database,
   input: { workspaceId: string; sandboxGroupId: string; enrollmentId: string; sandboxId: string },
+  bound?: DatabaseWorkBound,
 ): Promise<boolean> {
-  const scoped = withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const rows = await rawRows<{ named: boolean }>(
-      scopedDb,
-      sql`
+  const scoped = withinWorkBound(db, bound, (boundedDb) =>
+    withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
+      const rows = await rawRows<{ named: boolean }>(
+        scopedDb,
+        sql`
         select exists (
           select 1
           from enrollments e
@@ -62924,9 +62969,10 @@ export async function computeSandboxNamed(
             )
         ) as named
       `,
-    );
-    return rows[0]?.named === true;
-  });
+      );
+      return rows[0]?.named === true;
+    }),
+  );
   try {
     return await scoped;
   } catch (error) {
@@ -62947,26 +62993,37 @@ export async function computeSandboxNamed(
  * cross-workspace inventory (migration 0846) returns ids only; each revoke runs
  * under its workspace's RLS and re-checks the same condition, so an enrollment
  * a lease names in the meantime stays active. A failed revoke is counted and
- * found again by the next call.
+ * found again by the next call. With a bound, every query ends by its deadline
+ * and no new revoke starts once it is stopped.
  */
-export async function revokeStaleComputeSandboxEnrollments(db: Database): Promise<{
+export async function revokeStaleComputeSandboxEnrollments(
+  db: Database,
+  bound?: DatabaseWorkBound,
+): Promise<{
   revoked: { workspaceId: string; enrollmentId: string }[];
   failed: number;
 }> {
-  const candidates = await rawRows<{ workspace_id: string; enrollment_id: string }>(
+  const candidates = await withinWorkBound(
     db,
-    sql`
-      select workspace_id, enrollment_id
-      from opengeni_private.list_stale_compute_sandbox_enrollments()
-    `,
+    bound,
+    async (boundedDb) =>
+      await rawRows<{ workspace_id: string; enrollment_id: string }>(
+        boundedDb,
+        sql`
+          select workspace_id, enrollment_id
+          from opengeni_private.list_stale_compute_sandbox_enrollments()
+        `,
+      ),
   );
   const revoked: { workspaceId: string; enrollmentId: string }[] = [];
   let failed = 0;
   for (const candidate of candidates) {
-    const scoped = withWorkspaceRls(db, candidate.workspace_id, async (scopedDb) => {
-      const rows = await rawRows<{ id: string }>(
-        scopedDb,
-        sql`
+    if (bound && (bound.signal?.aborted || Date.now() >= bound.deadlineAtMs)) break;
+    const scoped = withinWorkBound(db, bound, (boundedDb) =>
+      withWorkspaceRls(boundedDb, candidate.workspace_id, async (scopedDb) => {
+        const rows = await rawRows<{ id: string }>(
+          scopedDb,
+          sql`
           update enrollments e
           set status = 'revoked',
               revoked_at = now(),
@@ -62989,9 +63046,10 @@ export async function revokeStaleComputeSandboxEnrollments(db: Database): Promis
             )
           returning e.id
         `,
-      );
-      return rows.length > 0;
-    });
+        );
+        return rows.length > 0;
+      }),
+    );
     try {
       if (await scoped) {
         revoked.push({

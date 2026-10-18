@@ -6,7 +6,7 @@ import {
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { createDb, revokeStaleComputeSandboxEnrollments } from "../src";
+import { computeSandboxNamed, createDb, revokeStaleComputeSandboxEnrollments } from "../src";
 import {
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
@@ -154,6 +154,63 @@ test("revoking stale enrollments revokes exactly those, under workspace RLS, onc
     await client.close();
   }
 });
+
+test("bounded sweep queries end by their deadline or stop, lock waits included", async () => {
+  const [source] = await fixture.admin`select account_id, workspace_id from enrollments
+    where id = ${stale[0]!}`;
+  const workspaceId = source!.workspace_id as string;
+  const enrollmentId = crypto.randomUUID();
+  const group = crypto.randomUUID();
+  await fixture.admin`insert into enrollments(id,account_id,workspace_id,kind,sandbox_group_id,
+    pubkey,exposure,status,created_at)
+    values(${enrollmentId},${source!.account_id},${workspaceId},'sandbox',${group},null,
+      'whole-machine','active',now() - interval '30 minutes')`;
+  // A workspace deletion holds the tenancy lock every workspace-scoped write waits on.
+  const holder = await fixture.admin.reserve();
+  const client = createDb(appUrl());
+  try {
+    await holder`select pg_advisory_lock(hashtextextended(${`session-tenancy:${workspaceId}`}::text, 0))`;
+    let started = Date.now();
+    const timedOut = await revokeStaleComputeSandboxEnrollments(client.db, {
+      deadlineAtMs: Date.now() + 400,
+    });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(timedOut.revoked).toEqual([]);
+    expect(timedOut.failed).toBe(1);
+
+    const stop = new AbortController();
+    setTimeout(() => stop.abort(), 200);
+    started = Date.now();
+    const stopped = await revokeStaleComputeSandboxEnrollments(client.db, {
+      deadlineAtMs: Date.now() + 60_000,
+      signal: stop.signal,
+    });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(stopped.revoked).toEqual([]);
+
+    started = Date.now();
+    await expect(
+      computeSandboxNamed(
+        client.db,
+        { workspaceId, sandboxGroupId: group, enrollmentId, sandboxId: "sbx" },
+        { deadlineAtMs: Date.now() + 400 },
+      ),
+    ).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    // A stopped or timed-out revoke committed nothing.
+    const [still] = await fixture.admin`select status from enrollments where id = ${enrollmentId}`;
+    expect(still!.status).toBe("active");
+
+    await holder`select pg_advisory_unlock(hashtextextended(${`session-tenancy:${workspaceId}`}::text, 0))`;
+    const after = await revokeStaleComputeSandboxEnrollments(client.db, {
+      deadlineAtMs: Date.now() + 30_000,
+    });
+    expect(after.revoked.map((row) => row.enrollmentId)).toEqual([enrollmentId]);
+  } finally {
+    holder.release();
+    await client.close();
+  }
+}, 60_000);
 
 test("PUBLIC and hostile default roles cannot execute the inventory, and posture holds", async () => {
   expect(
