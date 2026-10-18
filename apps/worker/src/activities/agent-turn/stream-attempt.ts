@@ -1130,6 +1130,7 @@ export async function runTurnStreamAttempt(
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,
                 onModelTransportDispatched: (clock) => {
+                  eventing.preparedTools?.startDeferredPreparation?.();
                   streamTiming.onProviderDispatch();
                   eventing.initialModelWireDispatch.record(
                     { provider: streamProvider, dispatchId },
@@ -2375,6 +2376,7 @@ export async function runTurnStreamAttempt(
       ? (trigger.payload as { approvalId: string }).approvalId
       : undefined,
     async () => {
+      eventing.preparedTools?.startDeferredPreparation?.();
       await eventing.toolPreparationReady;
       return eventing.codemodeDispatcher;
     },

@@ -49,6 +49,7 @@ import {
   InputWaitYield,
   extractOpenSuffixFromRunState,
   assertOpenSuffixResumable,
+  prepareAgentTools,
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
 import {
@@ -189,6 +190,72 @@ async function waitForToolEventCount(
 }
 
 describe("CodemodeAttemptDispatcher", () => {
+  test("user-message recovery starts deferred tools for a journaled operation before model dispatch", async () => {
+    const { scope, environment } = await fixture(async () => "unused");
+    const caller = `sandbox:${scope.attemptId}`;
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      durableApproval: true,
+      call: {
+        operationId: crypto.randomUUID(),
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: caller },
+      },
+    });
+    let connects = 0;
+    const prepared = await prepareAgentTools(
+      testSettings({
+        sandboxBackend: "none",
+        mcpServers: [{ id: "docs", url: "https://docs.invalid/mcp" }],
+      }),
+      [{ kind: "mcp", id: "docs" }],
+      {
+        deferNonEagerUntilToolDemand: true,
+        deferredPreparationStart: "provider-dispatch",
+        localMcpServers: [
+          {
+            id: "docs",
+            server: {
+              name: "docs",
+              cacheToolsList: false,
+              async connect() {
+                connects++;
+              },
+              async close() {},
+              async listTools() {
+                return [];
+              },
+              async callTool() {
+                return [];
+              },
+              async invalidateToolsCache() {},
+            },
+          },
+        ],
+      },
+    );
+    try {
+      expect(connects).toBe(0);
+      const resumed = await CodemodeAttemptDispatcher.resumeApproved(
+        client.db,
+        scope,
+        caller,
+        undefined,
+        async () => {
+          prepared.startDeferredPreparation?.();
+          await prepared.ready;
+          return null;
+        },
+      );
+      expect(resumed).toEqual([]);
+      expect(connects).toBe(1);
+    } finally {
+      await prepared.close();
+    }
+  });
+
   test("first-request recovery joins lazy tool preparation only when stored work must resume", async () => {
     const { scope, environment } = await fixture(async () => "unused");
     const caller = `sandbox:${scope.attemptId}`;

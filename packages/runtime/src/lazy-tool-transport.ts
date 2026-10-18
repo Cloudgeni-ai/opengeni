@@ -230,6 +230,7 @@ export class LazyToolRuntime {
     private readonly modelMcpServerIds: () => ReadonlyMap<string, string> = () => new Map(),
     private readonly conditionalRouter = false,
     routerInHistory = false,
+    private readonly startToolPreparation?: () => void,
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -271,7 +272,12 @@ export class LazyToolRuntime {
     return this.routerWasExposed ? this.controlTools : [];
   }
 
+  startPreparation(): void {
+    this.startToolPreparation?.();
+  }
+
   async ensurePrepared(): Promise<void> {
+    this.startPreparation();
     await this.toolPreparationReady;
     this.preparationSettled = true;
     if (!this.preparedToolsLoaded && this.activeAgent) {
@@ -694,6 +700,7 @@ export function installLazyToolRuntime(
   modelMcpServerIds?: () => ReadonlyMap<string, string>,
   conditionalRouter = false,
   routerInHistory = false,
+  startToolPreparation?: () => void,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -704,6 +711,7 @@ export function installLazyToolRuntime(
     modelMcpServerIds,
     conditionalRouter,
     routerInHistory,
+    startToolPreparation,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
@@ -1127,6 +1135,7 @@ class LazyToolModel implements Model {
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     const response = await this.inner.getResponse(prepared);
+    this.runtime.startPreparation();
     if (responseRequiresToolPreparation(response, this.runtime)) {
       await this.runtime.ensurePrepared();
     }
@@ -1138,9 +1147,16 @@ class LazyToolModel implements Model {
     const prepared = prepareLazyToolRequest(request, this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
+    let responseStartedPreparation = false;
     for await (const event of streamPreemptibleModelRequest(prepared, (preemptible) =>
       this.inner.getStreamedResponse(preemptible),
     )) {
+      // Some transports synthesize response_started before network I/O. A
+      // substantive response is the provider-neutral fallback, not that marker.
+      if (!responseStartedPreparation && event.type !== "response_started") {
+        responseStartedPreparation = true;
+        this.runtime.startPreparation();
+      }
       if (event.type === "response_done") {
         if (responseRequiresToolPreparation(event.response, this.runtime)) {
           await this.runtime.ensurePrepared();

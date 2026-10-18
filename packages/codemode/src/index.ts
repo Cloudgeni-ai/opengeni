@@ -691,11 +691,10 @@ export function createAttemptToolEnvironment(
       : {}),
     entries: [...prepared.entries],
   };
-  const catalog = AttemptToolCatalog.parse({
+  const catalog = immutableVerifiedCatalog({
     ...unsigned,
     digest: digestAttemptToolCatalog(unsigned),
   });
-  assertCatalogSize(catalog);
   return new AttemptToolEnvironment(
     catalog,
     prepared.create({
@@ -762,11 +761,51 @@ export function parseVerifiedAttemptToolCatalog(input: unknown): AttemptToolCata
   return verifyAttemptToolCatalog(input).catalog;
 }
 
+// Only snapshots constructed here enter this identity cache. A digest supplied
+// by a caller, a frozen object, or a JSON copy is not evidence of verification.
+// Weak keys retain no catalog beyond the lifetime of its ordinary consumers.
+const immutableCatalogVerifications = new WeakMap<
+  object,
+  { catalog: AttemptToolCatalogValue; byteLength: number }
+>();
+
+function immutableVerifiedCatalog(input: unknown): AttemptToolCatalogValue {
+  // JSON-schema records can retain caller-owned nested values after parsing.
+  // Detach before freezing so neither side can mutate the other's snapshot.
+  const verified = verifyAttemptToolCatalog(structuredClone(input));
+  if (isPlainCatalogValue(verified.catalog)) {
+    freezeCatalogValue(verified.catalog);
+    immutableCatalogVerifications.set(verified.catalog, verified);
+  }
+  return verified.catalog;
+}
+
+function isPlainCatalogValue(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return true;
+  // Freezing Date/Map/etc. does not freeze their internal mutable state.
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return false;
+  for (const child of Object.values(value)) {
+    if (!isPlainCatalogValue(child)) return false;
+  }
+  return true;
+}
+
+function freezeCatalogValue(value: unknown): void {
+  if (value === null || typeof value !== "object") return;
+  for (const child of Object.values(value)) freezeCatalogValue(child);
+  Object.freeze(value);
+}
+
 /** Verifies a catalog and also reports its serialized UTF-8 size. */
 export function verifyAttemptToolCatalog(input: unknown): {
   catalog: AttemptToolCatalogValue;
   byteLength: number;
 } {
+  if (input !== null && typeof input === "object") {
+    const verified = immutableCatalogVerifications.get(input);
+    if (verified) return { ...verified };
+  }
   const catalog = AttemptToolCatalog.parse(input);
   const byteLength = assertCatalogSize(catalog);
   const { digest, ...unsigned } = catalog;

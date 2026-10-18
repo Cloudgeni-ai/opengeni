@@ -482,10 +482,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getModelRunSettings: () => eventing.modelRunSettings,
       getExecutionGeneration: () => attempt.executionGeneration,
     });
-    // Diagnostic only: a timing observer can never fence or fail a request.
+    // Dispatch starts the already-owned deferred preparation. Timing remains
+    // diagnostic only and can never fence or fail a request.
     const observeProviderDispatch = () => {
       // Titles and generated images run these checks too, but are separate calls.
       if (isAuxiliaryProviderDispatch()) return;
+      eventing.preparedTools?.startDeferredPreparation?.();
       try {
         eventing.providerDispatchObserver?.();
       } catch {

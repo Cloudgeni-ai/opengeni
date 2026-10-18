@@ -125,3 +125,152 @@ coalesced edits, discarded drafts and hints after expiry. Database tests run wit
 the application role and real PostgreSQL. Repeat the same browser pairs after
 deployment, recording the exact release and separating startup from provider
 latency; do not count a provider-generation fluctuation as startup improvement.
+
+## Follow-up: remove repeated catalog verification
+
+A matched two-second composing cohort showed why catalog freshness alone is
+not an instant-Send solution. Mean time from `turn.started` to credential
+selection fell from 355 to 126 ms in new chats and 302 to 164 ms in follow-ups,
+but acceptance to the request-start audit stayed almost flat: 1,757 to 1,751 ms
+and 1,535 to 1,520 ms. Later tool/runtime work absorbed the saving. These are
+three samples per case, not a stable tail-latency estimate. The request-start
+audit precedes completion of the audit write and is not the socket-write time.
+
+The six draft saves completed before Send. Retained events and scoped provider
+request reservations cannot attribute a particular shared catalog observation
+to its draft hint: the hint has no per-run trace, and catalog observations are
+overwritten. Do not claim retrospective proof of that attribution. No new shared
+credential-request reservation was recorded during those six measured turns;
+this is consistent with reuse, not proof of which hint supplied the observation.
+
+A separate local stack with real API, Temporal, PostgreSQL and MCP, and a
+synthetic Responses endpoint, isolates application startup from provider
+inference. Its warm twenty-turn baseline spent about 97 ms building the attempt
+catalog, 90 ms persisting it and 28 ms constructing the agent. CPU sampling
+identified repeated catalog parsing and canonical serialization, including a
+full integrity check just to determine whether artifact tools are available.
+The proposed overlap of tool connection with agent-input reads was not chosen:
+those reads and their following catalog-history write measured only 13 ms here.
+
+The ordinary catalog factory now returns a detached, deeply frozen snapshot.
+After full schema, size and digest verification, its exact object identity can
+reuse that verification within the process. A private WeakMap retains neither
+another turn's authority nor a catalog beyond its consumers' lifetime. Caller
+schemas remain mutable; mutations cannot alter the detached snapshot. Mutable
+non-JSON objects are not registered as immutable snapshots.
+
+Only factory-created snapshots qualify. A matching digest, a frozen look-alike,
+a JSON copy or a database read still receives full verification. Database
+read-back and blob-integrity checks stay unchanged, including the conflict and
+replay paths. The same catalog bytes, tool order, prompt content and live
+execution checks remain in place. No worker lifecycle, speculative tool
+connection, model call, resource control or new API is introduced.
+
+### Keep deferred setup off the first-request path
+
+The production and minimal local fixtures do not have the same critical path.
+Production defers an MCP carrier, so catalog construction and persistence are
+reported as background phases. The minimal local fixture has no deferred
+carrier and builds its catalog inline. A local catalog-only improvement must
+not be presented as proof of a production startup improvement.
+
+Temporal histories for the six production turns put activity queue waits at
+4–10 ms. The exact chronological means below reconcile acceptance to the
+request-start event; rounding accounts for a millisecond of difference.
+
+| Interval (milliseconds) | New chat | Existing chat |
+| --- | ---: | ---: |
+| Acceptance → workflow start | 92 | 137 |
+| Workflow start → turn activity start | 79 | 66 |
+| Activity start → turn.started | 317 | 320 |
+| turn.started → credential selection | 126 | 164 |
+| Credential selection → tools started | 322 | 220 |
+| Tools started → tools completed | 370 | 172 |
+| Tools completed → model preparation | 261 | 333 |
+| Model preparation → request started | 185 | 108 |
+| Total | 1,751 | 1,520 |
+
+These event intervals are not pure SQL or CPU measurements. There is no retained
+per-turn pool-acquisition trace for this cohort. Low average worker CPU and
+mostly idle database connections do not rule out short event-loop or transaction
+waits. A later read-only database round-trip probe is not retrospective proof.
+
+In the same production window, Codex background catalog build/persist means
+were 278/191 ms; other provider traffic had longer builds. The exact measured
+catalogs contained 178–179 entries, about 748 KB, comparable to the local
+fixture's 171–172 entries and 744 KB. Background preparation runs on the same
+JavaScript event loop. Its canonical serialization, validation and hashing can
+therefore delay foreground continuations without the first request explicitly
+awaiting its promise. Aggregate phases overlap and must not be added to the
+chronological table above.
+
+The end-state change keeps one preparation operation and one completion fence.
+The worker starts non-eager preparation at the first main provider dispatch,
+or on earlier real tool demand. Required eager tools still complete before the
+request. The existing native and generic wire-dispatch hooks start the same
+idempotent operation. A provider-neutral fallback starts it on a substantive
+stream event or non-stream response, not a possibly synthetic `response_started`
+marker. Recovery of journaled operations starts it before joining readiness.
+No alternate workflow, speculative turn or authority
+snapshot is created. Existing embedded callers retain immediate background
+preparation unless they explicitly choose the dispatch-owned lifecycle.
+
+This is not demand-only setup: starting at dispatch retains overlap with
+provider latency, so the first tool call normally finds its catalog ready.
+If the turn closes before dispatch or tool demand, cleanup closes the already
+constructed servers without starting unused connections or catalog work.
+Started preparation is joined and cleaned up through the existing ownership
+path. A preparation failure still crosses the same lazy-tool fence.
+
+Tests compare the first request's input, instructions and tool definitions with
+preparation completed versus still pending for generic, OpenAI-native and
+Codex-native disclosure. They also cover early tool demand, single start,
+close-before-start, close during preparation, providers without dispatch hooks,
+journal recovery and connection failure. Even with byte-identical request
+fixtures, changing availability timing requires review as an agent-behavior
+change; this must remain a draft until approved.
+
+The expected saving is the CPU and database interference removed from before
+dispatch, not the full production second. Claim, policy, credential authority,
+eager tools and history remain on the accepted path. An instantaneous provider
+can expose some deferred work while its response is being handled; measure
+first byte as well as dispatch, and use a fixed provider-delay control before
+claiming useful overlap. Production verification is still required.
+
+### Matched development-stack result
+
+The final control and candidate each used ten new-chat/follow-up pairs after a
+separate warm-up pair. Both used real API admission, Temporal, PostgreSQL and
+MCP, an approximately 744 KB catalog, and a synthetic Responses provider that
+waited 700 ms before sending headers. The control disabled both immutable
+verification reuse and dispatch-owned preparation. The candidate retained both.
+No benchmark ran alongside the test suite. Times are milliseconds; p90 is the
+nearest-rank sample percentile, not a production service-level estimate.
+
+| Acceptance → milestone | Chat | Control median / p90 | Candidate median / p90 |
+| --- | --- | ---: | ---: |
+| Request-start event | New | 643 / 919 | 485 / 724 |
+| Request-start event | Existing | 736 / 1,112 | 424 / 559 |
+| Provider first byte | New | 1,362 / 1,640 | 1,211 / 1,447 |
+| Provider first byte | Existing | 1,461 / 1,829 | 1,138 / 1,398 |
+
+Mean request-start time fell from 735/899 to 522/489 ms (new/existing), and
+first-byte time from 1,454/1,619 to 1,244/1,226 ms. Background catalog builds
+started a mean 305/376 ms before request-start in the control and 16/14 ms after
+it in the candidate. This directly verifies the intended scheduling change.
+
+A separate warm zero-delay experiment isolated the two changes: control means
+were 746/771 ms, immutable verification alone 499/507 ms, and both 422/393 ms.
+The extra dispatch improvement was only partly reflected in first-byte latency
+when the provider replied instantaneously. Delaying setup does not eliminate its
+CPU cost; the immutable snapshot removes duplicate work, and dispatch ownership
+moves the remainder into useful provider-wait time when available.
+
+These fixtures use a direct provider and a small MCP fixture, not the production
+subscription authority path. A plausible production target is roughly 150–400 ms
+less startup interference, based on the local medians/means and retained catalog
+phase durations. This is a hypothesis for matched canary pairs, not a promised
+one-second saving or proof that all remaining latency is catalog CPU. The exact
+production pool/transaction contribution remains unmeasured. Keep the PR draft
+until the tool-timing change is reviewed, then compare new and existing chats,
+first byte, and first tool readiness on the same canary.
