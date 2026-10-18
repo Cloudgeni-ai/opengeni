@@ -48,7 +48,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Attaches sandbox `id` to the hub with the agent link its record
-    /// names, or detaches it when the record names none.
+    /// names, or detaches it when the record names none. Each write of its
+    /// session keeps a share of the root's ownership until it lands, so a
+    /// successor reads the sessions only after.
     pub(super) fn link_as_recorded(&self, id: Id) {
         let (Some(hub), Some(slot)) = (&self.link, self.slots.get(&id.0)) else {
             return;
@@ -63,6 +65,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     id.to_string(),
                     link,
                     slot.paths.dir.join(SESSION_FILE),
+                    Arc::new(self.records.ownership()),
                     Arc::new(wake),
                 );
                 self.tell_link(id);

@@ -12,6 +12,10 @@
 //! older one. Each write goes through a temporary file of its own, so two
 //! writes to one file never mix.
 //!
+//! Each write keeps an [`Owner`] until it lands, whether or not anyone
+//! still waits for it: on a host, a share of its state root's ownership,
+//! so a successor takes the root, and reads the sessions, only after.
+//!
 //! What is lost if the host stops before a change is written: a
 //! subscription the agent made just before, which a restarted host does
 //! not hold for it. While the agent runs it subscribes again as it
@@ -19,6 +23,7 @@
 //! finds no responder, and the sender wakes the sandbox through the fleet
 //! ([agent link](../../docs/agent-link.md), section 5).
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -30,6 +35,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+
+/// What a write of a session keeps until it lands; see the
+/// [module](self).
+pub type Owner = Arc<dyn Any + Send + Sync>;
 
 /// A session as kept on disk.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,15 +91,24 @@ impl Saved {
     ///
     /// When the file cannot be written or removed; what was there stays.
     pub async fn store(path: &Path, saved: Option<&Self>) -> io::Result<()> {
-        let bytes = saved
-            .map(serde_json::to_vec)
-            .transpose()
-            .map_err(io::Error::other)?;
-        let path = path.to_owned();
-        tokio::task::spawn_blocking(move || store(&path, bytes.as_deref()))
-            .await
-            .map_err(io::Error::other)?
+        write(path, saved, Arc::new(())).await
     }
+}
+
+/// [`Saved::store`], keeping `owner` until the write lands, even when
+/// nobody waits for it any more.
+async fn write(path: &Path, saved: Option<&Saved>, owner: Owner) -> io::Result<()> {
+    let bytes = saved
+        .map(serde_json::to_vec)
+        .transpose()
+        .map_err(io::Error::other)?;
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _owner = owner;
+        store(&path, bytes.as_deref())
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 fn store(path: &Path, bytes: Option<&[u8]>) -> io::Result<()> {
@@ -141,12 +159,26 @@ pub(crate) struct Saver {
 #[derive(Debug, Default)]
 struct Shared {
     /// What is to be written to each file, the latest asked.
-    dirty: Mutex<HashMap<PathBuf, Option<Saved>>>,
+    dirty: Mutex<HashMap<PathBuf, Put>>,
     asked: Notify,
     /// How long each write waits before it starts, to test what a slow
     /// disk does.
     #[cfg(test)]
     slow: Duration,
+}
+
+/// What one file is to hold, and what its write keeps until it lands.
+struct Put {
+    saved: Option<Saved>,
+    owner: Owner,
+}
+
+impl std::fmt::Debug for Put {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Put")
+            .field("saved", &self.saved)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The first wait before a failed write is tried again; it doubles up to
@@ -171,9 +203,10 @@ impl Saver {
         }
     }
 
-    /// Asks for `saved` to be kept at `path`, or removed for `None`.
-    pub(crate) fn put(&self, path: PathBuf, saved: Option<Saved>) {
-        self.shared.lock().insert(path, saved);
+    /// Asks for `saved` to be kept at `path`, or removed for `None`,
+    /// keeping `owner` until it is written or superseded.
+    pub(crate) fn put(&self, path: PathBuf, saved: Option<Saved>, owner: Owner) {
+        self.shared.lock().insert(path, Put { saved, owner });
         self.shared.asked.notify_one();
     }
 
@@ -189,7 +222,7 @@ impl Saver {
 }
 
 impl Shared {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Option<Saved>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Put>> {
         self.dirty.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -221,13 +254,13 @@ async fn run(shared: Arc<Shared>, stop: CancellationToken) {
 async fn write_dirty(shared: &Shared) -> bool {
     let dirty = std::mem::take(&mut *shared.lock());
     let mut failed = false;
-    for (path, saved) in dirty {
+    for (path, put) in dirty {
         #[cfg(test)]
         tokio::time::sleep(shared.slow).await;
-        if let Err(error) = Saved::store(&path, saved.as_ref()).await {
+        if let Err(error) = write(&path, put.saved.as_ref(), Arc::clone(&put.owner)).await {
             tracing::error!(path = %path.display(), %error, "could not keep an agent-link session; trying again");
             failed = true;
-            shared.lock().entry(path).or_insert(saved);
+            shared.lock().entry(path).or_insert(put);
         }
     }
     failed
@@ -254,6 +287,22 @@ mod tests {
                 queue: None,
             }],
             next_sid,
+        }
+    }
+
+    /// An owner no successor waits for.
+    fn nobody() -> Owner {
+        Arc::new(())
+    }
+
+    /// An owner that says when the last write keeping it let it go.
+    struct Held(Mutex<Option<tokio::sync::oneshot::Sender<()>>>);
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            if let Some(released) = self.0.lock().unwrap().take() {
+                let _ = released.send(());
+            }
         }
     }
 
@@ -326,8 +375,8 @@ mod tests {
         // Its directory is not there yet, so the first writes fail.
         let later = dir.join("later");
         let path = later.join("link.json");
-        saver.put(path.clone(), Some(session(2)));
-        saver.put(path.clone(), Some(session(3)));
+        saver.put(path.clone(), Some(session(2)), nobody());
+        saver.put(path.clone(), Some(session(3)), nobody());
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!path.exists());
         std::fs::create_dir_all(&later).unwrap();
@@ -337,7 +386,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         // What is asked last before it stops is written before it is done.
-        saver.put(path.clone(), Some(session(4)));
+        saver.put(path.clone(), Some(session(4)), nobody());
         saver.finish().await;
         assert_eq!(Saved::load(&path).unwrap(), Some(session(4)));
         let _ = std::fs::remove_dir_all(dir);
@@ -353,14 +402,47 @@ mod tests {
             slow: Duration::from_millis(300),
             ..Shared::default()
         });
-        old.put(path.clone(), Some(session(2)));
+        old.put(path.clone(), Some(session(2)), nobody());
         tokio::time::sleep(Duration::from_millis(20)).await;
         let started = tokio::time::Instant::now();
         old.finish().await;
         assert!(started.elapsed() >= Duration::from_millis(250));
         assert_eq!(Saved::load(&path).unwrap(), Some(session(2)));
         let new = Saver::start();
-        new.put(path.clone(), Some(session(3)));
+        new.put(path.clone(), Some(session(3)), nobody());
+        new.finish().await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(Saved::load(&path).unwrap(), Some(session(3)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_write_nobody_waits_for_any_more_keeps_its_owner_until_it_lands() {
+        let dir = scratch("owner");
+        let path = dir.join("link.json");
+        let old = Saver::with(Shared {
+            slow: Duration::from_millis(300),
+            ..Shared::default()
+        });
+        let (released, mut let_go) = tokio::sync::oneshot::channel();
+        old.put(
+            path.clone(),
+            Some(session(2)),
+            Arc::new(Held(Mutex::new(Some(released)))),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Whoever waited for the saver to finish stops waiting, its write
+        // still under way.
+        let waited = tokio::time::timeout(Duration::from_millis(20), old.finish()).await;
+        assert!(waited.is_err());
+        // The write keeps the owner, so a successor waiting for it waits
+        // until the write landed ...
+        assert!(let_go.try_recv().is_err(), "let go before it landed");
+        let_go.await.unwrap();
+        assert_eq!(Saved::load(&path).unwrap(), Some(session(2)));
+        // ... and nothing of the old saver overwrites what it then keeps.
+        let new = Saver::start();
+        new.put(path.clone(), Some(session(3)), nobody());
         new.finish().await;
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert_eq!(Saved::load(&path).unwrap(), Some(session(3)));

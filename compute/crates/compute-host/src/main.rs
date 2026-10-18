@@ -821,6 +821,7 @@ async fn run_agent<S: Store>(
     fleet: Option<(FleetConfig, Prepared)>,
 ) -> anyhow::Result<()> {
     let observer = config.observer.clone();
+    let links = config.agent_link.clone();
     let (handle, agent) = HostAgent::start(config, engine, store).await?;
     // On a host in a fleet only the service creates, adopts and hands off
     // sandboxes; the socket serves the host's own tools the rest.
@@ -846,6 +847,11 @@ async fn run_agent<S: Store>(
         result = agent => result.map_err(Into::into),
         result = joined => result.context("in the fleet"),
     };
+    // Stopped by a signal, the agent did not get to it: the agent links'
+    // sessions are on disk before the next agent reads them.
+    if let Some(links) = links {
+        links.shutdown().await;
+    }
     // What happened last, often why it stopped, still reaches the
     // collector; a collector that is away does not hold the stop up long.
     if tokio::time::timeout(FLUSH_WITHIN, observer.flush())

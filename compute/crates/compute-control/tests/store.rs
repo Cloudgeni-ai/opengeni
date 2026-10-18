@@ -361,7 +361,8 @@ fn request(row: &SandboxRow, request_id: &str) -> RequestRow {
 }
 
 async fn requests<S: Store>(store: S) {
-    let row = sandbox(HostId(1));
+    let (host, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let row = sandbox(host);
     let team = row.team.clone();
     let first = request(&row, "lease-1");
     assert_eq!(store.claim_request(&first).await.unwrap(), first);
@@ -449,8 +450,9 @@ async fn create_requests_answer_their_first_sandbox_until_it_is_gone() {
 async fn replay_racing_delete<S: Store>(store: S) {
     // A replay that finds no row creates the sandbox again only if it was
     // never made: one that races its deletion never brings it back.
+    let (host, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
     for _ in 0..30 {
-        let row = sandbox(HostId(1));
+        let row = sandbox(host);
         store.claim_request(&request(&row, "lease")).await.unwrap();
         assert_eq!(
             store.insert_requested(&row, "lease").await.unwrap(),

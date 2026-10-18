@@ -19,7 +19,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use crate::core::{ConnId, Core, Effect, Input, LinkId, Settings};
 use crate::guest;
 use crate::link::{self, Outgoing};
-use crate::saved::{Saved, Saver};
+use crate::saved::{Owner, Saved, Saver};
 
 /// A host token for one gateway, from the fleet.
 #[derive(Clone)]
@@ -123,6 +123,7 @@ pub(crate) enum Command {
         link: AgentLink,
         saved: Option<Saved>,
         save_at: PathBuf,
+        owner: Owner,
         wake: Arc<dyn Wake>,
     },
     Detach {
@@ -156,7 +157,7 @@ impl Hub {
             timing: config.timing,
             commands: commands.downgrade(),
             wakers: HashMap::new(),
-            save_paths: HashMap::new(),
+            saves: HashMap::new(),
             conns: HashMap::new(),
             links: HashMap::new(),
             writers: HashMap::new(),
@@ -184,9 +185,18 @@ impl Hub {
     }
 
     /// Attaches a sandbox whose agent is reached through `link`, keeping
-    /// its session at `save_at`. Again for an attached sandbox, it takes a
-    /// new ticket or gateway.
-    pub fn attach(&self, sandbox: String, link: AgentLink, save_at: PathBuf, wake: Arc<dyn Wake>) {
+    /// its session at `save_at`. Each write of it keeps `owner` until it
+    /// lands (see [`crate::saved`]), and the hub keeps it while the
+    /// sandbox is attached. Again for an attached sandbox, it takes a new
+    /// ticket or gateway.
+    pub fn attach(
+        &self,
+        sandbox: String,
+        link: AgentLink,
+        save_at: PathBuf,
+        owner: Owner,
+        wake: Arc<dyn Wake>,
+    ) {
         let saved = Saved::load(&save_at).unwrap_or_else(|error| {
             tracing::warn!(%sandbox, %error, "could not read an agent-link session");
             None
@@ -196,6 +206,7 @@ impl Hub {
             link,
             saved,
             save_at,
+            owner,
             wake,
         });
     }
@@ -235,7 +246,9 @@ struct Actor {
     timing: Timing,
     commands: mpsc::WeakUnboundedSender<Command>,
     wakers: HashMap<String, Arc<dyn Wake>>,
-    save_paths: HashMap<String, PathBuf>,
+    /// Where each attached sandbox's session is kept, and what its writes
+    /// keep.
+    saves: HashMap<String, (PathBuf, Owner)>,
     conns: HashMap<ConnId, guest::Handle>,
     /// The task keeping each gateway's link.
     links: HashMap<String, CancellationToken>,
@@ -264,18 +277,20 @@ impl Actor {
                 .map(|ms| self.started + Duration::from_millis(ms));
             tokio::select! {
                 // First, so that once stopped it asks the saver for nothing
-                // more.
+                // more; then what is due, so that steady commands never
+                // hold back a deadline. A tick always moves the deadline
+                // past now.
                 biased;
                 () = stop.cancelled() => break,
-                command = commands.recv() => match command {
-                    Some(command) => self.command(command),
-                    None => break,
-                },
                 () = sleep_until(deadline), if deadline.is_some() => {
                     let now = self.now();
                     self.core.on(now, Input::Tick);
                     self.apply(None);
                 }
+                command = commands.recv() => match command {
+                    Some(command) => self.command(command),
+                    None => break,
+                },
             }
         }
         for cancel in self.links.values() {
@@ -303,10 +318,11 @@ impl Actor {
                 link,
                 saved,
                 save_at,
+                owner,
                 wake,
             } => {
                 self.wakers.insert(sandbox.clone(), wake);
-                self.save_paths.insert(sandbox.clone(), save_at);
+                self.saves.insert(sandbox.clone(), (save_at, owner));
                 self.core.on(
                     now,
                     Input::Attach {
@@ -325,7 +341,7 @@ impl Actor {
                 );
                 self.apply(None);
                 self.wakers.remove(&sandbox);
-                self.save_paths.remove(&sandbox);
+                self.saves.remove(&sandbox);
                 return;
             }
             Command::Conn {
@@ -439,8 +455,8 @@ impl Actor {
                 }
             }
             Effect::Save { sandbox, saved } => {
-                if let Some(path) = self.save_paths.get(&sandbox) {
-                    self.saver.put(path.clone(), saved);
+                if let Some((path, owner)) = self.saves.get(&sandbox) {
+                    self.saver.put(path.clone(), saved, Arc::clone(owner));
                 }
             }
         }

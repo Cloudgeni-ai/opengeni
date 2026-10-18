@@ -642,8 +642,9 @@ impl Core {
             return;
         };
         let delay = sandbox.retry_delay;
-        // Between half the delay and all of it.
-        let wait = delay / 2 + jitter % (delay / 2 + 1);
+        // Between half the delay and all of it, and never now, so that a
+        // tick always moves the deadline on.
+        let wait = (delay / 2 + jitter % (delay / 2 + 1)).max(1);
         sandbox.retry_at = Some(now + wait);
         sandbox.retry_delay = (delay * 2).min(self.settings.retry_max_ms);
     }
