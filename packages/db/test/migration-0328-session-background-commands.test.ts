@@ -83,7 +83,7 @@ describe("migration 0328 session background commands", () => {
 
     const [claim] = await shared.admin<Array<{ definition: string }>>`
       select pg_get_functiondef(
-        'opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)'::regprocedure
+        'opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint,integer)'::regprocedure
       ) as definition`;
     expect(claim?.definition).toContain("session_background_commands");
     expect(claim?.definition).toContain("background_stopping");

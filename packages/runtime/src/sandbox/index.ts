@@ -37,6 +37,7 @@ export {
 } from "./host-archive-temporary";
 export type { DockerHostWorkspaceRelease } from "./providers/docker-workspace-drain";
 export { reduceModalRawOutputPage } from "./providers/modal-command-raw-page";
+export { isInSandboxSupervisedProcess } from "./durable-shell-process";
 export type {
   ModalRawOutputPage,
   ModalRawOutputStreams,

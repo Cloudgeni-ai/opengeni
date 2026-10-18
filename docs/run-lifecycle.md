@@ -3210,7 +3210,16 @@ util-linux `script`, or a box without `mkfifo` and fractional `sleep`) and
 OpenSandbox handles. After the bounded foreground wait those return an
 explicitly turn-scoped handle, stay registered with the exact turn cancellation
 fence, and are stopped and settled by ordinary completion, Pause, Steer and
-cancellation before workspace capture. Never wait for an indefinitely running
+cancellation before workspace capture. A supervised Docker or local command is
+retained with `reconciler_version = 2` (migration 0840): a worker built before
+the supervisor would look for it in its own memory and settle a live command as
+lost, so the original three-argument
+`claim_terminal_retained_processes(uuid,integer,bigint)`, which such a worker
+calls, now returns only version 1 rows, and current workers call the
+four-argument claim with `RETAINED_PROCESS_RECONCILER_VERSION`. During a rolling
+deploy an older reaper therefore leaves these commands to a newer one. Bump the
+version, never reuse it, when a later process kind needs a newer reaper.
+Never wait for an indefinitely running
 server to exit before returning control to its owning agent. A yielded
 Connected Machine exec likewise creates its session-owned background-command
 row before returning; that row freezes the physical control workspace,

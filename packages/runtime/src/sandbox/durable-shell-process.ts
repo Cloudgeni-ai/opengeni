@@ -109,6 +109,12 @@ export function hasDurableShellProcesses(session: unknown): session is DurableSh
   );
 }
 
+/** Whether a process handle runs under the in-sandbox supervisor, so any
+ * worker with that supervisor (but no older one) can reach it. */
+export function isInSandboxSupervisedProcess(session: unknown, providerSessionId: number): boolean {
+  return hasDurableShellProcesses(session) && session.isDurableProcessHandle(providerSessionId);
+}
+
 /** The SDK's exact loss banner: the reaper and the turn both treat it as
  * proof that this handle can never report again. */
 export function durableProcessLostResult(id: number): string {

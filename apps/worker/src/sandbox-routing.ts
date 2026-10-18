@@ -65,6 +65,7 @@ import {
   establishSandboxSessionFromEnvelope,
   isProviderSandboxGoneDuringRoutedOperation,
   isProviderSandboxNotFoundError,
+  isInSandboxSupervisedProcess,
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -557,6 +558,10 @@ function afterPersistableHomeMutation(
           admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
           operation: op,
           providerBinding: boundAdmission.providerBinding ?? null,
+          inSandboxSupervisor: isInSandboxSupervisedProcess(
+            backend.session,
+            retainedProcess.providerSessionId,
+          ),
           owner: {
             kind: "turn",
             turnId: fence.turnId,

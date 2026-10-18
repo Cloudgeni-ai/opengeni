@@ -220,7 +220,12 @@ describe("session-owned Docker/local processes", () => {
     const started = await session.execCommand({ cmd: "sleep 30", yieldTimeMs: 100 });
     const id = parseExecBannerSessionId(started)!;
     const later = await reopen(session);
-    const big = "x".repeat(256 * 1024);
+    // More than any pipe can hold here: an unprivileged pipe never exceeds
+    // the host's pipe-max-size, and some hosts default well above 64 KiB.
+    const pipeMax = existsSync("/proc/sys/fs/pipe-max-size")
+      ? Number(readFileSync("/proc/sys/fs/pipe-max-size", "utf8"))
+      : 1024 * 1024;
+    const big = "x".repeat(pipeMax + 64 * 1024);
     const began = Date.now();
     const first = await later.writeStdin({ sessionId: id, chars: big, yieldTimeMs: 100 });
     expect(parseExecBannerSessionId(first)).toBe(id);

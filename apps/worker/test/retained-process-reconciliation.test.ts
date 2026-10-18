@@ -9,6 +9,7 @@ import { sql } from "drizzle-orm";
 import { Manifest } from "@openai/agents/sandbox";
 import {
   createSandboxClientForBackend,
+  isInSandboxSupervisedProcess,
   RoutingSandboxSession,
   serializeEstablishedSandboxEnvelope,
 } from "@opengeni/runtime";
@@ -319,6 +320,7 @@ async function promoteTurnProcess(
     routerCommand?: boolean;
     providerCommandSandboxId?: string;
     box?: LeaseBox;
+    inSandboxSupervisor?: boolean;
   } = {},
 ): Promise<ProcessFixture> {
   const ids = await freshWorkspace();
@@ -398,6 +400,7 @@ async function promoteTurnProcess(
           backgroundCommand: { commandId: processId, command: input.backgroundCommand },
         }
       : {}),
+    ...(input.inSandboxSupervisor ? { inSandboxSupervisor: true } : {}),
     owner: {
       kind: "turn",
       turnId: attempt.turnId,
@@ -1496,6 +1499,122 @@ describe("retained-process terminal-owner reconciliation", () => {
           SETTINGS,
           lease,
           { ...retained, providerSessionId: server },
+          attempt === 0 ? "cancel" : "observe",
+          async () => {},
+        );
+        if ((stopped as { status: string }).status === "proved") break;
+      }
+      expect(stopped).toMatchObject({ status: "proved", proof: { outcome: "exited" } });
+    } finally {
+      await box.close();
+    }
+  }, 120_000);
+
+  test("rolling deploy: an older worker's reaper never claims a supervised local command", async () => {
+    if (!available) throw new Error("PostgreSQL required for the mixed-version reaper regression");
+    type LocalSession = {
+      state: { workspaceRootPath: string };
+      execCommand(args: Record<string, unknown>): Promise<string>;
+      close(): Promise<void>;
+    };
+    type LocalClient = { create(manifest: Manifest): Promise<LocalSession> };
+    const localClient = createSandboxClientForBackend("local", SETTINGS) as LocalClient;
+    const box = await localClient.create(
+      new Manifest({ environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }),
+    );
+    try {
+      const root = box.state.workspaceRootPath;
+      const started = await box.execCommand({ cmd: "sleep 600", yieldTimeMs: 200 });
+      const handle = Number(/Process running with session ID (\d+)/.exec(started)?.[1]);
+      // The worker derives the flag from the live session, as routing does.
+      expect(isInSandboxSupervisedProcess(box, handle)).toBe(true);
+      expect(isInSandboxSupervisedProcess(box, 71)).toBe(false);
+      const resumeState = await serializeEstablishedSandboxEnvelope({
+        client: localClient,
+        session: box,
+        sessionState: box.state,
+        instanceId: root,
+        backendId: "unix_local",
+      } as never);
+      if (!resumeState) throw new Error("Expected a resumable local envelope");
+      const supervised = await promoteTurnProcess({
+        providerSessionId: handle,
+        backgroundCommand: "sleep 600",
+        inSandboxSupervisor: isInSandboxSupervisedProcess(box, handle),
+        box: { backend: "local", resumeBackendId: "unix_local", instanceId: root, resumeState },
+      });
+      await adoptManagedSessionBackgroundCommand(db, {
+        accountId: supervised.accountId,
+        workspaceId: supervised.workspaceId,
+        sessionId: supervised.sessionId,
+        turnId: supervised.attempt!.turnId,
+        executionGeneration: supervised.attempt!.executionGeneration,
+        attemptId: supervised.attempt!.attemptId,
+        processId: supervised.process.id,
+        expected: retainedProcessSettlementIdentity(supervised.process),
+        command: "sleep 600",
+      });
+      await closeTurnOwner(supervised, supervised.attempt!, "completed");
+      // A process an older worker could also reach keeps the original version.
+      const legacy = await promoteTurnProcess({ outcome: "completed" });
+      const versions = await admin<{ id: string; reconciler_version: number }[]>`
+        select id, reconciler_version from sandbox_retained_processes
+        where id in (${supervised.process.id}, ${legacy.process.id})`;
+      expect(Object.fromEntries(versions.map((row) => [row.id, row.reconciler_version]))).toEqual({
+        [supervised.process.id]: 2,
+        [legacy.process.id]: 1,
+      });
+
+      // An older worker still calls the three-argument claim it was built with.
+      // It keeps reconciling the rows it understands, but is never handed the
+      // supervised command, so it can never probe its own memory for it and
+      // settle a live command as lost.
+      const oldReaperClaim = async () =>
+        (
+          await db.execute<{ process_id: string }>(sql`
+            select process_id from opengeni_private.claim_terminal_retained_processes(
+              ${crypto.randomUUID()}::uuid, 100::integer, 0::bigint
+            )`)
+        ).map((row) => row.process_id);
+      const oldClaims = await oldReaperClaim();
+      expect(oldClaims).toContain(legacy.process.id);
+      expect(oldClaims).not.toContain(supervised.process.id);
+      expect(await durableProcess(supervised)).toMatchObject({
+        state: "active",
+        reconcileClaimId: null,
+      });
+
+      // A newer worker running next to it claims and reaches the command.
+      const newClaims = await claimTerminalRetainedProcesses(db, {
+        claimId: crypto.randomUUID(),
+        limit: 100,
+        claimTtlMs: 0,
+      });
+      expect(newClaims.map((claim) => claim.process.id)).toContain(supervised.process.id);
+      const lease = await readLease(db, supervised.workspaceId, supervised.groupId);
+      if (!lease) throw new Error("Expected lease");
+      const retained = await durableProcess(supervised);
+      expect(
+        await probeRetainedProcessAtProvider(SETTINGS, lease, retained, "observe", async () => {}),
+      ).toEqual({ status: "deferred", reason: "provider_running" });
+      // Repeated old-reaper passes, including after the newer claim expires,
+      // still never return it.
+      expect(await oldReaperClaim()).not.toContain(supervised.process.id);
+      expect(await durableProcess(supervised)).toMatchObject({ state: "active" });
+      await expect(
+        (async () =>
+          await db.execute(sql`
+            select * from opengeni_private.claim_terminal_retained_processes(
+              ${crypto.randomUUID()}::uuid, 1::integer, 0::bigint, 0::integer
+            )`))(),
+      ).rejects.toThrow();
+
+      let stopped: unknown;
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        stopped = await probeRetainedProcessAtProvider(
+          SETTINGS,
+          lease,
+          retained,
           attempt === 0 ? "cancel" : "observe",
           async () => {},
         );
@@ -2691,7 +2810,9 @@ describe("retained-process terminal-owner reconciliation", () => {
         hasTemp: true,
         forceRls: true,
       });
-      expect(result.functions).toHaveLength(4);
+      // The three-argument claim an older worker calls and the versioned claim
+      // it wraps both pin the same search path.
+      expect(result.functions).toHaveLength(5);
       for (const fn of result.functions) {
         if (fn.name === "claim_terminal_retained_processes") {
           expect(fn.config).toEqual(["search_path=pg_catalog, public, pg_temp"]);

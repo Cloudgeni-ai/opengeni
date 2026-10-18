@@ -54803,6 +54803,9 @@ export async function retainWorkspaceMutationProcess(
       commandId: string;
       command: string;
     };
+    /** A Docker or local command under the in-sandbox supervisor: any worker
+     * built with that supervisor can reach it, older ones cannot. */
+    inSandboxSupervisor?: boolean;
     owner:
       | {
           kind: "turn";
@@ -55049,6 +55052,7 @@ export async function retainWorkspaceMutationProcess(
               routeTargetId: admission.route_target_id,
               routeEpoch: Number(admission.route_epoch),
               providerSessionId: input.providerSessionId,
+              reconcilerVersion: input.inSandboxSupervisor ? 2 : 1,
               // The retained process inherits the EXACT authority admitted with
               // its parent operation. It is copied, never re-resolved: the
               // process may outlive the request or turn behind it, and a later
@@ -55226,6 +55230,13 @@ export async function findRunningSessionBackgroundProcess(
   });
 }
 
+/** The newest retained-process kind this build's reaper can reach. Version 2
+ * adds Docker and local commands under the in-sandbox supervisor. The claim
+ * returns only rows at or below the caller's version, so during a rolling
+ * deploy an older worker's reaper leaves newer rows to a newer worker instead
+ * of probing its own memory for them and settling a live command as lost. */
+export const RETAINED_PROCESS_RECONCILER_VERSION = 2;
+
 /** Claim a bounded, oldest-due batch of active retained processes whose exact
  * owner attempt is closed, whose direct request returned, or whose lifecycle
  * was explicitly transferred to a session background command. Claim
@@ -55260,7 +55271,8 @@ export async function claimTerminalRetainedProcesses(
       select account_id, workspace_id, session_id, process_id, claim_id,
         owner_state, owner_attempt_outcome
       from opengeni_private.claim_terminal_retained_processes(
-        ${input.claimId}::uuid, ${input.limit}::integer, ${input.claimTtlMs}::bigint
+        ${input.claimId}::uuid, ${input.limit}::integer, ${input.claimTtlMs}::bigint,
+        ${RETAINED_PROCESS_RECONCILER_VERSION}::integer
       )
     `,
   );

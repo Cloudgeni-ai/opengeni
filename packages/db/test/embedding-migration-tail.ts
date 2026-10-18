@@ -312,4 +312,7 @@ export const embeddingMigrationTail = [
   // Replaces the containment inventory from 0687, which uses the session
   // tenancy fence helper from withheld 0345; replay after it.
   "0839_docker_local_command_containment.sql",
+  // Derives the versioned retained-process claim from the body 0345 repaired
+  // and turns the original claim into a wrapper; replay after 0345.
+  "0840_retained_process_reconciler_version.sql",
 ];
