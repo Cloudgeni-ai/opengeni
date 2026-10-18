@@ -627,7 +627,6 @@ test("a transactional runAs write is refused when the same runner stops advertis
     resolveOperationAdmission: async () => ({
       connectionInstanceId: "22222222-2222-4222-8222-222222222222",
       workspaceRoot: "/workspace",
-      opStream: true,
       transactionalFsWriteSupported: true,
       runAsSupported,
       operationResourcePolicy: {
