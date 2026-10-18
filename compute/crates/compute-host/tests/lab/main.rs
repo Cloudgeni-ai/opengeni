@@ -11,8 +11,9 @@
 //!
 //! `COMPUTE_TEST_SANDBOXES` sets how many sandboxes each test uses
 //! (default 12), `COMPUTE_TEST_RESULTS` a directory for JSON results and
-//! `COMPUTE_TEST_PROFILE` the agent's memory profile (the agent's default,
-//! `bare-metal`, when unset; `nested` needs a reserved 2 MiB page pool).
+//! `COMPUTE_TEST_PROFILE` the agent's memory profile (when unset, the one
+//! the agent chooses by itself: `nested` under a hypervisor, which needs a
+//! reserved 2 MiB page pool, and `bare-metal` otherwise).
 //! `COMPUTE_TEST_REQUIRE` (`lab` on a gate) makes a test that cannot run
 //! fail.
 

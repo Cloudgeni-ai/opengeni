@@ -47,8 +47,17 @@ impl Drop for ShrunkPool {
     }
 }
 
+/// Whether the agents the tests start run with the nested memory profile:
+/// as `COMPUTE_TEST_PROFILE` names it, or as an agent given none chooses
+/// by itself, from the CPU's hypervisor flag.
 pub(super) fn nested() -> bool {
-    std::env::var("COMPUTE_TEST_PROFILE").is_ok_and(|profile| profile == "nested")
+    match std::env::var("COMPUTE_TEST_PROFILE") {
+        Ok(profile) => profile == "nested",
+        Err(_) => std::fs::read_to_string("/proc/cpuinfo").is_ok_and(|cpuinfo| {
+            compute_engine::MemoryProfile::for_cpuinfo(&cpuinfo)
+                == compute_engine::MemoryProfile::nested()
+        }),
+    }
 }
 
 async fn create_sized(client: &Client, sandbox: Id, memory_mib: u32) {
