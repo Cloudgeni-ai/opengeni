@@ -90,7 +90,7 @@ import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 
-import { codexWorkspaceMetricKey } from "./codex";
+import { codexCacheAffinityKey, codexWorkspaceMetricKey } from "./codex";
 import {
   filterUnmaterializedSandboxFileDownloads,
   sandboxFileMaterializationOutcome,
@@ -113,7 +113,7 @@ import {
 } from "./codex-core-capacity";
 import { createCoreCodexRequests, providerRequestIdPrefix } from "./codex-core-requests";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
-import { prepareGovernanceAndModel } from "./governance-model";
+import { preferenceSnapshotHumanSubjectId, prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
 import { createSandboxTurnRuntime } from "./sandbox-runtime";
 import {
@@ -850,13 +850,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   };
                   return {
                     clientVersion: CODEX_CLIENT_VERSION,
-                    // Backend sticky cache-routing key — the SAME id as the body's
-                    // prompt_cache_key (set from input.sessionId for codex turns),
-                    // so routing and cache key agree. Without this header on the
-                    // wire, byte-identical resends hit the prompt cache ~50%
-                    // (per-request shard lottery = prod's measured 48.6% on sol);
-                    // with it, resends pin to the warm shard (Codex CLI parity).
                     sessionId: input.sessionId,
+                    cacheAffinityKey: codexCacheAffinityKey(
+                      input.workspaceId,
+                      preferenceSnapshotHumanSubjectId(turn),
+                      input.sessionId,
+                    ),
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
