@@ -14,7 +14,9 @@ the workstation only drives it.
    for Cloud NAT, a router and NAT for the hosts (they have no public
    address), firewall rules on the stack VM's tag (SSH from the workstation
    only; HTTPS from the workstation, the NAT address and the stack itself;
-   port 80 for Let's Encrypt's challenges), an Artifact Registry repository.
+   port 80 for Let's Encrypt's challenges), SSH to the hosts from the stack
+   VM's internal address only (for their journals), an Artifact Registry
+   repository.
 2. **fleet**: `deploy/terraform/gcp-compute` with this environment's
    settings: service accounts, the fleet's certificate authority, the
    fleet service's host-endpoint certificate, the archive bucket (deleted
@@ -64,13 +66,13 @@ subset with what it needs.
 | health, hosts, workspace | the API answers; the fleet has `HOSTS` live hosts; a workspace exists |
 | create | a session with `sandboxBackend: compute` runs its first turn (the agent runs `uname -r`); the fabric holds its sandbox |
 | commands | `terminal/exec` runs a command |
-| background | the agent runs a background command; the API lists it |
+| background | the agent starts a long background command; the API lists it while it runs, and stopping it through the API ends it |
 | files | `fs/write`, `fs/read` and `fs/list` (the file browser's API) agree |
 | git | `git/status` and `git/log` of a repository made in the sandbox |
 | terminal | a PTY opened through the API echoes a typed command on the event stream |
 | port | an HTTP server in the sandbox answers through the fabric's `connect` stream |
 | browser | the agent opens a page with the in-sandbox browser and reports its title |
-| desktop | the agent opens a computer session, takes a screenshot and describes it |
+| desktop | the agent opens a computer session that comes up (not failed), takes a screenshot and describes it |
 | run-as | runs a command and writes a file as a non-root user of the image, then checks the uid and the file's owner; not applicable while Opengeni has no way to ask for a sandbox's commands to run as another user |
 | sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level; the next Opengeni request wakes it, with its files |
 | move | the fabric moves the sandbox to another host; its files come along |
@@ -79,6 +81,11 @@ subset with what it needs.
 | ui | Playwright in the web app: the Files tab lists the file, a command typed in the Terminal tab runs, the Desktop tab draws the desktop |
 
 A check whose needs failed is skipped, so every run reports every check.
+
+After each run `suite` also copies every host's `compute-*` journal since
+the run began into the run's results (`host-<name>.log`), over OS Login
+through the stack VM; `env.sh host-logs [run]` does it alone. Each check
+has 30 minutes; one that hangs fails and the run goes on.
 
 ## Settings and cost
 
