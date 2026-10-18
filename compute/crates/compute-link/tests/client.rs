@@ -546,6 +546,7 @@ async fn an_agent_is_connected_only_once_its_session_opens_and_then_round_trips(
         SANDBOX.into(),
         link(&gateway, "ticket-1"),
         path.clone(),
+        Arc::new(()),
         wakes.clone(),
     );
     let (_, bearer) = gateway.up().await;
@@ -748,6 +749,7 @@ async fn a_message_for_a_sleeping_agent_waits_wakes_it_and_reaches_it_once_it_is
         SANDBOX.into(),
         link(&gateway, "ticket-1"),
         scratch("sleep"),
+        Arc::new(()),
         wakes.clone(),
     );
     gateway.up().await;
@@ -872,6 +874,7 @@ async fn a_lost_link_ends_the_agents_connection_and_its_session_opens_again() {
         SANDBOX.into(),
         link(&gateway, "ticket-1"),
         path.clone(),
+        Arc::new(()),
         Arc::new(Wakes::default()),
     );
     gateway.up().await;
@@ -947,6 +950,7 @@ async fn a_lost_link_ends_the_agents_connection_and_its_session_opens_again() {
         SANDBOX.into(),
         link(&gateway, "ticket-2"),
         path,
+        Arc::new(()),
         Arc::new(Wakes::default()),
     );
     gateway.open("inst-1", "ticket-2", SCOPE_1, "relay-3").await;
@@ -963,6 +967,7 @@ async fn a_restarted_host_opens_the_kept_session_so_messages_wait_for_the_agent(
         SANDBOX.into(),
         link(&gateway, "ticket-1"),
         path.clone(),
+        Arc::new(()),
         Arc::new(Wakes::default()),
     );
     gateway.up().await;
@@ -1008,6 +1013,7 @@ async fn a_restarted_host_opens_the_kept_session_so_messages_wait_for_the_agent(
         SANDBOX.into(),
         link(&gateway, "ticket-1"),
         path.clone(),
+        Arc::new(()),
         wakes.clone(),
     );
     gateway.up().await;
@@ -1075,6 +1081,7 @@ async fn a_gateway_that_refuses_a_ticket_shuts_the_agent_out() {
         SANDBOX.into(),
         link(&gateway, "ticket-bad"),
         scratch("refused"),
+        Arc::new(()),
         Arc::new(Wakes::default()),
     );
     gateway.up().await;
@@ -1114,6 +1121,7 @@ async fn a_connection_that_is_not_an_agent_is_refused() {
         SANDBOX.into(),
         link(&gateway, "ticket-1"),
         scratch("not-agent"),
+        Arc::new(()),
         Arc::new(Wakes::default()),
     );
     gateway.up().await;
@@ -1155,6 +1163,7 @@ async fn an_agents_control_and_bulk_connections_share_its_session() {
         SANDBOX.into(),
         link(&gateway, "ticket-1"),
         scratch("two-connections"),
+        Arc::new(()),
         Arc::new(Wakes::default()),
     );
     gateway.up().await;
@@ -1245,6 +1254,7 @@ async fn a_gateway_that_stops_reading_loses_its_link_by_the_silence_deadline() {
         SANDBOX.into(),
         link(&gateway, "t1"),
         scratch("stalled"),
+        Arc::new(()),
         Arc::new(Wakes::default()),
     );
     gateway.up().await;

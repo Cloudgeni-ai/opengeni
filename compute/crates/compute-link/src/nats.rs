@@ -339,7 +339,7 @@ pub fn parse_headers(block: &[u8]) -> Result<Headers, ProtocolError> {
 }
 
 /// The length of `headers` as a header block.
-fn header_block_len(headers: &Headers) -> usize {
+pub(crate) fn header_block_len(headers: &Headers) -> usize {
     HEADER_VERSION.len()
         + 2
         + headers

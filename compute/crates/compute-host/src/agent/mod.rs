@@ -1361,6 +1361,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         #[cfg(target_os = "linux")]
         let _ = trimming.await;
         while self.teardowns.join_next().await.is_some() {}
+        // The agent links' sessions are on disk before the next agent
+        // reads them.
+        if let Some(hub) = &self.link {
+            hub.shutdown().await;
+        }
     }
 
     fn now(&self) -> At {

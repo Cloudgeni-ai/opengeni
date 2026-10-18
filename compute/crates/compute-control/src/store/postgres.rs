@@ -21,74 +21,7 @@ use super::{
 };
 use crate::e2b::lifecycle::Record;
 
-/// The tables, created if missing. Replicas starting together take turns
-/// through a transaction-scoped advisory lock.
-const SCHEMA: &str = "
-begin;
-select pg_advisory_xact_lock(7231401);
-create sequence if not exists compute_changes;
-create sequence if not exists compute_host_epochs;
-create table if not exists compute_hosts (
-    id bigint primary key,
-    name text not null unique,
-    info jsonb not null,
-    epoch bigint not null,
-    state text not null check (state in ('live', 'draining', 'lost')),
-    renewals bigint not null,
-    seq bigint not null,
-    attempt bigint not null,
-    answer jsonb not null,
-    capacity jsonb not null,
-    changed bigint not null
-);
-create sequence if not exists compute_host_ids owned by compute_hosts.id;
-create index if not exists compute_hosts_changed on compute_hosts (changed);
-create table if not exists compute_sandboxes (
-    id text primary key,
-    team text not null,
-    spec jsonb not null,
-    metadata jsonb not null,
-    owner bigint,
-    epoch bigint not null,
-    taken bigint not null,
-    unanswered_epoch bigint,
-    unanswered_stamp bigint,
-    landed_epoch bigint,
-    landed_host_epoch bigint,
-    landed_seq bigint,
-    class text,
-    created_ms bigint not null,
-    version bigint not null
-);
-create index if not exists compute_sandboxes_owner on compute_sandboxes (owner)
-    where owner is not null;
-create index if not exists compute_sandboxes_team on compute_sandboxes (team, created_ms);
-create index if not exists compute_sandboxes_metadata on compute_sandboxes
-    using gin (metadata jsonb_path_ops);
-create table if not exists compute_keys (digest text primary key, team text not null);
-create table if not exists compute_lifecycles (
-    id text primary key,
-    team text not null,
-    record jsonb not null,
-    due_ms bigint not null,
-    version bigint not null
-);
-create index if not exists compute_lifecycles_team on compute_lifecycles (team);
-create index if not exists compute_lifecycles_due on compute_lifecycles (due_ms, id collate \"C\");
-create table if not exists compute_create_requests (
-    team text not null,
-    request_id text not null,
-    id text not null,
-    digest text not null,
-    created_ms bigint not null,
-    gone_ms bigint,
-    primary key (team, request_id)
-);
-create index if not exists compute_create_requests_id on compute_create_requests (id);
-create index if not exists compute_create_requests_gone_ms on compute_create_requests (gone_ms)
-    where gone_ms is not null;
-commit;
-";
+mod schema;
 
 /// The advisory lock the leader holds for as long as its connection lives.
 const LEADER_LOCK: i64 = 7_231_402;
@@ -331,8 +264,8 @@ impl Fields {
 
 impl PostgresStore {
     /// Connects to the database at `url` (a libpq connection string or
-    /// URL), over TLS with `tls` when given, and creates the tables if
-    /// they are missing.
+    /// URL), over TLS with `tls` when given, and brings its schema to the
+    /// latest version.
     pub async fn connect(
         url: &str,
         tls: Option<rustls::ClientConfig>,
@@ -355,12 +288,7 @@ impl PostgresStore {
             .build()
             .map_err(database)?;
         let store = Self { pool };
-        store
-            .client()
-            .await?
-            .batch_execute(SCHEMA)
-            .await
-            .map_err(database)?;
+        schema::migrate(&mut store.client().await?).await?;
         Ok(store)
     }
 
