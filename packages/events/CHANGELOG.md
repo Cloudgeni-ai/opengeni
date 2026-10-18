@@ -1,5 +1,66 @@
 # @opengeni/events
 
+## 4.0.4
+
+### Patch Changes
+
+- Updated dependencies [e7113e3]
+- Updated dependencies [fb0a25f]
+- Updated dependencies [b5fe653]
+- Updated dependencies [1e2ebb6]
+- Updated dependencies [e428801]
+- Updated dependencies [327d53a]
+- Updated dependencies [2f6b8bd]
+- Updated dependencies [9482fe0]
+- Updated dependencies [2708a32]
+- Updated dependencies [2a81601]
+- Updated dependencies [f2d5d8b]
+- Updated dependencies [903a3f5]
+- Updated dependencies [aeea237]
+- Updated dependencies [605af85]
+- Updated dependencies [d5b0003]
+- Updated dependencies [9cc3e18]
+- Updated dependencies [4098e67]
+- Updated dependencies [62a3815]
+- Updated dependencies [85889a5]
+- Updated dependencies [eeab688]
+- Updated dependencies [bf7a8f7]
+- Updated dependencies [0f1ea90]
+- Updated dependencies [71dfe30]
+- Updated dependencies [f010292]
+- Updated dependencies [9fb9db3]
+- Updated dependencies [c378f15]
+- Updated dependencies [47584d8]
+- Updated dependencies [0eab0c8]
+- Updated dependencies [c6be5c7]
+- Updated dependencies [7931f9c]
+- Updated dependencies [79ec9fd]
+- Updated dependencies [40b175f]
+- Updated dependencies [6384b14]
+- Updated dependencies [a34aebb]
+- Updated dependencies [5927aae]
+- Updated dependencies [ff38f1d]
+- Updated dependencies [5632ffc]
+- Updated dependencies [790ac6e]
+- Updated dependencies [6ab7b55]
+- Updated dependencies [3e061d6]
+- Updated dependencies [9c61ebd]
+- Updated dependencies [a22ed79]
+- Updated dependencies [cc182c7]
+- Updated dependencies [a312aaf]
+- Updated dependencies [6e15cfe]
+- Updated dependencies [2072131]
+- Updated dependencies [a2a47b3]
+- Updated dependencies [0c82106]
+- Updated dependencies [e47c979]
+- Updated dependencies [ba9ff31]
+- Updated dependencies [eaf6de4]
+- Updated dependencies [7b7b2b5]
+- Updated dependencies [23fc624]
+- Updated dependencies [9ddadf6]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/db@4.0.0
+
 ## 3.4.0
 
 ### Patch Changes
