@@ -145,6 +145,7 @@ export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
 export * from "./vaults";
+export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-resolution";
 export * from "./secret-generator";
@@ -222,7 +223,6 @@ export {
   COMPUTER_SCREENSHOT_MAX_DIMENSION,
   COMPUTER_SCREENSHOT_MAX_PIXELS,
   COMPUTER_SCREENSHOT_RETENTION_MS,
-  COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
   GENERATED_IMAGE_MAX_BYTES,
   GENERATED_VIDEO_MAX_BYTES,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
@@ -786,6 +786,8 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "allowance_exhausted",
     /** The task's root usage limit is reached; details carry SessionUsageLimitReachedRefusal fields. */
     "session_usage_limit_reached",
+    /** Organization seats are full; details.action points to the plan upgrade flow. */
+    "seat_limit_reached",
     "unauthenticated",
     "forbidden",
     "not_found",
@@ -1097,6 +1099,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_files_delete",
   "site_publication_get",
   "site_publication_update",
+  "site_publication_apply_fix",
   "site_hostname_check",
   "site_sql_inspect",
   "site_sql_enable",
@@ -2888,6 +2891,23 @@ export function organizationModelCompactionThreshold(
   return parsed.success ? parsed.data : null;
 }
 
+/**
+ * What an ordinary Send does while the agent is working. `queue` runs the
+ * message after the current turn; `steer` has the agent read it at its next
+ * model step, after the current step's tool calls finish.
+ */
+export const WorkspaceBusySend = /* @__PURE__ */ defineSchema(() => z.enum(["queue", "steer"]));
+export type WorkspaceBusySend = z.infer<typeof WorkspaceBusySend>;
+
+/** The workspace's busy-Send preference; absent or invalid is `queue`. */
+export function resolveWorkspaceBusySend(settings: unknown): WorkspaceBusySend {
+  const value =
+    settings !== null && typeof settings === "object"
+      ? (settings as { busySend?: unknown }).busySend
+      : undefined;
+  return value === "steer" ? "steer" : "queue";
+}
+
 export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -2938,6 +2958,10 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // billed in Opengeni credits (current and future); absent allows them.
       // Read leniently so a malformed value never fails the whole bag.
       allowCreditModels: z.boolean().optional().catch(undefined),
+      // What an ordinary Send does in the console composer while the agent is
+      // working: "queue" (absent) runs it after the current turn, "steer" has
+      // the agent read it at its next model step. Read leniently.
+      busySend: WorkspaceBusySend.optional().catch(undefined),
     })
     .passthrough(),
 );
@@ -3134,6 +3158,7 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
       // False blocks every model billed in Opengeni credits in this workspace.
       allowCreditModels: z.boolean().optional(),
+      busySend: WorkspaceBusySend.optional(),
     })
     .passthrough(),
 );
@@ -5862,6 +5887,21 @@ export const PromotionalCreditBalance = /* @__PURE__ */ defineSchema(() =>
 );
 export type PromotionalCreditBalance = z.infer<typeof PromotionalCreditBalance>;
 
+export {
+  SubscriptionPlan,
+  SubscriptionPlanCatalog,
+  BillingPlanBalance,
+} from "./subscription-plans";
+export {
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
+} from "./billing-subscriptions";
+import { BillingPlanBalance } from "./subscription-plans";
+
 export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
   z.object({
     accountId: z.string().uuid(),
@@ -5871,6 +5911,8 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
     /** General credits, including unrestricted legacy grants. May be negative after use. */
     generalBalanceMicros: z.number().int().optional(),
     promotionalCredits: z.array(PromotionalCreditBalance).optional(),
+    /** Absent/null until an operator or subscription worker activates this organization. */
+    plan: BillingPlanBalance.nullable().optional(),
   }),
 );
 export type BillingBalance = z.infer<typeof BillingBalance>;
@@ -6140,11 +6182,30 @@ export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
 /** Private marker for the compact attachment-reference carrier created by compaction. */
 export const MODEL_ATTACHMENT_CATALOG_MARKER = "opengeni_attachment_catalog" as const;
 /**
+ * Private marker on catalogs whose model-visible text is already complete in
+ * `content` (provenance and upload times were frozen when compaction created
+ * them). Projection must not append per-reference receipts to such a catalog.
+ * Catalogs without it keep their original projection byte for byte.
+ */
+export const MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD =
+  "opengeni_attachment_catalog_rendered" as const;
+/**
  * Structured timeline annotations retained beside the deterministic user-text
  * projection in canonical history. Provider adapters remove this Opengeni
  * extension field; the numbered projection in `content` remains model-visible.
  */
 export const MODEL_TIMELINE_ANNOTATIONS_FIELD = "opengeni_timeline_annotations" as const;
+/**
+ * Private durable field on user history items: the longest side, in pixels,
+ * at which this message's image attachments are shown to the model. It is
+ * stamped when the message is accepted, so a later change of the bound never
+ * re-renders images that an earlier request already sent. Items without it
+ * keep their original full-resolution projection.
+ */
+export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD =
+  "opengeni_attachment_image_max_dimension" as const;
+/** Bound stamped on newly accepted user messages with attachments. */
+export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION = 2000;
 
 export const ResourceRef = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]),
@@ -7027,6 +7088,9 @@ export const ToolRef = /* @__PURE__ */ defineSchema(() =>
     // configure the id, validation drops the ref. Auto-attached workspace-default
     // capability MCPs also use this marker.
     optional: z.boolean().optional(),
+    // Optional narrowing of this connection's tools. Empty means no tools;
+    // omission preserves the connection's authorized catalog.
+    allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
   }),
 );
 export type ToolRef = z.infer<typeof ToolRef>;
@@ -7336,11 +7400,18 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
     // per-turn tool selections are combined.
     const optional = prior.optional === true && tool.optional === true ? true : undefined;
     const eager = prior.eager === true || tool.eager === true ? true : undefined;
+    const allowedTools =
+      prior.allowedTools === undefined
+        ? tool.allowedTools
+        : tool.allowedTools === undefined
+          ? prior.allowedTools
+          : prior.allowedTools.filter((name) => tool.allowedTools!.includes(name));
     byKey.set(key, {
       kind: "mcp",
       id: prior.id,
       ...(optional ? { optional } : {}),
       ...(eager ? { eager } : {}),
+      ...(allowedTools !== undefined ? { allowedTools } : {}),
     });
   }
   return order.map((key) => byKey.get(key)!);
@@ -8705,12 +8776,11 @@ export type SessionAuthorizationPort = {
   ): Promise<SessionAuthorizationListScope>;
 };
 
-export const TIMELINE_ANNOTATION_MAX_COUNT = 12;
 export const TIMELINE_ANNOTATION_QUOTE_MAX_BYTES = 16 * 1024;
 export const TIMELINE_ANNOTATION_NOTE_MAX_BYTES = 2 * 1024;
 export const TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES = 512;
 export const TIMELINE_ANNOTATION_LABEL_MAX_BYTES = 256;
-export const TIMELINE_ANNOTATIONS_MAX_BYTES = 64 * 1024;
+export const TIMELINE_ANNOTATIONS_MAX_BYTES = 1024 * 1024;
 
 export const TimelineAnnotationSourceKind = /* @__PURE__ */ defineSchema(() =>
   z.enum(["user_message", "assistant_message", "tool_output"]),
@@ -8839,31 +8909,26 @@ export const TimelineAnnotation = /* @__PURE__ */ defineSchema(() =>
 export type TimelineAnnotation = z.infer<typeof TimelineAnnotation>;
 
 function timelineAnnotationArray<T extends z.ZodTypeAny>(item: T) {
-  return z
-    .array(item)
-    .max(TIMELINE_ANNOTATION_MAX_COUNT)
-    .superRefine((annotations, ctx) => {
-      const ids = new Set<string>();
-      for (let index = 0; index < annotations.length; index += 1) {
-        const id = (annotations[index] as { id?: unknown }).id;
-        if (typeof id === "string" && ids.has(id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [index, "id"],
-            message: "annotation ids must be unique",
-          });
-        }
-        if (typeof id === "string") ids.add(id);
-      }
-      if (
-        timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) > TIMELINE_ANNOTATIONS_MAX_BYTES
-      ) {
+  return z.array(item).superRefine((annotations, ctx) => {
+    const ids = new Set<string>();
+    for (let index = 0; index < annotations.length; index += 1) {
+      const id = (annotations[index] as { id?: unknown }).id;
+      if (typeof id === "string" && ids.has(id)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `annotations must be at most ${TIMELINE_ANNOTATIONS_MAX_BYTES} UTF-8 bytes`,
+          path: [index, "id"],
+          message: "annotation ids must be unique",
         });
       }
-    });
+      if (typeof id === "string") ids.add(id);
+    }
+    if (timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) > TIMELINE_ANNOTATIONS_MAX_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `annotations must be at most ${TIMELINE_ANNOTATIONS_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
 }
 
 export const DraftTimelineAnnotations = timelineAnnotationArray(DraftTimelineAnnotation);
@@ -9235,6 +9300,12 @@ export const SteerSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
     clientEventId: SessionOperationKey,
     expectedTurnVersion: z.number().int().positive(),
     controlEtag: z.string().min(1).optional(),
+    /**
+     * Interrupt the running turn now, cutting off its current step, instead
+     * of handing over at its next model step (the default). Also turns an
+     * already-waiting Steer into an immediate one.
+     */
+    interrupt: z.boolean().optional(),
   }),
 );
 export type SteerSessionQueueItemRequest = z.infer<typeof SteerSessionQueueItemRequest>;
@@ -10086,6 +10157,7 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
             commandId: z.string().uuid(),
           })
           .strict(),
+        notice: z.string().optional(),
       })
       .passthrough(),
     z
@@ -10250,6 +10322,16 @@ export function renderSessionSystemUpdateBatch(
 export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[Opengeni scheduled task occurrence]" as const;
 
 /**
+ * A schedule must never stay stuck without its owner knowing. The platform
+ * pauses a schedule and tells its owner when runs cannot start; this covers
+ * what only the agent can see: a run that starts but cannot do its job. The
+ * key matches the platform's own schedule notice, so either updates the other
+ * in place. Rendered only into new occurrences; delivered ones keep their text.
+ */
+export const SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE =
+  "If something blocks this task, first try to fix it within your authority. If it stays blocked, notify the schedule's owner once with what blocks it and exactly what would unblock it, using the notification key schedule-<scheduled task ID> so a later occurrence updates that notice instead of alerting again. If no later occurrence can succeed until a person acts, also pause this schedule. If you cannot notify or pause, say so in your result.";
+
+/**
  * A pure scheduled-occurrence batch is a new task boundary for the model, not
  * merely background context. The user role here is conversational only: the
  * owning turn retains its immutable scheduler/service initiator and frozen
@@ -10287,6 +10369,7 @@ function renderScheduledOccurrenceTaskBatch(
     introduction,
     ...renderSessionSystemUpdateDeliveredAt(options),
     "The scheduled instructions below are the task for this turn. Earlier completed goals, occurrences, conversation, and tool outputs are historical context and do not complete this occurrence. When the task depends on mutable external state, query that state during this occurrence instead of reusing an earlier result.",
+    SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE,
     ...occurrences.flatMap((occurrence, index) => {
       if (!occurrence) return [];
       return [
@@ -11868,6 +11951,27 @@ export const ScheduledTaskAccountPlan = /* @__PURE__ */ /* @__PURE__ */ defineSc
 );
 export type ScheduledTaskAccountPlan = z.infer<typeof ScheduledTaskAccountPlan>;
 
+/**
+ * What blocks a schedule. `paused`: no later run could start until a person
+ * acts, so the schedule paused itself; resume it once the cause is fixed.
+ * `notified`: its scheduled runs kept failing or being skipped and its owner
+ * was told once; it keeps running. `message` says what would unblock it.
+ */
+export const ScheduledTaskBlocker = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      state: z.enum(["paused", "notified"]),
+      /** Stable machine reason, such as `scheduled_session_paused`. Readers must tolerate new ones. */
+      reason: z.string().min(1).max(128),
+      message: z.string().min(1).max(1000),
+      /** The run that showed the blocker (the first of a failing streak). */
+      runId: z.string().uuid(),
+      since: z.string(),
+    })
+    .strict(),
+);
+export type ScheduledTaskBlocker = z.infer<typeof ScheduledTaskBlocker>;
+
 export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: z.string().uuid(),
@@ -11918,6 +12022,13 @@ export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
      * authority. Absent when it could not be computed.
      */
     accountPlan: ScheduledTaskAccountPlan.optional(),
+    /**
+     * Read-only response projection: why this schedule paused itself
+     * (`paused`, shown while it stays paused) or why its owner was told its
+     * runs keep failing or being skipped (`notified`, shown while it stays
+     * active and until a run succeeds). Absent when nothing blocks it.
+     */
+    blocker: ScheduledTaskBlocker.optional(),
   }),
 );
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
@@ -12126,6 +12237,7 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
       generatedSessionBinding: z
         .object({
           createIdempotencyKey: z.string().min(1).max(512),
+          toolPolicy: SessionToolPolicy.optional(),
           effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
           nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
           codexCompactionMode: CodexCompactionMode,
@@ -15274,6 +15386,10 @@ export const SessionCommandFailure = /* @__PURE__ */ defineSchema(() =>
 );
 export type SessionCommandFailure = z.infer<typeof SessionCommandFailure>;
 
+/** Appended only to a new result with positive native command-cleanup evidence. */
+export const CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE =
+  "Stopped background child processes when the shell exited. For long jobs, use exec_command on this machine with the job in the foreground, then command_read or command_wait with the returned command ID.";
+
 /** Stored reconciliation checkpoints, not a live provider probe or native ACK. */
 export const SessionBackgroundCommandReconciliation = /* @__PURE__ */ defineSchema(() =>
   z
@@ -15326,6 +15442,7 @@ export const SessionBackgroundCommand = /* @__PURE__ */ defineSchema(() =>
       exitCode: z.number().int().nullable(),
       settlementReason: z.string().nullable(),
       failure: SessionCommandFailure.optional(),
+      backgroundChildrenStopped: z.literal(true).optional(),
       startedAt: z.string(),
       settledAt: z.string().nullable(),
       completionObservedAt: z.string().nullable().optional(),
@@ -15728,6 +15845,8 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
     needsYouOnly: z.literal(true).optional(),
     /** Explicit receipt for the read-only (archived idle session) filter. */
     contentArchivedOnly: z.literal(true).optional(),
+    /** Explicit receipt for the started-or-messaged-by-you filter. */
+    mineOnly: z.literal(true).optional(),
     totals: SessionListTotals.optional(),
     /** Effective server ordering; name uses ASCII-space trim, ASCII case fold,
      * UTF-8 byte order, then id ASC. Date keys and their id ties use DESC. */
@@ -20456,6 +20575,7 @@ export const MachineConnectionAuthority = /* @__PURE__ */ defineSchema(() =>
     leaseExpiresAt: z.string().nullable(),
     duplicateRunnerDeniedCount: z.number().int().nonnegative(),
     duplicateRunnerDeniedAt: z.string().nullable(),
+    authenticationError: z.literal("credentials_expired").nullable().optional(),
   }),
 );
 export type MachineConnectionAuthority = z.infer<typeof MachineConnectionAuthority>;
@@ -20811,16 +20931,25 @@ export const MachineView = /* @__PURE__ */ defineSchema(() =>
 );
 export type MachineView = z.infer<typeof MachineView>;
 
-/**
- * GET /v1/workspaces/:ws/machines — the dashboard list. `activeSandboxId` /
- * `activeEpoch` echo the session's epoch-fenced active-sandbox pointer (null
- * activeSandboxId == the session's own group box is active).
- */
+/** Chat-visible explanation only, never authority to discover or use the machine. */
+export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    sandboxId: z.string().uuid(),
+    machineName: z.string(),
+    ownerName: z.string().nullable(),
+    isOwner: z.boolean(),
+    queuedTurnBlocked: z.boolean(),
+  }),
+);
+export type SessionMachineAccess = z.infer<typeof SessionMachineAccess>;
+
+/** GET /v1/workspaces/:ws/machines; active pointer fields are session-scoped. */
 export const MachinesResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     activeSandboxId: z.string().nullable(),
     activeEpoch: z.number().int(),
     machines: z.array(MachineView),
+    sessionMachineAccess: SessionMachineAccess.nullable().optional(),
   }),
 );
 export type MachinesResponse = z.infer<typeof MachinesResponse>;
@@ -20861,6 +20990,8 @@ export const SwapActiveSandboxResponse = /* @__PURE__ */ defineSchema(() =>
         "unsupported_backend_context",
         "transient_establishment",
         "concurrent_swap",
+        "personal_machine_permission_required",
+        "personal_machine_not_permitted",
         "recovery_in_progress",
         "recovery_degraded",
         "recovery_unrecoverable",

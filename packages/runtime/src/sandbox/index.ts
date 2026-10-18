@@ -37,6 +37,10 @@ export {
 } from "./host-archive-temporary";
 export type { DockerHostWorkspaceRelease } from "./providers/docker-workspace-drain";
 export { reduceModalRawOutputPage } from "./providers/modal-command-raw-page";
+export {
+  isInSandboxSupervisedProcess,
+  SUPERVISED_STOP_KILL_AFTER_SECONDS,
+} from "./durable-shell-process";
 export type {
   ModalRawOutputPage,
   ModalRawOutputStreams,
@@ -118,6 +122,10 @@ export {
 } from "./materialization-verification-error";
 export { sendCommandInput, type CommandInputSession } from "./command-input";
 export { OpStreamExecClient, type OpStreamOutputFrame } from "./selfhosted/op-stream";
+export {
+  replayConnectedCommandOutput,
+  connectedCommandExitProof,
+} from "./selfhosted/terminal-replay";
 
 export {
   repairSerializedRunStateExposedPorts,
@@ -361,6 +369,10 @@ export {
   type PlacementBrowserNetworkRoute,
   type PlacementBrowserTransport,
   type PlacementBrowserStateCaptureReceipt,
+  type PlacementBrowserWorkingCopyAdoption,
+  type PlacementBrowserWorkingCopyAuthority,
+  type PlacementBrowserWorkingCopyInspection,
+  type PlacementBrowserWorkingCopyRefusal,
   type ComputerControlFrame,
   type ComputerControlFrameMetadata,
   type ComputerFrameEvidenceMismatchReason,

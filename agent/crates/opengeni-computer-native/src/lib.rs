@@ -21,6 +21,8 @@ mod window_input_fences;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_gnome;
 #[cfg(target_os = "macos")]
 mod macos;
 

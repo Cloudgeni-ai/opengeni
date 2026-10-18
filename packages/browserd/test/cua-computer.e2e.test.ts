@@ -164,8 +164,8 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
               }),
             ),
           ).toMatchObject({ state: "completed" });
-          // SDK 0.30.4 requires foreground delivery for Mac drag. The pilot must
-          // report that limitation, not steal focus or claim it delivered input.
+          // CUA 0.36 delivers Mac drags in the background: the fixture receives
+          // them without becoming frontmost.
           expect(
             await supervisor.action(
               gesture({
@@ -178,13 +178,13 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
                 endY: y + 20,
               }),
             ),
-          ).toMatchObject({ state: "failed", error: { code: "unsupported" } });
+          ).toMatchObject({ state: "completed" });
         }
         await Bun.sleep(100);
         expect(((await actual()) as State & { scrollEvents: number }).scrollEvents).toBeGreaterThan(
           0,
         );
-        expect(((await actual()) as State & { dragEvents: number }).dragEvents).toBe(0);
+        expect(((await actual()) as State & { dragEvents: number }).dragEvents).toBeGreaterThan(0);
         expect((await actual()).frontmostPid).not.toBe(fixturePid);
 
         const nativeCall = (tool: string, args: Record<string, unknown>) => ({
@@ -218,9 +218,9 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
           await supervisor.observe(reference, target.id);
           await Bun.sleep(2100);
         }
-        const batched = nativeCall("run_actions", {
+        const batched = nativeCall("run_steps", {
           steps: [{ tool: "click", args: { element_token: increment.element_token } }],
-          observe: true,
+          observe: {},
         });
         const batchedReceipt = await supervisor.nativeCall(batched);
         expect(batchedReceipt.state).toBe("completed");

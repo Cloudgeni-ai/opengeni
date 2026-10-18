@@ -6,6 +6,9 @@ import {
   RUNNER_CONFLICT_ACTIVE_MS,
 } from "../src/components/machines/machine-status";
 import type { MachineView } from "../src/types/machines";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 type Runtime = NonNullable<MachineView["runtime"]>;
 type Update = NonNullable<Runtime["update"]>;
@@ -56,8 +59,25 @@ function update(overrides: Partial<Update>): Update {
 }
 
 describe("describeAgentRuntime", () => {
+  test("lost cleanup explains the cause and recovery without hiding the retry", () => {
+    for (const errorCode of ["update_cleanup_unconfirmed", "update_state_unavailable"]) {
+      const status = describeAgentRuntime(
+        englishText,
+        runtime({
+          update: update({ errorCode }),
+        }),
+        NOW,
+      );
+      expect(status.note).toContain("agent log");
+      expect(status.note).toContain("active commands");
+      expect(status.note).toContain("restart the agent service");
+      expect(status.action?.kind).toBe("retry");
+      expect(status.note).not.toContain("update_cleanup_unconfirmed");
+    }
+  });
   test("waiting for idle promises the update truthfully, with no action", () => {
     const status = describeAgentRuntime(
+      englishText,
       runtime({ versionState: "updating", update: update({ status: "waiting_for_idle" }) }),
       NOW,
     );
@@ -67,6 +87,7 @@ describe("describeAgentRuntime", () => {
 
   test("a rolled-back update says the current version was kept", () => {
     const status = describeAgentRuntime(
+      englishText,
       runtime({
         versionState: "update_failed",
         update: update({ rolledBack: true, errorCode: "health_check_failed" }),
@@ -80,6 +101,7 @@ describe("describeAgentRuntime", () => {
 
   test("a blocked update explains why and offers nothing it cannot do", () => {
     const status = describeAgentRuntime(
+      englishText,
       runtime({
         updateBlockedReason: "Use the installer first.",
         update: update({ errorCode: "update_busy_work" }),
@@ -92,6 +114,7 @@ describe("describeAgentRuntime", () => {
 
   test("a beta agent on the latest build is up to date", () => {
     const status = describeAgentRuntime(
+      englishText,
       runtime({ installedVersion: "0.1.54", versionState: "current", updateChannel: "beta" }),
       NOW,
     );
@@ -122,15 +145,34 @@ describe("runnerConflict and describeAgentConnection", () => {
   });
 
   test("the connection reads in plain words", () => {
-    expect(describeAgentConnection(authority)).toEqual({
+    expect(describeAgentConnection(englishText, authority)).toEqual({
       label: "Agent connected",
       detail: "Reconnected 3 times since setup",
     });
-    expect(describeAgentConnection({ ...authority, state: "expired", supersededCount: 0 })).toEqual(
-      {
-        label: "Agent connection lapsed",
-        detail: null,
-      },
-    );
+    expect(
+      describeAgentConnection(englishText, { ...authority, state: "expired", supersededCount: 0 }),
+    ).toEqual({
+      label: "Agent connection lapsed",
+      detail: expect.stringContaining("opengeni-agent connections"),
+    });
+  });
+
+  test("expired credentials have actionable status, but stale diagnostics never override a live connection", () => {
+    expect(
+      describeAgentConnection(englishText, {
+        ...authority,
+        state: "expired",
+        authenticationError: "credentials_expired",
+      }),
+    ).toEqual({
+      label: "Agent credentials expired",
+      detail: expect.stringContaining("reconnection is required"),
+    });
+    expect(
+      describeAgentConnection(englishText, {
+        ...authority,
+        authenticationError: "credentials_expired",
+      }).label,
+    ).toBe("Agent connected");
   });
 });

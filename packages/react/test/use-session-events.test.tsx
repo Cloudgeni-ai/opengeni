@@ -29,6 +29,9 @@ import {
   invokeOlderHistoryLoaderWithReceiptCapture,
   type OlderHistoryLoadReceipt,
 } from "../src/older-history";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -205,7 +208,9 @@ describe("useSessionEvents", () => {
         },
       ];
       expect(
-        buildTimeline(store).some((item) => item.kind === "user-message" && item.id === "evt-1"),
+        buildTimeline(englishText, store).some(
+          (item) => item.kind === "user-message" && item.id === "evt-1",
+        ),
       ).toBe(true);
       const { client, listCalls } = scriptedClient({ store });
       const hook = await renderHook(
@@ -2240,7 +2245,7 @@ describe("useSessionEvents", () => {
         event(index + 2, "agent.message.delta", { text }),
       ),
     ];
-    const rawText = buildTimeline(rawEquivalent)
+    const rawText = buildTimeline(englishText, rawEquivalent)
       .filter(
         (item): item is Extract<TimelineItem, { kind: "agent-message" }> =>
           item.kind === "agent-message",
@@ -2899,7 +2904,7 @@ describe("useSessionEvents", () => {
       listCalls.filter((call) => call.direction === "after").map((call) => call.after),
     ).toEqual([0, 10]);
     expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 11]);
-    expect(buildTimeline(hook.result.current.events)).toEqual(
+    expect(buildTimeline(englishText, hook.result.current.events)).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text: "abcd" })]),
     );
     expect(hook.result.current.hasNewer).toBe(true);
@@ -2911,7 +2916,7 @@ describe("useSessionEvents", () => {
     expect(
       listCalls.filter((call) => call.direction === "after").map((call) => call.after),
     ).toEqual([0, 10, 20, 30]);
-    expect(buildTimeline(hook.result.current.events)).toEqual(
+    expect(buildTimeline(englishText, hook.result.current.events)).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text: "abcdef" })]),
     );
     expect(hook.result.current.hasNewer).toBe(false);
@@ -2992,7 +2997,7 @@ describe("boundBrowserSessionEventWindow", () => {
     expect(window.events).toEqual(events);
     expect(window.events[1]).toBe(events[1]);
     expect(window.truncated).toBeFalse();
-    expect(buildTimeline(window.events)).toEqual(
+    expect(buildTimeline(englishText, window.events)).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text })]),
     );
   });

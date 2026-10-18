@@ -55,7 +55,14 @@ if (origin && window.location.origin === origin) {
   const bridge: DesktopBridge = {
     version: DESKTOP_BRIDGE_VERSION,
     platform: platform(),
-    capabilities: ["accounts", "thisComputer", "openExternal", "commands"],
+    capabilities: [
+      "accounts",
+      "thisComputer",
+      "thisComputerPermissions",
+      "thisComputerDisconnect",
+      "openExternal",
+      "commands",
+    ],
     productName: argument("opengeni-product") ?? "Opengeni",
     accounts: {
       list: () => ipcRenderer.invoke(DESKTOP_IPC.accountsList) as Promise<DesktopAccountsSnapshot>,
@@ -77,6 +84,8 @@ if (origin && window.location.origin === origin) {
         }) as Promise<ThisComputerStatus>,
       pause: () => ipcRenderer.invoke(DESKTOP_IPC.computerPause),
       resume: () => ipcRenderer.invoke(DESKTOP_IPC.computerResume),
+      requestPermission: (id) => ipcRenderer.invoke(DESKTOP_IPC.computerRequestPermission, id),
+      disconnect: (workspaceId) => ipcRenderer.invoke(DESKTOP_IPC.computerDisconnect, workspaceId),
       onChange: (listener) => subscribe(DESKTOP_IPC.computerChanged, () => listener()),
     },
     openExternal: (url) => ipcRenderer.invoke(DESKTOP_IPC.openExternal, url),

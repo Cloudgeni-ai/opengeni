@@ -6,11 +6,11 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "82e5d6f9cc0ebaba5519ddce29d706c71faeb3a1a240c3a449c3fdc2b72ba7d9"
+      "sha256": "4a0dd5190fcd77445f7287fdd052d4daee779c7dfff80df62c42397b68013b58"
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "5d9bc01143fd10aa7826eeda0bca6bf7d853b579db98c3a0b0f87b344fb13eb3"
+      "sha256": "89e70d63097b07c71d99203afe965789e94a131e16cccb73f05ecf56cdf6556b"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -21,8 +21,12 @@
       "sha256": "474f26fa2e86ea63beae0c1a2604401e61f74b350d390b5cebad116bfeb6459e"
     },
     {
+      "path": ".github/workflows/browser-engine-pins.yml",
+      "sha256": "db9e34041155dcdd512dabf16dce76b1990f7479ea5d3cc5fcf251306caca928"
+    },
+    {
       "path": ".github/workflows/ci.yml",
-      "sha256": "235d8e4d131178429bf04d2ebf7316da7f3a2421123707d85d9edad6530a64d6"
+      "sha256": "c7007f1f6cf29c2b8167719f0b447459b5bf4c4107291d05c694fff57719f8cf"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -62,7 +66,7 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "2fecee50c354d8567e750f0627de842e359298bb61c49396b6994341fbb9729e"
+      "sha256": "3df4a6050c9448b76421708eea7b15a4d50222c4237898651bbc379a50cb1245"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
@@ -137,6 +141,10 @@
     {
       "path": ".github/actions/public-oci-login/action.yml",
       "sha256": "2c4c1bcbac559a67a1bf74b5e3199ad82a32ee91ec593881f6d27786b51a37ea"
+    },
+    {
+      "path": ".github/actions/setup-agent-test-nats/action.yml",
+      "sha256": "744f65eb944451c9b4c33d32f1ec14cd1d06623abc3e90c3771290bfd62a3b26"
     }
   ],
   "generatedLocalTargets": [
@@ -281,7 +289,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build (Linux musl static)",
-      "sha256": "d89ddd6baa6b20ae87b6430992c376c5f28e08c81a7d384ce16c9b77f4262ecf"
+      "sha256": "8810a8bf5f3a5eeb73a3c555c8fdbd799f0c07181f62621a59f4913c8b5976d0"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -299,7 +307,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (Linux glibc)",
-      "sha256": "96627610d87b395d487b77685a4ba02a71ab04aab86c797234d29d81483471a4"
+      "sha256": "42214f3264e151ea02dd5c5846fadd7e2646873ceb71939afe3a9b45eebb90e6"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -542,6 +550,18 @@
       "sha256": "7c01541f3dc7c536488a007902ea1453cd191ebb6c348edcbac345077c0dcb25"
     },
     {
+      "workflow": ".github/workflows/browser-engine-pins.yml",
+      "job": "update",
+      "step": "Open or update the pull request",
+      "sha256": "7bbb7ad1c6768781bd6388bc7b5e1e0c437a3e8789a9b2e4da1db47259c50cd8"
+    },
+    {
+      "workflow": ".github/workflows/browser-engine-pins.yml",
+      "job": "update",
+      "step": "Resolve and rewrite pins",
+      "sha256": "0999ae760fbe71d0a3f60befc4d9ffe416c752e635269ba0399850d883df6e3f"
+    },
+    {
       "workflow": ".github/workflows/ci.yml",
       "job": "api-image",
       "step": "Bake and sign exact-SHA canary agent",
@@ -593,7 +613,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "automation-admission",
       "step": "Reproduce deterministic Version PR tree",
-      "sha256": "abd3d6e39075c7463d09e9d7db441013dc68017e86ced309dbf611a5c132e0ba"
+      "sha256": "74d5ec04aa741753f63a6b5fa961b817b1544411cc5e3f993c2bdc5d338911c0"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -869,7 +889,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "67607b839be59a82a088124958b3b7aab9f31098c888aac432551da9993903f0"
+      "sha256": "42c6ad458ed243282cdb4786fae53e7568b9ffe1bddcbc39eda960cb47a74833"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -1126,8 +1146,32 @@
     {
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
+      "step": "Admit exact source and CI",
+      "sha256": "dc894f956640654d7075246f3d4a8ad042575fbdd55f687a74dd0fad793b8adc"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
       "step": "Admit protected main source",
-      "sha256": "faec0df74f1ec9d6b83e2b21389f8cc52ec16d8f7873ecbec89edaec0cbc1bf8"
+      "sha256": "6590c803e20faf9692c6f63fe4e23f8c131e38f604f13d1288da3d709cdddc6e"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
+      "step": "Build trusted publisher for Node",
+      "sha256": "be6a4c8d74cb012c03aa87a848f414e7644b6840b29e6061b96d720ec709b3fe"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
+      "step": "Check out admitted source",
+      "sha256": "4a04e3e8059a0265df759ece12bc66ccca4028d5590d504b23b038a60292044a"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
+      "step": "Install admitted source dependencies",
+      "sha256": "ecb9e615659e3141ac8a5318b89529c2e3c319663adf0ae8fbef1112da0b08e7"
     },
     {
       "workflow": ".github/workflows/publish-canary.yml",
@@ -1139,13 +1183,7 @@
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Publish canary versions",
-      "sha256": "339463616de54eba4955bca6b0a3a69ad0be2e7e4f5bb3dd5e30ce6089b785d7"
-    },
-    {
-      "workflow": ".github/workflows/publish-canary.yml",
-      "job": "publish",
-      "step": "Verify exact source",
-      "sha256": "a75d25d34d692e5afcf6e883c33d3cd2ea19d2422effd6a041c38d0dc607dd49"
+      "sha256": "0cb9c571b7799a7b28947d061a45817f3bc25d8eccc3c3443c948454f0fbd408"
     },
     {
       "workflow": ".github/workflows/publish-desktop-image.yml",

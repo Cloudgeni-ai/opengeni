@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
 import * as events from "@opengeni/events";
-import { AnthropicRequestError } from "@opengeni/runtime";
+import { AnthropicRequestError, AnthropicStreamInterruptedError } from "@opengeni/runtime";
+import { XaiSubscriptionStreamIdleTimeoutError } from "@opengeni/xai-subscription";
 import * as parentWake from "../src/activities/parent-wake";
 import { classifyClaudeProviderError } from "../src/activities/agent-turn/errors";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
@@ -962,4 +963,186 @@ describe("Claude finalization on the core", () => {
     expect(wake).not.toHaveBeenCalled();
     expect(runtime.touch).not.toHaveBeenCalled();
   });
+});
+
+/**
+ * The shared request custody whose one request this attempt dispatched ended
+ * without a definite answer (a dropped or stalled stream), already settled
+ * unknown.
+ */
+async function interruptedLane(settles: string[]) {
+  const lane = createCoreSubscriptionRequests({
+    reserve: async (request) => ({ operationId: request.requestId }),
+    settle: async ({ operationId, outcome }) => {
+      settles.push(`${operationId}:${outcome}`);
+    },
+    displayName: "Provider",
+    outcomeUnknown: () =>
+      Object.assign(new Error("unknown"), { code: "subscription_core_request_outcome_unknown" }),
+    isOutcomeUnknown: (error) =>
+      (error as { code?: unknown }).code === "subscription_core_request_outcome_unknown",
+  });
+  const first = { requestId: "first", transportAttempt: 1 };
+  await lane.reserve(first);
+  await lane.observe({ ...first, outcome: "unknown" });
+  expect(lane.unknownIsOwnAndSettled()).toBe(true);
+  return lane;
+}
+
+function placeOn(
+  deps: ReturnType<typeof failureDeps>["deps"],
+  provider: "Claude" | "SuperGrok",
+  turn: SubscriptionCoreTurn,
+) {
+  Object.assign(deps.billingState, {
+    isClaudeTurn: provider === "Claude",
+    isXaiTurn: provider === "SuperGrok",
+  });
+  Object.assign(deps.providerTurn, {
+    claudeSubscriptionCore: provider === "Claude" ? turn : null,
+    xaiSubscriptionCore: provider === "SuperGrok" ? turn : null,
+  });
+}
+
+describe("an interrupted response recovers within the turn on every core provider", () => {
+  const interruptions = {
+    Claude: [
+      [
+        "an idle stream",
+        () => new AnthropicStreamInterruptedError("Claude stream timed out waiting for data"),
+      ],
+      [
+        "a stream that ended early",
+        () => new AnthropicStreamInterruptedError("Claude stream ended without message_stop"),
+      ],
+      [
+        "a dropped socket",
+        () =>
+          new Error(
+            "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+          ),
+      ],
+      ["a mid-stream server error", () => anthropic(500, "api_error")],
+    ],
+    SuperGrok: [
+      [
+        "an idle stream",
+        () =>
+          new XaiSubscriptionStreamIdleTimeoutError(
+            "request-1",
+            true,
+            7,
+            "response.output_text.delta",
+            300_000,
+          ),
+      ],
+      [
+        "a dropped socket",
+        () =>
+          new Error(
+            "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+          ),
+      ],
+    ],
+  } as const;
+  for (const provider of ["Claude", "SuperGrok"] as const) {
+    for (const [name, error] of interruptions[provider]) {
+      test(`${provider}: ${name} recovers the same turn as a provider interruption`, async () => {
+        coreRuntime({ refusals: 1 });
+        const recovery = recoveringRecovery();
+        spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+        spy(db, "readSessionTurnToolProgressRecoveryState").mockResolvedValue({
+          toolCallInFlight: false,
+          toolInterruptedRecoveries: 0,
+        });
+        const settles: string[] = [];
+        const lane = await interruptedLane(settles);
+        const { deps } = failureDeps(error(), null);
+        placeOn(deps, provider, core({ requests: lane, titleRequests: undefined }));
+        expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+        expect(recovery).toHaveBeenCalledTimes(1);
+        const failure = recovery.mock.calls[0]![2] as { detail: Record<string, unknown> };
+        // A marked stream interruption is reported as one; a transient
+        // transport failure keeps its own retryable classification.
+        const marked = name === "an idle stream" || name === "a stream that ended early";
+        expect(failure.detail).toMatchObject(
+          marked
+            ? {
+                code: "provider_unavailable",
+                retryable: true,
+                error: `The ${provider} response was interrupted before it finished`,
+              }
+            : { retryable: true },
+        );
+        // The unknown request keeps its outcome; nothing is settled twice.
+        expect(settles).toEqual(["first:unknown"]);
+      });
+    }
+
+    test(`${provider}: the SDK's refused retry after an interruption also recovers`, async () => {
+      coreRuntime({ refusals: 1 });
+      const recovery = recoveringRecovery();
+      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+      spy(db, "readSessionTurnToolProgressRecoveryState").mockResolvedValue({
+        toolCallInFlight: false,
+        toolInterruptedRecoveries: 0,
+      });
+      const lane = await interruptedLane([]);
+      const { deps } = failureDeps(
+        new Error("retry refused", {
+          cause: db.SUBSCRIPTION_CORE_CLAUDE.errors.requestOutcomeUnknown(),
+        }),
+        null,
+      );
+      placeOn(deps, provider, core({ requests: lane, titleRequests: undefined }));
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(recovery.mock.calls[0]![2]).toMatchObject({
+        detail: { code: "provider_unavailable", retryable: true },
+      });
+    });
+
+    test(`${provider}: an interruption with a lost lease stays terminal`, async () => {
+      coreRuntime({});
+      const recovery = spy(db, "requestSessionTurnRecovery");
+      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+      const lane = await interruptedLane([]);
+      const { deps } = failureDeps(
+        new AnthropicStreamInterruptedError("Claude stream ended without message_stop"),
+        null,
+      );
+      placeOn(deps, provider, core({ requests: lane, titleRequests: undefined }));
+      (deps.leases[provider === "Claude" ? "claude" : "xai"] as { lost: boolean }).lost = true;
+      await settleTurnFailure(deps as never).catch(() => undefined);
+      expect(recovery).not.toHaveBeenCalled();
+    });
+
+    test(`${provider}: a request refused by the durable fence for an earlier unknown outcome stays terminal`, async () => {
+      coreRuntime({});
+      const recovery = spy(db, "requestSessionTurnRecovery");
+      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+      const fenced = createCoreSubscriptionRequests({
+        reserve: async () => {
+          throw Object.assign(new Error("unknown"), {
+            code: "subscription_core_request_outcome_unknown",
+          });
+        },
+        settle: async () => undefined,
+        displayName: "Provider",
+        outcomeUnknown: () =>
+          Object.assign(new Error("unknown"), {
+            code: "subscription_core_request_outcome_unknown",
+          }),
+        isOutcomeUnknown: (error) =>
+          (error as { code?: unknown }).code === "subscription_core_request_outcome_unknown",
+      });
+      const refusal = await fenced
+        .reserve({ requestId: "first", transportAttempt: 1 })
+        .catch((error: unknown) => error);
+      expect(fenced.admissionRefused()).toBe(true);
+      const { deps } = failureDeps(refusal, null);
+      placeOn(deps, provider, core({ requests: fenced, titleRequests: undefined }));
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(recovery).not.toHaveBeenCalled();
+    });
+  }
 });

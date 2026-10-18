@@ -14,6 +14,7 @@ import type { SlashCommandContext } from "../hooks/use-slash-commands";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import {
   Actions,
+  AlternateSendButton,
   AttachButton,
   Attachments,
   CommandPalette,
@@ -268,6 +269,7 @@ export function ChatComposer({
                     {actionsStart}
                     <PauseButton />
                     <StopButton />
+                    <AlternateSendButton />
                     <SendButton />
                   </Actions>
                 </LayoutGroup>

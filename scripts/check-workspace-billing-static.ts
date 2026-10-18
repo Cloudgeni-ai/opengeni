@@ -202,6 +202,10 @@ export async function checkForbiddenProviderImports(
     if (
       ![
         "apps/api/src/routes/billing.ts",
+        "apps/api/src/billing-stripe-customer.ts",
+        "apps/api/src/billing-subscriptions.ts",
+        "apps/api/test/billing-subscriptions.test.ts",
+        "apps/api/test/billing-subscriptions-review-postgres.test.ts",
         "apps/api/test/scoped-credit-checkout.test.ts",
         "apps/api/test/scoped-credits-postgres.test.ts",
         "apps/api/test/stripe-dispute-postgres.test.ts",

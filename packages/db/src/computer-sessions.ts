@@ -16,7 +16,7 @@ import {
   type InteractionLifecycleOperationReceipt as InteractionLifecycleOperationReceiptValue,
   type InteractionPlacement,
 } from "@opengeni/contracts";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import { attachedDeviceGenerationMatches } from "./attached-browser-devices";
 import { type Database, withRlsContext } from "./database";
 import {
@@ -291,7 +291,14 @@ async function replayedMutation(
 
 export async function listComputerSessions(
   db: Database,
-  input: { accountId: string; workspaceId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    /** Only sessions with any association to this agent session. */
+    associatedSessionId?: string;
+    /** Defaults to true (complete history). */
+    includeTerminal?: boolean;
+  },
 ): Promise<ComputerSessionListResponseValue> {
   return await withRlsContext(
     db,
@@ -300,7 +307,22 @@ export async function listComputerSessions(
       const rows = await scopedDb
         .select()
         .from(schema.computerSessions)
-        .where(eq(schema.computerSessions.workspaceId, input.workspaceId))
+        .where(
+          and(
+            eq(schema.computerSessions.workspaceId, input.workspaceId),
+            input.includeTerminal === false
+              ? notInArray(schema.computerSessions.lifecycle, ["ended", "failed"])
+              : undefined,
+            input.associatedSessionId
+              ? sql`exists (
+                  select 1 from ${schema.computerSessionAssociations}
+                  where ${schema.computerSessionAssociations.workspaceId} = ${input.workspaceId}
+                    and ${schema.computerSessionAssociations.computerSessionId} = ${schema.computerSessions.id}
+                    and ${schema.computerSessionAssociations.sessionId} = ${input.associatedSessionId}
+                )`
+              : undefined,
+          ),
+        )
         .orderBy(desc(schema.computerSessions.lastUsedAt), desc(schema.computerSessions.id));
       const associations = await loadAssociations(
         scopedDb,

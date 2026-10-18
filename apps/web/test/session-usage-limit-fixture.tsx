@@ -72,8 +72,8 @@ const qa = {
   }>,
   reads: {} as Partial<Record<ScenarioName, number>>,
   failNext: {} as Partial<Record<ScenarioName, string>>,
-  /** Fail this many upcoming reads of a task with a 503. */
-  failReads: {} as Partial<Record<ScenarioName, number>>,
+  /** Keep an outage active across focus/poll refreshes until the test releases it. */
+  readOutage: {} as Partial<Record<ScenarioName, boolean>>,
   /** Every save's operation, to prove an exact retry reuses it. */
   saveOps: [] as Array<{ scenario: ScenarioName; operationId: string }>,
   saveDelayMs: 150,
@@ -134,10 +134,9 @@ function scenarioClient(name: ScenarioName, initial: SessionUsageLimit) {
   return {
     getSessionUsageLimit: async () => {
       qa.reads[name] = (qa.reads[name] ?? 0) + 1;
+      const outage = qa.readOutage[name];
       await delay(60);
-      const failing = qa.failReads[name] ?? 0;
-      if (failing > 0) {
-        qa.failReads[name] = failing - 1;
+      if (outage) {
         throw apiError(503, "unavailable", "session_usage_limit_unavailable", "Unavailable");
       }
       return current;

@@ -140,14 +140,17 @@ workspace bindings never acquire a personal owner. The account-qualified routes
 are separately visible to tool discovery, so selecting a tool also selects its
 account. Missing or revoked accounts do not fall back to another identity.
 
-Creating a session revalidates inherited workspace account identity. If an
-accepted account disappeared, needs reauthorization, or changed authorization
-generation, creation is refused. The first-party tool returns
-`session_create_connection_selection_unavailable` with `retryable: false`;
-HTTP creation returns `SESSION_CREATE_CONNECTION_SELECTION_UNAVAILABLE` (409).
-Repeating the same accepted selection cannot refresh authority. A new authorized
-turn must select current eligible accounts; neither transport silently removes,
-refreshes or substitutes an account. Unknown database failures remain generic.
+Creating a session revalidates inherited workspace account identity. Agent-created
+work copies its parent turn's accounts, and a shared account among them may have
+disappeared, need reauthorization, or have changed authorization generation since.
+The new session then runs without that connector, the same way the parent's own
+turn skips it, and keeps every other account. Nothing is refreshed, added or
+substituted, and personal accounts keep their own fence. Only an account that
+lapses concurrently, between this check and the session insert, is still refused
+by the fence: the first-party tool returns
+`session_create_connection_selection_unavailable` with `retryable: false`; HTTP
+creation returns `SESSION_CREATE_CONNECTION_SELECTION_UNAVAILABLE` (409).
+Unknown database failures remain generic.
 
 Initial turns and follow-up messages resolve the same executable connector
 policy before freezing accounts. Workspace-default connectors participate even

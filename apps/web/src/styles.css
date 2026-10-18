@@ -268,24 +268,40 @@ body {
   color: var(--color-fg);
 }
 
-/* Subtle scrollbars */
+/* Subtle scrollbars. On classic-scrollbar platforms (see markClassicScrollbars
+   in @opengeni/react) Chromium would draw arrow buttons on these, so engines
+   with ::-webkit-scrollbar get a slim rounded thumb that widens on hover. */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--color-border-strong) transparent;
 }
 
-*::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
+@supports selector(::-webkit-scrollbar) {
+  :where(:root[data-og-scrollbars="classic"]) * {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
 
-*::-webkit-scrollbar-thumb {
-  background: var(--color-border-strong);
-  border-radius: 999px;
-}
+  :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    background: transparent;
+  }
 
-*::-webkit-scrollbar-track {
-  background: transparent;
+  :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: var(--color-border-strong) padding-box;
+  }
+
+  :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-thumb:hover {
+    border-width: 2px;
+    background-color: var(--color-fg-subtle);
+  }
+
+  :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
 }
 
 /* Focus ring. One calm, intentional treatment: a soft brand-tinted ring set off
@@ -451,6 +467,13 @@ body {
   animation: pending-dot 1.2s infinite ease-in-out both;
 }
 
+/* Spend the title's last pixels on letters, not an ellipsis. Keep the fade
+   within the title column, before the gap to trailing icons. The mask affects
+   only text, so the rail glow and selected/hover backgrounds stay untouched. */
+[data-session-row-title] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 1rem), transparent);
+}
+
 /* Workspace Insights — tabular figures for meter columns */
 [data-insights] {
   font-feature-settings: "cv11", "ss01", "ss03", "tnum";
@@ -613,4 +636,20 @@ html[data-desktop="macos"]:has(nav[data-collapsed="true"]) [data-titlebar] {
    window) puts its tab row under the traffic lights. */
 html[data-desktop="macos"] [data-workspace-surface][role="dialog"] [data-dock-chrome] > :first-child {
   padding-left: 84px;
+}
+
+/* Expanded Sites escape the rail into the modal top layer. Their own header
+   must reserve the native controls, independently of the rail underneath.
+   Inline previews and browser/embedded viewers keep their normal spacing. */
+html:is([data-desktop="macos"], [data-desktop="windows"]) [data-artifact-fullscreen] > [data-window-drag] {
+  min-height: 56px;
+}
+
+html[data-desktop="macos"] [data-artifact-fullscreen] > [data-window-drag] {
+  padding-left: 84px;
+}
+
+html[data-desktop="windows"] [data-artifact-fullscreen] > [data-window-drag] {
+  min-height: var(--og-caption-row-height);
+  padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
 }

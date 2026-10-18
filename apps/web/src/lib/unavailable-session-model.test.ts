@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { describe, expect, test } from "bun:test";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
@@ -59,7 +60,7 @@ const astra = catalogModel({ id: "gpt-6-astra", label: "GPT-6 Astra" });
 const sol = catalogModel({ id: "gpt-6-sol", label: "GPT-6 Sol", aliases: ["sol-latest"] });
 const codex = catalogModel({ id: "codex/gpt-6-sol", label: "GPT-6 Sol (Codex)", source: "codex" });
 const models = [astra, sol, codex];
-const rows = sortPickerRows(projectPickerRows(models));
+const rows = sortPickerRows(projectPickerRows(t, models));
 
 describe("sessionModelMissingFromCatalog", () => {
   const loaded = { models, error: null };
@@ -195,7 +196,7 @@ describe("unavailableModelReplacement", () => {
     });
     const pool = [astra, unselectableCodex, codexMini];
     const replacement = unavailableModelReplacement({
-      rows: sortPickerRows(projectPickerRows(pool)),
+      rows: sortPickerRows(projectPickerRows(t, pool)),
       defaultSelection: { model: "gpt-6-astra", reasoningEffort: "low", source: "deployment" },
       latencyMode: "standard",
       codexOnly: true,

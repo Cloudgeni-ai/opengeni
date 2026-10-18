@@ -31,6 +31,8 @@ import {
   type HumanInputFormMessages,
 } from "../human-input-model";
 import { SecretQuestionField, type SecretFieldHandle } from "./secret-question-field";
+import { linkifyText } from "./linkified-text";
+import { useOpenGeniText } from "../messages/runtime";
 
 export {
   answersFromDrafts,
@@ -107,8 +109,9 @@ function HumanInputRequestForm({
   allowedSaveTo,
   className,
 }: HumanInputFormProps) {
+  const t = useOpenGeniText();
   const formatError = useErrorMessage();
-  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
+  const messages = { ...defaultHumanInputFormMessages(t), ...messageOverrides };
   const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
   const decision = decisionButtons ? binaryDecision(request.questions) : null;
   const [decisionChoice, setDecisionChoice] = useState<string | null>(null);
@@ -196,10 +199,7 @@ function HumanInputRequestForm({
     setReviews(null);
     void Promise.all(
       questions.map(async (question) => {
-        if (!loadSkillReview)
-          throw new Error(
-            "This client cannot preview Skill files. Ask your administrator for a review-capable client.",
-          );
+        if (!loadSkillReview) throw new Error(t("humanInputForm.thisClientCannotPreviewSkill"));
         const reference = question.reference;
         const record = await loadSkillReview(reference);
         if (
@@ -209,7 +209,7 @@ function HumanInputRequestForm({
           !record.files.some((file) => file.path === "SKILL.md")
         ) {
           throw new SkillReviewVerificationError(
-            "The requested Skill revision could not be verified.",
+            t("humanInputForm.theRequestedSkillRevisionCould"),
           );
         }
         return [question.id, record] as const;
@@ -235,7 +235,7 @@ function HumanInputRequestForm({
               cause instanceof SkillReviewVerificationError
                 ? cause.message
                 : !loadSkillReview
-                  ? "This client cannot preview Skill files. Ask your administrator for a review-capable client."
+                  ? t("humanInputForm.thisClientCannotPreviewSkill")
                   : undefined,
             ),
           });
@@ -243,7 +243,7 @@ function HumanInputRequestForm({
     return () => {
       current = false;
     };
-  }, [loadSkillReview, reviewIdentity, reviewReload, formatError]);
+  }, [loadSkillReview, reviewIdentity, reviewReload, formatError, t]);
   const visibleReviews =
     reviews?.loader === loadSkillReview && reviews?.identity === reviewIdentity ? reviews : null;
   const preview = (question: HumanInputQuestion) => {
@@ -254,12 +254,16 @@ function HumanInputRequestForm({
         {record ? (
           <>
             <p className="text-og-sm">
-              {record.title ?? "Skill"} · {record.scope} · {record.files.length} files
+              {record.title ?? t("humanInputForm.skill")}{" "}
+              {t("humanInputForm.scopeLengthFiles", {
+                scope: record.scope,
+                length: record.files.length,
+              })}
             </p>
             <p className="text-og-xs text-og-fg-muted">
               {question.skillReview.removalOperationId
-                ? "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged."
-                : "Saving activates these exact files. No additional review is required."}
+                ? t("humanInputForm.permanentlyDeletesThisSkillAnd")
+                : t("humanInputForm.savingActivatesTheseExactFiles")}
             </p>
             {record.files.map((file) => (
               <details key={file.path} open={file.path === "SKILL.md"}>
@@ -276,12 +280,12 @@ function HumanInputRequestForm({
               {visibleReviews.error}
             </p>
             <button type="button" onClick={() => setReviewReload((value) => value + 1)}>
-              Retry preview
+              {t("humanInputForm.retryPreview")}
             </button>
           </>
         ) : (
           <p role="status" className="text-og-sm">
-            Loading the exact Skill files…
+            {t("humanInputForm.loadingTheExactSkillFiles")}
           </p>
         )}
       </div>
@@ -378,14 +382,14 @@ function HumanInputRequestForm({
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    const result = answersFromDrafts(request.questions, drafts, messages);
+    const result = answersFromDrafts(t, request.questions, drafts, messages);
     const secretAnswers: HumanInputSecretAnswer[] = [];
     const secretPublicAnswers = new Map<string, HumanInputAnswer>();
     for (const question of request.questions) {
       if (question.kind !== "secret") continue;
       const handle = secretHandles.current.get(question.id);
       if (!handle) continue;
-      const secret = secretAnswerFromReading(question, handle.read(), messages);
+      const secret = secretAnswerFromReading(t, question, handle.read(), messages);
       if (!secret) continue;
       if ("error" in secret) {
         result.errors[question.id] = secret.error;
@@ -414,8 +418,8 @@ function HumanInputRequestForm({
     if (unreviewedSave) {
       setValidationErrors({
         [unreviewedSave.id]: unreviewedSave.skillReview?.removalOperationId
-          ? "Load the exact Skill proposal before approving permanent deletion."
-          : "Load the exact Skill files before saving.",
+          ? t("humanInputForm.loadTheExactSkillProposal")
+          : t("humanInputForm.loadTheExactSkillFiles"),
       });
       return;
     }
@@ -439,7 +443,10 @@ function HumanInputRequestForm({
     request.expiresAt ? (
       <>
         {messages.deadlineLabel}{" "}
-        <time dateTime={request.expiresAt} title={new Date(request.expiresAt).toLocaleString()}>
+        <time
+          dateTime={request.expiresAt}
+          title={new Date(request.expiresAt).toLocaleString(t.locale)}
+        >
           {messages.formatDeadline(request.expiresAt)}
         </time>
       </>
@@ -503,8 +510,11 @@ function HumanInputRequestForm({
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-              <h2 id={titleId} className="text-og-md font-semibold text-og-fg">
-                {resolvedTitle}
+              <h2
+                id={titleId}
+                className="min-w-0 text-og-md font-semibold text-og-fg [overflow-wrap:anywhere]"
+              >
+                {linkifyText(resolvedTitle)}
                 {singleQuestion?.required && !request.allowSkip && !decision ? (
                   <span aria-hidden className="ml-1 text-og-status-failed">
                     *
@@ -523,21 +533,25 @@ function HumanInputRequestForm({
               ) : null}
             </div>
             {resolvedDescription ? (
-              <div className="mt-0.5 text-og-sm text-og-fg-muted">{resolvedDescription}</div>
+              <div className="mt-0.5 text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
+                {linkifyText(resolvedDescription)}
+              </div>
             ) : null}
             {request.expiresAt ? (
               <p className="mt-1 text-og-xs text-og-fg-subtle">
                 {messages.deadlineLabel}{" "}
                 <time
                   dateTime={request.expiresAt}
-                  title={new Date(request.expiresAt).toLocaleString()}
+                  title={new Date(request.expiresAt).toLocaleString(t.locale)}
                 >
                   {messages.formatDeadline(request.expiresAt)}
                 </time>
               </p>
             ) : null}
             {request.allowSkip && singleQuestion ? (
-              <p className="mt-1 text-og-xs text-og-fg-subtle">Or skip and let the agent decide.</p>
+              <p className="mt-1 text-og-xs text-og-fg-subtle">
+                {t("humanInputForm.orSkipAndLetThe")}
+              </p>
             ) : null}
           </div>
           <button
@@ -557,9 +571,9 @@ function HumanInputRequestForm({
           {decision.question.helpText ||
           decision.accept.description ||
           decision.decline.description ? (
-            <div className="shrink-0 space-y-1 px-4 pt-3 text-og-sm text-og-fg-muted">
+            <div className="shrink-0 space-y-1 px-4 pt-3 text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
               {decision.question.label && decision.question.helpText ? (
-                <p>{decision.question.helpText}</p>
+                <p>{linkifyText(decision.question.helpText)}</p>
               ) : null}
               {[decision.accept, decision.decline].map((option) =>
                 option.description ? (
@@ -828,6 +842,7 @@ function QuestionControls({
   onSecretEdited: () => void;
   onUpdate: (apply: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => void;
 }) {
+  const t = useOpenGeniText();
   const errorId = `${fieldId}-error`;
   const helpId = `${fieldId}-help`;
   const labelId = `${fieldId}-label`;
@@ -866,13 +881,13 @@ function QuestionControls({
             <label
               id={labelId}
               htmlFor={question.kind === "text" ? fieldId : undefined}
-              className="text-og-sm font-medium text-og-fg"
+              className="min-w-0 text-og-sm font-medium text-og-fg [overflow-wrap:anywhere]"
             >
               {questionNumber === null ? null : (
                 <span className="mr-1.5 tabular-nums text-og-fg-muted">{questionNumber}.</span>
               )}
               {questionNumber === null ? null : " "}
-              {visibleLabel}
+              {linkifyText(visibleLabel)}
               {question.required && !allowSkip ? (
                 <span aria-hidden className="ml-1 text-og-status-failed">
                   *
@@ -885,13 +900,13 @@ function QuestionControls({
             </label>
           </div>
           {question.label ? (
-            <p id={promptId} className="text-og-sm text-og-fg-muted">
-              {question.prompt}
+            <p id={promptId} className="text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
+              {linkifyText(question.prompt)}
             </p>
           ) : null}
           {question.helpText ? (
-            <p id={helpId} className="text-og-xs text-og-fg-subtle">
-              {question.helpText}
+            <p id={helpId} className="text-og-xs text-og-fg-subtle [overflow-wrap:anywhere]">
+              {linkifyText(question.helpText)}
             </p>
           ) : null}
           {hint ? (
@@ -906,8 +921,8 @@ function QuestionControls({
             <p className="text-og-xs text-og-fg-subtle">{messages.optional}</p>
           ) : null}
           {question.helpText && question.label ? (
-            <p id={helpId} className="mb-1.5 text-og-xs text-og-fg-subtle">
-              {question.helpText}
+            <p id={helpId} className="mb-1.5 text-og-xs text-og-fg-subtle [overflow-wrap:anywhere]">
+              {linkifyText(question.helpText)}
             </p>
           ) : null}
           {hint ? (
@@ -939,7 +954,7 @@ function QuestionControls({
             onEdited={onSecretEdited}
           />
         ) : (
-          <p className="text-og-sm text-og-fg-muted">This question can't be answered here.</p>
+          <p className="text-og-sm text-og-fg-muted">{t("humanInputForm.thisQuestionCanTBe")}</p>
         )
       ) : question.kind === "text" ? (
         <textarea
@@ -1047,14 +1062,17 @@ function QuestionControls({
                   {messages.other}
                 </label>
                 <label htmlFor={otherTextId} className="sr-only">
-                  {messages.other} answer for {visibleLabel}
+                  {t("humanInputForm.otherAnswerForVisiblelabel", {
+                    other: messages.other,
+                    visibleLabel,
+                  })}
                 </label>
                 <input
                   id={otherTextId}
                   type="text"
                   value={draft.other}
                   disabled={busy}
-                  placeholder="Type a value…"
+                  placeholder={t("humanInputForm.typeAValue")}
                   onClick={() => onUpdate(selectOtherDraft)}
                   onFocus={() => onUpdate(selectOtherDraft)}
                   onChange={(event) => {

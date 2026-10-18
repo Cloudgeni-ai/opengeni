@@ -11,6 +11,9 @@ import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { fakeFileDiff } from "./sandbox-fixtures";
 import { WorkbenchChanges, buildRail } from "../src/components/workbench-changes";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -333,12 +336,12 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
   });
 
   test("buildRail groups by top-level dir past the threshold, flat below it", async () => {
-    const flat = buildRail(manyFiles(5));
+    const flat = buildRail(englishText, manyFiles(5));
     expect(flat.rows.every((row) => row.kind === "file")).toBe(true);
     expect(flat.orderedFiles).toHaveLength(5);
 
     const mixed = [...manyFiles(15, "api"), ...manyFiles(15, "web")];
-    const grouped = buildRail(mixed);
+    const grouped = buildRail(englishText, mixed);
     const groupRows = grouped.rows.filter((row) => row.kind === "group");
     expect(groupRows.map((g) => (g.kind === "group" ? g.label : ""))).toEqual(["api", "web"]);
     // Ordering the files by group keeps rail index == pane section index.
@@ -353,7 +356,7 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
       { ...manyFiles(1, "api/src")[0]!, repoRoot: "api" },
       { ...manyFiles(1, "web/src")[0]!, repoRoot: "web" },
     ];
-    const rail = buildRail(files);
+    const rail = buildRail(englishText, files);
     expect(rail.grouped).toBe(true);
     expect(rail.rows.flatMap((row) => (row.kind === "group" ? [row.label] : []))).toEqual([
       "api",

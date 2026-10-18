@@ -7,6 +7,7 @@ import type {
   FeedbackSentiment,
   OpenGeniClient,
 } from "@opengeni/sdk";
+import { type OpenGeniText } from "./messages/runtime";
 
 export type FeedbackClient = Pick<OpenGeniClient, "createFeedback" | "listOwnFeedback">;
 
@@ -74,22 +75,27 @@ export function feedbackSubmission(
   return { ...payload, idempotencyKey: newKey() };
 }
 
-export function feedbackDialogCopy(target: {
-  sessionId?: string | undefined;
-  turnId?: string | undefined;
-}) {
+export function feedbackDialogCopy(
+  t: OpenGeniText,
+  target: {
+    sessionId?: string | undefined;
+    turnId?: string | undefined;
+  },
+) {
   return {
     title: target.turnId
-      ? "Rate this reply"
+      ? t("sessionFeedbackModel.rateThisReply")
       : target.sessionId
-        ? "Rate this session"
-        : "Send feedback",
+        ? t("sessionFeedbackModel.rateThisSession")
+        : t("sessionFeedbackModel.sendFeedback"),
     description: target.sessionId
-      ? "Share what worked or what could be better."
-      : "Tell us what could make Opengeni better.",
+      ? t("sessionFeedbackModel.shareWhatWorkedOrWhat")
+      : t("sessionFeedbackModel.tellUsWhatCouldMake"),
   };
 }
 
-export function feedbackSentimentLabel(sentiment: FeedbackSentiment): string {
-  return sentiment === "positive" ? "Thumbs up" : "Thumbs down";
+export function feedbackSentimentLabel(t: OpenGeniText, sentiment: FeedbackSentiment): string {
+  return sentiment === "positive"
+    ? t("sessionFeedbackModel.thumbsUp")
+    : t("sessionFeedbackModel.thumbsDown");
 }

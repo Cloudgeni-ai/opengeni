@@ -4,6 +4,7 @@ import {
   connectionStatusForState,
   type MachineState,
 } from "../types/machines";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type ConnectionStatusMeta = {
   label: string;
@@ -14,26 +15,28 @@ export type ConnectionStatusMeta = {
 };
 
 /** Token-backed meta for the three connection-status pill values. */
-export const CONNECTION_STATUS_META: Record<ConnectionStatus, ConnectionStatusMeta> = {
+export const CONNECTION_STATUS_META = (
+  t: OpenGeniText,
+): Record<ConnectionStatus, ConnectionStatusMeta> => ({
   online: {
-    label: "Online",
+    label: t("machineStatusPill.online"),
     dotClassName: "bg-og-status-running",
     badgeClassName: "text-og-status-running border-og-status-running/30 bg-og-status-running/10",
     pulse: false,
   },
   reconnecting: {
-    label: "Reconnecting",
+    label: t("machineStatusPill.reconnecting"),
     dotClassName: "bg-og-status-waiting",
     badgeClassName: "text-og-status-waiting border-og-status-waiting/35 bg-og-status-waiting/10",
     pulse: true,
   },
   offline: {
-    label: "Offline",
+    label: t("machineStatusPill.offline"),
     dotClassName: "bg-og-status-failed",
     badgeClassName: "text-og-fg-subtle border-og-border bg-og-status-failed/10",
     pulse: false,
   },
-};
+});
 
 export type MachineStateBadgeMeta = {
   label: string;
@@ -45,20 +48,22 @@ export type MachineStateBadgeMeta = {
  * `consent_required` / `display_unavailable` / `enrolling` describe a capability
  * limitation, not reachability, so they render as their own tinted chip.
  */
-export const MACHINE_STATE_BADGE_META: Partial<Record<MachineState, MachineStateBadgeMeta>> = {
+export const MACHINE_STATE_BADGE_META = (
+  t: OpenGeniText,
+): Partial<Record<MachineState, MachineStateBadgeMeta>> => ({
   consent_required: {
-    label: "Consent required",
+    label: t("machineStatusPill.consentRequired"),
     badgeClassName: "text-og-status-waiting border-og-status-waiting/35 bg-og-status-waiting/10",
   },
   display_unavailable: {
-    label: "No display",
+    label: t("machineStatusPill.noDisplay"),
     badgeClassName: "text-og-fg-muted border-og-border bg-og-surface-2",
   },
   enrolling: {
-    label: "Enrolling",
+    label: t("machineStatusPill.enrolling"),
     badgeClassName: "text-og-accent border-og-accent/30 bg-og-accent-soft",
   },
-};
+});
 
 export type ConnectionStatusPillProps = {
   status: ConnectionStatus;
@@ -79,7 +84,8 @@ export function ConnectionStatusPill({
   size = "md",
   className,
 }: ConnectionStatusPillProps) {
-  const meta = CONNECTION_STATUS_META[status];
+  const t = useOpenGeniText();
+  const meta = CONNECTION_STATUS_META(t)[status];
   return (
     <span
       data-connection-status={status}
@@ -103,7 +109,8 @@ export type ConnectionDotProps = {
 
 /** Just the dot — for dense rows, the dock header, and timeline notices. */
 export function ConnectionDot({ status, className }: ConnectionDotProps) {
-  const meta = CONNECTION_STATUS_META[status];
+  const t = useOpenGeniText();
+  const meta = CONNECTION_STATUS_META(t)[status];
   return (
     <span
       className={cn(
@@ -140,7 +147,8 @@ export function MachineStatusPill({
   size = "md",
   className,
 }: MachineStatusPillProps) {
-  const stateBadge = MACHINE_STATE_BADGE_META[state];
+  const t = useOpenGeniText();
+  const stateBadge = MACHINE_STATE_BADGE_META(t)[state];
   const shared = (sharedSessionCount ?? 0) > 1;
   return (
     <span
@@ -168,9 +176,9 @@ export function MachineStatusPill({
             "text-og-accent border-og-accent/30 bg-og-accent-soft",
             size === "sm" ? "px-1.5 py-px text-og-xs" : "px-2 py-0.5 text-og-sm",
           )}
-          title={`${sharedSessionCount} sessions are on this machine`}
+          title={t("machineStatusPill.sessionsOnThisMachine", { count: sharedSessionCount ?? 0 })}
         >
-          Shared · {sharedSessionCount}
+          {t("machineStatusPill.sharedCount", { count: sharedSessionCount ?? 0 })}
         </span>
       ) : null}
     </span>

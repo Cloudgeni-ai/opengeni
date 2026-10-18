@@ -299,6 +299,12 @@ describe("unit process planning", () => {
     ).toBe(true);
     expect(sourceUsesWallClockPerformanceAssertion("const now = Date.now();")).toBe(false);
     expect(sourceUsesWallClockPerformanceAssertion("expect(rows).toBeLessThan(100);")).toBe(false);
+    expect(
+      sourceUsesWallClockPerformanceAssertion(
+        "// opengeni:test-wall-clock-sensitive\nexpect(block.durationMs).toBeGreaterThanOrEqual(200);",
+      ),
+    ).toBe(true);
+    expect(sourceUsesWallClockPerformanceAssertion("// wall clock sensitive")).toBe(false);
   });
 
   test("recognizes only shared-container cluster-role mutations", () => {
@@ -357,7 +363,6 @@ describe("unit process planning", () => {
       "apps/worker/test/editable-artifact-outbox-posture-postgres.test.ts",
       "packages/db/test/editable-artifact-materialization-postgres.test.ts",
       "packages/db/test/editable-artifacts-postgres.test.ts",
-      "packages/db/test/session-activity-commit-gate.test.ts",
       "packages/db/test/migration-0120-durable-goal-wake.test.ts",
       "packages/db/test/migration-0138-sandbox-checkpoints.test.ts",
       "packages/db/test/migration-0352-session-variable-set-attachments.test.ts",

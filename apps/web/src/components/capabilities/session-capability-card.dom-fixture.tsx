@@ -1,4 +1,5 @@
 // Run explicitly through session-capability-card.test.tsx so Radix sees the DOM at import time.
+import { t } from "@/lib/console-text";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, StrictMode } from "react";
@@ -201,8 +202,8 @@ async function render(
         },
       },
     ];
-    expect(buildTimeline(startupEvents)).toEqual([]);
-    const requested = buildTimeline([
+    expect(buildTimeline(t, startupEvents)).toEqual([]);
+    const requested = buildTimeline(t, [
       ...startupEvents,
       {
         ...startupEvents[0]!,
@@ -229,6 +230,7 @@ async function render(
     expect(auth).toBeDefined();
     if (!auth) throw new Error("Requested authorization event was lost from the timeline");
     const recommendation = sessionAuthRecommendation(
+      t,
       auth,
       (await context.client.listCapabilities()).items as CapabilityCatalogItem[],
     );

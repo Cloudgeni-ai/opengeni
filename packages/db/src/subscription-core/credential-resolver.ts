@@ -133,7 +133,12 @@ export function buildSubscriptionCoreCredentialResolver<
   Snapshot,
 >(
   input: SubscriptionCoreResolverInput<Loaded, Refreshed, Snapshot>,
-): { getToken: () => Promise<Snapshot>; refresh: () => Promise<Snapshot> } {
+): {
+  getToken: () => Promise<Snapshot>;
+  /** Scoped read only: null when normal use would require credential renewal. */
+  getFreshToken: () => Promise<Snapshot | null>;
+  refresh: () => Promise<Snapshot>;
+} {
   const { errors, holderKey } = input;
   const load = async (): Promise<Loaded> => {
     const loaded = await input.load();
@@ -201,21 +206,28 @@ export function buildSubscriptionCoreCredentialResolver<
         throw errors.accessLost();
     }
   };
-  const resolve = async (force: boolean): Promise<Snapshot> => {
-    const loaded = await load();
+  const stale = (loaded: Loaded): boolean => {
     const expiry = loaded.expiresAt ?? input.embeddedExpiry(loaded);
     const policy = input.policy(loaded);
-    const stale =
-      force ||
-      (policy === null
-        ? // A credential that never renews is used until its known expiry.
-          expiry !== null && expiry.getTime() <= Date.now()
-        : expiry
-          ? expiry.getTime() <= Date.now() + policy.windowMs
-          : loaded.lastRefreshAt
-            ? loaded.lastRefreshAt.getTime() < Date.now() - policy.fallbackMs
-            : true);
-    return stale ? await doRefresh(loaded) : input.snapshot(loaded);
+    return policy === null
+      ? // A credential that never renews is used until its known expiry.
+        expiry !== null && expiry.getTime() <= Date.now()
+      : expiry
+        ? expiry.getTime() <= Date.now() + policy.windowMs
+        : loaded.lastRefreshAt
+          ? loaded.lastRefreshAt.getTime() < Date.now() - policy.fallbackMs
+          : true;
   };
-  return { getToken: () => resolve(false), refresh: () => resolve(true) };
+  const resolve = async (force: boolean): Promise<Snapshot> => {
+    const loaded = await load();
+    return force || stale(loaded) ? await doRefresh(loaded) : input.snapshot(loaded);
+  };
+  return {
+    getToken: () => resolve(false),
+    getFreshToken: async () => {
+      const loaded = await load();
+      return stale(loaded) ? null : input.snapshot(loaded);
+    },
+    refresh: () => resolve(true),
+  };
 }

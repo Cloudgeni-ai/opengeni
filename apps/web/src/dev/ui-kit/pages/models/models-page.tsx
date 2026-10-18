@@ -754,18 +754,20 @@ function useDetailRowProps(target: DetailTarget, render: () => ReactNode) {
   };
 }
 
-/** ⋯ on an organization row: keep new work on the organization's accounts. */
+/** ⋯ on an organization row: keep new work on only the organization's accounts. */
 function AlwaysOrganizationItem() {
   const { setData } = useModels();
   return (
     <DropdownMenuItem
       onSelect={() => {
         setData((current) => ({ ...current, legacySource: "organization" }));
-        toast.success(`New work in ${currentWorkspace.name} now uses the organization's accounts`);
+        toast.success(
+          `New work in ${currentWorkspace.name} now uses only the organization's accounts`,
+        );
       }}
     >
       <BuildingIcon />
-      Always use the organization's accounts
+      Use only the organization's accounts
     </DropdownMenuItem>
   );
 }

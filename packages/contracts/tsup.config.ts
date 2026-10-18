@@ -6,6 +6,7 @@ export default defineConfig({
   entry: [
     "src/modal-native-proof-v2.ts",
     "src/allowance-refusal.ts",
+    "src/learning-refusal.ts",
     "src/usage-allowances.ts",
     "src/session-usage-limits.ts",
     "src/session-usage-limit-refusal.ts",
@@ -36,6 +37,7 @@ export default defineConfig({
     "src/tool-review-presentation.ts",
     "src/code-search.ts",
     "src/workspace-integration-wire.ts",
+    "src/vault-provider-wire.ts",
     "src/organization-access.ts",
     "src/organization-recovery.ts",
     "src/personal-github.ts",

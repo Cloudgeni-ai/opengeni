@@ -161,7 +161,7 @@ export function createSkillPublishAttemptToolDefinition(input: {
     codemodePath: ["opengeni", "skill_publish"],
     title: "Publish Skill directory",
     description:
-      "Save a complete sandbox Skill directory through the same Learning-controlled service as skill_save. Reads UTF-8 text files directly; do not serialize the directory into arguments. Files missing from the directory are removed from the new revision. Supply the checkout revision and scope version; stale edits are refused. The result reports whether the change is live or pending approval.",
+      "Save a complete sandbox Skill directory through the same Learning-controlled service as skill_save. Reads UTF-8 text files directly; do not serialize the directory into arguments. Files missing from the directory are removed from the new revision. Supply the checkout revision and scope version; stale edits are refused. Set scope as in skill_save only to publish a new Skill somewhere other than this chat's default. The result reports whether the change is live or pending approval.",
     inputSchema: {
       type: "object",
       properties: {
@@ -170,6 +170,12 @@ export function createSkillPublishAttemptToolDefinition(input: {
         expectedRevisionId: { type: ["string", "null"], format: "uuid" },
         expectedScopeVersion: { type: "integer", minimum: 0 },
         directory: { type: "string", minLength: 1, maxLength: 1024 },
+        scope: {
+          type: "string",
+          enum: ["personal", "workspace"],
+          description:
+            "Only to save a new Skill somewhere other than this chat's default. Omit when editing.",
+        },
         reason: { type: "string", minLength: 1, maxLength: 2000 },
       },
       required: [
@@ -199,6 +205,7 @@ export function createSkillPublishAttemptToolDefinition(input: {
         expectedRevisionId: args.expectedRevisionId as string | null,
         expectedScopeVersion: args.expectedScopeVersion as number,
         files: artifact.files,
+        ...(args.scope === "personal" || args.scope === "workspace" ? { scope: args.scope } : {}),
         reason: args.reason as string,
       });
       return {

@@ -90,7 +90,9 @@ export function projectPendingApprovals(events: SessionEvent[]): PendingApproval
       }
       case "turn.completed":
       case "turn.failed":
-      case "turn.cancelled": {
+      case "turn.cancelled":
+      // A Steer that replaces an approval wait closes its approvals unexecuted.
+      case "turn.superseded": {
         // Scope clearing to the turn that raised the approvals when both
         // sides carry a turn id; clear conservatively when either is unknown.
         if (owningTurnId === null || event.turnId == null || event.turnId === owningTurnId) {

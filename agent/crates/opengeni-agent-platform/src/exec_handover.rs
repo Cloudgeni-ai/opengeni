@@ -55,6 +55,7 @@ pub struct OpCgroupHandover {
 
 /// Everything a successor needs to keep owning one contained exec.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // Independent additive lifecycle facts preserve old handovers.
 pub struct ExecHandover {
     /// The stopped anchor that owns the process group and holds the lease.
     pub anchor: ProcHandover,
@@ -66,6 +67,12 @@ pub struct ExecHandover {
     pub running: bool,
     /// Whether the post-exit group kill already ran.
     pub wait_killed_group: bool,
+    /// Positive remaining-child cleanup evidence from the predecessor.
+    #[serde(default)]
+    pub background_children_stopped: bool,
+    /// Whether cleanup was explicitly requested rather than caused by shell exit.
+    #[serde(default)]
+    pub termination_requested: bool,
     /// The write end of the anchor's death lease.
     pub lease_fd: Option<RawFd>,
     /// The command's stdin write end, when the runner still feeds it.
@@ -314,18 +321,6 @@ mod tests {
         nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
     }
 
-    /// Whether our own direct child has exited (reaping it if so). A zombie
-    /// still answers signal probes, so `alive` cannot tell for direct children.
-    fn reaped(pid: i32) -> bool {
-        !matches!(
-            nix::sys::wait::waitpid(
-                nix::unistd::Pid::from_raw(pid),
-                Some(nix::sys::wait::WaitPidFlag::WNOHANG),
-            ),
-            Ok(nix::sys::wait::WaitStatus::StillAlive)
-        )
-    }
-
     /// A running command keeps producing output and is waited to its real exit
     /// code across handover and adoption; nothing is signaled in between.
     #[tokio::test]
@@ -377,6 +372,8 @@ mod tests {
     /// group, including a descendant.
     #[tokio::test]
     async fn an_adopted_command_is_still_killed_with_its_group() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        let drain = std::sync::Arc::new(UpdateDrain::default());
         let mut exec = spawn_contained(script("sleep 300 & echo $!; wait"), None).unwrap();
         let mut stdout = BufReader::new(exec.stdout.take().unwrap());
         let mut line = String::new();
@@ -385,11 +382,21 @@ mod tests {
         exec.stdout = Some(stdout.into_inner());
         let handover = exec.into_handover().map_err(|(_, error)| error).unwrap();
         let child = handover.child.pid.unwrap();
-        let adopted = crate::ContainedExec::adopt(&handover, None).unwrap();
+        let adopted = crate::with_work_reservation_sync(drain.reserve_adopted_work(), || {
+            crate::ContainedExec::adopt(&handover, None).unwrap()
+        });
         assert!(alive(grandchild));
         drop(adopted);
+        assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
+        assert!(!drain.seal_update_with_handover("update"));
         for _ in 0..100 {
-            if reaped(child) && !alive(grandchild) {
+            // The cleanup owner must obtain the receipt; this test must not
+            // steal it with waitpid and then infer safety from a signal probe.
+            if drain.snapshot().is_some_and(|state| state.routed == 0)
+                && !alive(child)
+                && !alive(grandchild)
+            {
+                assert!(drain.seal_update("update"));
                 return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

@@ -232,6 +232,8 @@ function InboxRow(props: {
   when: string;
   actions?: ReactNode;
   menu: ReactNode;
+  /** One-click removal, shown on hover or focus (always on touch). */
+  dismiss?: { label: string; pending: boolean; onDismiss: () => void };
   onOpen: () => void;
   /** False when the person can't open the session (another member's private one). */
   canOpen?: boolean;
@@ -290,7 +292,19 @@ function InboxRow(props: {
             </div>
           ) : null}
         </div>
-        <div className="relative z-10 -mr-1.5 -mt-1 shrink-0 self-start">
+        <div className="relative z-10 -mr-1.5 -mt-1 flex shrink-0 items-center self-start">
+          {props.dismiss ? (
+            <button
+              type="button"
+              aria-label={`${props.dismiss.label}: ${props.title}`}
+              title={props.dismiss.label}
+              disabled={props.dismiss.pending}
+              onClick={props.dismiss.onDismiss}
+              className="grid size-8 place-items-center rounded-[10px] text-fg-subtle opacity-0 transition-[opacity,color,background-color] duration-[120ms] hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-brand/55 group-hover/row:opacity-100 group-focus-within/row:opacity-100 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-11 pointer-coarse:opacity-100"
+            >
+              <XIcon aria-hidden="true" className="size-4" />
+            </button>
+          ) : null}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -561,6 +575,15 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         actions={control(item)}
         onOpen={() => openSession(item)}
         canOpen={item.sessionAvailable !== false}
+        dismiss={
+          item.kind === "notification" || item.kind === "reply"
+            ? {
+                label: "Dismiss",
+                pending: Boolean(busy[item.id]),
+                onDismiss: () => dismiss(item),
+              }
+            : undefined
+        }
         menu={
           <>
             {item.sessionAvailable !== false ? (

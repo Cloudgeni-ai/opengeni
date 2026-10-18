@@ -1,23 +1,24 @@
 import { useState, type FormEvent } from "react";
 import type { ConnectAttempt, ConnectController } from "@opengeni/connect";
 import { useConnect } from "./hooks/use-connect";
+import { useOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
-const setupStatus: Record<ConnectAttempt["state"], string> = {
-  ready: "Ready to connect",
-  requires_user_action: "Authorize your account",
-  credential_input: "Enter connection details",
-  provider_wait: "Waiting for authorization",
-  account_selection: "Choose an account",
-  resource_selection: "Choose resources",
-  preview: "Choose tools",
-  installing: "Adding selected tools…",
-  connected_but_incomplete: "Choose which tools to add",
-  complete: "Connection ready",
-  cancelled: "Setup cancelled",
-  expired: "Setup expired",
-  failed: "Setup could not finish",
-  uncertain: "Setup outcome needs checking",
-};
+const setupStatus = (t: OpenGeniText): Record<ConnectAttempt["state"], string> => ({
+  ready: t("connectSetup.readyToConnect"),
+  requires_user_action: t("connectSetup.authorizeYourAccount"),
+  credential_input: t("connectSetup.enterConnectionDetails"),
+  provider_wait: t("connectSetup.waitingForAuthorization2"),
+  account_selection: t("connectSetup.chooseAnAccount"),
+  resource_selection: t("connectSetup.chooseResources"),
+  preview: t("connectSetup.chooseTools"),
+  installing: t("connectSetup.addingSelectedTools"),
+  connected_but_incomplete: t("connectSetup.chooseWhichToolsToAdd"),
+  complete: t("connectSetup.connectionReady"),
+  cancelled: t("connectSetup.setupCancelled"),
+  expired: t("connectSetup.setupExpired"),
+  failed: t("connectSetup.setupCouldNotFinish"),
+  uncertain: t("connectSetup.setupOutcomeNeedsChecking"),
+});
 
 /** GitHub returned from a non-owner's install request: an organization owner must approve. */
 export function isOwnerApprovalPending(attempt: Pick<ConnectAttempt, "error">): boolean {
@@ -70,8 +71,11 @@ function ScopedSetup({
   onBrowseResources,
   onSelectAccount,
   className,
-  authorizeLabel = "Authorize connection",
+  authorizeLabel: authorizeLabelProp,
 }: ConnectSetupProps) {
+  const t = useOpenGeniText();
+  const authorizeLabel =
+    authorizeLabelProp === undefined ? t("connectSetup.authorizeConnection") : authorizeLabelProp;
   const view = useConnect(controller);
   const [localError, setLocalError] = useState(false);
   const [navigating, setNavigating] = useState(false);
@@ -88,9 +92,9 @@ function ScopedSetup({
     return (
       <section
         className={["og-connect-setup", className].filter(Boolean).join(" ")}
-        aria-label="Connection setup"
+        aria-label={t("connectSetup.connectionSetup")}
       >
-        <p role="status">Choose a connection to begin.</p>
+        <p role="status">{t("connectSetup.chooseAConnectionToBegin")}</p>
       </section>
     );
   const action = attempt.nextAction;
@@ -150,49 +154,46 @@ function ScopedSetup({
   return (
     <section
       className={["og-connect-setup", className].filter(Boolean).join(" ")}
-      aria-label="Connection setup"
+      aria-label={t("connectSetup.connectionSetup")}
       aria-busy={view.busy || navigating}
     >
       <div className="og-connect-setup-summary">
         <p className="og-connect-setup-scope">
-          {attempt.ownership === "personal" ? "Personal connection" : "Workspace connection"}
+          {attempt.ownership === "personal"
+            ? t("connectSetup.personalConnection")
+            : t("connectSetup.workspaceConnection")}
         </p>
         <p role="status" className="og-connect-setup-status">
           {awaitingOwner
-            ? "Waiting for an organization owner"
+            ? t("connectSetup.waitingForAnOrganizationOwner")
             : attempt.mcpSetup && attempt.state === "credential_input"
-              ? "Enter the requested key"
-              : setupStatus[attempt.state]}
+              ? t("connectSetup.enterTheRequestedKey")
+              : setupStatus(t)[attempt.state]}
         </p>
         <p className="og-connect-setup-description">
           {attempt.ownership === "personal"
-            ? "Only your work can use this connection."
-            : "Work in this workspace can use this connection."}
+            ? t("connectSetup.onlyYourWorkCanUse")
+            : t("connectSetup.workInThisWorkspaceCan")}
         </p>
       </div>
-      {attempt.account && <p>Account: {attempt.account.label}</p>}
+      {attempt.account && <p>{t("connectSetup.accountLabel", { label: attempt.account.label })}</p>}
       {awaitingOwner && (
         <div className="og-connect-setup-pending">
-          <p>
-            Your request was sent. GitHub asked the owners of your organization to approve Opengeni.
-          </p>
+          <p>{t("connectSetup.yourRequestWasSentGithub")}</p>
           <ol>
-            <li>An organization owner approves the request on GitHub.</li>
-            <li>
-              An owner then connects the organization here. If they don't use Opengeni yet, invite
-              them to this workspace first.
-            </li>
+            <li>{t("connectSetup.anOrganizationOwnerApprovesThe")}</li>
+            <li>{t("connectSetup.anOwnerThenConnectsThe")}</li>
           </ol>
-          <p>Nothing is connected until then. You can close this and keep working.</p>
+          <p>{t("connectSetup.nothingIsConnectedUntilThen")}</p>
         </div>
       )}
       {(localError || view.error || (attempt.error && !awaitingOwner)) && (
         <p role="alert">
           {attempt.error?.code === "source_changed"
-            ? "The integration source changed. Review the updated tools before adding them."
+            ? t("connectSetup.theIntegrationSourceChangedReview")
             : attempt.error?.code === "mcp_verification_failed"
-              ? "Could not verify this connection. Check the key and server, then submit again. Nothing was connected."
-              : "Connection setup could not continue. Refresh its status before trying again."}
+              ? t("connectSetup.couldNotVerifyThisConnection")
+              : t("connectSetup.connectionSetupCouldNotContinue")}
         </p>
       )}
       {!terminal && (
@@ -202,7 +203,7 @@ function ScopedSetup({
               action.type,
             ) ? (
               <legend className={attempt.mcpSetup ? "og-capability-catalog-sr-only" : undefined}>
-                Connection details
+                {t("connectSetup.connectionDetails")}
               </legend>
             ) : null}
             {attempt.state === "connected_but_incomplete" &&
@@ -213,7 +214,7 @@ function ScopedSetup({
                   className="og-connect-setup-primary"
                   onClick={() => invoke(() => view.advance({ type: "retry" }, crypto.randomUUID()))}
                 >
-                  Choose tools
+                  {t("connectSetup.chooseTools")}
                 </button>
               )}
             {action.type === "credentials" &&
@@ -223,7 +224,9 @@ function ScopedSetup({
                   {field.options ? (
                     <select name={`field-${i}`} required={field.required} defaultValue="">
                       <option value="">
-                        {field.required ? "Choose an option" : "No account (public service)"}
+                        {field.required
+                          ? t("connectSetup.chooseAnOption")
+                          : t("connectSetup.noAccountPublicService")}
                       </option>
                       {field.options.map((option) => (
                         <option key={option.value} value={option.value}>
@@ -243,10 +246,10 @@ function ScopedSetup({
               ))}
             {action.type === "select_account" && (
               <label>
-                Account
+                {t("connectSetup.account")}
                 <select name="account" required defaultValue="">
                   <option value="" disabled>
-                    Choose an account
+                    {t("connectSetup.chooseAnAccount")}
                   </option>
                   {action.accounts.map((account) => (
                     <option
@@ -261,11 +264,7 @@ function ScopedSetup({
               </label>
             )}
             {offersGitHubRequest && (
-              <p className="og-connect-setup-hint">
-                Don't see your organization? Only its owners can connect it. Choose "Install on
-                another GitHub account" and pick the organization: GitHub lets you send its owners a
-                request to approve.
-              </p>
+              <p className="og-connect-setup-hint">{t("connectSetup.donTSeeYourOrganization")}</p>
             )}
             {action.type === "select_resources" &&
               action.resources.map((resource) => (
@@ -276,20 +275,20 @@ function ScopedSetup({
               ))}
             {action.type === "select_resources" && action.cursor && (
               <>
-                <p>More resources are available. Review all pages before submitting a selection.</p>
+                <p>{t("connectSetup.moreResourcesAreAvailableReview")}</p>
                 {onBrowseResources && (
                   <button
                     type="button"
                     onClick={() => invoke(() => onBrowseResources(structuredClone(attempt)))}
                   >
-                    Browse all resources
+                    {t("connectSetup.browseAllResources")}
                   </button>
                 )}
               </>
             )}
             {action.type === "preview" && (
               <>
-                <p>Choose the tools agents can use with this account.</p>
+                <p>{t("connectSetup.chooseTheToolsAgentsCan")}</p>
                 {action.operations.map((operation) => (
                   <label key={operation.id}>
                     <input type="checkbox" name="operation" value={operation.id} />
@@ -307,12 +306,12 @@ function ScopedSetup({
                 disabled={action.type === "select_resources" && Boolean(action.cursor)}
               >
                 {action.type === "preview"
-                  ? "Add selected tools"
+                  ? t("connectSetup.addSelectedTools")
                   : attempt.mcpSetup && action.type === "credentials"
                     ? view.busy
-                      ? "Verifying connection…"
-                      : "Connect"
-                    : "Continue"}
+                      ? t("connectSetup.verifyingConnection")
+                      : t("connectSetup.connect")
+                    : t("connectSetup.continue")}
               </button>
             )}
             {action.type === "authorize" && (
@@ -321,30 +320,30 @@ function ScopedSetup({
                 className="og-connect-setup-primary"
                 onClick={() => invoke(() => onAuthorize(structuredClone(attempt)))}
               >
-                {navigating ? "Waiting for authorization…" : authorizeLabel}
+                {navigating ? t("connectSetup.waitingForAuthorization") : authorizeLabel}
               </button>
             )}
             {action.type === "wait" && (
               <>
                 {action.userCode && (
                   <p>
-                    Verification code: <code>{action.userCode}</code>
+                    {t("connectSetup.verificationCode")} <code>{action.userCode}</code>
                   </p>
                 )}
-                <p>Complete provider authorization, then check the connection status.</p>
+                <p>{t("connectSetup.completeProviderAuthorizationThenCheck")}</p>
                 {verificationUrl && (
                   <a href={verificationUrl} target="_blank" rel="noopener noreferrer">
-                    Open provider verification page (new tab)
+                    {t("connectSetup.openProviderVerificationPageNew")}
                   </a>
                 )}
               </>
             )}
             <div className="og-connect-setup-secondary">
               <button type="button" onClick={() => invoke(() => view.refresh())}>
-                Check status
+                {t("connectSetup.checkStatus")}
               </button>
               <button type="button" onClick={() => invoke(() => view.cancel(crypto.randomUUID()))}>
-                Cancel setup
+                {t("connectSetup.cancelSetup")}
               </button>
             </div>
           </fieldset>

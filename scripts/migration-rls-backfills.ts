@@ -33,6 +33,11 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { batchedBackfillTransactionLocalSetting } from "../packages/db/src/migration-runner-settings";
+import {
+  SESSION_HISTORY_CAPABILITY,
+  sessionHistoryBackfillPlan,
+  sessionHistoryRlsExecutableSql,
+} from "../packages/db/src/migration-session-history-backfills";
 
 export const MIGRATIONS_DIR = "packages/db/drizzle";
 
@@ -417,7 +422,9 @@ function stripCatalogRoutinePatchLiterals(statement: string): string {
     }
   }
 
-  const assignments = /\b([a-z_]\w*)\s*:=\s*(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\2\s*;/gi;
+  // The literal may be assigned in the body or initialised in DECLARE
+  // (`replacement text := $new$...$new$;`); both bind the same variable.
+  const assignments = /\b([a-z_]\w*)(?:\s+text)?\s*:=\s*(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\2\s*;/gi;
   return statement.replace(assignments, (whole, variable: string, _tag: string) => {
     const outside = statement.replace(whole, `${variable} := NULL;`);
     const use = new RegExp(
@@ -565,11 +572,15 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
   const findings: BackfillFinding[] = [];
 
   for (const file of files) {
-    const raw = readFileSync(join(migrationsDir, file), "utf8");
+    const source = readFileSync(join(migrationsDir, file), "utf8");
+    const raw = sessionHistoryRlsExecutableSql(file, source);
     const runnerSetting = batchedBackfillTransactionLocalSetting(file);
-    const runnerCapabilityGuc =
-      runnerSetting?.value === "1" &&
-      /^-- deployment-mode: (?:rolling|maintenance)\r?\n-- opengeni:batched-backfill\b/u.test(raw)
+    const runnerCapabilityGuc = sessionHistoryBackfillPlan(file, source)
+      ? SESSION_HISTORY_CAPABILITY.slice("opengeni.".length)
+      : runnerSetting?.value === "1" &&
+          /^-- deployment-mode: (?:rolling|maintenance)\r?\n-- opengeni:batched-backfill\b/u.test(
+            raw,
+          )
         ? runnerSetting.guc.slice("opengeni.".length)
         : undefined;
     // Owner-only posture window and tenant GUC state are per-file: the runner

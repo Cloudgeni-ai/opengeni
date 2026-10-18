@@ -83,20 +83,25 @@ export function normalizeCdpAccessibilityTree(options: {
     if (typeof node.nodeId === "string") rawById.set(node.nodeId, node);
   }
   const entriesByNodeId = new Map<string, CdpAccessibilityEntry>();
+  const usedRefs = new Set<string>();
   for (const [nodeId, node] of rawById) {
     if (node.ignored === true || roleValue(node) === "InlineTextBox") continue;
     const role = normalizedRole(roleValue(node));
     const name = accessibleStringValue(node.name) || null;
     const states = propertyStates(node.properties);
     const backendDOMNodeId = finitePositiveInteger(node.backendDOMNodeId);
-    const ref = semanticRef({
-      controllerGeneration: options.controllerGeneration,
-      targetId: options.targetId,
-      documentGeneration: options.documentGeneration,
-      frameId: typeof node.frameId === "string" ? node.frameId : null,
-      nodeId,
-      backendDOMNodeId,
-    });
+    const ref = semanticRef(
+      {
+        controllerGeneration: options.controllerGeneration,
+        targetId: options.targetId,
+        documentGeneration: options.documentGeneration,
+        frameId: typeof node.frameId === "string" ? node.frameId : null,
+        nodeId,
+        backendDOMNodeId,
+      },
+      usedRefs,
+    );
+    usedRefs.add(ref);
     entriesByNodeId.set(nodeId, {
       ref,
       nodeId,
@@ -141,7 +146,15 @@ export function normalizeCdpAccessibilityTree(options: {
   for (const [nodeId, entry] of entriesByNodeId) {
     if (!isEditableControlRole(entry.role)) continue;
     const raw = rawById.get(nodeId);
-    if (raw) for (const childId of childIds(raw)) suppressSubtree(childId);
+    if (!raw) continue;
+    // A native select's options are what an agent chooses from, so a short
+    // option list stays visible under its non-editable combobox. Long lists
+    // (countries, time zones) stay collapsed; select takes the label anyway.
+    if (entry.role === "combobox" && !entry.states.some((state) => state.startsWith("editable"))) {
+      const optionCount = countOptions(rawById, nodeId, VISIBLE_SELECT_OPTIONS_MAX + 1);
+      if (optionCount > 0 && optionCount <= VISIBLE_SELECT_OPTIONS_MAX) continue;
+    }
+    for (const childId of childIds(raw)) suppressSubtree(childId);
   }
 
   const visit = (nodeId: string): InteractionSemanticNodeValue[] => {
@@ -162,12 +175,15 @@ export function normalizeCdpAccessibilityTree(options: {
     // control focused; a later ancestor must not replace that exact control.
     if (entry.states.includes("focused") && focusedRef === null) focusedRef = entry.ref;
     const description = accessibleStringValue(raw.description);
+    // Pages can compute accessible names from arbitrarily long text (a whole
+    // table cell or <pre> block). Clip to the semantic-node contract so one
+    // long node cannot make the entire observation invalid.
     const semantic: InteractionSemanticNodeValue = {
       ref: entry.ref,
       role: entry.role,
-      ...(entry.name !== null ? { name: entry.name } : {}),
-      ...(description ? { description } : {}),
-      ...safeValue(raw, entry.role),
+      ...(entry.name !== null ? { name: entry.name.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
+      ...(description ? { description: description.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
+      ...safeValue(raw, entry.role, entry.states),
       states: entry.states,
       actions: entry.actions,
       ...(children.length > 0 ? { children } : {}),
@@ -237,29 +253,76 @@ export function accessibilityContainer(
 function safeValue(
   node: CdpAxNode,
   role: string,
+  states: readonly string[],
 ): { value?: string | { redacted: true; reason: "password" } } {
   const value = stringValue(node.value);
   if (!value) return {};
+  // Text typed into a field may hold a secret, so editable values stay out of
+  // observations. A non-editable combobox (a native select or a custom
+  // picker) only shows the option chosen on the page, which the agent needs
+  // to confirm a selection.
+  if (role === "combobox" && !states.some((state) => state.startsWith("editable"))) {
+    return { value: value.slice(0, SEMANTIC_VALUE_MAX_CHARS) };
+  }
   if (["textbox", "searchbox", "combobox", "spinbutton"].includes(role)) return {};
-  return { value: value.slice(0, 32_768) };
+  return { value: value.slice(0, SEMANTIC_VALUE_MAX_CHARS) };
 }
+
+/** Contract bounds for semantic node name/description and value. */
+const SEMANTIC_TEXT_MAX_CHARS = 8_192;
+const SEMANTIC_VALUE_MAX_CHARS = 32_768;
 
 function isEditableControlRole(role: string): boolean {
   return ["textbox", "searchbox", "combobox", "spinbutton"].includes(role);
 }
 
+/** Most options a collapsed select may show in an observation. */
+const VISIBLE_SELECT_OPTIONS_MAX = 25;
+
+/** Counts option descendants of a node, stopping once `limit` is reached. */
+function countOptions(
+  rawById: ReadonlyMap<string, CdpAxNode>,
+  nodeId: string,
+  limit: number,
+): number {
+  let count = 0;
+  const pending = [...childIds(rawById.get(nodeId) ?? {})];
+  const seen = new Set<string>();
+  while (pending.length > 0 && count < limit) {
+    const id = pending.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const node = rawById.get(id);
+    if (!node) continue;
+    if (roleValue(node) === "option" || roleValue(node) === "MenuListOption") count += 1;
+    pending.push(...childIds(node));
+  }
+  return count;
+}
+
 /** Chromium's roles for native date, time, month, week and datetime-local inputs. */
 const NATIVE_DATE_TIME_ROLES: ReadonlySet<string> = new Set(["Date", "DateTime", "InputTime"]);
 
-function semanticRef(options: {
-  controllerGeneration: string;
-  targetId: string;
-  documentGeneration: string;
-  frameId: string | null;
-  nodeId: string;
-  backendDOMNodeId: number | null;
-}): string {
-  const kind = options.backendDOMNodeId === null ? "ax" : "element";
+/**
+ * A node's ref: `e` (DOM-backed element) or `a` (accessibility-only node)
+ * plus 8 hex digits of a digest scoped to the exact controller, tab, document
+ * and frame, so a ref from another document is never reused. Refs are what
+ * the model reads on every observed line, so they stay short. Should two
+ * nodes of one snapshot share the short form, the later one keeps the full
+ * 16-digit digest instead.
+ */
+export function semanticRef(
+  options: {
+    controllerGeneration: string;
+    targetId: string;
+    documentGeneration: string;
+    frameId: string | null;
+    nodeId: string;
+    backendDOMNodeId: number | null;
+  },
+  usedRefs: ReadonlySet<string>,
+): string {
+  const kind = options.backendDOMNodeId === null ? "a" : "e";
   const digest = createHash("sha256")
     .update(
       [
@@ -272,8 +335,9 @@ function semanticRef(options: {
       ].join("\0"),
     )
     .digest("hex")
-    .slice(0, 32);
-  return `${kind}-${digest}`;
+    .slice(0, 16);
+  const short = `${kind}${digest.slice(0, 8)}`;
+  return usedRefs.has(short) ? `${kind}${digest}` : short;
 }
 
 function propertyStates(properties: unknown): string[] {

@@ -163,6 +163,42 @@ const EnvGoalIdleBackoffMs = z.preprocess((value) => {
   });
 }, z.array(z.number().int().nonnegative()).min(1, "OPENGENI_GOAL_IDLE_BACKOFF_MS must list at least one delay in milliseconds").readonly());
 
+/** `{"<workspace id>": bytes}`: per-workspace retained-image limits. */
+const EnvRetainedImageWorkspaceQuotaOverrides = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const source = value.trim();
+    if (!source) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(source);
+    } catch {
+      return value;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
+    return Object.fromEntries(
+      Object.entries(parsed).map(([workspaceId, bytes]) => [workspaceId.toLowerCase(), bytes]),
+    );
+  },
+  z
+    .record(z.string().uuid(), z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER))
+    .default({}),
+);
+
+/** The retained-image byte limit for one workspace: its override, else the deployment default. */
+export function retainedImageWorkspaceQuotaBytes(
+  settings: Pick<
+    Settings,
+    "retainedImageWorkspaceQuotaBytes" | "retainedImageWorkspaceQuotaOverrides"
+  >,
+  workspaceId: string,
+): number {
+  return (
+    settings.retainedImageWorkspaceQuotaOverrides[workspaceId.toLowerCase()] ??
+    settings.retainedImageWorkspaceQuotaBytes
+  );
+}
+
 const EnvFirstPartyMcpTools = z.preprocess(
   (value) => {
     if (typeof value !== "string") return value;
@@ -307,6 +343,11 @@ const SettingsSchema = z.object({
   // reuses the application handle. Keep the historical default for existing
   // deployments and let operators budget this per process with replica counts.
   apiDatabasePoolMax: z.coerce.number().int().positive().default(32),
+  // Named prepared statements for the application database pools. Unset → on
+  // for direct connections and off when the URL targets port 6432 (PgBouncer's
+  // port, including Azure Flexible Server's built-in pooler). Set false for any
+  // other transaction-pooling proxy; set true to force them on.
+  databasePreparedStatements: EnvBoolean.optional(),
   // Step I (§7.8 runtime half). Dedicated Postgres schema for the EMBEDDED
   // topology. Default "" → standalone: no search_path scoping, server default
   // (`public`). When set (e.g. "opengeni"), the db handle + the managed-auth
@@ -493,6 +534,18 @@ const SettingsSchema = z.object({
   // 1Password tokens, backed by the in-memory fake provider. The managed
   // product posture refuses to start with it set (OP-7).
   onePasswordFakeTokens: EnvBoolean.default(false),
+  // Operator-installed official pass-cli; never auto-download or resolve an
+  // agent-controlled executable from PATH. The adapter verifies its version.
+  protonPassCliPath: z
+    .string()
+    .trim()
+    .min(1)
+    .max(1_024)
+    .refine(
+      (value) => value.startsWith("/") || /^[a-z]:[\\/]/i.test(value),
+      "Proton Pass CLI path must be absolute",
+    )
+    .optional(),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
@@ -716,6 +769,17 @@ const SettingsSchema = z.object({
     .positive()
     .max(Number.MAX_SAFE_INTEGER)
     .default(20 * 1024 * 1024 * 1024),
+  // Bytes of retained session images (screenshots, viewed images) a workspace
+  // keeps. When a new image does not fit, the workspace's oldest images are
+  // evicted to make room; a new image is only refused when it is larger than
+  // the whole limit. The overrides map a workspace id to its own limit.
+  retainedImageWorkspaceQuotaBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(5 * 1024 * 1024 * 1024),
+  retainedImageWorkspaceQuotaOverrides: EnvRetainedImageWorkspaceQuotaOverrides,
   videoGenerationTempDirectory: z.string().trim().min(1).max(1_024).default("/tmp/opengeni-video"),
   videoGenerationFfprobePath: z.string().trim().min(1).max(1_024).default("ffprobe"),
   // Opengeni's customer price, not a claim about the provider's delayed cost report.
@@ -765,8 +829,11 @@ const SettingsSchema = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(8 * 1024 * 1024),
-  /** Move idle sessions' bulky content to object storage (docs/session-storage-lifecycle.md). */
-  sessionArchiveEnabled: EnvBoolean.default(false),
+  /**
+   * Move idle sessions' bulky content to object storage (docs/session-storage-lifecycle.md).
+   * On by default; without object storage the worker skips archiving.
+   */
+  sessionArchiveEnabled: EnvBoolean.default(true),
   /** Days without a new turn before a session becomes eligible for the archive. */
   sessionArchiveIdleDays: z.coerce.number().int().min(1).max(3650).default(30),
   voiceInputResumableRetentionSeconds: z.coerce
@@ -831,6 +898,8 @@ const SettingsSchema = z.object({
   // this flag. Set false and omit codex-subscription from PROVIDER_ORDER to
   // keep subscription model routing while disabling Codex voice input.
   voiceInputCodexExperimentalEnabled: EnvBoolean.default(false),
+  /** Deployment-wide override for every credit price calculated from a provider rate. */
+  creditMarginBpsOverride: z.coerce.number().int().min(0).max(10_000).optional(),
   modelPricingJson: z.string().default("{}"),
   // Supported-model membership source. Database mode is resolved by the async
   // core overlay; getSettings remains synchronous and env-only.
@@ -936,6 +1005,17 @@ const SettingsSchema = z.object({
   // emergency compatibility diagnosis.
   // OPENGENI_CODEX_TOOL_SEARCH_ENABLED
   codexToolSearchEnabled: EnvBoolean.default(true),
+  // Carry Codex subscription model requests over the backend's Responses
+  // WebSocket (one warm connection per conversation) instead of a new HTTP
+  // request per step. Requests the socket cannot carry fall back to HTTP.
+  // OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED
+  codexResponsesWebSocketEnabled: EnvBoolean.default(true),
+  // The same transport for the OpenAI API (/v1/responses) and Azure OpenAI's
+  // v1 API (/openai/v1/responses): one connection per conversation, each step
+  // continuing the previous response with only its new input. Other
+  // OpenAI-compatible hosts always use HTTP.
+  // OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED
+  openaiResponsesWebSocketEnabled: EnvBoolean.default(true),
   // Provider-neutral progressive disclosure for direct OpenAI/Azure native
   // client search and ordinary-function generic dispatch. Kept separate from
   // the Codex rollout so an emergency Codex opt-out cannot disable every model.
@@ -1196,8 +1276,22 @@ const SettingsSchema = z.object({
   runloopBlueprintId: z.string().optional(),
   runloopTunnel: EnvBoolean.default(true),
   runloopKeepAliveSeconds: z.coerce.number().int().positive().optional(),
-  // --- e2b (SDK reads E2B_API_KEY from env; mirrored for validation + forwarding) ---
+  // --- e2b: E2B's cloud or any E2B-compatible API ---
+  // The key, domain and addresses are handed to the SDK explicitly on every
+  // create and resume; unset ones keep the SDK's defaults (E2B's cloud).
   e2bApiKey: z.string().optional(),
+  // Sandboxes are reached as `<port>-<sandbox id>.<domain>`; the API is
+  // `https://api.<domain>` unless e2bApiUrl is set.
+  e2bDomain: z
+    .string()
+    .regex(/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::\d{1,5})?$/, {
+      message: "must be a host name such as sandboxes.example.com, without a scheme or path",
+    })
+    .optional(),
+  e2bApiUrl: z.string().url().optional(),
+  // One address for all envd traffic, routed by the E2b-Sandbox-Id and
+  // E2b-Sandbox-Port headers, instead of a name per sandbox.
+  e2bSandboxUrl: z.string().url().optional(),
   e2bTemplate: z.string().optional(),
   e2bTimeoutSeconds: z.coerce.number().int().positive().optional(),
   e2bTimeoutAction: z.enum(["pause", "kill"]).optional(),
@@ -1568,13 +1662,16 @@ const SettingsSchema = z.object({
       return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
     }, "must be an https origin (http only on loopback)")
     .optional(),
+  // Site SQL storage per Site; defaults to the 5 GiB hard ceiling.
   sitesSqlFreeStorageBytes: z.coerce
     .number()
     .int()
     .positive()
-    .default(50 * 1024 * 1024),
-  sitesSqlFreeRowsReadPerMonth: z.coerce.number().int().positive().default(5_000_000),
-  sitesSqlFreeRowsWrittenPerMonth: z.coerce.number().int().positive().default(100_000),
+    .default(5 * 1024 * 1024 * 1024),
+  // Optional per-Site monthly row quotas; unset means none (the platform
+  // meters rows per workspace instead; rate and per-call caps still apply).
+  sitesSqlFreeRowsReadPerMonth: z.coerce.number().int().positive().optional(),
+  sitesSqlFreeRowsWrittenPerMonth: z.coerce.number().int().positive().optional(),
   sitesSqlFreeCallsPerMinutePerViewer: z.coerce.number().int().positive().default(60),
   sitesSqlFreeCallsPerMinutePerSite: z.coerce.number().int().positive().default(600),
   sitesSqlMaxRowsPerCall: z.coerce.number().int().min(1).max(5_000).default(1_000),
@@ -1638,17 +1735,69 @@ const SettingsSchema = z.object({
   sitesAbuseEmail: z.string().email().optional(),
   // Guests start embedded agents only after the gateway verified a bot challenge.
   sitesGuestAgentHumanCheck: EnvBoolean.default(false),
-  // The free limit profile (DEFAULT_FREE_SITE_LIMITS); money in micro-USD.
+  // Rate brakes of every Site limit profile (all access modes).
   sitesFreeRequestsPerMinutePerVisitor: z.coerce.number().int().positive().default(120),
   sitesFreeGuestWritesPerMinute: z.coerce.number().int().nonnegative().default(30),
-  sitesFreeConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().default(10),
-  sitesFreeConversationsPerSitePerDay: z.coerce.number().int().nonnegative().default(50),
-  sitesFreeTurnsPerConversation: z.coerce.number().int().nonnegative().default(20),
-  sitesFreeAgentMicrosPerConversation: z.coerce.number().int().nonnegative().default(20_000),
-  sitesFreeAgentMicrosPerVisitorPerDay: z.coerce.number().int().nonnegative().default(200_000),
-  sitesFreeAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().default(2_000_000),
-  // The credits profile multiplies the free conversation and spend caps.
+  // Deprecated (the former free profile): fallbacks for the public and guest
+  // settings below when those are unset.
+  sitesFreeConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeConversationsPerSitePerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeTurnsPerConversation: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeAgentMicrosPerConversation: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeAgentMicrosPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().optional(),
+  // Standard model-spend limits (micro-USD) for people outside the workspace
+  // (invited and public alike). Members are never limited by Site limits:
+  // they use the workspace's normal session limits. Unset: the deprecated
+  // free setting, else $10 per Site per month and no per-person limit.
+  sitesAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().optional(),
+  sitesAgentMicrosPerPersonPerDay: z.coerce.number().int().nonnegative().optional(),
+  // Internal guards for anonymous public visitors (not shown to Site owners). Unset:
+  // the deprecated free setting, else 20, 500, 50 and $1.
+  sitesGuestConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesGuestConversationsPerSitePerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesGuestTurnsPerConversation: z.coerce.number().int().nonnegative().optional(),
+  sitesGuestAgentMicrosPerConversation: z.coerce.number().int().nonnegative().optional(),
+  // What each agent turn of someone outside the workspace holds against the
+  // Site's spend limits while it runs (micro-USD; actual spend replaces it
+  // when settled), capped by the conversation's own cap and what is left.
+  sitesAgentReservationMicrosPerTurn: z.coerce.number().int().min(1_000).default(250_000),
+  // The credits profile multiplies the standard spend caps and guest guards.
   sitesCreditsLimitMultiplier: z.coerce.number().int().min(1).max(1_000).default(10),
+  // Site platform usage (gateway requests, Site SQL rows and storage, Site
+  // Data storage), metered apart from model spend. usage_only records it;
+  // shadow computes the charge without charging; credits charges usage above
+  // the per-workspace monthly allowance.
+  sitesPlatformBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
+  // Credits mode: false refuses usage past the allowance instead of charging it.
+  sitesPlatformOverageEnabled: EnvBoolean.default(true),
+  sitesPlatformAllowanceRequests: z.coerce.number().int().nonnegative().default(1_000_000),
+  sitesPlatformAllowanceSqlRowsRead: z.coerce.number().int().nonnegative().default(10_000_000),
+  sitesPlatformAllowanceSqlRowsWritten: z.coerce.number().int().nonnegative().default(100_000),
+  sitesPlatformAllowanceStorageBytes: z.coerce.number().int().nonnegative().default(1_000_000_000),
+  // Unit prices in micro-USD: twice the Cloudflare list price (Workers
+  // requests, Durable Object SQLite rows and storage), covering host lookups,
+  // Durable Object requests and duration, and API work.
+  sitesPlatformPriceMicrosPerMillionRequests: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(600_000),
+  sitesPlatformPriceMicrosPerMillionSqlRowsRead: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(2_000),
+  sitesPlatformPriceMicrosPerMillionSqlRowsWritten: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(2_000_000),
+  sitesPlatformPriceMicrosPerGbMonth: z.coerce.number().int().nonnegative().default(400_000),
+  // The Opengeni-wide monthly brake: estimated USD cost of all workspaces'
+  // platform usage at the prices above. 0 turns the brake off.
+  sitesPlatformMonthlyLimitUsd: z.coerce.number().nonnegative().max(100_000_000).default(1_000),
+  sitesPlatformAlertPercent: z.coerce.number().int().min(1).max(100).default(80),
   sitesReportsPerMinutePerVisitor: z.coerce.number().int().positive().default(5),
   sitesViewerSessionIdleSeconds: z.coerce
     .number()
@@ -1774,6 +1923,8 @@ const SettingsSchema = z.object({
   stripePublishableKey: z.string().optional(),
   stripeWebhookSecret: z.string().optional(),
   stripeCreditsProductId: z.string().optional(),
+  // Enables subscription service paths only; top-up billing remains independent.
+  subscriptionPlansEnabled: EnvBoolean.default(false),
   mcpServers: z
     .array(
       z.object({
@@ -1815,6 +1966,7 @@ const ArtifactServiceSettingsSchema = SettingsSchema.pick({
   deploymentRevision: true,
   dbSchema: true,
   rlsStrategy: true,
+  databasePreparedStatements: true,
   observabilityStructuredLogs: true,
   observabilityMetricsEnabled: true,
   observabilityOtlpEndpoint: true,
@@ -1862,6 +2014,7 @@ function artifactServiceEnvironment(source: NodeJS.ProcessEnv) {
       optional("GITHUB_SHA"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
+    databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),
     observabilityStructuredLogs: optional("OPENGENI_OBSERVABILITY_STRUCTURED_LOGS"),
     observabilityMetricsEnabled: optional("OPENGENI_OBSERVABILITY_METRICS_ENABLED"),
     observabilityOtlpEndpoint:
@@ -2502,6 +2655,14 @@ export function voiceInputPricingHasTokenRates(pricing: VoiceInputPricing): bool
   );
 }
 
+/** Resolve the deployment override without changing unset per-price behavior. */
+function effectiveCreditMarginBps(
+  settings: Pick<Settings, "creditMarginBpsOverride">,
+  configuredMarginBps: number | undefined,
+): number {
+  return settings.creditMarginBpsOverride ?? configuredMarginBps ?? 0;
+}
+
 /**
  * Exact integer credit math. Token usage needs token rates; duration usage
  * uses `microsPerMinute` at millisecond resolution. Both round up once, after
@@ -2510,6 +2671,7 @@ export function voiceInputPricingHasTokenRates(pricing: VoiceInputPricing): bool
 export function calculateVoiceInputCost(
   pricing: VoiceInputPricing,
   usage: VoiceInputUsage,
+  marginBpsOverride?: number,
 ): VoiceInputCost {
   let numerator: bigint;
   let denominator: bigint;
@@ -2549,7 +2711,7 @@ export function calculateVoiceInputCost(
     numerator = BigInt(Math.ceil(usage.seconds * 1_000)) * BigInt(pricing.microsPerMinute);
     denominator = 60_000n;
   }
-  const margin = BigInt(10_000 + (pricing.marginBps ?? 0));
+  const margin = BigInt(10_000 + (marginBpsOverride ?? pricing.marginBps ?? 0));
   const provider = (numerator + denominator - 1n) / denominator;
   const scaled = denominator * 10_000n;
   const credit = (numerator * margin + scaled - 1n) / scaled;
@@ -4560,6 +4722,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
     apiDatabasePoolMax: optional("OPENGENI_API_DATABASE_POOL_MAX"),
+    databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
     runtimeDatabaseRole: optional("OPENGENI_RUNTIME_DATABASE_ROLE"),
@@ -4641,6 +4804,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     onePasswordFakeTokens: optional("OPENGENI_ONEPASSWORD_FAKE_TOKENS"),
+    protonPassCliPath: optional("OPENGENI_PROTON_PASS_CLI_PATH"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsAllowPrivateNetworkTargets: optional(
@@ -4728,6 +4892,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_VIDEO_GENERATION_MAX_CONCURRENT_PER_WORKSPACE",
     ),
     videoGenerationWorkspaceQuotaBytes: optional("OPENGENI_VIDEO_GENERATION_WORKSPACE_QUOTA_BYTES"),
+    retainedImageWorkspaceQuotaBytes: optional("OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_BYTES"),
+    retainedImageWorkspaceQuotaOverrides: optional(
+      "OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_OVERRIDES",
+    ),
     videoGenerationTempDirectory: optional("OPENGENI_VIDEO_GENERATION_TEMP_DIRECTORY"),
     videoGenerationFfprobePath: optional("OPENGENI_VIDEO_GENERATION_FFPROBE_PATH"),
     videoGenerationCredit480pMicrosPerSecond: optional(
@@ -4778,6 +4946,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputOpenaiPricingJson: optional("OPENGENI_VOICE_INPUT_OPENAI_PRICING_JSON"),
     voiceInputAzurePricingJson: optional("OPENGENI_VOICE_INPUT_AZURE_PRICING_JSON"),
     voiceInputCodexExperimentalEnabled: optional("OPENGENI_VOICE_INPUT_CODEX_EXPERIMENTAL"),
+    creditMarginBpsOverride: optional("OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelCatalogSource,
     modelCostPolicyJson,
@@ -4799,6 +4968,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modelStreamProgressTimeoutMs: optional("OPENGENI_MODEL_STREAM_PROGRESS_TIMEOUT_MS"),
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
+    codexResponsesWebSocketEnabled: optional("OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED"),
+    openaiResponsesWebSocketEnabled: optional("OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
@@ -4891,6 +5062,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     runloopTunnel: optional("OPENGENI_RUNLOOP_TUNNEL"),
     runloopKeepAliveSeconds: optional("OPENGENI_RUNLOOP_KEEP_ALIVE_SECONDS"),
     e2bApiKey: optional("OPENGENI_E2B_API_KEY"),
+    e2bDomain: optional("OPENGENI_E2B_DOMAIN"),
+    e2bApiUrl: optional("OPENGENI_E2B_API_URL"),
+    e2bSandboxUrl: optional("OPENGENI_E2B_SANDBOX_URL"),
     e2bTemplate: optional("OPENGENI_E2B_TEMPLATE"),
     e2bTimeoutSeconds: optional("OPENGENI_E2B_TIMEOUT_SECONDS"),
     e2bTimeoutAction: optional("OPENGENI_E2B_TIMEOUT_ACTION"),
@@ -5062,6 +5236,43 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_SITES_FREE_AGENT_MICROS_PER_SITE_PER_MONTH",
     ),
     sitesCreditsLimitMultiplier: optional("OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER"),
+    sitesAgentReservationMicrosPerTurn: optional(
+      "OPENGENI_SITES_AGENT_RESERVATION_MICROS_PER_TURN",
+    ),
+    sitesAgentMicrosPerSitePerMonth: optional("OPENGENI_SITES_AGENT_MICROS_PER_SITE_PER_MONTH"),
+    sitesAgentMicrosPerPersonPerDay: optional("OPENGENI_SITES_AGENT_MICROS_PER_PERSON_PER_DAY"),
+    sitesGuestConversationsPerVisitorPerDay: optional(
+      "OPENGENI_SITES_GUEST_CONVERSATIONS_PER_VISITOR_PER_DAY",
+    ),
+    sitesGuestConversationsPerSitePerDay: optional(
+      "OPENGENI_SITES_GUEST_CONVERSATIONS_PER_SITE_PER_DAY",
+    ),
+    sitesGuestTurnsPerConversation: optional("OPENGENI_SITES_GUEST_TURNS_PER_CONVERSATION"),
+    sitesGuestAgentMicrosPerConversation: optional(
+      "OPENGENI_SITES_GUEST_AGENT_MICROS_PER_CONVERSATION",
+    ),
+    sitesPlatformBillingMode: optional("OPENGENI_SITES_PLATFORM_BILLING_MODE"),
+    sitesPlatformOverageEnabled: optional("OPENGENI_SITES_PLATFORM_OVERAGE_ENABLED"),
+    sitesPlatformAllowanceRequests: optional("OPENGENI_SITES_PLATFORM_ALLOWANCE_REQUESTS"),
+    sitesPlatformAllowanceSqlRowsRead: optional("OPENGENI_SITES_PLATFORM_ALLOWANCE_SQL_ROWS_READ"),
+    sitesPlatformAllowanceSqlRowsWritten: optional(
+      "OPENGENI_SITES_PLATFORM_ALLOWANCE_SQL_ROWS_WRITTEN",
+    ),
+    sitesPlatformAllowanceStorageBytes: optional("OPENGENI_SITES_PLATFORM_ALLOWANCE_STORAGE_BYTES"),
+    sitesPlatformPriceMicrosPerMillionRequests: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_REQUESTS",
+    ),
+    sitesPlatformPriceMicrosPerMillionSqlRowsRead: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_SQL_ROWS_READ",
+    ),
+    sitesPlatformPriceMicrosPerMillionSqlRowsWritten: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_SQL_ROWS_WRITTEN",
+    ),
+    sitesPlatformPriceMicrosPerGbMonth: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_GB_MONTH",
+    ),
+    sitesPlatformMonthlyLimitUsd: optional("OPENGENI_SITES_PLATFORM_MONTHLY_LIMIT_USD"),
+    sitesPlatformAlertPercent: optional("OPENGENI_SITES_PLATFORM_ALERT_PERCENT"),
     sitesReportsPerMinutePerVisitor: optional("OPENGENI_SITES_REPORTS_PER_MINUTE_PER_VISITOR"),
     sitesViewerSessionIdleSeconds: optional("OPENGENI_SITES_VIEWER_SESSION_IDLE_SECONDS"),
     sitesViewerSessionAbsoluteSeconds: optional("OPENGENI_SITES_VIEWER_SESSION_ABSOLUTE_SECONDS"),
@@ -5150,6 +5361,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     stripePublishableKey: optional("OPENGENI_STRIPE_PUBLISHABLE_KEY"),
     stripeWebhookSecret: optional("OPENGENI_STRIPE_WEBHOOK_SECRET"),
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
+    subscriptionPlansEnabled: optional("OPENGENI_SUBSCRIPTION_PLANS_ENABLED"),
     mcpServers: parseMcpServers(optional("OPENGENI_MCP_SERVERS")),
   };
   const parsed = SettingsSchema.parse(raw);
@@ -8562,7 +8774,8 @@ export function calculateModelListUsageCostSnapshot(
   let providerCostMicros = sumListCostClasses(classes);
   let creditCostMicros = 0;
   for (const [pricing, raw] of rawCostByPricing) {
-    creditCostMicros += Math.ceil((raw * (10_000 + (pricing.marginBps ?? 0))) / 10_000);
+    const marginBps = effectiveCreditMarginBps(settings, pricing.marginBps);
+    creditCostMicros += Math.ceil((raw * (10_000 + marginBps)) / 10_000);
   }
   let listByClassApprox = false;
   const latencyMode = options.latencyMode ?? "standard";
@@ -8800,7 +9013,7 @@ function calculateUsageCostBreakdown(
   let providerCostMicros = 0;
   let creditCostMicros = 0;
   for (const [pricing, rawCost] of rawCostByPricing) {
-    const marginBps = pricing.marginBps ?? 0;
+    const marginBps = effectiveCreditMarginBps(settings, pricing.marginBps);
     providerCostMicros += rawCost;
     creditCostMicros += Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
   }
@@ -8881,7 +9094,7 @@ export function calculateGatewayReportedCostBreakdown(
   const pricing = selectModelPricing(schedule, positiveInt(options?.inputTokens));
   const { providerNumerator, decimalScale, providerCostMicros } =
     parseGatewayReportedCostDecimal(inferenceCostUsd);
-  const marginBps = BigInt(10_000 + (pricing.marginBps ?? 0));
+  const marginBps = BigInt(10_000 + effectiveCreditMarginBps(settings, pricing.marginBps));
   const numerator = providerNumerator * marginBps;
   const denominator = decimalScale * 10_000n;
   const creditMicros = (numerator + denominator - 1n) / denominator;

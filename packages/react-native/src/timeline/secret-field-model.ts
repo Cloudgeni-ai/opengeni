@@ -8,6 +8,7 @@ import type {
   HumanInputSecretSaveTo,
   HumanInputSecretSpec,
 } from "@opengeni/sdk";
+import { type OpenGeniText } from "@opengeni/react/messages";
 
 /* ----------------------------------------------------------------------------
    Pure rules for the native secret question: which keyboard and autofill
@@ -242,31 +243,37 @@ export type SecretFieldMessages = {
   saved: (vaultName: string, itemName: string) => string;
 };
 
-export const defaultSecretFieldMessages: SecretFieldMessages = {
-  saveTo: "Save to",
-  saveToOption: { user: "Only me", task: "This task", workspace: "Workspace" },
-  vaultHint: (vault) => `Saves to the ${vault} vault`,
-  show: "Show secret",
-  hide: "Hide secret",
-  generate: "Generate",
-  generated: "A strong password will be generated",
-  undo: "Undo",
-  looksLike: (example) => `Looks like ${example}`,
-  patternWarning: "This doesn't match the expected format. You can still send it.",
-  placeholder: {
-    "current-password": "Password",
-    "new-password": "New password",
-    "one-time-code": "Code",
-    "setup-key": "Setup key or otpauth:// link",
-    off: "Value",
+export const defaultSecretFieldMessages = (t: OpenGeniText): SecretFieldMessages => ({
+  saveTo: t("native.timeline.secretFieldModel.saveTo"),
+  saveToOption: {
+    user: t("native.timeline.secretFieldModel.onlyMe"),
+    task: t("native.timeline.secretFieldModel.thisTask"),
+    workspace: t("native.timeline.secretFieldModel.workspace"),
   },
-  saved: (vaultName, itemName) => `Saved to ${vaultName} › ${itemName}`,
-};
+  vaultHint: (vault) => t("native.timeline.secretFieldModel.savesToTheVaultVault", { vault }),
+  show: t("native.timeline.secretFieldModel.showSecret"),
+  hide: t("native.timeline.secretFieldModel.hideSecret"),
+  generate: t("native.timeline.secretFieldModel.generate"),
+  generated: t("native.timeline.secretFieldModel.aStrongPasswordWillBe"),
+  undo: t("native.timeline.secretFieldModel.undo"),
+  looksLike: (example) => t("native.timeline.secretFieldModel.looksLikeExample", { example }),
+  patternWarning: t("native.timeline.secretFieldModel.thisDoesnTMatchThe"),
+  placeholder: {
+    "current-password": t("native.timeline.secretFieldModel.password"),
+    "new-password": t("native.timeline.secretFieldModel.newPassword"),
+    "one-time-code": t("native.timeline.secretFieldModel.code"),
+    "setup-key": t("native.timeline.secretFieldModel.setupKeyOrOtpauthLink"),
+    off: t("native.timeline.secretFieldModel.value"),
+  },
+  saved: (vaultName, itemName) =>
+    t("native.timeline.secretFieldModel.savedToVaultnameItemname", { vaultName, itemName }),
+});
 
 /** The answered chip: where the value went, never the value. */
 export function secretSavedLabel(
+  t: OpenGeniText,
   result: Pick<HumanInputSecretAnswerResult, "vaultName" | "itemName">,
-  messages: Pick<SecretFieldMessages, "saved"> = defaultSecretFieldMessages,
+  messages: Pick<SecretFieldMessages, "saved"> = defaultSecretFieldMessages(t),
 ): string {
   return messages.saved(result.vaultName, result.itemName);
 }

@@ -7,6 +7,9 @@ import {
   type TimelineGroup,
 } from "../src/timeline";
 import recorded from "./fixtures/exchange-answer-before-machine-turns.json";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 /*
  * Answers stay visible; settled progress joins only its own turn's work. A settled answer is
@@ -129,7 +132,9 @@ function emptyTurn(turnId: string): SessionEvent[] {
 }
 
 function fold(events: SessionEvent[]): TimelineGroup[] {
-  const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+  const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+    readableTurns: true,
+  });
   if (
     events.some(
       (entry) => (entry.payload as { text?: string }).text === "Querying the regional tables.",
@@ -176,7 +181,7 @@ function answeredFirstTurn(settle: typeof answer = answer): SessionEvent[] {
 describe("answers stay visible across readable turns", () => {
   test("recorded exchange: an agent message after the answer starts one more short turn", () => {
     const events = recorded as SessionEvent[];
-    const final = buildTimeline(events).find(
+    const final = buildTimeline(englishText, events).find(
       (item): item is AgentMessageItem =>
         item.kind === "agent-message" && item.phase === "final_answer",
     );
@@ -374,7 +379,9 @@ describe("answers stay visible across readable turns", () => {
       ),
       ...tool("render", "exec_command", "turn-1"),
     ];
-    const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+      readableTurns: true,
+    });
     expect(visibleMessages(groups)).toEqual([
       "Querying the regional tables.",
       "Rendering the chart.",
@@ -455,7 +462,7 @@ describe("answers stay visible across readable turns", () => {
       machineInput("agent_message", "turn-2"),
       ...quietTurn("turn-2"),
     ];
-    expect(topLevelKinds(groupTimeline(buildTimeline(events)))).toEqual([
+    expect(topLevelKinds(groupTimeline(englishText, buildTimeline(englishText, events)))).toEqual([
       "user-message",
       "turn",
       "agent-message",
@@ -562,7 +569,9 @@ describe("a person's question answered before a wait", () => {
     const events = answeredThenWaited(
       event("user.message", { text: "Does the scaler maximum change what we pay?" }, null),
     );
-    const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+      readableTurns: true,
+    });
     expect(visibleMessages(groups)).toEqual([ANSWER, CORRECTION]);
     const kinds = topLevelKinds(groups);
     expect(kinds.slice(0, 4)).toEqual([
@@ -587,7 +596,9 @@ describe("a person's question answered before a wait", () => {
       ...commentary(CORRECTION, "last", "turn-q"),
       ...waitThenSettle("turn-q"),
     ];
-    const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+      readableTurns: true,
+    });
     expect(visibleMessages(groups)).toEqual(["I'll use 2 to 28 in production.", CORRECTION]);
     const work = groups.find((group) => group.kind === "activity");
     expect(work?.kind === "activity" && visibleMessages(work.work!.details)).toEqual([
@@ -608,7 +619,9 @@ describe("a person's question answered before a wait", () => {
       ...commentary(CORRECTION, "last", "turn-q"),
       ...waitThenSettle("turn-q"),
     ];
-    const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+      readableTurns: true,
+    });
     expect(visibleMessages(groups)).toEqual([ANSWER_A, CORRECTION]);
   });
 
@@ -629,7 +642,9 @@ describe("a person's question answered before a wait", () => {
         ...commentary(CORRECTION, "last", "turn-m"),
         ...waitThenSettle("turn-m"),
       ];
-      const groups = groupTimeline(buildTimeline(events), { readableTurns });
+      const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+        readableTurns,
+      });
       expect(visibleMessages(groups)).toEqual([ANSWER_A, CORRECTION]);
     });
 
@@ -644,7 +659,9 @@ describe("a person's question answered before a wait", () => {
         ...commentary(CORRECTION, "last", "turn-q"),
         ...waitThenSettle("turn-q"),
       ];
-      const groups = groupTimeline(buildTimeline(events), { readableTurns });
+      const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+        readableTurns,
+      });
       expect(visibleMessages(groups)).toEqual([ANSWER, CORRECTION]);
     });
   }
@@ -664,7 +681,9 @@ describe("a person's question answered before a wait", () => {
       ...commentary(CORRECTION, "correction", "turn-q"),
       ...waitThenSettle("turn-q"),
     ];
-    const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events), {
+      readableTurns: true,
+    });
     expect(visibleMessages(groups)).toEqual([ANSWER, CORRECTION]);
   });
 
@@ -673,7 +692,7 @@ describe("a person's question answered before a wait", () => {
     const events = answeredThenWaited(
       event("user.message", { text: "Does the scaler maximum change what we pay?" }, null),
     );
-    const groups = groupTimeline(buildTimeline(events));
+    const groups = groupTimeline(englishText, buildTimeline(englishText, events));
     expect(visibleMessages(groups)).toEqual([ANSWER, CORRECTION]);
     expect(topLevelKinds(groups).slice(0, 4)).toEqual([
       "user-message",

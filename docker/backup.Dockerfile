@@ -1,5 +1,5 @@
 # Independent operator utility: no application runtime, database driver or SDK.
-ARG POSTGRES_MAJOR=17
+ARG POSTGRES_MAJOR=18
 FROM oven/bun:1.4.0 AS bun
 FROM postgres:${POSTGRES_MAJOR}-bookworm
 RUN apt-get update \

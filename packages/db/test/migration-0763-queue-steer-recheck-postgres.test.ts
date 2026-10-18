@@ -23,6 +23,7 @@ import {
 } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { stageSiteSessionAudienceColumns } from "./vault-policy-column-fixture";
 
 const MIGRATION = "0763_queue_steer_admission_recheck_repair.sql";
 let database: OwnerMigratedTestDatabase;
@@ -36,10 +37,15 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     for (const name of await readdir(join(import.meta.dir, "../drizzle"))) {
-      if (name.endsWith(".sql") && name >= MIGRATION)
+      if (name.endsWith(".sql") && name >= MIGRATION && name !== "0834_session_activity_xid.sql")
         await owner`insert into schema_migrations(name) values (${name})`;
     }
     await migrate(database.ownerUrl);
+    // Keep the repair-era schema plus the additive xid writer migration needed
+    // by current adapters. They also name the 0793 Site audience columns.
+    await stageSiteSessionAudienceColumns(database.ownerUrl);
+    // Likewise, current event readers project 0810's nullable usage source key.
+    await owner`alter table session_events add column usage_source_key text`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await owner.end();

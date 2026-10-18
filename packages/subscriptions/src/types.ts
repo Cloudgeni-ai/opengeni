@@ -77,6 +77,9 @@ export type SubscriptionConnection = {
   entitledModelIds: readonly ModelId[] | null;
   /** Fresh adapter catalog; the chat adapter maps the accepted upstream model to its product id. */
   observedModelSlugs?: readonly string[] | null;
+  /** Observation times for the fresh catalog above; never extended by a read. */
+  modelCatalogObservedAt?: number | null;
+  modelCatalogExpiresAt?: number | null;
   /** Entitlement exclusions observed by the adapter (SUB-ELIG-03). */
   excludedModelIds: readonly ModelId[];
   /** Administrator access policy; null allows every entitled model. */

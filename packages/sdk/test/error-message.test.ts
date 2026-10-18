@@ -20,6 +20,57 @@ test("neutral formatter is available through the core and browser entry points",
 });
 
 describe("brand-neutral error presentation", () => {
+  test("seat refusals preserve only the bounded upgrade action and do not suggest buying credits", () => {
+    for (const action of [
+      { type: "upgrade", href: "/billing", extra: { ignored: true } },
+      { type: "upgrade", href: "https://untrusted.example/billing" },
+      { type: "other", href: "/billing" },
+    ]) {
+      const error = new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            status: 402,
+            code: "seat_limit_reached",
+            message: "Organization seat limit reached. Upgrade your plan to add people.",
+            retryable: false,
+            requestId: "seat-refusal",
+            details: { action, unrelated: { nested: "ignored" } },
+          },
+        }),
+        { mutation: true },
+      );
+      expect(error.code).toBe("seat_limit_reached");
+      expect(error.details?.action).toEqual(
+        action.type === "upgrade" && action.href === "/billing"
+          ? { type: "upgrade", href: "/billing" }
+          : undefined,
+      );
+      expect(error.details?.unrelated).toBeUndefined();
+      expect(error.retryable).toBe(false);
+      expect(error.outcomeUnknown).toBe(false);
+      expect(formatErrorMessage(error)).toBe(
+        "Your organization has reached its seat limit. Upgrade the plan to add people. Reference: seat-refusal.",
+      );
+    }
+  });
+
+  test("Site refusals are friendly before a conversation exists too", () => {
+    for (const [code, status, text] of [
+      ["not_available_for_viewer", 403, "not available for this viewer"],
+      ["site_budget_exhausted", 429, "usage limit for now"],
+      ["site_budget_busy", 429, "busy. Try again"],
+      ["site_platform_brake_engaged", 503, "paused for visitors"],
+    ] as const) {
+      const error = new OpenGeniApiError(
+        status,
+        JSON.stringify({ error: { code: "forbidden", message: "diagnostic", details: { code } } }),
+        { mutation: false },
+      );
+      expect(formatErrorMessage(error)).toContain(text);
+      expect(error.details?.code).toBe(code);
+    }
+  });
   test("keeps API diagnostics and references without displaying API prose", () => {
     const body = JSON.stringify({
       error: {

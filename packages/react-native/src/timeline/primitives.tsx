@@ -12,6 +12,7 @@ import Animated, {
 } from "react-native-reanimated";
 import { Icon, type NativeIconName } from "./icon";
 import { fontStyle, useNativeTimelineTheme, type NativeTimelineTheme } from "./theme";
+import { useOpenGeniText } from "@opengeni/react/messages";
 
 /**
  * A reader opening or closing a disclosure owns the scroll position: the
@@ -392,6 +393,7 @@ export function TermBlock({
   failed?: boolean | undefined;
   tailLines?: number;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const [full, setFull] = useState(false);
   const lines = output.split("\n");
@@ -426,7 +428,7 @@ export function TermBlock({
       ) : null}
       {output.trim() === "" ? (
         <Text style={[mono, { fontStyle: "italic", color: theme.colors["fg-subtle"] }]}>
-          (no output)
+          {t("native.timeline.primitives.noOutput")}
         </Text>
       ) : (
         <ScrollView style={{ maxHeight: 288 }} nestedScrollEnabled>
@@ -445,7 +447,7 @@ export function TermBlock({
               color: theme.colors["fg-subtle"],
             }}
           >
-            show full output ({lines.length} lines)
+            {t("native.timeline.primitives.showFullOutputLengthLines", { length: lines.length })}
           </Text>
         </Pressable>
       ) : null}

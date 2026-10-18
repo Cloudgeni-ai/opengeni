@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { copyTextToClipboard } from "@opengeni/react/clipboard";
 import type { MachineView } from "@opengeni/react/machines";
 import { machineDisplayName, machineScopeLabel } from "@opengeni/react/sandbox-label-model";
@@ -38,6 +39,8 @@ import {
   type ConnectOs,
 } from "@/lib/deployment";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
+import { computerConnectUrl } from "@opengeni/sdk/app-links";
+import { desktopDownloadsFor, desktopDownloadUrl } from "@/lib/desktop-download";
 
 /** Who can use the machine: the person connecting it, or the whole workspace. */
 export type ConnectMachineScope = "user" | "workspace";
@@ -209,6 +212,8 @@ export type ConnectMachineDialogProps = {
   workspaceId: string;
   /** The deployment origin the commands dial (the API origin, else this page). */
   origin: string;
+  /** Return to this chat after opening the installed app. */
+  sessionId?: string;
   /** The workspace's machines, polled by the host while the dialog is open. */
   machines: readonly MachineView[];
   machinesLoading: boolean;
@@ -255,6 +260,7 @@ export function ConnectMachineDialog({ open, onOpenChange, ...body }: ConnectMac
 
 function ConnectMachineBody({
   workspaceId,
+  sessionId,
   origin,
   machines,
   machinesLoading,
@@ -268,6 +274,7 @@ function ConnectMachineBody({
 }: Omit<ConnectMachineDialogProps, "open" | "onOpenChange"> & { onClose: () => void }) {
   const [scope, setScope] = useState<ConnectMachineScope>(defaultScope);
   const [allowScreenControl, setAllowScreenControl] = useState(defaultAllowScreenControl);
+  const [advanced, setAdvanced] = useState(defaultAllowScreenControl);
   const connected = useNewlyConnectedMachine(
     machines,
     machinesLoading,
@@ -289,22 +296,114 @@ function ConnectMachineBody({
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Connect a machine</DialogTitle>
+        <DialogTitle>Use your computer</DialogTitle>
         <DialogDescription>
-          Run one command on the computer you want to use. Existing Opengeni connections on it stay
-          as they are.
+          {advanced
+            ? "For a server without the desktop app, run the command below on that server."
+            : "Install the desktop app, then open it from here to connect to this workspace. Only you can use your computer."}
         </DialogDescription>
       </DialogHeader>
-      <ConnectSetup
-        workspaceId={workspaceId}
-        origin={origin}
-        personalWorkspace={personalWorkspace}
-        scope={scope}
-        onScopeChange={setScope}
-        allowScreenControl={allowScreenControl}
-        onAllowScreenControlChange={setAllowScreenControl}
-      />
+      {!advanced ? (
+        <DesktopConnectSetup workspaceId={workspaceId} sessionId={sessionId} origin={origin} />
+      ) : null}
+      <Disclosure
+        title="Connect a server instead"
+        summary="Advanced setup for a computer without the desktop app."
+        open={advanced}
+        onOpenChange={setAdvanced}
+      >
+        {advanced ? (
+          <ConnectSetup
+            workspaceId={workspaceId}
+            origin={origin}
+            personalWorkspace={personalWorkspace}
+            scope={scope}
+            onScopeChange={setScope}
+            allowScreenControl={allowScreenControl}
+            onAllowScreenControlChange={setAllowScreenControl}
+          />
+        ) : null}
+      </Disclosure>
     </>
+  );
+}
+
+function DesktopConnectSetup({
+  workspaceId,
+  sessionId,
+  origin,
+}: {
+  workspaceId: string;
+  sessionId?: string | undefined;
+  origin: string;
+}) {
+  const { accessContext } = useAppContext();
+  const userAgent = typeof navigator === "undefined" ? undefined : navigator.userAgent;
+  const [os, setOs] = useState<ConnectOs>(() => detectConnectOs(userAgent));
+  const [handoffAttempted, setHandoffAttempted] = useState(false);
+  const mobile = /android|iphone|ipad|ipod/i.test(userAgent ?? "");
+  const subjectId = accessContext?.subjectId;
+  const webUrl = new URL(
+    `/workspaces/${encodeURIComponent(workspaceId)}${sessionId ? `/sessions/${encodeURIComponent(sessionId)}` : ""}`,
+    origin,
+  ).toString();
+  const appUrl = subjectId ? computerConnectUrl({ webUrl, subjectId }) : null;
+  return (
+    <div className="flex min-w-0 flex-col gap-3" data-desktop-connect="">
+      <SegmentedControl
+        aria-label="Operating system"
+        size="sm"
+        fullWidth
+        options={OS_OPTIONS}
+        value={os}
+        onValueChange={setOs}
+      />
+      {mobile ? (
+        <Notice>
+          Open this chat on the computer you want to connect. The desktop app doesn't run on phones
+          or tablets.
+        </Notice>
+      ) : null}
+      <div className="flex flex-wrap gap-2">
+        {desktopDownloadsFor(os, userAgent).map((download, index) => (
+          <Button
+            key={download.asset}
+            asChild
+            className="pointer-coarse:min-h-11"
+            variant={index === 0 ? "default" : "outline"}
+          >
+            <a href={desktopDownloadUrl(origin, download.asset)}>{download.label}</a>
+          </Button>
+        ))}
+      </div>
+      {os === "linux" ? (
+        <p className="text-xs leading-4.5 text-fg-muted">
+          Choose .deb for Ubuntu or Debian, .rpm for Fedora, or AppImage for other Linux desktops.
+        </p>
+      ) : null}
+      <p className="text-xs leading-4.5 text-fg-muted">
+        After installing, return here and open the app. It will ask you to sign in if needed, then
+        confirm this computer's access. You won't need a setup code.
+      </p>
+      {appUrl && !mobile ? (
+        <Button asChild variant="outline" className="pointer-coarse:min-h-11">
+          <a href={appUrl} onClick={() => setHandoffAttempted(true)}>
+            Open app and connect
+          </a>
+        </Button>
+      ) : !subjectId ? (
+        <p role="status" className="text-xs text-fg-muted">
+          Sign in to connect this computer to your account.
+        </p>
+      ) : null}
+      {handoffAttempted ? (
+        <Notice live="polite">
+          If the app doesn't open or opens without connecting, install the latest app using a
+          download above, replacing the old version. Then return here and choose Open app and
+          connect again.
+        </Notice>
+      ) : null}
+    </div>
   );
 }
 
@@ -564,7 +663,7 @@ function ConnectedStep({
   useInChat: ConnectMachineDialogProps["useInChat"];
   onClose: () => void;
 }) {
-  const name = machineDisplayName(machine);
+  const name = machineDisplayName(t, machine);
   const Icon = machine.os === "linux" && !machine.hasDisplay ? ServerIcon : LaptopIcon;
   const canUse = Boolean(useInChat?.canUse);
   return (
@@ -589,7 +688,7 @@ function ConnectedStep({
           <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs text-fg-muted">
             <StatusBadge status="connected" variant="dot" />
             <span aria-hidden>·</span>
-            <span data-connected-scope={machine.scope}>{machineScopeLabel(machine.scope)}</span>
+            <span data-connected-scope={machine.scope}>{machineScopeLabel(t, machine.scope)}</span>
           </span>
         </div>
       </div>

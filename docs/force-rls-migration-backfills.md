@@ -6,14 +6,47 @@ and reports success.
 
 ## The mechanism
 
+### Historical session projections (0809/0811; repair 0821)
+
+0809's interruption-quiescence hint and 0811's open-turn usage keys originally
+backfilled without owner visibility. Their published SQL bytes remain immutable.
+The execution compatibility in `packages/db/src/migration-session-history-backfills.ts`
+pins both source hashes. Fresh 0809 executes its original update inside a
+two-table owner window within its existing DDL transaction; the workspace-fence
+trigger is disabled only while the table locks exclude writers, then restored
+together with FORCE. No advisory fence is acquired behind those DDL locks.
+
+Fresh 0811 and forward repair 0821 use temporary owner-and-transaction-marker
+policies, SELECT-only on the source tables and `sessions` for the unchanged
+restrictive child-table visibility probes. FORCE and all restrictive policies
+remain unchanged. Policy DDL commits before discovery. Each transaction chooses
+one workspace, acquires its existing fence before locking candidate rows, and
+updates at most 1,000 rows. A raced empty batch does not certify global
+completion. Each next transaction rediscovers remaining work; a failed tail can
+retry without repeating completed rows. The migration-owner transaction clears
+only its ambient actor subject, restoring it on exit, so private and Site rows
+are not accidentally filtered by an inherited human context.
+
+Policies are removed on success and in error cleanup. A process crash can leave
+only dormant owner-only policies (not relaxed FORCE flags or application grants);
+retry reinstalls them and removes them after convergence. If cleanup itself
+cannot acquire its bounded DDL lock, the migration fails rather than recording
+success. The guard analyzes the same hash-checked executable policy/update SQL
+and the runner's exact transaction marker, not a filename exemption. Real owner
+tests cover historical rows, nonowner marker forgery, unchanged private policies,
+batch commits, failed-tail recovery, and restored posture. New writers still use
+the original triggers; finished-turn keys and unquiesced hints remain unchanged.
+
 The rolling `0604_insights_raw_usage_api.sql` endpoint checkpoint performs no
 data backfill and does not relax FORCE RLS. Its scoped readers reuse the
 existing owner-only Insights read capability and session inventory windows;
 the raw intermediate helper additionally attests the schema owner, so direct
 application EXECUTE cannot expose unmasked rows. The owner/app fixture verifies
 historical rows remain readable, policies unchanged, and capabilities cleaned
-up. Daily rollup backfill remains a separate migration with its own owner
-posture/convergence gate.
+up. Hourly rollup migrations 0815–0818 reuse that exact scoped owner capability
+for their backfill, commit one hour per transaction and refuse reader activation
+until the backfill queue converges. They never relax FORCE RLS or hold the
+trigger-installation table lock during the historical scan.
 
 `FORCE ROW LEVEL SECURITY` binds the **table owner**, not merely ordinary roles.
 Only a genuine `SUPERUSER` (or a role with `BYPASSRLS`) is exempt. Opengeni's

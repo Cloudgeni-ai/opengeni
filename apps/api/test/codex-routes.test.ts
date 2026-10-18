@@ -84,15 +84,16 @@ describe("Codex status readiness semantics", () => {
       credentialEncrypted: "must-not-leak",
     } as unknown as opengeniDb.CodexAccountStatus;
     // A visible workspace-shared session: request surfaces refuse an absent one.
-    const authority = spyOn(opengeniDb, "getSessionAuthorityProjection").mockResolvedValue({
-      sessionId,
-      rootSessionId: sessionId,
-      visibility: "workspace_shared",
-      ownerSubjectId: null,
-    } as unknown as opengeniDb.SessionAuthorityProjection);
-    const slack = spyOn(opengeniDb, "getSlackInteractionSessionAccessForSession").mockResolvedValue(
-      null,
-    );
+    const authority = spyOn(opengeniDb, "getSessionAuthorizationFacts").mockResolvedValue({
+      target: {
+        sessionId,
+        rootSessionId: sessionId,
+        visibility: "workspace_shared",
+        ownerSubjectId: null,
+        slackAccess: null,
+      },
+      caller: null,
+    } as unknown as opengeniDb.SessionAuthorizationFacts);
     const projection = spyOn(
       opengeniDb,
       "getSubscriptionCoreSessionCodexAccounts",
@@ -110,7 +111,6 @@ describe("Codex status readiness semantics", () => {
     });
     restores.push(
       () => authority.mockRestore(),
-      () => slack.mockRestore(),
       () => projection.mockRestore(),
     );
     const path = `/v1/workspaces/${WS_A}/sessions/${sessionId}/codex-accounts`;

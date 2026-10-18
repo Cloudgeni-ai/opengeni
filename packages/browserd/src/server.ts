@@ -31,6 +31,10 @@ import {
   CdpTransportError,
 } from "./cdp";
 import { BrowserWorkingRuntimeUnavailableError } from "./working-runtime-journal";
+import {
+  WorkingCopyAdoptionError,
+  type BrowserWorkingCopyAuthorityInput,
+} from "./working-copy-adoption";
 import type { ComputerFrameSubscription, ComputerFrameStreamOptions } from "./computer-media";
 import {
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
@@ -480,6 +484,36 @@ export class BrowserControlServer {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
       }
       return await this.captureState(browserSessionId, request);
+    }
+    if (segments.length >= 5 && segments[3] === "working-copy") {
+      this.requireAdmin(request);
+      if (segments.length === 5 && segments[4] === "inspection" && request.method === "POST") {
+        return await this.inspectWorkingCopy(browserSessionId, request);
+      }
+      if (segments.length === 5 && segments[4] === "adoptions" && request.method === "POST") {
+        return await this.adoptWorkingCopy(browserSessionId, request);
+      }
+      if (
+        segments.length === 7 &&
+        segments[4] === "adoptions" &&
+        segments[6] === "revert" &&
+        request.method === "POST"
+      ) {
+        return await this.revertWorkingCopyAdoption(
+          browserSessionId,
+          requireUuid(segments[5], "adoption operation id"),
+          request,
+        );
+      }
+      if (segments.length === 6 && segments[4] === "adoptions" && request.method === "GET") {
+        return success(
+          await this.supervisor.workingCopyAdoptionStatus({
+            browserSessionId,
+            operationId: requireUuid(segments[5], "adoption operation id"),
+          }),
+        );
+      }
+      throw new ProtocolError("invalid_action", "method not allowed", 405);
     }
     if (segments.length === 6 && segments[3] === "targets" && segments[5] === "frames") {
       if (request.method !== "GET") {
@@ -939,6 +973,15 @@ export class BrowserControlServer {
             : {}),
         };
         const created = await this.supervisor.createSession(sessionOptions);
+        // The tab inventory rides along so the caller can show the opened
+        // browser without another round trip. It is a read-only convenience:
+        // a failed listing leaves the created session intact.
+        const targets = await this.supervisor
+          .listTargets({
+            browserSessionId: created.browserSessionId,
+            controllerGeneration: created.controllerGeneration,
+          })
+          .catch(() => null);
         const rotated = current && body.tokenGeneration > current.tokenGeneration;
         this.authorities.set(body.browserSessionId, {
           browserSessionId: body.browserSessionId,
@@ -949,12 +992,91 @@ export class BrowserControlServer {
           viewGrants: rotated ? new Map() : (current?.viewGrants ?? new Map()),
         });
         if (rotated) this.closeSessionSockets(body.browserSessionId, 1008, "authorization rotated");
-        return success(created, current ? 200 : 201);
+        return success(targets ? { ...created, targets } : created, current ? 200 : 201);
       });
     } finally {
       body.restore?.dataKey.fill(0);
       body.restore?.aad.fill(0);
     }
+  }
+
+  /** The exact controller authority a working-copy request claims. It must be
+   * the authority the copy's receipt recorded; a different live authority for
+   * this browser on this controller refuses the request. */
+  private workingCopyAuthority(
+    browserSessionId: string,
+    body: Record<string, unknown>,
+  ): BrowserWorkingCopyAuthorityInput {
+    const controllerGeneration = requireGeneration(body.controllerGeneration);
+    const tokenGeneration = requireInteger(
+      body.tokenGeneration,
+      "tokenGeneration",
+      1,
+      MAX_TOKEN_GENERATION,
+    );
+    const controlDigest = tokenDigest(requireToken(body.controlToken, "controlToken"));
+    const viewDigest = tokenDigest(requireToken(body.viewToken, "viewToken"));
+    const current = this.authorities.get(browserSessionId);
+    if (current && current.controllerGeneration !== controllerGeneration) {
+      throw new ProtocolError(
+        "controller_stale",
+        "browser session belongs to another controller generation",
+        409,
+      );
+    }
+    return {
+      browserSessionId,
+      controllerGeneration,
+      authority: {
+        tokenGeneration,
+        placementDigest: this.adminDigest.toString("hex"),
+        controlDigest: controlDigest.toString("hex"),
+        viewDigest: viewDigest.toString("hex"),
+      },
+    };
+  }
+
+  private async inspectWorkingCopy(browserSessionId: string, request: Request) {
+    const body = await readJsonObject(request);
+    assertOnlyKeys(body, ["controllerGeneration", "tokenGeneration", "controlToken", "viewToken"]);
+    const input = this.workingCopyAuthority(browserSessionId, body);
+    return await this.withLifecycleLock(browserSessionId, async () =>
+      success(await this.supervisor.inspectWorkingCopy(input)),
+    );
+  }
+
+  private async adoptWorkingCopy(browserSessionId: string, request: Request) {
+    const body = await readJsonObject(request);
+    assertOnlyKeys(body, [
+      "controllerGeneration",
+      "tokenGeneration",
+      "controlToken",
+      "viewToken",
+      "operationId",
+      "manifestDigest",
+    ]);
+    const input = this.workingCopyAuthority(browserSessionId, body);
+    const operationId = requireUuid(body.operationId, "adoption operation id");
+    if (typeof body.manifestDigest !== "string" || !/^[0-9a-f]{64}$/u.test(body.manifestDigest)) {
+      throw new ProtocolError("invalid_action", "manifestDigest must be a sha256 hex digest", 400);
+    }
+    const manifestDigest = body.manifestDigest;
+    return await this.withLifecycleLock(browserSessionId, async () =>
+      success(await this.supervisor.adoptWorkingCopy({ ...input, operationId, manifestDigest })),
+    );
+  }
+
+  private async revertWorkingCopyAdoption(
+    browserSessionId: string,
+    operationId: string,
+    request: Request,
+  ) {
+    const body = await readJsonObject(request);
+    assertOnlyKeys(body, ["controllerGeneration", "tokenGeneration", "controlToken", "viewToken"]);
+    const input = this.workingCopyAuthority(browserSessionId, body);
+    return await this.withLifecycleLock(browserSessionId, async () =>
+      success(await this.supervisor.revertWorkingCopyAdoption({ ...input, operationId })),
+    );
   }
 
   private async createComputerSession(request: Request): Promise<Response> {
@@ -1193,17 +1315,26 @@ export class BrowserControlServer {
 
   private async endSession(browserSessionId: string, request: Request): Promise<Response> {
     const body = await readJsonObject(request);
-    assertOnlyKeys(body, ["controllerGeneration", "removeState", "discardWorkingRuntime"]);
+    assertOnlyKeys(body, [
+      "controllerGeneration",
+      "removeState",
+      "discardWorkingRuntime",
+      "setAsideInterruptedLaunch",
+    ]);
     const controllerGeneration = requireGeneration(body.controllerGeneration);
     const removeState = requireBoolean(body.removeState, "removeState");
     const discardWorkingRuntime =
       body.discardWorkingRuntime === undefined
         ? false
         : requireBoolean(body.discardWorkingRuntime, "discardWorkingRuntime");
+    const setAsideInterruptedLaunch =
+      body.setAsideInterruptedLaunch === undefined
+        ? false
+        : requireBoolean(body.setAsideInterruptedLaunch, "setAsideInterruptedLaunch");
     return await this.withLifecycleLock(browserSessionId, async () => {
       await this.supervisor.endSession(
         { browserSessionId, controllerGeneration },
-        { removeState, discardWorkingRuntime },
+        { removeState, discardWorkingRuntime, setAsideInterruptedLaunch },
       );
       // Validate and complete the bound lifecycle transition before disrupting
       // viewers. A stale admin lifecycle request must not close a live session.
@@ -2002,7 +2133,26 @@ async function browserReadResponse(
 
 function protocolResponse(error: unknown): Response {
   if (error instanceof BrowserWorkingRuntimeUnavailableError) {
-    return failure("resource_unavailable", error.message, false, 409);
+    return failure(
+      "resource_unavailable",
+      error.message,
+      false,
+      409,
+      error.reason ? { reason: error.reason } : undefined,
+    );
+  }
+  if (error instanceof WorkingCopyAdoptionError) {
+    return failure(
+      error.reason === "unsupported_platform"
+        ? "unsupported"
+        : error.reason === "operation_conflict"
+          ? "operation_conflict"
+          : "resource_unavailable",
+      error.message,
+      false,
+      error.reason === "unsupported_platform" ? 422 : 409,
+      { reason: error.reason },
+    );
   }
   if (error instanceof ProtocolError)
     return failure(error.code, error.message, error.retryable, error.status);
@@ -2047,6 +2197,7 @@ function failure(
   message: string,
   retryable: boolean,
   status: number,
+  details?: Record<string, string>,
 ): Response {
   const headers: Record<string, string> = { "cache-control": "no-store" };
   if (status === 401) headers["www-authenticate"] = "Bearer";
@@ -2055,7 +2206,7 @@ function failure(
     JSON.stringify({
       protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
       ok: false,
-      error: { code, message, retryable },
+      error: { code, message, retryable, ...(details ? { details } : {}) },
     }),
     { status, headers },
   );
@@ -2065,6 +2216,7 @@ function interactionStatus(code: string): number {
   if (code === "resource_not_found" || code === "target_not_found") return 404;
   if (code === "permission_denied") return 403;
   if (code === "machine_locked") return 423;
+  if (code === "capacity_exhausted") return 409;
   if (code === "tab_not_responding" || code === "tab_crashed") return 409;
   if (code.endsWith("_stale") || code === "operation_conflict" || code === "outcome_unknown")
     return 409;

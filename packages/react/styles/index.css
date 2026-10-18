@@ -589,6 +589,37 @@
   scrollbar-color: var(--og-color-border-strong) transparent;
 }
 
+/* Classic-scrollbar platforms (see markClassicScrollbars): Chromium would draw
+   arrow buttons on the thin, colored scrollbar above, so use a slim rounded
+   thumb that widens on hover instead. */
+@supports selector(::-webkit-scrollbar) {
+  :where(:root[data-og-scrollbars="classic"]) .og-root :where(*) {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
+
+  :where(:root[data-og-scrollbars="classic"]) .og-root :where(*)::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    background: transparent;
+  }
+
+  :where(:root[data-og-scrollbars="classic"]) .og-root :where(*)::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: var(--og-color-border-strong) padding-box;
+  }
+
+  :where(:root[data-og-scrollbars="classic"]) .og-root :where(*)::-webkit-scrollbar-thumb:hover {
+    border-width: 2px;
+    background-color: var(--og-color-fg-subtle);
+  }
+
+  :where(:root[data-og-scrollbars="classic"]) .og-root :where(*)::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
 /* The machine popover stays mounted so its trigger's `aria-controls` always
    resolves. Keep Radix's positioning wrapper measurable while closed, but
    remove the entire fixed layer from painting, hit testing, and the a11y tree.

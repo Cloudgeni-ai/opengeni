@@ -14,6 +14,13 @@ import { OpenGeniClient } from "./client";
 import { sitePortFetch, siteSessionPath, SITE_WORKSPACE } from "./site-http";
 import { createOpenGeniSiteData, type OpenGeniSiteData, type OpenGeniSiteFiles } from "./site-data";
 import { createOpenGeniSiteSql, type OpenGeniSiteSql } from "./site-sql";
+import { createOpenGeniSiteAi, type OpenGeniSiteAi } from "./site-ai";
+export type {
+  OpenGeniSiteAi,
+  OpenGeniSiteAiRequest,
+  OpenGeniSiteAiResult,
+  OpenGeniSiteAiOptions,
+} from "./site-ai";
 export {
   OpenGeniSiteSqlError,
   type OpenGeniSiteSql,
@@ -44,7 +51,7 @@ export {
   siteSessionPath,
   type SiteHttpRequest,
 } from "./site-http";
-import type { SiteViewer } from "@opengeni/contracts";
+import type { SiteViewer, SiteViewerCapabilities } from "@opengeni/contracts";
 import type {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
@@ -75,6 +82,16 @@ export const OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD = "auth.signIn" as const;
  * Site Data owner principal; it is not an Opengeni subject id usable elsewhere.
  */
 export type OpenGeniSiteViewer = SiteViewer;
+
+/**
+ * What the current viewer may do on this published Site, so a page can hide
+ * features instead of failing: `agent`, `workspaceTools` (workspace members
+ * only), `siteData` (`"guest"` when a collection's guest access applies),
+ * the Site SQL query audiences the viewer may call, and `viewAs` while a
+ * member previews the Site as a visitor. Anything refused at call time
+ * still answers with the error code `not_available_for_viewer`.
+ */
+export type OpenGeniSiteCapabilities = SiteViewerCapabilities;
 
 /** Result of `site.auth.signIn()`: `started` is true when the host began a sign-in navigation. */
 export type OpenGeniSiteSignInResult = { started: boolean };
@@ -155,6 +172,8 @@ export type OpenGeniSiteBridgeResponseMessage = {
 export type OpenGeniSiteClient = {
   /** Ordinary SDK, including React session/composer methods and SSE streams. */
   readonly client: OpenGeniClient;
+  /** Inline AI over ordinary Site sessions. No conversation component is required. */
+  readonly ai: OpenGeniSiteAi;
   /** Host-bound routing alias, not a credential or a caller-selected tenant. */
   readonly workspaceId: string;
   /** Workspace-bound typed facade. The parent host owns workspace identity and credentials. */
@@ -178,6 +197,13 @@ export type OpenGeniSiteClient = {
    * local previews). A failed lookup is not cached; reading again retries.
    */
   readonly viewer: Promise<OpenGeniSiteViewer | null>;
+  /**
+   * What this viewer may do on the published Site (`await site.capabilities`),
+   * resolved once and cached like `viewer`. Resolves `null` when the host
+   * does not report it (the console, older hosts and local previews): treat
+   * null as "everything the Site declares", as for a workspace member.
+   */
+  readonly capabilities: Promise<OpenGeniSiteCapabilities | null>;
   readonly auth: {
     /**
      * Ask the host to sign the viewer in. On a published Site the host
@@ -240,12 +266,15 @@ export function createOpenGeniSiteClient(
     () => transport.siteDataSupported(),
   );
   let viewer: Promise<OpenGeniSiteViewer | null> | null = null;
+  let capabilities: Promise<OpenGeniSiteCapabilities | null> | null = null;
+  const client = new OpenGeniClient({
+    baseUrl: "https://site.opengeni.invalid",
+    toolGatewayMode: options.toolGatewayMode ?? "target",
+    fetch: (input, init) => transport.fetch(input, init),
+  });
   return {
-    client: new OpenGeniClient({
-      baseUrl: "https://site.opengeni.invalid",
-      toolGatewayMode: options.toolGatewayMode ?? "target",
-      fetch: (input, init) => transport.fetch(input, init),
-    }),
+    client,
+    ai: createOpenGeniSiteAi(client, SITE_WORKSPACE),
     workspaceId: SITE_WORKSPACE,
     tools: new OpenGeniToolsClient(transport).forWorkspace("site-host"),
     data: siteData.data,
@@ -260,6 +289,10 @@ export function createOpenGeniSiteClient(
         });
       }
       return viewer;
+    },
+    get capabilities() {
+      capabilities ??= readSiteCapabilities(transport);
+      return capabilities;
     },
     auth: { signIn: () => transport.signIn() },
     close: () => transport.close(),
@@ -778,6 +811,42 @@ function isOpenGeniSiteBridgeReadyMessage(value: unknown): value is OpenGeniSite
 }
 
 const SITE_VIEWER_KINDS: readonly string[] = ["member", "invited", "user", "guest"];
+
+/** `GET /site/config` over the Site HTTP channel; null when the host does not serve it. */
+async function readSiteCapabilities(transport: {
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  siteDataSupported(): Promise<boolean>;
+}): Promise<OpenGeniSiteCapabilities | null> {
+  try {
+    if (!(await transport.siteDataSupported())) return null;
+    const response = await transport.fetch(
+      "https://site.opengeni.invalid/v1/workspaces/site-host/site/config",
+      { method: "GET", headers: { accept: "application/json" } },
+    );
+    if (!response.ok) {
+      await response.body?.cancel();
+      return null;
+    }
+    const value = ((await response.json()) as { capabilities?: unknown } | null)?.capabilities;
+    return isOpenGeniSiteCapabilities(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function isOpenGeniSiteCapabilities(value: unknown): value is OpenGeniSiteCapabilities {
+  return (
+    isRecord(value) &&
+    typeof value.agent === "boolean" &&
+    typeof value.workspaceTools === "boolean" &&
+    (value.siteData === "viewer" || value.siteData === "guest") &&
+    Array.isArray(value.sqlQueryAudiences) &&
+    value.sqlQueryAudiences.every(
+      (audience) => audience === "everyone" || audience === "signed_in",
+    ) &&
+    (value.viewAs === null || value.viewAs === "invited" || value.viewAs === "public")
+  );
+}
 
 function isOpenGeniSiteViewer(value: unknown): value is OpenGeniSiteViewer {
   return (

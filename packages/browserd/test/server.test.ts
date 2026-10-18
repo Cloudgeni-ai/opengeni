@@ -293,6 +293,28 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("create returns the launch observation with the tab inventory", async () => {
+    await withServer(async ({ server, reference }) => {
+      const created = await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      expect(created.status).toBe(201);
+      const data = (await json(created)).data as {
+        observation: { target: { id: string } };
+        targets: Array<{ id: string }>;
+      };
+      const listed = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/targets`,
+        { token: viewToken },
+      );
+      expect(data.targets).toEqual((await json(listed)).data as unknown as Array<{ id: string }>);
+      expect(data.targets.map((target) => target.id)).toContain(data.observation.target.id);
+    });
+  });
+
   test("passkey sync is control-only, bound to the session path and validated", async () => {
     await withServer(async ({ server, reference }) => {
       expect(
@@ -852,6 +874,20 @@ describe("BrowserControlServer", () => {
         ).status,
       ).toBe(200);
 
+      const malformedSetAside = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/end`,
+        {
+          method: "POST",
+          token: adminToken,
+          body: {
+            controllerGeneration: reference.controllerGeneration,
+            removeState: true,
+            setAsideInterruptedLaunch: "yes",
+          },
+        },
+      );
+      expect(malformedSetAside.status).toBe(400);
       const ended = await request(
         server,
         `/v1/browser-sessions/${reference.browserSessionId}/end`,
@@ -861,6 +897,9 @@ describe("BrowserControlServer", () => {
           body: {
             controllerGeneration: reference.controllerGeneration,
             removeState: true,
+            // A resident browser ends normally; the flag only affects a
+            // preserved interrupted launch.
+            setAsideInterruptedLaunch: true,
           },
         },
       );

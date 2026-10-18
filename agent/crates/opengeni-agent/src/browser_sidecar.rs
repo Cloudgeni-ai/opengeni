@@ -77,6 +77,8 @@ struct Sidecar {
     allowed_origins: Vec<String>,
     pending_update: Option<String>,
     exit_reported: bool,
+    /// The controller's own process group (it is spawned as its leader).
+    process_group: Option<u32>,
 }
 
 impl Sidecar {
@@ -107,8 +109,16 @@ pub struct BrowserSidecarManager {
     binary: PathBuf,
     sidecars: Mutex<HashMap<String, Sidecar>>,
     update_drain: Arc<crate::uploads::update_drain::UpdateDrain>,
+    /// Process groups of controllers that ended without a clean cooperative
+    /// stop. Updates wait until nothing remains in them; see
+    /// `record_unclean_exit`.
+    unclean_exits: std::sync::Mutex<Vec<u32>>,
     /// The local attached-Chrome inventory, once the bridge is listening.
     attached: std::sync::OnceLock<crate::browser_bridge::BrowserBridgeInventory>,
+    /// Pooled loopback client for controller requests.
+    http_client: reqwest::Client,
+    /// Remainders of controller responses too large for one reply.
+    http_spool: std::sync::Mutex<crate::browser_control_http::ResponseSpool>,
 }
 
 impl BrowserSidecarManager {
@@ -143,7 +153,10 @@ impl BrowserSidecarManager {
             binary,
             sidecars: Mutex::new(HashMap::new()),
             update_drain: Arc::default(),
+            unclean_exits: std::sync::Mutex::default(),
             attached: std::sync::OnceLock::new(),
+            http_client: crate::browser_control_http::client()?,
+            http_spool: std::sync::Mutex::default(),
         })
     }
 
@@ -154,6 +167,64 @@ impl BrowserSidecarManager {
     ) -> Self {
         self.update_drain = drain;
         self
+    }
+
+    /// Records a controller that ended without a clean cooperative stop
+    /// (crashed, killed, timed out or failed to start). It may have left
+    /// helpers behind, so updates wait until its private process group is
+    /// empty. The browsers it launched run in their own sessions and are meant
+    /// to outlive it (its successor adopts them), so they never count. Where
+    /// a process group cannot be observed, the host stays unsettled.
+    fn record_unclean_exit(&self, process_group: Option<u32>) {
+        #[cfg(unix)]
+        if let Some(group) = process_group {
+            if let Ok(mut groups) = self.unclean_exits.lock() {
+                if !groups.contains(&group) {
+                    groups.push(group);
+                }
+                return;
+            }
+        }
+        let _ = process_group;
+        self.update_drain.mark_unsettled(format!(
+            "browser controller {process_group:?} exited without observable process-group cleanup"
+        ));
+    }
+
+    /// Whether nothing remains of any controller that ended uncleanly.
+    fn unclean_exits_settled(&self) -> bool {
+        let Ok(mut groups) = self.unclean_exits.lock() else {
+            return false;
+        };
+        groups.retain(|group| process_group_is_alive(*group));
+        groups.is_empty()
+    }
+
+    /// Removes controllers that already exited from the map, recording each
+    /// as an unclean exit. Only an unreadable process state is unprovable.
+    fn retire_exited_sidecars(
+        &self,
+        sidecars: &mut HashMap<String, Sidecar>,
+    ) -> PlatformResult<()> {
+        let mut exited = Vec::new();
+        for (scope_id, sidecar) in sidecars.iter_mut() {
+            match sidecar.try_wait_logged() {
+                Ok(None) => {}
+                Ok(Some(_)) => exited.push(scope_id.clone()),
+                Err(_) => {
+                    return Err(PlatformError::os(
+                        "browser controller process state unavailable",
+                    ));
+                }
+            }
+        }
+        for scope_id in exited {
+            if let Some(sidecar) = sidecars.remove(&scope_id) {
+                sidecar.stderr_task.abort();
+                self.record_unclean_exit(sidecar.process_group);
+            }
+        }
+        Ok(())
     }
 
     /// Lets the update gate see which attached-Chrome placements would not
@@ -181,7 +252,7 @@ impl BrowserSidecarManager {
         futures::future::join_all(
             sidecars
                 .into_iter()
-                .map(|sidecar| stop_sidecar(sidecar, &self.update_drain)),
+                .map(|sidecar| stop_sidecar(sidecar, self)),
         )
         .await;
     }
@@ -248,7 +319,7 @@ impl BrowserSidecarManager {
                     port = sidecar.endpoint.port,
                     "stopping a browser controller that holds no sessions"
                 );
-                stop_sidecar(sidecar, &self.update_drain).await;
+                stop_sidecar(sidecar, self).await;
             }
         }
         retiring.len()
@@ -300,8 +371,9 @@ impl BrowserSidecarManager {
         let mut child = command
             .spawn()
             .map_err(|error| PlatformError::from_io("start browser controller sidecar", &error))?;
+        let process_group = child.id();
         let (lifeline, stdout, stderr) = take_sidecar_pipes(&mut child).inspect_err(|_| {
-            self.update_drain.mark_unsettled();
+            self.record_unclean_exit(process_group);
         })?;
         let stderr_diagnostic = Arc::new(Mutex::new(Vec::new()));
         let stderr_task = tokio::spawn(drain_bounded_stderr(
@@ -318,7 +390,7 @@ impl BrowserSidecarManager {
         let ready = match ready {
             Ok(ready) => ready,
             Err(error) => {
-                self.update_drain.mark_unsettled();
+                self.record_unclean_exit(process_group);
                 return Err(stop_with_startup_diagnostic(
                     child,
                     stderr_task,
@@ -330,7 +402,7 @@ impl BrowserSidecarManager {
             }
         };
         if let Some(mismatches) = ready_document_mismatches(&ready, admin_token) {
-            self.update_drain.mark_unsettled();
+            self.record_unclean_exit(process_group);
             return Err(stop_with_startup_diagnostic(
                 child,
                 stderr_task,
@@ -358,6 +430,7 @@ impl BrowserSidecarManager {
             allowed_origins: allowed_origins.to_vec(),
             pending_update: None,
             exit_reported: false,
+            process_group,
         })
     }
 }
@@ -442,6 +515,10 @@ impl BrowserControlBackend for BrowserSidecarManager {
         // one endpoint between observation and the update decision.
         tokio::time::timeout(IDLE_PROBE_TIMEOUT, async {
             let mut sidecars = self.sidecars.lock().await;
+            self.retire_exited_sidecars(&mut sidecars)?;
+            if !self.unclean_exits_settled() {
+                return Ok(false);
+            }
             if sidecars.is_empty() {
                 return Ok(true);
             }
@@ -452,19 +529,6 @@ impl BrowserControlBackend for BrowserSidecarManager {
                 .build()
                 .map_err(|_| PlatformError::os("browser controller idle probe unavailable"))?;
             for sidecar in sidecars.values_mut() {
-                if sidecar
-                    .try_wait_logged()
-                    .map_err(|_| {
-                        self.update_drain.mark_unsettled();
-                        PlatformError::os("browser controller process state unavailable")
-                    })?
-                    .is_some()
-                {
-                    self.update_drain.mark_unsettled();
-                    // A crashed controller may have left children behind. It
-                    // cannot prove idle; ordinary scoped recovery owns cleanup.
-                    return Err(PlatformError::os("browser controller is no longer running"));
-                }
                 if !sidecar_is_idle(&client, sidecar).await? {
                     return Ok(false);
                 }
@@ -503,13 +567,11 @@ impl BrowserControlBackend for BrowserSidecarManager {
             let live = existing
                 .try_wait_logged()
                 .map_err(|error| {
-                    self.update_drain.mark_unsettled();
                     PlatformError::from_io("inspect browser controller sidecar", &error)
                 })?
                 .is_none();
-            if !live {
-                self.update_drain.mark_unsettled();
-            }
+            // An exited controller is replaced below; stopping it records the
+            // unclean exit.
             if live
                 && existing.scope_generation == scope_generation
                 && existing.token_digest == token_digest
@@ -536,7 +598,7 @@ impl BrowserControlBackend for BrowserSidecarManager {
             ));
         }
         if let Some(stale) = sidecars.remove(scope_id) {
-            stop_sidecar(stale, &self.update_drain).await;
+            stop_sidecar(stale, self).await;
         }
         let sidecar = self
             .start(scope_id, scope_generation, admin_token, &allowed_origins)
@@ -568,15 +630,13 @@ impl BrowserControlBackend for BrowserSidecarManager {
         }
         if sidecar
             .try_wait_logged()
-            .map_err(|error| {
-                self.update_drain.mark_unsettled();
-                PlatformError::from_io("inspect browser controller sidecar", &error)
-            })?
+            .map_err(|error| PlatformError::from_io("inspect browser controller sidecar", &error))?
             .is_some()
         {
-            self.update_drain.mark_unsettled();
             sidecar.stderr_task.abort();
+            let process_group = sidecar.process_group;
             sidecars.remove(scope_id);
+            self.record_unclean_exit(process_group);
             return Err(PlatformError::NotFound(
                 "browser controller sidecar is no longer running".to_string(),
             ));
@@ -584,6 +644,47 @@ impl BrowserControlBackend for BrowserSidecarManager {
         recover_update_admission(sidecar, &self.update_drain).await?;
         sidecar.last_used = Instant::now();
         Ok(sidecar.endpoint.clone())
+    }
+
+    fn http_supported(&self) -> bool {
+        true
+    }
+
+    async fn http(
+        &self,
+        req: &v1::BrowserControlHttpRequest,
+        inline_limit: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpResponse> {
+        let checked = crate::browser_control_http::check(req)?;
+        // A replaced generation means the caller's controller is gone; like a
+        // missing one, nothing was sent, so it may ensure and send again.
+        let endpoint = self
+            .resolve(&req.scope_id, &req.scope_generation)
+            .await
+            .map_err(|error| match error {
+                PlatformError::Unsupported(message) => PlatformError::NotFound(message),
+                other => other,
+            })?;
+        crate::browser_control_http::send(
+            &self.http_client,
+            endpoint.port,
+            req,
+            checked,
+            inline_limit,
+            &self.http_spool,
+        )
+        .await
+    }
+
+    async fn http_read(
+        &self,
+        req: &v1::BrowserControlHttpReadRequest,
+        max_bytes: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpReadResponse> {
+        self.http_spool
+            .lock()
+            .map_err(|_| PlatformError::os("browser controller response spool is unavailable"))?
+            .read(req, max_bytes)
     }
 }
 
@@ -641,15 +742,13 @@ async fn sidecars_update_admission(
 ) -> PlatformResult<bool> {
     tokio::time::timeout(IDLE_PROBE_TIMEOUT, async {
         let mut sidecars = manager.sidecars.lock().await;
+        manager.retire_exited_sidecars(&mut sidecars)?;
         let client = runtime_client()?;
-        let mut idle = true;
+        // A controller that ended uncleanly holds the update back (busy, not
+        // failed) until nothing of it remains.
+        let mut idle = manager.unclean_exits_settled();
         let mut failure = None;
         for sidecar in sidecars.values_mut() {
-            if !matches!(sidecar.try_wait_logged(), Ok(None)) {
-                manager.update_drain.mark_unsettled();
-                failure = Some(PlatformError::os("browser controller is no longer running"));
-                continue;
-            }
             if let Some(previous) = sidecar.pending_update.clone() {
                 if previous != operation_id {
                     if !begin {
@@ -784,7 +883,7 @@ struct RuntimeIdleState {
     released: Option<bool>,
 }
 
-async fn stop_sidecar(mut sidecar: Sidecar, drain: &crate::uploads::update_drain::UpdateDrain) {
+async fn stop_sidecar(mut sidecar: Sidecar, manager: &BrowserSidecarManager) {
     let cooperative = matches!(sidecar.child.try_wait(), Ok(None))
         && signal_sidecar_termination(&mut sidecar.child);
     match tokio::time::timeout(
@@ -797,11 +896,11 @@ async fn stop_sidecar(mut sidecar: Sidecar, drain: &crate::uploads::update_drain
     {
         Ok(Ok(status)) if cooperative && status.success() => {}
         result => {
-            drain.mark_unsettled();
             if result.is_err() {
                 let _ = sidecar.child.kill().await;
                 let _ = sidecar.child.wait().await;
             }
+            manager.record_unclean_exit(sidecar.process_group);
         }
     }
     if tokio::time::timeout(Duration::from_secs(1), &mut sidecar.stderr_task)
@@ -832,6 +931,28 @@ fn signal_sidecar_termination(child: &mut Child) -> bool {
 #[cfg(windows)]
 fn signal_sidecar_termination(child: &mut Child) -> bool {
     let _ = child.start_kill();
+    false
+}
+
+/// Whether any process of ours remains in `group`. A group owned by another
+/// user can only be an unrelated reuse of the id, so it does not count.
+#[cfg(unix)]
+fn process_group_is_alive(group: u32) -> bool {
+    use nix::errno::Errno;
+    use nix::sys::signal::killpg;
+    use nix::unistd::Pid;
+
+    let Ok(group) = i32::try_from(group) else {
+        return false;
+    };
+    !matches!(
+        killpg(Pid::from_raw(group), None),
+        Err(Errno::ESRCH | Errno::EPERM)
+    )
+}
+
+#[cfg(not(unix))]
+fn process_group_is_alive(_group: u32) -> bool {
     false
 }
 
@@ -1281,6 +1402,69 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn http_resolves_the_exact_scope_and_never_guesses_a_port() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let manager = idle_fixture_manager(directory.path(), listener.local_addr().unwrap().port());
+        assert!(manager.http_supported());
+        let request = |scope: &str, generation: &str| v1::BrowserControlHttpRequest {
+            scope_id: scope.into(),
+            scope_generation: generation.into(),
+            method: "GET".into(),
+            path: "/v1/runtime".into(),
+            bearer_token: "p".repeat(32),
+            body: prost::bytes::Bytes::new(),
+            has_body: false,
+            timeout_ms: 5_000,
+            max_response_bytes: 4_096,
+        };
+        // Nothing ensured yet: the caller learns to ensure, and nothing is sent.
+        let absent = manager
+            .http(&request("scope-http", "fixture-generation"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(absent, PlatformError::NotFound(_)), "{absent:?}");
+
+        ensure_idle_fixture(&manager, "scope-http").await;
+        let stale = manager
+            .http(&request("scope-http", "older-generation"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, PlatformError::NotFound(_)), "{stale:?}");
+
+        let body = r#"{"protocolVersion":1,"ok":true,"data":{"idle":true}}"#;
+        let server = tokio::spawn(serve_idle_proofs(listener, vec![(200, body.into())]));
+        let response = manager
+            .http(&request("scope-http", "fixture-generation"), Some(16))
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.total_bytes, body.len() as u64);
+        assert_eq!(&response.body[..], &body.as_bytes()[..16]);
+        let rest = manager
+            .http_read(
+                &v1::BrowserControlHttpReadRequest {
+                    spool_id: response.spool_id,
+                    offset: 16,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(rest.done);
+        assert_eq!(&rest.data[..], &body.as_bytes()[16..]);
+        assert!(response
+            .headers
+            .iter()
+            .any(|header| header.name == "content-type" && header.value == "application/json"));
+        manager.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn an_empty_controller_is_stopped_after_its_grace_and_restarts_on_demand() {
         let directory = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -1670,15 +1854,25 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn replacing_a_crashed_controller_does_not_erase_host_uncertainty() {
+    async fn a_crashed_controller_holds_updates_only_until_its_process_group_is_gone() {
         use crate::uploads::update_drain::{UpdateDrain, UpdateReservation};
         let directory = tempfile::tempdir().unwrap();
         let drain = Arc::new(UpdateDrain::default());
         let manager = idle_fixture_manager(directory.path(), 1).with_update_drain(drain.clone());
         ensure_idle_fixture(&manager, "scope").await;
+        // A helper the controller started in its own process group outlives
+        // the crash for a moment, like an orphaned child would.
+        let group = manager.sidecar_pid("scope").await.unwrap();
         {
             let mut sidecars = manager.sidecars.lock().await;
             let old = sidecars.get_mut("scope").unwrap();
+            let mut helper = Command::new("sh")
+                .args(["-c", "exec sleep 2"])
+                .process_group(i32::try_from(group).unwrap())
+                .spawn()
+                .unwrap();
+            // Reaped when it exits, like an orphan adopted by init.
+            tokio::spawn(async move { helper.wait().await });
             old.child.kill().await.unwrap();
             old.child.wait().await.unwrap();
         }
@@ -1687,19 +1881,31 @@ mod tests {
             .await
             .is_err());
         assert!(manager.sidecars.lock().await.is_empty());
-        assert_eq!(
-            drain.reserve_update("other-link"),
-            UpdateReservation::Unavailable
-        );
-        // Ordinary scoped recovery still works, but is not descendant-exit proof.
+        // The crash is not a permanent host failure: the update is accepted
+        // and waits (busy) while anything of the controller remains.
+        assert!(drain.snapshot().is_some());
+        assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
+        assert!(!manager.begin_update("update").await.unwrap());
+        assert!(!manager.is_idle().await.unwrap());
+        manager.release_update("update").await.unwrap();
+        drain.release_update("update");
+        // Once the group is empty, the same host proves idle again.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !manager.is_idle().await.unwrap() {
+            assert!(
+                Instant::now() < deadline,
+                "crashed controller never settled"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(drain.reserve_update("later"), UpdateReservation::Started);
+        assert!(manager.begin_update("later").await.unwrap());
+        manager.release_update("later").await.unwrap();
+        drain.release_update("later");
+        // Ordinary scoped recovery still works afterwards.
         ensure_idle_fixture(&manager, "scope").await;
-        assert_eq!(drain.snapshot(), None);
-        assert_eq!(
-            drain.reserve_update("other-link"),
-            UpdateReservation::Unavailable
-        );
         manager.shutdown().await;
-        assert_eq!(drain.snapshot(), None);
+        assert!(drain.snapshot().is_some());
     }
 
     #[cfg(unix)]
@@ -1747,10 +1953,17 @@ mod tests {
         sidecar.child.start_kill().unwrap();
         sidecar.child.wait().await.unwrap();
         drop(sidecars);
-        assert!(
-            manager.is_idle().await.is_err(),
-            "crashed sidecar cannot prove child cleanup"
-        );
+        // A crashed controller is retired from the map and holds idle back
+        // only while something of its own process group remains.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !manager.is_idle().await.unwrap() {
+            assert!(
+                Instant::now() < deadline,
+                "crashed controller never settled"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(manager.sidecars.lock().await.is_empty());
         manager.shutdown().await;
     }
 

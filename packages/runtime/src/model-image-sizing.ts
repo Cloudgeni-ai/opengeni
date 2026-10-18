@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import sharp from "sharp";
 
-type SizedImage = {
+export type SizedImage = {
   data: string;
   mediaType: string;
   originalWidth: number;
@@ -10,13 +10,32 @@ type SizedImage = {
   height: number;
 };
 
-/** A bounded, run-local cache. Image count never changes an image's projection. */
-export function createModelImageSizer(maxDimension: number, maxEncodedBytes = 10 * 1024 * 1024) {
+export type ModelImageSizerOptions = {
+  /**
+   * Re-encode a resized JPEG as JPEG at this quality instead of starting with
+   * lossless PNG. Photos then stay small without a PNG encode per image.
+   */
+  jpegQuality?: number;
+};
+
+/** A bounded cache. Image count never changes an image's projection. */
+export function createModelImageSizer(
+  maxDimension: number,
+  maxEncodedBytes = 10 * 1024 * 1024,
+  options: ModelImageSizerOptions = {},
+) {
   if (!Number.isSafeInteger(maxDimension) || maxDimension < 1) {
     throw new RangeError("Model image dimension must be a positive integer.");
   }
   if (!Number.isSafeInteger(maxEncodedBytes) || maxEncodedBytes < 1) {
     throw new RangeError("Model image byte limit must be a positive integer.");
+  }
+  const jpegQuality = options.jpegQuality;
+  if (
+    jpegQuality !== undefined &&
+    (!Number.isSafeInteger(jpegQuality) || jpegQuality < 1 || jpegQuality > 100)
+  ) {
+    throw new RangeError("Model image JPEG quality must be an integer from 1 to 100.");
   }
   const cache = new Map<string, SizedImage>();
   let cacheBytes = 0;
@@ -70,8 +89,14 @@ export function createModelImageSizer(maxDimension: number, maxEncodedBytes = 10
         // Never expand image payloads: that can break a previously valid request
         // at its total byte limit. This budget depends only on the image itself.
         const encodedBudget = Math.min(maxEncodedBytes, data.length);
-        let resized = await pipeline.clone().png().toBuffer({ resolveWithObject: true });
-        let outputType = "image/png";
+        const asJpeg = jpegQuality !== undefined && mediaType === "image/jpeg";
+        let resized = asJpeg
+          ? await pipeline
+              .clone()
+              .jpeg({ quality: jpegQuality })
+              .toBuffer({ resolveWithObject: true })
+          : await pipeline.clone().png().toBuffer({ resolveWithObject: true });
+        let outputType = asJpeg ? "image/jpeg" : "image/png";
         for (const quality of [90, 65, 45]) {
           if (Math.ceil(resized.data.length / 3) * 4 <= encodedBudget) break;
           resized = await pipeline.clone().webp({ quality }).toBuffer({ resolveWithObject: true });

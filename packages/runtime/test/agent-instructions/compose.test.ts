@@ -306,7 +306,6 @@ describe("modular composer: secrets module (AG-2)", () => {
         "",
         "- Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`). A reference is replaced by its value wherever you write it: shell commands, files, browser typing and every tool call. To pass one on unresolved (a schedule prompt, a message to another agent, a goal, a note or comment), write `\\{{secret:Item}}`; it arrives as `{{secret:Item}}` and resolves when that work uses it. Find saved items and their ready references with `secret_search`.",
         "- Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.",
-        "- Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
         '- Never ask for passwords, keys or codes in chat or in a plain text question. Ask only for what only the user has, with a `kind: "secret"` question in `request_human_input`; a tool error about a missing secret already contains that call, so make it, adjusting only `saveTo` or `prompt`, and continue with the returned reference.',
         "- Hand the browser to the user with `interaction_request_human` only for push approvals or hardware keys.",
         "- For playbooks, read the `opengeni-secrets` skill.",
@@ -325,7 +324,8 @@ describe("modular composer: secrets module (AG-2)", () => {
           const lines = section.split("\n").filter((line) => line.trim().length > 0);
           expect(lines.length - 1).toBeLessThanOrEqual(6);
           expect(section).toContain("Never ask for passwords, keys or codes in chat");
-          expect(section).toContain("Solve CAPTCHAs");
+          // The CAPTCHA rule lives with the browser and computer entry tools.
+          expect(section).not.toContain("CAPTCHA");
         }
   });
 

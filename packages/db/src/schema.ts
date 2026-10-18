@@ -61,6 +61,7 @@ import {
   pgSchema,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -286,6 +287,33 @@ export const workspaceArtifacts = pgTable(
       sql`${table.visibility} in ('workspace_shared', 'user_private') and (${table.visibility} = 'workspace_shared' or ${table.ownerSubjectId} is not null)`,
     ),
   }),
+);
+
+export const siteSessionAccess = pgTable(
+  "site_session_access",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    ownerSubjectId: text("owner_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.siteId, table.sessionId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+  ],
 );
 
 export const workspaceArtifactUploads = pgTable(
@@ -543,10 +571,8 @@ export const workspaceInferenceControls = pgTable(
   }),
 );
 
-// One transactionally allocated activity clock per workspace. Updated-order
-// discovery reads the committed value through plain MVCC. Semantic writers
-// advance it once at their explicit commit gate, after every other deferred
-// constraint and row lock has settled.
+// Legacy rolling-compatibility shape, not the activity clock for new readers or
+// writers. Retain until old binaries and SQL lifecycle finalizers are retired.
 export const workspaceSessionActivityRevisions = pgTable(
   "workspace_session_activity_revisions",
   {
@@ -5003,6 +5029,12 @@ export const sessions = pgTable(
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
     ownerSubjectId: text("owner_subject_id"),
     visibility: text("visibility").notNull().default("workspace_shared"),
+    // Immutable server-derived Site audience. Independent of mutable metadata,
+    // reservations, and native member ownership; descendants inherit the binding.
+    siteId: uuid("site_id"),
+    siteAccessRootId: uuid("site_access_root_id"),
+    siteViewerPrincipal: text("site_viewer_principal"),
+    siteOwnerSubjectId: text("site_owner_subject_id"),
     createRequestedVisibility: text("create_requested_visibility")
       .notNull()
       .default("workspace_shared"),
@@ -5237,15 +5269,13 @@ export const sessions = pgTable(
     agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-    // Assigned once by the explicit transaction commit gate whenever canonical
-    // updated_at activity advances. Raw delta-only writers intentionally omit
-    // updated_at and therefore do not allocate revisions.
-    activityRevision: bigint("activity_revision", { mode: "number" }).notNull().default(0),
-    // Transaction ownership marker between the cheap row trigger and the
-    // once-per-transaction commit gate. Committed rows must always be null.
-    activityRevisionPendingXid: bigint("activity_revision_pending_xid", {
-      mode: "bigint",
-    }),
+    // Top-level xid, assigned by a BEFORE trigger in the original row write.
+    // Strings preserve all 64 bits; raw event-only writes do not stamp activity.
+    activityXid: customType<{ data: string; driverData: string }>({
+      dataType: () => "xid8",
+    })("activity_xid")
+      .notNull()
+      .default(sql`'0'::xid8`),
   },
   (table) => ({
     reasoningEffortValid: check(
@@ -5322,15 +5352,12 @@ export const sessions = pgTable(
       table.updatedAt.desc(),
       table.id.desc(),
     ),
-    workspaceActivityRevision: index("sessions_workspace_activity_revision_idx").on(
+    workspaceActivityXid: index("sessions_workspace_activity_xid_idx").on(
       table.workspaceId,
-      table.activityRevision.desc(),
+      table.activityXid.desc(),
       table.updatedAt.desc(),
       table.id.desc(),
     ),
-    workspaceActivityPending: index("sessions_workspace_activity_pending_idx")
-      .on(table.workspaceId, table.activityRevisionPendingXid, table.id)
-      .where(sql`${table.activityRevisionPendingXid} is not null`),
     ownerOrganizationMembership: foreignKey({
       name: "sessions_owner_organization_membership_fk",
       columns: [table.ownerOrganizationMembershipId, table.accountId],
@@ -7576,6 +7603,26 @@ export const sessionTurns = pgTable(
     unclaimedPromptTrigger: index("session_turns_unclaimed_prompt_trigger_idx")
       .on(table.workspaceId, table.sessionId, table.triggerEventId)
       .where(sql`${table.startedAt} is null`),
+    // Newest-finished-first walk for the session input-wait deciding turn, so
+    // the lateral LIMIT 1 stops at the first match instead of sorting the whole
+    // session history (migration 0786).
+    finishedOrder: index("session_turns_finished_order_idx")
+      .on(
+        table.workspaceId,
+        table.sessionId,
+        table.finishedAt.desc(),
+        table.position.desc(),
+        table.createdAt.desc(),
+      )
+      .where(sql`${table.finishedAt} is not null`),
+    // "Mine" session-list filter (migration 0799): prompts a person sent
+    // directly, by sender, so a workstream probe is one index lookup per tree
+    // session. Agent-relayed and service turns are excluded by the predicate.
+    humanPromptSubject: index("session_turns_human_prompt_subject_idx")
+      .on(table.workspaceId, table.initiatorSubjectId, table.sessionId)
+      .where(
+        sql`${table.initiatorKind} = 'subject' and ${table.source} in ('user', 'api') and ${table.surface} is distinct from 'agent'`,
+      ),
     latencyModeValid: check(
       "session_turns_latency_mode_check",
       sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
@@ -8859,6 +8906,9 @@ export const sessionAttemptInterruptions = pgTable(
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
     settledAt: timestamp("settled_at", { withTimezone: true }),
+    // Monotonic hint maintained by triggers from the attempt's quiesced_at.
+    // Indexes the open settlement set only; readers still check the attempt.
+    attemptQuiesced: boolean("attempt_quiesced").notNull().default(false),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -8888,6 +8938,11 @@ export const sessionAttemptInterruptions = pgTable(
     unsettled: index("session_attempt_interruptions_unsettled_idx")
       .on(table.workspaceId, table.sessionId, table.requestedAt)
       .where(sql`${table.state} in ('pending', 'delivered', 'acknowledged')`),
+    openSettlement: index("session_attempt_interruptions_open_settlement_idx")
+      .on(table.workspaceId, table.sessionId)
+      .where(
+        sql`${table.state} in ('pending', 'delivered', 'acknowledged') or not ${table.attemptQuiesced}`,
+      ),
     kindValid: check(
       "session_attempt_interruptions_kind_check",
       sql`${table.kind} in ('session_pause', 'workspace_pause', 'steer', 'maintenance', 'authority_change', 'organization_membership_revoked')`,
@@ -9099,6 +9154,11 @@ export const sessionSystemUpdates = pgTable(
     pendingTerminalRepair: index("session_system_updates_pending_terminal_repair_idx")
       .on(table.workspaceId, table.sessionId, table.sourceId, table.dedupeKey)
       .where(sql`${table.state} = 'pending' and ${table.kind} = 'child_terminal_result'`),
+    // "Did this turn consume awaited machine input?" in the session input-wait
+    // deciding-turn predicate, probed once per candidate turn (migration 0787).
+    deliveredTurn: index("session_system_updates_delivered_turn_idx")
+      .on(table.workspaceId, table.deliveredTurnId)
+      .where(sql`${table.deliveredTurnId} is not null`),
     onePendingSteer: uniqueIndex("session_system_updates_one_pending_steer_idx")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.kind} = 'agent_steer_instruction' and ${table.state} = 'pending'`),
@@ -9612,6 +9672,11 @@ export const sessionEvents = pgTable(
     producerSeq: integer("producer_seq"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Filled by a BEFORE INSERT trigger from payload ->> 'sourceKey' for
+    // agent.model.usage rows (migration 0810). Never written by application
+    // code; a plain column keeps the usage idempotency lookup indexable under
+    // row-level security, where the payload expression index cannot be used.
+    usageSourceKey: text("usage_source_key"),
   },
   (table) => ({
     workspaceAttempt: foreignKey({
@@ -9658,11 +9723,27 @@ export const sessionEvents = pgTable(
     workspaceTurnType: index("session_events_workspace_turn_type_idx")
       .on(table.workspaceId, table.turnId, table.type)
       .where(sql`${table.turnId} is not null`),
+    usageSourceKey: index("session_events_usage_source_key_idx")
+      .on(table.workspaceId, table.turnId, table.usageSourceKey)
+      .where(sql`${table.usageSourceKey} is not null`),
     commandOutputPage: index("session_events_command_output_page_idx")
       .on(
         table.workspaceId,
         table.sessionId,
         sql`(${table.payload} ->> 'commandId')`,
+        table.sequence,
+      )
+      .where(sql`${table.type} = 'sandbox.command.output.delta'`),
+    // Command output paging under row-level security (migration 0788). Every
+    // output chunk's client event id starts with `command-output:<commandId>:`;
+    // byte-order text comparisons are leakproof, so a policy-bound reader can
+    // bound the scan to one command and the cursor. The JSON key above cannot:
+    // `->>` is not leakproof, so policies demote it to a per-row filter.
+    commandOutputClient: index("session_events_command_output_client_idx")
+      .on(
+        table.workspaceId,
+        table.sessionId,
+        sql`${table.clientEventId} collate "C"`,
         table.sequence,
       )
       .where(sql`${table.type} = 'sandbox.command.output.delta'`),
@@ -10841,6 +10922,11 @@ export const sandboxRetainedProcesses = pgTable(
     reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", {
       withTimezone: true,
     }),
+    // The oldest reconciler that can reach this process (migration 0840).
+    // Docker and local commands under the in-sandbox supervisor are 2: a
+    // worker built before that supervisor would look for them in its own
+    // memory and settle a live command as lost, so its claim skips them.
+    reconcilerVersion: smallint("reconciler_version").notNull().default(1),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -11108,9 +11194,11 @@ export const sessionBackgroundCommands = pgTable(
     settlementReason: text("settlement_reason"),
     runnerFailure:
       jsonb("runner_failure").$type<import("@opengeni/contracts").SessionCommandFailure>(),
+    backgroundChildrenStopped: boolean("background_children_stopped").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     settledAt: timestamp("settled_at", { withTimezone: true }),
     completionObservedAt: timestamp("completion_observed_at", { withTimezone: true }),
+    completionNotifiedAt: timestamp("completion_notified_at", { withTimezone: true }),
     reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).notNull().defaultNow(),
     reconcileClaimId: uuid("reconcile_claim_id"),
     reconcileClaimedAt: timestamp("reconcile_claimed_at", {
@@ -12170,6 +12258,44 @@ export const scheduledTaskScheduleOutbox = pgTable(
 );
 
 /**
+ * Migration 0792: one review per schedule of its newest settled scheduled run.
+ * A blocked schedule tells its owner once (`notified`) or pauses itself when
+ * no later run can start until a person acts (`paused`). Owner-run lifecycle
+ * code writes it under the task lock; see `scheduled-task-blockers.ts`.
+ */
+export const scheduledTaskBlockerReviews = pgTable(
+  "scheduled_task_blocker_reviews",
+  {
+    taskId: uuid("task_id")
+      .primaryKey()
+      .references(() => scheduledTasks.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    reviewedRunId: uuid("reviewed_run_id"),
+    state: text("state").notNull().default("clear"),
+    reason: text("reason"),
+    message: text("message"),
+    blockedRunId: uuid("blocked_run_id"),
+    blockedSince: timestamp("blocked_since", { withTimezone: true }),
+    noticeSessionId: uuid("notice_session_id"),
+    noticeKey: text("notice_key"),
+    noticePending: text("notice_pending"),
+    noticePayload: jsonb("notice_payload"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspace: index("scheduled_task_blocker_reviews_workspace_idx").on(
+      table.workspaceId,
+      table.taskId,
+    ),
+  }),
+);
+
+/**
  * Durable ownership of Temporal schedules whose database owner was deleted.
  * No workspace/account foreign key: deletion cleanup survives the cascade.
  * Cross-workspace claim/settlement uses migration-owned lifecycle functions.
@@ -12817,6 +12943,8 @@ export const modelCallFacts = pgTable(
     initiatorKind: text("initiator_kind"),
     initiatorSubjectId: text("initiator_subject_id"),
     scheduledTaskId: uuid("scheduled_task_id"),
+    // Source-stamped attribution survives session/Site deletion. Not a foreign key.
+    siteId: uuid("site_id"),
     inputTokens: bigint("input_tokens", { mode: "number" }),
     outputTokens: bigint("output_tokens", { mode: "number" }),
     cachedTokens: bigint("cached_tokens", { mode: "number" }),
@@ -12838,6 +12966,12 @@ export const modelCallFacts = pgTable(
     listCostIsApprox: boolean("list_cost_is_approx"),
     contextContributions:
       jsonb("context_contributions").$type<readonly ModelContextContributionSummary[]>(),
+    // Worker-measured call timing in milliseconds (see ModelCallTiming); null
+    // for calls before 0802 and calls the worker did not stream.
+    preDispatchMs: integer("pre_dispatch_ms"),
+    timeToFirstTokenMs: integer("time_to_first_token_ms"),
+    timeToFirstTextMs: integer("time_to_first_text_ms"),
+    durationMs: integer("duration_ms"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -13183,6 +13317,8 @@ export const creditLedgerEntries = pgTable(
     currency: text("currency").notNull().default("usd"),
     sourceType: text("source_type"),
     sourceId: text("source_id"),
+    // Immutable execution-origin attribution, not an allocated platform charge.
+    siteId: uuid("site_id"),
     idempotencyKey: text("idempotency_key").notNull(),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
@@ -13212,6 +13348,113 @@ export const creditLedgerEntries = pgTable(
       table.accountId,
       table.createdAt,
     ),
+  }),
+);
+
+export const subscriptionPlanCatalogRevisions = opengeniPrivateSchema.table(
+  "subscription_plan_catalog_revisions",
+  {
+    revision: bigint("revision", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    catalog: jsonb("catalog")
+      .$type<import("@opengeni/contracts").SubscriptionPlanCatalog>()
+      .notNull(),
+    operator: text("operator").notNull(),
+    reason: text("reason").notNull(),
+    databaseRole: text("database_role")
+      .notNull()
+      .default(sql`session_user`),
+    changedAt: timestamp("changed_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+);
+
+export const billingSubscriptionOperations = pgTable(
+  "billing_subscription_operations",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    operationKey: uuid("operation_key").notNull(),
+    kind: text("kind").notNull(),
+    request: jsonb("request").$type<Record<string, unknown>>().notNull(),
+    intent: jsonb("intent").$type<Record<string, unknown>>().notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.accountId, table.operationKey] }),
+    pending: uniqueIndex("billing_subscription_operations_pending_idx")
+      .on(table.accountId)
+      .where(sql`${table.completedAt} is null`),
+  }),
+);
+
+export const organizationPlans = pgTable("organization_plans", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  planKey: text("plan_key").notNull(),
+  status: text("status").notNull(),
+  stripeSubscriptionId: text("stripe_subscription_id").unique(),
+  currentPeriodStart: timestamp("current_period_start", { withTimezone: true }),
+  currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
+  cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .default(sql`clock_timestamp()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .default(sql`clock_timestamp()`),
+});
+
+export const planCreditPeriods = pgTable(
+  "plan_credit_periods",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    planKey: text("plan_key").notNull(),
+    catalogRevision: bigint("catalog_revision", { mode: "number" })
+      .notNull()
+      .references(() => subscriptionPlanCatalogRevisions.revision),
+    stripeSubscriptionId: text("stripe_subscription_id"),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    grantedMicros: bigint("granted_micros", { mode: "number" }).notNull(),
+    openingDebtMicros: bigint("opening_debt_micros", { mode: "number" }).notNull(),
+    grantEntryId: uuid("grant_entry_id").notNull().unique(),
+    idempotencyKey: text("idempotency_key").notNull().unique(),
+    grantedAt: timestamp("granted_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    expiredAt: timestamp("expired_at", { withTimezone: true }),
+    expiryEntryId: uuid("expiry_entry_id").unique(),
+    usageAtExpiryMicros: bigint("usage_at_expiry_micros", { mode: "number" }),
+  },
+  (table) => ({
+    openingDebt: check(
+      "plan_credit_periods_opening_debt_check",
+      sql`${table.openingDebtMicros} between 0 and ${table.grantedMicros}`,
+    ),
+    grant: foreignKey({
+      columns: [table.grantEntryId, table.accountId],
+      foreignColumns: [creditLedgerEntries.id, creditLedgerEntries.accountId],
+    }),
+    expiry: foreignKey({
+      columns: [table.expiryEntryId, table.accountId],
+      foreignColumns: [creditLedgerEntries.id, creditLedgerEntries.accountId],
+    }),
+    open: uniqueIndex("plan_credit_periods_open_idx")
+      .on(table.accountId)
+      .where(sql`${table.expiredAt} is null`),
+    due: index("plan_credit_periods_due_idx")
+      .on(table.periodEnd, table.accountId)
+      .where(sql`${table.expiredAt} is null`),
   }),
 );
 

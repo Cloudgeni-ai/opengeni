@@ -208,9 +208,12 @@ struct ServeArgs {
     /// touches memory in, for the next wake to prefetch.
     #[arg(long, default_value_t = 120_000)]
     pager_record_ms: u64,
+    /// The guest kernel's command line. The engine adds the clock source and
+    /// the free-page reporting order for the host's memory profile unless
+    /// this names them.
     #[arg(
         long,
-        default_value = "console=ttyS0 reboot=k panic=1 quiet loglevel=1 page_reporting.page_reporting_order=0"
+        default_value = "console=ttyS0 reboot=k panic=1 quiet loglevel=1"
     )]
     boot_args: String,
     /// Where archived sandboxes go, which enables the archived and remote

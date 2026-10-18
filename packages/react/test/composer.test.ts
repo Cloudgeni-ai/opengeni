@@ -6,6 +6,9 @@ import {
   resolveSendExtras,
   shouldSubmitOnKey,
 } from "../src/hooks/use-composer";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 describe("composeSendInput", () => {
   test("sends bare text with the idempotency key when no extras are configured", () => {
@@ -75,7 +78,7 @@ describe("resolveSendExtras", () => {
 
 describe("FILE_ONLY_MESSAGE_TEXT", () => {
   test("is non-empty so the wire contract (text.min(1)) and worker guard accept a file-only message", () => {
-    expect(FILE_ONLY_MESSAGE_TEXT.trim().length).toBeGreaterThan(0);
+    expect(FILE_ONLY_MESSAGE_TEXT(englishText).trim().length).toBeGreaterThan(0);
   });
 });
 

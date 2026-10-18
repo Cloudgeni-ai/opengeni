@@ -586,8 +586,19 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(posture.memberships).toEqual([]);
     expect(posture.ownedSchemas).toEqual([]);
     expect(posture.ownedRelations).toEqual([]);
-    expect(posture.targetRoutines).toEqual(
+    // Configuration is additive diagnostic metadata; retain the exact former
+    // authority inventory and separately pin the new Site policy configuration.
+    expect(
+      posture.targetRoutines.map(({ configuration: _configuration, ...routine }) => routine),
+    ).toEqual(
       [
+        {
+          name: "site_session_cancellation_capability_active(uuid, uuid, uuid, uuid)",
+          owner: "postgres",
+          execute: true,
+          publicExecute: true,
+          securityDefiner: true,
+        },
         ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
           name,
           owner: "postgres",
@@ -610,6 +621,12 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         })),
       ].sort((left, right) => left.name.localeCompare(right.name)),
     );
+    expect(
+      posture.targetRoutines.find(
+        (routine) =>
+          routine.name === "site_session_cancellation_capability_active(uuid, uuid, uuid, uuid)",
+      )?.configuration,
+    ).toContain("search_path=pg_catalog");
     expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(
       FORCE_RLS_TABLES.length,
     );

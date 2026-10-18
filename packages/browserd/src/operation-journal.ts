@@ -199,6 +199,25 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
     return this.recordFromRow(row);
   }
 
+  /** Newest record of this exact generation whose receipt satisfies
+   * `matches`. Read-only; the scan is bounded by the journal's own capacity. */
+  findLatest(matches: (receipt: TReceipt) => boolean): InteractionJournalRecord<TReceipt> | null {
+    this.assertOpen();
+    const rows = this.database
+      .query<JournalRow, [string, string, string, number]>(
+        `SELECT sequence, operation_id, command_digest, state, receipt_json, receipt_bytes
+           FROM interaction_operation_journal
+          WHERE resource_kind = ? AND resource_id = ? AND controller_generation = ?
+          ORDER BY sequence DESC LIMIT ?`,
+      )
+      .all(this.resourceKind, this.resourceId, this.controllerGeneration, this.maxEntries);
+    for (const row of rows) {
+      const record = this.recordFromRow(row);
+      if (matches(record.receipt)) return record;
+    }
+    return null;
+  }
+
   loadAndRecover(settledAt = new Date().toISOString()): InteractionJournalRecord<TReceipt>[] {
     return this.withRecoveredRecords((records) => Array.from(records), settledAt);
   }

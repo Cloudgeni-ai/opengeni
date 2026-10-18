@@ -402,7 +402,7 @@ describe("migration 0356 set-based Insights session visibility", () => {
       order by tablename`;
     expect(policies).toHaveLength(2);
     for (const policy of policies) {
-      expect(policy.usingExpression).toContain("session_reference_visible");
+      expect(policy.usingExpression).toMatch(/session_reference_visible|FROM sessions session_row/);
       expect(policy.usingExpression).toContain("insights_fact_read_policy_capability_active");
       expect(policy.checkExpression).toBeNull();
     }

@@ -1,3 +1,4 @@
+import type { LearningRefusal } from "@opengeni/sdk/learning-refusal";
 import type {
   AllowanceExhaustedRefusal,
   HumanInputQuestion,
@@ -414,6 +415,8 @@ export type NoticeItem = {
   id: string;
   tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
+  /** An approval wait (`session.requiresAction`), independent of its display text. */
+  approval?: true;
   /** Presentation-only evidence that a historical approval wait resumed. */
   resolvedAt?: string;
   /**
@@ -448,6 +451,13 @@ export type NoticeItem = {
    * `MessageTimeline` renders it as a "Usage limit reached" row.
    */
   sessionUsageLimit?: SessionUsageLimitStop;
+  /**
+   * A Skill, workspace instruction, or Knowledge change the agent tried to
+   * save was refused. `text` keeps the plain sentence for plain-text
+   * consumers; `MessageTimeline` renders it as a "Not saved" row with the
+   * place where the change can still be made.
+   */
+  learningRefusal?: LearningRefusal;
   occurredAt: string;
 };
 
@@ -646,7 +656,14 @@ export type TimelineGroup =
          * running clock: that span is not work and ends on a quota reset or
          * a person's choice, not after a predictable time.
          */
-        waiting?: { label: string; since: string; detail?: string; untimed?: true };
+        waiting?: {
+          label: string;
+          since: string;
+          detail?: string;
+          untimed?: true;
+          /** The wait needs the reader. */
+          waitingOn?: "you";
+        };
         /**
          * Settled capacity-wait time inside this work span. It is not work:
          * the worked duration and the live working clock exclude it.

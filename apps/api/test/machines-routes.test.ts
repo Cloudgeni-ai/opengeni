@@ -19,6 +19,7 @@ import {
   activateBrowserSession,
   advanceEnrollmentAgentUpdate,
   claimEnrollmentConnection,
+  claimSessionWorkForAttempt,
   beginEnrollmentAgentUpdate,
   createDb,
   createEnrollment,
@@ -26,10 +27,14 @@ import {
   createScheduledTask,
   createSession,
   getEnrollment,
+  initializeSessionStartAtomically,
   listSandboxes,
   prepareBrowserSessionCreate,
   revokeEnrollment,
+  recordEnrollmentExpiredCredentials,
+  touchEnrollmentLastSeen,
   setActiveSandbox,
+  transitionSessionVisibility,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -513,13 +518,80 @@ async function openManagedBrowser(
 }
 
 describe("M10 GET /machines — dashboard list + states + metrics", () => {
+  test("the owner's human move request consents to a running personal-machine route", async () => {
+    if (!available) return;
+    const {
+      accountId,
+      originWorkspaceId,
+      targetWorkspaceId: workspaceId,
+      enrollmentId,
+    } = await seedCrossWorkspaceScopedMachine("user");
+    await admin`insert into session_tenancy_activations(account_id, activation_version, inventory_digest, parity_digest, activated_by)
+      values (${accountId}, 1, ${"a".repeat(64)}, ${"b".repeat(64)}, 'machine-move-test')`;
+    await admin`update enrollments set workspace_root = '/srv/build', connection_lease_expires_at = now() + interval '1 hour'
+      where id = ${enrollmentId}`;
+    const [sandbox] = await admin<
+      Array<{ id: string }>
+    >`select id from sandboxes where enrollment_id = ${enrollmentId}`;
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "Run the build",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: "user-m10" },
+      subjectId: "user-m10",
+      visibility: "workspace_shared",
+    });
+    await initializeSessionStartAtomically(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    const app = appFor(
+      busWithAgent({ workspaceId: originWorkspaceId, agentId: enrollmentId, online: true }),
+    );
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/sessions/${session.id}/active-sandbox`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["sessions:control"])}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ target: sandbox!.id }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ swapped: true, activeSandboxId: sandbox!.id });
+    const receipts = await admin`select consent.consenting_subject_id, binding.attempt_id
+      from session_turn_machine_consents consent join session_attempt_machine_consents binding on binding.consent_id = consent.id
+      where consent.session_id = ${session.id}`;
+    expect([...receipts]).toEqual([{ consenting_subject_id: "user-m10", attempt_id: attemptId }]);
+  }, 120_000);
   test("a backend:none session exposes its machine fleet without a synthetic home", async () => {
     if (!available) return;
     const { accountId, workspaceId, session, sandbox, bus } = await seed({
       sandboxBackend: "none",
     });
     const app = appFor(bus);
-    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`;
 
     const response = await app.request(
       `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
@@ -544,7 +616,7 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     const app = appFor(bus, {
       settings: testSettings({ ...settings, sandboxBackend: "modal" }),
     });
-    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`;
 
     const response = await app.request(
       `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
@@ -645,10 +717,14 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(machine.metrics).not.toBeNull();
     expect(machine.metrics!.cpuPct).toBe(42.5);
 
-    // In-session view: the synthetic Modal group box is prepended.
+    // In-session view additionally requires permission to read the chat.
     const sessRes = await app.request(
       `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
-      { headers: { authorization: auth } },
+      {
+        headers: {
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`,
+        },
+      },
     );
     expect(sessRes.status).toBe(200);
     const sessBody = (await sessRes.json()) as {
@@ -717,6 +793,31 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(after?.connectionLeaseExpiresAt).not.toBeNull();
     expect(after?.lastSeenAt).not.toBeNull();
   }, 90_000);
+
+  test("machine status projects verified credential expiration and clears it after recovery", async () => {
+    if (!available) throw new Error("authentication status requires PostgreSQL");
+    const { accountId, workspaceId, enrollment, bus } = await seed({ online: false });
+    await admin`UPDATE enrollments SET last_seen_at = NULL, connection_lease_expires_at = NULL WHERE id = ${enrollment.id}`;
+    await recordEnrollmentExpiredCredentials(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+    });
+    const app = appFor(bus);
+    const authorization = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const read = async () =>
+      (
+        await (
+          await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+            headers: { authorization },
+          })
+        ).json()
+      ).machines[0];
+    expect((await read()).connectionAuthority.authenticationError).toBe("credentials_expired");
+    await touchEnrollmentLastSeen(db, { accountId, workspaceId, enrollmentId: enrollment.id });
+    expect((await read()).connectionAuthority.authenticationError).toBeUndefined();
+  }, 60_000);
 
   test("state matrix: displayed-but-unconsented is ONLINE (view/control decoupled); offline when last_seen is missing", async () => {
     if (!available) return;
@@ -1670,12 +1771,13 @@ describe("Connected Machine signed self-update orchestration", () => {
     // Still open after the busy backoff: postponed again, never requested.
     now += 11 * 60_000;
     await heartbeat();
-    await waitForValue(
+    // A new operation is recorded before it settles; wait for its postponement.
+    const postponedAgain = await waitForValue(
       status,
-      (update) => update?.operationId !== postponed!.operationId,
+      (update) => update?.operationId !== postponed!.operationId && update?.status === "failed",
       "the second postponement",
     );
-    expect((await status())?.errorCode).toBe("update_busy_browsers");
+    expect(postponedAgain?.errorCode).toBe("update_busy_browsers");
     expect(updateRequests()).toHaveLength(0);
 
     // Once the browser has ended, the next look requests the update.
@@ -2132,6 +2234,81 @@ describe("who can use a machine: Workspace or Only me, changed in place", () => 
       from enrollments where id = ${enrollmentId}`;
     return row!;
   }
+
+  test("session-scoped explanation names a colleague's machine only for authorized chat readers", async () => {
+    if (!available) return;
+    const org = await audienceOrganization();
+    await admin`insert into auth_users(id, name, email) values (${org.owner.slice(5)}, 'Alex', ${`${crypto.randomUUID()}@example.test`})`;
+    const narrowed = await audienceRequest(
+      org,
+      await bearerFor(org, org.owner, ["workspace:admin"]),
+      "PUT",
+      {
+        audience: "only_me",
+        expectedGeneration: (await machineScope(org.enrollmentId)).generation,
+      },
+    );
+    expect(narrowed.status).toBe(200);
+    const session = await createSession(db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: org.owner },
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    expect(
+      await setActiveSandbox(db, {
+        ...org,
+        sessionId: session.id,
+        subjectId: org.owner,
+        targetSandboxId: org.sandboxId,
+        expectedEpoch: session.activeEpoch,
+      }),
+    ).toMatchObject({ swapped: true });
+    const app = appFor(new MemoryEventBus());
+    const request = async (permissions: Permission[], sessionId: string | null = session.id) =>
+      app.request(
+        `/v1/workspaces/${org.workspaceId}/machines${sessionId ? `?sessionId=${sessionId}` : ""}`,
+        { headers: { authorization: await bearerFor(org, org.member, permissions) } },
+      );
+    const response = await request(["enrollments:read", "sessions:read"]);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      machines: [],
+      sessionMachineAccess: {
+        sandboxId: org.sandboxId,
+        machineName: "Team build box",
+        ownerName: "Alex",
+        isOwner: false,
+        queuedTurnBlocked: false,
+      },
+    });
+    expect((await request(["enrollments:read"])).status).toBe(403);
+    expect((await request(["enrollments:read", "sessions:read"], "external")).status).toBe(400);
+    expect(await (await request(["enrollments:read"], null)).json()).toMatchObject({
+      machines: [],
+      sessionMachineAccess: null,
+    });
+    expect((await request(["enrollments:read", "sessions:read"], crypto.randomUUID())).status).toBe(
+      404,
+    );
+    await transitionSessionVisibility(db, {
+      workspaceId: org.workspaceId,
+      sessionId: session.id,
+      actorSubjectId: org.owner,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: crypto.randomUUID(),
+    });
+    const hidden = await request(["enrollments:read", "sessions:read"]);
+    expect(hidden.status).toBe(404);
+    expect(await hidden.text()).not.toContain("Alex");
+  }, 90_000);
 
   test("only the would-be owner, or a workspace admin for them, can narrow; sharing needs admin", async () => {
     if (!available) return;

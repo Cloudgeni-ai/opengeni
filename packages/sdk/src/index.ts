@@ -70,10 +70,19 @@ export type {
   SiteLimitProfile,
   SiteLimitProfileKind,
   SiteLimits,
+  SitePlatformBillingMode,
+  SitePlatformBrakeState,
+  SitePlatformMeter,
+  SitePlatformMeterUsage,
+  SitePlatformUsage,
   SitePublication,
   SitePublicationStatus,
+  SitePublishWarning,
+  SitePublishWarningFix,
   SiteTakedownRequest,
+  SiteViewAs,
   SiteViewer,
+  SiteViewerCapabilities,
   UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
 export {
@@ -103,6 +112,7 @@ export type {
   SessionMessagePreviewReference,
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export { observedSessionSequence, SESSION_SEQUENCE_HEADER } from "./session-sequence";
 export type { Chats } from "./chats";
 export type { ServiceContext } from "./embedding-client";
 export {
@@ -235,6 +245,7 @@ export type {
   FetchLike,
   FetchResponse,
   GetSessionOptions,
+  InteractionSessionListOptions,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,
@@ -271,6 +282,7 @@ export type {
   OpenGeniSiteToolCatalog,
   OpenGeniSiteToolCallRequest,
   OpenGeniSiteViewer,
+  OpenGeniSiteCapabilities,
   OpenGeniSiteWorkspaceTools,
 } from "./site";
 export type {
@@ -731,6 +743,15 @@ export type {
   AgentToolCallOutputPayload,
   ApiKey,
   BillingBalance,
+  BillingPlanBalance,
+  SubscriptionPlan,
+  SubscriptionPlanCatalog,
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
   PromotionalCreditScope,
   PromotionalCreditBalance,
   BillingEntitlementsResponse,
@@ -1244,6 +1265,8 @@ export type {
   Session,
   SessionAdmissionBlock,
   SessionBackgroundCommand,
+  WorkspaceBackgroundCommand,
+  WorkspaceBackgroundCommandListResponse,
   SessionBackgroundCommandReconciliation,
   SessionBackgroundCommandActivity,
   SessionBackgroundCommandListResponse,
@@ -1585,6 +1608,7 @@ export type {
   UpdateMachineOperationPolicyRequest,
   MachineView,
   MachinesResponse,
+  SessionMachineAccess,
   MachineMetricsSeriesResponse,
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,

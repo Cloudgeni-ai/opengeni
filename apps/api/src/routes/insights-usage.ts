@@ -1,6 +1,8 @@
 import {
   InsightsCallsResponse,
   InsightsUsageResponse,
+  InsightsSiteUsageQuery,
+  InsightsSiteUsageResponse,
   OrganizationInsightsCallsQuery,
   OrganizationInsightsUsageQuery,
   WorkspaceInsightsCallsQuery,
@@ -10,10 +12,12 @@ import type { AccessContext } from "@opengeni/contracts";
 import {
   accountScopedApiKeyWorkspaceAuthority,
   getInsightsUsage,
+  getInsightsSiteUsage,
   hasPermission,
   listInsightsCalls,
   requireAccessContext,
   requireAccessGrant,
+  siteViewerForGrant,
   type ApiRouteDeps,
   type InsightsQueryScope,
 } from "@opengeni/core";
@@ -220,6 +224,24 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
       return response;
     });
   }
+
+  app.get("/v1/workspaces/:workspaceId/insights/sites", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const query = InsightsSiteUsageQuery.safeParse(insightsQueryParameters(c.req.queries()));
+    if (!query.success) throw new HTTPException(400, { message: "invalid Site Insights query" });
+    const viewer = await siteViewerForGrant(deps.db, grant);
+    const response = await insightsWithFriendlyTimeout(() =>
+      getInsightsSiteUsage(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        query: query.data,
+        viewerSubjectId: viewer.subjectId,
+      }),
+    );
+    c.header("cache-control", "private, no-store");
+    return c.json(InsightsSiteUsageResponse.parse(response));
+  });
 
   app.get("/v1/workspaces/:workspaceId/insights/usage", async (c) => {
     const workspaceId = c.req.param("workspaceId");

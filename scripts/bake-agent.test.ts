@@ -55,7 +55,9 @@ if (tool === "git") {
   console.log(process.env.BAKE_FIXTURE_SOURCE_ID);
 } else if (tool === "cargo") {
   if (args[0] !== "zigbuild") throw Error("unexpected Cargo command");
-  const target = args[args.indexOf("--target") + 1];
+  // cargo-zigbuild accepts a glibc version suffix (x86_64-unknown-linux-gnu.2.28)
+  // but writes to the plain target directory.
+  const target = args[args.indexOf("--target") + 1].replace(/\.\d+\.\d+$/, "");
   const name = args[args.indexOf("-p") + 1];
   const bundle = {};
   for (const [key, path] of Object.entries(embedded)) if (path) bundle[key] = await readFile(path, "utf8");

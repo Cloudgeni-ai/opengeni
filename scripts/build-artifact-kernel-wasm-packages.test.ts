@@ -153,7 +153,7 @@ test("version automation regenerates WASM identity without forcing peer dependen
   ).version.split(".")[0];
 
   expect(rootPackage.scripts?.["changeset:version"]).toBe(
-    "changeset version && bun scripts/release/lockstep-version.ts && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities && bun scripts/public-api/refresh-sdk-major.ts",
+    "changeset version && bun scripts/release/drop-ignored-changesets.ts && bun scripts/release/lockstep-version.ts && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities && bun scripts/public-api/refresh-sdk-major.ts",
   );
   expect(
     changesetConfig.___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH
@@ -166,7 +166,7 @@ test("version automation regenerates WASM identity without forcing peer dependen
   );
   expect(
     ciWorkflow.match(
-      /@changesets\/cli\/bin\.js" version\n\s+bun scripts\/release\/lockstep-version\.ts\n\s+bun scripts\/build-artifact-kernel-wasm-packages\.ts --refresh-package-identities\n\s+bun scripts\/public-api\/refresh-sdk-major\.ts/gu,
+      /@changesets\/cli\/bin\.js" version\n\s+if \[ -f scripts\/release\/drop-ignored-changesets\.ts \]; then bun scripts\/release\/drop-ignored-changesets\.ts; fi\n\s+bun scripts\/release\/lockstep-version\.ts\n\s+bun scripts\/build-artifact-kernel-wasm-packages\.ts --refresh-package-identities\n\s+bun scripts\/public-api\/refresh-sdk-major\.ts/gu,
     ),
   ).toHaveLength(2);
 });

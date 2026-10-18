@@ -16,6 +16,9 @@ import type { UseGoalResult } from "../src/hooks/use-goal";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { fakeTurn } from "./fake-client";
 import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -511,6 +514,37 @@ describe("SessionChrome", () => {
       mounted.container.querySelector('[data-og-session-chrome-signal="steering"]'),
     ).toBeNull();
     expect(mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')).toBeNull();
+  });
+
+  test("one Send: waiting messages without Queue or Steer words or Steer actions", async () => {
+    // The prompts are the person's own words; only the chrome must avoid the queue and Steer.
+    const words = (root: HTMLElement) =>
+      [
+        root.textContent ?? "",
+        ...[...root.querySelectorAll("*")].flatMap((node) =>
+          ["aria-label", "title", "data-og-tip"].map((name) => node.getAttribute(name) ?? ""),
+        ),
+      ]
+        .join(" ")
+        .replaceAll("first queued prompt", "")
+        .replaceAll("second queued prompt", "");
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ effectiveControl: { ...pausedEffectiveControl(), settlement: null } })}
+        composer={composer({ busySend: "steer", singleSend: true })}
+      />,
+    );
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    )!;
+    expect(chip.textContent).toContain("2 waiting");
+    expect(mounted.container.querySelector('[data-analytics-action="steer"]')).toBeNull();
+    expect(words(mounted.container)).not.toMatch(/queue|steer/i);
+    await act(async () => chip.click());
+    await flush(50);
+    expect(mounted.container.textContent).toContain("second queued prompt");
+    expect(mounted.container.querySelector('[data-analytics-action="steer"]')).toBeNull();
+    expect(words(mounted.container)).not.toMatch(/queue|steer/i);
   });
 
   test("lands an optimistic Send in the queue instead of chat chrome", async () => {
@@ -1227,10 +1261,12 @@ describe("SessionChrome goal pill reasons", () => {
   });
 
   test("spells out why a goal is paused", () => {
-    expect(sessionChromeGoalPillLabel("paused", paused("max_auto_continuations").goal)).toBe(
-      "Paused · cap",
+    expect(
+      sessionChromeGoalPillLabel(englishText, "paused", paused("max_auto_continuations").goal),
+    ).toBe("Paused · cap");
+    expect(sessionChromeGoalPillLabel(englishText, "paused", paused("limits").goal)).toBe(
+      "Paused · limits",
     );
-    expect(sessionChromeGoalPillLabel("paused", paused("limits").goal)).toBe("Paused · limits");
     for (const [reason, label] of [
       ["model_unavailable", "model"],
       ["model_policy", "policy"],
@@ -1240,28 +1276,40 @@ describe("SessionChrome goal pill reasons", () => {
       ["usage_policy", "limits"],
       ["allowance", "allowance"],
     ]) {
-      expect(sessionChromeGoalPillLabel("paused", paused(reason!).goal)).toBe(`Paused · ${label}`);
+      expect(sessionChromeGoalPillLabel(englishText, "paused", paused(reason!).goal)).toBe(
+        `Paused · ${label}`,
+      );
     }
-    expect(sessionChromeGoalPillLabel("paused", paused("user_pause").goal)).toBe(
+    expect(sessionChromeGoalPillLabel(englishText, "paused", paused("user_pause").goal)).toBe(
       "Paused · manually",
     );
-    expect(sessionChromeGoalPillLabel("paused", paused("api").goal)).toBe("Paused · manually");
-    expect(sessionChromeGoalPillLabel("paused", paused("agent").goal)).toBe("Paused · agent");
-    // Unknown/legacy reasons and missing records keep the bare label.
-    expect(sessionChromeGoalPillLabel("paused", paused("something_else").goal)).toBe("Paused");
-    expect(sessionChromeGoalPillLabel("paused", paused(null).goal)).toBe("Paused");
-    expect(sessionChromeGoalPillLabel("paused", null)).toBe("Paused");
-    expect(sessionChromeGoalPillLabel("pursuing", goal().goal)).toBe("Pursuing");
-    expect(
-      sessionChromeGoalPillExplanation("paused", paused("max_auto_continuations").goal),
-    ).toContain("continuation cap");
-    expect(sessionChromeGoalPillExplanation("paused", paused("limits").goal)).toContain(
-      "admission limit",
+    expect(sessionChromeGoalPillLabel(englishText, "paused", paused("api").goal)).toBe(
+      "Paused · manually",
     );
-    expect(sessionChromeGoalPillExplanation("paused", paused("agent").goal)).toContain(
+    expect(sessionChromeGoalPillLabel(englishText, "paused", paused("agent").goal)).toBe(
+      "Paused · agent",
+    );
+    // Unknown/legacy reasons and missing records keep the bare label.
+    expect(sessionChromeGoalPillLabel(englishText, "paused", paused("something_else").goal)).toBe(
+      "Paused",
+    );
+    expect(sessionChromeGoalPillLabel(englishText, "paused", paused(null).goal)).toBe("Paused");
+    expect(sessionChromeGoalPillLabel(englishText, "paused", null)).toBe("Paused");
+    expect(sessionChromeGoalPillLabel(englishText, "pursuing", goal().goal)).toBe("Pursuing");
+    expect(
+      sessionChromeGoalPillExplanation(
+        englishText,
+        "paused",
+        paused("max_auto_continuations").goal,
+      ),
+    ).toContain("continuation cap");
+    expect(
+      sessionChromeGoalPillExplanation(englishText, "paused", paused("limits").goal),
+    ).toContain("admission limit");
+    expect(sessionChromeGoalPillExplanation(englishText, "paused", paused("agent").goal)).toContain(
       "human decision",
     );
-    expect(sessionChromeGoalPillExplanation("pursuing", goal().goal)).toBeNull();
+    expect(sessionChromeGoalPillExplanation(englishText, "pursuing", goal().goal)).toBeNull();
   });
 
   test("explains idle backoff as the next goal check time", () => {
@@ -1275,9 +1323,9 @@ describe("SessionChrome goal pill reasons", () => {
         lastError: null,
       },
     }).goal;
-    expect(sessionChromeGoalPillLabel("scheduled", record)).toBe("Waiting");
-    expect(sessionChromeGoalPillExplanation("scheduled", record)).toBe(
-      `Continues at ${formatClockTime("2026-08-22T14:05:00.000Z")}.`,
+    expect(sessionChromeGoalPillLabel(englishText, "scheduled", record)).toBe("Waiting");
+    expect(sessionChromeGoalPillExplanation(englishText, "scheduled", record)).toBe(
+      `Continues at ${formatClockTime(englishText, "2026-08-22T14:05:00.000Z")}.`,
     );
   });
 
@@ -1293,15 +1341,19 @@ describe("SessionChrome goal pill reasons", () => {
         holdReason: "waiting for two child sessions to report",
       },
     }).goal;
-    expect(sessionChromeGoalPillLabel("held", record)).toBe("Held");
-    const explanation = sessionChromeGoalPillExplanation("held", record);
+    expect(sessionChromeGoalPillLabel(englishText, "held", record)).toBe("Held");
+    const explanation = sessionChromeGoalPillExplanation(englishText, "held", record);
     expect(explanation).toContain("Waiting for input: waiting for two child sessions to report");
-    expect(explanation).toContain(`until ${formatClockTime("2026-08-22T18:00:00.000Z")}`);
+    expect(explanation).toContain(
+      `until ${formatClockTime(englishText, "2026-08-22T18:00:00.000Z")}`,
+    );
     // Older servers omit holdReason; the hold still explains itself.
     const legacy = goal({
       continuation: { ...record!.continuation!, holdReason: undefined },
     }).goal;
-    expect(sessionChromeGoalPillExplanation("held", legacy)).toContain("Waiting for input until");
+    expect(sessionChromeGoalPillExplanation(englishText, "held", legacy)).toContain(
+      "Waiting for input until",
+    );
   });
 
   test("renders the pause reason on the chip and in the panel", async () => {
@@ -1346,7 +1398,7 @@ describe("SessionChrome goal pill reasons", () => {
     expect(mounted.container.textContent).not.toContain("budget");
     // Older servers used the limits bucket for model failures. Preserve their explanation.
     expect(
-      sessionChromeGoalPillExplanation("paused", {
+      sessionChromeGoalPillExplanation(englishText, "paused", {
         status: "paused",
         pausedReason: "limits",
         rationale,
@@ -1804,8 +1856,12 @@ test("controlled compact command selection exposes activity navigation", async (
 test("a failed session blocks only active goal presentation", () => {
   const continuation = goal().goal!.continuation;
   const failedState = sessionChromeGoalPillState("active", continuation, "failed");
-  expect(sessionChromeGoalPillLabel(failedState, goal().goal)).toBe("Blocked by session failure");
-  expect(sessionChromeGoalPillExplanation(failedState, goal().goal)).toContain("Continue");
+  expect(sessionChromeGoalPillLabel(englishText, failedState, goal().goal)).toBe(
+    "Blocked by session failure",
+  );
+  expect(sessionChromeGoalPillExplanation(englishText, failedState, goal().goal)).toContain(
+    "Continue",
+  );
   expect(sessionChromeGoalPillState("completed", continuation, "failed")).toBe("completed");
   expect(sessionChromeGoalPillState("paused", continuation, "failed")).toBe("paused");
   expect(sessionChromeGoalPillState("active", continuation, "idle")).toBe(

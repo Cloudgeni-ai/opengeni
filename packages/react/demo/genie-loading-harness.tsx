@@ -10,6 +10,9 @@ import {
 import type { SessionEvent } from "@opengeni/sdk";
 import "./styles.css";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
+import { createOpenGeniText } from "@opengeni/react/messages";
+
+const englishText = createOpenGeniText();
 
 // The demo ships the optional @pierre/diffs peer.
 enablePierreDiffs();
@@ -86,7 +89,7 @@ function App() {
     return () => timers.forEach(window.clearTimeout);
   }, [scenario, run]);
   const phases = useMemo(
-    () => buildTimeline(events).filter((item) => item.kind === "startup-phase"),
+    () => buildTimeline(englishText, events).filter((item) => item.kind === "startup-phase"),
     [events],
   );
   return (

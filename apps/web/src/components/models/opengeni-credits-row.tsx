@@ -8,6 +8,7 @@ import { formatMoneyMicros } from "@/lib/format";
 import { modelUsesCredits } from "@/lib/model-policy";
 import { hasAccountPermission } from "@/lib/permissions";
 import { currentPageReturnTo, returnToSearch } from "@/lib/return-to";
+import { CREDIT_BALANCE_CHANGED } from "@/lib/credit-balance-events";
 import type { ClientConfig } from "@/types";
 
 /* ----------------------------------------------------------------------------
@@ -38,29 +39,56 @@ export function useOpenGeniCredits(organizationId: string | undefined): OpenGeni
   const canManage = visible && hasAccountPermission(accessContext, accountId, "billing:manage");
   const canRead =
     visible && (canManage || hasAccountPermission(accessContext, accountId, "billing:read"));
-  const [balanceLabel, setBalanceLabel] = useState<string | null>(null);
+  const [balance, setBalance] = useState<{
+    accountId: string;
+    accessContext: typeof accessContext;
+    label: string;
+  } | null>(null);
+  const [revision, setRevision] = useState(0);
   useEffect(() => {
-    setBalanceLabel(null);
+    const changed = (event: Event) => {
+      if ((event as CustomEvent<{ accountId: string }>).detail.accountId === accountId)
+        setRevision((value) => value + 1);
+    };
+    window.addEventListener(CREDIT_BALANCE_CHANGED, changed);
+    return () => window.removeEventListener(CREDIT_BALANCE_CHANGED, changed);
+  }, [accountId]);
+  useEffect(() => {
+    setBalance(null);
     if (!canRead) return;
     let current = true;
     void client
       .getBilling({ accountId })
-      .then((billing) => {
+      .then(async (billing) => {
         if (!current || billing.mode !== "stripe") return;
         const { balanceMicros, currency } = billing.balance;
-        setBalanceLabel(
+        let label =
           balanceMicros > 0
             ? `${formatMoneyMicros(balanceMicros, currency)} left`
-            : "No credits left",
-        );
+            : "No credits left";
+        if (billing.balance.plan) {
+          const catalog = await client.getBillingSubscriptionPlans({ accountId }).catch(() => null);
+          if (catalog?.plan) {
+            const remaining = billing.balance.plan.creditRemainingMicros;
+            label = `${formatMoneyMicros(remaining, currency)} plan credit · ${formatMoneyMicros(balanceMicros - remaining, currency)} other credit`;
+          }
+        }
+        if (current) setBalance({ accountId, accessContext, label });
       })
       // The balance is a detail: without it the row still says how credits pay.
       .catch(() => undefined);
     return () => {
       current = false;
     };
-  }, [client, accountId, canRead]);
-  return { visible, balanceLabel, canOpenBilling: canManage };
+  }, [client, accountId, canRead, accessContext, revision]);
+  return {
+    visible,
+    balanceLabel:
+      canRead && balance?.accountId === accountId && balance.accessContext === accessContext
+        ? balance.label
+        : null,
+    canOpenBilling: canManage,
+  };
 }
 
 export function OpenGeniCreditsRow({

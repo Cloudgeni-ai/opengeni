@@ -4,6 +4,11 @@ import { createHash } from "node:crypto";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import {
+  applyFakeRlsScopeSetup,
+  emptyFakeRlsSettings,
+  type FakeRlsSettings,
+} from "@opengeni/testing/rls-scope-fake";
+import {
   signDelegatedAccessToken,
   type Permission,
   type OrganizationUsageSummary,
@@ -66,22 +71,21 @@ describe("organization usage HTTP actor binding", () => {
     const observations: Array<{ subject: string; human: string }> = [];
     const db = {
       async transaction(fn: (tx: Database) => Promise<unknown>) {
-        let account = "";
-        let workspace = "";
-        let subject = "";
-        let human = "";
+        let settings: FakeRlsSettings = emptyFakeRlsSettings;
         return await fn({
           execute: async (query: SQL) => {
             const { sql, params } = dialect.sqlToQuery(query);
-            if (sql.includes("set_config('opengeni.account_id'")) {
-              account = String(params[0]);
-              workspace = String(params[1]);
+            // The scope's setup statement applies tenant, subject and initiator.
+            const setup = applyFakeRlsScopeSetup(sql, params, settings);
+            if (setup) {
+              settings = setup.settings;
+              return setup.rows;
             }
-            if (sql.includes("set_config('opengeni.subject_id'")) subject = String(params[0]);
-            if (/\bset_config\(\s*'opengeni\.initiating_human_subject_id'/.test(sql))
-              human = String(params[1]);
-            if (sql.includes("current_setting('opengeni.account_id'"))
-              return [{ account_id: account, workspace_id: workspace }];
+            if (sql.includes("set_config('opengeni.subject_id'")) {
+              settings = { ...settings, subjectId: String(params[0]) };
+            }
+            const subject = settings.subjectId;
+            const human = settings.initiatingHumanSubjectId;
             if (sql.includes("current_setting('opengeni.subject_id'"))
               return [{ subject_id: subject }];
             if (sql.includes("opengeni_private.organization_model_usage_summary(")) {

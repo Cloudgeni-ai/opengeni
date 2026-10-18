@@ -15,6 +15,7 @@ import {
   getSessionBackgroundCommand,
   backgroundCommandActivityForSessions,
 } from "../src/session-background-commands";
+import { appendSessionCommandOutput } from "../src/session-command-output";
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -57,6 +58,23 @@ afterAll(async () => {
   await client?.close();
   await shared?.release();
 }, 60_000);
+
+/** Output is written only by the command output writer, which keys each chunk. */
+async function output(
+  command: { accountId: string; workspaceId: string; sessionId: string; commandId: string },
+  chunk: string,
+  stream: "stdout" | "stderr" = "stdout",
+) {
+  return await appendSessionCommandOutput(client.db, {
+    accountId: command.accountId,
+    workspaceId: command.workspaceId,
+    sessionId: command.sessionId,
+    commandId: command.commandId,
+    chunkId: crypto.randomUUID(),
+    stream,
+    chunk,
+  });
+}
 
 async function connected() {
   const commandId = crypto.randomUUID(),
@@ -113,12 +131,7 @@ test("concurrent finish and observation obey whichever terminal state was actual
 
 test("retention deletion of a partially read event produces an explicit gap", async () => {
   const command = await connected();
-  const events = await appendSessionEvents(client.db, workspaceId, sessionId, [
-    {
-      type: "sandbox.command.output.delta",
-      payload: { commandId: command.commandId, chunk: "abcdefghijk", stream: "stdout" },
-    },
-  ]);
+  const events = await output(command, "abcdefghijk");
   const first = await read(client.db, { ...command, maxOutputBytes: 4 });
   expect(first.hasMore).toBe(true);
   await shared.admin`delete from session_events where id=${events[0]!.id}`;
@@ -130,11 +143,8 @@ test("retention deletion of a partially read event produces an explicit gap", as
 test("running reads do not observe; terminal retained paging suppresses only pending completion", async () => {
   const command = await connected();
   expect((await observe(client.db, command))?.completionObservedAt).toBeNull();
+  await output(command, "hello 😀 world");
   await appendSessionEvents(client.db, workspaceId, sessionId, [
-    {
-      type: "sandbox.command.output.delta",
-      payload: { commandId: command.commandId, chunk: "hello 😀 world", stream: "stdout" },
-    },
     {
       type: "sandbox.command.output.delta",
       payload: { commandId: crypto.randomUUID(), chunk: "must not leak", stream: "stderr" },
@@ -160,12 +170,7 @@ test.each(["exited", "lost"] as const)(
   "already observed %s paging does not wait for an unrelated session writer",
   async (outcome) => {
     const command = await connected();
-    await appendSessionEvents(client.db, workspaceId, sessionId, [
-      {
-        type: "sandbox.command.output.delta",
-        payload: { commandId: command.commandId, chunk: "abcdefgh", stream: "stdout" },
-      },
-    ]);
+    await output(command, "abcdefgh");
     const exitCode = outcome === "exited" ? 0 : null;
     await settleConnectedMachineSessionBackgroundCommand(client.db, {
       ...command,

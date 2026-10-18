@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
-  DEFAULT_FREE_SITE_LIMITS,
+  DEFAULT_SITE_LIMITS,
   type SiteAbuseReport,
+  type SitePlatformUsage,
   type SitePublication,
 } from "@opengeni/contracts";
 import { OpenGeniClient } from "../src/client";
@@ -21,11 +22,13 @@ const publication: SitePublication = {
   status: "active",
   noindex: true,
   agent: { enabled: false, model: null, instructions: null, tools: null, guestTools: false },
-  limitProfile: { kind: "free", overrides: null },
-  effectiveLimits: { ...DEFAULT_FREE_SITE_LIMITS },
+  limitProfile: { kind: "standard", overrides: null },
+  effectiveLimits: { ...DEFAULT_SITE_LIMITS },
   invitedEmails: [],
   moderation: { openReports: 0, suspendedAt: null, suspendedBy: null, suspendedReason: null },
-  usage: { agentMicrosThisMonth: 0, conversationsToday: 0 },
+  usage: { agentMicrosThisMonth: 0, agentMicrosToday: 0, conversationsToday: 0 },
+  warnings: [],
+  outsideAgentModel: null,
   createdAt: "2026-10-14T09:00:00.000Z",
   updatedAt: "2026-10-14T09:00:00.000Z",
 };
@@ -141,15 +144,53 @@ describe("published Site management client", () => {
 
   test("reads and changes the workspace limit profile", async () => {
     const { client, seen } = fakeClient(({ body }) => ({
-      body: body ?? { kind: "free", overrides: null },
+      body: body ?? { kind: "standard", overrides: null },
     }));
-    expect(await client.getSiteLimitProfile(WS)).toEqual({ kind: "free", overrides: null });
+    expect(await client.getSiteLimitProfile(WS)).toEqual({ kind: "standard", overrides: null });
     const profile = { kind: "custom" as const, overrides: { turnsPerConversation: 5 } };
     expect(await client.updateSiteLimitProfile(WS, profile)).toEqual(profile);
     expect(seen.map(({ method, url }) => `${method} ${url}`)).toEqual([
       `GET https://api.example.test/v1/workspaces/${WS}/site-limit-profile`,
       `PUT https://api.example.test/v1/workspaces/${WS}/site-limit-profile`,
     ]);
+  });
+
+  test("applies a readiness fix and reads platform usage", async () => {
+    const usage: SitePlatformUsage = {
+      workspaceId: WS,
+      periodStart: "2026-10-01",
+      billingMode: "usage_only",
+      meters: [
+        {
+          meter: "requests",
+          used: 1200,
+          peak: 1200,
+          allowance: 1_000_000,
+          priceMicros: 600_000,
+          priceUnit: 1_000_000,
+          estimatedMicros: 720,
+        },
+      ],
+      estimatedMicros: 720,
+      chargedMicros: 0,
+      shadowMicros: 0,
+      brake: { engaged: false, engagedAt: null },
+    };
+    const { client, seen } = fakeClient(({ method }) => ({
+      body: method === "POST" ? publication : usage,
+    }));
+    const fix = {
+      kind: "site_data_guest_access" as const,
+      collection: "votes",
+      guestAccess: "append" as const,
+    };
+    expect(await client.applySitePublicationFix(WS, SITE, fix)).toEqual(publication);
+    expect(await client.getSitePlatformUsage(WS)).toEqual(usage);
+    expect(seen.map(({ method, url }) => `${method} ${url}`)).toEqual([
+      `POST ${BASE}/fixes`,
+      `GET https://api.example.test/v1/workspaces/${WS}/site-platform-usage`,
+    ]);
+    expect(seen[0]!.body).toEqual(fix);
   });
 
   test("authorizes a Site viewer and returns the redirect", async () => {

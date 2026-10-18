@@ -69,6 +69,7 @@
           "run-locally",
           "guides/connect-a-machine",
           "guides/webhooks-and-credentials",
+          "guides/connected-vaults",
           "guides/usage-allowances",
           "guides/task-usage-limits",
           "guides/insights",

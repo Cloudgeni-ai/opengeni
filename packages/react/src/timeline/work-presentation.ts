@@ -4,6 +4,7 @@
 import { timelineGroupContainsPresentedImage } from "./presented-image";
 import type { TurnSummaryStatus } from "./turn-summary-model";
 import type { ActivityItem, TimelineGroup, ToolCallItem } from "./types";
+import { type OpenGeniText } from "../messages/runtime";
 
 export type ActivityGroup = Extract<TimelineGroup, { kind: "activity" }>;
 export type TurnGroup = Extract<TimelineGroup, { kind: "turn" }>;
@@ -113,6 +114,7 @@ export function readableWorkHasDetails(
  * wait's `detail` is its one quiet secondary line.
  */
 export function readableWorkStatus(
+  t: OpenGeniText,
   group: ActivityGroup & { work: NonNullable<ActivityGroup["work"]> },
 ): Omit<TurnSummaryStatus, "preview"> & { detail?: string | undefined } {
   const end = group.work.endedAt;
@@ -121,7 +123,12 @@ export function readableWorkStatus(
     const durationMs = durationBetween(group.work.startedAt, end);
     const cycles = group.work.cycles;
     // Folded quiet cycles report their wall-clock span: waits are the point.
-    if (cycles) return { kind: "worked", label: `${cycles.count} updates over`, durationMs };
+    if (cycles)
+      return {
+        kind: "worked",
+        label: t("timeline.workPresentation.countUpdatesOver", { count: cycles.count }),
+        durationMs,
+      };
     return {
       kind: "worked",
       durationMs: durationMs === undefined ? undefined : Math.max(0, durationMs - pausedMs),

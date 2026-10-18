@@ -11,6 +11,8 @@ export type OpenGeniSiteDataErrorCode =
   | "conflict"
   | "not_found"
   | "forbidden"
+  /** This viewer may not do this on this Site (a role the Site's rules exclude). */
+  | "not_available_for_viewer"
   | "quota_exceeded"
   | "rate_limited"
   | "site_data_unsupported"
@@ -333,6 +335,7 @@ const KNOWN_CODES = new Set<OpenGeniSiteDataErrorCode>([
   "conflict",
   "not_found",
   "forbidden",
+  "not_available_for_viewer",
   "quota_exceeded",
   "rate_limited",
 ]);

@@ -313,7 +313,7 @@ function rawSetup() {
   );
   track(spyOn(db, "getWorkspaceGrant").mockResolvedValue(null));
   track(
-    spyOn(db, "requireWorkspace").mockResolvedValue({
+    spyOn(db, "getWorkspace").mockResolvedValue({
       id: workspaceId,
       accountId,
       kind: "shared",

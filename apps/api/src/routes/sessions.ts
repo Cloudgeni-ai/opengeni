@@ -7,22 +7,36 @@ import {
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
-import { agentConfigDeploymentPolicy, UnsupportedLatencyModeError } from "@opengeni/config";
+import {
+  agentConfigDeploymentPolicy,
+  resolveFirstPartyMcpToolPolicy,
+  UnsupportedLatencyModeError,
+} from "@opengeni/config";
+import { siteAgentDataToolNames, siteAgentSiteSqlOn } from "../site-publishing/agent-data-tools";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
+import { listWorkspaceBackgroundCommandsForSubject } from "@opengeni/db";
 import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import {
+  FIRST_PARTY_MCP_TOOL_CAPABILITIES,
+  FirstPartyMcpToolName,
   resolveWorkspaceAgentDefaults,
   SessionMessageSearchRequest,
   type AgentCapabilities,
+  type ToolRef,
 } from "@opengeni/contracts";
 import {
   SITE_FRAME_SESSION_CREATE_FIELDS,
   siteFrameBodyRefusal,
 } from "@opengeni/contracts/site-session-http";
-import { requireWorkspace, scheduledSessionIds } from "@opengeni/db";
+import {
+  requireWorkspace,
+  scheduledSessionIds,
+  currentSiteViewerRlsContext,
+  nestedPostgresSqlState,
+} from "@opengeni/db";
 import {
   currentSiteSessionOrigin,
   isVerifiedDelegatedHumanAuthorization,
@@ -170,6 +184,7 @@ import {
   getLiveEnrollmentConnection,
   getRetainedProcess,
   getSandbox,
+  getPublishedSiteVersion,
   getSession,
   readActiveSandbox,
   deleteSessionTreeIfQuiescent,
@@ -320,6 +335,7 @@ import {
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { SessionRetryConflictError } from "@opengeni/db";
+import { reauthorizeSiteSessionRequest } from "../site-publishing/session-request-authority";
 import {
   attachViewer,
   detachViewer,
@@ -372,7 +388,12 @@ import {
   sessionUsageLimitForRead,
   setSessionUsageLimitForAccess,
 } from "@opengeni/core";
-import { assertSessionExists, boundedLimit } from "../http/common";
+import {
+  assertSessionExists,
+  boundedLimit,
+  requireSessionSequence,
+  SESSION_SEQUENCE_HEADER,
+} from "../http/common";
 import { isAgentActingAsPerson } from "../http/acting-person";
 import {
   humanSecretWriteContext,
@@ -752,7 +773,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       // nothing else: the session gets the minimal Site profile. Only the Site
       // itself, running its published agent as `site:<siteId>`, chooses tools.
       const siteOrigin = origin ?? currentSiteSessionOrigin();
-      if (siteOrigin && grant.subjectId !== `site:${siteOrigin.siteId}`) {
+      if (siteOrigin && currentSiteViewerRlsContext()?.siteId !== siteOrigin.siteId) {
         const refused = siteFrameBodyRefusal("sessions.create", "/sessions", payload);
         if (refused)
           return c.json(
@@ -764,7 +785,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             },
             403,
           );
-        payload = await siteFrameSessionProfile(deps, workspaceId, payload);
+        payload = await siteFrameSessionProfile(deps, workspaceId, payload, {
+          accountId: grant.accountId,
+          siteId: siteOrigin.siteId,
+          versionId: siteOrigin.versionId ?? null,
+        });
+        // Ordinary Site viewers use native Only-me ownership. An agent preview
+        // inherits its parent's native visibility; the Site audience binding
+        // additionally restricts that execution to the parent's real owner.
+        if (grant.principalKind !== "agent_attempt")
+          (payload as Record<string, unknown>).visibility = "private";
       }
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
@@ -955,6 +985,31 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     } catch (error) {
       throw sessionAuthorizationHttpError(error);
     }
+    // Console-only command projection shares chat discovery authorization; it
+    // neither adds a command lifecycle nor changes ordinary session responses.
+    if (c.req.query("view") === "running_commands") {
+      const cursor = c.req.query("cursor");
+      if (cursor !== undefined && !z.string().uuid().safeParse(cursor).success)
+        throw new HTTPException(400, { message: "Invalid running command cursor" });
+      try {
+        return c.json(
+          await listWorkspaceBackgroundCommandsForSubject(
+            db,
+            workspaceId,
+            {
+              subjectId: grant.subjectId,
+              ...(authorizationScope ? { authorizationScope } : {}),
+              personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
+            },
+            cursor,
+          ),
+        );
+      } catch (error) {
+        if (error instanceof SessionListAccessError)
+          throw new HTTPException(403, { message: error.message });
+        throw error;
+      }
+    }
     const pageView = c.req.query("view") === "page";
     const query = sessionListQuery(c.req.query(), pageView);
     const projection = c.req.query("projection");
@@ -980,6 +1035,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.includeTotals ? { includeTotals: true } : {}),
           ...(query.needsYouOnly ? { needsYouOnly: true } : {}),
           ...(query.contentArchivedOnly ? { contentArchivedOnly: true } : {}),
+          ...(query.mineOnly ? { mineOnly: true } : {}),
           ...(query.includePinned === false ? { includePinned: false } : {}),
           ...(query.archivedOnly ? { archivedOnly: true } : {}),
           ...(query.sortBy ? { sortBy: query.sortBy } : {}),
@@ -989,6 +1045,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             : {}),
           ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
           ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
+          ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
           ...(query.createdBy ? { createdBy: query.createdBy } : {}),
           ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
           ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
@@ -1049,6 +1106,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
         ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
         pinned: page.pinned.map(decorateEntry),
+        ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
         sessions: page.sessions.map(decorateEntry),
       });
     }
@@ -1071,6 +1129,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
         ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
         pinned: page.pinned.map(decorate),
+        ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
         sessions: page.sessions.map(decorate),
       });
     }
@@ -2421,6 +2480,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/lineage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const observedSequence = await requireSessionSequence(
+      db,
+      workspaceId,
+      c.req.param("sessionId"),
+    );
     const lineage = await readSessionLineage(deps, grant, c.req.param("sessionId"));
     const sessionIds = [
       c.req.param("sessionId"),
@@ -2452,6 +2516,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       grant.subjectId,
       lineageSessions,
     );
+    c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     return c.json({
       ...lineage,
       sessionHasSchedules: targets.has(c.req.param("sessionId")),
@@ -2884,8 +2949,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
-    await assertSessionExists(db, workspaceId, sessionId);
+    const observedSequence = await requireSessionSequence(db, workspaceId, sessionId);
     const goal = await getSessionGoalWithContinuation(db, workspaceId, sessionId);
+    c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     if (!goal) {
       // `?absent=null` opts in to a successful `null` for a goal-less session,
       // so a browser polling a fresh chat logs no failed request. Without it
@@ -3582,8 +3648,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
         reauthorizeAfterMs:
-          authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
+          c.req.header("x-opengeni-site-frame") === "1"
+            ? 2_000
+            : (authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS),
         reauthorize: async () => {
+          await reauthorizeSiteSessionRequest(c.req.raw);
           const freshGrant = await requireFreshAccessGrant(c, deps, workspaceId, "sessions:read");
           await requireSessionAuthorization(deps, freshGrant, {
             sessionId,
@@ -3637,8 +3706,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
+    const observedSequence = await requireSessionSequence(db, workspaceId, sessionId);
     const snapshot = await getSessionQueueSnapshot(db, workspaceId, sessionId);
     if (!snapshot) throw new HTTPException(404, { message: "session not found" });
+    c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     return c.json(projectQueueSnapshot(snapshot, sessionId, relatedSessionAccessFor(c)));
   });
 
@@ -4223,7 +4294,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
-    await assertSessionExists(db, workspaceId, sessionId);
+    const observedSequence = await requireSessionSequence(db, workspaceId, sessionId);
     const rawStatus = c.req.query("status");
     const status = rawStatus ? HumanInputRequestStatus.safeParse(rawStatus) : null;
     if (status && !status.success) {
@@ -4234,6 +4305,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const requests = await listSessionHumanInputRequests(db, workspaceId, sessionId, {
       ...(status?.success ? { status: status.data } : {}),
     });
+    c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     return c.json({ requests });
   });
 
@@ -5626,7 +5698,7 @@ export function sessionAuthorizationOperationForHttp(
   return null;
 }
 
-function sessionAuthorizationHttpError(error: unknown): HTTPException {
+export function sessionAuthorizationHttpError(error: unknown): HTTPException {
   if (error instanceof SessionAuthorizationDeniedError) {
     return new HTTPException(404, { message: "session not found" });
   }
@@ -5658,7 +5730,10 @@ export function sessionTenancyHttpError(error: unknown): Error {
       retryable: false,
     });
   }
-  if (error instanceof SessionTenancyNotActivatedError) {
+  if (
+    error instanceof SessionTenancyNotActivatedError ||
+    nestedPostgresSqlState(error) === "P0793"
+  ) {
     return new ApiHttpError(409, {
       code: "conflict",
       message: "Only-me chats are not enabled for this organization.",
@@ -5798,6 +5873,7 @@ export function sessionListQuery(
   allowCursor = true,
 ): {
   originSiteId: string | undefined;
+  siteAccessId: string | undefined;
   limit: string | undefined;
   parentSessionId: string | null | undefined;
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
@@ -5807,6 +5883,7 @@ export function sessionListQuery(
   includeTotals: boolean;
   needsYouOnly: boolean;
   contentArchivedOnly: boolean;
+  mineOnly: boolean;
   archivedOnly: boolean;
   sortBy: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
@@ -5821,6 +5898,14 @@ export function sessionListQuery(
 } {
   const parentSessionId = query.parentSessionId;
   const originSiteId = query.originSiteId;
+  const siteAccessId = query.siteAccessId;
+  if (
+    siteAccessId !== undefined &&
+    (!z.string().uuid().safeParse(siteAccessId).success || originSiteId !== undefined)
+  )
+    throw new HTTPException(400, {
+      message: "siteAccessId must name one Site without an origin filter",
+    });
   if (originSiteId !== undefined && !z.string().uuid().safeParse(originSiteId).success)
     throw new HTTPException(400, { message: "originSiteId must be a Site id" });
   // "null" = roots only; a uuid = children of that session; anything else is
@@ -5856,17 +5941,20 @@ export function sessionListQuery(
     throw new HTTPException(400, { message: 'includePinned must be "true" or "false"' });
   }
   const includePinned = query.includePinned !== "false";
-  for (const key of ["includeTotals", "needsYouOnly", "contentArchivedOnly"]) {
+  for (const key of ["includeTotals", "needsYouOnly", "contentArchivedOnly", "mineOnly"]) {
     if (query[key] !== undefined && !["true", "false"].includes(query[key]!))
       throw new HTTPException(400, { message: `${key} must be "true" or "false"` });
   }
   const includeTotals = query.includeTotals === "true";
   const needsYouOnly = query.needsYouOnly === "true";
   const contentArchivedOnly = query.contentArchivedOnly === "true";
+  const mineOnly = query.mineOnly === "true";
   if (includeTotals && (!allowCursor || (parentSessionId !== "null" && !pinsOnly)))
     throw new HTTPException(400, { message: "includeTotals requires a root page" });
   if (needsYouOnly && !allowCursor)
     throw new HTTPException(400, { message: 'needsYouOnly requires view="page"' });
+  if (mineOnly && !allowCursor)
+    throw new HTTPException(400, { message: 'mineOnly requires view="page"' });
   if (pinsOnly && !includePinned) {
     throw new HTTPException(400, { message: "pinsOnly requires includePinned" });
   }
@@ -5962,7 +6050,9 @@ export function sessionListQuery(
   const hasPageFilters =
     needsYouOnly ||
     contentArchivedOnly ||
+    mineOnly ||
     originSiteId !== undefined ||
+    siteAccessId !== undefined ||
     channelId !== undefined ||
     createdByKind !== undefined ||
     updatedFrom !== undefined ||
@@ -5984,6 +6074,7 @@ export function sessionListQuery(
   return {
     limit: query.limit,
     originSiteId,
+    siteAccessId,
     parentSessionId:
       parentSessionId === undefined
         ? undefined
@@ -5997,6 +6088,7 @@ export function sessionListQuery(
     includeTotals,
     needsYouOnly,
     contentArchivedOnly,
+    mineOnly,
     archivedOnly,
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,
@@ -6125,8 +6217,8 @@ function decodeAgentTopologyCursor(value: string): AgentTopologyCursorEnvelope {
     if (
       !/^(?:0|[1-9]\d*)$/.test(parsed.cursor.sortRevision) ||
       !/^(?:0|[1-9]\d*)$/.test(parsed.cursor.snapshotRevision) ||
-      BigInt(parsed.cursor.sortRevision) > 9_223_372_036_854_775_807n ||
-      BigInt(parsed.cursor.snapshotRevision) > 9_223_372_036_854_775_807n ||
+      BigInt(parsed.cursor.sortRevision) > (1n << 65n) - 1n ||
+      BigInt(parsed.cursor.snapshotRevision) > (1n << 65n) - 1n ||
       Number.isNaN(Date.parse(parsed.cursor.sortAt)) ||
       Number.isNaN(Date.parse(parsed.cursor.snapshotAt))
     ) {
@@ -6360,14 +6452,18 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
  * and the workspace's default agent capabilities without workspace
  * administration or browser and computer control, so the page cannot reach
  * the viewer's Connected Machines, sandboxes or browsers. Workers it spawns
- * only narrow that. Everything else (tools, servers, sandbox, resources,
- * Skills, learning, goals) is the workspace default for a plain chat, and
- * agents started from a Site stay clamped (`assertNotSiteClampedAgent`).
+ * only narrow that. It runs without a sandbox; its first-party tools are the
+ * ones the Site declares plus the Site's own data tools, and its MCP
+ * connections only the ones the Site declares. Everything else (resources,
+ * Skills, learning, goals) is the workspace default for a plain chat. Agents
+ * started from a Site stay clamped
+ * (`assertNotSiteClampedAgent`).
  */
 async function siteFrameSessionProfile(
   deps: ApiRouteDeps,
   workspaceId: string,
   payload: unknown,
+  frame: { accountId: string; siteId: string | null; versionId: string | null },
 ): Promise<Record<string, unknown>> {
   const body = (payload ?? {}) as Record<string, unknown>;
   const profile: Record<string, unknown> = {};
@@ -6379,14 +6475,96 @@ async function siteFrameSessionProfile(
       ? Object.fromEntries(Object.entries(metadata).filter(([key]) => !key.startsWith("_opengeni")))
       : {};
   profile.vaultPolicy = { mode: "selected", vaultIds: [] };
-  profile.agent = {
-    capabilities: siteFrameCapabilities(
-      resolveWorkspaceAgentDefaults((await requireWorkspace(deps.db, workspaceId)).settings)
-        ?.capabilities ?? "all",
-      agentConfigDeploymentPolicy(deps.settings).unavailable,
-    ),
-  };
+  // Tools are the overlap of what the Site declares and what the person may
+  // use: only the workspace MCP connections the Site version requests (the
+  // person's own access to each still applies), never the workspace
+  // default set. A frame with no published Site declares none.
+  profile.tools = await siteFrameDeclaredTools(deps, workspaceId, frame);
+  const unavailable = agentConfigDeploymentPolicy(deps.settings).unavailable;
+  const capabilities = siteFrameCapabilities(
+    resolveWorkspaceAgentDefaults((await requireWorkspace(deps.db, workspaceId)).settings)
+      ?.capabilities ?? "all",
+    unavailable,
+  );
+  profile.agent = { capabilities };
+  // First-party tools are the ones the Site declares plus the Site's own data
+  // tools, never the workspace default set; a Site page's agent runs without
+  // a sandbox.
+  profile.firstPartyMcpTools = (await siteFrameFirstPartyTools(deps, workspaceId, frame)).filter(
+    (tool) => {
+      const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
+      if (owner === "runtime") return true;
+      if (owner === "sandbox" || unavailable[owner] !== undefined) return false;
+      const value = (capabilities as Record<string, unknown>)[owner];
+      return value === undefined ? capabilities.from === "all" : value !== false;
+    },
+  );
+  profile.sandboxBackend = "none";
   return profile;
+}
+
+/**
+ * The first-party tools of a Site page's session: the session runtime's own,
+ * the first-party tools the Site version declares, and, for a published Site,
+ * its own data tools (`site_data_query`, `site_data_write`, and the Site SQL
+ * tools when Site SQL is on), all within the deployment's tool allowlist.
+ */
+async function siteFrameFirstPartyTools(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  frame: { accountId: string; siteId: string | null; versionId: string | null },
+): Promise<FirstPartyMcpToolName[]> {
+  const allowed = new Set<string>(resolveFirstPartyMcpToolPolicy(deps.settings).allowed);
+  const tools = new Set<FirstPartyMcpToolName>(["set_session_title", "wait_for_input"]);
+  if (frame.siteId && frame.versionId) {
+    const scope = { accountId: frame.accountId, workspaceId };
+    const version = await getPublishedSiteVersion(
+      deps.db,
+      scope,
+      frame.siteId,
+      frame.versionId,
+    ).catch(() => null);
+    for (const tool of version?.requestedTools ?? []) {
+      const parsed = FirstPartyMcpToolName.safeParse(tool.toolName);
+      if (tool.serverId === "opengeni" && parsed.success) tools.add(parsed.data);
+    }
+    if (version)
+      for (const tool of siteAgentDataToolNames({
+        viewerKind: "member",
+        siteSql: await siteAgentSiteSqlOn(deps, scope, frame.siteId),
+        allowed: [...allowed],
+      }))
+        tools.add(tool);
+  }
+  return [...tools].filter((tool) => allowed.has(tool)).sort();
+}
+
+/** The workspace MCP connections (not the first-party server) a Site version declares. */
+async function siteFrameDeclaredTools(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  frame: { accountId: string; siteId: string | null; versionId: string | null },
+): Promise<ToolRef[]> {
+  if (!frame.siteId || !frame.versionId) return [];
+  const version = await getPublishedSiteVersion(
+    deps.db,
+    { accountId: frame.accountId, workspaceId },
+    frame.siteId,
+    frame.versionId,
+  ).catch(() => null);
+  const declared = new Map<string, Set<string>>();
+  for (const { serverId, toolName } of version?.requestedTools ?? []) {
+    if (serverId === "opengeni" || !/^[A-Za-z0-9_-]{1,200}$/u.test(serverId)) continue;
+    const names = declared.get(serverId) ?? new Set<string>();
+    names.add(toolName);
+    declared.set(serverId, names);
+  }
+  return [...declared].map(([id, names]) => ({
+    kind: "mcp",
+    id,
+    optional: true,
+    allowedTools: [...names].sort(),
+  }));
 }
 
 /**
@@ -6453,7 +6631,10 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
       403,
     );
   }
-  if (error instanceof SessionTenancyNotActivatedError) {
+  if (
+    error instanceof SessionTenancyNotActivatedError ||
+    nestedPostgresSqlState(error) === "P0793"
+  ) {
     return c.json(
       {
         code: "SESSION_TENANCY_NOT_ACTIVATED",

@@ -8,6 +8,7 @@ import {
   queuedTurnPresentation,
   queueNeighborAnchors,
 } from "@opengeni/react/queue-presentation-model";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { useMemo, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { Button } from "./controls";
@@ -22,7 +23,7 @@ import { useNativeTimelineMessages } from "./messages";
    chip, then each waiting prompt on one line with Move up/down, Steer, Edit
    (back into the composer, confirming before it replaces a draft) and Remove.
    Which turns count, their text and the move anchors are the shared queue
-   model.
+   model. Under one Send (`singleSend`) waiting messages offer no Steer.
    -------------------------------------------------------------------------- */
 
 type TurnQueue = ReturnType<typeof useTurnQueue>;
@@ -40,24 +41,45 @@ export function QueueDock({
   composer,
   onComposerFocus,
   leading,
+  singleSend = false,
 }: {
   queue: TurnQueue;
   composer?: QueueDockComposer | undefined;
   onComposerFocus?: (() => void) | undefined;
   /** Chips sharing the queue chip's row (goal, agents, commands). */
   leading?: ReactNode;
+  /** One Send and nothing to choose: no Steer on waiting messages. */
+  singleSend?: boolean | undefined;
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const c = theme.colors;
   const [open, setOpen] = useState(true);
+  const t = useOpenGeniText();
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
   const turns = useMemo(
     () => queue.queue.filter((turn) => isAuthoritativeQueuedTurn(turn, queue.mutationFor)),
     [queue.mutationFor, queue.queue],
   );
+  // A failed queue action stays visible until tapped, whether or not prompts
+  // are queued (a Steer is never a queue row).
+  const mutationError = queue.mutationError ? (
+    <Pressable accessibilityRole="alert" onPress={queue.clearMutationError}>
+      <Text style={{ ...fontStyle(theme), fontSize: theme.size.xs, color: c["status-failed"] }}>
+        {queue.mutationError.message}
+      </Text>
+    </Pressable>
+  ) : null;
   if (turns.length === 0) {
-    return leading ? <View style={{ flexDirection: "row" }}>{leading}</View> : null;
+    if (!mutationError) {
+      return leading ? <View style={{ flexDirection: "row" }}>{leading}</View> : null;
+    }
+    return (
+      <View style={{ gap: 6 }}>
+        {leading ? <View style={{ flexDirection: "row" }}>{leading}</View> : null}
+        {mutationError}
+      </View>
+    );
   }
   const first = turns[0]!;
   // The compact signal chip text (goal, agents and the queue share one row).
@@ -95,7 +117,7 @@ export function QueueDock({
           <Pressable
             accessibilityRole="button"
             accessibilityState={{ expanded: open }}
-            accessibilityLabel={`${turns.length} queued prompt${turns.length === 1 ? "" : "s"}`}
+            accessibilityLabel={t("counts.queuedPrompts", { count: turns.length })}
             onPress={() => setOpen((value) => !value)}
             hitSlop={{ top: 7, bottom: 7 }}
             style={{
@@ -108,27 +130,33 @@ export function QueueDock({
             }}
           >
             <Icon name="list-ordered" size={13} color={c["fg-muted"]} />
-            <Text style={small}>{`${turns.length} queued`}</Text>
+            <Text style={small}>{t("sessionChrome.queuedCount", { count: turns.length })}</Text>
           </Pressable>
-          <View style={{ width: 1, height: 14, backgroundColor: c.border }} />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={m.steerFirstQueued}
-            disabled={queue.mutating || queue.mutationFor(first.id) !== null}
-            onPress={() => void queue.steerTurn(first.id)}
-            hitSlop={{ top: 7, bottom: 7 }}
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 4,
-              height: 30,
-              paddingLeft: 6,
-              paddingRight: 10,
-            }}
-          >
-            <Icon name="corner-down-right" size={13} color={c["fg-muted"]} />
-            <Text style={small}>{m.steer}</Text>
-          </Pressable>
+          {singleSend ? (
+            <View style={{ width: 4 }} />
+          ) : (
+            <>
+              <View style={{ width: 1, height: 14, backgroundColor: c.border }} />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={m.steerFirstQueued}
+                disabled={queue.mutating || queue.mutationFor(first.id) !== null}
+                onPress={() => void queue.steerTurn(first.id)}
+                hitSlop={{ top: 7, bottom: 7 }}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 4,
+                  height: 30,
+                  paddingLeft: 6,
+                  paddingRight: 10,
+                }}
+              >
+                <Icon name="corner-down-right" size={13} color={c["fg-muted"]} />
+                <Text style={small}>{m.steer}</Text>
+              </Pressable>
+            </>
+          )}
         </View>
       </View>
       {open ? (
@@ -143,7 +171,7 @@ export function QueueDock({
           }}
         >
           {turns.map((turn, index) => {
-            const presentation = queuedTurnPresentation(turn);
+            const presentation = queuedTurnPresentation(t, turn);
             const voice = presentation.kind !== "prompt";
             const pending = queue.mutationFor(turn.id);
             const busy = pending !== null;
@@ -154,8 +182,8 @@ export function QueueDock({
               content === "text"
                 ? presentation.text
                 : content === "annotations"
-                  ? `${annotationCount} timeline annotation${annotationCount === 1 ? "" : "s"}`
-                  : QUEUE_ITEM_CONTENT_UNAVAILABLE;
+                  ? t("counts.timelineAnnotations", { count: annotationCount })
+                  : QUEUE_ITEM_CONTENT_UNAVAILABLE(t);
             return (
               <View key={turn.id} style={{ gap: 4 }}>
                 <View
@@ -191,29 +219,31 @@ export function QueueDock({
                     <>
                       <RowAction
                         icon="arrow-up"
-                        label={`Move queued prompt ${index + 1} up`}
+                        label={t("sessionChrome.moveQueuedPromptIndexUp", { index: index + 1 })}
                         disabled={busy || index === 0}
                         onPress={() => void queue.moveTurn(turn.id, beforeUp)}
                       />
                       <RowAction
                         icon="arrow-down"
-                        label={`Move queued prompt ${index + 1} down`}
+                        label={t("sessionChrome.moveQueuedPromptIndexDown", { index: index + 1 })}
                         disabled={busy || index >= turns.length - 1}
                         onPress={() => void queue.moveTurn(turn.id, beforeDown)}
                       />
                     </>
                   ) : null}
-                  <RowAction
-                    icon="corner-down-right"
-                    label={`Steer queued prompt ${index + 1}`}
-                    disabled={busy}
-                    busy={pending === "steer"}
-                    onPress={() => void queue.steerTurn(turn.id)}
-                  />
+                  {singleSend ? null : (
+                    <RowAction
+                      icon="corner-down-right"
+                      label={t("sessionChrome.steerQueuedPromptIndex", { index: index + 1 })}
+                      disabled={busy}
+                      busy={pending === "steer"}
+                      onPress={() => void queue.steerTurn(turn.id)}
+                    />
+                  )}
                   {canEdit ? (
                     <RowAction
                       icon="pencil"
-                      label={`Edit queued prompt ${index + 1}`}
+                      label={t("sessionChrome.editQueuedPromptIndex", { index: index + 1 })}
                       disabled={busy}
                       busy={pending === "edit"}
                       onPress={() => edit(turn)}
@@ -221,7 +251,7 @@ export function QueueDock({
                   ) : null}
                   <RowAction
                     icon="trash-2"
-                    label={`Remove queued prompt ${index + 1}`}
+                    label={t("sessionChrome.removeQueuedPromptIndex", { index: index + 1 })}
                     disabled={busy}
                     busy={pending === "delete"}
                     onPress={() => void queue.removeTurn(turn.id)}
@@ -240,12 +270,12 @@ export function QueueDock({
                     }}
                   >
                     <Text style={{ ...fontStyle(theme), fontSize: theme.size.xs, color: c.fg }}>
-                      {QUEUE_REPLACE_DRAFT_COPY.title}
+                      {QUEUE_REPLACE_DRAFT_COPY(t).title}
                     </Text>
                     <Text
                       style={{ ...fontStyle(theme), fontSize: theme.size.xs, color: c["fg-muted"] }}
                     >
-                      {QUEUE_REPLACE_DRAFT_COPY.detail}
+                      {QUEUE_REPLACE_DRAFT_COPY(t).detail}
                     </Text>
                     <View
                       style={{
@@ -256,12 +286,12 @@ export function QueueDock({
                       }}
                     >
                       <Button
-                        label={QUEUE_REPLACE_DRAFT_COPY.keep}
+                        label={QUEUE_REPLACE_DRAFT_COPY(t).keep}
                         variant="ghost"
                         onPress={() => setReplaceDraftFor(null)}
                       />
                       <Button
-                        label={QUEUE_REPLACE_DRAFT_COPY.replace}
+                        label={QUEUE_REPLACE_DRAFT_COPY(t).replace}
                         variant="primary"
                         onPress={() => {
                           setReplaceDraftFor(null);
@@ -276,13 +306,7 @@ export function QueueDock({
           })}
         </View>
       ) : null}
-      {queue.mutationError ? (
-        <Pressable accessibilityRole="alert" onPress={queue.clearMutationError}>
-          <Text style={{ ...fontStyle(theme), fontSize: theme.size.xs, color: c["status-failed"] }}>
-            {queue.mutationError.message}
-          </Text>
-        </Pressable>
-      ) : null}
+      {mutationError}
     </View>
   );
 }

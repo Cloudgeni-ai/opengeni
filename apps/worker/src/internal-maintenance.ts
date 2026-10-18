@@ -10,11 +10,13 @@ import {
   automaticSessionTitleFanoutDue,
   browserDeadlineCheckpointDue,
   knowledgeIndexDue,
+  maintainSubscriptionPlans,
   sandboxIdleCheckpointDue,
   sandboxLeaseReaperDue,
   sandboxMaintenanceDue,
   sessionWorkflowWakesDue,
   siteAuthMaintenanceDue,
+  subscriptionPlanMaintenanceDue,
   workspacePauseTimerDue,
   type Database,
 } from "@opengeni/db";
@@ -53,6 +55,8 @@ export const SITE_AUTH_MAINTENANCE_WORKFLOW_ID = "opengeni-site-auth-maintenance
 export const SITE_AUTH_MAINTENANCE_PERIOD_MS = 60 * 1_000;
 /** The Schedule earlier releases used to drive the sandbox lease reaper. */
 export const SANDBOX_REAPER_SCHEDULE_ID = "opengeni-sandbox-lease-reaper";
+/** Small bounded DB-only pass; no Temporal execution for plan maintenance. */
+export const SUBSCRIPTION_PLAN_MAINTENANCE_PERIOD_MS = 60_000;
 
 export const INTERNAL_MAINTENANCE_JOBS = [
   "session-workflow-wake-dispatcher",
@@ -61,6 +65,7 @@ export const INTERNAL_MAINTENANCE_JOBS = [
   "sandbox-lease-reaper",
   "sandbox-idle-checkpoint",
   "browser-deadline-checkpoint",
+  "subscription-plan-maintenance",
 ] as const;
 export type InternalMaintenanceJob = (typeof INTERNAL_MAINTENANCE_JOBS)[number];
 
@@ -139,6 +144,25 @@ export async function internalMaintenanceCadences(input: {
   const jobs = new Set(input.jobs ?? INTERNAL_MAINTENANCE_JOBS);
   const taskQueue = settings.temporalTaskQueue;
   const cadences: MaintenanceCadence[] = [];
+  if (settings.subscriptionPlansEnabled && jobs.has("subscription-plan-maintenance")) {
+    cadences.push({
+      job: "subscription-plan-maintenance",
+      periodMs: SUBSCRIPTION_PLAN_MAINTENANCE_PERIOD_MS,
+      hasWork: async () => await subscriptionPlanMaintenanceDue(db),
+      start: async () => {
+        const result = await maintainSubscriptionPlans(db, {
+          onError: (error, accountId) =>
+            observability.warn("Subscription plan maintenance account failed", {
+              accountId,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+        });
+        if (result.failedAccounts > 0)
+          throw new Error(`${result.failedAccounts} subscription plan maintenance accounts failed`);
+        return "started";
+      },
+    });
+  }
   if (jobs.has("session-workflow-wake-dispatcher")) {
     const { repairMissedSessionWorkflowWakes } = await import("./activities/parent-wake");
     cadences.push({

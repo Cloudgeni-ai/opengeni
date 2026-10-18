@@ -1,4 +1,5 @@
 import type { SessionStatus } from "@opengeni/sdk";
+import { type OpenGeniText } from "./messages/runtime";
 
 /** Status token family (`--og-color-status-<tone>`) for a session status. */
 export type SessionStatusTone = "queued" | "running" | "waiting" | "idle" | "failed" | "cancelled";
@@ -32,22 +33,21 @@ export function sessionDisplayStatus(session: {
 }
 
 /** Renderer-neutral session status presentation: label, color family and liveness. */
-export const SESSION_STATUS_PRESENTATION: Record<
-  SessionDisplayStatus,
-  { label: string; tone: SessionStatusTone; pulse: boolean }
-> = {
-  queued: { label: "Queued", tone: "queued", pulse: false },
-  running: { label: "Running", tone: "running", pulse: true },
-  recovering: { label: "Recovering", tone: "running", pulse: true },
+export const SESSION_STATUS_PRESENTATION = (
+  t: OpenGeniText,
+): Record<SessionDisplayStatus, { label: string; tone: SessionStatusTone; pulse: boolean }> => ({
+  queued: { label: t("sessionStatusModel.queued"), tone: "queued", pulse: false },
+  running: { label: t("sessionStatusModel.running"), tone: "running", pulse: true },
+  recovering: { label: t("sessionStatusModel.recovering"), tone: "running", pulse: true },
   // Model subscription capacity is exhausted; the turn continues by itself.
-  waiting_capacity: { label: "Limit reached", tone: "waiting", pulse: true },
-  idle: { label: "Idle", tone: "idle", pulse: false },
-  requires_action: { label: "Waiting on you", tone: "waiting", pulse: true },
+  waiting_capacity: { label: t("sessionStatusModel.limitReached"), tone: "waiting", pulse: true },
+  idle: { label: t("sessionStatusModel.idle"), tone: "idle", pulse: false },
+  requires_action: { label: t("sessionStatusModel.waitingOnYou"), tone: "waiting", pulse: true },
   // The runtime could not start the next turn. Nothing moves until a recheck.
-  blocked: { label: "Stuck", tone: "failed", pulse: false },
-  failed: { label: "Failed", tone: "failed", pulse: false },
-  cancelled: { label: "Cancelled", tone: "cancelled", pulse: false },
-};
+  blocked: { label: t("sessionStatusModel.stuck"), tone: "failed", pulse: false },
+  failed: { label: t("sessionStatusModel.failed"), tone: "failed", pulse: false },
+  cancelled: { label: t("sessionStatusModel.cancelled"), tone: "cancelled", pulse: false },
+});
 
 /**
  * The status badge's color tokens (text, border and its alpha); the fill is the

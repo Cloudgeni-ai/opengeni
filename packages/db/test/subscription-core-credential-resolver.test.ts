@@ -41,6 +41,26 @@ function credential(expiresAt: Date | null, lastRefreshAt: Date | null = null): 
 }
 
 describe("shared credential resolver refresh policy", () => {
+  test("fresh-only reads share the normal expiry policy without renewing or degrading credentials", async () => {
+    const policy = { windowMs: 60_000, fallbackMs: 3_600_000 };
+    for (const [loaded, expected] of [
+      [credential(new Date(Date.now() + 30_000)), null],
+      [credential(new Date(Date.now() + 600_000)), "current"],
+      [credential(new Date(Date.now() - 1_000)), null],
+      [credential(null), null],
+      [credential(null, new Date(Date.now() - 7_200_000)), null],
+      [credential(null, new Date()), "current"],
+    ] as const) {
+      const { resolver, refreshed } = resolverFor(policy, loaded);
+      expect(await resolver.getFreshToken()).toBe(expected);
+      expect(refreshed).toEqual([]);
+    }
+    const expired = resolverFor(null, credential(new Date(Date.now() - 1_000)));
+    expect(await expired.resolver.getFreshToken()).toBeNull();
+    expect(expired.refreshed).toEqual([]);
+    await expect(expired.resolver.getToken()).rejects.toBeInstanceOf(Relogin);
+  });
+
   test("the policy follows the adapter: none for a credential that never renews", () => {
     const capabilities = (autoRenews: boolean) => ({
       autoRenews,

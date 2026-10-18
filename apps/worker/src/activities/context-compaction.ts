@@ -2,6 +2,7 @@ import { readReasoningConfiguration } from "@opengeni/codex";
 import {
   applyContextCompaction,
   getActiveSessionHistoryItemsPaged,
+  getFiles,
   recordSkippedContextCompaction,
   recordStartedContextCompaction,
   type Database,
@@ -19,6 +20,7 @@ import {
   omitOpaqueArtifactsFromPortableCompactionHistory,
   buildCompactionReplacementHistory,
   buildRemoteV2ReplacementHistory,
+  compactionAttachmentFileIds,
   compactionThresholdTokens,
   compactionReplacementFingerprint,
   decideCompaction,
@@ -28,6 +30,7 @@ import {
   projectRemoteCompactionOverflowRetryInput,
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
+  type AttachmentUploadTimes,
   type CompactionItem,
   type CompactionProviderRejection,
 } from "@opengeni/runtime";
@@ -438,6 +441,7 @@ async function compactContextRemoteV2(
     canonicalItems,
     compactionItem,
     (item) => retainedTokens.get(item) ?? estimateTokens([item]),
+    await attachmentUploadTimes(db, scope.workspaceId, canonicalItems),
   );
   const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
@@ -571,6 +575,7 @@ async function compactContextPortable(
     summaryBody,
     (item) => retainedTokens.get(item) ?? estimateTokens([item]),
     Math.min(outputReserve, Math.max(0, structuralBudget - prefixTokens - summaryTokens)),
+    await attachmentUploadTimes(db, scope.workspaceId, summarizedItems),
   );
   const estimatedTokensAfter = estimateTokens(
     await projectForWire([...replacementHistory, ...deferredItems]),
@@ -751,6 +756,21 @@ export function isExactContextLengthExceeded(
     isExactContextLengthExceeded(record.error, seen) ||
     isExactContextLengthExceeded(record.diagnostics, seen)
   );
+}
+
+/**
+ * Upload times for the files a new attachment catalog may list. They are
+ * immutable file facts, frozen into the catalog text when it is created.
+ */
+async function attachmentUploadTimes(
+  db: Database,
+  workspaceId: string,
+  items: readonly CompactionItem[],
+): Promise<AttachmentUploadTimes> {
+  const fileIds = compactionAttachmentFileIds(items);
+  if (fileIds.length === 0) return new Map();
+  const files = await getFiles(db, workspaceId, fileIds);
+  return new Map(files.map((file) => [file.id, file.createdAt]));
 }
 
 /** Charge retained uploads by their projected image context, not reference text. */

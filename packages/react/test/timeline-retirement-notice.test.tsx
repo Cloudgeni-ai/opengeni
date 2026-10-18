@@ -4,6 +4,9 @@ import type { SessionEvent } from "@opengeni/sdk";
 import { MessageTimeline } from "../src";
 import { buildTimeline } from "../src/timeline";
 import { registerDom, renderComponent, flush } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -38,7 +41,7 @@ function receipt(notificationOnly = true): SessionEvent {
 describe("retired child timeline receipt", () => {
   test("notification-only settlement renders the existing failed-agent row without a user prompt", async () => {
     const events = [receipt()];
-    const items = buildTimeline(events);
+    const items = buildTimeline(englishText, events);
     expect(items).toHaveLength(1);
     const item = items[0]!;
     expect(item.kind).toBe("machine-input-batch");
@@ -65,6 +68,6 @@ describe("retired child timeline receipt", () => {
   });
 
   test("ordinary input-settlement metadata remains quiet", () => {
-    expect(buildTimeline([receipt(false)])).toEqual([]);
+    expect(buildTimeline(englishText, [receipt(false)])).toEqual([]);
   });
 });

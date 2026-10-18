@@ -44,6 +44,21 @@ describe("session browse preferences", () => {
     expect(
       sessionBrowsePreferencesCustomized({ ...DEFAULT_SESSION_BROWSE_PREFERENCES, sortBy: "name" }),
     ).toBe(true);
+    expect(
+      sessionBrowsePreferencesCustomized({ ...DEFAULT_SESSION_BROWSE_PREFERENCES, mineOnly: true }),
+    ).toBe(true);
+  });
+
+  test("remembers Only mine with any status", () => {
+    const storage = memoryStorage();
+    const id = sessionBrowsePreferenceStorageId("user:one", "workspace:one");
+    const view = {
+      ...DEFAULT_SESSION_BROWSE_PREFERENCES,
+      status: "needs-you",
+      mineOnly: true,
+    } as const;
+    writeSessionBrowsePreferences(id, view, storage);
+    expect(readSessionBrowsePreferences(id, storage)).toEqual(view);
   });
 
   test("remembers the Needs you view and treats it as a customized one", () => {
@@ -59,18 +74,25 @@ describe("session browse preferences", () => {
     const storage = memoryStorage();
     const id = sessionBrowsePreferenceStorageId("user:one", "workspace:one");
     const other = sessionBrowsePreferenceStorageId("user:one", "workspace:two");
-    const view = { groupBy: "none", sortBy: "name", status: "all", showEmptyGroups: true } as const;
+    const view = {
+      groupBy: "none",
+      sortBy: "name",
+      status: "all",
+      mineOnly: false,
+      showEmptyGroups: true,
+    } as const;
     writeSessionBrowsePreferences(id, view, storage);
     expect(readSessionBrowsePreferences(id, storage)).toEqual(view);
     expect(readSessionBrowsePreferences(other, storage)).toEqual({
       groupBy: "project",
       sortBy: "updatedAt",
       status: "active",
+      mineOnly: false,
       showEmptyGroups: false,
     });
     storage.setItem(
       `${id}:view`,
-      '{"groupBy":"bad","sortBy":"bad","status":"bad","showEmptyGroups":"true"}',
+      '{"groupBy":"bad","sortBy":"bad","status":"bad","mineOnly":"true","showEmptyGroups":"true"}',
     );
     expect(readSessionBrowsePreferences(id, storage)).toEqual(
       readSessionBrowsePreferences(other, storage),
@@ -130,6 +152,7 @@ describe("session browse preferences", () => {
         groupBy,
         sortBy: "updatedAt",
         status: "active",
+        mineOnly: false,
         showEmptyGroups: false,
       } as const;
       writeSessionBrowsePreferences(id, view, storage);

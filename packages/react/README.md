@@ -120,6 +120,18 @@ import "@opengeni/react/compiled.css";
 // or one conversation: <SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} />
 ```
 
+To give people one Send and nothing to learn, pass `busySend: "steer"`:
+
+```tsx
+<SessionConversation sessionId={sessionId} composerOptions={{ busySend: "steer" }} />
+// OpenGeniChat: conversationProps={{ composerOptions: { busySend: "steer" } }}
+```
+
+A message sent while the agent works is then read as soon as it can, usually
+within seconds. There is no Queue choice beside Send and no Queue or Steer
+words; a message sent while the workstream is paused waits and shows as a
+waiting message. Add `offerQueue: true` to offer Queue beside Send again.
+
 Bearer-token apps pass `headers` (a function runs per request) or a custom
 `fetch`; a `client` passed with `baseUrl` replaces the one the component
 creates:
@@ -159,6 +171,13 @@ voice model answers and hands work to the agent in the same chat, and the
 transcript lands in the timeline. It stays hidden when no model is available,
 when the proxy sets `realtimeVoice: false`, or when you pass
 `realtimeVoice={false}`. The voice code loads lazily on first display.
+The voice button never names the voice model (the model menu does, when
+shown), and neither does the React Native call screen. To name the action
+after your assistant, set its text through `messages`: on the web,
+`"realtime.realtimeControl.startVoice": "Talk to Ava"`, with
+`"realtime.realtimeControl.tryVoiceAgain"` and
+`"realtime.realtimeControl.talkLiveWithTheAgent"` for the retry label and the
+idle hint; on React Native, `"native.timeline.messages.startACall"`.
 
 The working indicator before the first reply says "Thinking…". Pass
 `genieLoading` (`phrases`, `messages`, `orb`, or a whole `render`) to use your
@@ -237,10 +256,28 @@ they are older than 10 seconds. Failed reads are never kept, and a
 401/403/404 drops what was kept. Retained reads are dropped when `client`
 changes or the provider unmounts.
 
-> **Host action item:** only set `retainReadsAcrossMounts` when every signed-in
-> person gets their own `client` object (create a new client on sign-in,
-> sign-out and account switch), as the stock Opengeni console does. With a
-> shared client, leave it off.
+The same opt-in keeps the last view of each conversation a person leaves: its
+event tail, detail, prompt queue, pending questions, goal and lineage. Reopening
+it within 10 minutes draws that view in the first render, with no loading
+state, while every hook still reads its resource once in the background and the
+fresh tail replaces the kept one when it lands. It is held in memory only (never
+written to the device), and the kept event tails together stay within one open
+conversation's window budget, dropping the least recently left first. Hosts
+without `OpenGeniProvider` (for example a React Native app passing `client` to
+each hook) opt in with `useRetainedReads(client)` in a component that stays
+mounted while that person is signed in.
+
+> **Host action item:** only set `retainReadsAcrossMounts` (or call
+> `useRetainedReads`) when every signed-in person gets their own `client`
+> object (create a new client on sign-in, sign-out and account switch), as the
+> stock Opengeni console does. With a shared client, leave it off.
+
+Read hooks watching a shared event feed (`events` from `useSessionEvents`)
+re-read their projection only for an event after what their own read reflects.
+Current servers report that in the `X-OpenGeni-Session-Sequence` response header
+of the queue, pending questions, goal and lineage reads
+(`observedSessionSequence` in `@opengeni/sdk`); behind a server or proxy that
+does not report it, every matching event in the loaded tail re-reads as before.
 
 ### Exact conversation search navigation
 
@@ -628,6 +665,51 @@ export function App() {
 }
 ```
 
+## Your own labels and languages
+
+Every piece of text the components show, including user-facing error messages,
+comes from one message catalog. The built-in catalog is English; pass `locale`
+and `messages` to `OpenGeniProvider` to show your own words or a full translation.
+
+```tsx
+import { OpenGeniProvider, type OpenGeniMessages } from "@opengeni/react";
+
+const norwegian: OpenGeniMessages = {
+  "composer.stop": "Stopp",
+  "counts.items_one": "{count} element",
+  "counts.items_other": "{count} elementer",
+};
+
+<OpenGeniProvider client={client} workspaceId={workspaceId} locale="nb" messages={norwegian}>
+  {children}
+</OpenGeniProvider>;
+```
+
+- Keys are stable, typed identifiers. `englishMessages` is the complete default
+  catalog: export it to your translation tooling as is.
+- Templates use single-brace parameters (`"Move queued prompt {index} up"`); a
+  translation must keep the same parameters.
+- Counted text uses plural suffixes (`_zero`, `_one`, `_two`, `_few`, `_many`,
+  `_other`) chosen with `Intl.PluralRules` for `locale`, so each language
+  supplies the forms it needs. `_other` is always required. Where the runtime
+  has no `Intl.PluralRules` (Hermes on React Native), 1 uses `_one` and every
+  other count `_other`; no polyfill is needed.
+- `locale` also sets the language of the dates, times and numbers the
+  components format.
+- Missing keys fall back to an outer provider, then English, never to a raw key.
+  Declare a full translation as `OpenGeniMessageCatalog` and TypeScript reports
+  every key you have not translated yet, including keys added in later releases.
+- `OpenGeniMessagesProvider` scopes overrides to part of a tree (for example a
+  different label in one panel); `useOpenGeniText()` gives your own components
+  the same translator.
+- `@opengeni/react/messages` exports the catalog and runtime without any DOM
+  code, for React Native and server rendering.
+
+Component props that accept labels (for example `ChatComposer`'s `messages`)
+still win over the catalog; their defaults, such as `defaultChatComposerMessages(t)`,
+are functions of the translator. Internal diagnostics (developer invariants and
+protocol errors never meant for end users) stay in English.
+
 ## Realtime composer controls (`@opengeni/react/realtime`)
 
 The realtime subpath is the exact Opengeni composer experience: model catalog
@@ -945,10 +1027,19 @@ state remains application-owned; durable draft and session state remain in
   or session change clears that failure. Loading older rows alone does not
   resolve a failed newer read. Late failures from a previous session are ignored.
   A host that discards the promise must handle its own rejected request.
-- `useComposer(sessionId, { sendExtras, effectiveControl })` — revisioned private
+- `useComposer(sessionId, { sendExtras, effectiveControl, busySend })` — revisioned private
   draft, Send, Steer, and workstream Pause/Resume state. `send()` appends in
   visible queue order (including while paused); `steer()` puts the new direction
-  directly in chat and supersedes the current direction. Resume is always an
+  directly in chat, and a running turn reads it as soon as it can, usually
+  within seconds, without cutting off running tools. With `busySend: "steer"`,
+  `send()` steers while a turn is running or prompts wait (it still queues
+  while paused) and `sendToQueue()` always queues; the default `"queue"` keeps
+  Send queueing. `alternateSend` names the other choice while Send takes that
+  busy path (`null` otherwise) and `sendAlternate()` performs it; hosts show it
+  beside Send exactly when it is not `null`. Under `busySend: "steer"` there is
+  no other choice unless `offerQueue: true` is set (`singleSend` is then
+  false): `alternateSend` stays `null`, Cmd/Ctrl+Enter sends, and the stock
+  surfaces use `SingleSendWording` for queue-free copy. Resume is always an
   explicit control action and never an implicit side effect of Send. Drafts
   autosave with optimistic concurrency, survive failed sends, and reuse one
   `clientEventId` across retries so the server dedupes. Draft reads retry transient

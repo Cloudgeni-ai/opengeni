@@ -2,10 +2,11 @@ import { afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import type { BillingPlanBalance } from "@opengeni/sdk";
 
 type TestBillingSummary = {
   mode: "stripe" | "disabled";
-  balance: { balanceMicros: number };
+  balance: { balanceMicros: number; plan?: BillingPlanBalance };
 };
 
 const getBilling = mock(
@@ -80,6 +81,70 @@ afterEach(async () => {
 });
 
 describe("credit required prompt", () => {
+  test("an enrolled Free account offers plans while a disabled catalog preserves the legacy action", async () => {
+    const plan: BillingPlanBalance = {
+      key: "free",
+      label: "Free",
+      status: "active",
+      creditGrantedMicros: 10_000_000,
+      creditRemainingMicros: 0,
+      periodResetAt: null,
+      seatsUsed: 1,
+      seatLimit: 5,
+      cancelAtPeriodEnd: false,
+    };
+    getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: 0, plan } });
+    const getBillingSubscriptionPlans = mock(async () => ({
+      accountId: "account-a",
+      revision: 1,
+      plan,
+      plans: [
+        {
+          key: "pro",
+          label: "Pro",
+          monthlyPriceMicros: 20_000_000,
+          monthlyCreditMicros: 200_000_000,
+          seatLimit: 10,
+          freeCredit: false,
+          stripePriceId: "price_pro",
+          selfService: true,
+        },
+      ],
+    }));
+    const custom = { ...client, getBillingSubscriptionPlans } as unknown as Parameters<
+      typeof CreditRequiredPromptView
+    >[0]["client"];
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const render = async (open: boolean) =>
+      act(async () =>
+        root!.render(
+          <CreditRequiredPromptView
+            client={custom}
+            open={open}
+            workspaceId="workspace-a"
+            accountId="account-a"
+            canBuyCredits
+            onOpenChange={() => undefined}
+          />,
+        ),
+      );
+    await render(true);
+    expect(container.textContent).toContain("View upgrade options");
+    expect(container.textContent).toContain("Buy credits");
+    expect(
+      container.querySelector('a[href="/workspaces/workspace-a/organization?section=billing"]'),
+    ).not.toBeNull();
+    await render(false);
+    getBillingSubscriptionPlans.mockImplementation(async () => {
+      throw Object.assign(new Error("disabled"), { status: 404 });
+    });
+    await render(true);
+    expect(container.textContent).not.toContain("View upgrade options");
+    expect(container.textContent).toContain("Connect a model");
+  });
+
   test("the notice follows selected-model funding rather than the total credit balance", async () => {
     getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: 100_000_000 } });
     const container = document.createElement("div");

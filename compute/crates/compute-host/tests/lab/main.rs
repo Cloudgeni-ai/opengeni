@@ -42,6 +42,8 @@ mod ready;
 mod required;
 mod spoofing;
 mod squeeze;
+#[path = "../support/state.rs"]
+mod state;
 
 use required::skip;
 
@@ -96,7 +98,7 @@ impl Host {
     fn new(lab: &Path, name: &str, extra: &[&str]) -> Self {
         let root = lab.join("t").join(format!("{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        state::private_dir(&root);
         Self {
             lab: lab.to_owned(),
             socket: root.join("agent.sock"),

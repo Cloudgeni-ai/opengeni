@@ -1,5 +1,14 @@
 # Unified Skill content and writes
 
+Repository-provided Skills are optional turn context, not managed activations.
+Malformed SKILL.md YAML, invalid metadata and names, configured-name collisions,
+and differing repository definitions of the same name are skipped. A conflicting
+name excludes every repository definition, including later copies; identical
+trees still deduplicate. The repository index exposes structured warnings to the
+agent and the worker log without quoting YAML contents. Valid Skills remain
+usable. Managed/explicitly selected Skill validation and filesystem, permission,
+or cancellation errors retain their existing failure behavior.
+
 `packages/core/src/domain/skills.ts` exports `listSkills`, `readSkill`,
 `saveSkill`, `installSkill`, `approveSkill` and `restoreSkill`.
 `packages/contracts/src/skills.ts` owns their shared inputs and receipts.

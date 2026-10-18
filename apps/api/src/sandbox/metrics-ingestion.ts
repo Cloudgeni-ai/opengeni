@@ -80,6 +80,7 @@ import {
 } from "@opengeni/agent-proto";
 import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
 import { reconcileScreenControlOnHello } from "./screen-control";
+import { ingestConnectedCommandCompletion } from "./command-completion";
 
 /** The wildcard subject the agent event plane publishes heartbeats on. */
 export const AGENT_EVENTS_SUBJECT = "agent.*.*.connection.*.events";
@@ -124,9 +125,39 @@ function payloadIsHeartbeat(payload: Uint8Array): boolean {
  * deployment-wide serial DB queue. Each exact process subject retains FIFO order;
  * separate subjects drain concurrently. Consecutive pending heartbeats for one
  * subject are latest-wins because they are point-in-time liveness/metrics samples,
- * while GoingOffline and update-progress events remain ordered barriers.
+ * while GoingOffline and update-progress events remain ordered barriers. Exit
+ * collectors use a separate exact-operation lane: draining retained output must
+ * not hold that machine's heartbeats or unrelated command completions hostage.
  */
 export function createAgentEventIngestionScheduler(
+  handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
+  options: { maxConcurrentSubjects?: number; onHeartbeatCoalesced?: () => void } = {},
+): AgentEventIngestionScheduler {
+  // Data-plane collectors must never consume heartbeat/control admission. Both
+  // lanes reuse the existing concurrency discipline, with independent capacity.
+  const control = createAgentEventIngestionLane(handler, options);
+  const completions = createAgentEventIngestionLane(handler, options);
+  return {
+    enqueue(payload, subject) {
+      let completion = false;
+      try {
+        completion = AgentEvent.decode(payload).event?.$case === "operationCompleted";
+      } catch {
+        /* The control handler owns malformed-event diagnostics. */
+      }
+      (completion ? completions : control).enqueue(payload, subject);
+    },
+    async whenIdle() {
+      await Promise.all([control.whenIdle(), completions.whenIdle()]);
+    },
+    close() {
+      control.close();
+      completions.close();
+    },
+  };
+}
+
+function createAgentEventIngestionLane(
   handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
   options: { maxConcurrentSubjects?: number; onHeartbeatCoalesced?: () => void } = {},
 ): AgentEventIngestionScheduler {
@@ -191,22 +222,33 @@ export function createAgentEventIngestionScheduler(
     enqueue(payload, subject) {
       if (!accepting) return;
       const heartbeat = payloadIsHeartbeat(payload);
-      let state = states.get(subject);
+      let queueKey = subject;
+      let completion = false;
+      try {
+        const event = AgentEvent.decode(payload).event;
+        if (event?.$case === "operationCompleted") {
+          completion = true;
+          queueKey = `${subject}:operation:${event.operationCompleted.opId}`;
+        }
+      } catch {
+        /* The handler owns malformed payload diagnostics. */
+      }
+      let state = states.get(queueKey);
       if (!state) {
         state = { scheduled: false, pending: [] };
-        states.set(subject, state);
+        states.set(queueKey, state);
       }
 
       const queued = { payload, subject, heartbeat };
       const lastIndex = state.pending.length - 1;
-      if (heartbeat && lastIndex >= 0 && state.pending[lastIndex]!.heartbeat) {
+      if (lastIndex >= 0 && (completion || (heartbeat && state.pending[lastIndex]!.heartbeat))) {
         state.pending[lastIndex] = queued;
-        options.onHeartbeatCoalesced?.();
+        if (heartbeat) options.onHeartbeatCoalesced?.();
       } else {
         state.pending.push(queued);
       }
 
-      schedule(subject, state);
+      schedule(queueKey, state);
     },
     async whenIdle() {
       if (states.size === 0) return;
@@ -519,6 +561,17 @@ export async function handleAgentEventPayload(
       subject,
       error: error instanceof Error ? error.message : String(error),
     });
+    return;
+  }
+  if (event.event?.$case === "operationCompleted") {
+    try {
+      await ingestConnectedCommandCompletion(db, ids, event.event.operationCompleted, bus);
+    } catch (error) {
+      observability?.warn?.("Failed to settle a Connected Machine completion event", {
+        subject,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     return;
   }
   // A clean GoingOffline is the machine-plane's typed shutdown signal. Two things
@@ -842,7 +895,9 @@ export function helloRuntimeCapabilities(hello: Hello): Record<string, boolean> 
     operationResourcePolicy: caps.operationResourcePolicy === true,
     operationCpuQuota: caps.operationCpuQuota === true,
     transactionalFsWrite: caps.transactionalFsWrite === true,
+    transactionalFsWriteMachine: caps.transactionalFsWriteMachine === true,
     credentialRenew: caps.credentialRenew === true,
+    browserControlHttp: caps.browserControlHttp === true,
     screenControl: caps.consentedScreenControl === true,
     ...(caps.macPermissions ? enrollmentMacPermissionCapabilities(caps.macPermissions) : {}),
   };

@@ -26,6 +26,8 @@ export type ComputerBackendObservation = {
   frameId: string | null;
   roots: InteractionSemanticNodeValue[];
   nodeCount: number;
+  /** The platform stopped reading the tree early; listed nodes are real. */
+  incomplete?: { reason: "time_budget" | "node_budget"; unreadCount: number } | undefined;
   focusedRef: string | null;
   changedRegions: InteractionRect[];
 };

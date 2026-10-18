@@ -2,6 +2,7 @@ import { ThinkingOrb } from "thinking-orbs";
 import { useThemeType } from "../lib/use-theme-type";
 import { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "./genie-copy";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type GenieLoadingRenderProps = {
   startedAt: string;
@@ -45,10 +46,11 @@ export const GenieLoadingOptionsContext = createContext<GenieLoadingOptions | un
  * (`SessionConversation`, `OpenGeniChat`), which should not carry Opengeni's
  * own playful copy. The Opengeni app keeps the defaults above.
  */
-export const EMBEDDED_GENIE_LOADING = {
-  phrases: ["Thinking…"],
-  messages: { showDetails: "Show details" },
-} as const satisfies GenieLoadingOptions;
+export const EMBEDDED_GENIE_LOADING = (t: OpenGeniText) =>
+  ({
+    phrases: [t("timeline.genieLoading.thinking")],
+    messages: { showDetails: t("timeline.genieLoading.showDetails") },
+  }) as const satisfies GenieLoadingOptions;
 
 /** Decorative copy never substitutes for a failure or claims measurable progress. */
 export function GenieLoading({
@@ -65,27 +67,33 @@ export function GenieLoading({
   /** An actionable startup problem takes precedence over decorative copy. */
   notice?: string | undefined;
 }) {
+  const t = useOpenGeniText();
   const options = useContext(GenieLoadingOptionsContext);
   const waiting = phase === "waiting";
   const phrases = options?.phrases?.length
     ? options.phrases
     : waiting
-      ? GENIE_WAITING_PHRASES
-      : GENIE_PREPARING_PHRASES;
+      ? GENIE_WAITING_PHRASES(t)
+      : GENIE_PREPARING_PHRASES(t);
   const theme = useThemeType(undefined);
   const [phrase, setPhrase] = useState(0);
   const [showDetails, setShowDetails] = useState(false);
   const [slow, setSlow] = useState(false);
+  // Only the number of phrases matters to the rotation. The phrase list is a
+  // fresh array on every render (translated text, or an inline host option),
+  // so depending on its identity would restart the timer and re-pick a phrase
+  // after every render, chaining renders until the random pick repeats.
+  const phraseCount = phrases.length;
   useEffect(() => {
     const update = () => {
       setShowDetails(Date.now() - Date.parse(startedAt) >= 30_000);
       setSlow(Date.now() - Date.parse(startedAt) >= 60_000);
-      if (!document.hidden) setPhrase(Math.floor(Math.random() * phrases.length));
+      if (!document.hidden) setPhrase(Math.floor(Math.random() * phraseCount));
     };
     update();
     const timer = window.setInterval(update, 5_000);
     return () => window.clearInterval(timer);
-  }, [startedAt, phrases]);
+  }, [startedAt, phraseCount]);
   if (options?.render && !notice)
     return options.render({ startedAt, phase, detailsOpen, onShowDetails });
   return (
@@ -107,10 +115,12 @@ export function GenieLoading({
             (slow
               ? (options?.messages?.slowStatus ??
                 (waiting
-                  ? "Waiting for a response. Taking longer than usual."
-                  : "Preparing your task. Taking longer than usual."))
+                  ? t("timeline.genieLoading.waitingForAResponseTaking")
+                  : t("timeline.genieLoading.preparingYourTaskTakingLonger")))
               : (options?.messages?.status ??
-                (waiting ? "Waiting for a response." : "Preparing your task.")))}
+                (waiting
+                  ? t("timeline.genieLoading.waitingForAResponse")
+                  : t("timeline.genieLoading.preparingYourTask"))))}
         </span>
         <span
           key={notice ?? (slow ? "slow" : phrase)}
@@ -121,7 +131,9 @@ export function GenieLoading({
           {notice ??
             (slow
               ? (options?.messages?.slowText ??
-                (waiting ? "Still waiting for a response…" : "A little longer than usual…"))
+                (waiting
+                  ? t("timeline.genieLoading.stillWaitingForAResponse")
+                  : t("timeline.genieLoading.aLittleLongerThanUsual")))
               : phrases[phrase % phrases.length])}
         </span>
         {showDetails || detailsOpen || notice ? (
@@ -132,8 +144,11 @@ export function GenieLoading({
             onClick={onShowDetails}
           >
             {detailsOpen
-              ? (options?.messages?.hideDetails ?? "Hide details")
-              : (options?.messages?.showDetails ?? (waiting ? "Show details" : "Behind the magic"))}
+              ? (options?.messages?.hideDetails ?? t("timeline.genieLoading.hideDetails"))
+              : (options?.messages?.showDetails ??
+                (waiting
+                  ? t("timeline.genieLoading.showDetails")
+                  : t("timeline.genieLoading.behindTheMagic")))}
             <span aria-hidden="true"> ↗</span>
           </button>
         ) : null}

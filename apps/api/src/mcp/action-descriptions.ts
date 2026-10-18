@@ -26,6 +26,36 @@ const PROVIDERS: Record<string, string> = {
 const RULES: Rule[] = [
   {
     method: "GET",
+    pattern: /\/vault-providers\/connections$/,
+    text: () =>
+      "List connected password managers and deployment availability: 1Password, Proton Pass, Keeper, Bitwarden and external vaults. Returns connection metadata and setup status, not secret values; does not contact providers.",
+  },
+  {
+    method: "POST",
+    pattern: /\/vault-providers\/connections$/,
+    text: () =>
+      "Connect Proton Pass, Keeper Secrets Manager, a customer-controlled Bitwarden bridge or an external vault. Set ownership and provider-specific credentials. Saved-but-pending setup returns a connection ID; register it with a remote host if needed, then verify using the saved credentials.",
+  },
+  {
+    method: "PUT",
+    pattern: /\/vault-providers\/connections\/:connectionId\/credentials$/,
+    text: () =>
+      "Replace a connected password manager's credentials without changing its vault links. The same upstream account must verify successfully; pending verification keeps the previously working credential. Never repeat a consumed Keeper one-time token.",
+  },
+  {
+    method: "POST",
+    pattern: /\/vault-providers\/connections\/:connectionId\/verify$/,
+    text: () =>
+      "Finish a pending vault connection using its already saved credentials. Checks the provider and discovers available vaults without resubmitting a Keeper bootstrap token or remote signing key.",
+  },
+  {
+    method: "DELETE",
+    pattern: /\/vault-providers\/connections\/:connectionId$/,
+    text: () =>
+      "Disconnect a password manager and unlink its local vault mirrors. Removes Opengeni's stored access; never deletes upstream vaults or items.",
+  },
+  {
+    method: "GET",
     pattern: /\/(codex|claude|supergrok)\/accounts$/,
     text: ({ provider, scope }) =>
       `List the ${provider} subscription accounts connected ${scope}, with health, plan, primary account, whether each is used for new work, and which workspaces it serves.`,
@@ -276,9 +306,9 @@ const RULES: Rule[] = [
   },
 ];
 
-/** Actions that must carry a description (subscription and model settings). */
+/** Actions that must carry a description (subscriptions, models and vault connections). */
 export const DESCRIBED_ACTION_PATH =
-  /\/(codex|claude|supergrok)(\/|$)|\/model-providers\/|\/model-connections\/|\/model-account-settings(\/|$)/;
+  /\/(codex|claude|supergrok)(\/|$)|\/model-providers\/|\/model-connections\/|\/model-account-settings(\/|$)|\/vault-providers\//;
 
 function scopeOf(path: string): string {
   return path.startsWith("/v1/organizations/") ? "for the organization" : "in a workspace";

@@ -27,6 +27,7 @@ import { normalizeProtocolJsonValue } from "./protocol-json";
 import { mcpResultFromCustomData } from "./mcp-result-custom-data";
 import { isInternalGenericDispatchRegistrationItem } from "./lazy-tool-transport";
 import { toolCallIdFromSdkItem } from "./tool-call-identity";
+import { isPreemptedModelResponse } from "./model-preemption";
 
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
@@ -37,6 +38,12 @@ export type NormalizedRuntimeEvent = {
 export type NormalizeSdkEventOptions = {
   /** Trusted worker replacement for one tool output (for example an artifact receipt). */
   toolOutputOverride?: unknown;
+  /**
+   * Trusted worker edit of one tool output before media normalization, for
+   * example replacing retained image blocks with their artifact receipts while
+   * keeping the result's text.
+   */
+  toolOutputTransform?: (output: unknown) => unknown;
   /** Separately trusted receipt for the event truncation boundary. */
   retainedOutputEvidence?: unknown;
   /** Per-stream phase memory; without it only a completion's own declared phase is known. */
@@ -156,7 +163,9 @@ export class AssistantMessagePhaseTracker {
       return [];
     }
     if (data?.type !== "response_done" || !Array.isArray(data.response?.output)) return [];
-    return this.responseDone(data.response.output);
+    // A Steer cut this response short: the turn goes on, so what it kept is a
+    // progress note, never the final answer.
+    return this.responseDone(data.response.output, isPreemptedModelResponse(data));
   }
 
   /** Phase for a streamed text delta, when the provider already declared it. */
@@ -213,8 +222,8 @@ export class AssistantMessagePhaseTracker {
     return due;
   }
 
-  private responseDone(output: unknown[]): NormalizedRuntimeEvent[] {
-    const asksForToolWork = output.some(isClientToolWork);
+  private responseDone(output: unknown[], preempted: boolean): NormalizedRuntimeEvent[] {
+    const asksForToolWork = preempted || output.some(isClientToolWork);
     const messages = output.filter(isAssistantMessageItem);
     const finalMessage = asksForToolWork ? undefined : messages.at(-1);
     this.anonymousPhases = [];
@@ -604,7 +613,11 @@ export function normalizeSdkEvent(
         output:
           "toolOutputOverride" in options
             ? options.toolOutputOverride
-            : normalizeToolOutputForEvent(retainedMcpResult ?? item.output),
+            : normalizeToolOutputForEvent(
+                options.toolOutputTransform
+                  ? options.toolOutputTransform(retainedMcpResult ?? item.output)
+                  : (retainedMcpResult ?? item.output),
+              ),
       },
       ...(options.retainedOutputEvidence !== undefined
         ? { retainedOutputEvidence: options.retainedOutputEvidence }
@@ -848,6 +861,14 @@ function usageFromResponse(response: unknown): ModelResponseUsage["usage"] | nul
     return null;
   }
   const record = raw as Record<string, unknown>;
+  // Chat's SDK-facing usage is numeric-only. Its original provider detail
+  // snapshot also carries unknown/invalid counts for the shared normalizer;
+  // never replace those with a sanitized omission or SDK-defaulted zero.
+  const chatDetails = (
+    response as {
+      providerData?: { usage?: { prompt_tokens_details?: unknown } };
+    }
+  )?.providerData?.usage?.prompt_tokens_details;
   const usage = {
     ...numberProp(
       record,
@@ -866,7 +887,9 @@ function usageFromResponse(response: unknown): ModelResponseUsage["usage"] | nul
       "completion_tokens",
     ),
     ...numberProp(record, "totalTokens", "totalTokens", "total_tokens"),
-    ...inputTokenDetailsProp(record),
+    ...inputTokenDetailsProp(
+      chatDetails === undefined ? record : { prompt_tokens_details: chatDetails },
+    ),
     ...outputTokenDetailsProp(record),
     ...requestUsageEntriesProp(record),
   };

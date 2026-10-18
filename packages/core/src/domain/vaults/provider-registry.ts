@@ -12,7 +12,12 @@ import {
   type VaultProvider,
   type VaultProviderErrorCode,
   type VaultProviderRegistry,
+  type VaultProviderAuthority,
 } from "@opengeni/vaults";
+import {
+  externalVaultProviderForConnection,
+  type ExternalVaultProviderFactories,
+} from "./external-provider-connections";
 
 /**
  * Provider error codes as vault API error codes (§10B.1.1). `provider_not_found`
@@ -170,6 +175,8 @@ export function createWorkspaceVaultProviderRegistry(input: {
   subjectId: string | null;
   hostVaultProvider?: VaultProvider | null;
   onePasswordVaultProvider?: OnePasswordVaultProviderFactory | null;
+  externalVaultProviders?: ExternalVaultProviderFactories | null;
+  executionContext?: Pick<VaultProviderAuthority, "sessionId" | "turnId" | "attemptId" | "siteId">;
 }): VaultProviderRegistry {
   const factory = input.onePasswordVaultProvider;
   const host = input.hostVaultProvider;
@@ -197,5 +204,27 @@ export function createWorkspaceVaultProviderRegistry(input: {
         }
       : {}),
     ...(host ? { host: async () => host } : {}),
+    ...Object.fromEntries(
+      Object.entries(input.externalVaultProviders ?? {}).map(([provider, providerFactory]) => [
+        provider,
+        async (connectionId: string | null) => {
+          if (!connectionId || !providerFactory)
+            throw new VaultProviderError(
+              "provider_unavailable",
+              "This vault has no available connection.",
+            );
+          return externalVaultProviderForConnection({
+            db: input.db,
+            settings: input.settings,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            connectionId,
+            provider: provider as keyof ExternalVaultProviderFactories,
+            factory: providerFactory,
+            ...(input.executionContext ? { executionContext: input.executionContext } : {}),
+          });
+        },
+      ]),
+    ),
   });
 }

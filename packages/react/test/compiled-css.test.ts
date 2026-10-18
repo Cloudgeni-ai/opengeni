@@ -8,6 +8,7 @@ import {
   assertScoped,
   buildCompiledCss,
   buildEffectiveTokensCss,
+  flattenLayers,
 } from "../scripts/build-compiled-css";
 
 const packageRoot = join(import.meta.dir, "..");
@@ -166,6 +167,22 @@ describe("compiled CSS contract", () => {
       "background-color": "transparent",
       font: "inherit",
     });
+  });
+  test("lets unlayered component rules beat the layered base reset, as in the browser", () => {
+    const reset = compiled.indexOf(".og-root :where(li, p, blockquote");
+    expect(reset).toBeGreaterThan(-1);
+    expect(reset).toBeLessThan(compiled.indexOf(".og-session-capability-copy"));
+
+    const root = parse(
+      "@layer theme, base, utilities;\n.card p { padding: 1px }\n@layer utilities { .u { color: red } }\n@layer base { p { padding: 0 } }\n.after { color: blue }",
+    );
+    flattenLayers(root);
+    expect(root.nodes.map((node) => (node as { selector?: string }).selector)).toEqual([
+      "p",
+      ".u",
+      ".card p",
+      ".after",
+    ]);
   });
 
   test("ships effective derived tokens through the Tailwind source bridge", () => {

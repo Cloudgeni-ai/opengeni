@@ -17,6 +17,8 @@ test("only the worker image retains the native Documents parser", () => {
   expect(API_RUNTIME_EXTERNALS).not.toContain("@llamaindex/liteparse");
   expect(WORKER_RUNTIME_EXTERNALS).toContain("@llamaindex/liteparse");
   expect(API_RUNTIME_EXTERNALS).toContain("sharp");
+  expect(API_RUNTIME_EXTERNALS).toContain("ws");
+  expect(WORKER_RUNTIME_EXTERNALS).toContain("ws");
 });
 
 test("both images ship the 1Password SDK as a package, so its WASM core travels with it", () => {
@@ -24,6 +26,12 @@ test("both images ship the 1Password SDK as a package, so its WASM core travels 
   expect(PACKAGE_ASSET_RUNTIME_EXTERNALS).toContain("@1password/sdk");
   expect(API_RUNTIME_EXTERNALS).toContain("@1password/sdk");
   expect(WORKER_RUNTIME_EXTERNALS).toContain("@1password/sdk");
+});
+
+test("both images ship the Keeper SDK as a package; its adapter reads the installed build", () => {
+  expect(PACKAGE_ASSET_RUNTIME_EXTERNALS).toContain("@keeper-security/secrets-manager-core");
+  expect(API_RUNTIME_EXTERNALS).toContain("@keeper-security/secrets-manager-core");
+  expect(WORKER_RUNTIME_EXTERNALS).toContain("@keeper-security/secrets-manager-core");
 });
 
 describe("finalizeCommandEntry", () => {

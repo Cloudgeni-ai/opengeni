@@ -1,4 +1,4 @@
-import { BotIcon, PlusIcon } from "lucide-react";
+import { BotIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -21,13 +21,12 @@ import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { Field, FieldStack } from "@/components/ui/field";
-import { FLUSH_DETAIL_PAGE_CLASS, FLUSH_FORM_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { FormPage } from "@/components/ui/form-dialog";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { RelativeTime } from "@/components/ui/relative-time";
-import { Section } from "@/components/ui/section";
+import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
@@ -48,20 +47,19 @@ import {
 } from "@/lib/organization-access";
 
 /* ----------------------------------------------------------------------------
-   Organization settings > Developer > Connected agents.
+   Organization settings > Connected agents.
 
    An outside agent (Claude Code, Cursor, Codex, any MCP client) connects to
    the organization's one server URL and signs in in the browser, where the
-   person chooses what it can do. This section lists those connections; each
-   row opens the agent's page, where its access can be narrowed or widened and
-   the agent disconnected.
+   person chooses what it can do. The page shows how to add the server to each
+   client, then lists those connections; each row opens the agent's page, where
+   its access can be narrowed or widened and the agent disconnected.
 
-     (none)                 the list
-     view=connect-agent     Connect an agent: the URL and per-client setup
+     (none)                 setup and the list
      agent=<id>             a connected agent's page
    -------------------------------------------------------------------------- */
 
-export type ConnectedAgentsLocation = { view?: "connect-agent"; agent?: string };
+export type ConnectedAgentsLocation = { agent?: string };
 
 export type ConnectedAgentsProps = {
   organizationName: string;
@@ -127,16 +125,6 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
   const { api, location, onNavigate } = props;
   const { connections, canManageAll, error, refresh, replace } = useConnections(api);
 
-  if (location.view === "connect-agent") {
-    return (
-      <ConnectAgentPage
-        organizationName={props.organizationName}
-        mcpUrl={props.mcpUrl}
-        onClose={() => onNavigate({})}
-        {...(props.onCreateApiKey ? { onCreateApiKey: props.onCreateApiKey } : {})}
-      />
-    );
-  }
   if (location.agent) {
     const connection = connections?.find((each) => each.id === location.agent) ?? null;
     return (
@@ -155,12 +143,6 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
     );
   }
 
-  const connect = (
-    <Button type="button" onClick={() => onNavigate({ view: "connect-agent" })}>
-      <PlusIcon aria-hidden="true" />
-      Connect an agent
-    </Button>
-  );
   const visible = connections?.filter((each) => mcpConnectionStatus(each) !== "revoked") ?? null;
 
   let body;
@@ -185,12 +167,9 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
   } else if (visible.length === 0) {
     body = (
       <EmptyState
-        variant="page"
-        icon={<BotIcon />}
-        title="No agents connected yet"
-        description={`Let Claude Code, Cursor, Codex or any MCP client work in ${props.organizationName}, with the access you choose.`}
-        action={connect}
-        className="pt-8 pb-6"
+        variant="inline"
+        title="No agents connected yet."
+        description="An agent shows here once it signs in."
       />
     );
   } else {
@@ -239,45 +218,42 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
   }
 
   return (
-    <Section
-      title="Connected agents"
-      description={
-        canManageAll
-          ? "Outside agents people connected to this organization."
-          : "Outside agents you connected. Owners and admins see everyone's."
-      }
-      action={visible && visible.length > 0 ? connect : undefined}
-    >
-      {body}
-    </Section>
+    <SectionStack>
+      <Section
+        title="Connect an agent"
+        description="Add the Opengeni MCP server to your agent. It opens your browser to sign in, where you choose what it can do."
+      >
+        <ConnectAgentSetup
+          mcpUrl={props.mcpUrl}
+          {...(props.onCreateApiKey ? { onCreateApiKey: props.onCreateApiKey } : {})}
+        />
+      </Section>
+      <Section
+        title={canManageAll ? "All agents" : "Your agents"}
+        description={
+          canManageAll
+            ? "Outside agents people connected to this organization."
+            : "Outside agents you connected. Owners and admins see everyone's."
+        }
+      >
+        {body}
+      </Section>
+    </SectionStack>
   );
 }
 
 /** Connect an agent: the one URL, and what to paste into each client. */
-export function ConnectAgentPage({
-  organizationName,
+export function ConnectAgentSetup({
   mcpUrl,
-  onClose,
   onCreateApiKey,
 }: {
-  organizationName: string;
   mcpUrl: string;
-  onClose: () => void;
   onCreateApiKey?: () => void;
 }) {
   const [client, setClient] = useState<McpClientSetup["id"]>("claude");
   const snippet = mcpClientSnippet(client, mcpUrl);
   return (
-    <FormPage
-      className={FLUSH_FORM_PAGE_CLASS}
-      back={{ label: "Developer", onClick: onClose }}
-      title="Connect an agent"
-      description={`The agent can do what a person can do in ${organizationName}: chats, workspaces, knowledge, schedules and settings. When it signs in, you choose its access.`}
-      submitLabel="Done"
-      cancelLabel={null}
-      onSubmit={() => true}
-      onSubmitted={onClose}
-    >
+    <div className="min-w-0 py-5">
       <FieldStack>
         <Field label="Server URL">
           <CopyField value={mcpUrl} label="server URL" variant="field" size="md" />
@@ -322,7 +298,7 @@ export function ConnectAgentPage({
           </p>
         ) : null}
       </FieldStack>
-    </FormPage>
+    </div>
   );
 }
 
@@ -396,7 +372,7 @@ export function ConnectedAgentPage({
     () => Boolean(connection && draft && !samePolicy(connection.policy, draft)),
     [connection, draft],
   );
-  const back = { label: "Developer", onClick: onClose };
+  const back = { label: "Connected agents", onClick: onClose };
 
   if (!connection || !draft) {
     return (

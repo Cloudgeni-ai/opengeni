@@ -800,13 +800,16 @@ describe("Codex routes with an enabled cutover", () => {
   test("the session account view and pin use the core binding", async () => {
     cutover("core");
     const sessionId = crypto.randomUUID();
-    mock("getSessionAuthorityProjection", async () => ({
-      sessionId,
-      rootSessionId: sessionId,
-      visibility: "workspace_shared",
-      ownerSubjectId: null,
+    mock("getSessionAuthorizationFacts", async () => ({
+      target: {
+        sessionId,
+        rootSessionId: sessionId,
+        visibility: "workspace_shared",
+        ownerSubjectId: null,
+        slackAccess: null,
+      },
+      caller: null,
     }));
-    mock("getSlackInteractionSessionAccessForSession", async () => null);
     const view = mock("getSubscriptionCoreSessionCodexAccounts", async () => ({
       accounts: [account],
       rotation: projection.rotation,

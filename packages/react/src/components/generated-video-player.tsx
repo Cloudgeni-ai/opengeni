@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
 import type { VideoArtifactPlaybackLoader } from "../timeline";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type GeneratedVideoPlayerProps = {
   receipt: GeneratedVideoReceipt;
@@ -21,8 +22,10 @@ export function GeneratedVideoPlayer({
   receipt,
   loadPlaybackSource,
   className,
-  label = "Generated video",
+  label: labelProp,
 }: GeneratedVideoPlayerProps) {
+  const t = useOpenGeniText();
+  const label = labelProp === undefined ? t("generatedVideoPlayer.generatedVideo") : labelProp;
   const formatError = useErrorMessage();
   const [retry, setRetry] = useState(0);
   const [state, setState] = useState<SourceState>({ kind: "loading" });
@@ -48,7 +51,7 @@ export function GeneratedVideoPlayer({
   if (state.kind === "loading") {
     return (
       <div
-        aria-label={`Loading ${label.toLowerCase()}`}
+        aria-label={t("generatedVideoPlayer.loadingLowercase", { lowerCase: label.toLowerCase() })}
         className={cn(
           "aspect-video w-full animate-pulse rounded-og-md bg-og-surface-2 motion-reduce:animate-none",
           className,
@@ -84,7 +87,7 @@ export function GeneratedVideoPlayer({
       src={state.source.url}
       onError={() => {
         if (retry === 0) setRetry(1);
-        else setState({ kind: "error", message: "Video playback failed." });
+        else setState({ kind: "error", message: t("generatedVideoPlayer.videoPlaybackFailed") });
       }}
     />
   );

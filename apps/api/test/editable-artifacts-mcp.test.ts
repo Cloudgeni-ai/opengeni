@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import * as core from "@opengeni/core";
 import type { AccessGrant } from "@opengeni/contracts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -14,6 +15,15 @@ const attemptId = "55555555-5555-4555-8555-555555555555";
 const artifactId = "a".repeat(32);
 
 describe("editable artifact MCP surface", () => {
+  // This suite isolates the artifact application contract. The real session
+  // lineage and declared-tool clamp is exercised by site-frame-boundary-postgres.
+  let clamp: ReturnType<typeof spyOn<typeof core, "siteAgentClamp">>;
+  beforeEach(() => {
+    clamp = spyOn(core, "siteAgentClamp").mockResolvedValue(null);
+  });
+  afterEach(() => {
+    clamp.mockRestore();
+  });
   test("artifact-only create, get and final body inspection return a supported handoff reference", async () => {
     const server = new McpServer({ name: "artifact-only-report", version: "1" });
     const requests: string[] = [];

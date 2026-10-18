@@ -5,6 +5,7 @@ import {
   STARTUP_WAIT_TITLES,
 } from "./platform-activity-presentation";
 import type { ReasoningItem, SandboxItem, StartupPhaseItem } from "./types";
+import { useOpenGeniText } from "../messages/runtime";
 
 type RowJsx = typeof import("react/jsx-runtime").jsx;
 type RowJsxs = typeof import("react/jsx-runtime").jsxs;
@@ -28,15 +29,16 @@ export default function PlatformActivityRow({
   j: RowJsx;
   s: RowJsxs;
 }) {
+  const msg = useOpenGeniText();
   if (item.kind === "reasoning") {
     return j(ActivityDisclosure, {
       icon: brainIcon(j, s),
       iconTone: "muted",
       title: item.streaming
-        ? "Thinking"
+        ? msg("timeline.platformActivityRow.thinking")
         : j("span", {
             className: "font-normal italic text-og-fg-subtle",
-            children: "Thought",
+            children: msg("timeline.platformActivityRow.thought"),
           }),
       running: item.streaming,
       compactPreview: item.text.replace(/\*\*|__|`/g, "").replace(/\s+/g, " "),
@@ -55,14 +57,26 @@ export default function PlatformActivityRow({
       icon: terminalIcon(j, s),
       iconTone:
         item.status === "failed" ? "failed" : item.status === "running" ? "running" : "muted",
-      title: sandboxRowTitle(item, displayName),
+      title: sandboxRowTitle(msg, item, displayName),
       running: item.status === "running",
       failed: item.status === "failed",
       cancelled: item.status === "cancelled",
       preview: item.command ?? undefined,
       children: [
-        item.command ? j(PayloadBlock, { label: "Command", value: item.command }, "command") : null,
-        item.output ? j(PayloadBlock, { label: "Output", value: item.output }, "output") : null,
+        item.command
+          ? j(
+              PayloadBlock,
+              { label: msg("timeline.platformActivityRow.command"), value: item.command },
+              "command",
+            )
+          : null,
+        item.output
+          ? j(
+              PayloadBlock,
+              { label: msg("timeline.platformActivityRow.output"), value: item.output },
+              "output",
+            )
+          : null,
       ],
     });
   }
@@ -74,11 +88,11 @@ export default function PlatformActivityRow({
     icon: j(BotIcon, { className: "size-3.5" }),
     iconTone: failed ? "failed" : running ? "running" : "muted",
     title: item.blockedReason
-      ? STARTUP_WAIT_TITLES[item.blockedReason]
-      : startupPhaseTitle(item.phase, item.status, item.outcome),
+      ? STARTUP_WAIT_TITLES(msg)[item.blockedReason]
+      : startupPhaseTitle(msg, item.phase, item.status, item.outcome),
     preview:
       item.phase === "model_preparation"
-        ? "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup shown below."
+        ? msg("timeline.platformActivityRow.includesOverlappingSandboxStartupCustom")
         : undefined,
     running,
     failed,

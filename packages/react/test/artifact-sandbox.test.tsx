@@ -66,6 +66,8 @@ describe("published HTML artifacts", () => {
       const dialog = container.querySelector("dialog")!;
       const iframe = dialog.querySelector("iframe")!;
       expect(dialog.open).toBe(true);
+      expect(dialog.hasAttribute("data-artifact-fullscreen")).toBe(false);
+      expect(dialog.querySelector("[data-window-drag]")).toBeNull();
       await act(async () =>
         (
           container.querySelector('[aria-label="Open Site full screen"]') as HTMLButtonElement
@@ -74,6 +76,8 @@ describe("published HTML artifacts", () => {
       expect(showModal).toHaveBeenCalledTimes(1);
       expect(dialog.querySelector("iframe")).toBe(iframe);
       expect(dialog.className).toContain("fixed");
+      expect(dialog.getAttribute("data-artifact-fullscreen")).toBe("true");
+      expect(dialog.querySelector("[data-window-drag]")?.contains(iframe)).toBe(false);
       await act(async () =>
         [...container.querySelectorAll("button")]
           .find((button) => button.textContent === "Back")!
@@ -82,11 +86,55 @@ describe("published HTML artifacts", () => {
       expect(show).toHaveBeenCalledTimes(1);
       expect(dialog.querySelector("iframe")).toBe(iframe);
       expect(dialog.open).toBe(true);
+      expect(dialog.hasAttribute("data-artifact-fullscreen")).toBe(false);
+      expect(dialog.querySelector("[data-window-drag]")).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();
       showModal.mockRestore();
       show.mockRestore();
+    }
+  });
+
+  it("lets the host control full screen and reports the person's requests", async () => {
+    const showModal = spyOn(HTMLDialogElement.prototype, "showModal");
+    const requests: boolean[] = [];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const render = (fullScreen: boolean) =>
+      root.render(
+        <ArtifactSandbox
+          html="<h1>App</h1>"
+          title="Site"
+          fullScreen={fullScreen}
+          onFullScreenChange={(next) => requests.push(next)}
+        />,
+      );
+    try {
+      await act(async () => render(true));
+      const dialog = container.querySelector("dialog")!;
+      expect(showModal).toHaveBeenCalledTimes(1);
+      expect(dialog.getAttribute("data-artifact-fullscreen")).toBe("true");
+      const back = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Back",
+      )!;
+      await act(async () => back.click());
+      // The host owns the state: a request alone does not leave full screen.
+      expect(requests).toEqual([false]);
+      expect(dialog.getAttribute("data-artifact-fullscreen")).toBe("true");
+      await act(async () => render(false));
+      expect(dialog.hasAttribute("data-artifact-fullscreen")).toBe(false);
+      await act(async () =>
+        (
+          container.querySelector('[aria-label="Open Site full screen"]') as HTMLButtonElement
+        ).click(),
+      );
+      expect(requests).toEqual([false, true]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      showModal.mockRestore();
     }
   });
 

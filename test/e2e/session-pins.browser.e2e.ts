@@ -3356,12 +3356,65 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       await queueChip.getByText("2 queued", { exact: true }).waitFor();
 
-      // Pause is a durable workstream barrier. Row Steer is one atomic action:
-      // it moves that row to the head and resumes the branch. The accepted row
-      // is presented separately as the active direction, never as still queued.
+      // Pause's mutation receipt updates the toolbar before the independent
+      // queue read necessarily catches up. Hold that old read deliberately:
+      // Steer must reject its stale control fence, not silently resume Pause.
+      const queueUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${manager.id}/queue`;
+      const staleQueue = await (await desktopPage.request.get(queueUrl)).json();
+      expect(staleQueue.effectiveControl.state).toBe("active");
+      await desktopPage.route(queueUrl, (route) => route.fulfill({ json: staleQueue }));
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
+      const staleSteerResponsePromise = desktopPage.waitForResponse(
+        (response) => response.request().method() === "POST" && response.url().endsWith("/steer"),
+      );
       await chrome.getByRole("button", { name: "Steer queued prompt 2" }).click();
+      const staleSteerResponse = await staleSteerResponsePromise;
+      expect(staleSteerResponse.request().postDataJSON().controlEtag).toBe(
+        staleQueue.effectiveControl.controlEtag,
+      );
+      expect(staleSteerResponse.status()).toBe(409);
+      expect(await staleSteerResponse.json()).toMatchObject({ code: "CONTROL_CHANGED" });
+      await chrome
+        .getByText("Not confirmed. Check the queue before retrying.", { exact: true })
+        .waitFor();
+      const pausedQueue = await (await desktopPage.request.get(queueUrl)).json();
+      expect(pausedQueue.effectiveControl.state).toBe("paused");
+      expect(pausedQueue.effectiveControl.controlEtag).not.toBe(
+        staleQueue.effectiveControl.controlEtag,
+      );
+      expect(pausedQueue.version).toBe(staleQueue.version);
+      expect(pausedQueue.items).toEqual(staleQueue.items);
+
+      // Explicitly refresh after the refusal. This also proves Pause and the
+      // exact queue survive a reload; no mutation is automatically retried.
+      // The fresh row Steer still atomically resumes and advances that same
+      // prompt into chat, rather than leaving it in the waiting queue.
+      await desktopPage.unroute(queueUrl);
+      await desktopPage.reload();
+      await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
+      await queueChip.getByText("2 queued", { exact: true }).waitFor();
+      if ((await queueChip.getAttribute("aria-expanded")) !== "true") await queueChip.click();
+      await expectRowPrompt(queuedRows, 1, "A second prompt queued from the composer (edited)");
+      const steerResponsePromise = desktopPage.waitForResponse(
+        (response) => response.request().method() === "POST" && response.url().endsWith("/steer"),
+      );
+      await chrome.getByRole("button", { name: "Steer queued prompt 2" }).click();
+      const steerResponse = await steerResponsePromise;
+      const steerReceipt = await steerResponse.json();
+      expect(steerResponse.url()).toBe(staleSteerResponse.url());
+      expect(steerResponse.request().postDataJSON().clientEventId).not.toBe(
+        staleSteerResponse.request().postDataJSON().clientEventId,
+      );
+      expect(steerResponse.request().postDataJSON()).toMatchObject({
+        controlEtag: pausedQueue.effectiveControl.controlEtag,
+        expectedTurnVersion: pausedQueue.items[1].version,
+      });
+      expect(steerResponse.request().postDataJSON()).not.toHaveProperty("interrupt");
+      expect({ status: steerResponse.status(), receipt: steerReceipt }).toMatchObject({
+        status: 200,
+        receipt: { snapshot: { effectiveControl: { state: "active" } } },
+      });
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
       try {
         await timeline

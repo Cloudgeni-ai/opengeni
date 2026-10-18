@@ -94,6 +94,9 @@ export async function createProductionEditableArtifactOutboxService(
     ...(options.databasePoolSize === undefined
       ? {}
       : { databasePoolSize: options.databasePoolSize }),
+    ...(options.settings.databasePreparedStatements === undefined
+      ? {}
+      : { databasePreparedStatements: options.settings.databasePreparedStatements }),
     natsUrl: options.natsUrl,
     natsAuth: options.natsAuth,
     owner: options.owner,

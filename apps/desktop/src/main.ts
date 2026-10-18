@@ -20,5 +20,7 @@ createDesktopApp({
   appIconPath: join(here, "assets", "icon.png"),
   background: { light: "#ffffff", dark: "#202020" },
   thisComputer: true,
+  // The second line of agent/install/opengeni-agent-minisign.pub.
+  agentSigningKey: "RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2Pn",
   updates: { githubRepository: "Cloudgeni-ai/opengeni", tagPrefix: "desktop-v" },
 });

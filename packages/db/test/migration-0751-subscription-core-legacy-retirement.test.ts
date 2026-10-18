@@ -194,7 +194,10 @@ async function catalog(db = database!): Promise<Catalog> {
       from pg_constraint constraint_row
       join pg_namespace namespace on namespace.oid = constraint_row.connamespace
       where namespace.nspname in ('public', 'opengeni_private', 'opengeni_subscription_internal')
-        and constraint_row.conrelid <> 0`,
+        and constraint_row.conrelid <> 0
+        -- PostgreSQL 18 also lists column NOT NULL constraints here; they are
+        -- column properties, which this catalog does not track.
+        and constraint_row.contype <> 'n'`,
   );
   return entries;
 }

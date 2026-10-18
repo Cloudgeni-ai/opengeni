@@ -2,16 +2,20 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type { VaultErrorCode, VaultSummary } from "@opengeni/react";
 import {
-  connectionAttention,
   expiryLabel,
   expiryState,
   groupVaults,
   isMissingKeyError,
   itemsLabel,
+  createdManagedVault,
+  managedVaultCreationText,
+  savedCreation,
+  savedTransfer,
   secretsCapabilityOff,
   secretsOffIn,
   syncLabel,
   vaultAudience,
+  vaultError,
   vaultErrorText,
   vaultsOfConnection,
 } from "./vault-model";
@@ -59,6 +63,79 @@ function vaultApiError(status: number, code: VaultErrorCode, details?: Record<st
   );
 }
 
+describe("a confirmed create awaiting inventory", () => {
+  test("reads the confirmation through the route's wrapper, not the generic retry copy", () => {
+    const original = vaultApiError(503, "provider_inventory_incomplete", { saved: true });
+    const expected = {
+      title: "Saved Example",
+      description:
+        "It will appear in Operations after the next successful sync. Don't save it again.",
+    };
+    expect(savedCreation(original, "Example", "Operations")).toEqual(expected);
+    expect(
+      savedCreation(vaultError(original, undefined, "Proton Pass"), "Example", "Operations"),
+    ).toEqual(expected);
+  });
+
+  test("requires a literal confirmation; an error code alone never proves a save", () => {
+    for (const saved of [undefined, false, "true", 1]) {
+      const error = vaultApiError(503, "provider_inventory_incomplete", { saved });
+      expect(savedCreation(error, "Example", "Operations")).toBeNull();
+    }
+    expect(
+      savedCreation(vaultApiError(503, "provider_outcome_unknown"), "Example", "Operations"),
+    ).toBeNull();
+    expect(savedCreation(null, "Example", "Operations")).toBeNull();
+  });
+});
+
+describe("a confirmed managed vault creation", () => {
+  test("retains unknown linking and unconfirmed sharing independently", () => {
+    const error = vaultApiError(503, "provider_unavailable", {
+      created: true,
+      linked: null,
+      externalVaultId: "external",
+      groupGrantConfirmed: false,
+    });
+    const created = createdManagedVault(vaultError(error), "Agents")!;
+    expect(created.linked).toBeNull();
+    expect(created.vaultId).toBeNull();
+    expect(created.externalVaultId).toBe("external");
+    expect(managedVaultCreationText(created, "1Password")).toContain("Its link wasn't confirmed.");
+    expect(managedVaultCreationText(created, "1Password")).toContain(
+      "Also check sharing in 1Password.",
+    );
+    expect(managedVaultCreationText(created, "1Password")).toContain("Don't create it again.");
+  });
+
+  test("preflight and uncertain outcomes never become confirmed creates", () => {
+    for (const created of [undefined, false, "true", 1]) {
+      expect(
+        createdManagedVault(vaultApiError(403, "vault_permission_denied", { created }), "Agents"),
+      ).toBeNull();
+    }
+    expect(
+      createdManagedVault(vaultApiError(503, "provider_outcome_unknown"), "Agents"),
+    ).toBeNull();
+  });
+
+  test("local refusals guide repair of the existing vault, never repeat creation", () => {
+    for (const code of [
+      "vault_name_conflict",
+      "vault_permission_denied",
+      "vault_limit_reached",
+    ] as const) {
+      const created = createdManagedVault(
+        vaultApiError(409, code, { created: true, linked: false }),
+        "Agents",
+      )!;
+      const text = managedVaultCreationText(created, "1Password");
+      expect(text).toContain("existing vault");
+      expect(text).toContain("Don't create it again.");
+    }
+  });
+});
+
 describe("vault list grouping", () => {
   test("groups by owner whatever the source, the default first, then by name, and hides task vaults", () => {
     const groups = groupVaults([
@@ -77,7 +154,7 @@ describe("vault list grouping", () => {
     ]);
   });
 
-  test("a connection's vaults and what it needs", () => {
+  test("a connection's vaults", () => {
     const connectionId = "00000000-0000-4000-8000-0000000000c1";
     const linked = [
       vault({ name: "B", source: "onepassword", providerConnectionId: connectionId }),
@@ -87,13 +164,12 @@ describe("vault list grouping", () => {
     ];
     const ofConnection = vaultsOfConnection(linked, connectionId);
     expect(ofConnection.map((each) => each.name)).toEqual(["A", "B"]);
-    expect(connectionAttention(ofConnection)).toBeNull();
-    expect(connectionAttention([...ofConnection, vault({ syncStatus: "error" })])).toBe(
-      "sync_failed",
-    );
-    expect(
-      connectionAttention([vault({ syncStatus: "error" }), vault({ syncStatus: "auth_expired" })]),
-    ).toBe("token_expired");
+    const proton = vault({ name: "P", source: "protonpass", providerConnectionId: connectionId });
+    expect(vaultsOfConnection([...linked, proton], connectionId).map((each) => each.name)).toEqual([
+      "A",
+      "B",
+      "P",
+    ]);
   });
 
   test("an empty list has no groups and item counts read naturally", () => {
@@ -155,9 +231,12 @@ describe("provider sync status", () => {
 
 describe("error copy (UI-9)", () => {
   test("vault errors read as product sentences, never raw codes or server text", () => {
-    const readOnly = vaultErrorText(vaultApiError(409, "vault_read_only"));
+    const readOnly = vaultErrorText(vaultApiError(409, "vault_read_only"), undefined, "1Password");
     expect(readOnly).toBe(
       "This vault is read-only. Change it in 1Password or link it as Read & write.",
+    );
+    expect(vaultErrorText(vaultApiError(409, "vault_read_only"))).toBe(
+      "This vault is read-only. Link it as Read & write to save to it.",
     );
     expect(readOnly).not.toContain("raw server text");
     expect(vaultErrorText(vaultApiError(409, "vault_name_conflict"))).toContain("Choose another");
@@ -167,8 +246,37 @@ describe("error copy (UI-9)", () => {
     expect(
       vaultErrorText(
         vaultApiError(429, "provider_rate_limited", { retryAt: "2026-10-12T13:00:00Z" }),
+        undefined,
+        "1Password",
       ),
     ).toStartWith("1Password is limiting requests. Try again after ");
+    expect(
+      vaultErrorText(
+        vaultApiError(429, "provider_rate_limited", { retryAt: "2026-10-12T13:00:00Z" }),
+      ),
+    ).toStartWith("The password manager is limiting requests. Try again after ");
+  });
+
+  test("provider errors name the password manager, and 1Password keeps its own words", () => {
+    expect(
+      vaultErrorText(vaultApiError(401, "provider_auth_expired"), undefined, "1Password"),
+    ).toBe("The 1Password token expired. Paste a new service account token to reconnect.");
+    expect(vaultErrorText(vaultApiError(401, "provider_auth_expired"), undefined, "Keeper")).toBe(
+      "Access to Keeper expired. Reconnect it to keep using its vaults.",
+    );
+    expect(vaultErrorText(vaultApiError(423, "provider_locked"), undefined, "Bitwarden")).toBe(
+      "Bitwarden is locked on the bridge. Unlock it there, then try again.",
+    );
+    expect(
+      vaultErrorText(vaultApiError(502, "provider_outcome_unknown"), undefined, "Proton Pass"),
+    ).toContain("so nothing is saved twice");
+  });
+
+  test("a wrapped error keeps naming its password manager when unwrapped again", () => {
+    const raw = vaultApiError(423, "provider_locked");
+    const wrapped = vaultError(raw, undefined, "Proton Pass");
+    expect(wrapped.message).toBe("Proton Pass is locked. Unlock it, then try again.");
+    expect(vaultErrorText((wrapped as { cause?: unknown }).cause)).toBe(wrapped.message);
   });
 
   test("the missing encryption key is recognised", () => {
@@ -234,5 +342,128 @@ describe("chat and schedule Secrets summaries", () => {
     expect(scheduleSecretsSummary({ mode: "all" })).toBeNull();
     expect(scheduleSecretsSummary({ mode: "selected", vaultIds: [] })).toBe("No secrets");
     expect(scheduleSecretsSummary({ mode: "selected", vaultIds: ["a"] })).toBe("1 vault");
+  });
+});
+
+describe("a move whose copy was saved", () => {
+  const context = {
+    mode: "move" as const,
+    itemName: "Grafana",
+    targetName: "Platform",
+    source: "Proton Pass",
+    removal: "trash" as const,
+  };
+  // The server's details when the copy is saved but the original isn't moved to trash.
+  const kept = {
+    saved: true,
+    sourceArchived: false,
+    vaultId: "target-vault",
+    itemId: "copy-item",
+    sourceItemId: "original-item",
+    sourceVaultId: "source-vault",
+  };
+
+  test.each([
+    ["provider_unavailable", 503, {}],
+    ["vault_generation_conflict", 409, { sourceChanged: true }],
+    ["vault_item_not_found", 404, { sourceChanged: true }],
+  ] as const)("%s with saved: true is not offered again", (code, status, extra) => {
+    const outcome = savedTransfer(vaultApiError(status, code, { ...kept, ...extra }), context);
+    expect(outcome).not.toBeNull();
+    expect(outcome!.title).toBe("Saved a copy in Platform");
+    expect(outcome!.description).toContain("Don't move it again");
+    expect(outcome!.copy).toEqual({ vaultId: "target-vault", itemId: "copy-item" });
+    expect(outcome!.originalRemoved).toBe(false);
+  });
+
+  test("each reason says what happened to the original", () => {
+    const unanswered = savedTransfer(vaultApiError(503, "provider_unavailable", kept), context);
+    expect(unanswered!.description).toBe(
+      "Trashing the original in Proton Pass didn't finish. Don't move it again; check Proton Pass and move the original to trash if it's still there.",
+    );
+    const archived = savedTransfer(vaultApiError(503, "provider_unavailable", kept), {
+      ...context,
+      source: "1Password",
+      removal: "archive",
+    });
+    expect(archived!.description).toContain("Archiving the original in 1Password didn't finish.");
+    const changed = savedTransfer(
+      vaultApiError(409, "vault_generation_conflict", { ...kept, sourceChanged: true }),
+      context,
+    );
+    expect(changed!.description).toContain("Grafana changed in Proton Pass during the move");
+    expect(changed!.description).toContain("compare the two");
+    const missing = savedTransfer(
+      vaultApiError(404, "vault_item_not_found", { ...kept, sourceChanged: true }),
+      context,
+    );
+    expect(missing!.description).toBe(
+      "The original is no longer listed in Proton Pass. Don't move it again; check Proton Pass for it.",
+    );
+    // Never the generic "this item isn't here" copy for the code.
+    expect(missing!.description).not.toContain("isn't here anymore");
+  });
+
+  test("an archived original, with a copy not listed yet, opens nothing", () => {
+    const outcome = savedTransfer(
+      vaultApiError(409, "provider_inventory_incomplete", {
+        saved: true,
+        sourceArchived: true,
+        vaultId: "target-vault",
+        itemName: "Grafana",
+      }),
+      { ...context, removal: "archive" },
+    );
+    expect(outcome).toEqual({
+      title: "Moved Grafana to Platform",
+      description: "It appears in Platform after the next sync. Don't move it again.",
+      copy: null,
+      originalRemoved: true,
+    });
+  });
+
+  test("a copy not listed yet says so", () => {
+    const outcome = savedTransfer(
+      vaultApiError(409, "provider_inventory_incomplete", { saved: true, vaultId: "target" }),
+      { ...context, mode: "copy" },
+    );
+    expect(outcome!.title).toBe("Copied Grafana to Platform");
+    expect(outcome!.description).toContain("Don't copy it again");
+    expect(outcome!.originalRemoved).toBe(false);
+  });
+
+  test("reads through the copy wrapper the route adds", () => {
+    const wrapped = vaultError(
+      vaultApiError(503, "provider_unavailable", kept),
+      undefined,
+      "Proton Pass",
+    );
+    expect(savedTransfer(wrapped, context)?.copy?.itemId).toBe("copy-item");
+  });
+
+  test("reads the details of a failed POST as the API sends them", () => {
+    const posted = new OpenGeniApiError(
+      503,
+      JSON.stringify({
+        error: "provider_unavailable",
+        message: "Saved Grafana in Platform…",
+        details: kept,
+      }),
+      { mutation: true },
+    );
+    expect(savedTransfer(posted, context)?.copy).toEqual({
+      vaultId: "target-vault",
+      itemId: "copy-item",
+    });
+  });
+
+  test.each([
+    ["provider_unavailable", 503],
+    ["vault_generation_conflict", 409],
+    ["vault_item_not_found", 404],
+    ["provider_outcome_unknown", 502],
+  ] as const)("an ordinary %s stays retryable", (code, status) => {
+    expect(savedTransfer(vaultApiError(status, code), context)).toBeNull();
+    expect(savedTransfer(vaultApiError(status, code, { saved: false }), context)).toBeNull();
   });
 });

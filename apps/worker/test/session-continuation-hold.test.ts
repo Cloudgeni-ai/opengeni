@@ -4,9 +4,20 @@ import {
   continuationHoldMs,
   deferredResultMayContinue,
   humanInputDeadlineWaitMs,
+  recoveryBackoffWaitMs,
   unclaimedAttemptRetryDelayMs,
   unclaimedAttemptWakeChanged,
 } from "../src/workflows/session";
+
+describe("recovery backoff waits", () => {
+  test("wait until the durable deadline, never in a tight loop past it", () => {
+    const now = Date.parse("2026-10-17T12:00:00.000Z");
+    expect(recoveryBackoffWaitMs("2026-10-17T12:00:30.000Z", now)).toBe(30_000);
+    expect(recoveryBackoffWaitMs("2026-10-17T12:00:00.200Z", now)).toBe(1_000);
+    expect(recoveryBackoffWaitMs("2026-10-17T11:59:00.000Z", now)).toBe(1_000);
+    expect(recoveryBackoffWaitMs("not a date", now)).toBe(1_000);
+  });
+});
 
 describe("cancelled activity result recovery", () => {
   test("continues only while exact-attempt redispatch remains bounded", () => {

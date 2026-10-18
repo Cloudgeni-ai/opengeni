@@ -501,6 +501,14 @@ function safePosture(): RuntimeDatabasePosture {
         delete: false,
       },
       {
+        name: "subscription_plan_catalog_revisions",
+        owner: "opengeni_migrator",
+        select: true,
+        insert: false,
+        update: false,
+        delete: false,
+      },
+      {
         name: "personal_resource_delegation_capabilities",
         owner: "opengeni_migrator",
         select: false,
@@ -1508,6 +1516,8 @@ describe("runtime database posture evaluator", () => {
         "session_attempt_personal_resource_admissions",
         "session_attempt_personal_resource_snapshots",
         "session_attempt_connected_machine_authorizations",
+        "session_attempt_machine_consents",
+        "session_turn_machine_consents",
         "turn_personal_resource_attachment_receipts",
         "turn_personal_resource_once_receipts",
         "turn_personal_resource_snapshots",
@@ -1569,6 +1579,13 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0790 adds the four Site platform usage tables (FORCE RLS, full runtime DML):
+          // one workspace-isolated, three deployment-global behind the platform lane.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 4
+            : 0) +
           // 0783 adds the five workspace-isolated Site SQL tables with full runtime DML.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -1589,6 +1606,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
             ? 8
+            : 0) +
+          // 0792 adds the tenant-scoped schedule blocker reviews.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
             : 0) +
           // 0761 adds the tenant-scoped schedule reconciliation outbox.
           (tables === FORCE_RLS_TABLES ||
@@ -1686,6 +1709,30 @@ describe("runtime database posture evaluator", () => {
           // 0748: the five legacy Claude pool tables and its usage table too.
           (tables === RUNTIME_FULL_DML_TABLES ? 6 : 0) +
           embeddingTableCount +
+          // 0797 adds two account-isolated read-only plan tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_ONLY_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 2
+            : 0) +
+          // 0796 adds the organization-scoped read-only subscription operation journal.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_ONLY_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 0842 adds explicit owner-scoped Site chat access, full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 0820 adds retained browser downloads: read, insert and update, FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1724,7 +1771,15 @@ describe("runtime database posture evaluator", () => {
         1 + // 0761 schedule reconciliation outbox: full-DML, FORCE-RLS.
         8 + // 0776 Site Data tables: full-DML, FORCE-RLS.
         10 + // 0782 published Sites tables: FORCE-RLS; nine full-DML, one read-only.
-        5; // 0783 Site SQL tables: full-DML, FORCE-RLS.
+        5 + // 0783 Site SQL tables: full-DML, FORCE-RLS.
+        4 + // 0790 Site platform usage tables: full-DML, FORCE-RLS.
+        1 + // 0792 schedule blocker reviews: full-DML, FORCE-RLS.
+        2 + // 0797 subscription plan state and periods: read-only, FORCE-RLS.
+        1 + // 0796 subscription operation receipts: read-only, FORCE-RLS.
+        1 + // 0820 retained browser downloads: read, insert and update, FORCE-RLS.
+        1; // 0842 owner-scoped Site chat access: full-DML, FORCE-RLS.
+      expect(FORCE_RLS_TABLES).toContain("site_session_access");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("site_session_access");
       expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_FULL_DML_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_TABLE_PRIVILEGES.organization_model_defaults).toEqual([
@@ -1834,6 +1889,8 @@ describe("runtime database posture evaluator", () => {
           "UPDATE",
         ]);
         expect(RUNTIME_TABLE_PRIVILEGES.workspace_session_activity_revisions).toEqual([
+          // The xid expand release must not change old replicas' readiness or
+          // finalizer grants. Contract removal belongs to a subsequent release.
           "SELECT",
           "UPDATE",
         ]);
@@ -2381,6 +2438,8 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("scoped_sandbox") ||
         routine.name.includes("scoped_machine_dependent_sessions") ||
         routine.name.includes("personal_machine") ||
+        routine.name.startsWith("get_session_attempt_machine(") ||
+        routine.name.startsWith("get_session_machine_access(") ||
         routine.name.includes("connected_machine_audience") ||
         routine.name.includes("subscription_codex_refresh") ||
         routine.name.includes("authorize_subscription_ownerless_session_access") ||
@@ -2392,6 +2451,16 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+  });
+
+  test("current readiness still requires the chat-visible machine access capability", () => {
+    const posture = safePosture();
+    posture.targetRoutines = posture.targetRoutines.filter(
+      (routine) => routine.name !== "get_session_machine_access(uuid, uuid, uuid)",
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "target-schema runtime capability get_session_machine_access(uuid, uuid, uuid) is missing or ambiguous",
+    );
   });
 
   test("Knowledge capabilities must share their authority-table owner even in public", () => {

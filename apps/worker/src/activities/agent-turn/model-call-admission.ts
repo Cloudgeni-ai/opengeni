@@ -4,7 +4,18 @@ import type { StreamEvent } from "@openai/agents";
 export function createModelCallAdmission(input: {
   signal: AbortSignal;
   admit: () => Promise<void>;
+  /** Diagnostic timing of the producer side; never fences or fails a call. */
+  observe?: (phase: "settlement_wait" | "admission", durationSeconds: number) => void;
+  now?: () => number;
 }) {
+  const now = input.now ?? (() => performance.now());
+  const observe = (phase: "settlement_wait" | "admission", startedAt: number) => {
+    try {
+      input.observe?.(phase, (now() - startedAt) / 1_000);
+    } catch {
+      // Diagnostics must never affect admission.
+    }
+  };
   type Receipt = {
     promise: Promise<void>;
     resolve: () => void;
@@ -18,6 +29,12 @@ export function createModelCallAdmission(input: {
     return typeof id === "string" && id.length > 0 ? id : null;
   };
   let latest: Promise<void> = Promise.resolve();
+  // The admission the model call now in flight received. The SDK model wrapper
+  // asks at model entry, then the transport and its dispatch checkpoint ask
+  // again before the same request reaches the wire. One call needs one
+  // admission: the later checks join it instead of re-running every database
+  // check. A new model entry, a registered response or a failure retires it.
+  let currentCallAdmission: Promise<void> | null = null;
   let failure: unknown;
   let failed = false;
   let rejectHalted!: (error: unknown) => void;
@@ -29,6 +46,7 @@ export function createModelCallAdmission(input: {
     if (failed) return;
     failed = true;
     failure = error;
+    currentCallAdmission = null;
     rejectHalted(error);
     for (const receipt of pending) receipt.reject(error);
     pending.clear();
@@ -38,15 +56,31 @@ export function createModelCallAdmission(input: {
   input.signal.addEventListener("abort", abort, { once: true });
   if (input.signal.aborted) abort();
   return {
-    beforeModelRequest: async () => {
+    beforeModelRequest: async (point: "model_entry" | "transport" = "model_entry") => {
+      const waitStartedAt = now();
       await Promise.race([latest, halted]);
       if (failed) throw failure;
-      // Even a settled predecessor does not grant admission to the next call.
-      await Promise.race([input.admit(), halted]);
+      if (point === "model_entry") observe("settlement_wait", waitStartedAt);
+      // Even a settled predecessor does not grant admission to the next call:
+      // every model entry revalidates, and so does a transport check with no
+      // admission of its own call to join.
+      let admission = point === "transport" ? currentCallAdmission : null;
+      if (!admission) {
+        const admissionStartedAt = now();
+        admission = input.admit().then(() => observe("admission", admissionStartedAt));
+        currentCallAdmission = admission;
+        const issued = admission;
+        void issued.catch(() => {
+          if (currentCallAdmission === issued) currentCallAdmission = null;
+        });
+      }
+      await Promise.race([admission, halted]);
       if (failed) throw failure;
     },
     onModelResponse: (event: StreamEvent): Promise<void> => {
       if (failed) return Promise.reject(failure);
+      // The response consumed its call's admission; the next call needs a new one.
+      currentCallAdmission = null;
       const id = responseId(event);
       const existing =
         receipts.get(event) ??

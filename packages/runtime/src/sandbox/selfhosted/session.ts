@@ -30,7 +30,7 @@ import {
   type OperationResourcePolicy,
   type StreamChannel,
 } from "@opengeni/agent-proto";
-import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
+import { DESKTOP_STREAM_PORT, CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
 import {
   SELFHOSTED_FILE_CHUNK_BYTES,
   fileContentDigest,
@@ -45,6 +45,11 @@ import {
 import { Manifest } from "@openai/agents/sandbox";
 import { formatExecResponse } from "@openai/agents-core/sandbox/internal";
 import type { ExposedPortEndpoint } from "../stream-port";
+import {
+  BROWSER_CONTROL_HTTP_REPLY_GRACE_MS,
+  type BrowserControlHttpCall,
+  type BrowserControlHttpOutcome,
+} from "../browser-control-http";
 import {
   agentErrorToControlError,
   drainingExhaustedError,
@@ -279,12 +284,18 @@ export interface SelfhostedBackgroundCommandAdoption {
   connectionInstanceId: string;
   opId: string;
   command: string;
+  /** The exec already failed because the machine stopped answering. Record it
+   * with a stop request instead of as a running background command. */
+  abandoned?: boolean;
 }
 
 /** Exact command-admission snapshot. A worker resolves this immediately before
  * every exec/Git admission; retries and already-started operations retain it. */
 export interface SelfhostedOperationAdmission {
   transactionalFsWriteSupported?: boolean;
+  transactionalFsWriteMachineSupported?: boolean;
+  /** The live runner serves in-process browser/computer controller requests. */
+  browserControlHttpSupported?: boolean;
   /** Workspace segment of the physical agent/relay route. Personal machines may
    * originate in a different same-organization workspace than the session. */
   workspaceId?: string;
@@ -309,6 +320,11 @@ export interface SelfhostedOperationAdmission {
 export interface SelfhostedSessionDeps {
   /** Exact live daemon capability; absent preserves legacy small-file writes. */
   transactionalFsWriteSupported?: boolean;
+  /** The exact live daemon also accepts machine-addressed (epoch-zero) uploads. */
+  transactionalFsWriteMachineSupported?: boolean;
+  /** Exact live daemon capability; absent keeps controller requests on the
+   * command transport. */
+  browserControlHttpSupported?: boolean;
   /** Authorization/session workspace. */
   workspaceId: string;
   /** Physical control-plane workspace. Defaults to workspaceId for legacy and
@@ -331,7 +347,8 @@ export interface SelfhostedSessionDeps {
   opStream?: SelfhostedOpStreamDeps;
   /** The lease/active epoch this session is fenced under (echoed on every
    *  ControlRequest so the agent can reject a stale op with ERROR_CODE_FENCED).
-   *  Defaults to 0 (no fence) for the negotiation-only / test path. */
+   *  Defaults to 0 for machine-addressed operations, which retain the exact
+   *  connection fence but have no session route epoch. */
   epoch?: number;
   /** The CONTROL-op timeout (ping/fs/desktop/pty and op-stream control RPCs). The
    *  agent's own control liveness must stay responsive, so this is short (the 30s
@@ -379,6 +396,7 @@ export interface SelfhostedSessionDeps {
     exitCode: number | null;
     reason: string;
     failure?: import("@opengeni/contracts").SessionCommandFailure;
+    backgroundChildrenStopped?: boolean;
     outputReceipt?: OpStreamOutputReceipt;
   }) => void | Promise<void>;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
@@ -440,6 +458,8 @@ export interface SelfhostedExecResult {
   /** Present only for a model-facing command durably transferred to its session. */
   backgroundCommandId?: string;
   backgroundOpId?: string;
+  /** Native cleanup evidence; never injected into structured stdout/stderr. */
+  backgroundChildrenStopped?: boolean;
 }
 
 /** The `exec` args the structural surface accepts (mirrors ChannelAExecArgs). */
@@ -521,6 +541,8 @@ export class SelfhostedSession {
   private readonly resourcePolicySupported: boolean;
   private readonly operationCpuQuotaSupported: boolean;
   private readonly transactionalFsWriteSupported: boolean;
+  private readonly transactionalFsWriteMachineSupported: boolean;
+  private readonly browserControlHttpSupported: boolean;
   private readonly defaultOpStream: SelfhostedOpStreamDeps | undefined;
   private readonly connectionInstanceId: string;
   private readonly resolveOperationAdmission:
@@ -594,6 +616,8 @@ export class SelfhostedSession {
     this.resourcePolicySupported = deps.operationResourcePolicySupported === true;
     this.operationCpuQuotaSupported = deps.operationCpuQuotaSupported === true;
     this.transactionalFsWriteSupported = deps.transactionalFsWriteSupported === true;
+    this.transactionalFsWriteMachineSupported = deps.transactionalFsWriteMachineSupported === true;
+    this.browserControlHttpSupported = deps.browserControlHttpSupported === true;
     this.defaultOpStream = deps.opStream;
     this.connectionInstanceId = deps.connectionInstanceId;
     this.resolveOperationAdmission = deps.resolveOperationAdmission;
@@ -612,6 +636,8 @@ export class SelfhostedSession {
             resourcePolicy: this.resourcePolicy,
             opStream: deps.opStream,
             transactionalFsWriteSupported: this.transactionalFsWriteSupported,
+            transactionalFsWriteMachineSupported: this.transactionalFsWriteMachineSupported,
+            browserControlHttpSupported: this.browserControlHttpSupported,
           })
         : undefined;
     // A valid Manifest whose root is the machine's actual effective root. There
@@ -680,6 +706,8 @@ export class SelfhostedSession {
 
   private async admitOperation(commandPolicy: boolean): Promise<{
     transactionalFsWriteSupported: boolean;
+    transactionalFsWriteMachineSupported: boolean;
+    browserControlHttpSupported: boolean;
     controlWorkspaceId: string;
     connectionInstanceId: string;
     subject: string;
@@ -701,6 +729,8 @@ export class SelfhostedSession {
         resourcePolicy: commandPolicy ? this.resourcePolicy : undefined,
         opStream: this.defaultOpStream,
         transactionalFsWriteSupported: this.transactionalFsWriteSupported,
+        transactionalFsWriteMachineSupported: this.transactionalFsWriteMachineSupported,
+        browserControlHttpSupported: this.browserControlHttpSupported,
       };
     }
 
@@ -736,6 +766,8 @@ export class SelfhostedSession {
       resourcePolicy: commandPolicy ? resourcePolicy : undefined,
       opStream: resolved.opStream,
       transactionalFsWriteSupported: resolved.transactionalFsWriteSupported === true,
+      transactionalFsWriteMachineSupported: resolved.transactionalFsWriteMachineSupported === true,
+      browserControlHttpSupported: resolved.browserControlHttpSupported === true,
     };
   }
 
@@ -1200,6 +1232,8 @@ export class SelfhostedSession {
                         ? { outputReceipt }
                         : {}),
                       exitCode: terminal.outcome.response.exitCode,
+                      backgroundChildrenStopped:
+                        terminal.outcome.response.backgroundChildrenStopped,
                       reason: terminal.outcome.failure
                         ? `op_failure_${terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
                         : "op_exit",
@@ -1243,6 +1277,7 @@ export class SelfhostedSession {
                 ? { outputReceipt: result.terminal.outputReceipt }
                 : {}),
               exitCode: result.terminal.outcome.response.exitCode,
+              backgroundChildrenStopped: result.terminal.outcome.response.backgroundChildrenStopped,
               reason: result.terminal.outcome.failure
                 ? `op_failure_${result.terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
                 : "op_exit",
@@ -1295,6 +1330,7 @@ export class SelfhostedSession {
             opId,
             outcome: "exited",
             exitCode: outcome.response.exitCode,
+            backgroundChildrenStopped: outcome.response.backgroundChildrenStopped,
             reason: outcome.failure
               ? `op_failure_${outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
               : "op_exit",
@@ -1343,6 +1379,34 @@ export class SelfhostedSession {
               reason: null,
               retryable: false,
             });
+      if (
+        !terminalProof &&
+        !adoptedCommandId &&
+        !controlError.neverSent &&
+        machineStoppedAnswering(controlError) &&
+        this.adoptBackgroundCommand
+      ) {
+        // The machine went away mid-operation. The command may still run there,
+        // but only the machine can stop or report it, so this turn must not wait
+        // for it. Hand it to the session's command ledger with a stop request;
+        // the reconciler stops or settles it once the machine returns or its
+        // runner is retired. If recording fails, turn cleanup keeps ownership.
+        try {
+          notifyDurableOpOwnershipTransferStarted(opId);
+          const abandoned = await this.adoptBackgroundCommand({
+            controlWorkspaceId: admission.controlWorkspaceId,
+            enrollmentId: this.agentId,
+            connectionInstanceId: admission.connectionInstanceId,
+            opId,
+            command,
+            abandoned: true,
+          });
+          adoptedCommandId = abandoned.commandId;
+          notifyDurableOpOwnershipTransferred(opId);
+        } catch {
+          notifyDurableOpOwnershipTransferFailed(opId);
+        }
+      }
       this.emitOp({
         op: "exec",
         outcome: "failed",
@@ -1411,11 +1475,14 @@ export class SelfhostedSession {
       typeof result.exitCode === "number" && Number.isSafeInteger(result.exitCode)
         ? result.exitCode
         : 1;
-    return formatExecResponse({
+    const formatted = formatExecResponse({
       output: joinExecCommandOutput(result.stdout, result.stderr),
       wallTimeSeconds: Math.max(0, Date.now() - startedAt) / 1000,
       exitCode,
     });
+    return result.backgroundChildrenStopped
+      ? `${formatted}\n\n${CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE}`
+      : formatted;
   }
 
   /**
@@ -1575,9 +1642,10 @@ export class SelfhostedSession {
         return;
       }
       const initial = await this.admitOperation(false);
-      if (!initial.transactionalFsWriteSupported) {
-        // Older agents may have a larger negotiated message budget. Preserve
-        // their existing writes; a real size rejection remains a typed fault.
+      if (!this.supportsFileTransfer(initial)) {
+        // Preserve small legacy writes. writeFile preflights an old transactional
+        // agent's missing machine scope; agents with no transactional support
+        // retain their existing single-message transport budget.
         await this.writeFile({ path, content, createParents: true });
         return;
       }
@@ -1759,7 +1827,7 @@ export class SelfhostedSession {
       try {
         const current = await this.admitOperation(false);
         if (
-          !current.transactionalFsWriteSupported ||
+          !this.supportsFileTransfer(current) ||
           current.subject !== initial.subject ||
           current.connectionInstanceId !== initial.connectionInstanceId
         ) {
@@ -1811,6 +1879,15 @@ export class SelfhostedSession {
     };
   }
 
+  private supportsFileTransfer(
+    admission: Awaited<ReturnType<SelfhostedSession["admitOperation"]>>,
+  ): boolean {
+    return (
+      admission.transactionalFsWriteSupported &&
+      (this.epoch !== 0 || admission.transactionalFsWriteMachineSupported)
+    );
+  }
+
   /** Write a file onto the machine (the fs surface the descriptor advertises). */
   async writeFile(args: {
     path: string;
@@ -1830,6 +1907,15 @@ export class SelfhostedSession {
     }
     if (content.byteLength > SELFHOSTED_FILE_CHUNK_BYTES && !args.append) {
       const initial = await this.admitOperation(false);
+      if (initial.transactionalFsWriteSupported && !this.supportsFileTransfer(initial)) {
+        throw new SelfhostedControlError({
+          code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+          message:
+            "This Connected Machine's agent requires a session route epoch for transactional writes. Machine-addressed writes are limited to 262144 bytes (256 KiB) until the agent is updated; no file was written.",
+          reason: null,
+          retryable: false,
+        });
+      }
       if (initial.transactionalFsWriteSupported) {
         const baseContent = (await this.pathExists(args.path))
           ? await this.readFile({ path: args.path })
@@ -1953,6 +2039,99 @@ export class SelfhostedSession {
       throw new Error(`selfhosted ensureBrowserControl: unexpected result ${result.$case}`);
     }
     return result.browserControlEnsure;
+  }
+
+  /** Send one request to the agent-owned controller of an exact authority
+   * scope, served inside the runner over loopback without starting a process.
+   * `unsupported` means this connection's runner does not serve it and nothing
+   * was sent. `controller_absent` means no controller for that scope and
+   * generation accepted the request, so it was not delivered and the caller may
+   * ensure the controller and send again. A body too large for one reply is
+   * drained from the runner's spool; the request is never repeated. */
+  async browserControlHttp(request: BrowserControlHttpCall): Promise<BrowserControlHttpOutcome> {
+    const admission = await this.admitOperation(false);
+    if (!admission.browserControlHttpSupported) return { kind: "unsupported" };
+    // The runner bounds the request by timeoutMs; allow the reply to arrive.
+    const rpcTimeoutMs = request.timeoutMs + BROWSER_CONTROL_HTTP_REPLY_GRACE_MS;
+    let result: NonNullable<ControlResponse["result"]>;
+    try {
+      result = await this.call(
+        {
+          $case: "browserControlHttp",
+          browserControlHttp: {
+            scopeId: request.scopeId,
+            scopeGeneration: request.scopeGeneration,
+            method: request.method,
+            path: request.path,
+            bearerToken: request.bearerToken,
+            body: request.body ?? new Uint8Array(),
+            hasBody: request.body !== undefined,
+            timeoutMs: request.timeoutMs,
+            maxResponseBytes: String(request.maxResponseBytes),
+          },
+        },
+        rpcTimeoutMs,
+        admission,
+      );
+    } catch (error) {
+      if (
+        error instanceof SelfhostedControlError &&
+        error.code === ErrorCode.ERROR_CODE_NOT_FOUND
+      ) {
+        return { kind: "controller_absent" };
+      }
+      throw error;
+    }
+    if (result.$case !== "browserControlHttp") {
+      throw new Error(`selfhosted browserControlHttp: unexpected result ${result.$case}`);
+    }
+    const response = result.browserControlHttp;
+    const totalBytes = Number(response.totalBytes);
+    if (
+      !Number.isSafeInteger(totalBytes) ||
+      totalBytes < response.body.byteLength ||
+      totalBytes > request.maxResponseBytes
+    ) {
+      throw new Error("selfhosted browserControlHttp: response length is invalid");
+    }
+    let body = response.body;
+    if (response.spoolId) {
+      const complete = new Uint8Array(totalBytes);
+      complete.set(response.body, 0);
+      let offset = response.body.byteLength;
+      for (;;) {
+        const read = await this.call(
+          {
+            $case: "browserControlHttpRead",
+            browserControlHttpRead: { spoolId: response.spoolId, offset: String(offset) },
+          },
+          this.timeoutMs,
+          admission,
+        );
+        if (read.$case !== "browserControlHttpRead") {
+          throw new Error(`selfhosted browserControlHttpRead: unexpected result ${read.$case}`);
+        }
+        const part = read.browserControlHttpRead;
+        if (offset + part.data.byteLength > totalBytes) {
+          throw new Error("selfhosted browserControlHttpRead: response exceeds its length");
+        }
+        complete.set(part.data, offset);
+        offset += part.data.byteLength;
+        if (part.done) break;
+        if (part.data.byteLength === 0) {
+          throw new Error("selfhosted browserControlHttpRead: spool made no progress");
+        }
+      }
+      if (offset !== totalBytes) {
+        throw new Error("selfhosted browserControlHttpRead: response is incomplete");
+      }
+      body = complete;
+    } else if (response.body.byteLength !== totalBytes) {
+      throw new Error("selfhosted browserControlHttp: response is incomplete");
+    }
+    const headers = new Map<string, string>();
+    for (const header of response.headers) headers.set(header.name.toLowerCase(), header.value);
+    return { kind: "response", status: response.status, headers, body };
   }
 
   /** Open one browser-native frame producer and return its canonical relay
@@ -2145,6 +2324,8 @@ export class SelfhostedSandboxClient {
   private readonly operationResourcePolicySupported: boolean | undefined;
   private readonly operationCpuQuotaSupported: boolean | undefined;
   private readonly transactionalFsWriteSupported: boolean | undefined;
+  private readonly transactionalFsWriteMachineSupported: boolean | undefined;
+  private readonly browserControlHttpSupported: boolean | undefined;
   private readonly resolveOperationAdmission:
     | (() => Promise<SelfhostedOperationAdmission | null>)
     | undefined;
@@ -2186,6 +2367,8 @@ export class SelfhostedSandboxClient {
     operationResourcePolicySupported?: boolean;
     operationCpuQuotaSupported?: boolean;
     transactionalFsWriteSupported?: boolean;
+    transactionalFsWriteMachineSupported?: boolean;
+    browserControlHttpSupported?: boolean;
     resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
     adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
     settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
@@ -2218,6 +2401,8 @@ export class SelfhostedSandboxClient {
     this.operationResourcePolicySupported = opts.operationResourcePolicySupported;
     this.operationCpuQuotaSupported = opts.operationCpuQuotaSupported;
     this.transactionalFsWriteSupported = opts.transactionalFsWriteSupported;
+    this.transactionalFsWriteMachineSupported = opts.transactionalFsWriteMachineSupported;
+    this.browserControlHttpSupported = opts.browserControlHttpSupported;
     this.resolveOperationAdmission = opts.resolveOperationAdmission;
     this.adoptBackgroundCommand = opts.adoptBackgroundCommand;
     this.settleBackgroundCommand = opts.settleBackgroundCommand;
@@ -2262,6 +2447,8 @@ export class SelfhostedSandboxClient {
         ? { operationCpuQuotaSupported: this.operationCpuQuotaSupported }
         : {}),
       transactionalFsWriteSupported: this.transactionalFsWriteSupported === true,
+      transactionalFsWriteMachineSupported: this.transactionalFsWriteMachineSupported === true,
+      browserControlHttpSupported: this.browserControlHttpSupported === true,
       ...(this.resolveOperationAdmission !== undefined
         ? { resolveOperationAdmission: this.resolveOperationAdmission }
         : {}),
@@ -2382,6 +2569,9 @@ export interface SelfhostedSessionBuild {
   /** Exact live CPU enforcement capability paired with the initial snapshot. */
   operationCpuQuotaSupported?: boolean;
   transactionalFsWriteSupported?: boolean;
+  transactionalFsWriteMachineSupported?: boolean;
+  /** Exact live runner capability for in-process controller requests. */
+  browserControlHttpSupported?: boolean;
   /** Live last-boundary operation admission resolver; see SelfhostedSessionDeps. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
@@ -2438,6 +2628,8 @@ export async function buildSelfhostedBackendSession(
       ? { operationCpuQuotaSupported: deps.operationCpuQuotaSupported }
       : {}),
     transactionalFsWriteSupported: deps.transactionalFsWriteSupported === true,
+    transactionalFsWriteMachineSupported: deps.transactionalFsWriteMachineSupported === true,
+    browserControlHttpSupported: deps.browserControlHttpSupported === true,
     ...(deps.resolveOperationAdmission !== undefined
       ? { resolveOperationAdmission: deps.resolveOperationAdmission }
       : {}),
@@ -2516,6 +2708,7 @@ function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): Selfho
     stderr,
     exitCode: res.exitCode,
     timedOut: res.timedOut,
+    ...(res.backgroundChildrenStopped ? { backgroundChildrenStopped: true } : {}),
   };
 }
 
@@ -2587,6 +2780,13 @@ function mediaTypeFromPath(path: string): string | undefined {
 
 /** A random uint64-safe numeric nonce (the wire `PingRequest.nonce` is a uint64,
  *  represented as a numeric string by ts-proto). */
+/** The machine itself stopped answering (offline, reconnecting past the hold
+ * window, or draining), as opposed to an answer that the operation failed. */
+function machineStoppedAnswering(error: SelfhostedControlError): boolean {
+  const faultClass = selfhostedFaultClass(error);
+  return faultClass === "offline" || faultClass === "reconnecting" || faultClass === "draining";
+}
+
 function randomNonce(): string {
   // 2^53-safe random integer as a decimal string.
   return String(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));

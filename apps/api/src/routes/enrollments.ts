@@ -21,6 +21,7 @@
 // start can never grant access to a workspace no authorized user later approves in.
 
 import { randomUUID } from "node:crypto";
+import { resolveEnrollmentSigningSecret } from "@opengeni/config";
 import {
   DeviceEnrollmentApproveRequest,
   DeviceEnrollmentApproveResponse,
@@ -145,13 +146,36 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     rateLimit(c, exchangeLimiter);
     const parsed = RenewEnrollmentRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "invalid renewal request" });
-    const credentials = await renewEnrollmentCredentials({ db, settings }, parsed.data);
+    c.header("Cache-Control", "no-store");
+    const now = Math.floor(Date.now() / 1000);
+    // These failures do not establish that the credential can never recover.
+    if (Math.abs(now - parsed.data.signedAt) > 120)
+      return c.json(
+        {
+          code: "enrollment_clock_skew",
+          message: "Correct the machine clock, then retry credential renewal.",
+        },
+        401,
+      );
+    if (!resolveEnrollmentSigningSecret(settings))
+      return c.json(
+        {
+          code: "enrollment_renewal_unavailable",
+          message: "Credential renewal is temporarily unavailable.",
+        },
+        503,
+      );
+    const credentials = await renewEnrollmentCredentials({ db, settings }, parsed.data, now);
     recordEnrollment(deps, "renew", credentials ? "ok" : "unauthorized");
     if (!credentials)
-      throw new HTTPException(401, {
-        message: "machine renewal not authorized",
-      });
-    c.header("Cache-Control", "no-store");
+      return c.json(
+        {
+          code: "enrollment_reconnect_required",
+          message:
+            "This connection can no longer renew its credentials. Connect this machine again, or remove the saved connection.",
+        },
+        401,
+      );
     return c.json(EnrollTokenExchangeResponse.parse({ credentials }), 200);
   });
 

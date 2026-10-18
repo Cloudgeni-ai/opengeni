@@ -18,6 +18,7 @@ import {
 } from "../session-context";
 import { isNonRetryableInteractionError } from "../lib/interaction-errors";
 import { usePageLiveActivity } from "./internal";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** Immutable input fence; queued actions never need the encoded screenshot. */
 export type BrowserFrameInputFence = Pick<
@@ -80,6 +81,7 @@ export type UseBrowserSessionResult = {
 /** Selected BrowserSession control state. All human actions use the same
  *  generation-fenced controller operation stream as agent actions. */
 export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowserSessionResult {
+  const t = useOpenGeniText();
   const { client, workspaceId } = useEmbeddedBrowserInteraction(options);
   const browserSessionId = options.browserSessionId;
   const enabled = (options.enabled ?? true) && browserSessionId !== null;
@@ -435,7 +437,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
       changesInventory = false,
     ): Promise<T> => {
       if (!enabled || !isCurrentSource()) {
-        throw new Error("The browser source is no longer selected.");
+        throw new Error(t("hooks.useBrowserSession.theBrowserSourceIsNo"));
       }
       const selectionRevision = ++selectionRevisionRef.current;
       invalidateRefresh();
@@ -507,7 +509,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         }
       }
     },
-    [enabled, invalidateRefresh, isCurrentSource, refreshInventory, source],
+    [enabled, invalidateRefresh, isCurrentSource, refreshInventory, source, t],
   );
 
   const selectTarget = useCallback(
@@ -711,7 +713,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     ): Promise<BrowserActionReceipt> => {
       if (!browserSessionId) throw new Error("No BrowserSession is selected.");
       if (!enabled || !isCurrentSource()) {
-        throw new Error("The browser source is no longer selected.");
+        throw new Error(t("hooks.useBrowserSession.theBrowserSourceIsNo"));
       }
       if (!selectedTargetRef.current) {
         throw new Error("The browser page is not ready for input.");
@@ -857,7 +859,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         throw error;
       }
     },
-    [browserSessionId, client, enabled, invalidateRefresh, isCurrentSource, source, workspaceId],
+    [browserSessionId, client, enabled, invalidateRefresh, isCurrentSource, source, workspaceId, t],
   );
 
   const act = useCallback(
@@ -882,24 +884,25 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   const observeForInput = useCallback(async (): Promise<BrowserObservation> => {
     const target = selectedTargetRef.current;
     if (!enabled || !isCurrentSource()) {
-      throw new Error("The browser source is no longer selected.");
+      throw new Error(t("hooks.useBrowserSession.theBrowserSourceIsNo"));
     }
-    if (!browserSessionId || !target) throw new Error("No browser tab is selected.");
+    if (!browserSessionId || !target)
+      throw new Error(t("hooks.useBrowserSession.noBrowserTabIsSelected"));
     const observation = await client.observeBrowserTarget(workspaceId, browserSessionId, target.id);
     if (
       !isCurrentSource() ||
       observation.browserSessionId !== browserSessionId ||
       !sameObservationTarget(observation, selectedTargetRef.current)
     ) {
-      throw new Error("The browser page changed. Open the options again.");
+      throw new Error(t("hooks.useBrowserSession.theBrowserPageChangedOpen"));
     }
     return observation;
-  }, [browserSessionId, client, enabled, isCurrentSource, workspaceId]);
+  }, [browserSessionId, client, enabled, isCurrentSource, workspaceId, t]);
 
   const actFromObservation = useCallback(
     async (action: BrowserAction, observation: BrowserObservation) => {
       if (!sameObservationTarget(observation, selectedTargetRef.current)) {
-        throw new Error("The browser page changed. Open the options again.");
+        throw new Error(t("hooks.useBrowserSession.theBrowserPageChangedOpen"));
       }
       return await dispatchAction(action, crypto.randomUUID(), {
         browserSessionId: observation.browserSessionId,
@@ -910,17 +913,17 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         frameId: observation.frameId,
       });
     },
-    [dispatchAction],
+    [dispatchAction, t],
   );
 
   const diagnostics = useCallback(
     async (diagnosticOptions: BrowserDiagnosticsOptions = {}): Promise<BrowserDiagnosticBatch> => {
       if (!enabled || !isCurrentSource()) {
-        throw new Error("The browser source is no longer selected.");
+        throw new Error(t("hooks.useBrowserSession.theBrowserSourceIsNo"));
       }
       const targetId = selectedTargetIdRef.current;
       if (!browserSessionId || !targetId) {
-        throw new Error("No browser tab is selected.");
+        throw new Error(t("hooks.useBrowserSession.noBrowserTabIsSelected"));
       }
       return await client.listBrowserDiagnostics(
         workspaceId,
@@ -929,12 +932,12 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         diagnosticOptions,
       );
     },
-    [browserSessionId, client, enabled, isCurrentSource, workspaceId],
+    [browserSessionId, client, enabled, isCurrentSource, workspaceId, t],
   );
 
   const readClipboard = useCallback(async (): Promise<BrowserClipboard> => {
     if (!enabled || !isCurrentSource()) {
-      throw new Error("The browser source is no longer selected.");
+      throw new Error(t("hooks.useBrowserSession.theBrowserSourceIsNo"));
     }
     if (!browserSessionId) throw new Error("No BrowserSession is selected.");
     const clipboard = await client.readBrowserClipboard(workspaceId, browserSessionId);
@@ -942,7 +945,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
       throw new Error("Browser clipboard belongs to another BrowserSession.");
     }
     return clipboard;
-  }, [browserSessionId, client, enabled, isCurrentSource, workspaceId]);
+  }, [browserSessionId, client, enabled, isCurrentSource, workspaceId, t]);
 
   return {
     session: visible.session,

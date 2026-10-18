@@ -18,7 +18,10 @@ import type { Observability } from "@opengeni/observability";
 import type { OpenGeniRuntime } from "@opengeni/runtime";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { VaultConnectionCredentialsPort } from "@opengeni/vaults";
-import type { OnePasswordVaultProviderFactory } from "@opengeni/core";
+import type {
+  ExternalVaultProviderFactories,
+  OnePasswordVaultProviderFactory,
+} from "@opengeni/core";
 
 // Signal (start-if-needed) a session's Temporal workflow so a queued turn it
 // cannot otherwise observe gets claimed. Used to wake a PARENT session's
@@ -141,6 +144,7 @@ export type SharedActivityServices = {
    * `@opengeni/vaults-onepassword`); null leaves 1Password vaults unavailable.
    */
   onePasswordVaultProvider?: OnePasswordVaultProviderFactory | null;
+  externalVaultProviders?: ExternalVaultProviderFactories | null;
   /** Standalone, default-off personal GitHub smart-HTTP broker consumer. */
   personalGitHubCredentials?: ConnectionCredentialsPort["gitCredentials"] | null;
 };
@@ -407,6 +411,8 @@ export type PeekSessionWorkInput = {
   includeAdmissionFence?: boolean;
   /** Versioned workflow observer opt-in, never a caller authorization grant. */
   observerAccountId?: string;
+  /** Patch-gated: old workflow histories only understand unavailable. */
+  includeDeletion?: boolean;
 };
 
 export type SettleSessionInputWaitInput = {

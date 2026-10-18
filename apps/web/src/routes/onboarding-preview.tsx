@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { Section, SectionStack, SectionVariantProvider } from "@/components/ui/section";
 import { SettingRow } from "@/components/ui/setting-row";
 import { ModelPolicyPicker, projectPickerRows } from "@opengeni/react";
@@ -287,6 +288,7 @@ function CreditBalancePreview() {
   const [effort, setEffort] = useState<ReasoningEffort>("medium");
   const [latency, setLatency] = useState<LatencyMode>("standard");
   const rows = projectPickerRows(
+    t,
     ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"].map(
       (id): WorkspaceModelCatalogModel => ({
         id,

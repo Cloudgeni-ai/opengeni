@@ -20,6 +20,7 @@ import {
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
+  BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
   claimSessionWorkForAttempt,
   connectSubscriptionCoreCodexConnection,
   createDb,
@@ -37,6 +38,7 @@ import {
   RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
   SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   SESSION_USAGE_LIMIT_RUNTIME_ROUTINES,
+  SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
@@ -50,6 +52,7 @@ import {
   withoutAbsentLaterPosture,
   withoutAbsentVaultPosture,
   stageConnectionAccountIntentColumns,
+  stageSiteSessionAudienceColumns,
 } from "./vault-policy-column-fixture";
 
 setDefaultTimeout(180_000);
@@ -482,8 +485,13 @@ beforeAll(async () => {
   // Stage a provisioned database without 0726, as a deployment is before it:
   // 0726 and every later migration (which may require 0726, or retire the
   // routines it patches) are held back, and only 0726 is applied below.
+  // Current session writers need the real additive 0834 activity xid column
+  // and trigger, which are independent of the routines this fixture exercises.
   const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
-    .filter((file) => file.endsWith(".sql") && file >= MIGRATION)
+    .filter(
+      (file) =>
+        file.endsWith(".sql") && file >= MIGRATION && file !== "0834_session_activity_xid.sql",
+    )
     .sort();
   const staging = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -493,6 +501,9 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
+    await stageSiteSessionAudienceColumns(database.ownerUrl);
+    // Current event readers also project 0810's nullable usage source key.
+    await staging`alter table session_events add column usage_source_key text`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -620,9 +631,49 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       ),
       "session usage limit capability has unsafe owner or direct runtime privileges",
     );
+    // 0795 (Site lifecycle cancellation) is deliberately held back as well.
+    heldBack.push(
+      "Site cancellation capability ledger is missing or unsafe",
+      "Site cancellation policy predicate is missing or unsafe",
+      "Site cancellation routine begin_site_session_cancellation(uuid, uuid, uuid, uuid) is missing or unsafe",
+      "Site cancellation routine end_site_session_cancellation(uuid) is missing or unsafe",
+    );
+    // 0796-0798 (subscription plans and billing operations) are held back too.
+    heldBack.push(
+      ...[...BILLING_SUBSCRIPTION_OPERATION_ROUTINES, ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES].map(
+        (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
+      ),
+      "owner-internal target-schema helper set_subscription_plan_catalog(jsonb, text, text) is missing or ambiguous",
+      "runtime role cannot read the subscription plan catalog",
+      "subscription plan maintenance inventory is missing",
+      "subscription plan Free anniversary helper is missing",
+    );
+    // 0805 (private actor visibility), 0823 (personal machine consents), and
+    // 0841 (chat-visible machine access explanation) are also held back.
+    heldBack.push(
+      ...[
+        "consent_session_turn_personal_machine(uuid, uuid, uuid, uuid)",
+        "get_session_attempt_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, boolean, boolean)",
+        "get_session_machine_access(uuid, uuid, uuid)",
+        "session_private_actor_visible_keys()",
+      ].map((routine) => `target-schema runtime capability ${routine} is missing or ambiguous`),
+      ...[
+        "assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean)",
+        "bind_session_attempt_machine_consent(uuid, uuid, uuid)",
+        "live_session_turn_machine_consent(uuid)",
+      ].map((routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`),
+    );
     // 0776 (Site Data), 0782 (published Sites) and 0783 (Site SQL): their tables
     // are in the runtime and protected contracts.
-    const siteDataTables = [
+    const runtimeTables = [
+      // 0796 and 0797 (billing operations and subscription plans).
+      "billing_subscription_operations",
+      // 0820 (retained browser downloads).
+      "browser_session_retained_downloads",
+      "organization_plans",
+      "plan_credit_periods",
+      // 0792 (schedule blocker reviews) is also a later runtime/protected table.
+      "scheduled_task_blocker_reviews",
       "site_abuse_reports",
       "site_auth_codes",
       "site_data_collections",
@@ -636,20 +687,32 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "site_hostname_holds",
       "site_hostnames",
       "site_limit_profiles",
+      "site_platform_brake",
+      "site_platform_storage",
+      "site_platform_totals",
+      "site_platform_usage",
       "site_publications",
       "site_runtime_conversations",
       "site_runtime_rate_windows",
       "site_runtime_usage",
+      // 0842 adds private Site/chat grants to both posture inventories.
+      "site_session_access",
       "site_sql_databases",
       "site_sql_migrations",
       "site_sql_queries",
       "site_sql_rate_windows",
       "site_sql_usage",
       "site_viewer_sessions",
-    ].join(", ");
+    ];
+    // 0823 machine-consent tables are protected but not runtime-privileged.
+    const protectedTables = [
+      ...runtimeTables,
+      "session_attempt_machine_consents",
+      "session_turn_machine_consents",
+    ].sort();
     heldBack.push(
-      `runtime privilege tables are missing: ${siteDataTables}`,
-      `protected tables are missing: ${siteDataTables}`,
+      `runtime privilege tables are missing: ${runtimeTables.join(", ")}`,
+      `protected tables are missing: ${protectedTables.join(", ")}`,
     );
     const expected = [
       ...heldBack,

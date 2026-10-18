@@ -689,6 +689,8 @@ export type ResourceRef = RepositoryResourceRef | FileResourceRef;
 export type ToolRef = {
   kind: "mcp";
   id: string;
+  /** Narrow this connection's authorized tool names; an empty list allows none. */
+  allowedTools?: string[] | undefined;
   /** Skip this server when its connect/tools-list fails instead of failing the turn. */
   optional?: boolean | undefined;
   /**
@@ -1626,6 +1628,16 @@ export type SessionBackgroundCommandListResponse = {
   commands: SessionBackgroundCommand[];
 };
 
+export type WorkspaceBackgroundCommand = SessionBackgroundCommand & {
+  sessionTitle: string | null;
+  machineName: string | null;
+};
+
+export type WorkspaceBackgroundCommandListResponse = {
+  commands: WorkspaceBackgroundCommand[];
+  nextCursor: string | null;
+};
+
 export type CancelSessionBackgroundCommandResult = {
   command: SessionBackgroundCommand;
   accepted: boolean;
@@ -1922,6 +1934,8 @@ export type SessionListResponse = {
   needsYouOnly?: true;
   /** Receipt for the read-only (archived idle session) filter. */
   contentArchivedOnly?: true;
+  /** Receipt for the started-or-messaged-by-you filter. */
+  mineOnly?: true;
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
@@ -1933,6 +1947,8 @@ export type SessionListResponse = {
   archiveStatus?: "active" | "archived" | "all";
   /** Server-resolved Site origin filter, when requested. */
   originSiteId?: string;
+  /** Server-resolved Site access filter, when requested. */
+  siteAccessId?: string;
   sessions: Session[];
   nextCursor: string | null;
 };
@@ -2938,7 +2954,7 @@ export type FsReadResponse = {
   isBinary: boolean;
   revision: number;
 };
-export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 25 * 1024 * 1024 - 1;
+export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 5_000_000_000;
 export type PublishSandboxFileArtifactRequest = { path: string };
 export type SandboxFileArtifactReceipt = {
   type: "sandbox_file";
@@ -3443,6 +3459,24 @@ export type ScheduledTask = {
   policyDrift?: ScheduledTaskPolicyDrift | null | undefined;
   /** Read-only: which accounts a run would use if it started now, for a viewer who can act on it. */
   accountPlan?: ScheduledTaskAccountPlan | undefined;
+  /** Read-only: why it paused itself, or why its owner was told its runs keep failing. */
+  blocker?: ScheduledTaskBlocker | undefined;
+};
+
+/**
+ * What blocks a schedule. `paused`: no later run could start until a person
+ * acts, so it paused itself; resume it once the cause is fixed. `notified`:
+ * its scheduled runs kept failing or being skipped and its owner was told
+ * once; it keeps running. `message` says what would unblock it.
+ */
+export type ScheduledTaskBlocker = {
+  state: "paused" | "notified";
+  /** Stable machine reason, such as `scheduled_session_paused`; tolerate new ones. */
+  reason: string;
+  message: string;
+  /** The run that showed the blocker (the first of a failing streak). */
+  runId: string;
+  since: string;
 };
 
 /**
@@ -3911,6 +3945,7 @@ export type FirstPartyMcpToolName =
   | "site_files_delete"
   | "site_publication_get"
   | "site_publication_update"
+  | "site_publication_apply_fix"
   | "site_hostname_check"
   | "site_sql_inspect"
   | "site_sql_enable"
@@ -5810,6 +5845,12 @@ export type WorkspaceSettings = {
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   /** Whether agents may invoke the built-in structured human-input tool. */
   agentHumanInputEnabled?: boolean | undefined;
+  /**
+   * What an ordinary Send does in the console composer while the agent is
+   * working: `queue` (absent) runs it after the current turn, `steer` has the
+   * agent read it at its next model step.
+   */
+  busySend?: "queue" | "steer" | undefined;
   /** Whether agents get the Jev-backed code_search tool; absent or null follows the deployment. */
   codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
@@ -5909,6 +5950,7 @@ export type UpdateWorkspaceSettingsRequest = {
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   agentHumanInputEnabled?: boolean | undefined;
+  busySend?: "queue" | "steer" | undefined;
   codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
@@ -6972,6 +7014,11 @@ export type SteerSessionQueueItemRequest = {
   clientEventId: string;
   expectedTurnVersion: number;
   controlEtag?: string;
+  /**
+   * Interrupt the running turn now instead of at its next model step. Also
+   * turns an already-waiting Steer into an immediate one.
+   */
+  interrupt?: boolean;
 };
 
 export type DeleteSessionQueueItemRequest = {
@@ -9202,6 +9249,19 @@ export type PromotionalCreditBalance = PromotionalCreditScope & {
   coversVoice?: boolean | undefined;
 };
 
+export type {
+  BillingPlanBalance,
+  SubscriptionPlan,
+  SubscriptionPlanCatalog,
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
+} from "@opengeni/contracts";
+import type { BillingPlanBalance } from "@opengeni/contracts";
+
 export type BillingBalance = {
   accountId: string;
   balanceMicros: number;
@@ -9209,6 +9269,7 @@ export type BillingBalance = {
   updatedAt: string;
   generalBalanceMicros?: number | undefined;
   promotionalCredits?: PromotionalCreditBalance[] | undefined;
+  plan?: BillingPlanBalance | null | undefined;
 };
 
 export const KNOWN_USAGE_EVENT_TYPES = [
@@ -9702,6 +9763,7 @@ export type MachineConnectionAuthority = {
   leaseExpiresAt: string | null;
   duplicateRunnerDeniedCount: number;
   duplicateRunnerDeniedAt: string | null;
+  authenticationError?: "credentials_expired" | null | undefined;
 };
 
 export type MachineRuntimeCapabilities = {
@@ -9929,10 +9991,19 @@ export type MachineView = {
 
 /** GET /v1/workspaces/:ws/machines — the dashboard list + the active-sandbox
  *  pointer (null activeSandboxId == the session's own group box is active). */
+export type SessionMachineAccess = {
+  sandboxId: string;
+  machineName: string;
+  ownerName: string | null;
+  isOwner: boolean;
+  queuedTurnBlocked: boolean;
+};
+
 export type MachinesResponse = {
   activeSandboxId: string | null;
   activeEpoch: number;
   machines: MachineView[];
+  sessionMachineAccess?: SessionMachineAccess | null | undefined;
 };
 
 /** GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series — the downsampled
@@ -9992,6 +10063,8 @@ export type SwapActiveSandboxResponse = {
     | "unsupported_backend_context"
     | "transient_establishment"
     | "concurrent_swap"
+    | "personal_machine_permission_required"
+    | "personal_machine_not_permitted"
     | "recovery_in_progress"
     | "recovery_degraded"
     | "recovery_unrecoverable";

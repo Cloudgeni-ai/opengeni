@@ -969,24 +969,61 @@ describe("canonical queue commands", () => {
     });
 
     const target = value.turns[2]!;
-    const steered = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
-      db.transaction((tx) =>
-        steerQueuedTurnInTransaction(tx as unknown as typeof db, {
-          accountId: value.grant.accountId,
-          workspaceId: value.grant.workspaceId!,
-          sessionId: value.session.id,
-          turnId: target.id,
-          expectedTurnVersion: target.version,
-          actor: value.actor,
-          operationKey: crypto.randomUUID(),
-        }),
-      ),
+    const steerRow = async (expectedTurnVersion: number, interrupt: boolean) =>
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          steerQueuedTurnInTransaction(tx as unknown as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            turnId: target.id,
+            expectedTurnVersion,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            ...(interrupt ? { interrupt: true } : {}),
+          }),
+        ),
+      );
+    // An ordinary Steer waits for the live owner's next model step: no
+    // interruption, the attempt keeps running, and the queue reports it.
+    const waiting = await steerRow(target.version, false);
+    expect(waiting.interruptionCount).toBe(0);
+    expect(waiting.items.map((row) => row.id)).toEqual([
+      target.id,
+      value.turns[0]!.id,
+      value.turns[1]!.id,
+    ]);
+    expect(waiting.items[0]).toMatchObject({
+      id: target.id,
+      version: target.version + 1,
+      metadata: {
+        delivery: "steer",
+        replacedTurnId: runningTurn.id,
+        replacedAttemptId: attemptId,
+        interruptionCount: 0,
+        deferredUntilModelStep: true,
+      },
+    });
+    expect(
+      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+    ).toMatchObject({
+      stoppingPreviousAttempt: false,
+    });
+    const [noInterruption] = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db
+        .select()
+        .from(schema.sessionAttemptInterruptions)
+        .where(eq(schema.sessionAttemptInterruptions.attemptId, attemptId)),
     );
+    expect(noInterruption).toBeUndefined();
+
+    // "Send now" interrupts the live owner for the waiting Steer.
+    const steered = await steerRow(target.version + 1, true);
     expect(steered.items[0]).toMatchObject({
       id: target.id,
       triggerEventId: target.triggerEventId,
       prompt: target.prompt,
-      version: target.version + 1,
+      version: target.version + 2,
       metadata: {
         delivery: "steer",
         replacedTurnId: runningTurn.id,
@@ -994,6 +1031,7 @@ describe("canonical queue commands", () => {
         interruptionCount: 1,
       },
     });
+    expect(steered.items[0]!.metadata).not.toHaveProperty("deferredUntilModelStep");
     expect(steered.interruptionCount).toBe(1);
     expect(steered.eventIds.length).toBeGreaterThan(0);
     const validSteerMetadata = steered.items[0]!.metadata;

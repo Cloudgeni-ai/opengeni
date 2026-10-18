@@ -160,6 +160,16 @@ async function retryFailedSessionInTransaction(
     failurePayload !== null &&
     typeof failurePayload === "object" &&
     !Array.isArray(failurePayload) &&
+    (failurePayload as Record<string, unknown>).code === "knowledge_learning_scope_changed"
+  )
+    throw new SessionRetryConflictError(
+      "RETRY_UNSUPPORTED_FAILURE",
+      "Send a new message to continue with this chat's current Knowledge scope",
+    );
+  if (
+    failurePayload !== null &&
+    typeof failurePayload === "object" &&
+    !Array.isArray(failurePayload) &&
     (failurePayload as Record<string, unknown>).code === "provider_safety_refusal"
   )
     throw new SessionRetryConflictError(

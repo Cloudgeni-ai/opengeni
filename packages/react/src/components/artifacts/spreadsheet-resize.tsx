@@ -9,6 +9,7 @@ import {
 } from "react";
 
 import { cn } from "../../lib/cn";
+import { useOpenGeniText } from "../../messages/runtime";
 
 export type SpreadsheetDimensionAxis = "row" | "column";
 
@@ -59,6 +60,7 @@ function boundedSize(size: number): number {
 
 /** Transient gesture/pending previews only; the caller owns durable dimensions. */
 export function useSpreadsheetResizing(options: ResizeOptions) {
+  const t = useOpenGeniText();
   const optionsRef = useRef(options);
   optionsRef.current = options;
   const [gesture, setGesture] = useState<Gesture | null>(null);
@@ -131,62 +133,70 @@ export function useSpreadsheetResizing(options: ResizeOptions) {
     if (changed) setPending([...pendingRef.current.values()]);
   }, [authoritativeSize, options.columnWidths, options.revision, options.rowHeights, pending]);
 
-  const submit = useCallback((change: SpreadsheetDimensionCommit): void => {
-    const current = optionsRef.current;
-    if (!current.enabled || !current.commit || change.sheetId !== current.sheetId) return;
-    const scope = scopeRef.current;
-    const id = ++nextIdRef.current;
-    const key = keyOf(change);
-    const entry: ResizePreview = { ...change, id, baseRevision: current.revision, settled: false };
-    pendingRef.current.set(key, entry);
-    setPending([...pendingRef.current.values()]);
-    errorsRef.current.delete(key);
-    setErrors([...errorsRef.current.values()]);
-    current.onStart?.();
-    let asynchronous = false;
-    const settle = (failed: boolean, cause?: unknown) => {
-      if (!mountedRef.current || scopeRef.current !== scope) return;
-      if (asynchronous) setInFlightCount((count) => Math.max(0, count - 1));
-      const latest = pendingRef.current.get(key);
-      if (latest?.id !== id) return;
-      if (failed) {
-        pendingRef.current.delete(key);
-        const failure = cause instanceof Error ? cause : new Error(String(cause));
-        errorsRef.current.set(key, {
-          key,
-          message: failure.message || "Spreadsheet resize failed",
-          retry: () => {
-            if (!mountedRef.current || scopeRef.current !== scope) return;
-            submit(change);
-          },
-        });
-        setErrors([...errorsRef.current.values()]);
-        optionsRef.current.onCommandError?.(failure);
-      } else {
-        pendingRef.current.set(key, {
-          ...entry,
-          baseRevision: optionsRef.current.revision,
-          settled: true,
-        });
-      }
+  const submit = useCallback(
+    (change: SpreadsheetDimensionCommit): void => {
+      const current = optionsRef.current;
+      if (!current.enabled || !current.commit || change.sheetId !== current.sheetId) return;
+      const scope = scopeRef.current;
+      const id = ++nextIdRef.current;
+      const key = keyOf(change);
+      const entry: ResizePreview = {
+        ...change,
+        id,
+        baseRevision: current.revision,
+        settled: false,
+      };
+      pendingRef.current.set(key, entry);
       setPending([...pendingRef.current.values()]);
-    };
-    try {
-      const result = current.commit(change);
-      if (result && typeof result.then === "function") {
-        asynchronous = true;
-        setInFlightCount((count) => count + 1);
-        void Promise.resolve(result).then(
-          () => settle(false),
-          (cause) => settle(true, cause),
-        );
-      } else {
-        settle(false);
+      errorsRef.current.delete(key);
+      setErrors([...errorsRef.current.values()]);
+      current.onStart?.();
+      let asynchronous = false;
+      const settle = (failed: boolean, cause?: unknown) => {
+        if (!mountedRef.current || scopeRef.current !== scope) return;
+        if (asynchronous) setInFlightCount((count) => Math.max(0, count - 1));
+        const latest = pendingRef.current.get(key);
+        if (latest?.id !== id) return;
+        if (failed) {
+          pendingRef.current.delete(key);
+          const failure = cause instanceof Error ? cause : new Error(String(cause));
+          errorsRef.current.set(key, {
+            key,
+            message: failure.message || t("artifacts.spreadsheetResize.spreadsheetResizeFailed"),
+            retry: () => {
+              if (!mountedRef.current || scopeRef.current !== scope) return;
+              submit(change);
+            },
+          });
+          setErrors([...errorsRef.current.values()]);
+          optionsRef.current.onCommandError?.(failure);
+        } else {
+          pendingRef.current.set(key, {
+            ...entry,
+            baseRevision: optionsRef.current.revision,
+            settled: true,
+          });
+        }
+        setPending([...pendingRef.current.values()]);
+      };
+      try {
+        const result = current.commit(change);
+        if (result && typeof result.then === "function") {
+          asynchronous = true;
+          setInFlightCount((count) => count + 1);
+          void Promise.resolve(result).then(
+            () => settle(false),
+            (cause) => settle(true, cause),
+          );
+        } else {
+          settle(false);
+        }
+      } catch (cause) {
+        settle(true, cause);
       }
-    } catch (cause) {
-      settle(true, cause);
-    }
-  }, []);
+    },
+    [t],
+  );
 
   const update = useCallback((next: Gesture) => {
     activeRef.current = next;
@@ -397,6 +407,7 @@ export function SpreadsheetResizeHandle({
   label: string;
   size: number;
 } & ReturnType<ReturnType<typeof useSpreadsheetResizing>["handleProps"]>) {
+  const t = useOpenGeniText();
   return (
     <div
       {...handlers}
@@ -407,7 +418,7 @@ export function SpreadsheetResizeHandle({
       aria-valuemin={MIN_SIZE}
       aria-valuemax={MAX_SIZE}
       aria-valuenow={size}
-      aria-valuetext={`${size} pixels`}
+      aria-valuetext={t("artifacts.spreadsheetResize.sizePixels", { size })}
       data-og-resize-axis={axis}
       style={{ [axis === "column" ? "right" : "bottom"]: "calc(var(--spacing) * -1)" }}
       className={cn(

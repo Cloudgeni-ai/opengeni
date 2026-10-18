@@ -10,6 +10,25 @@ function uuid(index: number): string {
 }
 
 describe("sessions_list legacy bounded detail=full discovery projection", () => {
+  test("xid relevance and incremental cursors fit the unchanged 512-character input", () => {
+    for (const orderBy of ["updatedAt", "relevance"] as const) {
+      const cursor = {
+        orderBy,
+        sortRank: orderBy === "relevance" ? 123 : null,
+        sortRevision: "18446744073709551615",
+        sortAt: "2026-10-17T12:00:00.123456Z",
+        id: uuid(1),
+        snapshotAt: "2026-10-17T12:00:00.123456Z",
+        snapshotRevision: "36893488147419103231",
+        updatedAfter: orderBy === "updatedAt" ? "36893488147419103230" : null,
+        filterHash: orderBy === "relevance" ? "a".repeat(64) : null,
+        originSiteId: uuid(2),
+      };
+      const encoded = encodeSessionDiscoveryCursor(cursor);
+      expect(encoded.length).toBeLessThanOrEqual(512);
+      expect(decodeSessionDiscoveryCursor(encoded)).toEqual(cursor);
+    }
+  });
   test("Site-bound chronological cursors preserve origin in their versioned wire format", () => {
     const cursor = {
       orderBy: "createdAt" as const,

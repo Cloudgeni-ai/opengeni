@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
@@ -247,7 +248,7 @@ function catalogModel(
 
 describe("catalog-backed ModelPicker", () => {
   test("first-party branding stays explicit while custom presentation and provider identities survive", async () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(t, [
       catalogModel({ id: "deployment/free", label: "Free deployment", cost: "free" }),
       catalogModel({
         id: "codex/example",
@@ -324,7 +325,7 @@ describe("catalog-backed ModelPicker", () => {
   });
 
   test("renders selected product model and effort on the trigger", async () => {
-    const rows: PickerModelRow[] = projectPickerRows([
+    const rows: PickerModelRow[] = projectPickerRows(t, [
       catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),
       catalogModel({
         id: "blocked",
@@ -381,7 +382,7 @@ describe("catalog-backed ModelPicker", () => {
   });
 
   test("collapsed Fast uses a lightning icon, not the word Fast", async () => {
-    const rows = projectPickerRows([catalogModel({ id: "gpt-5.6-sol", label: "Sol" })]);
+    const rows = projectPickerRows(t, [catalogModel({ id: "gpt-5.6-sol", label: "Sol" })]);
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -411,7 +412,7 @@ describe("catalog-backed ModelPicker", () => {
   });
 
   test("shows every billing section and separate thinking controls", async () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(t, [
       catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),
       catalogModel({
         id: "codex/gpt-5.6-luna",
@@ -461,7 +462,7 @@ describe("catalog-backed ModelPicker", () => {
   });
 
   test("one usable rail collapses the provider root", async () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(t, [
       catalogModel({ id: "gpt-5.6-sol", label: "Sol", source: "opengeni" }),
       catalogModel({
         id: "deepseek-v4-flash-0731",
@@ -500,7 +501,7 @@ describe("catalog-backed ModelPicker", () => {
   });
 
   test("changes model directly and adjusts thinking without navigation", async () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(t, [
       catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),
       catalogModel({
         id: "codex/gpt-5.6-luna",
@@ -582,7 +583,7 @@ describe("catalog-backed ModelPicker", () => {
       id: "x",
       label: "x",
     }).capabilities!;
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(t, [
       catalogModel({
         id: "slow-only",
         label: "Slow",

@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { StartupTimings, useStartupDetails, setStartupDetails } from "@opengeni/react/session-ui";
@@ -41,7 +42,7 @@ export function SessionInspector(props: {
 }) {
   const startupDetails = useStartupDetails();
   const startupPhases = useMemo(
-    () => buildTimeline(props.events).filter((item) => item.kind === "startup-phase"),
+    () => buildTimeline(t, props.events).filter((item) => item.kind === "startup-phase"),
     [props.events],
   );
   const context = useAppContext();
@@ -138,7 +139,7 @@ export function SessionInspector(props: {
       ? fleet.loading
         ? "Checking…"
         : "Unavailable"
-      : sessionSandboxLabel(props.session.sandboxBackend);
+      : sessionSandboxLabel(t, props.session.sandboxBackend);
   const displayEvents = props.events;
   const sortedEvents = [...displayEvents].sort((a, b) => b.sequence - a.sequence);
   const lifecycleEvents = [...displayEvents]
@@ -240,7 +241,7 @@ export function SessionInspector(props: {
                 />
                 <InfoRow
                   label="Effort"
-                  value={labelReasoningEffort(props.session.reasoningEffort)}
+                  value={labelReasoningEffort(t, props.session.reasoningEffort)}
                 />
                 <InfoRow label={computeLabel} value={computeValue} />
                 <InfoRow label="Sandbox Environment" value={props.session.rigId ?? "none"} />

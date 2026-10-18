@@ -3,6 +3,24 @@ import { z } from "zod";
 import { ConnectorToolPermission } from "./connector-tool-permissions";
 import { MCP_MAX_CATALOG_TOOL_ENTRIES } from "./mcp-catalog-limits";
 
+/**
+ * Tool `_meta` key an MCP server sets in `tools/list` to recommend a default
+ * permission for that tool: `"ask"` or `"allow"`. Like `requireApproval`, it
+ * applies only when the workspace has no saved choice for the tool and no
+ * server default. The tool asks when either this or `requireApproval` says so.
+ */
+export const MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY = "opengeni/recommendedPermission" as const;
+
+/** True when a listed MCP tool recommends Ask through its `_meta`. */
+export function mcpToolRecommendsApproval(tool: object): boolean {
+  const meta = (tool as { _meta?: unknown })._meta;
+  return (
+    typeof meta === "object" &&
+    meta !== null &&
+    (meta as Record<string, unknown>)[MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY] === "ask"
+  );
+}
+
 // Host-attached session MCP servers have no catalog capability. Their tool
 // permissions are keyed by the same secret-free identity the runtime derives:
 // `session-mcp:<serverId>:<sha256(exact url)>`. The host names the server and
@@ -47,7 +65,8 @@ export const SessionMcpToolPermissionsQuery = /* @__PURE__ */ defineSchema(() =>
 export type SessionMcpToolPermissionsQuery = z.infer<typeof SessionMcpToolPermissionsQuery>;
 
 /** Saved choices only. Tools without a rule follow `defaultPermission`, then
- * the attaching session's `requireApproval` recommendation, then Allow. */
+ * the server's recommendation (the tool's `opengeni/recommendedPermission`
+ * `_meta`, or the attaching session's `requireApproval`), then Allow. */
 export const SessionMcpToolPermissionsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     connectionId: z.string(),

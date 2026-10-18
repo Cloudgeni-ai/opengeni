@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import {
   organizationLandingWorkspaceId,
   organizationsForSubject,
@@ -92,6 +93,7 @@ function unauthorized(caught: unknown): boolean {
 const ORG_WORKSPACE_KEY = "opengeni:native:org-workspaces:";
 
 export function AccountProvider({ children }: { children: ReactNode }) {
+  const t = useOpenGeniText();
   const [snapshot, setSnapshot] = useState<AccountsSnapshot | null>(null);
   const [token, setToken] = useState<{ id: string; value: string | null } | null>(null);
   const snapshotRef = useRef<AccountsSnapshot | null>(null);
@@ -315,8 +317,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   );
 
   const organizations = useMemo(
-    () => (accessContext ? organizationsForSubject(accessContext, workspaces) : []),
-    [accessContext, workspaces],
+    () => (accessContext ? organizationsForSubject(t, accessContext, workspaces) : []),
+    [t, accessContext, workspaces],
   );
   const workspace = workspaces.find((each) => each.id === workspaceId) ?? null;
   const tokenLoaded = token?.id === accountId;

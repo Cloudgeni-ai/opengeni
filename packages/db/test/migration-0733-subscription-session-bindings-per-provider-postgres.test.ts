@@ -20,6 +20,7 @@ import {
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
+  BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
   createDb,
   createSession,
   ensureManagedAccessForUser,
@@ -32,6 +33,7 @@ import {
   RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
   SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   SESSION_USAGE_LIMIT_RUNTIME_ROUTINES,
+  SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
 } from "../src";
 import { rawRows, withRlsContext, type Database } from "../src/database";
 import { migrate } from "../src/migrate";
@@ -46,6 +48,7 @@ import {
   withoutAbsentLaterPosture,
   withoutAbsentVaultPosture,
   stageConnectionAccountIntentColumns,
+  stageSiteSessionAudienceColumns,
 } from "./vault-policy-column-fixture";
 
 setDefaultTimeout(180_000);
@@ -246,9 +249,13 @@ beforeAll(async () => {
   database = await acquireOwnerMigratedTestDatabase("subscription-session-bindings-per-provider");
   if (!database) throw new Error("Real PostgreSQL is required");
   // A provisioned database before 0733: 0733 and every later migration are
-  // held back, and only 0733 is applied below.
+  // held back, and only 0733 is applied below. The additive 0834 activity
+  // writer is the exception: today's session adapter speaks its protocol.
   const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
-    .filter((file) => file.endsWith(".sql") && file >= MIGRATION)
+    .filter(
+      (file) =>
+        file.endsWith(".sql") && file >= MIGRATION && file !== "0834_session_activity_xid.sql",
+    )
     .sort();
   const staging = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -258,6 +265,7 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
+    await stageSiteSessionAudienceColumns(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -393,6 +401,14 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
     // routines. Current readiness must report exactly those missing routines
     // both before and after provisioning; no other posture failure is allowed.
     const SITE_DATA_TABLES = [
+      // 0796 and 0797 (billing operations and subscription plans).
+      "billing_subscription_operations",
+      // 0820 (retained browser downloads).
+      "browser_session_retained_downloads",
+      "organization_plans",
+      "plan_credit_periods",
+      // 0792 (schedule blocker reviews) is also a later runtime/protected table.
+      "scheduled_task_blocker_reviews",
       "site_abuse_reports",
       "site_auth_codes",
       "site_data_collections",
@@ -406,10 +422,16 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "site_hostname_holds",
       "site_hostnames",
       "site_limit_profiles",
+      "site_platform_brake",
+      "site_platform_storage",
+      "site_platform_totals",
+      "site_platform_usage",
       "site_publications",
       "site_runtime_conversations",
       "site_runtime_rate_windows",
       "site_runtime_usage",
+      // 0842 adds private Site/chat grants to both posture inventories.
+      "site_session_access",
       "site_sql_databases",
       "site_sql_migrations",
       "site_sql_queries",
@@ -417,6 +439,13 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "site_sql_usage",
       "site_viewer_sessions",
     ];
+    // 0823 (personal machine consent) adds protected tables the runtime role
+    // never reads directly; insert them in the sorted protected list.
+    const PROTECTED_TABLES = [
+      ...SITE_DATA_TABLES,
+      "session_attempt_machine_consents",
+      "session_turn_machine_consents",
+    ].sort();
     const missing0735Routines = [
       "subscription M3 precursor private routine read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid) is missing or unsafe",
       "subscription M3 precursor private routine begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid) is missing or unsafe",
@@ -428,23 +457,47 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
       "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
       "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
+      // Nor subscription plans and billing operations (0796-0798).
+      "subscription plan maintenance inventory is missing",
+      "subscription plan Free anniversary helper is missing",
       "subscription M3 precursor private routine subscription_core_personal_sharing(text, uuid, text, uuid, integer) is missing or unsafe",
       ...missing0735Routines,
       // Nor Site Data (0776), published Sites (0782) or Site SQL (0783), whose
       // tables the runtime and protected contracts list.
       `runtime privilege tables are missing: ${SITE_DATA_TABLES.join(", ")}`,
-      `protected tables are missing: ${SITE_DATA_TABLES.join(", ")}`,
+      `protected tables are missing: ${PROTECTED_TABLES.join(", ")}`,
+      // Nor the personal machine consent helpers (0823).
+      "owner-internal target-schema helper live_session_turn_machine_consent(uuid) is missing or ambiguous",
+      "owner-internal target-schema helper bind_session_attempt_machine_consent(uuid, uuid, uuid) is missing or ambiguous",
+      "owner-internal target-schema helper assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean) is missing or ambiguous",
       // Nor per-task usage limits (0773).
       ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES.map(
         (routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`,
       ),
+      "owner-internal target-schema helper set_subscription_plan_catalog(jsonb, text, text) is missing or ambiguous",
+      ...[...BILLING_SUBSCRIPTION_OPERATION_ROUTINES, ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES].map(
+        (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
+      ),
       ...SESSION_USAGE_LIMIT_RUNTIME_ROUTINES.map(
         (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
       ),
+      // Nor the chat-visible machine access explanation (0841).
+      "target-schema runtime capability get_session_machine_access(uuid, uuid, uuid) is missing or ambiguous",
+      // Nor personal machine consent (0823) or the private-actor visibility
+      // helper the inlined session visibility probe calls (0805).
+      "target-schema runtime capability consent_session_turn_personal_machine(uuid, uuid, uuid, uuid) is missing or ambiguous",
+      "target-schema runtime capability get_session_attempt_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, boolean, boolean) is missing or ambiguous",
+      "target-schema runtime capability session_private_actor_visible_keys() is missing or ambiguous",
+      "runtime role cannot read the subscription plan catalog",
       ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
         (table) => `session usage limit private table ${table} is missing or unsafe`,
       ),
       "session usage limit capability has unsafe owner or direct runtime privileges",
+      // Nor the later Site lifecycle cancellation capability (0795).
+      "Site cancellation capability ledger is missing or unsafe",
+      "Site cancellation policy predicate is missing or unsafe",
+      "Site cancellation routine begin_site_session_cancellation(uuid, uuid, uuid, uuid) is missing or unsafe",
+      "Site cancellation routine end_site_session_cancellation(uuid) is missing or unsafe",
     ];
     expect(posture).toEqual({ unprovisioned: expected, provisioned: expected });
   });

@@ -20,6 +20,7 @@ import {
   UNRECOVERABLE_TEXT,
   type ToolReviewDetailsLoader,
 } from "./tool-action-review";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type ApprovalSurfaceMessages = {
   title: string;
@@ -32,20 +33,20 @@ export type ApprovalSurfaceMessages = {
   showDetails?: string | undefined;
   hideDetails?: string | undefined;
 };
-export const defaultApprovalSurfaceMessages: ApprovalSurfaceMessages = {
-  title: "Approval needed",
-  description: "Review the action before it runs.",
-  approve: "Approve action",
-  reject: "Decline",
-  approving: "Approving…",
-  rejecting: "Declining…",
+export const defaultApprovalSurfaceMessages = (t: OpenGeniText): ApprovalSurfaceMessages => ({
+  title: t("approvalSurface.approvalNeeded"),
+  description: t("approvalSurface.reviewTheActionBeforeIt"),
+  approve: t("approvalSurface.approveAction"),
+  reject: t("approvalSurface.decline"),
+  approving: t("approvalSurface.approving"),
+  rejecting: t("approvalSurface.declining"),
   formatToolName: (name) =>
     name.includes("__") || /^[a-f0-9]{64}$/.test(name)
-      ? toolDisplayName(name)
+      ? toolDisplayName(t, name)
       : humanToolName(name.replaceAll("_", " ").replaceAll(".", " › ")),
-  showDetails: "View full details",
-  hideDetails: "Back to review",
-};
+  showDetails: t("approvalSurface.viewFullDetails"),
+  hideDetails: t("approvalSurface.backToReview"),
+});
 /** "batch modify messages" → "Modify messages": how a call is grouped is not what it does. */
 function humanToolName(name: string): string {
   const phrase = name.replace(/^batch\s+/i, "").trim();
@@ -96,7 +97,8 @@ export function ApprovalSurface({
   onSelectedApprovalChange,
   className,
 }: ApprovalSurfaceProps) {
-  const messages = { ...defaultApprovalSurfaceMessages, ...overrides };
+  const t = useOpenGeniText();
+  const messages = { ...defaultApprovalSurfaceMessages(t), ...overrides };
   const formatError = useErrorMessage();
   const [pending, setPending] = useState<{
     id: string;
@@ -153,16 +155,16 @@ export function ApprovalSurface({
     >
       {approvals.length > 1 && (
         <nav
-          aria-label="Actions to review"
+          aria-label={t("approvalSurface.actionsToReview")}
           className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-og-xs text-og-fg-muted"
         >
           <span className="font-medium text-og-status-waiting">
-            {approvals.length} actions are waiting for you
+            {t("approvalSurface.lengthActionsAreWaitingFor", { length: approvals.length })}
           </span>
           <div className="flex items-center gap-1">
             <button
               type="button"
-              aria-label="Previous action"
+              aria-label={t("approvalSurface.previousAction")}
               disabled={selectedIndex === 0}
               onClick={() => setSelectedId(approvals[selectedIndex - 1]!.id)}
               className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-og-md hover:bg-og-hover hover:text-og-fg disabled:opacity-40 disabled:hover:bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
@@ -170,11 +172,11 @@ export function ApprovalSurface({
               <ChevronLeftIcon className="size-4" aria-hidden="true" />
             </button>
             <span className="tabular-nums" aria-live="polite">
-              {selectedIndex + 1} of {approvals.length}
+              {selectedIndex + 1} {t("approvalSurface.ofLength", { length: approvals.length })}
             </span>
             <button
               type="button"
-              aria-label="Next action"
+              aria-label={t("approvalSurface.nextAction")}
               disabled={selectedIndex === approvals.length - 1}
               onClick={() => setSelectedId(approvals[selectedIndex + 1]!.id)}
               className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-og-md hover:bg-og-hover hover:text-og-fg disabled:opacity-40 disabled:hover:bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
@@ -230,6 +232,7 @@ function ApprovalRequest({
   onApprove: () => void;
   onReject: () => void;
 }) {
+  const t = useOpenGeniText();
   const [retry, setRetry] = useState(0);
   // Event projection recreates the same approval on unrelated timeline updates.
   // Keep one request for equal facts, but never reuse it across changed facts,
@@ -336,7 +339,7 @@ function ApprovalRequest({
         data-og-tool-review-loading=""
       >
         <div role="status" className="space-y-2">
-          <span className="sr-only">Loading action details…</span>
+          <span className="sr-only">{t("approvalSurface.loadingActionDetails")}</span>
           <div className="h-3 w-3/4 animate-pulse rounded-og-sm bg-og-fg/8" aria-hidden="true" />
           <div className="h-3 w-1/2 animate-pulse rounded-og-sm bg-og-fg/8" aria-hidden="true" />
         </div>
@@ -352,8 +355,7 @@ function ApprovalRequest({
         subtitle={fallback.accountLabel}
       >
         <p role="alert" className="m-0 text-og-sm text-og-fg">
-          You don't have access to review this action. Ask someone with access to this chat to
-          decide.
+          {t("approvalSurface.youDonTHaveAccess")}
         </p>
       </ToolReviewFrame>
     );
@@ -377,13 +379,13 @@ function ApprovalRequest({
         }
       >
         <p role="alert" className="m-0 text-og-sm text-og-fg">
-          Couldn't load this action, so it can't be approved yet. You can still decline it.{" "}
+          {t("approvalSurface.couldnTLoadThisAction")}{" "}
           <button
             type="button"
             className="min-h-8 font-medium underline underline-offset-4 [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
             onClick={() => setRetry((value) => value + 1)}
           >
-            Try again
+            {t("approvalSurface.tryAgain")}
           </button>
         </p>
       </ToolReviewFrame>
@@ -410,7 +412,7 @@ function ApprovalRequest({
             </div>
           }
         >
-          <p className="m-0 text-og-sm text-og-fg">{UNRECOVERABLE_TEXT}</p>
+          <p className="m-0 text-og-sm text-og-fg">{UNRECOVERABLE_TEXT(t)}</p>
         </ToolReviewFrame>
       </div>
     );

@@ -57,6 +57,8 @@ import {
   type HostSurfacePreference,
   type HostThemePreference,
 } from "../lib/host-theme";
+import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { ThisComputerCard, type ThisComputerCardProps } from "./this-computer/this-computer-card";
 
 export type SessionConversationLabels = {
   /** Banner action after a refresh failure; the conversation stays mounted. */
@@ -67,15 +69,17 @@ export type SessionConversationLabels = {
   sitePreviewUnavailable: string;
 };
 
-const DEFAULT_CONVERSATION_LABELS: SessionConversationLabels = {
-  retry: "Retry",
-  tryAgain: "Try again",
-  sitePreviewUnavailable: "Site preview unavailable",
-};
+const DEFAULT_CONVERSATION_LABELS = (t: OpenGeniText): SessionConversationLabels => ({
+  retry: t("sessionConversation.retry"),
+  tryAgain: t("sessionConversation.tryAgain"),
+  sitePreviewUnavailable: t("sessionConversation.sitePreviewUnavailable"),
+});
 
 export type SessionConversationProps = ClientOverride &
   SessionProxyBaseUrl & {
     sessionId: string;
+    /** Product-owned desktop connection flow for computer offers. No console URLs or shell commands are assumed. */
+    computerConnection?: Omit<ThisComputerCardProps, "rationale">;
     /** Host-owned artifact links, previews and other message presentation. */
     renderMessageText?: MessageTimelineProps["renderMessageText"];
     /**
@@ -297,6 +301,7 @@ function ConversationView({
   renderInteractiveBlock,
   toolRegistry,
   timelineProps,
+  computerConnection,
   renderAllowanceExhausted,
   allowanceExhaustedLabels,
   voiceInput: voiceInputRequested = true,
@@ -317,6 +322,7 @@ function ConversationView({
   approvalProps,
   onRetry,
 }: SessionConversationViewProps & { onRetry: () => void }) {
+  const t = useOpenGeniText();
   const {
     sessionId,
     config,
@@ -347,7 +353,7 @@ function ConversationView({
     context.workspaceId,
     sessionId,
     config.artifacts,
-    labelOverrides?.sitePreviewUnavailable ?? DEFAULT_CONVERSATION_LABELS.sitePreviewUnavailable,
+    labelOverrides?.sitePreviewUnavailable ?? DEFAULT_CONVERSATION_LABELS(t).sitePreviewUnavailable,
   );
   const retainedLoaders = useRetainedLoaders(context.client, context.workspaceId, sessionId);
   const transcription = useComposerTranscription(
@@ -358,13 +364,13 @@ function ConversationView({
   const inheritedLinks = useOpenGeniLinkResolver();
   const defaultLinks = useMemo(
     () =>
-      sessionLinkResolver({
+      sessionLinkResolver(t, {
         client: context.client,
         workspaceId: context.workspaceId,
         sessionId,
         sandboxFiles: config.sandboxFiles,
       }),
-    [context.client, context.workspaceId, sessionId, config.sandboxFiles],
+    [context.client, context.workspaceId, sessionId, config.sandboxFiles, t],
   );
   const onOpenArtifactRef = useRef(onOpenArtifact);
   onOpenArtifactRef.current = onOpenArtifact;
@@ -383,10 +389,10 @@ function ConversationView({
     () => chainLinkResolvers(resolveLink, viewerLinks, inheritedLinks, defaultLinks) ?? undefined,
     [resolveLink, viewerLinks, inheritedLinks, defaultLinks],
   );
-  const labels = { ...DEFAULT_CONVERSATION_LABELS, ...labelOverrides };
+  const labels = { ...DEFAULT_CONVERSATION_LABELS(t), ...labelOverrides };
   const retryInPlace = () => void conversation.retry();
   const realtimeVoiceRequested = realtimeVoiceProp ?? config.realtimeVoiceOffered;
-  const loadingOptions = useMemo(() => embeddedGenieLoading(genieLoading), [genieLoading]);
+  const loadingOptions = useMemo(() => embeddedGenieLoading(t, genieLoading), [genieLoading, t]);
   const providerRecovery = useMemo(
     () =>
       detail.session
@@ -440,232 +446,248 @@ function ConversationView({
       </Suspense>
     ) : null;
   return (
-    <div
-      className={cn(
-        "og-root flex min-h-0 min-w-0 flex-col gap-2 overflow-hidden bg-og-bg text-og-base text-og-fg",
-        className,
-      )}
-      ref={region}
-      style={{ ...hostTheme.style, height }}
-      data-og-theme={hostTheme.attribute}
-      data-og-host-theme=""
-      data-og-conversation=""
-    >
-      {error && !loadFailed ? (
-        <div
-          role="alert"
-          className="mx-auto flex w-full max-w-3xl shrink-0 items-center gap-3 rounded-og-md border border-og-status-failed/30 bg-og-status-failed/10 px-3 py-2 text-og-sm text-og-fg"
-          data-og-conversation-error=""
-        >
-          <span className="min-w-0 flex-1">{formatError(error)}</span>
-          <button
-            type="button"
-            onClick={retryInPlace}
-            className="shrink-0 rounded-og-sm px-2 py-1 font-medium text-og-fg hover:bg-og-hover"
-          >
-            {labels.retry}
-          </button>
-        </div>
-      ) : null}
-      {loadFailed ? (
-        <div
-          role="alert"
-          className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
-          data-og-conversation-error=""
-        >
-          <p className="max-w-sm text-og-base text-og-fg-muted">{formatError(feed.error)}</p>
-          <button
-            type="button"
-            onClick={onRetry}
-            className="inline-flex min-h-9 items-center rounded-og-md border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm font-medium text-og-fg hover:bg-og-surface-2"
-          >
-            {labels.tryAgain}
-          </button>
-        </div>
-      ) : (
-        <MessageTimeline
-          renderMessageText={renderMessageText}
-          resolveLink={links}
-          renderInteractiveBlock={
-            renderInteractiveBlock === false
-              ? undefined
-              : (renderInteractiveBlock ?? defaultInteractiveBlock)
-          }
-          userMessageDisclosureLabels={userMessageDisclosureLabels}
-          genieLoading={loadingOptions}
-          renderAllowanceExhausted={renderAllowanceExhausted}
-          allowanceExhaustedLabels={allowanceExhaustedLabels}
-          // Isolated and clipped: floating navigation stays inside the timeline.
-          className="isolate min-h-0 flex-1 overflow-hidden"
-          {...(toolRegistry ? { toolRegistry } : {})}
-          {...retainedLoaders}
-          {...(onOpenSession ? { onOpenSession } : {})}
-          {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
-          events={feed.events}
-          items={conversation.timeline}
-          turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
-          renderAuthNeeded={timelineProps?.renderAuthNeeded}
-          emptyState={timelineProps?.emptyState}
-          renderMessageSender={timelineProps?.renderMessageSender}
-          status={status}
-          hasOlder={feed.hasOlder}
-          loadingOlder={feed.loadingOlder}
-          onLoadOlder={feed.loadOlder}
-          hasNewer={feed.hasNewer}
-          loadingNewer={feed.loadingNewer}
-          onLoadNewer={feed.loadNewer}
-          onJumpToStart={async () => {
-            await feed.loadOldest();
-          }}
-          loadingOldest={feed.loadingOldest}
-          onJumpToLatest={feed.jumpToLatest}
-          onAnnotate={importedArchive ? undefined : composer.addAnnotation}
-          // A narrow embed above a decision card has no room for the pill.
-          questionNavMinViewportHeight={320}
-        />
-      )}
-      {importedArchive ? (
-        <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
-          Archived conversation · Read only
-        </p>
-      ) : (
-        <>
+    <SingleSendWording enabled={composer.singleSend === true}>
+      <div
+        className={cn(
+          "og-root flex min-h-0 min-w-0 flex-col gap-2 overflow-hidden bg-og-bg text-og-base text-og-fg",
+          className,
+        )}
+        ref={region}
+        style={{ ...hostTheme.style, height }}
+        data-og-theme={hostTheme.attribute}
+        data-og-host-theme=""
+        data-og-conversation=""
+      >
+        {error && !loadFailed ? (
           <div
-            // Above the timeline's floating navigation, which may never paint
-            // over a decision card.
-            className="relative z-20 min-h-0 max-h-[40%] shrink-0 overflow-y-auto empty:hidden"
-            data-og-conversation-inputs=""
+            role="alert"
+            className="mx-auto flex w-full max-w-3xl shrink-0 items-center gap-3 rounded-og-md border border-og-status-failed/30 bg-og-status-failed/10 px-3 py-2 text-og-sm text-og-fg"
+            data-og-conversation-error=""
           >
-            {approvals.length > 0 && !terminal ? (
-              <ApprovalSurface
-                className="mx-auto max-w-3xl"
-                {...approvalProps}
-                approvals={approvals}
-                onApprove={async (approval) => {
-                  await control.approve(approval.id);
-                }}
-                onReject={async (approval) => {
-                  await control.reject(approval.id);
-                }}
-                responding={control.responding}
-                error={control.error}
+            <span className="min-w-0 flex-1">{formatError(error)}</span>
+            <button
+              type="button"
+              onClick={retryInPlace}
+              className="shrink-0 rounded-og-sm px-2 py-1 font-medium text-og-fg hover:bg-og-hover"
+            >
+              {labels.retry}
+            </button>
+          </div>
+        ) : null}
+        {loadFailed ? (
+          <div
+            role="alert"
+            className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+            data-og-conversation-error=""
+          >
+            <p className="max-w-sm text-og-base text-og-fg-muted">{formatError(feed.error)}</p>
+            <button
+              type="button"
+              onClick={onRetry}
+              className="inline-flex min-h-9 items-center rounded-og-md border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm font-medium text-og-fg hover:bg-og-surface-2"
+            >
+              {labels.tryAgain}
+            </button>
+          </div>
+        ) : (
+          <MessageTimeline
+            renderMessageText={renderMessageText}
+            resolveLink={links}
+            renderInteractiveBlock={
+              renderInteractiveBlock === false
+                ? undefined
+                : (renderInteractiveBlock ?? defaultInteractiveBlock)
+            }
+            userMessageDisclosureLabels={userMessageDisclosureLabels}
+            genieLoading={loadingOptions}
+            renderAllowanceExhausted={renderAllowanceExhausted}
+            allowanceExhaustedLabels={allowanceExhaustedLabels}
+            // Isolated and clipped: floating navigation stays inside the timeline.
+            className="isolate min-h-0 flex-1 overflow-hidden"
+            {...(toolRegistry ? { toolRegistry } : {})}
+            {...retainedLoaders}
+            {...(onOpenSession ? { onOpenSession } : {})}
+            {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
+            events={feed.events}
+            items={conversation.timeline}
+            turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
+            renderAuthNeeded={(item) =>
+              timelineProps?.renderAuthNeeded?.(item) ??
+              (item.capability?.id === "api:connected-machine" && computerConnection ? (
+                <ThisComputerCard {...computerConnection} rationale={item.capability.rationale} />
+              ) : undefined)
+            }
+            emptyState={timelineProps?.emptyState}
+            renderMessageSender={timelineProps?.renderMessageSender}
+            status={status}
+            hasOlder={feed.hasOlder}
+            loadingOlder={feed.loadingOlder}
+            onLoadOlder={feed.loadOlder}
+            hasNewer={feed.hasNewer}
+            loadingNewer={feed.loadingNewer}
+            onLoadNewer={feed.loadNewer}
+            onJumpToStart={async () => {
+              await feed.loadOldest();
+            }}
+            loadingOldest={feed.loadingOldest}
+            onJumpToLatest={feed.jumpToLatest}
+            onAnnotate={importedArchive ? undefined : composer.addAnnotation}
+            // A narrow embed above a decision card has no room for the pill.
+            questionNavMinViewportHeight={320}
+          />
+        )}
+        {importedArchive ? (
+          <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
+            {t("sessionConversation.archivedConversationReadOnly")}
+          </p>
+        ) : (
+          <>
+            <div
+              // Above the timeline's floating navigation, which may never paint
+              // over a decision card.
+              className="relative z-20 min-h-0 max-h-[40%] shrink-0 overflow-y-auto empty:hidden"
+              data-og-conversation-inputs=""
+            >
+              {approvals.length > 0 && !terminal ? (
+                <ApprovalSurface
+                  className="mx-auto max-w-3xl"
+                  {...approvalProps}
+                  approvals={approvals}
+                  onApprove={async (approval) => {
+                    await control.approve(approval.id);
+                  }}
+                  onReject={async (approval) => {
+                    await control.reject(approval.id);
+                  }}
+                  responding={control.responding}
+                  error={control.error}
+                />
+              ) : null}
+              <ProviderRecoveryNotice
+                className="mx-auto max-w-3xl px-1"
+                recovery={providerRecovery}
               />
-            ) : null}
-            <ProviderRecoveryNotice
-              className="mx-auto max-w-3xl px-1"
-              recovery={providerRecovery}
-            />
-            <HumanInputSurface
-              className="mx-auto max-w-3xl"
-              autoFocus={false}
-              decisionButtons
-              {...humanInputProps}
-              loadSkillReview={loadSkillReview}
-              requests={human.requests}
-              onSubmit={async (id, response) => {
-                // `respond` reports a failed send as null. Reject so the card
-                // keeps what was typed (including a secret) for a retry.
-                if (!(await human.respond(id, response))) {
-                  throw new Error("Your answer wasn't sent. Try again.");
+              <HumanInputSurface
+                className="mx-auto max-w-3xl"
+                autoFocus={false}
+                decisionButtons
+                {...humanInputProps}
+                loadSkillReview={loadSkillReview}
+                requests={human.requests}
+                onSubmit={async (id, response) => {
+                  // `respond` reports a failed send as null. Reject so the card
+                  // keeps what was typed (including a secret) for a retry.
+                  if (!(await human.respond(id, response))) {
+                    throw new Error(t("sessionConversation.yourAnswerWasnTSent"));
+                  }
+                }}
+                respondingRequestId={human.respondingRequestId}
+                error={human.mutationError ? formatError(human.mutationError) : null}
+              />
+              <ConversationChrome
+                sessionId={sessionId}
+                client={context.client}
+                workspaceId={context.workspaceId}
+                events={feed.events}
+                chrome={
+                  terminal
+                    ? {
+                        ...chromeProps,
+                        queue,
+                        sessionStatus: status,
+                        readOnly: true,
+                        onOpenSession,
+                      }
+                    : {
+                        ...chromeProps,
+                        queue,
+                        composer,
+                        sessionStatus: status,
+                        onOpenSession,
+                        onComposerFocus: () =>
+                          region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus(),
+                      }
                 }
-              }}
-              respondingRequestId={human.respondingRequestId}
-              error={human.mutationError ? formatError(human.mutationError) : null}
-            />
-            <ConversationChrome
-              sessionId={sessionId}
-              client={context.client}
-              workspaceId={context.workspaceId}
-              events={feed.events}
-              chrome={
-                terminal
-                  ? { ...chromeProps, queue, sessionStatus: status, readOnly: true, onOpenSession }
-                  : {
-                      ...chromeProps,
-                      queue,
-                      composer,
-                      sessionStatus: status,
-                      onOpenSession,
-                      onComposerFocus: () =>
-                        region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus(),
-                    }
-              }
-            />
-          </div>
-          <div
-            className="relative z-20 mx-auto w-full max-w-3xl shrink-0"
-            data-og-conversation-composer=""
-          >
-            <ChatComposer
-              runControl="stop"
-              running={running}
-              {...composerProps}
-              {...(transcription && composerProps?.transcription === undefined
-                ? { transcription }
-                : {})}
-              actionsStart={
-                voice ? (
-                  <>
-                    {composerProps?.actionsStart}
-                    {voice}
-                  </>
-                ) : (
-                  composerProps?.actionsStart
-                )
-              }
-              transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
-              composer={composer}
-              attachments={uploadsEnabled ? files : undefined}
-              disabled={terminal || composerProps?.disabled}
-              controlsStart={
-                composerProps?.controlsStart ??
-                (showModelPicker && composer.policy && (
-                  <ModelPolicyPicker
-                    groupPresentation={modelPickerProps?.groupPresentation}
-                    messages={modelPickerProps?.messages}
-                    rows={catalog.rows}
-                    model={composer.policy.model}
-                    effort={composer.policy.reasoningEffort}
-                    latencyMode={composer.policy.latencyMode}
-                    loading={catalog.loading}
-                    error={catalog.error?.message}
-                    disabled={terminal}
-                    // A session frozen on Codex remote compaction refuses
-                    // other providers' models; offer them only as disabled.
-                    codexOnly={detail.session?.codexCompactionMode === "remote_v2"}
-                    sessionKey={sessionId}
-                    onOpenChange={(open) => {
-                      if (open) void catalog.refresh();
-                    }}
-                    onModelChange={(model) => composer.setModel?.(model)}
-                    onEffortChange={(effort) => composer.setReasoningEffort?.(effort)}
-                    onLatencyModeChange={(mode) => composer.setLatencyMode?.(mode)}
-                  />
-                ))
-              }
-              responsiveBasis={composerProps?.responsiveBasis ?? "container"}
-              effectiveControl={
-                composer.effectiveControl ??
-                queue.effectiveControl ??
-                detail.session?.effectiveControl
-              }
-              queuedAheadCount={queue.queue.length}
-            />
-          </div>
-        </>
-      )}
-    </div>
+              />
+            </div>
+            <div
+              className="relative z-20 mx-auto w-full max-w-3xl shrink-0"
+              data-og-conversation-composer=""
+            >
+              <ChatComposer
+                runControl="stop"
+                running={running}
+                {...composerProps}
+                {...(transcription && composerProps?.transcription === undefined
+                  ? { transcription }
+                  : {})}
+                actionsStart={
+                  voice ? (
+                    <>
+                      {composerProps?.actionsStart}
+                      {voice}
+                    </>
+                  ) : (
+                    composerProps?.actionsStart
+                  )
+                }
+                transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
+                composer={composer}
+                attachments={uploadsEnabled ? files : undefined}
+                disabled={terminal || composerProps?.disabled}
+                controlsStart={
+                  composerProps?.controlsStart ??
+                  (showModelPicker && composer.policy && (
+                    <ModelPolicyPicker
+                      groupPresentation={modelPickerProps?.groupPresentation}
+                      messages={modelPickerProps?.messages}
+                      rows={catalog.rows}
+                      model={composer.policy.model}
+                      effort={composer.policy.reasoningEffort}
+                      latencyMode={composer.policy.latencyMode}
+                      loading={catalog.loading}
+                      error={catalog.error?.message}
+                      disabled={terminal}
+                      // A session frozen on Codex remote compaction refuses
+                      // other providers' models; offer them only as disabled.
+                      codexOnly={detail.session?.codexCompactionMode === "remote_v2"}
+                      sessionKey={sessionId}
+                      onOpenChange={(open) => {
+                        if (open) void catalog.refresh();
+                      }}
+                      onModelChange={(model) => composer.setModel?.(model)}
+                      onEffortChange={(effort) => composer.setReasoningEffort?.(effort)}
+                      onLatencyModeChange={(mode) => composer.setLatencyMode?.(mode)}
+                    />
+                  ))
+                }
+                responsiveBasis={composerProps?.responsiveBasis ?? "container"}
+                effectiveControl={
+                  composer.effectiveControl ??
+                  queue.effectiveControl ??
+                  detail.session?.effectiveControl
+                }
+                queuedAheadCount={queue.queue.length}
+              />
+            </div>
+          </>
+        )}
+      </div>
+    </SingleSendWording>
   );
 }
 
 /** Neutral embedded defaults under the host's overrides; an empty phrase list keeps them. */
-function embeddedGenieLoading(options: GenieLoadingOptions | undefined): GenieLoadingOptions {
-  if (!options) return EMBEDDED_GENIE_LOADING;
+function embeddedGenieLoading(
+  t: OpenGeniText,
+  options: GenieLoadingOptions | undefined,
+): GenieLoadingOptions {
+  if (!options) return EMBEDDED_GENIE_LOADING(t);
   return {
-    ...EMBEDDED_GENIE_LOADING,
+    ...EMBEDDED_GENIE_LOADING(t),
     ...options,
-    phrases: options.phrases?.length ? options.phrases : EMBEDDED_GENIE_LOADING.phrases,
-    messages: { ...EMBEDDED_GENIE_LOADING.messages, ...options.messages },
+    phrases: options.phrases?.length ? options.phrases : EMBEDDED_GENIE_LOADING(t).phrases,
+    messages: { ...EMBEDDED_GENIE_LOADING(t).messages, ...options.messages },
   };
 }
 
@@ -719,6 +741,7 @@ function useDefaultInteractiveBlock(
   sitesAvailable: boolean,
   sitePreviewUnavailable: string,
 ): NonNullable<MessageTimelineProps["renderInteractiveBlock"]> {
+  const t = useOpenGeniText();
   // Scope lazily: only a rendered preview reads, and some clients (a Site's
   // own client) cannot add headers.
   const scoped = useMemo((): SiteSnapshotClient => {
@@ -746,11 +769,11 @@ function useDefaultInteractiveBlock(
           {sitePreviewUnavailable}
         </div>
       ) : (
-        <Suspense fallback={<span role="status">Loading preview…</span>}>
+        <Suspense fallback={<span role="status">{t("sessionConversation.loadingPreview")}</span>}>
           <LazyChatInteractiveBlock workspaceId={workspaceId} client={scoped} {...block} />
         </Suspense>
       ),
-    [scoped, workspaceId, sitesAvailable, sitePreviewUnavailable],
+    [scoped, workspaceId, sitesAvailable, sitePreviewUnavailable, t],
   );
 }
 

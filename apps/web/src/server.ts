@@ -5,6 +5,7 @@ import { SETUP_ACCOUNT_PATH, SETUP_ACCOUNT_RESPONSE_HEADERS } from "./setup-acco
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_HOST = "0.0.0.0";
+const SHUTDOWN_GRACE_MS = 10_000;
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATE_CACHE_CONTROL = "no-cache";
 const SHORT_CACHE_CONTROL = "public, max-age=3600";
@@ -399,7 +400,7 @@ function acceptsEncoding(header: string | null, encoding: string): boolean {
 if (import.meta.main) {
   const port = Number(process.env.PORT ?? DEFAULT_PORT);
   const hostname = process.env.HOST ?? DEFAULT_HOST;
-  Bun.serve({
+  const server = Bun.serve({
     hostname,
     port,
     fetch: createWebHandler(undefined, {
@@ -407,5 +408,13 @@ if (import.meta.main) {
       publicOrigin: publicWebOriginFromEnvironment(),
     }),
   });
+  // As a container's PID 1 the process gets no default SIGTERM action, so stop
+  // explicitly: finish in-flight requests, bounded well inside the pod's grace.
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.once(signal, () => {
+      setTimeout(() => process.exit(0), SHUTDOWN_GRACE_MS).unref();
+      void server.stop().finally(() => process.exit(0));
+    });
+  }
   console.log(`Opengeni web listening on http://${hostname}:${port}`);
 }

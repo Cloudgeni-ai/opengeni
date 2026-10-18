@@ -1,7 +1,7 @@
 import {
   vaultErrorCode,
   vaultErrorDetail,
-  type OnePasswordConnectionSummary,
+  type OnePasswordPlanTier,
   type VaultErrorCode,
   type VaultItemSummary,
   type VaultItemType,
@@ -51,9 +51,9 @@ export function groupVaults(
     .filter((group) => group.vaults.length > 0);
 }
 
-/* ------------------------------------------------------------- 1Password */
+/* ------------------------------------------------------------- connections */
 
-export type ConnectionOwner = OnePasswordConnectionSummary["ownership"];
+export type ConnectionOwner = "user" | "workspace" | "organization";
 
 /** "Only me", "This workspace" or "Organization", as on vaults. */
 export function connectionOwnerLabel(owner: ConnectionOwner): string {
@@ -69,32 +69,14 @@ export function connectionAudience(owner: ConnectionOwner, organizationName: str
       : `Workspaces in ${organizationName} can use its vaults.`;
 }
 
-/** A connection's name: its label, else its 1Password sign-in host. */
-export function connectionName(connection: OnePasswordConnectionSummary): string {
-  return connection.label?.trim() || connection.accountName || "1Password";
-}
-
+/** The vaults linked through one connection, by name. */
 export function vaultsOfConnection(vaults: VaultSummary[], connectionId: string): VaultSummary[] {
   return vaults
-    .filter(
-      (vault) => vault.source === "onepassword" && vault.providerConnectionId === connectionId,
-    )
+    .filter((vault) => vault.source !== "opengeni" && vault.providerConnectionId === connectionId)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/**
- * What a connection needs, judged from the vaults linked through it: a new
- * token beats a failed sync. Null while everything is fine.
- */
-export function connectionAttention(
-  vaults: VaultSummary[],
-): "token_expired" | "sync_failed" | null {
-  if (vaults.some((vault) => vault.syncStatus === "auth_expired")) return "token_expired";
-  if (vaults.some((vault) => vault.syncStatus === "error")) return "sync_failed";
-  return null;
-}
-
-export const PLAN_LABEL: Record<OnePasswordConnectionSummary["planTier"], string> = {
+export const PLAN_LABEL: Record<OnePasswordPlanTier, string> = {
   family: "Individual or Family",
   teams: "Teams",
   business: "Business",
@@ -110,7 +92,11 @@ export const OWNER_LABEL: Record<VaultSummary["ownerKind"], string> = {
 export const SOURCE_LABEL: Record<VaultSummary["source"], string> = {
   opengeni: "Opengeni",
   onepassword: "1Password",
-  host: "Host",
+  host: "Your app",
+  external: "Your vault service",
+  protonpass: "Proton Pass",
+  keeper: "Keeper",
+  bitwarden: "Bitwarden",
 };
 
 export const MODE_LABEL: Record<VaultSummary["mode"], string> = {
@@ -245,7 +231,6 @@ const ERROR_COPY: Partial<Record<VaultErrorCode, string>> = {
   vault_item_name_conflict:
     "An item with this name already exists in this vault. Choose another name.",
   vault_limit_reached: "You've reached the vault limit. Delete a vault you no longer need first.",
-  vault_read_only: "This vault is read-only. Change it in 1Password or link it as Read & write.",
   vault_generation_conflict:
     "This changed elsewhere since you opened it. Reload to get the latest version.",
   vault_permission_denied: "You don't have access to do this. Ask a workspace admin.",
@@ -254,13 +239,6 @@ const ERROR_COPY: Partial<Record<VaultErrorCode, string>> = {
     "The parent task doesn't allow these vaults. Pick from the vaults it allows.",
   encryption_key_missing:
     "Secrets can't be stored or read until the server's encryption key is set. Ask whoever runs this Opengeni server.",
-  provider_auth_invalid:
-    "1Password rejected this token. Check it's a service account token, then paste it again.",
-  provider_auth_expired:
-    "The 1Password token expired. Paste a new service account token to reconnect.",
-  provider_rate_limited: "1Password is limiting requests. Try again in a few minutes.",
-  provider_unavailable: "1Password didn't respond. Try again in a moment.",
-  provider_conflict: "This item changed in 1Password. Sync, then try again.",
   secret_save_forbidden: "You can't save secrets there. Choose another place.",
   invalid_secret_name: "Names can't contain /, {, }, # or \\, or start or end with a space.",
   secret_value_too_large:
@@ -268,27 +246,226 @@ const ERROR_COPY: Partial<Record<VaultErrorCode, string>> = {
   human_auth_required: "Sign in again to continue.",
 };
 
-/** What happened and what to do, never a raw code. */
-export function vaultErrorText(error: unknown, fallback?: string): string {
+/** 1Password's own words, kept from before other password managers. */
+const ONEPASSWORD_COPY: Partial<Record<VaultErrorCode, string>> = {
+  provider_auth_invalid:
+    "1Password rejected this token. Check it's a service account token, then paste it again.",
+  provider_auth_expired:
+    "The 1Password token expired. Paste a new service account token to reconnect.",
+};
+
+function capitalized(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/**
+ * Copy for the errors that come from a password manager. `home` names it
+ * ("Proton Pass"); without one the sentence says "the password manager".
+ */
+function providerCopy(code: VaultErrorCode, home: string | null): string | undefined {
+  if (home === "1Password" && ONEPASSWORD_COPY[code]) return ONEPASSWORD_COPY[code];
+  const where = home ?? "the password manager";
+  const Where = capitalized(where);
+  switch (code) {
+    case "vault_read_only":
+      return home
+        ? `This vault is read-only. Change it in ${where} or link it as Read & write.`
+        : "This vault is read-only. Link it as Read & write to save to it.";
+    case "provider_auth_invalid":
+      return `${Where} didn't accept the saved access. Reconnect it to keep using its vaults.`;
+    case "provider_auth_expired":
+      return `Access to ${where} expired. Reconnect it to keep using its vaults.`;
+    case "provider_rate_limited":
+      return `${Where} is limiting requests. Try again in a few minutes.`;
+    case "provider_unavailable":
+      return `${Where} didn't respond. Try again in a moment.`;
+    case "provider_conflict":
+      return `This item changed in ${where}. Sync, then try again.`;
+    case "provider_locked":
+      return home === "Bitwarden"
+        ? "Bitwarden is locked on the bridge. Unlock it there, then try again."
+        : `${Where} is locked. Unlock it, then try again.`;
+    case "provider_inventory_incomplete":
+      return `Not every item in ${where} could be listed. Try again in a moment.`;
+    case "provider_outcome_unknown":
+      return `${Where} didn't confirm the change. Check there before you try again, so nothing is saved twice.`;
+    default:
+      return undefined;
+  }
+}
+
+/** What happened and what to do, never a raw code. `home` names the password manager. */
+export function vaultErrorText(error: unknown, fallback?: string, home?: string | null): string {
   const code = vaultErrorCode(error);
+  const where = home ?? homeOfError(error);
   if (code === "provider_rate_limited") {
     const retryAt = vaultErrorDetail(error, "retryAt");
     const clock = typeof retryAt === "string" ? formatClock(retryAt) : null;
-    if (clock) return `1Password is limiting requests. Try again after ${clock}.`;
+    if (clock)
+      return `${capitalized(where ?? "the password manager")} is limiting requests. Try again after ${clock}.`;
   }
-  const copy = code ? ERROR_COPY[code] : undefined;
+  const copy = code ? (providerCopy(code, where) ?? ERROR_COPY[code]) : undefined;
   return copy ?? userErrorText(error, fallback);
 }
 
+// The password manager an error came from, remembered by vaultError so a caller
+// that unwraps `cause` and asks for the copy again still names it.
+const ERROR_HOMES = new WeakMap<object, string>();
+
+function homeOfError(error: unknown): string | null {
+  return typeof error === "object" && error !== null ? (ERROR_HOMES.get(error) ?? null) : null;
+}
+
 /** An Error carrying the user-facing copy, for FormPage and confirm throwers. */
-export function vaultError(error: unknown, fallback?: string): Error {
-  const wrapped = new Error(vaultErrorText(error, fallback));
+export function vaultError(error: unknown, fallback?: string, home?: string | null): Error {
+  if (home && typeof error === "object" && error !== null) ERROR_HOMES.set(error, home);
+  const wrapped = new Error(vaultErrorText(error, fallback, home));
   (wrapped as Error & { cause?: unknown }).cause = error;
+  if (home) ERROR_HOMES.set(wrapped, home);
   return wrapped;
 }
 
 export function isMissingKeyError(error: unknown): boolean {
   return vaultErrorCode(error) === "encryption_key_missing";
+}
+
+/* ------------------------------------------------- confirmed provider writes */
+
+/** A confirmed create awaiting inventory, not a failed or uncertain write. */
+export function savedCreation(
+  caught: unknown,
+  itemName: string,
+  vaultName: string,
+): { title: string; description: string } | null {
+  const error = (caught as { cause?: unknown } | null)?.cause ?? caught;
+  if (vaultErrorDetail(error, "saved") !== true) return null;
+  return {
+    title: `Saved ${itemName}`,
+    description: `It will appear in ${vaultName} after the next successful sync. Don't save it again.`,
+  };
+}
+
+export interface CreatedManagedVault {
+  name: string;
+  externalVaultId: string | null;
+  vaultId: string | null;
+  linked: boolean | null;
+  sharingUnconfirmed: boolean;
+  errorCode: VaultErrorCode | null;
+}
+
+/** Creation is confirmed independently of local linking, sharing and discovery. */
+export function createdManagedVault(caught: unknown, name: string): CreatedManagedVault | null {
+  const error = (caught as { cause?: unknown } | null)?.cause ?? caught;
+  if (vaultErrorDetail(error, "created") !== true) return null;
+  const linked = vaultErrorDetail(error, "linked");
+  return {
+    name,
+    externalVaultId: stringDetail(error, "externalVaultId"),
+    vaultId: stringDetail(error, "vaultId"),
+    linked: typeof linked === "boolean" ? linked : null,
+    sharingUnconfirmed: vaultErrorDetail(error, "groupGrantConfirmed") === false,
+    errorCode: vaultErrorCode(error),
+  };
+}
+
+export function managedVaultCreationText(created: CreatedManagedVault, home: string): string {
+  let next: string;
+  if (created.linked) {
+    next = created.sharingUnconfirmed
+      ? `It's linked, but group access wasn't confirmed. Check sharing in ${home}.`
+      : "It's linked. Open the vault and sync it to check its items.";
+  } else if (created.linked === null) {
+    next = "Its link wasn't confirmed. Check the list before linking this existing vault.";
+  } else {
+    switch (created.errorCode) {
+      case "vault_name_conflict":
+        next = `A vault with this name already exists here. Rename that vault or the one in ${home}, then link the existing vault.`;
+        break;
+      case "vault_permission_denied":
+        next =
+          "You don't have access to link it here. Ask a workspace admin to link the existing vault.";
+        break;
+      case "vault_limit_reached":
+        next = "The vault limit prevented linking. Free a place, then link the existing vault.";
+        break;
+      default:
+        next = "It isn't linked here. Choose its access, then link this existing vault.";
+    }
+  }
+  if (!created.linked && created.sharingUnconfirmed) next += ` Also check sharing in ${home}.`;
+  return `${next} Don't create it again.`;
+}
+
+/* ------------------------------------------------- a move that half finished */
+
+/** A move or copy that failed after its copy was saved: what to tell the person. */
+export interface SavedTransfer {
+  title: string;
+  description: string;
+  /** The saved copy, when the server could name it (it may not be listed yet). */
+  copy: { vaultId: string; itemId: string } | null;
+  /** The original was archived or trashed too, so its page is gone. */
+  originalRemoved: boolean;
+}
+
+function stringDetail(error: unknown, key: string): string | null {
+  const value = vaultErrorDetail(error, key);
+  return typeof value === "string" && value ? value : null;
+}
+
+/**
+ * A failed move or copy whose copy was saved anyway (`details.saved`), so it
+ * mustn't be offered again: a retry would save a second copy. Null for an
+ * ordinary failure, which stays retryable. The error's code says why the
+ * original was kept (a provider that didn't answer, a changed original, one
+ * no longer listed), so the copy here never reads the code alone.
+ */
+export function savedTransfer(
+  caught: unknown,
+  context: {
+    mode: "move" | "copy";
+    itemName: string;
+    targetName: string;
+    /** Where the original lives: "Proton Pass", or the vault's name in Opengeni. */
+    source: string;
+    removal: "archive" | "trash";
+  },
+): SavedTransfer | null {
+  const error = (caught as { cause?: unknown } | null)?.cause ?? caught;
+  if (vaultErrorDetail(error, "saved") !== true) return null;
+  const { mode, itemName, targetName, source, removal } = context;
+  const vaultId = stringDetail(error, "vaultId");
+  const itemId = stringDetail(error, "itemId");
+  const copy = vaultId && itemId ? { vaultId, itemId } : null;
+  const later = copy ? "" : ` It appears in ${targetName} after the next sync.`;
+  const originalRemoved = mode === "move" && vaultErrorDetail(error, "sourceArchived") === true;
+  if (mode === "copy" || originalRemoved) {
+    return {
+      title:
+        mode === "move"
+          ? `Moved ${itemName} to ${targetName}`
+          : `Copied ${itemName} to ${targetName}`,
+      description: `${later.trim() || `It's saved in ${targetName}.`} Don't ${mode} it again.`,
+      copy,
+      originalRemoved,
+    };
+  }
+  const removing = removal === "trash" ? "Trashing" : "Archiving";
+  const remove = removal === "trash" ? "move the original to trash" : "archive the original";
+  const again = "Don't move it again;";
+  const changed = vaultErrorDetail(error, "sourceChanged") === true;
+  const reason = !changed
+    ? `${removing} the original in ${source} didn't finish. ${again} check ${source} and ${remove} if it's still there.`
+    : vaultErrorCode(error) === "vault_item_not_found"
+      ? `The original is no longer listed in ${source}. ${again} check ${source} for it.`
+      : `${itemName} changed in ${source} during the move, so the original was kept. ${again} compare the two, then update the copy or ${remove}.`;
+  return {
+    title: `Saved a copy in ${targetName}`,
+    description: `${reason}${later}`,
+    copy,
+    originalRemoved: false,
+  };
 }
 
 export function isNotFoundError(error: unknown): boolean {

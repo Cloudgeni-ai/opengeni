@@ -24,6 +24,7 @@ import {
 } from "@opengeni/events";
 import {
   createObservability,
+  installCpuSamplingSignal,
   logStartupDependencyRetry,
   type Observability,
 } from "@opengeni/observability";
@@ -42,6 +43,7 @@ import { fileURLToPath } from "node:url";
 import type { createControlActivities } from "./activities-control";
 import type { createTurnActivities } from "./activities-turn";
 import type { ActivityDependencies } from "./activities/types";
+import { closeNativeExternalVaultProviders } from "./external-vault-providers";
 import type {
   InspectSessionAttemptActivity,
   SignalCodexCapacityWorkflow,
@@ -1068,6 +1070,11 @@ export async function startWorker() {
   const observability = createObservability(settings, { component: `worker-${role}` });
   // Before any NativeConnection: SDK and core logs become structured lines.
   installTemporalRuntimeLogging(observability);
+  // `kill -USR2 <pid>` samples this process for 30 s and logs where the event
+  // loop was busy, so stalls can be attributed on a live worker.
+  installCpuSamplingSignal({
+    log: (message, attributes) => observability.info(message, attributes),
+  });
   // The Agents SDK also listens for unhandled rejections and exits the process.
   // Keep detached SDK/transport promises observational here: durable turn
   // activity boundaries own failures, while process exit causes cross-session
@@ -1077,9 +1084,14 @@ export async function startWorker() {
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
   const searchPath = dbSearchPath(settings);
+  const preparedStatements =
+    settings.databasePreparedStatements === undefined
+      ? {}
+      : { preparedStatements: settings.databasePreparedStatements };
   const dbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
+    ...preparedStatements,
   });
   // Readiness must prove PostgreSQL independently of activity demand. Sharing
   // the default application pool makes the probe wait behind live turns when
@@ -1089,6 +1101,7 @@ export async function startWorker() {
   const readinessDbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
+    ...preparedStatements,
     max: 1,
   });
   const databasePosture = {
@@ -1129,7 +1142,12 @@ export async function startWorker() {
       },
     });
   } finally {
-    await Promise.allSettled([bus?.close(), readinessDbClient.close(), dbClient.close()]);
+    await Promise.allSettled([
+      closeNativeExternalVaultProviders(),
+      bus?.close(),
+      readinessDbClient.close(),
+      dbClient.close(),
+    ]);
     disposeUnhandledRejectionBoundary();
   }
 }

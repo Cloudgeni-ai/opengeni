@@ -3,6 +3,14 @@ import { base64url, base64urlDecode, hmacBase64url, randomToken, timingSafeEqual
 
 /** Short-lived proof that this visitor passed the optional Turnstile check. */
 export const SITE_HUMAN_COOKIE = "__Host-og_h";
+/**
+ * Set while a workspace member previews the Site as a visitor ("View as
+ * visitor"). Informational only: the preview lives on the API's site
+ * session, and the gateway uses this cookie just to key its access cache
+ * and to know when to ask the API.
+ */
+export const SITE_VIEW_COOKIE = "__Host-og_view";
+export const VIEW_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 
 export const VISITOR_COOKIE_MAX_AGE = 180 * 24 * 60 * 60;
 export const LOGIN_COOKIE_MAX_AGE = 10 * 60;

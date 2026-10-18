@@ -5,6 +5,7 @@ declare module "libnpmpublish" {
     defaultTag: "canary";
     access: "public";
     provenance: boolean;
+    provenanceFile?: string;
     retry?: { retries: 0 };
     timeout?: number;
     signal?: AbortSignal;

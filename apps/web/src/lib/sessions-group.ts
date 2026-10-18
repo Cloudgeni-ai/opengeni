@@ -2,6 +2,7 @@
 // bucketing (Today / Yesterday / Previous 7 days / Older), and the ordering
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
+import { t } from "@/lib/console-text";
 import { formatWaitingSince } from "@/lib/format";
 import { awaitsPerson } from "./needs-you";
 import { sessionInputWait } from "./session-rail";
@@ -807,7 +808,7 @@ export function categorizeRailRoots(
     if (list && list.length > 0) {
       grouped.push({
         group,
-        label: SESSION_GROUP_LABELS[group],
+        label: SESSION_GROUP_LABELS(t)[group],
         sessions: list,
       });
     }

@@ -32,6 +32,11 @@ export interface GatewayEnv {
   ABUSE_EMAIL?: string;
   TURNSTILE_SITE_KEY?: string;
   TURNSTILE_SECRET?: string;
+  /**
+   * Seconds between platform request-count reports to the API (1 to 25,
+   * default 10). Counts wait in the isolate for at most this long.
+   */
+  PLATFORM_REPORT_INTERVAL_SECONDS?: string;
   HOST_MAP?: KVNamespaceLike;
   RATE_LIMITER?: RateLimiterLike;
   /**
@@ -58,6 +63,8 @@ export type GatewayConfig = {
   loginOnly: boolean;
   abuseEmail: string;
   turnstile: { siteKey: string; secret: string } | null;
+  /** How long served-request counts wait before they are reported (platform usage). */
+  platformReportIntervalMs: number;
   hostMap: KVNamespaceLike | null;
   rateLimiter: RateLimiterLike | null;
 };
@@ -91,6 +98,13 @@ export function gatewayConfig(env: GatewayEnv): GatewayConfig {
     throw new GatewayConfigError("GATEWAY_SECRET_PREVIOUS must be at least 32 characters");
   const turnstileSiteKey = env.TURNSTILE_SITE_KEY?.trim() ?? "";
   const turnstileSecret = env.TURNSTILE_SECRET?.trim() ?? "";
+  const intervalText = env.PLATFORM_REPORT_INTERVAL_SECONDS?.trim() ?? "";
+  const intervalSeconds = intervalText ? Number(intervalText) : 10;
+  // Workers keep `waitUntil` work for 30 seconds after the response.
+  if (!Number.isInteger(intervalSeconds) || intervalSeconds < 1 || intervalSeconds > 25)
+    throw new GatewayConfigError(
+      "PLATFORM_REPORT_INTERVAL_SECONDS must be a whole number from 1 to 25",
+    );
   const config: GatewayConfig = {
     sitesDomain,
     apiOrigin: origin(env.API_ORIGIN, "API_ORIGIN"),
@@ -106,6 +120,7 @@ export function gatewayConfig(env: GatewayEnv): GatewayConfig {
       turnstileSiteKey && turnstileSecret
         ? { siteKey: turnstileSiteKey, secret: turnstileSecret }
         : null,
+    platformReportIntervalMs: intervalSeconds * 1000,
     hostMap: env.HOST_MAP ?? null,
     rateLimiter: env.RATE_LIMITER ?? null,
   };

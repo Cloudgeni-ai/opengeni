@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { Link } from "@tanstack/react-router";
 import { Building2Icon, LockIcon, PauseIcon, PlusIcon } from "lucide-react";
 import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
@@ -204,7 +205,7 @@ export function WorkspaceSwitcherMenu(props: {
     context.workspaces.find((workspace) => workspace.id === props.workspaceId) ?? null;
   const activeAccountId =
     activeWorkspace?.accountId ?? context.accessContext.defaultAccountId ?? null;
-  const orgs = organizationsForSubject(context.accessContext, context.workspaces);
+  const orgs = organizationsForSubject(t, context.accessContext, context.workspaces);
   const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
   const activeIsPersonal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
   const administers = useCanCreateWorkspaceIn(activeAccountId);

@@ -68,19 +68,51 @@ const JAILER_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 /// so boot pins it unless the caller already chose a clock source.
 const CLOCK_SOURCE: &str = "clocksource=kvm-clock";
 
+/// Guest kernel parameter for the smallest free block, as a power of two of
+/// 4 KiB pages, that the guest reports to the host for reclaim.
+const REPORTING_ORDER: &str = "page_reporting.page_reporting_order";
+
+/// The reporting order that matches the pages backing guest memory.
+///
+/// The host can give back only whole backing pages. A reported range smaller
+/// than one of the 2 MiB huge pages frees nothing (Firecracker's discard of
+/// it fails) and still costs the guest and the VMM a report, which also
+/// slows the reports that would free memory. So a guest on huge pages reports
+/// only blocks of at least one huge page (order 9), and a guest on 4 KiB
+/// pages every free page (order 0), the most it can give back. Firecracker's
+/// ballooning guide gives the same advice: reported ranges should match the
+/// backing page size.
+fn reporting_order(pages: PageSize) -> u32 {
+    (pages.bytes() / PageSize::Base.bytes()).trailing_zeros()
+}
+
 /// The kernel command line to boot with: the caller's, plus [`CLOCK_SOURCE`]
-/// if it names no clock source of its own.
-fn boot_args(requested: &str) -> String {
-    if requested
-        .split_whitespace()
-        .any(|arg| arg.starts_with("clocksource="))
-    {
-        requested.to_owned()
-    } else if requested.trim().is_empty() {
-        CLOCK_SOURCE.to_owned()
-    } else {
-        format!("{} {CLOCK_SOURCE}", requested.trim_end())
+/// if it names no clock source of its own, plus the [`reporting_order`] for
+/// `reporting`, the pages backing a guest that reports freed memory, if it
+/// names no order of its own. A guest keeps the order it booted with.
+fn boot_args(requested: &str, reporting: Option<PageSize>) -> String {
+    let names = |parameter: &str| {
+        requested.split_whitespace().any(|arg| {
+            arg.split_once('=')
+                .is_some_and(|(name, _)| name == parameter)
+        })
+    };
+    let mut args = requested.trim().to_owned();
+    let mut add = |arg: &str| {
+        if !args.is_empty() {
+            args.push(' ');
+        }
+        args.push_str(arg);
+    };
+    if !names("clocksource") {
+        add(CLOCK_SOURCE);
     }
+    if let Some(pages) = reporting
+        && !names(REPORTING_ORDER)
+    {
+        add(&format!("{REPORTING_ORDER}={}", reporting_order(pages)));
+    }
+    args
 }
 
 /// Firecracker's name for a page size.
@@ -831,7 +863,10 @@ impl Engine for Firecracker {
                 "/boot-source",
                 json!({
                     "kernel_image_path": vm.inside(OP, &spec.kernel)?,
-                    "boot_args": boot_args(&spec.boot_args),
+                    "boot_args": boot_args(
+                        &spec.boot_args,
+                        spec.free_page_reporting.then_some(self.memory.pages),
+                    ),
                 }),
             )
             .await?;

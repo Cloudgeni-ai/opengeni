@@ -69,19 +69,18 @@ works but holds an exclusive lock for the duration.
 
 ## Idle-session archive
 
-Off by default. Enable it per deployment:
+On by default. Turn it off per deployment to keep every session in PostgreSQL:
 
 | Setting | Helm value | Default |
 | --- | --- | --- |
-| `OPENGENI_SESSION_ARCHIVE_ENABLED` | `sessionArchive.enabled` | `false` |
+| `OPENGENI_SESSION_ARCHIVE_ENABLED` | `sessionArchive.enabled` | `true` |
 | `OPENGENI_SESSION_ARCHIVE_IDLE_DAYS` | `sessionArchive.idleDays` | `30` |
 
-The archive requires the deployment's object storage. The same maintenance
+The archive requires the deployment's object storage; a deployment without it
+never archives (the worker logs a warning each pass). The same maintenance
 Schedule runs it after content compaction; each pass keeps archiving batches
 of eligible sessions until its ten-minute budget ends or none remain, so a
-backlog drains steadily after the archive is first enabled. Compaction and
-delta folding get the same budget in the same workflow, so neither starves the
-other while a backlog drains.
+backlog drains steadily after the archive is first enabled.
 
 ### What qualifies
 
@@ -124,6 +123,17 @@ all of these hold for the idle period:
      catalogs, model-request snapshots, content blobs, pending tool calls and
      preference snapshots, each as `{"table": ..., "row": <exact row JSON>}`,
      then a footer with row counts. Full fidelity, for analysis and audit.
+     Rows are read in pages of 200 under the workspace's row-level security,
+     and each page is an indexed read, so a session with hundreds of thousands
+     of rows exports in linear time. Under a policy PostgreSQL only uses
+     leakproof comparisons as index conditions; numeric and row comparisons
+     are not leakproof and become a filter after the policy, which re-reads
+     every earlier row, and a multi-column cursor only bounds its first column.
+     So tables ordered by several keys or by a numeric key (turns, attempts,
+     model history, code-mode calls and the like) read their ordered row ids
+     once and then fetch each page by primary key. Events, machine inputs and
+     content blobs page by one integer or text key that leads a unique
+     `(workspace_id, session_id, key)` index.
    - `transcript.jsonl.zst`: a header, then the readable timeline as public
      `SessionEvent` objects (`{"event": ...}`), then a footer. This is the
      stable, documented readable section and does not require Opengeni's
@@ -190,17 +200,29 @@ finish resumes purging on the next pass. Deleting an archived session queues
 its objects for deletion in the deleting transaction, and the maintenance
 worker removes them, so a deleted session never leaves its bundle behind.
 
-## Folded text deltas
+## Streamed text deltas
 
-A model answer or reasoning stream is stored as one `session_events` row per
-provider fragment, often thousands per turn, next to the completed message.
-Ten minutes after a turn settles, the same maintenance pass folds each run of
-adjacent `agent.message.delta` or `agent.reasoning.delta` rows (one turn, one
-producer, one message and phase, at most 48 KiB of text) into the run's first
-row and removes the others. Always on: it is lossless.
+A model answer or reasoning stream arrives as many small provider fragments.
+The turn writer flushes them at most one window apart (100 ms; the first
+fragment of a turn, after a structural event such as a tool call or a
+completed message, or after a silence of one window goes at once, so time to
+first token is unchanged) and stores each flush's adjacent `agent.message.delta` or
+`agent.reasoning.delta` fragments (one message and phase, plain
+`text`/`messageId`/`phase` payloads, at most 48 KiB of text) as one row. Live
+subscribers receive exactly the stored rows. The text and the order of every
+other event are unchanged; only the provider's fragment boundaries are not
+kept. Reasoning fragments are joined with the separator every reader uses
+(`reasoningDeltaSeparator` in `@opengeni/events`: a part that opens bold right
+after one that closed bold starts a new paragraph), so reasoning renders the
+same from fragments, merged rows or the read-side coalescer. On staging
+traffic this stores about a fifth of the fragments, with no
+deletes afterwards and so no table or index churn.
 
-The folded row keeps its id, sequence and timestamps, and its payload is the
-shape live streams already deliver:
+### Rows folded by earlier versions
+
+Before write-time merging, a maintenance pass folded each settled turn's runs
+of fragment rows into the run's first row. Those rows keep their id, sequence
+and timestamps, and a payload in the shape live streams deliver:
 
 ```json
 {
@@ -217,10 +239,9 @@ shape live streams already deliver:
 
 Each part is `[sequenceOffset, occurredOffsetMicroseconds,
 createdOffsetMicroseconds, producerSeq, textLengthInUtf16Units, id]`, relative
-to the folded row. `unfoldSessionEventDeltas` in `@opengeni/db` rebuilds the
-original events. Readers already treat a delta with `coalescedUntil` as
-covering the sequences up to it; event streams and compact pages report that
-coverage, and raw pages skip the removed sequences. Only plain fragments fold:
-anything with another payload field, a client event id or a duplicate marker,
-and command or terminal output, stays as it was. Progress is recorded per turn
-in `opengeni_private.session_turn_delta_folds`, so each turn is folded once.
+to the folded row. Readers treat a delta with `coalescedUntil` as covering the
+sequences up to it; event streams and compact pages report that coverage, and
+raw pages skip the removed sequences. The pass no longer runs; its routines and
+the `opengeni_private.session_turn_delta_folds` bookkeeping table remain until
+a later contract migration removes them. Fragments of unfolded older sessions
+leave PostgreSQL with the idle-session archive.

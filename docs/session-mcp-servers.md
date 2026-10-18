@@ -19,6 +19,12 @@ credentials, without making those servers deployment-global.
   tool names. A workspace's explicit Allow, Ask or Block choice for a tool wins
   over this recommendation. Selective policies are canonicalized as a sorted set and bounded to
   2,048 names, 256 KiB total UTF-8, and 1 KiB UTF-8 per name.
+  The server can also recommend Ask per tool in its own `tools/list` with
+  `_meta: { "opengeni/recommendedPermission": "ask" }`
+  (`MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY`). Opengeni lists tools again on
+  every attempt, so a new recommendation applies from the next attempt of every
+  session without reattaching. A tool asks by default when either source asks;
+  `"allow"` never removes a `requireApproval` entry.
 - `headers`: configured credential headers, authenticated-encrypted at rest.
 - `connectionRef`: optional non-secret opaque connection pointer. Standalone
   deployments resolve it through Opengeni's connection store; embedded hosts
@@ -348,8 +354,9 @@ new URL. Every reader and writer derives the identity through the runtime's
 `sessionMcpApprovalConnectionId`. The response lists only saved choices:
 `defaultPermission` (the `*` rule) and whole-tool rules, plus `revision` for
 `expectedRevision`. Tools without a choice follow the default, then the
-session's `requireApproval` recommendation, then Allow. The host owns its tool
-catalog and never asks Opengeni to discover it. Writes use the same
+server's recommendation (the tool's `opengeni/recommendedPermission` `_meta`
+or the session's `requireApproval`), then Allow. The host owns its tool
+catalog and its recommendations and never asks Opengeni to discover them. Writes use the same
 `capabilities:manage` rule as connector settings, so agent attempts and service
 principals cannot change the permissions that bound them.
 
@@ -365,7 +372,8 @@ decision across the approval-resume attempt.
 
 Resolution is most-specific-first. Two matching policies with equal specificity
 fail closed as Block. No matching row preserves the historical unmanaged
-behavior. `requireApproval` only supplies the recommended default when no explicit
+behavior. `requireApproval` and a tool's `opengeni/recommendedPermission` `_meta`
+only supply the recommended default when no explicit
 choice matches: Block stops before MCP invocation, Ask requires the ordinary
 durable approval, and an explicit Allow runs the tool without asking.
 

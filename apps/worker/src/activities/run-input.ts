@@ -1,6 +1,8 @@
 import {
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   FileResourceRef,
   resourceMountPath,
   readTurnExecutionPolicyV1,
@@ -20,6 +22,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
+  createModelImageSizer,
   projectHistoryForProvider,
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,
@@ -218,6 +221,25 @@ export class RetainedAttachmentTransportLimitError extends Error {
   }
 }
 
+/**
+ * A retained image the conversation already sent could not be read from
+ * object storage, for example while a storage replica catches up after an
+ * outage. Its pixels are part of the accepted prompt, so the turn waits and
+ * retries rather than continuing without them. Integrity mismatches are not
+ * this error: retrying cannot repair different bytes.
+ */
+export class RetainedAttachmentUnavailableError extends Error {
+  readonly fileIds: readonly string[];
+
+  constructor(fileIds: readonly string[]) {
+    super("An image attached earlier in this conversation can't be read from storage right now.");
+    this.name = "RetainedAttachmentUnavailableError";
+    this.fileIds = [...fileIds];
+  }
+}
+
+export type ModelAttachmentReadFailure = "unavailable" | "integrity_mismatch";
+
 export type ModelAttachmentContent = {
   kind: "image" | "file";
   fileId: string;
@@ -285,7 +307,11 @@ function modelAttachmentDescriptor(
 export async function modelAttachmentContentForFiles(
   files: FileAsset[],
   readFileBytes: (file: FileAsset) => Promise<Uint8Array>,
-  options: { retainAll?: boolean } = {},
+  options: {
+    retainAll?: boolean;
+    /** Why a selected file produced no content; omitted files are not reported. */
+    onReadFailure?: (fileId: string, failure: ModelAttachmentReadFailure) => void;
+  } = {},
 ): Promise<ModelAttachmentContent[]> {
   const selected: Array<{
     file: FileAsset;
@@ -326,12 +352,14 @@ export async function modelAttachmentContentForFiles(
             expectedSizeBytes: file.sizeBytes,
             actualSizeBytes: bytes.byteLength,
           });
+          options.onReadFailure?.(file.id, "integrity_mismatch");
           continue;
         }
         if (createHash("sha256").update(bytes).digest("hex") !== checksum) {
           console.error("model attachment checksum did not match finalized metadata", {
             fileId: file.id,
           });
+          options.onReadFailure?.(file.id, "integrity_mismatch");
           continue;
         }
         attachments[index] = {
@@ -349,6 +377,7 @@ export async function modelAttachmentContentForFiles(
           fileId: file.id,
           errorType: safeErrorType(error),
         });
+        options.onReadFailure?.(file.id, "unavailable");
       }
     }
   };
@@ -391,10 +420,64 @@ function unavailableAttachmentReceiptText(ref: FileResourceRef): string {
   return requesterUnavailableReceiptText(`Attachment: fileId=${ref.fileId}`, "file");
 }
 
+/** The image bound stamped on a message when it was accepted, if any. */
+function attachmentImageBound(item: Record<string, unknown>): number | undefined {
+  const raw = item[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD];
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 64 && raw <= 8192
+    ? raw
+    : undefined;
+}
+
+// Process-wide, so a long conversation does not re-encode the same photos on
+// every turn. The projection depends only on the image bytes and the bound.
+const boundedImageSizers = new Map<number, ReturnType<typeof createModelImageSizer>>();
+
+type BoundedAttachmentImage = { image: string; note: string };
+
+/**
+ * The model-facing rendition of one image under the bound its message was
+ * stamped with. Smaller images keep their original bytes. The file in the
+ * sandbox and in storage stays at full resolution.
+ */
+async function boundedAttachmentImage(
+  attachment: ModelAttachmentContent,
+  bound: number,
+): Promise<BoundedAttachmentImage> {
+  const original = { image: attachment.dataUrl, note: "" };
+  const comma = attachment.dataUrl.indexOf(",");
+  if (comma < 0) return original;
+  const data = attachment.dataUrl.slice(comma + 1);
+  let sizer = boundedImageSizers.get(bound);
+  if (!sizer) {
+    sizer = createModelImageSizer(bound, 10 * 1024 * 1024, { jpegQuality: 85 });
+    boundedImageSizers.set(bound, sizer);
+  }
+  try {
+    const sized = await sizer(data, attachment.contentType);
+    if (sized.data === data && sized.mediaType === attachment.contentType) return original;
+    return {
+      image: `data:${sized.mediaType};base64,${sized.data}`,
+      note:
+        ` Shown to you downscaled to ${sized.width}x${sized.height} from ` +
+        `${sized.originalWidth}x${sized.originalHeight}; the file itself is full resolution.`,
+    };
+  } catch (error) {
+    // Decoding is deterministic: an image that cannot be resized here keeps
+    // the original projection on every turn rather than being dropped.
+    console.error("model attachment image could not be resized; sending original", {
+      fileId: attachment.fileId,
+      errorType: safeErrorType(error),
+    });
+    return original;
+  }
+}
+
 /**
  * Build one turn-scoped durable-attachment projector. Resolve active refs under
  * current file authority and memoize metadata/bytes for retries and compaction.
  * A turn boundary never changes an authorized attachment's representation.
+ * Images of a message stamped with an image bound are shown downscaled to fit
+ * it; unstamped (older) messages keep their full-resolution projection.
  */
 export function createModelHistoryAttachmentProjector(
   policy: ModelAttachmentInputPolicy,
@@ -406,6 +489,7 @@ export function createModelHistoryAttachmentProjector(
   const fileById = new Map<string, FileAsset>();
   const resolvedFileIds = new Set<string>();
   const retainedByteSizes = new Map<string, number>();
+  const boundedById = new Map<string, BoundedAttachmentImage>();
 
   return async (items, options = {}) => {
     for (const file of options.inlineFiles ?? []) {
@@ -474,28 +558,54 @@ export function createModelHistoryAttachmentProjector(
           return Boolean(descriptor && descriptor.kind === "image" && policy.supportsImageInput);
         });
       for (const file of readable) attemptedContentIds.add(file.id);
+      const readFailures = new Map<string, ModelAttachmentReadFailure>();
       const content = await modelAttachmentContentForFiles(readable, readFileBytes, {
         retainAll: true,
+        onReadFailure: (fileId, failure) => readFailures.set(fileId, failure),
       });
       const loadedIds = new Set(content.map((entry) => entry.fileId));
-      for (const file of readable) {
-        if (
+      const missing = readable.filter(
+        (file) =>
           file.status === "ready" &&
           file.sizeBytes <= MAX_INLINE_MODEL_ATTACHMENT_BYTES &&
           /^[a-f0-9]{64}$/i.test(file.sha256 ?? "") &&
-          !loadedIds.has(file.id)
-        ) {
-          // Do not let a retry silently proceed with pixels removed.
-          for (const candidate of readable) attemptedContentIds.delete(candidate.id);
-          throw new Error(`Retained attachment bytes unavailable or invalid: ${file.id}`);
+          !loadedIds.has(file.id),
+      );
+      if (missing.length > 0) {
+        // Do not let a retry silently proceed with pixels removed.
+        for (const candidate of readable) attemptedContentIds.delete(candidate.id);
+        const corrupt = missing.find((file) => readFailures.get(file.id) === "integrity_mismatch");
+        if (corrupt) {
+          throw new Error(`Retained attachment bytes unavailable or invalid: ${corrupt.id}`);
         }
+        throw new RetainedAttachmentUnavailableError(missing.map((file) => file.id));
       }
       for (const attachment of content) contentById.set(attachment.fileId, attachment);
+    }
+
+    for (const [index, refs] of refsByIndex) {
+      const item = items[index]!;
+      if (item[MODEL_ATTACHMENT_CATALOG_MARKER] === true) continue;
+      const bound = attachmentImageBound(item);
+      if (bound === undefined) continue;
+      for (const ref of refs) {
+        const attachment = fileById.has(ref.fileId) ? contentById.get(ref.fileId) : undefined;
+        const key = `${bound}:${ref.fileId}`;
+        if (!attachment || attachment.kind !== "image" || boundedById.has(key)) continue;
+        boundedById.set(key, await boundedAttachmentImage(attachment, bound));
+      }
     }
 
     const projected = [...items];
     for (const [index, refs] of refsByIndex) {
       const original = items[index]!;
+      if (original[MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD] === true) {
+        // Its complete, dated text was frozen when compaction created it.
+        const clone: Record<string, unknown> = { ...original };
+        delete clone[MODEL_ATTACHMENT_REFS_FIELD];
+        projected[index] = clone;
+        continue;
+      }
       const existingContent = Array.isArray(original.content)
         ? [...original.content]
         : [{ type: "input_text", text: String(original.content ?? "") }];
@@ -511,14 +621,20 @@ export function createModelHistoryAttachmentProjector(
           resolvedFileIds.has(ref.fileId) &&
           currentFile === undefined;
         const attachment = currentFile ? contentById.get(ref.fileId) : undefined;
-        const receipt = {
-          type: "input_text",
-          text: excluded ? unavailableAttachmentReceiptText(ref) : attachmentReceiptText(ref),
-        };
         if (!attachment || attachment.kind !== "image") {
-          return [receipt];
+          return [
+            {
+              type: "input_text",
+              text: excluded ? unavailableAttachmentReceiptText(ref) : attachmentReceiptText(ref),
+            },
+          ];
         }
-        return [receipt, { type: "input_image", image: attachment.dataUrl }];
+        const bound = attachmentImageBound(original);
+        const bounded = bound === undefined ? undefined : boundedById.get(`${bound}:${ref.fileId}`);
+        return [
+          { type: "input_text", text: attachmentReceiptText(ref) + (bounded?.note ?? "") },
+          { type: "input_image", image: bounded?.image ?? attachment.dataUrl },
+        ];
       });
       const clone: Record<string, unknown> = {
         ...original,

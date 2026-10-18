@@ -108,7 +108,14 @@ beforeEach(() => {
   );
   restores.push(spyOn(sessionPrototype, "retrieve").mockImplementation(async () => session));
   app = new Hono();
-  registerBillingRoutes(app, { settings, db: {} } as core.ApiRouteDeps);
+  // Customer read/create/persist now shares a scoped account transaction even
+  // when the mocked existing customer means no provider creation is needed.
+  const transactionalDb = {
+    execute: async () => [{ account_id: accountId, workspace_id: "" }],
+    transaction: async (run: (tx: db.Database) => Promise<unknown>) =>
+      run(transactionalDb as unknown as db.Database),
+  };
+  registerBillingRoutes(app, { settings, db: transactionalDb } as core.ApiRouteDeps);
 });
 afterEach(() => {
   for (const spy of restores.splice(0).reverse()) spy.mockRestore();

@@ -9,10 +9,25 @@ box.
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
-account-admin approval. Only the owner may attach a user machine. Using it from an
-exact agent attempt additionally requires an explicit `connected_machine.use` grant
-for that session visibility/context. Once/session/always grants use the common
-personal-resource lifecycle; every operation revalidates the exact attempt, owner
+account-admin approval. Only the owner may attach a user machine. Moving a running
+chat is explicit owner consent for that logical turn, even when another person,
+a schedule, or an agent started it. The route changes immediately; the next tool
+operation uses the new machine. Already dispatched work is not moved or replayed.
+The separate `session_turn_machine_consents` receipt is bound to the current attempt
+and to replacement attempts of the same turn (recovery, failover, retry). It does
+not change the initiating person, rewrite accepted resource snapshots, expose the
+owner's other machines/resources, or authorize another person's future turns.
+Only the human move path supplies `consentToCurrentTurn`; session creation and
+schedule seeding do not implicitly consent for a running turn. The receipt's
+route epoch records which successful move supplied consent and orders successive
+clicks; it is not a standing route lock. Metadata resolution does not audit usage
+or demand an unchanged pointer, while dispatch checks the current selection and
+records usage once. Worker and API-direct browser/computer/file routes share this
+authority, including turns without an initiating human.
+Without a turn-bound move receipt, an exact attempt still needs an explicit
+`connected_machine.use` grant for that session visibility/context.
+Once/session/always grants use the common personal-resource lifecycle;
+every operation revalidates the exact attempt, owner
 membership revision, target-workspace access, authority epoch, resource/grant
 generation, interruption state, and current machine selection immediately before
 the machine transport is used. Revocation advances the machine and common authority
@@ -156,6 +171,22 @@ complete catalog. `show <path>` returns the complete details/schema for one tool
 redirect large output to a file and read only needed ranges.
 It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
+
+Native `codemode call` accepts inline JSON (default `{}`), `-` to read one UTF-8
+JSON object from stdin through EOF, or `@path` to read it from a local file.
+Use stdin or a file for large arguments so the operating system's argv limit
+does not apply to the JSON payload:
+
+```sh
+"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call server.tool - < arguments.json
+"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call server.tool '@arguments with spaces.json'
+```
+
+Relative file paths resolve from the command's working directory. Input is read
+once and validated before catalog lookup or submission; errors do not echo the
+file's contents. Omitting arguments does not consume stdin. These input forms
+require an updated native agent; API/tool payload limits and the existing
+attempt journal, approval and recovery semantics are unchanged.
 
 Vault secrets reach a machine only per command. When an `exec_command` or
 `run_on` command contains `{{secret:…}}` references, Opengeni runs it with
@@ -527,9 +558,19 @@ Every failure is fail-closed: a command that cannot be continued ends as a
 typed failure, and if the successor never starts, the command's anchor ends it
 as for a crashed runner. Other admitted work, such as a request still being
 answered, a git operation or a pending upload, still makes the update wait,
-and Windows keeps waiting for every command. Only lost physical settlement, which can never
-become provable in that process, ends the update with retryable
-`update_state_unavailable`. The agent checks every owned browserd scope through
+and Windows keeps waiting for every command. Command spawn failures, cancellation
+and panicking waiters retain their actual cleanup owner until exit is proved;
+they do not permanently disable self-update. A transient cleanup error is scoped
+to its exact producer and clears only when that producer obtains completion
+evidence. While that evidence is unavailable, the update reports retryable
+`update_cleanup_unconfirmed`; the response and agent log identify the producer
+and explain recovery. If the cleanup owner itself was lost, finish active commands
+and restart the agent service before retrying. An unreadable admission boundary
+still reports `update_state_unavailable`. A browser controller that crashed, was killed or
+stopped uncleanly is not lost settlement on Linux and macOS: it runs as the
+leader of its own process group, so the update waits (busy) only until nothing
+remains in that group. The browsers it launched run in their own sessions and
+are adopted by the next controller. The agent checks every owned browserd scope through
 its private admin-only idle proof. Open sessions block only when a restart
 would lose something: admitted commands, pending creation or shutdown,
 attached browser sessions, browsers without a durable working runtime, and
@@ -627,8 +668,9 @@ commands may use N GiB. An already-admitted command keeps its immutable policy.
 Every provider operation revalidates its exact live connection and any
 caller-owned personal-machine authority at the last boundary before dispatch,
 even inside a cached, swapped, or pinned multi-day turn. For a personal machine,
-that same PostgreSQL snapshot verifies the accepted attempt, immutable admission
-snapshot, current visibility-keyed grant, membership/generation fences, and the
+that same PostgreSQL snapshot verifies the accepted attempt, its owner-click
+consent or immutable admission snapshot/current visibility-keyed grant,
+membership/generation fences, and the
 runner connection. One-off `run_on` exec/read/write uses the same boundary after
 creating its attempt snapshot, so a concurrent revoke cannot reach the provider.
 Organization- and user-scoped machines used from another same-organization
@@ -681,6 +723,27 @@ move adopted commands to `stopping`, after which the global reconciler issues
 affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.
+
+The runner pushes an `OperationCompleted` event after exit and pipe drain,
+independently of the output consumer and its credit. API ingestion uses the
+authenticated control-workspace/enrollment/connection subject and operation ID
+to claim the original adopted command, even after its session changes routes.
+The collector durably captures retained output through the verified exit frontier
+before settlement, so a terminal read cannot race ahead of the final output.
+Duplicate events cannot steal an active collector's claim. The runner republishes
+unacknowledged terminal records on connection establishment and at its existing
+heartbeat cadence over the independent bulk connection, healing a full send queue
+or reconnect without waiting for reaper backoff. A delivery-only acknowledgement
+stops these notifications after the server durably owns reconciliation; it never
+releases retained output. Only the first notification bypasses polling backoff.
+Failed collections reuse reconciliation's exponential backoff, and pending
+duplicates coalesce per operation. Older agents and lost connections remain covered by
+reconciliation. Terminal publication
+does not discard retained output; release remains separately retryable after custody.
+Completion collectors have independent ingestion capacity, so even a saturated
+collection queue cannot delay machine heartbeats. A collector yields to reconciliation
+before its existing claim lease expires; this never cancels or time-limits the command.
+
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: Opengeni sends that shell as direct argv, with the requested login or
 non-login semantics, instead of silently substituting the machine service's
@@ -690,6 +753,16 @@ On Unix a private unreaped group anchor fences the PGID until cleanup has been
 issued, so cancellation cannot signal a recycled group and the requested command
 cannot exit and leave invisible same-group work behind. The runner-death lease
 also closes the crash gap where `Drop` cannot run.
+On Windows the owned Job Object provides the same containment and a native
+active-process-zero cleanup receipt. Ordinary shell backgrounding (`&`, subshells
+and `nohup`) does not detach work from the command's scope. Just before automatic
+shell-exit cleanup, the runner observes live non-anchor members using the owned
+Linux cgroup, the anchored Unix process group, or the Windows Job Object. Positive
+evidence travels with the terminal result and survives command settlement and
+agent handover. Only then does a new shell result or terminal command read append
+a short notice explaining the cleanup and the foreground `exec_command` workflow
+for long jobs. Structured stdout/stderr remain unchanged; ordinary commands,
+explicit cancellation/deadlines and older runners produce no inferred notice.
 An oversized reply is likewise returned as typed `PAYLOAD_TOO_LARGE`; neither
 backpressure nor a reply-size failure changes the machine's heartbeat state.
 
@@ -707,7 +780,8 @@ ambiguous and is not replayed. `run_on` uses the deployment's separate
 deadline by default), while preserving the active sandbox pointer and epoch.
 
 Large `write` operations use the existing bounded transactional file transfer
-when the live target advertises `transactional_fs_write`. Each transfer request
+when the live target advertises `transactional_fs_write` and
+`transactional_fs_write_machine`. Each transfer request
 rechecks authority, capability, and the pinned connection; it never falls back
 to a whole-file write after an uncertain result. Older agents keep their legacy
 small-write behavior and report oversized requests without marking the machine
@@ -948,8 +1022,19 @@ command. Success requires empty internal buffers and a flush of that stream;
 losing the stream fails its attached receipt before reconnect. A replacement
 socket cannot prove that the previous reply was sent.
 Controller admission is fenced atomically during its idle proof; failed or
-deferred updates release only their own fence. Missing settlement makes updates
-unavailable for the running process while ordinary work remains usable. Older
+deferred updates release only their own fence. Missing physical settlement makes
+updates unavailable while ordinary work remains usable. Failures are retained per
+producer, never cleared globally or merely by dropping a reservation. Native exec
+and PTY cleanup keep owned handles and retry failed exit observations; a positive
+exit clears only that cleanup's failure. Cleanup cannot inherit a running job's
+handover exemption. Successor startup and rollback restore each adopted command's
+reservation as well as its native handles. After handing over running jobs, the updater rechecks cleanup
+before recording its restart manifest, including failures during the download.
+A panicking worker releases its own reservation only after
+unwinding; independently owned native resources still retain theirs. Lost reply
+delivery is logged, not mistaken for still-running native work. Retained RPC
+replies hold their reservation through delivery or expiry; expiry still rejects
+the original request and does not permit replay or release a live producer. Older
 controller builds without the update-admission transaction cannot authorize
 replacement from an unfenced idle snapshot. A lost fence-release reply retains
 its exact operation owner; ordinary scoped recovery retries only that release
@@ -957,10 +1042,8 @@ after host update admission has reopened. Failed helper/factory cleanup and
 forced or nonzero helper termination remain unsettled even after the original
 owner leaves active inventory. Helper EOF joins persistent capture producers;
 missing ScreenCaptureKit stop completion cannot become a successful shutdown.
-The current Windows command-group dependency cannot prove full-job
-exit; commands keep their ordinary results, but accepting a command fences
-subsequent self-update for that process. A positive same-job exit proof is
-required before normal Windows update eligibility can be restored. Unexpected
+Windows cleanup retains the same Job Object until its active process count is
+zero; signaling it alone is not completion. Unexpected
 controller exit and forced controller termination likewise preserve uncertainty
 after the old controller is removed from the active inventory. They cannot be
 made update-eligible by reconnecting or replacing the controller.
@@ -978,6 +1061,31 @@ credentials load into the existing process, preserving host operations.
 The signed `/v1/enrollments/renew` machine protocol is outside the browser API
 contract-revision fence, like device polling and token exchange. Its install-key,
 enrollment-generation and revocation checks still apply in production.
+
+A NATS authentication refusal suspends dialing for that exact saved connection;
+it is not treated as an ordinary network outage. The existing renewal loop checks
+it even when its bearer is not near expiration. A successful renewal clears the
+suspension and the live file reconciler resumes that link. An explicit
+`enrollment_reconnect_required` renewal response persists a terminal state across
+agent restarts: no more NATS or renewal requests until an authorized reconnect
+replaces the connection. `opengeni-agent connections` shows pending renewal versus
+reconnect-required state and the deployment-specific recovery command. Removing
+an obsolete saved connection is also supported. Other workspace links and retained
+host operations remain independent.
+
+Clock skew, transport failure, disabled renewal and older APIs' generic 401/404
+responses are not terminal proof. They allow another transport attempt on the
+existing jittered renewal cadence, so an older API or a temporary callout outage
+cannot strand a still-valid connection. Deploy the typed renewal response before the
+agent update to stop retries for permanently rejected grants completely. An older
+agent does not gain this behavior from a server deployment alone.
+
+Machines shows expired credentials only when the server can verify the bearer
+signature and match its current enrollment generation, and never over a live
+runner. Fresh Hello/heartbeat clears the diagnostic. Invalid signatures and
+removed enrollments cannot safely identify a dashboard row; inspect the local
+connection inventory instead. Saved links to other deployments/workspaces are
+never disclosed through a healthy workspace's machine status.
 
 Deploy the API renewal endpoint before upgrading agents. An older API returns
 404 and the agent retries with jitter while retaining its existing credentials.
@@ -1034,9 +1142,21 @@ The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
   chat.` (the name quoted, on one line, at most 60 characters) so the agent
   continues there. A chat that cannot take a Send is not moved; a chat waiting
   on a question is moved and keeps the question;
-- opens the shared **Connect a machine** dialog
+- inside the desktop app, **Use this computer** calls the existing desktop host
+  connection directly, with personal ownership and screen-control consent. There
+  is no second setup confirmation; required operating-system permission prompts
+  still use the shared permission guide. Connecting does not move an existing
+  chat's compute route: **Use in this chat** remains a separate optional action;
+- in a browser, opens the shared **Use your computer** dialog
   (`apps/web/src/components/machines/connect-machine-dialog.tsx`, also used by
-  the Machines page). The person chooses **Who can use it?** (**Only me** by
+  the Machines page). It offers the current platform's desktop app download and
+  **Open app and connect**. After installation the person returns to that link;
+  the app selects the exact account or starts its existing PKCE sign-in, checks
+  workspace access and confirms locally before connecting. The link carries only
+  the origin, workspace/chat destination and subject, never an enrollment token.
+  Mobile browsers direct the person to the computer they want to connect;
+- **Connect a server instead** explicitly reveals the advanced terminal flow.
+  Only then is a token minted. The person chooses **Who can use it?** (**Only me** by
   default, or **This workspace**) and screen control (off by default); both are
   baked into a single-use token minted in their browser for exactly that choice.
   Mac, Linux and Windows tabs (the detected OS selected) show the matching
@@ -1058,6 +1178,13 @@ The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
 Reading the list needs `enrollments:read`; connecting needs `enrollments:manage`;
 moving the chat needs `sessions:control`. The card says who can act otherwise.
 Like GitHub, the card is posted even when machines are already connected.
+
+Embedded products supply `SessionConversation.computerConnection` (also through
+`OpenGeniChat.conversationProps`) with their own desktop host, downloads and
+account-bound handoff, or a product-owned connect callback. The shared
+`ThisComputerCard` never chooses an Opengeni download or terminal command for a
+host. Without host configuration the default card explains that setup is not
+enabled there. See [embedding](embedding.md#computer-connection-offers).
 
 ### Turn on screen control for a connected machine
 
@@ -1351,11 +1478,20 @@ Large Files-panel writes use provider byte transport instead of shell arguments.
 On capable Linux and macOS agents, raw replacements above 256 KiB use these same transfers,
 including binary files; an ambiguous write is never retried through a fallback.
 Every transfer request is reauthorized against the same physical connection.
-The runner pins each operation to its original nonzero session route epoch;
+The runner pins each operation to its original session route epoch;
 different sessions may have different epochs on the same machine. This is not
 the legacy machine hello epoch, which normal enrollment leaves unset. The
 connection-local registry rejects another epoch adopting an operation, and
 connection shutdown is checked again at publication.
+Machine-addressed operations such as `run_on` use epoch 0 and additionally
+require the live `transactional_fs_write_machine` capability. Zero is pinned
+exactly, never a wildcard or a fabricated session epoch. Older agents with only
+`transactional_fs_write` still support session-scoped transfers, but new servers
+refuse their machine-addressed replacements above 262144 bytes (256 KiB) before
+any file operation, with an instruction to update the agent. Small writes keep
+working. Deploy the updated server and release/update the native agent for
+large machine-addressed writes; either rollout order is safe. No mutation is
+retried through the legacy path after a transfer has begun.
 An ambiguous acknowledgment triggers one read-only query of the exact operation,
 never a replay of the edit. A lost operation after agent restart remains unknown;
 inspect the destination before submitting another edit.
@@ -1366,12 +1502,17 @@ lost authority do not prove cleanup: private staging may remain until the link
 ends, and a process crash may leave an orphan. There is no automatic sweep or
 adoption of unknown transfers.
 
-The native implementation supports ordinary Linux and macOS APFS regular files
-with existing parent directories. It fails closed on unsupported symlinks, hard links,
+The native implementation supports ordinary Linux and macOS APFS regular files.
+Expected-absent creates honor `create_parents`: missing directories are created
+through pinned handles and remain after cancellation or failure; file publication
+is still atomic. Existing-base edits never create missing parents. It fails closed on unsupported symlinks, hard links,
 ownership, special modes, and extended metadata rather than silently discarding
 their semantics. Transactional editing does not implement `runAs` impersonation.
-macOS permits OS-generated provenance only when replacement preserves its exact
-bytes; extended ACLs, other attributes and inode flags remain unsupported.
+macOS leaves parent-directory ACLs and attributes untouched, including the standard
+home-directory ACL. The replacement inode keeps OS-assigned provenance; the old
+inode's provenance is not copied or required to match. Destination/staged-file
+ACLs, other file attributes and inode flags remain unsupported rather than being
+silently removed.
 Expected-base checks detect observed changes but are not a filesystem
 compare-and-swap against unrelated concurrent writers.
 

@@ -14,22 +14,17 @@ import {
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   currentSessionRlsActorIdentityKey,
-  getSessionAuthorityProjection,
-  getSessionAuthorizationTargetProjection,
-  getSession,
-  getSessionTurnForAttempt,
-  getSlackInteractionSessionAccessForSession,
+  currentSiteViewerRlsContext,
+  getSessionAuthorizationFacts,
   withSessionRlsActorContext,
   type Database,
+  type SessionAuthorizationFacts,
   type SessionRlsActorContext,
 } from "@opengeni/db";
 import type { AppDependencies } from "./dependencies";
-import {
-  currentSiteSessionOrigin,
-  siteOriginsMatch,
-  siteSessionOriginFromMetadata,
-} from "./site-session-origin";
+import { currentSiteSessionOrigin } from "./site-session-origin";
 import { siteAgentMayReachSession } from "./site-agent-clamp";
+import { isConsoleSiteSessionRequest, siteMayAccessSession } from "./site-session-access";
 
 export type SessionAuthorizationDependencies = Pick<AppDependencies, "db" | "sessionAuthorization">;
 
@@ -199,10 +194,6 @@ export function agentAccessListScopeForViewer(
   };
 }
 
-type ResolvedSessionAuthorizationTarget = {
-  target: SessionAuthorizationTarget;
-};
-
 /**
  * Whether a grant acts with live agent-attempt authority: an explicit
  * `agent_attempt` principal kind, or (for legacy tokens without one) any
@@ -237,6 +228,7 @@ export function sessionRlsActorForAuthorization(
     ? {
         subjectId: authorization.actor.subjectId,
         initiatingHumanSubjectId: authorization.actor.initiatingHumanSubjectId,
+        agentRootSessionId: authorization.actor.callerRootSessionId,
       }
     : { subjectId: authorization.actor.subjectId };
 }
@@ -259,7 +251,11 @@ export async function requireLiveAgentAttemptAuthorization(
   callerSessionId: string,
 ): Promise<Extract<SessionAuthorizationActor, { kind: "agent_attempt" }>> {
   const reads = claimSessionAuthorizationReads();
-  const { actor } = await resolveSessionAuthorizationActor(db, grant, reads);
+  const claims = agentAttemptClaims(grant);
+  const facts = claims
+    ? await readSessionAuthorizationFacts(db, grant, claims.callerSessionId, claims, reads)
+    : null;
+  const { actor } = resolveSessionAuthorizationActor(grant, claims, facts);
   if (actor.kind !== "agent_attempt" || actor.callerSessionId !== callerSessionId) {
     throw new SessionAuthorizationDeniedError("caller_stale");
   }
@@ -289,18 +285,13 @@ export async function requireSessionAuthorization(
   const reads = claimSessionAuthorizationReads();
   const port = deps.sessionAuthorization;
   const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
-  // Callers can supply a transaction handle. Both reads open nested RLS
-  // savepoints, which must not race on the same PostgreSQL connection.
-  const slackAccess = await getSlackInteractionSessionAccessForSession(deps.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    sessionId: input.sessionId,
-  });
-  const authority = await getSessionAuthorityProjection(
-    deps.db,
-    grant.workspaceId,
-    input.sessionId,
-  );
+  const claims = agentAttemptClaims(grant);
+  // One scoped read returns the target's authority, its Slack ownership and,
+  // for an agent attempt, the caller session and its live turn. Every check
+  // below decides from these facts; none of them reads again.
+  const facts = await readSessionAuthorizationFacts(deps.db, grant, input.sessionId, claims, reads);
+  const authority = facts.target;
+  const slackAccess = authority?.slackAccess ?? null;
 
   // The projection is read under the caller's own RLS context, so a missing
   // session and one the caller may not see (another member's private session)
@@ -312,14 +303,36 @@ export async function requireSessionAuthorization(
     throw new SessionAuthorizationDeniedError("not_found");
   }
 
+  // Also enforce the durable Site audience for hosts using scoped (owner-role)
+  // databases. The request-local viewer proof is never taken from Site JSON.
+  if (authority?.siteAccessRootId) {
+    const viewer = currentSiteViewerRlsContext();
+    const actor = resolveSessionAuthorizationActor(grant, claims, facts).actor;
+    const allowed =
+      actor.kind === "agent_attempt"
+        ? (authority.siteOwnerSubjectId !== null &&
+            authority.siteOwnerSubjectId === actor.initiatingHumanSubjectId) ||
+          (actor.callerRootSessionId === authority.rootSessionId &&
+            authority.siteAccessRootId === authority.rootSessionId)
+        : authority.siteOwnerSubjectId === actor.subjectId ||
+          (actor.subjectId === `site:${authority.siteId}` &&
+            viewer?.siteId === authority.siteId &&
+            viewer.principal === authority.siteViewerPrincipal);
+    if (!allowed) throw new SessionAuthorizationDeniedError("not_found");
+  }
+
   // A request from a Site page (an HTTP frame request, or a tool the page
   // called) may act on a session only when that same Site, or for a frame
-  // without a published Site the same mounted frame, started it. Anything
+  // without a published Site the same mounted frame, started it, or the owner
+  // explicitly allowed it in this console Site. Anything
   // else is indistinguishable from a missing session.
   const siteOrigin = currentSiteSessionOrigin();
-  if (siteOrigin && authority && !input.operation.endsWith(".read")) {
-    const session = await getSession(deps.db, grant.workspaceId, input.sessionId);
-    if (!siteOriginsMatch(siteOrigin, siteSessionOriginFromMetadata(session?.metadata)))
+  if (
+    siteOrigin &&
+    authority &&
+    (!input.operation.endsWith(".read") || isConsoleSiteSessionRequest())
+  ) {
+    if (!(await siteMayAccessSession(deps.db, grant, input.sessionId, siteOrigin)))
       throw new SessionAuthorizationDeniedError("not_found");
   }
 
@@ -335,15 +348,15 @@ export async function requireSessionAuthorization(
   }
   if (!authority) throw new SessionAuthorizationDeniedError("not_found");
 
-  const resolvedActor = await resolveSessionAuthorizationActor(deps.db, grant, reads);
-  const resolvedTarget = await resolveSessionAuthorizationTarget(
-    deps.db,
-    grant,
-    input.sessionId,
-    reads,
-  );
+  const resolvedActor = resolveSessionAuthorizationActor(grant, claims, facts);
+  if (authority.accountId !== grant.accountId) {
+    throw new SessionAuthorizationDeniedError("not_found");
+  }
   const actor = resolvedActor.actor;
-  const target = resolvedTarget.target;
+  const target: SessionAuthorizationTarget = {
+    sessionId: authority.sessionId,
+    rootSessionId: authority.rootSessionId,
+  };
   const agentRelatedSessionAccess =
     actor.kind === "agent_attempt"
       ? relatedSessionAccessForAgentAttempt(actor, target.sessionId)
@@ -462,7 +475,11 @@ export async function requireSessionAuthorizationListScope(
   const port = deps.sessionAuthorization;
   const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
   if (!port && !isAgentAttempt) return null;
-  const { actor, callerAccess } = await resolveSessionAuthorizationActor(deps.db, grant, reads);
+  const claims = agentAttemptClaims(grant);
+  const facts = claims
+    ? await readSessionAuthorizationFacts(deps.db, grant, claims.callerSessionId, claims, reads)
+    : null;
+  const { actor, callerAccess } = resolveSessionAuthorizationActor(grant, claims, facts);
   // Standalone agents retain compact workspace discovery only while the signed
   // caller attempt is still the exact live attempt, and only within their own
   // declared agent-access reach (migration 0427). The viewer is derived from
@@ -504,36 +521,72 @@ export async function requireSessionAuthorizationListScope(
   return viewer ? agentAccessListScopeForViewer(viewer, hostScope) : hostScope;
 }
 
-async function resolveSessionAuthorizationTarget(
-  db: Database,
-  grant: AccessGrant,
-  sessionId: string,
-  reads: SessionAuthorizationReads | null,
-): Promise<ResolvedSessionAuthorizationTarget> {
-  const session = await reusableAuthorizationRead(
-    reads,
-    db,
-    ["target-identity", grant.workspaceId, sessionId],
-    () => getSessionAuthorizationTargetProjection(db, grant.workspaceId, sessionId),
-  );
-  if (!session || session.accountId !== grant.accountId) {
-    throw new SessionAuthorizationDeniedError("not_found");
-  }
-  return {
-    target: { sessionId: session.id, rootSessionId: session.rootSessionId },
-  };
-}
-async function resolveSessionAuthorizationActor(
-  db: Database,
-  grant: AccessGrant,
-  reads: SessionAuthorizationReads | null,
-): Promise<ResolvedSessionAuthorizationActor> {
+type AgentAttemptClaims = {
+  callerSessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+};
+
+/**
+ * The signed attempt claims of an agent-attempt grant, or null for any other
+ * principal and for malformed claims (which the actor check then refuses).
+ */
+function agentAttemptClaims(grant: AccessGrant): AgentAttemptClaims | null {
+  if (!grantHasAgentAttemptAuthority(grant)) return null;
   const callerSessionId = grant.metadata?.["sessionId"];
   const turnId = grant.metadata?.["turnId"];
   const attemptId = grant.metadata?.["attemptId"];
   const executionGeneration = grant.metadata?.["executionGeneration"];
-  const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
-  if (!isAgentAttempt) {
+  if (
+    typeof callerSessionId !== "string" ||
+    typeof turnId !== "string" ||
+    typeof attemptId !== "string" ||
+    typeof executionGeneration !== "number" ||
+    !Number.isSafeInteger(executionGeneration) ||
+    executionGeneration < 1
+  ) {
+    return null;
+  }
+  return { callerSessionId, turnId, attemptId, executionGeneration };
+}
+
+async function readSessionAuthorizationFacts(
+  db: Database,
+  grant: AccessGrant,
+  sessionId: string,
+  claims: AgentAttemptClaims | null,
+  reads: SessionAuthorizationReads | null,
+): Promise<SessionAuthorizationFacts> {
+  return await reusableAuthorizationRead(
+    reads,
+    db,
+    [
+      "authorization-facts",
+      grant.accountId,
+      grant.workspaceId,
+      sessionId,
+      claims?.callerSessionId ?? "",
+      claims?.attemptId ?? "",
+    ],
+    () =>
+      getSessionAuthorizationFacts(db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId,
+        caller: claims
+          ? { sessionId: claims.callerSessionId, attemptId: claims.attemptId }
+          : undefined,
+      }),
+  );
+}
+
+function resolveSessionAuthorizationActor(
+  grant: AccessGrant,
+  claims: AgentAttemptClaims | null,
+  facts: SessionAuthorizationFacts | null,
+): ResolvedSessionAuthorizationActor {
+  if (!grantHasAgentAttemptAuthority(grant)) {
     return {
       actor: SessionAuthorizationActor.parse({
         kind: "subject",
@@ -544,36 +597,15 @@ async function resolveSessionAuthorizationActor(
       callerAccess: null,
     };
   }
+  const callerSession = facts?.caller?.session ?? null;
+  const turn = facts?.caller?.turn ?? null;
   if (
-    typeof callerSessionId !== "string" ||
-    typeof turnId !== "string" ||
-    typeof attemptId !== "string" ||
-    typeof executionGeneration !== "number" ||
-    !Number.isSafeInteger(executionGeneration) ||
-    executionGeneration < 1
-  ) {
-    throw new SessionAuthorizationDeniedError("caller_stale");
-  }
-  // These scoped reads can also open nested savepoints on a transaction handle.
-  const callerSession = await reusableAuthorizationRead(
-    reads,
-    db,
-    ["session", grant.workspaceId, callerSessionId],
-    () => getSession(db, grant.workspaceId, callerSessionId),
-  );
-  const turn = await reusableAuthorizationRead(
-    reads,
-    db,
-    ["turn", grant.workspaceId, callerSessionId, attemptId],
-    () => getSessionTurnForAttempt(db, grant.workspaceId, callerSessionId, attemptId),
-  );
-  if (
+    !claims ||
     !callerSession ||
     callerSession.accountId !== grant.accountId ||
     !turn ||
-    turn.id !== turnId ||
-    turn.executionGeneration !== executionGeneration ||
-    callerSession.activeTurnId !== turn.id
+    turn.id !== claims.turnId ||
+    turn.executionGeneration !== claims.executionGeneration
   ) {
     throw new SessionAuthorizationDeniedError("caller_stale");
   }
@@ -581,11 +613,11 @@ async function resolveSessionAuthorizationActor(
     actor: SessionAuthorizationActor.parse({
       kind: "agent_attempt",
       subjectId: grant.subjectId,
-      callerSessionId,
+      callerSessionId: claims.callerSessionId,
       callerRootSessionId: callerSession.rootSessionId,
-      turnId,
-      attemptId,
-      executionGeneration,
+      turnId: claims.turnId,
+      attemptId: claims.attemptId,
+      executionGeneration: claims.executionGeneration,
       initiator: turn.initiator,
       initiatorContext: turn.initiatorContext,
       initiatingHumanSubjectId:

@@ -11,6 +11,9 @@ import {
   relativeTimeLabel,
   sessionRepoLabel,
 } from "../src/session-list-model";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 const now = new Date("2026-10-03T12:00:00Z");
 
@@ -63,11 +66,11 @@ describe("session-list-model", () => {
   });
 
   test("relative time labels", () => {
-    expect(relativeTimeLabel("2026-10-03T11:59:30Z", now)).toBe("now");
-    expect(relativeTimeLabel("2026-10-03T11:55:00Z", now)).toBe("5m");
-    expect(relativeTimeLabel("2026-10-03T09:00:00Z", now)).toBe("3h");
-    expect(relativeTimeLabel("2026-10-01T12:00:00Z", now)).toBe("2d");
-    expect(relativeTimeLabel("not a date", now)).toBe("");
+    expect(relativeTimeLabel(englishText, "2026-10-03T11:59:30Z", now)).toBe("now");
+    expect(relativeTimeLabel(englishText, "2026-10-03T11:55:00Z", now)).toBe("5m");
+    expect(relativeTimeLabel(englishText, "2026-10-03T09:00:00Z", now)).toBe("3h");
+    expect(relativeTimeLabel(englishText, "2026-10-01T12:00:00Z", now)).toBe("2d");
+    expect(relativeTimeLabel(englishText, "not a date", now)).toBe("");
   });
 
   test("home order: pins, then running, then recency", () => {
@@ -75,15 +78,20 @@ describe("session-list-model", () => {
     const running = session("r", { status: "running", updatedAt: "2026-10-01T00:00:00Z" });
     const recent = session("a", { updatedAt: "2026-10-03T11:30:00Z" });
     const older = session("b", { updatedAt: "2026-09-01T00:00:00Z" });
-    const rows = recentSessionsForHome([older, pinned, recent, running], [pinned], 6, now);
+    const rows = recentSessionsForHome(
+      englishText,
+      [older, pinned, recent, running],
+      [pinned],
+      6,
+      now,
+    );
     expect(rows.map((row) => row.id)).toEqual(["p", "r", "a", "b"]);
     expect(
-      recentSessionsForHome([older, recent, running], [], 2, now).map((row) => row.id),
+      recentSessionsForHome(englishText, [older, recent, running], [], 2, now).map((row) => row.id),
     ).toEqual(["r", "a"]);
-    expect(groupSessionsForRail([older, recent], now).grouped.map((group) => group.label)).toEqual([
-      "Today",
-      "Older",
-    ]);
+    expect(
+      groupSessionsForRail(englishText, [older, recent], now).grouped.map((group) => group.label),
+    ).toEqual(["Today", "Older"]);
   });
 
   test("home leaves sub-agents to their parent, so they never crowd out conversations", () => {
@@ -97,7 +105,7 @@ describe("session-list-model", () => {
     );
     const pinnedAgent = session("pinned-agent", { pinned: true, parentSessionId: "mine" });
     expect(
-      recentSessionsForHome([...agents, mine, pinnedAgent], [pinnedAgent], 6, now).map(
+      recentSessionsForHome(englishText, [...agents, mine, pinnedAgent], [pinnedAgent], 6, now).map(
         (row) => row.id,
       ),
     ).toEqual(["mine"]);

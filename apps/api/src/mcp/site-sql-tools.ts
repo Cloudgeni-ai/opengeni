@@ -9,6 +9,8 @@ import {
   type AccessGrant,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { siteAgentClamp, siteViewerForGrant } from "@opengeni/core";
+import { isSiteWorkspaceMember } from "@opengeni/db";
 import * as z4 from "zod/v4";
 import { contractToolInput } from "./contract-input";
 import {
@@ -24,6 +26,12 @@ import {
   setSiteSqlSettings,
   SiteSqlError,
 } from "../site-sql/service";
+import {
+  SITE_AGENT_MANAGEMENT_MESSAGE,
+  SITE_AGENT_OTHER_SITE_MESSAGE,
+  type SiteAgentDataContext,
+  type SiteAgentDataResolution,
+} from "../site-publishing/agent-data-tools";
 
 type JsonResult = (value: unknown) => {
   content: Array<{ type: "text"; text: string }>;
@@ -47,6 +55,11 @@ const SITE_SQL_TOOL_EXPORT_MAX_BYTES = 2 * 1024 * 1024;
  * agent started from a Site page gets that page's reach (resolveSiteDataAccess):
  * every management tool refuses it, and site_sql_run runs only the named
  * queries the page itself could run, on that Site.
+ *
+ * A published Site's own agent (`siteAgent` resolves a Site context) gets
+ * `site_sql_run` as the conversation's viewer (audiences and `:viewer` as on
+ * the page) and, for workspace members, read-only `site_sql_query`; both are
+ * pinned to that Site and every other tool refuses it.
  */
 export function registerSiteSqlTools(
   server: McpServer,
@@ -54,12 +67,24 @@ export function registerSiteSqlTools(
   grant: AccessGrant,
   authorize: () => Promise<void>,
   json: JsonResult,
+  siteAgent?: () => Promise<SiteAgentDataResolution>,
 ): void {
   const call =
-    <A>(fn: (args: A) => Promise<unknown>) =>
+    <A extends { siteId: string }>(
+      fn: (args: A) => Promise<unknown>,
+      forSiteAgent?: (site: SiteAgentDataContext, args: A) => Promise<unknown>,
+    ) =>
     async (args: A) => {
       await authorize();
       try {
+        const site = siteAgent ? await siteAgent() : null;
+        if (site && site.kind !== "ordinary") {
+          if (site.kind === "refused") throw new SiteSqlError("forbidden", site.message);
+          if (!forSiteAgent) throw new SiteSqlError("forbidden", SITE_AGENT_MANAGEMENT_MESSAGE);
+          if (args.siteId !== site.siteId)
+            throw new SiteSqlError("forbidden", SITE_AGENT_OTHER_SITE_MESSAGE);
+          return json(await forSiteAgent(site, args));
+        }
         return json(await fn(args));
       } catch (error) {
         if (!(error instanceof SiteSqlError)) throw error;
@@ -186,13 +211,24 @@ export function registerSiteSqlTools(
       inputSchema: statementInput,
     },
     call(
-      (args: {
+      async (args: {
         siteId: string;
         sql: string;
         params?: Record<string, string | number | boolean | null> | undefined;
         maxRows?: number | undefined;
-      }) =>
-        runSiteSqlStatement(
+      }) => {
+        const clamp = await siteAgentClamp(deps.db, grant);
+        if (clamp?.clamped) {
+          const viewer = await siteViewerForGrant(deps.db, grant);
+          if (
+            clamp.originSiteIds.length !== 1 ||
+            clamp.originSiteIds[0] !== args.siteId ||
+            !viewer.subjectId ||
+            !(await isSiteWorkspaceMember(deps.db, grant, viewer.subjectId))
+          )
+            throw new SiteSqlError("forbidden", SITE_AGENT_OTHER_SITE_MESSAGE);
+        }
+        return await runSiteSqlStatement(
           deps,
           grant,
           args.siteId,
@@ -202,7 +238,29 @@ export function registerSiteSqlTools(
             ...(args.maxRows ? { maxRows: args.maxRows } : {}),
           },
           "read",
-        ),
+          { asSiteMember: clamp?.clamped === true },
+        );
+      },
+      async (site, args) => {
+        // Workspace members only, read-only, as that member.
+        if (site.viewerKind !== "member")
+          throw new SiteSqlError(
+            "forbidden",
+            "Only workspace members can query this Site's database through its assistant",
+          );
+        return await runSiteSqlStatement(
+          deps,
+          site.viewer,
+          site.siteId,
+          {
+            sql: args.sql,
+            ...(args.params ? { params: args.params } : {}),
+            ...(args.maxRows ? { maxRows: args.maxRows } : {}),
+          },
+          "read",
+          { asSiteMember: true },
+        );
+      },
     ),
   );
 
@@ -225,6 +283,26 @@ export function registerSiteSqlTools(
         name: string;
         params?: Record<string, string | number | boolean | null> | undefined;
       }) => runSiteSqlQuery(deps, grant, args.siteId, args.name, args.params ?? {}),
+      (site, args) =>
+        runSiteSqlQuery(
+          deps,
+          site.viewer,
+          site.siteId,
+          args.name,
+          args.params ?? {},
+          { frameSiteId: site.siteId },
+          {
+            profileKind: site.profileKind,
+            beforeWrite: async () => {
+              // Guests' write queries count against the guest write limit.
+              const wait = await site.guestWrite();
+              if (wait !== null)
+                throw new SiteSqlError("rate_limited", "Too many writes; try again shortly", {
+                  retryAfterSeconds: wait,
+                });
+            },
+          },
+        ),
     ),
   );
 

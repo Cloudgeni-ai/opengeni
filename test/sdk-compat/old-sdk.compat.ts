@@ -173,7 +173,12 @@ test(`published @opengeni/sdk ${VERSION} drives the embedding flow against curre
     },
   } as unknown as ApiRouteDeps;
   const app = createApp(deps);
-  server = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 60, fetch: app.fetch });
+  server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: Number(process.env.OPENGENI_SDK_COMPAT_PORT ?? 0),
+    idleTimeout: 60,
+    fetch: app.fetch,
+  });
   const baseUrl = `http://127.0.0.1:${server.port}`;
 
   const exchanges: ExchangeRecord[] = [];

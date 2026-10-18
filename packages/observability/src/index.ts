@@ -15,6 +15,13 @@ import {
 } from "./trace-context";
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
+import { projectErrorCauseAttributes } from "./error-cause";
+export {
+  errorCauseAttributes,
+  PUBLIC_ERROR_CAUSE_NAMES,
+  PUBLIC_INTERACTION_ERROR_CODES,
+  type ErrorCauseAttributes,
+} from "./error-cause";
 export type { FailureDiagnosticInput } from "./failure-diagnostic";
 export {
   AGENT_TOOL_CALL_OUTCOMES,
@@ -54,6 +61,13 @@ export {
   linkCurrentSpanToAdmission,
   type TraceContext,
 } from "./trace-context";
+export {
+  analyzeCpuSamples,
+  captureCpuSamplingProfile,
+  installCpuSamplingSignal,
+  type CpuSampleTrace,
+  type CpuSamplingSummary,
+} from "./cpu-sampling";
 
 export type AttributeValue = string | number | boolean | null | undefined;
 export type Attributes = Record<string, AttributeValue>;
@@ -276,6 +290,7 @@ const INTERACTION_OPERATION_REASONS = new Set([
   "unsupported",
   "permission_denied",
   "machine_locked",
+  "capacity_exhausted",
   "attempt_stale",
   "operation_conflict",
   "outcome_unknown",
@@ -406,12 +421,19 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "fullEvidenceAvailable",
   "retainedOutputKind",
   "suppressedCount",
+  // On-demand CPU profile summaries (cpu-sampling.ts): counts and durations.
+  "cpuProfileWindowMs",
+  "cpuProfileSamples",
+  "cpuProfileBusyMs",
+  "cpuProfileLongestBlockMs",
+  "cpuProfileBlocksOver100Ms",
 ]);
 
 /** Opaque correlation fields require both a reviewed name and a closed value
  * grammar. Merely adding one to the ordinary allow-list would let an unrelated
  * caller accidentally publish a raw identifier under that name. */
 const HTTP_REJECTION_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const CPU_PROFILE_FRAMES_PATTERN = /^[\w$<>()[\]:./@ |#*,-]{0,2000}$/;
 const HTTP_REJECTION_REASON_PATTERN =
   /^(?:permission:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*|control:[a-z][a-z0-9_]{0,31}|[A-Za-z][A-Za-z0-9_.-]{0,63})$/;
 
@@ -434,6 +456,12 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // enum and a code-registered workflow type name, never an identifier.
   ["sdkComponent", TEMPORAL_SDK_COMPONENT_PATTERN],
   ["workflowType", TEMPORAL_TYPE_NAME_PATTERN],
+  // CPU profile summaries: the report file under the temp directory, and
+  // sampled code locations (function names and bundle file:line:column,
+  // joined with counts and separators). Code identity, never request data.
+  ["cpuProfilePath", /^\/[\w./-]{1,255}$/],
+  ["cpuProfileTopSelf", CPU_PROFILE_FRAMES_PATTERN],
+  ["cpuProfileLongestBlockTopStack", CPU_PROFILE_FRAMES_PATTERN],
 ]);
 
 /**
@@ -471,6 +499,22 @@ const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
   "terminal.pty.write",
   "terminal.pty.resize",
   "terminal.pty.close",
+  "artifact.publish",
+  "browser.create",
+  "browser.resume",
+  "browser.suspend",
+  "browser.end",
+  "browser.read",
+  "browser.action",
+  "browser.control",
+  "browser.download.save",
+  "browser.attach",
+  "computer.create",
+  "computer.end",
+  "computer.read",
+  "computer.action",
+  "computer.control",
+  "computer.attach",
   "read",
   "mutation",
 ]);
@@ -670,6 +714,31 @@ export function createObservability(
   return new Observability(settings, options);
 }
 
+/**
+ * Default metrics whose collection walks the whole JavaScript heap on Bun.
+ * Bun answers `v8.getHeapSpaceStatistics()` from a full heap census, which
+ * blocks the event loop for hundreds of milliseconds on a busy process at
+ * every scrape, stalling every request in flight. The per-space split is
+ * V8-specific anyway; heap totals stay available from the cheap
+ * `nodejs_heap_size_*` and `process_heap_bytes` series.
+ */
+export const FULL_HEAP_WALK_DEFAULT_METRICS = [
+  "nodejs_heap_space_size_total_bytes",
+  "nodejs_heap_space_size_used_bytes",
+  "nodejs_heap_space_size_available_bytes",
+] as const;
+
+export function dropFullHeapWalkMetrics(
+  registry: Registry,
+  prefix: string,
+  runtime: { bun?: string | undefined } = process.versions,
+): void {
+  if (!runtime.bun) return;
+  for (const name of FULL_HEAP_WALK_DEFAULT_METRICS) {
+    registry.removeSingleMetric(`${prefix}${name}`);
+  }
+}
+
 type MetricRegistration = {
   kind: "counter" | "gauge" | "histogram";
   labelNames: string[];
@@ -732,6 +801,7 @@ export class Observability {
     });
     if (settings.observabilityMetricsEnabled) {
       collectDefaultMetrics({ register: this.registry, prefix: "opengeni_" });
+      dropFullHeapWalkMetrics(this.registry, "opengeni_");
       this.setGauge({
         name: "opengeni_build_info",
         help: "Opengeni build information.",
@@ -1765,6 +1835,7 @@ function projectHttpDiagnosticAttributes(attributes: Attributes): Attributes {
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(diagnosticId)
       ? { diagnosticId }
       : {}),
+    ...projectErrorCauseAttributes(attributes),
   };
 }
 
@@ -1813,6 +1884,7 @@ function projectPublicChannelADiagnosticAttributes(attributes: Attributes): Attr
     PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get("sandboxLeaseKey")?.test(sandboxLeaseKey)
       ? { sandboxLeaseKey }
       : {}),
+    ...projectErrorCauseAttributes(attributes),
   };
 }
 

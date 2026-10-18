@@ -74,7 +74,7 @@ pub async fn serve_op_start_scoped<P: Platform>(
     start: v1::OpStart,
 ) -> ControlResponse {
     serve_op_start_scoped_with_policy(
-        engine, platform, scope, publish, request_id, start, None, None,
+        engine, platform, scope, publish, request_id, start, None, None, None,
     )
     .await
 }
@@ -95,6 +95,7 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
     start: v1::OpStart,
     resource_policy: Option<v1::OperationResourcePolicy>,
     frame_subject: Option<String>,
+    completion_sink: Option<FrameSink>,
 ) -> ControlResponse {
     let mut exec = match extract_exec(&request_id, start.op) {
         Ok(exec) => exec,
@@ -146,7 +147,7 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
         || platform.spawn_exec_with_policy(&exec, resource_policy.as_ref()),
         frame_publisher(publish, request_id.clone()),
         |exit| wire_exit(exit).encode_to_vec(),
-        |_, _| {},
+        completion_publisher(completion_sink, request_id.clone()),
     );
 
     match outcome {
@@ -207,6 +208,7 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
                     detail: format!("spawn failed: {error}"),
                 }),
                 duration_ms: 0,
+                background_children_stopped: false,
                 stdout: empty_channel(),
                 stderr: empty_channel(),
             });
@@ -359,7 +361,20 @@ pub fn handle_op_ack(engine: &Arc<Engine>, ack: &v1::OpAck) {
     handle_op_ack_scoped(engine, "default", ack);
 }
 
-/// Multi-connection form of [`handle_op_ack`].
+/// Decode a notification-only receipt, never an output credit or final ACK.
+pub fn handle_completion_ack_scoped(engine: &Engine, scope: &str, payload: &[u8]) -> bool {
+    if let Ok(v1::AgentEventAck {
+        ack: Some(v1::agent_event_ack::Ack::OperationCompleted(ack)),
+    }) = v1::AgentEventAck::decode(payload)
+    {
+        engine.acknowledge_completion(scope, &ack.op_id);
+        true
+    } else {
+        false
+    }
+}
+
+/// Multi-connection output acknowledgement, independent of notification receipts.
 pub fn handle_op_ack_scoped(engine: &Arc<Engine>, scope: &str, ack: &v1::OpAck) {
     let op_id = scoped_op_id(scope, &ack.op_id);
     let routed = engine.route_command(
@@ -404,6 +419,32 @@ pub(crate) fn frame_publisher(
             body: Some(body),
         };
         publish(wire.encode_to_vec());
+    }
+}
+
+/// Publish terminal proof even when there is no output consumer or send credit.
+/// The bulk publisher retries retained, unacknowledged completions independently
+/// of frame credit; this immediate hook never acknowledges output.
+pub(crate) fn completion_publisher(
+    publish: Option<FrameSink>,
+    op_id: String,
+) -> impl FnOnce(Option<u64>, &JobExit) + Send + 'static {
+    move |_, exit| {
+        if let Some(publish) = publish {
+            publish(completion_event(op_id, exit).encode_to_vec());
+        }
+    }
+}
+
+pub(crate) fn completion_event(op_id: String, exit: &JobExit) -> v1::AgentEvent {
+    v1::AgentEvent {
+        agent_id: String::new(),
+        event: Some(v1::agent_event::Event::OperationCompleted(
+            v1::OperationCompleted {
+                op_id,
+                exit: Some(wire_exit(exit)),
+            },
+        )),
     }
 }
 
@@ -471,6 +512,7 @@ pub fn wire_exit(exit: &JobExit) -> v1::OpExit {
         timed_out: false,
         cancelled: false,
         duration_ms: exit.duration_ms,
+        background_children_stopped: exit.background_children_stopped,
         digests: [
             (
                 "stdout".to_string(),
@@ -875,6 +917,16 @@ mod tests {
             "wire digest proves byte-exact assembly"
         );
         assert_eq!(exit.totals.get("stdout"), Some(&4));
+        // No completion sink was supplied: even a completely lost immediate
+        // notification remains recoverable from this connection's retained truth.
+        let retry = rig.engine.retained_completions("default");
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].0, "op-1");
+        assert_eq!(wire_exit(&retry[0].1).exit_code, 3);
+        assert_eq!(
+            rig.engine.retained_completions("another-connection"),
+            vec![]
+        );
 
         // Query answers COMPLETE with the same record.
         let q = serve_op_query(
@@ -917,6 +969,19 @@ mod tests {
             1,
             "the command ran exactly once"
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_record_carries_native_child_cleanup_evidence() {
+        let rig = rig();
+        let response = rig
+            .start_exec("cleanup", "sleep 60 >/dev/null 2>&1 & printf done", 1 << 20)
+            .await;
+        assert!(started_status(&response).0);
+        let exit = rig.wait_for_exit_frame().await;
+        assert_eq!(exit.exit_code, 0);
+        assert!(exit.background_children_stopped);
+        assert_eq!(rig.stdout_bytes(), b"done");
     }
 
     #[tokio::test]
@@ -1028,6 +1093,7 @@ mod tests {
                 .route_command(&op, JobCommand::Detach { completed: None }),
             "pump ended after the final ack"
         );
+        assert_eq!(rig.engine.retained_completions("default"), vec![]);
         assert!(matches!(
             rig.engine.query(&op),
             QueryAnswer::Complete {
@@ -1091,6 +1157,7 @@ mod tests {
                 retained_bytes: 12345,
             }),
             duration_ms: 7,
+            background_children_stopped: false,
             stdout: empty_channel(),
             stderr: empty_channel(),
         };
@@ -1104,6 +1171,85 @@ mod tests {
         );
         assert!(!wire.timed_out);
         assert!(!wire.cancelled);
+    }
+
+    #[tokio::test]
+    async fn detached_operation_pushes_completion_without_output_attachment() {
+        let rig = rig();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let completion_sink: FrameSink = Arc::new(move |bytes| {
+            tx.send(v1::AgentEvent::decode(bytes.as_slice()).expect("completion event"))
+                .expect("completion receiver");
+        });
+        let response = serve_op_start_scoped_with_policy(
+            &rig.engine,
+            &rig.platform,
+            "default",
+            rig.sink(),
+            "detached-exit".into(),
+            v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                    command: vec!["sleep 30".into()],
+                    shell: true,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            None,
+            None,
+            Some(completion_sink),
+        )
+        .await;
+        assert!(started_status(&response).0);
+        let id = scoped_op_id("default", "detached-exit");
+        assert!(rig
+            .engine
+            .route_command(&id, JobCommand::Detach { completed: None }));
+        serve_op_cancel_scoped(
+            &rig.engine,
+            "default",
+            "cancel".into(),
+            &v1::OpCancel {
+                op_id: "detached-exit".into(),
+            },
+        );
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("completion is pushed promptly")
+            .expect("event");
+        let Some(v1::agent_event::Event::OperationCompleted(completed)) = event.event else {
+            panic!("not a completion event");
+        };
+        assert_eq!(completed.op_id, "detached-exit");
+        assert!(completed.exit.expect("terminal proof").cancelled);
+        assert!(rx.try_recv().is_err(), "one terminal event only");
+        // Lifecycle publication does not release retained output.
+        assert!(rig.engine.handles(&id).is_some());
+    }
+
+    #[test]
+    fn completion_publication_does_not_require_a_retained_exit_frame() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let sink: FrameSink = Arc::new(move |bytes| captured.lock().unwrap().push(bytes));
+        completion_publisher(Some(sink), "overflow".into())(
+            None,
+            &JobExit {
+                outcome: JobOutcome::Failed(JobFailure::Overflow {
+                    retained_bytes: 12345,
+                }),
+                duration_ms: 7,
+                background_children_stopped: false,
+                stdout: empty_channel(),
+                stderr: empty_channel(),
+            },
+        );
+        let events = events.lock().unwrap();
+        let event = v1::AgentEvent::decode(events[0].as_slice()).unwrap();
+        let Some(v1::agent_event::Event::OperationCompleted(completed)) = event.event else {
+            panic!("not a completion event");
+        };
+        assert_eq!(completed.exit.unwrap().failure_code, "OP_OVERFLOW");
     }
 
     #[test]

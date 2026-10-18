@@ -47,7 +47,6 @@ import {
   getAttachedBrowserDevice,
   getComputerSessionControlRecord,
   getLiveEnrollmentConnection,
-  getSandbox,
   getSession,
   listComputerSessions,
   prepareComputerSessionCreate,
@@ -55,16 +54,21 @@ import {
   releaseLeaseHolder,
   readLease,
   recordLeaseControllerDataPlaneUrl,
+  readActiveSandbox,
   terminalizeStaleConnectedInteractionPlacement,
   touchComputerSessionController,
   type ComputerSessionControlRecord,
+  type EnrollmentRecord,
   type LeaseSnapshot,
 } from "@opengeni/db";
 import {
   hasPermission,
   requireAccessGrant,
   requireSessionAuthorization,
+  withSessionAuthorizationReadReuse,
   relayConfigFromSettings,
+  resolveChannelAMachineConnection,
+  getChannelAMachineSandbox,
   resolveSessionSandboxRuntime,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
@@ -100,6 +104,10 @@ import {
   deriveComputerSessionControllerTokens,
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
+import {
+  retireFormerPlacementControllers,
+  retireSourceFormerPlacements,
+} from "../former-placement-retirement";
 import { connectedMachineComputerAccessError } from "../connected-machine-computer-access";
 import {
   controllerCacheAllowsHostFetch,
@@ -107,11 +115,17 @@ import {
   shouldPersistControllerDataPlaneUrl,
   withCachedController,
 } from "../controller-data-plane";
-import { filterInteractionSessionsForGrant } from "../interaction-agent-access";
+import {
+  filterInteractionSessionsForGrant,
+  parseInteractionSessionListQuery,
+} from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { ApiHttpError } from "../http/api-error";
-import { interactionControlApiError } from "../http/interaction-control-error";
+import {
+  interactionControlApiError,
+  legacyInteractionCapacityError,
+} from "../http/interaction-control-error";
 import {
   createInteractionFrameProxyAttachment,
   placementUsesInteractionFrameProxy,
@@ -121,9 +135,17 @@ import {
   observeComputerFrameEvidenceMismatch,
   observeLifecycleResult,
 } from "../interaction-metrics";
-import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
+import {
+  withChannelA,
+  withChannelARead,
+  type ChannelAHandle,
+  type ChannelAOperation,
+} from "../sandbox/channel-a";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
-import { wrongInteractionPlacementMessage } from "./interaction-placement-message";
+import {
+  wrongInteractionPlacementMessage,
+  wrongPlacementInsteadOfOffline,
+} from "./interaction-placement-message";
 import {
   collectStringsDeep,
   resolveInteractionSecretValues,
@@ -139,6 +161,14 @@ type ComputerPlacement = {
   /** Current placement consent, separate from passive viewing authority. */
   screenControlAllowed?: boolean;
 };
+
+type ActiveComputerControllerCallback<T> = (input: {
+  client: BrowserControlClient;
+  sessionClient: ReturnType<BrowserControlClient["computerSessionClient"]>;
+  record: ComputerSessionControlRecord;
+  binding: NonNullable<ComputerSessionControlRecord["session"]["controller"]>;
+  placement: ComputerPlacement;
+}) => Promise<T>;
 
 const MODEL_COMPUTER_FRAME_MAX_BYTES = 256 * 1024;
 
@@ -232,6 +262,7 @@ export function registerComputerSessionRoutes(
     const listed = await listComputerSessions(deps.db, {
       accountId: grant.accountId,
       workspaceId,
+      ...parseInteractionSessionListQuery(context.req.query()),
     });
     return context.json(
       ComputerSessionListResponse.parse({
@@ -993,6 +1024,30 @@ export function registerComputerSessionRoutes(
           computerSessionId,
         });
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
+        if (
+          before.session.lifecycle === "lost" &&
+          before.session.failureCode === "source_placement_changed" &&
+          before.session.controller &&
+          before.session.placement.kind === "connected_machine"
+        ) {
+          // The task moved away, so its route no longer reaches the machine
+          // this Desktop controller still runs on. Stop it there first; the
+          // end below then has no controller left to reach.
+          const retirement = await retireFormerPlacementControllers(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            connectedSandboxId: before.session.placement.sandboxId,
+            browserSessionIds: [],
+            computerSessionIds: [computerSessionId],
+            origin,
+            waitSignal: context.req.raw.signal,
+          });
+          if (retirement.remaining.length > 0) {
+            throw new ComputerSessionStateError(
+              "This computer session still runs on the Connected Machine its task moved away from, and that machine could not stop it now. Try again when the machine is online.",
+            );
+          }
+        }
         if (before.session.controller) controllerAuthorityRoot(deps);
         const prepared = await prepareComputerSessionEnd(deps.db, {
           accountId: grant.accountId,
@@ -1112,6 +1167,39 @@ export function registerComputerSessionRoutes(
     },
   );
 
+  async function routedMachineConnection(
+    handle: ChannelAHandle,
+    grant: AccessGrant,
+    sourceSession: Session,
+    sandboxId: string,
+  ): Promise<EnrollmentRecord | null> {
+    const machineAuthority = await handle.machineAuthority();
+    const sandbox = await getChannelAMachineSandbox(
+      deps.db,
+      {
+        accountId: grant.accountId,
+        workspaceId: sourceSession.workspaceId,
+        sessionId: sourceSession.id,
+      },
+      machineAuthority,
+      sandboxId,
+    );
+    if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
+      throw new ComputerSessionStateError("Connected Machine placement is unavailable");
+    }
+    return await resolveChannelAMachineConnection(
+      deps.db,
+      {
+        accountId: grant.accountId,
+        workspaceId: sourceSession.workspaceId,
+        sessionId: sourceSession.id,
+        machineWorkspaceId: sandbox.workspaceId,
+        enrollmentId: sandbox.enrollmentId,
+      },
+      machineAuthority,
+    );
+  }
+
   async function withComputerPlacement<T>(
     sourceSession: Session,
     grant: AccessGrant,
@@ -1169,6 +1257,9 @@ export function registerComputerSessionRoutes(
           enrollment.agentCapabilities.operationResourcePolicy === true,
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+        transactionalFsWriteMachineSupported:
+          enrollment.agentCapabilities.transactionalFsWriteMachine === true,
+        browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection
@@ -1197,119 +1288,140 @@ export function registerComputerSessionRoutes(
       operation === "computer.attach"
         ? withChannelARead
         : withChannelA;
-    return await runWithChannelA(
-      channelServices,
-      {
-        accountId: grant.accountId,
-        workspaceId: sourceSession.workspaceId,
-        session: sourceSession,
-        subjectId: grant.subjectId,
-        grant,
-        waitSignal,
-        operation,
-        retryControllerTransport: operation === "computer.read" || operation === "computer.action",
-        ...(expectedPlacementInstanceId && expectedPlacement?.kind === "sandbox_group"
-          ? { retainedInstanceId: expectedPlacementInstanceId }
-          : {}),
-      },
-      async (handle) => {
-        if (expectedPlacement?.kind === "sandbox_group") {
-          if (
-            sourceSession.sandboxGroupId !== expectedPlacement.sandboxGroupId ||
-            !handle.lease?.instanceId
-          ) {
-            throw new ComputerSessionStateError("ComputerSession home placement is unavailable");
-          }
-          assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
-          return await callback({
-            placement: expectedPlacement,
-            placementInstanceId: handle.lease.instanceId,
-            session: handle.homeSession,
-            lease: handle.lease,
-          });
-        }
-
-        const resolved = await handle.routingSession.prime();
-        let screenControlAllowed = false;
-        if (operation !== "computer.end" && resolved.kind === "selfhosted" && resolved.sandboxId) {
-          const sandbox = await getSandbox(deps.db, grant, resolved.sandboxId);
-          if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
-            throw new ComputerSessionStateError("Connected Machine placement is unavailable");
-          }
-          const enrollment = await getLiveEnrollmentConnection(
-            deps.db,
-            grant,
-            sandbox.enrollmentId,
-          );
-          if (!enrollment?.connectionInstanceId) {
-            throw new ComputerSessionStateError("Connected Machine is unavailable");
-          }
-          assertConnectedMachineComputerAccess(enrollment, operation);
-          screenControlAllowed = enrollment.allowScreenControl === true;
-        }
-        if (expectedPlacement?.kind === "connected_machine") {
-          if (
-            resolved.kind !== "selfhosted" ||
-            resolved.sandboxId !== expectedPlacement.sandboxId
-          ) {
-            if (operation === "computer.create") {
-              throw new HTTPException(422, {
-                message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
-              });
+    try {
+      return await runWithChannelA(
+        channelServices,
+        {
+          accountId: grant.accountId,
+          workspaceId: sourceSession.workspaceId,
+          session: sourceSession,
+          subjectId: grant.subjectId,
+          grant,
+          waitSignal,
+          operation,
+          retryControllerTransport:
+            operation === "computer.read" || operation === "computer.action",
+          ...(expectedPlacementInstanceId && expectedPlacement?.kind === "sandbox_group"
+            ? { retainedInstanceId: expectedPlacementInstanceId }
+            : {}),
+        },
+        async (handle) => {
+          if (expectedPlacement?.kind === "sandbox_group") {
+            if (
+              sourceSession.sandboxGroupId !== expectedPlacement.sandboxGroupId ||
+              !handle.lease?.instanceId
+            ) {
+              throw new ComputerSessionStateError("ComputerSession home placement is unavailable");
             }
-            return await throwComputerSourcePlacementChanged(
-              grant,
-              sourceSession.id,
-              expectedPlacement.sandboxId,
-            );
+            assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
+            return await callback({
+              placement: expectedPlacement,
+              placementInstanceId: handle.lease.instanceId,
+              session: handle.homeSession,
+              lease: handle.lease,
+            });
           }
-          const placementInstanceId = resolved.providerInstanceId ?? expectedPlacement.sandboxId;
-          assertPlacementInstance(expectedPlacementInstanceId, placementInstanceId);
-          return await callback({
-            placement: expectedPlacement,
-            placementInstanceId,
-            session: resolved.session as unknown as BrowserControlPlacementSession,
-            lease: null,
-            screenControlAllowed,
-          });
-        }
-        if (resolved.sandboxId === null) {
-          if (!handle.lease?.instanceId) {
-            throw new ComputerSessionStateError("ComputerSession home placement is unavailable");
+
+          const resolved = await handle.routingSession.prime();
+          // A request for another machine than the one this chat is routed to
+          // says so, before anything about the routed machine's own desktop.
+          if (expectedPlacement?.kind === "connected_machine") {
+            if (
+              resolved.kind !== "selfhosted" ||
+              resolved.sandboxId !== expectedPlacement.sandboxId
+            ) {
+              if (operation === "computer.create") {
+                throw new HTTPException(422, {
+                  message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
+                });
+              }
+              return await throwComputerSourcePlacementChanged(
+                grant,
+                sourceSession.id,
+                expectedPlacement.sandboxId,
+              );
+            }
           }
+          let screenControlAllowed = false;
           if (
-            resolved.providerInstanceId &&
-            resolved.providerInstanceId !== handle.lease.instanceId
+            operation !== "computer.end" &&
+            resolved.kind === "selfhosted" &&
+            resolved.sandboxId
           ) {
-            throw new ComputerSessionStateError("ComputerSession home placement fence changed");
+            // The request already resolved this machine's live runner when it
+            // pinned the route; otherwise look the routed machine up as the
+            // routing did: an agent acts for the person who started its turn, so
+            // a personal (Only me) machine stays reachable, subject to that
+            // attempt's per-chat permission.
+            const enrollment =
+              handle.pinnedMachine?.sandboxId === resolved.sandboxId
+                ? handle.pinnedMachine.enrollment
+                : await routedMachineConnection(handle, grant, sourceSession, resolved.sandboxId);
+            if (!enrollment?.connectionInstanceId) {
+              throw new ComputerSessionStateError("Connected Machine is unavailable");
+            }
+            assertConnectedMachineComputerAccess(enrollment, operation);
+            screenControlAllowed = enrollment.allowScreenControl === true;
           }
-          return await callback({
-            placement: {
-              kind: "sandbox_group",
-              sandboxGroupId: sourceSession.sandboxGroupId,
-            },
-            placementInstanceId: handle.lease.instanceId,
-            session: handle.homeSession,
-            lease: handle.lease,
-          });
-        }
-        if (resolved.kind === "selfhosted") {
-          return await callback({
-            placement: {
-              kind: "connected_machine",
-              sandboxId: resolved.sandboxId,
-            },
-            placementInstanceId: resolved.providerInstanceId ?? resolved.sandboxId,
-            session: resolved.session as unknown as BrowserControlPlacementSession,
-            lease: null,
-            screenControlAllowed,
-          });
-        }
-        throw new BrowserControlUnsupportedError(
-          "computer creation on a non-home provider sandbox is not supported",
-        );
-      },
-    );
+          if (expectedPlacement?.kind === "connected_machine") {
+            const placementInstanceId = resolved.providerInstanceId ?? expectedPlacement.sandboxId;
+            assertPlacementInstance(expectedPlacementInstanceId, placementInstanceId);
+            return await callback({
+              placement: expectedPlacement,
+              placementInstanceId,
+              session: resolved.session as unknown as BrowserControlPlacementSession,
+              lease: null,
+              screenControlAllowed,
+            });
+          }
+          if (resolved.sandboxId === null) {
+            if (!handle.lease?.instanceId) {
+              throw new ComputerSessionStateError("ComputerSession home placement is unavailable");
+            }
+            if (
+              resolved.providerInstanceId &&
+              resolved.providerInstanceId !== handle.lease.instanceId
+            ) {
+              throw new ComputerSessionStateError("ComputerSession home placement fence changed");
+            }
+            return await callback({
+              placement: {
+                kind: "sandbox_group",
+                sandboxGroupId: sourceSession.sandboxGroupId,
+              },
+              placementInstanceId: handle.lease.instanceId,
+              session: handle.homeSession,
+              lease: handle.lease,
+            });
+          }
+          if (resolved.kind === "selfhosted") {
+            return await callback({
+              placement: {
+                kind: "connected_machine",
+                sandboxId: resolved.sandboxId,
+              },
+              placementInstanceId: resolved.providerInstanceId ?? resolved.sandboxId,
+              session: resolved.session as unknown as BrowserControlPlacementSession,
+              lease: null,
+              screenControlAllowed,
+            });
+          }
+          throw new BrowserControlUnsupportedError(
+            "computer creation on a non-home provider sandbox is not supported",
+          );
+        },
+      );
+    } catch (error) {
+      if (operation !== "computer.create" || expectedPlacement?.kind !== "connected_machine")
+        throw error;
+      throw await wrongPlacementInsteadOfOffline(
+        error,
+        expectedPlacement.sandboxId,
+        async () =>
+          (await readActiveSandbox(deps.db, sourceSession.workspaceId, sourceSession.id))
+            ?.activeSandboxId ?? null,
+      );
+    }
   }
 
   function controllerOnlySession(url: string): BrowserControlPlacementSession {
@@ -1453,14 +1565,37 @@ export function registerComputerSessionRoutes(
     computerSessionId: string,
     authorizationOperation: SessionAuthorizationOperation,
     channelOperation: ChannelAOperation,
-    callback: (input: {
-      client: BrowserControlClient;
-      sessionClient: ReturnType<BrowserControlClient["computerSessionClient"]>;
-      record: ComputerSessionControlRecord;
-      binding: NonNullable<ComputerSessionControlRecord["session"]["controller"]>;
-      placement: ComputerPlacement;
-    }) => Promise<T>,
+    callback: ActiveComputerControllerCallback<T>,
     recoverMissing = true,
+  ): Promise<T> {
+    // The source-session check and the machine-route check that follows it
+    // prove the same live agent attempt; they share those reads. Everything
+    // from the controller call onward reads fresh.
+    return await withSessionAuthorizationReadReuse((authorizationReads) =>
+      withActiveComputerControllerReads(
+        context,
+        grant,
+        workspaceId,
+        computerSessionId,
+        authorizationOperation,
+        channelOperation,
+        callback,
+        recoverMissing,
+        authorizationReads,
+      ),
+    );
+  }
+
+  async function withActiveComputerControllerReads<T>(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    computerSessionId: string,
+    authorizationOperation: SessionAuthorizationOperation,
+    channelOperation: ChannelAOperation,
+    callback: ActiveComputerControllerCallback<T>,
+    recoverMissing: boolean,
+    authorizationReads: { handOffToToolDispatch(): void },
   ): Promise<T> {
     try {
       const record = await getComputerSessionControlRecord(deps.db, {
@@ -1468,11 +1603,20 @@ export function registerComputerSessionRoutes(
         workspaceId,
         computerSessionId,
       });
-      await authorizeSourceSession(deps, grant, record.sourceSessionId, authorizationOperation);
-      let sourceSession: Session | null = null;
+      // Only a cached managed controller can skip the source session; read it
+      // alongside authorization otherwise. A denial still wins.
+      const sourceSessionNeeded = record.session.placement?.kind !== "sandbox_group";
+      const [authorized, sourceRead] = await Promise.allSettled([
+        authorizeSourceSession(deps, grant, record.sourceSessionId, authorizationOperation),
+        sourceSessionNeeded
+          ? requireSourceSession(deps, workspaceId, record.sourceSessionId)
+          : Promise.resolve(null),
+      ]);
+      if (authorized.status === "rejected") throw authorized.reason;
+      if (sourceRead.status === "rejected") throw sourceRead.reason;
+      let sourceSession: Session | null = sourceRead.value;
       if (record.session.placement?.kind === "connected_machine") {
-        sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
-        if (sourceSession.activeSandboxId !== record.session.placement.sandboxId) {
+        if (sourceSession?.activeSandboxId !== record.session.placement.sandboxId) {
           return await throwComputerSourcePlacementChanged(
             grant,
             record.sourceSessionId,
@@ -1494,6 +1638,7 @@ export function registerComputerSessionRoutes(
         throw new ComputerSessionStateError("ComputerSession controller authority changed");
       }
       const run = async (placement: ComputerPlacement): Promise<T> => {
+        authorizationReads.handOffToToolDispatch();
         // The active controller binding is the provisioning fence. Live
         // input connects to it directly instead of re-ensuring the sidecar.
         const client = connectController(grant, record, placement);
@@ -1592,6 +1737,14 @@ export function registerComputerSessionRoutes(
       connectedSandboxId,
     });
     if (reconciliation.sourcePlacementChanged) {
+      // End what the move left running on its former machines without making
+      // this request wait for it. Earlier failed retirements of this task's
+      // resources are retried too; a failure leaves the binding for later.
+      void retireSourceFormerPlacements(channelServices, {
+        grant,
+        sourceSessionId,
+        origin: null,
+      });
       throw sourcePlacementChangedApiError("computer_session");
     }
     throw new ComputerSessionStateError(
@@ -2095,6 +2248,8 @@ function computerRouteError(error: unknown): HTTPException {
   ) {
     return new HTTPException(409, { message: error.message, cause: error });
   }
+  const legacyCapacity = legacyInteractionCapacityError(error, "computer");
+  if (legacyCapacity) return legacyCapacity;
   if (error instanceof BrowserControlRequestError) {
     return new HTTPException(error.status as ContentfulStatusCode, {
       message: error.error.message,

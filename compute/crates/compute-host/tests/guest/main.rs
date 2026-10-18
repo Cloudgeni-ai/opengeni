@@ -34,6 +34,8 @@ use tokio::time::{Instant, sleep};
 mod envd;
 #[path = "../support/required.rs"]
 mod required;
+#[path = "../support/state.rs"]
+mod state;
 
 use envd::{Envd, init};
 use required::skip;
@@ -155,7 +157,7 @@ impl Host {
             .join("t")
             .join(format!("g-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        state::private_dir(&root);
         let socket = root.join("agent.sock");
         let log = std::fs::File::create(root.join("agent.log")).unwrap();
         let profile = std::env::var("COMPUTE_TEST_PROFILE")

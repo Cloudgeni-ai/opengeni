@@ -201,9 +201,26 @@ describe("Bun canary publication boundary", () => {
         verifyCanarySourceBinding({ ...env, ...changed }, sha, "/source", "/source"),
       ).toThrow("must agree");
     }
-    expect(() => verifyCanarySourceBinding(env, sha, "/older-source", "/controller")).toThrow(
-      "must agree",
-    );
+    expect(() => verifyCanarySourceBinding(env, sha, "/source", "/controller")).not.toThrow();
+    const older = "b".repeat(40);
+    expect(() =>
+      verifyCanarySourceBinding(
+        { ...env, SOURCE_SHA: older },
+        older,
+        "/source",
+        "/controller",
+        sha,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      verifyCanarySourceBinding(
+        { ...env, SOURCE_SHA: older },
+        older,
+        "/controller",
+        "/controller",
+        sha,
+      ),
+    ).toThrow();
   });
 
   test("reads synthetic registry metadata and rejects malformed or occupied existing versions", async () => {

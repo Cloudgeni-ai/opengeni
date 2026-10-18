@@ -15,6 +15,7 @@ writeSessionBrowsePreferences(sessionBrowsePreferenceStorageId("rename-qa", work
   groupBy: "project",
   sortBy: "updatedAt",
   status: "active",
+  mineOnly: false,
   showEmptyGroups: true,
 });
 Object.assign(window, { renameQa: evidence });

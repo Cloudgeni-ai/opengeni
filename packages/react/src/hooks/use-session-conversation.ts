@@ -22,11 +22,23 @@ export type UseSessionConversationOptions = ClientOverride & {
    * Optional host context and notifications. The stock composer still owns
    * draft validation, annotations, retry identity, queueing and delivery.
    * File cleanup and upload blocking are composed with, not replaced by, these hooks.
+   *
+   * `busySend: "steer"` gives people one Send and nothing to learn: a message
+   * sent while the agent works is read as soon as it can, with no Queue
+   * choice beside Send and no Queue or Steer words (`offerQueue` brings the
+   * Queue choice back).
    */
   composerOptions?:
     | Pick<
         UseComposerOptions,
-        "sendExtras" | "sendBlocked" | "onSubmitted" | "onSent" | "onDeliveryError" | "initialDraft"
+        | "sendExtras"
+        | "sendBlocked"
+        | "onSubmitted"
+        | "onSent"
+        | "onDeliveryError"
+        | "initialDraft"
+        | "busySend"
+        | "offerQueue"
       >
     | undefined;
 };
@@ -83,8 +95,17 @@ export function useSessionConversation(
   const composer = useComposer(sessionId, {
     ...eventOptions,
     initialDraft: host?.initialDraft,
+    busySend: host?.busySend,
+    offerQueue: host?.offerQueue,
     effectiveControl: queue.effectiveControl ?? detail.session?.effectiveControl,
-    sendDestination: () => (queue.queue.length > 0 || status === "running" ? "queue" : "chat"),
+    // As in the console and the native screen: a turn that is still current
+    // (running, recovering or waiting for capacity) means a Send waits.
+    sendDestination: () =>
+      queue.queue.length > 0 ||
+      status === "running" ||
+      (detail.session?.activeTurnId ?? null) !== null
+        ? "queue"
+        : "chat",
     sendExtras: () => {
       const extras = resolveExtras();
       return {

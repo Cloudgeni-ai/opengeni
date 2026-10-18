@@ -67,21 +67,27 @@ export async function listConnectionsMetadata(
   subjectId?: string | null,
 ): Promise<ConnectionMetadataWithVerification[]> {
   return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select(connectionMetadataColumns)
-      .from(schema.connections)
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          connectionSubjectVisibility(subjectId),
-        ),
-      )
-      // Legacy rows can share created_at. UUID DESC is the immutable stable
-      // tie-breaker, so every caller that intentionally selects the first row
-      // collapses duplicates in the same documented direction.
-      .orderBy(desc(schema.connections.createdAt), desc(schema.connections.id));
-    return rows.map(mapConnectionMetadata);
+    return await listConnectionsMetadataInScope(scopedDb, workspaceId, subjectId);
   });
+}
+
+/** Internal reader for callers that already hold this workspace's RLS scope. */
+export async function listConnectionsMetadataInScope(
+  scopedDb: Database,
+  workspaceId: string,
+  subjectId?: string | null,
+): Promise<ConnectionMetadataWithVerification[]> {
+  const rows = await scopedDb
+    .select(connectionMetadataColumns)
+    .from(schema.connections)
+    .where(
+      and(eq(schema.connections.workspaceId, workspaceId), connectionSubjectVisibility(subjectId)),
+    )
+    // Legacy rows can share created_at. UUID DESC is the immutable stable
+    // tie-breaker, so every caller that intentionally selects the first row
+    // collapses duplicates in the same documented direction.
+    .orderBy(desc(schema.connections.createdAt), desc(schema.connections.id));
+  return rows.map(mapConnectionMetadata);
 }
 
 export async function getConnectionMetadata(

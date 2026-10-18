@@ -127,6 +127,48 @@ function fullAppWith(port: SessionAuthorizationPort): Hono {
   });
 }
 
+test("workspace commands use the live host list scope and reject malformed cursors", async () => {
+  if (!available || !shared) return;
+  const value = await fixture();
+  const ids = [value.root.id, value.hidden.id];
+  for (const sessionId of ids)
+    await shared.admin`insert into session_background_commands (
+    account_id, workspace_id, session_id, provider, control_workspace_id, enrollment_id,
+    connection_instance_id, op_id, command_preview
+  ) values (${value.grant.accountId}, ${value.grant.workspaceId}, ${sessionId}, 'connected_machine',
+    ${value.grant.workspaceId}, ${crypto.randomUUID()}, 'workspace-commands', ${crypto.randomUUID()}, 'bun run dev')`;
+  let allowed = true;
+  const app = fullAppWith({
+    authorizeSession: async () => ({ allowed: false, reason: "not_found" }),
+    resolveListScope: async () => ({
+      kind: "scoped",
+      rootSessionIds: [],
+      sessionIds: allowed ? [value.root.id] : [],
+    }),
+  });
+  const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    subjectId: value.grant.subjectId,
+    permissions: ["sessions:read"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })}`;
+  const path = `/v1/workspaces/${value.grant.workspaceId}/sessions?view=running_commands`;
+  const read = await app.request(path, { headers: { authorization } });
+  expect(read.status).toBe(200);
+  expect(
+    (await read.json()).commands.map((command: { sessionId: string }) => command.sessionId),
+  ).toEqual([value.root.id]);
+  allowed = false;
+  const revoked = await app.request(path, { headers: { authorization } });
+  expect(revoked.status).toBe(200);
+  expect(await revoked.json()).toEqual({ commands: [], nextCursor: null });
+  expect(
+    (await app.request(`${path}&cursor=external`, { headers: { authorization } })).status,
+  ).toBe(400);
+});
+
 async function callMcpTool<T>(
   server: unknown,
   name: string,

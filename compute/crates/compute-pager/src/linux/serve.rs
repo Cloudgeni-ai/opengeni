@@ -17,7 +17,7 @@
 //! a VM that has been awake for a while carries no pager at all.
 
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::MetadataExt;
@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use super::dir::Dir;
 use super::quiesce::AskVmm;
 use super::user::User;
 use super::{MAX_BATCH, Pager, Progress, poll};
@@ -236,15 +237,18 @@ fn run(options: &Options) -> io::Result<()> {
         .as_deref()
         .map(WakeProfile::load)
         .unwrap_or_default();
+    let (control, control_file) = bind(&options.control)?;
+    let (vmm, _vmm_file) = bind(&options.vmm_socket)?;
     let prepared = Prepared {
         source: crate::source::filled(&file, Arc::clone(&filling))?,
         profile,
-        quiesce: AskVmm::new(api_socket),
+        quiesce: AskVmm::new(&api_socket)?,
+        learned: options.learned.as_deref().map(Dir::of).transpose()?,
+        done: control_file.sibling("done"),
     };
-    let (control, _control_file) = bind(&options.control)?;
-    let (vmm, _vmm_file) = bind(&options.vmm_socket)?;
     // Everything a pager opens by name is open now, while it has one
-    // thread: from here on it is no more than the VM.
+    // thread: from here on it is no more than the VM, and names files only
+    // within the directories it opened (see `super::dir`).
     if let Some(user) = options.user {
         user.assume()?;
     }
@@ -277,17 +281,19 @@ fn run(options: &Options) -> io::Result<()> {
 
 /// Binds a listening socket at `path`, replacing a stale one.
 fn bind(path: &Path) -> io::Result<(UnixListener, Bound)> {
-    match fs::remove_file(path) {
+    let (dir, name) = Dir::of(path)?;
+    match dir.remove(&name) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
     let listener = UnixListener::bind(path)?;
-    let metadata = fs::symlink_metadata(path)?;
+    let identity = dir.identity(&name)?;
     Ok((
         listener,
         Bound {
-            path: path.to_owned(),
-            identity: (metadata.dev(), metadata.ino()),
+            dir,
+            name,
+            identity,
         },
     ))
 }
@@ -296,16 +302,28 @@ fn bind(path: &Path) -> io::Result<(UnixListener, Bound)> {
 /// pager has bound its own at the same path since: a pager left over from
 /// a restore that never finished may exit after the next one started.
 struct Bound {
-    path: PathBuf,
+    dir: Dir,
+    name: OsString,
     identity: (u64, u64),
+}
+
+impl Bound {
+    /// The file beside the socket with its name's extension `extension`,
+    /// in the same directory.
+    fn sibling(&self, extension: &str) -> (Dir, OsString) {
+        let name = Path::new(&self.name).with_extension(extension);
+        (self.dir.clone(), name.into_os_string())
+    }
 }
 
 impl Drop for Bound {
     fn drop(&mut self) {
-        let ours = fs::symlink_metadata(&self.path)
-            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == self.identity);
+        let ours = self
+            .dir
+            .identity(&self.name)
+            .is_ok_and(|identity| identity == self.identity);
         if ours {
-            let _ = fs::remove_file(&self.path);
+            let _ = self.dir.remove(&self.name);
         }
     }
 }
@@ -317,6 +335,10 @@ struct Prepared {
     /// The order to prefetch in.
     profile: WakeProfile,
     quiesce: AskVmm,
+    /// Where to write the order this wake learns.
+    learned: Option<(Dir, OsString)>,
+    /// The file whose presence says the pager finished.
+    done: (Dir, OsString),
 }
 
 fn serve(
@@ -352,6 +374,8 @@ fn serve(
         source,
         profile,
         quiesce,
+        learned: learned_file,
+        done,
     } = prepared;
     let mut pager =
         Pager::new(peer, source, options.record_for)?.finish_when_complete(Box::new(quiesce));
@@ -374,11 +398,11 @@ fn serve(
             filling.signal_tell();
         }
         Progress::Recorded(touched) => {
-            if let Some(path) = &options.learned {
+            if let Some((dir, name)) = &learned_file {
                 let learned = profile.learn(touched, page_size);
                 if let Err(error) = serde_json::to_vec(&learned)
                     .map_err(io::Error::other)
-                    .and_then(|bytes| write_atomic(path, &bytes))
+                    .and_then(|bytes| dir.write_atomic(name, &bytes))
                 {
                     eprintln!("pager: learned profile not written: {error}");
                 }
@@ -387,7 +411,7 @@ fn serve(
         Progress::Settled => {
             // Word for a host whose connection dropped just now, which
             // would otherwise take the pager's exit for its death.
-            if let Err(error) = fs::write(options.control.with_extension("done"), b"") {
+            if let Err(error) = done.0.touch(&done.1) {
                 eprintln!("pager: done not recorded: {error}");
             }
             status.done.store(true, Ordering::Release);
@@ -399,13 +423,6 @@ fn serve(
         serde_json::to_string(&pager.stats).unwrap_or_default()
     );
     result
-}
-
-/// Replaces `path` with `bytes` all at once.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let staging = path.with_extension("pager-tmp");
-    fs::write(&staging, bytes)?;
-    fs::rename(&staging, path)
 }
 
 /// What the pager tells every host that connects about itself.

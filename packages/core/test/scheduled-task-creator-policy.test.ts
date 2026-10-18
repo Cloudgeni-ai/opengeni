@@ -166,6 +166,20 @@ function origin(restricted: "turn" | "session" | "neither") {
 }
 
 describe("scheduled task frozen setup restriction", () => {
+  test("default-following creators do not freeze today's tool names or widen permissions", async () => {
+    const { session } = origin("neither");
+    session.toolPolicy.firstPartyMode = "workspace_default";
+    const policy = await frozen(undefined, actor);
+    expect(policy?.firstPartyMcpTools).toBeNull();
+    expect(policy?.firstPartyMcpPermissions).toEqual(["sessions:read", "scheduled_tasks:manage"]);
+  });
+
+  test("an explicitly empty selection stays empty", async () => {
+    const { session } = origin("neither");
+    session.firstPartyMcpTools = [];
+    expect((await frozen(undefined, actor))?.firstPartyMcpTools).toEqual([]);
+  });
+
   test.each(["raw", "service", "asUser"] as const)(
     "%s setup creates capture restriction without agent defaults",
     async (lane) => {
@@ -180,7 +194,7 @@ describe("scheduled task frozen setup restriction", () => {
         } as ApiKey & { credentialKind: "organization" }),
       );
       track(
-        spyOn(db, "requireWorkspace").mockResolvedValue({
+        spyOn(db, "getWorkspace").mockResolvedValue({
           id: workspaceId,
           accountId,
           kind: "shared",

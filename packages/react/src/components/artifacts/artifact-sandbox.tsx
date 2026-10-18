@@ -36,6 +36,13 @@ export type ArtifactSandboxProps = {
   connectedToolCount?: number | undefined;
   sourceFileCount?: number | undefined;
   fill?: boolean | undefined;
+  /**
+   * Control full screen from the host (for example from its URL). Omit to let
+   * the frame's own expand and back buttons manage it.
+   */
+  fullScreen?: boolean | undefined;
+  /** Called when the person expands the frame or leaves full screen. */
+  onFullScreenChange?: ((fullScreen: boolean) => void) | undefined;
 };
 
 /**
@@ -46,7 +53,12 @@ export type ArtifactSandboxProps = {
 export function ArtifactSandbox(props: ArtifactSandboxProps) {
   const labels = useArtifactLabels();
   const [reloadKey, setReloadKey] = useState(0);
-  const [focused, setFocused] = useState(false);
+  const [ownFocused, setOwnFocused] = useState(false);
+  const focused = props.fullScreen ?? ownFocused;
+  const setFocused = (next: boolean) => {
+    if (props.fullScreen === undefined) setOwnFocused(next);
+    props.onFullScreenChange?.(next);
+  };
   const frameRef = useRef<HTMLDialogElement>(null);
   const modalRef = useRef(false);
   useLayoutEffect(() => {
@@ -73,6 +85,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
       ref={frameRef}
       open
       aria-label={props.title}
+      data-artifact-fullscreen={focused || undefined}
       onCancel={(event) => {
         event.preventDefault();
         setFocused(false);
@@ -85,7 +98,10 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
           "fixed inset-0 z-50 flex h-dvh w-dvw flex-col rounded-none border-0 bg-surface shadow-none",
       )}
     >
-      <div className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4">
+      <div
+        data-window-drag={focused || undefined}
+        className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4"
+      >
         <div className="flex min-w-0 items-center gap-2.5">
           {focused ? (
             <ArtifactButton

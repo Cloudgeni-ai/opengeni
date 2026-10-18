@@ -815,7 +815,9 @@ export async function frozenScheduledTaskCreatorPolicy(input: {
   const scopeSubjectId = SessionScopeSubjectId.safeParse(projection["scopeSubjectId"]);
   const memoryScope = SessionMemoryScope.safeParse(projection["memoryScope"]);
   return {
-    firstPartyMcpTools,
+    // Defaults are intent, not today's resolved catalog. Explicit choices stay fixed.
+    firstPartyMcpTools:
+      session.toolPolicy.firstPartyMode === "workspace_default" ? null : firstPartyMcpTools,
     firstPartyMcpPermissions,
     ...(restricted ? { credentialRestriction: "developer_setup" as const } : {}),
     sessionPolicy: {

@@ -1108,7 +1108,22 @@ export interface Capabilities {
    * macOS desktop permissions (TCC), read without prompting. Present only on Mac
    * builds with desktop support; absence means unknown, never denied.
    */
-  macPermissions: MacDesktopPermissions | undefined;
+  macPermissions:
+    | MacDesktopPermissions
+    | undefined;
+  /**
+   * The runner serves BrowserControlHttpRequest / BrowserControlHttpReadRequest:
+   * one in-process loopback request to the agent-owned browser/computer
+   * controller of an exact authority scope. Absent/false runners keep the legacy
+   * path (a shell + curl command per controller request).
+   */
+  browserControlHttp: boolean;
+  /**
+   * Transactional uploads also accept epoch 0 for machine-addressed operations.
+   * Requires transactional_fs_write. Older runners require a nonzero session
+   * epoch; callers MUST NOT invent one for a machine-addressed operation.
+   */
+  transactionalFsWriteMachine: boolean;
 }
 
 /** The three macOS Privacy & Security grants desktop capture and input need. */
@@ -1330,6 +1345,8 @@ export interface ExecResponse {
   timedOut: boolean;
   /** Wall-clock duration the process ran. */
   durationMs: string;
+  /** Positive native evidence that normal shell-exit cleanup stopped live children. */
+  backgroundChildrenStopped: boolean;
 }
 
 export interface FsReadRequest {
@@ -1606,6 +1623,66 @@ export interface BrowserControlEnsureRequest {
 export interface BrowserControlEnsureResponse {
   port: number;
   sidecarGeneration: string;
+}
+
+/**
+ * Send one HTTP request to the agent-owned browser/computer controller that
+ * serves exactly `scope_id` at `scope_generation`, over loopback, inside the
+ * runner process. The runner resolves the port itself; the control plane never
+ * names an arbitrary local port. The bearer is the controller's own scoped
+ * authority and is forwarded only to that controller.
+ */
+export interface BrowserControlHttpRequest {
+  scopeId: string;
+  scopeGeneration: string;
+  /** GET, POST, PUT or DELETE. */
+  method: string;
+  /** Absolute controller path with optional query, beginning with "/". */
+  path: string;
+  /** Bearer token value, without the "Bearer " prefix. */
+  bearerToken: string;
+  /** JSON request body. Sent only when has_body is set. */
+  body: Uint8Array;
+  hasBody: boolean;
+  /** Whole-request deadline in milliseconds. */
+  timeoutMs: number;
+  /** Largest response body the caller accepts. Larger bodies fail the request. */
+  maxResponseBytes: string;
+}
+
+export interface BrowserControlHttpHeader {
+  /** Lowercase header name. */
+  name: string;
+  value: string;
+}
+
+export interface BrowserControlHttpResponse {
+  status: number;
+  headers: BrowserControlHttpHeader[];
+  /** The whole body, or its first part when spool_id is set. */
+  body: Uint8Array;
+  /** Exact length of the complete body. */
+  totalBytes: string;
+  /**
+   * Set when the complete body does not fit one reply. The remainder stays in a
+   * short-lived runner spool; read it with BrowserControlHttpReadRequest from
+   * offset len(body). The controller request itself is never repeated.
+   */
+  spoolId: string;
+}
+
+/**
+ * Read the next part of a spooled controller response. Reading the final part
+ * releases the spool entry; unread entries expire after a short bound.
+ */
+export interface BrowserControlHttpReadRequest {
+  spoolId: string;
+  offset: string;
+}
+
+export interface BrowserControlHttpReadResponse {
+  data: Uint8Array;
+  done: boolean;
 }
 
 /**
@@ -1983,6 +2060,7 @@ export interface OpExit {
    * IO error text, captured byte totals) — the out-of-band plane's food.
    */
   failureDetail: { [key: string]: string };
+  backgroundChildrenStopped: boolean;
 }
 
 export interface OpExit_DigestsEntry {
@@ -2252,6 +2330,8 @@ export interface ControlRequest {
     | { $case: "computerFramesOpen"; computerFramesOpen: ComputerFramesOpenRequest }
     | { $case: "agentUpdateApply"; agentUpdateApply: AgentUpdateApplyRequest }
     | { $case: "credentialRenew"; credentialRenew: CredentialRenewRequest }
+    | { $case: "browserControlHttp"; browserControlHttp: BrowserControlHttpRequest }
+    | { $case: "browserControlHttpRead"; browserControlHttpRead: BrowserControlHttpReadRequest }
     | undefined;
 }
 
@@ -2294,6 +2374,8 @@ export interface ControlResponse {
     | { $case: "computerFramesOpen"; computerFramesOpen: ComputerFramesOpenResponse }
     | { $case: "agentUpdateApply"; agentUpdateApply: AgentUpdateApplyResponse }
     | { $case: "credentialRenew"; credentialRenew: CredentialRenewResponse }
+    | { $case: "browserControlHttp"; browserControlHttp: BrowserControlHttpResponse }
+    | { $case: "browserControlHttpRead"; browserControlHttpRead: BrowserControlHttpReadResponse }
     | undefined;
 }
 
@@ -2315,15 +2397,38 @@ export interface HelloAck {
  */
 export interface AgentEvent {
   agentId: string;
-  event: { $case: "heartbeat"; heartbeat: Heartbeat } | { $case: "goingOffline"; goingOffline: GoingOffline } | {
-    $case: "agentUpdateProgress";
-    agentUpdateProgress: AgentUpdateProgress;
-  } | undefined;
+  event:
+    | { $case: "heartbeat"; heartbeat: Heartbeat }
+    | { $case: "goingOffline"; goingOffline: GoingOffline }
+    | { $case: "agentUpdateProgress"; agentUpdateProgress: AgentUpdateProgress }
+    | { $case: "operationCompleted"; operationCompleted: OperationCompleted }
+    | undefined;
+}
+
+/**
+ * Lifecycle proof, independent of output attachment, credit and final ACK.
+ * The authenticated events subject supplies the exact connection identity.
+ * Output remains retained and must still be collected through OpAttach.
+ */
+export interface OperationCompleted {
+  opId: string;
+  exit: OpExit | undefined;
 }
 
 /** The control plane's ack of an AgentEvent (e.g. a HeartbeatAck). */
 export interface AgentEventAck {
-  ack: { $case: "heartbeat"; heartbeat: HeartbeatAck } | undefined;
+  ack: { $case: "heartbeat"; heartbeat: HeartbeatAck } | {
+    $case: "operationCompleted";
+    operationCompleted: OperationCompletedAck;
+  } | undefined;
+}
+
+/**
+ * The server durably owns exit reconciliation. This acknowledges notification
+ * delivery only: it grants no output custody, credit, final ACK or collection.
+ */
+export interface OperationCompletedAck {
+  opId: string;
 }
 
 /**
@@ -2988,6 +3093,8 @@ function createBaseCapabilities(): Capabilities {
     transactionalFsWrite: false,
     credentialRenew: false,
     macPermissions: undefined,
+    browserControlHttp: false,
+    transactionalFsWriteMachine: false,
   };
 }
 
@@ -3040,6 +3147,12 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.macPermissions !== undefined) {
       MacDesktopPermissions.encode(message.macPermissions, writer.uint32(130).fork()).join();
+    }
+    if (message.browserControlHttp !== false) {
+      writer.uint32(136).bool(message.browserControlHttp);
+    }
+    if (message.transactionalFsWriteMachine !== false) {
+      writer.uint32(144).bool(message.transactionalFsWriteMachine);
     }
     return writer;
   },
@@ -3179,6 +3292,22 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.macPermissions = MacDesktopPermissions.decode(reader, reader.uint32());
           continue;
         }
+        case 17: {
+          if (tag !== 136) {
+            break;
+          }
+
+          message.browserControlHttp = reader.bool();
+          continue;
+        }
+        case 18: {
+          if (tag !== 144) {
+            break;
+          }
+
+          message.transactionalFsWriteMachine = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3246,6 +3375,16 @@ export const Capabilities: MessageFns<Capabilities> = {
         : isSet(object.mac_permissions)
         ? MacDesktopPermissions.fromJSON(object.mac_permissions)
         : undefined,
+      browserControlHttp: isSet(object.browserControlHttp)
+        ? globalThis.Boolean(object.browserControlHttp)
+        : isSet(object.browser_control_http)
+        ? globalThis.Boolean(object.browser_control_http)
+        : false,
+      transactionalFsWriteMachine: isSet(object.transactionalFsWriteMachine)
+        ? globalThis.Boolean(object.transactionalFsWriteMachine)
+        : isSet(object.transactional_fs_write_machine)
+        ? globalThis.Boolean(object.transactional_fs_write_machine)
+        : false,
     };
   },
 
@@ -3299,6 +3438,12 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.macPermissions !== undefined) {
       obj.macPermissions = MacDesktopPermissions.toJSON(message.macPermissions);
     }
+    if (message.browserControlHttp !== false) {
+      obj.browserControlHttp = message.browserControlHttp;
+    }
+    if (message.transactionalFsWriteMachine !== false) {
+      obj.transactionalFsWriteMachine = message.transactionalFsWriteMachine;
+    }
     return obj;
   },
 
@@ -3327,6 +3472,8 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.macPermissions = (object.macPermissions !== undefined && object.macPermissions !== null)
       ? MacDesktopPermissions.fromPartial(object.macPermissions)
       : undefined;
+    message.browserControlHttp = object.browserControlHttp ?? false;
+    message.transactionalFsWriteMachine = object.transactionalFsWriteMachine ?? false;
     return message;
   },
 };
@@ -5365,7 +5512,14 @@ export const ExecRequest_EnvEntry: MessageFns<ExecRequest_EnvEntry> = {
 };
 
 function createBaseExecResponse(): ExecResponse {
-  return { exitCode: 0, stdout: new Uint8Array(0), stderr: new Uint8Array(0), timedOut: false, durationMs: "0" };
+  return {
+    exitCode: 0,
+    stdout: new Uint8Array(0),
+    stderr: new Uint8Array(0),
+    timedOut: false,
+    durationMs: "0",
+    backgroundChildrenStopped: false,
+  };
 }
 
 export const ExecResponse: MessageFns<ExecResponse> = {
@@ -5384,6 +5538,9 @@ export const ExecResponse: MessageFns<ExecResponse> = {
     }
     if (message.durationMs !== "0") {
       writer.uint32(40).uint64(message.durationMs);
+    }
+    if (message.backgroundChildrenStopped !== false) {
+      writer.uint32(48).bool(message.backgroundChildrenStopped);
     }
     return writer;
   },
@@ -5435,6 +5592,14 @@ export const ExecResponse: MessageFns<ExecResponse> = {
           message.durationMs = reader.uint64().toString();
           continue;
         }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.backgroundChildrenStopped = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5463,6 +5628,11 @@ export const ExecResponse: MessageFns<ExecResponse> = {
         : isSet(object.duration_ms)
         ? globalThis.String(object.duration_ms)
         : "0",
+      backgroundChildrenStopped: isSet(object.backgroundChildrenStopped)
+        ? globalThis.Boolean(object.backgroundChildrenStopped)
+        : isSet(object.background_children_stopped)
+        ? globalThis.Boolean(object.background_children_stopped)
+        : false,
     };
   },
 
@@ -5483,6 +5653,9 @@ export const ExecResponse: MessageFns<ExecResponse> = {
     if (message.durationMs !== "0") {
       obj.durationMs = message.durationMs;
     }
+    if (message.backgroundChildrenStopped !== false) {
+      obj.backgroundChildrenStopped = message.backgroundChildrenStopped;
+    }
     return obj;
   },
 
@@ -5496,6 +5669,7 @@ export const ExecResponse: MessageFns<ExecResponse> = {
     message.stderr = object.stderr ?? new Uint8Array(0);
     message.timedOut = object.timedOut ?? false;
     message.durationMs = object.durationMs ?? "0";
+    message.backgroundChildrenStopped = object.backgroundChildrenStopped ?? false;
     return message;
   },
 };
@@ -8548,6 +8722,598 @@ export const BrowserControlEnsureResponse: MessageFns<BrowserControlEnsureRespon
     const message = createBaseBrowserControlEnsureResponse();
     message.port = object.port ?? 0;
     message.sidecarGeneration = object.sidecarGeneration ?? "";
+    return message;
+  },
+};
+
+function createBaseBrowserControlHttpRequest(): BrowserControlHttpRequest {
+  return {
+    scopeId: "",
+    scopeGeneration: "",
+    method: "",
+    path: "",
+    bearerToken: "",
+    body: new Uint8Array(0),
+    hasBody: false,
+    timeoutMs: 0,
+    maxResponseBytes: "0",
+  };
+}
+
+export const BrowserControlHttpRequest: MessageFns<BrowserControlHttpRequest> = {
+  encode(message: BrowserControlHttpRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scopeId !== "") {
+      writer.uint32(10).string(message.scopeId);
+    }
+    if (message.scopeGeneration !== "") {
+      writer.uint32(18).string(message.scopeGeneration);
+    }
+    if (message.method !== "") {
+      writer.uint32(26).string(message.method);
+    }
+    if (message.path !== "") {
+      writer.uint32(34).string(message.path);
+    }
+    if (message.bearerToken !== "") {
+      writer.uint32(42).string(message.bearerToken);
+    }
+    if (message.body.length !== 0) {
+      writer.uint32(50).bytes(message.body);
+    }
+    if (message.hasBody !== false) {
+      writer.uint32(56).bool(message.hasBody);
+    }
+    if (message.timeoutMs !== 0) {
+      writer.uint32(64).uint32(message.timeoutMs);
+    }
+    if (message.maxResponseBytes !== "0") {
+      writer.uint32(72).uint64(message.maxResponseBytes);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BrowserControlHttpRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBrowserControlHttpRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scopeId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.scopeGeneration = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.method = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.path = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.bearerToken = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.body = reader.bytes();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.hasBody = reader.bool();
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.timeoutMs = reader.uint32();
+          continue;
+        }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.maxResponseBytes = reader.uint64().toString();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): BrowserControlHttpRequest {
+    return {
+      scopeId: isSet(object.scopeId)
+        ? globalThis.String(object.scopeId)
+        : isSet(object.scope_id)
+        ? globalThis.String(object.scope_id)
+        : "",
+      scopeGeneration: isSet(object.scopeGeneration)
+        ? globalThis.String(object.scopeGeneration)
+        : isSet(object.scope_generation)
+        ? globalThis.String(object.scope_generation)
+        : "",
+      method: isSet(object.method) ? globalThis.String(object.method) : "",
+      path: isSet(object.path) ? globalThis.String(object.path) : "",
+      bearerToken: isSet(object.bearerToken)
+        ? globalThis.String(object.bearerToken)
+        : isSet(object.bearer_token)
+        ? globalThis.String(object.bearer_token)
+        : "",
+      body: isSet(object.body) ? bytesFromBase64(object.body) : new Uint8Array(0),
+      hasBody: isSet(object.hasBody)
+        ? globalThis.Boolean(object.hasBody)
+        : isSet(object.has_body)
+        ? globalThis.Boolean(object.has_body)
+        : false,
+      timeoutMs: isSet(object.timeoutMs)
+        ? globalThis.Number(object.timeoutMs)
+        : isSet(object.timeout_ms)
+        ? globalThis.Number(object.timeout_ms)
+        : 0,
+      maxResponseBytes: isSet(object.maxResponseBytes)
+        ? globalThis.String(object.maxResponseBytes)
+        : isSet(object.max_response_bytes)
+        ? globalThis.String(object.max_response_bytes)
+        : "0",
+    };
+  },
+
+  toJSON(message: BrowserControlHttpRequest): unknown {
+    const obj: any = {};
+    if (message.scopeId !== "") {
+      obj.scopeId = message.scopeId;
+    }
+    if (message.scopeGeneration !== "") {
+      obj.scopeGeneration = message.scopeGeneration;
+    }
+    if (message.method !== "") {
+      obj.method = message.method;
+    }
+    if (message.path !== "") {
+      obj.path = message.path;
+    }
+    if (message.bearerToken !== "") {
+      obj.bearerToken = message.bearerToken;
+    }
+    if (message.body.length !== 0) {
+      obj.body = base64FromBytes(message.body);
+    }
+    if (message.hasBody !== false) {
+      obj.hasBody = message.hasBody;
+    }
+    if (message.timeoutMs !== 0) {
+      obj.timeoutMs = Math.round(message.timeoutMs);
+    }
+    if (message.maxResponseBytes !== "0") {
+      obj.maxResponseBytes = message.maxResponseBytes;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<BrowserControlHttpRequest>, I>>(base?: I): BrowserControlHttpRequest {
+    return BrowserControlHttpRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<BrowserControlHttpRequest>, I>>(object: I): BrowserControlHttpRequest {
+    const message = createBaseBrowserControlHttpRequest();
+    message.scopeId = object.scopeId ?? "";
+    message.scopeGeneration = object.scopeGeneration ?? "";
+    message.method = object.method ?? "";
+    message.path = object.path ?? "";
+    message.bearerToken = object.bearerToken ?? "";
+    message.body = object.body ?? new Uint8Array(0);
+    message.hasBody = object.hasBody ?? false;
+    message.timeoutMs = object.timeoutMs ?? 0;
+    message.maxResponseBytes = object.maxResponseBytes ?? "0";
+    return message;
+  },
+};
+
+function createBaseBrowserControlHttpHeader(): BrowserControlHttpHeader {
+  return { name: "", value: "" };
+}
+
+export const BrowserControlHttpHeader: MessageFns<BrowserControlHttpHeader> = {
+  encode(message: BrowserControlHttpHeader, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.name !== "") {
+      writer.uint32(10).string(message.name);
+    }
+    if (message.value !== "") {
+      writer.uint32(18).string(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BrowserControlHttpHeader {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBrowserControlHttpHeader();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): BrowserControlHttpHeader {
+    return {
+      name: isSet(object.name) ? globalThis.String(object.name) : "",
+      value: isSet(object.value) ? globalThis.String(object.value) : "",
+    };
+  },
+
+  toJSON(message: BrowserControlHttpHeader): unknown {
+    const obj: any = {};
+    if (message.name !== "") {
+      obj.name = message.name;
+    }
+    if (message.value !== "") {
+      obj.value = message.value;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<BrowserControlHttpHeader>, I>>(base?: I): BrowserControlHttpHeader {
+    return BrowserControlHttpHeader.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<BrowserControlHttpHeader>, I>>(object: I): BrowserControlHttpHeader {
+    const message = createBaseBrowserControlHttpHeader();
+    message.name = object.name ?? "";
+    message.value = object.value ?? "";
+    return message;
+  },
+};
+
+function createBaseBrowserControlHttpResponse(): BrowserControlHttpResponse {
+  return { status: 0, headers: [], body: new Uint8Array(0), totalBytes: "0", spoolId: "" };
+}
+
+export const BrowserControlHttpResponse: MessageFns<BrowserControlHttpResponse> = {
+  encode(message: BrowserControlHttpResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.status !== 0) {
+      writer.uint32(8).uint32(message.status);
+    }
+    for (const v of message.headers) {
+      BrowserControlHttpHeader.encode(v!, writer.uint32(18).fork()).join();
+    }
+    if (message.body.length !== 0) {
+      writer.uint32(26).bytes(message.body);
+    }
+    if (message.totalBytes !== "0") {
+      writer.uint32(32).uint64(message.totalBytes);
+    }
+    if (message.spoolId !== "") {
+      writer.uint32(42).string(message.spoolId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BrowserControlHttpResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBrowserControlHttpResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.status = reader.uint32();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.headers.push(BrowserControlHttpHeader.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.body = reader.bytes();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.totalBytes = reader.uint64().toString();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.spoolId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): BrowserControlHttpResponse {
+    return {
+      status: isSet(object.status) ? globalThis.Number(object.status) : 0,
+      headers: globalThis.Array.isArray(object?.headers)
+        ? object.headers.map((e: any) => BrowserControlHttpHeader.fromJSON(e))
+        : [],
+      body: isSet(object.body) ? bytesFromBase64(object.body) : new Uint8Array(0),
+      totalBytes: isSet(object.totalBytes)
+        ? globalThis.String(object.totalBytes)
+        : isSet(object.total_bytes)
+        ? globalThis.String(object.total_bytes)
+        : "0",
+      spoolId: isSet(object.spoolId)
+        ? globalThis.String(object.spoolId)
+        : isSet(object.spool_id)
+        ? globalThis.String(object.spool_id)
+        : "",
+    };
+  },
+
+  toJSON(message: BrowserControlHttpResponse): unknown {
+    const obj: any = {};
+    if (message.status !== 0) {
+      obj.status = Math.round(message.status);
+    }
+    if (message.headers?.length) {
+      obj.headers = message.headers.map((e) => BrowserControlHttpHeader.toJSON(e));
+    }
+    if (message.body.length !== 0) {
+      obj.body = base64FromBytes(message.body);
+    }
+    if (message.totalBytes !== "0") {
+      obj.totalBytes = message.totalBytes;
+    }
+    if (message.spoolId !== "") {
+      obj.spoolId = message.spoolId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<BrowserControlHttpResponse>, I>>(base?: I): BrowserControlHttpResponse {
+    return BrowserControlHttpResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<BrowserControlHttpResponse>, I>>(object: I): BrowserControlHttpResponse {
+    const message = createBaseBrowserControlHttpResponse();
+    message.status = object.status ?? 0;
+    message.headers = object.headers?.map((e) => BrowserControlHttpHeader.fromPartial(e)) || [];
+    message.body = object.body ?? new Uint8Array(0);
+    message.totalBytes = object.totalBytes ?? "0";
+    message.spoolId = object.spoolId ?? "";
+    return message;
+  },
+};
+
+function createBaseBrowserControlHttpReadRequest(): BrowserControlHttpReadRequest {
+  return { spoolId: "", offset: "0" };
+}
+
+export const BrowserControlHttpReadRequest: MessageFns<BrowserControlHttpReadRequest> = {
+  encode(message: BrowserControlHttpReadRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.spoolId !== "") {
+      writer.uint32(10).string(message.spoolId);
+    }
+    if (message.offset !== "0") {
+      writer.uint32(16).uint64(message.offset);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BrowserControlHttpReadRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBrowserControlHttpReadRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.spoolId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.offset = reader.uint64().toString();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): BrowserControlHttpReadRequest {
+    return {
+      spoolId: isSet(object.spoolId)
+        ? globalThis.String(object.spoolId)
+        : isSet(object.spool_id)
+        ? globalThis.String(object.spool_id)
+        : "",
+      offset: isSet(object.offset) ? globalThis.String(object.offset) : "0",
+    };
+  },
+
+  toJSON(message: BrowserControlHttpReadRequest): unknown {
+    const obj: any = {};
+    if (message.spoolId !== "") {
+      obj.spoolId = message.spoolId;
+    }
+    if (message.offset !== "0") {
+      obj.offset = message.offset;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<BrowserControlHttpReadRequest>, I>>(base?: I): BrowserControlHttpReadRequest {
+    return BrowserControlHttpReadRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<BrowserControlHttpReadRequest>, I>>(
+    object: I,
+  ): BrowserControlHttpReadRequest {
+    const message = createBaseBrowserControlHttpReadRequest();
+    message.spoolId = object.spoolId ?? "";
+    message.offset = object.offset ?? "0";
+    return message;
+  },
+};
+
+function createBaseBrowserControlHttpReadResponse(): BrowserControlHttpReadResponse {
+  return { data: new Uint8Array(0), done: false };
+}
+
+export const BrowserControlHttpReadResponse: MessageFns<BrowserControlHttpReadResponse> = {
+  encode(message: BrowserControlHttpReadResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.data.length !== 0) {
+      writer.uint32(10).bytes(message.data);
+    }
+    if (message.done !== false) {
+      writer.uint32(16).bool(message.done);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BrowserControlHttpReadResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBrowserControlHttpReadResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.data = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.done = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): BrowserControlHttpReadResponse {
+    return {
+      data: isSet(object.data) ? bytesFromBase64(object.data) : new Uint8Array(0),
+      done: isSet(object.done) ? globalThis.Boolean(object.done) : false,
+    };
+  },
+
+  toJSON(message: BrowserControlHttpReadResponse): unknown {
+    const obj: any = {};
+    if (message.data.length !== 0) {
+      obj.data = base64FromBytes(message.data);
+    }
+    if (message.done !== false) {
+      obj.done = message.done;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<BrowserControlHttpReadResponse>, I>>(base?: I): BrowserControlHttpReadResponse {
+    return BrowserControlHttpReadResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<BrowserControlHttpReadResponse>, I>>(
+    object: I,
+  ): BrowserControlHttpReadResponse {
+    const message = createBaseBrowserControlHttpReadResponse();
+    message.data = object.data ?? new Uint8Array(0);
+    message.done = object.done ?? false;
     return message;
   },
 };
@@ -12166,6 +12932,7 @@ function createBaseOpExit(): OpExit {
     totals: {},
     failureCode: "",
     failureDetail: {},
+    backgroundChildrenStopped: false,
   };
 }
 
@@ -12195,6 +12962,9 @@ export const OpExit: MessageFns<OpExit> = {
     globalThis.Object.entries(message.failureDetail).forEach(([key, value]: [string, string]) => {
       OpExit_FailureDetailEntry.encode({ key: key as any, value }, writer.uint32(66).fork()).join();
     });
+    if (message.backgroundChildrenStopped !== false) {
+      writer.uint32(72).bool(message.backgroundChildrenStopped);
+    }
     return writer;
   },
 
@@ -12278,6 +13048,14 @@ export const OpExit: MessageFns<OpExit> = {
           }
           continue;
         }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.backgroundChildrenStopped = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -12345,6 +13123,11 @@ export const OpExit: MessageFns<OpExit> = {
           {},
         )
         : {},
+      backgroundChildrenStopped: isSet(object.backgroundChildrenStopped)
+        ? globalThis.Boolean(object.backgroundChildrenStopped)
+        : isSet(object.background_children_stopped)
+        ? globalThis.Boolean(object.background_children_stopped)
+        : false,
     };
   },
 
@@ -12392,6 +13175,9 @@ export const OpExit: MessageFns<OpExit> = {
         });
       }
     }
+    if (message.backgroundChildrenStopped !== false) {
+      obj.backgroundChildrenStopped = message.backgroundChildrenStopped;
+    }
     return obj;
   },
 
@@ -12432,6 +13218,7 @@ export const OpExit: MessageFns<OpExit> = {
       },
       {},
     );
+    message.backgroundChildrenStopped = object.backgroundChildrenStopped ?? false;
     return message;
   },
 };
@@ -14211,6 +14998,12 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       case "credentialRenew":
         CredentialRenewRequest.encode(message.op.credentialRenew, writer.uint32(322).fork()).join();
         break;
+      case "browserControlHttp":
+        BrowserControlHttpRequest.encode(message.op.browserControlHttp, writer.uint32(330).fork()).join();
+        break;
+      case "browserControlHttpRead":
+        BrowserControlHttpReadRequest.encode(message.op.browserControlHttpRead, writer.uint32(338).fork()).join();
+        break;
     }
     return writer;
   },
@@ -14507,6 +15300,28 @@ export const ControlRequest: MessageFns<ControlRequest> = {
           };
           continue;
         }
+        case 41: {
+          if (tag !== 330) {
+            break;
+          }
+
+          message.op = {
+            $case: "browserControlHttp",
+            browserControlHttp: BrowserControlHttpRequest.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
+        case 42: {
+          if (tag !== 338) {
+            break;
+          }
+
+          message.op = {
+            $case: "browserControlHttpRead",
+            browserControlHttpRead: BrowserControlHttpReadRequest.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -14657,6 +15472,26 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         ? { $case: "credentialRenew", credentialRenew: CredentialRenewRequest.fromJSON(object.credentialRenew) }
         : isSet(object.credential_renew)
         ? { $case: "credentialRenew", credentialRenew: CredentialRenewRequest.fromJSON(object.credential_renew) }
+        : isSet(object.browserControlHttp)
+        ? {
+          $case: "browserControlHttp",
+          browserControlHttp: BrowserControlHttpRequest.fromJSON(object.browserControlHttp),
+        }
+        : isSet(object.browser_control_http)
+        ? {
+          $case: "browserControlHttp",
+          browserControlHttp: BrowserControlHttpRequest.fromJSON(object.browser_control_http),
+        }
+        : isSet(object.browserControlHttpRead)
+        ? {
+          $case: "browserControlHttpRead",
+          browserControlHttpRead: BrowserControlHttpReadRequest.fromJSON(object.browserControlHttpRead),
+        }
+        : isSet(object.browser_control_http_read)
+        ? {
+          $case: "browserControlHttpRead",
+          browserControlHttpRead: BrowserControlHttpReadRequest.fromJSON(object.browser_control_http_read),
+        }
         : undefined,
     };
   },
@@ -14732,6 +15567,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       obj.agentUpdateApply = AgentUpdateApplyRequest.toJSON(message.op.agentUpdateApply);
     } else if (message.op?.$case === "credentialRenew") {
       obj.credentialRenew = CredentialRenewRequest.toJSON(message.op.credentialRenew);
+    } else if (message.op?.$case === "browserControlHttp") {
+      obj.browserControlHttp = BrowserControlHttpRequest.toJSON(message.op.browserControlHttp);
+    } else if (message.op?.$case === "browserControlHttpRead") {
+      obj.browserControlHttpRead = BrowserControlHttpReadRequest.toJSON(message.op.browserControlHttpRead);
     }
     return obj;
   },
@@ -14951,6 +15790,24 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         }
         break;
       }
+      case "browserControlHttp": {
+        if (object.op?.browserControlHttp !== undefined && object.op?.browserControlHttp !== null) {
+          message.op = {
+            $case: "browserControlHttp",
+            browserControlHttp: BrowserControlHttpRequest.fromPartial(object.op.browserControlHttp),
+          };
+        }
+        break;
+      }
+      case "browserControlHttpRead": {
+        if (object.op?.browserControlHttpRead !== undefined && object.op?.browserControlHttpRead !== null) {
+          message.op = {
+            $case: "browserControlHttpRead",
+            browserControlHttpRead: BrowserControlHttpReadRequest.fromPartial(object.op.browserControlHttpRead),
+          };
+        }
+        break;
+      }
     }
     return message;
   },
@@ -15052,6 +15909,12 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         break;
       case "credentialRenew":
         CredentialRenewResponse.encode(message.result.credentialRenew, writer.uint32(322).fork()).join();
+        break;
+      case "browserControlHttp":
+        BrowserControlHttpResponse.encode(message.result.browserControlHttp, writer.uint32(330).fork()).join();
+        break;
+      case "browserControlHttpRead":
+        BrowserControlHttpReadResponse.encode(message.result.browserControlHttpRead, writer.uint32(338).fork()).join();
         break;
     }
     return writer;
@@ -15331,6 +16194,28 @@ export const ControlResponse: MessageFns<ControlResponse> = {
           };
           continue;
         }
+        case 41: {
+          if (tag !== 330) {
+            break;
+          }
+
+          message.result = {
+            $case: "browserControlHttp",
+            browserControlHttp: BrowserControlHttpResponse.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
+        case 42: {
+          if (tag !== 338) {
+            break;
+          }
+
+          message.result = {
+            $case: "browserControlHttpRead",
+            browserControlHttpRead: BrowserControlHttpReadResponse.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -15474,6 +16359,26 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         ? { $case: "credentialRenew", credentialRenew: CredentialRenewResponse.fromJSON(object.credentialRenew) }
         : isSet(object.credential_renew)
         ? { $case: "credentialRenew", credentialRenew: CredentialRenewResponse.fromJSON(object.credential_renew) }
+        : isSet(object.browserControlHttp)
+        ? {
+          $case: "browserControlHttp",
+          browserControlHttp: BrowserControlHttpResponse.fromJSON(object.browserControlHttp),
+        }
+        : isSet(object.browser_control_http)
+        ? {
+          $case: "browserControlHttp",
+          browserControlHttp: BrowserControlHttpResponse.fromJSON(object.browser_control_http),
+        }
+        : isSet(object.browserControlHttpRead)
+        ? {
+          $case: "browserControlHttpRead",
+          browserControlHttpRead: BrowserControlHttpReadResponse.fromJSON(object.browserControlHttpRead),
+        }
+        : isSet(object.browser_control_http_read)
+        ? {
+          $case: "browserControlHttpRead",
+          browserControlHttpRead: BrowserControlHttpReadResponse.fromJSON(object.browser_control_http_read),
+        }
         : undefined,
     };
   },
@@ -15542,6 +16447,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
       obj.agentUpdateApply = AgentUpdateApplyResponse.toJSON(message.result.agentUpdateApply);
     } else if (message.result?.$case === "credentialRenew") {
       obj.credentialRenew = CredentialRenewResponse.toJSON(message.result.credentialRenew);
+    } else if (message.result?.$case === "browserControlHttp") {
+      obj.browserControlHttp = BrowserControlHttpResponse.toJSON(message.result.browserControlHttp);
+    } else if (message.result?.$case === "browserControlHttpRead") {
+      obj.browserControlHttpRead = BrowserControlHttpReadResponse.toJSON(message.result.browserControlHttpRead);
     }
     return obj;
   },
@@ -15751,6 +16660,24 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         }
         break;
       }
+      case "browserControlHttp": {
+        if (object.result?.browserControlHttp !== undefined && object.result?.browserControlHttp !== null) {
+          message.result = {
+            $case: "browserControlHttp",
+            browserControlHttp: BrowserControlHttpResponse.fromPartial(object.result.browserControlHttp),
+          };
+        }
+        break;
+      }
+      case "browserControlHttpRead": {
+        if (object.result?.browserControlHttpRead !== undefined && object.result?.browserControlHttpRead !== null) {
+          message.result = {
+            $case: "browserControlHttpRead",
+            browserControlHttpRead: BrowserControlHttpReadResponse.fromPartial(object.result.browserControlHttpRead),
+          };
+        }
+        break;
+      }
     }
     return message;
   },
@@ -15875,6 +16802,9 @@ export const AgentEvent: MessageFns<AgentEvent> = {
       case "agentUpdateProgress":
         AgentUpdateProgress.encode(message.event.agentUpdateProgress, writer.uint32(98).fork()).join();
         break;
+      case "operationCompleted":
+        OperationCompleted.encode(message.event.operationCompleted, writer.uint32(106).fork()).join();
+        break;
     }
     return writer;
   },
@@ -15921,6 +16851,17 @@ export const AgentEvent: MessageFns<AgentEvent> = {
           };
           continue;
         }
+        case 13: {
+          if (tag !== 106) {
+            break;
+          }
+
+          message.event = {
+            $case: "operationCompleted",
+            operationCompleted: OperationCompleted.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -15953,6 +16894,10 @@ export const AgentEvent: MessageFns<AgentEvent> = {
           $case: "agentUpdateProgress",
           agentUpdateProgress: AgentUpdateProgress.fromJSON(object.agent_update_progress),
         }
+        : isSet(object.operationCompleted)
+        ? { $case: "operationCompleted", operationCompleted: OperationCompleted.fromJSON(object.operationCompleted) }
+        : isSet(object.operation_completed)
+        ? { $case: "operationCompleted", operationCompleted: OperationCompleted.fromJSON(object.operation_completed) }
         : undefined,
     };
   },
@@ -15968,6 +16913,8 @@ export const AgentEvent: MessageFns<AgentEvent> = {
       obj.goingOffline = GoingOffline.toJSON(message.event.goingOffline);
     } else if (message.event?.$case === "agentUpdateProgress") {
       obj.agentUpdateProgress = AgentUpdateProgress.toJSON(message.event.agentUpdateProgress);
+    } else if (message.event?.$case === "operationCompleted") {
+      obj.operationCompleted = OperationCompleted.toJSON(message.event.operationCompleted);
     }
     return obj;
   },
@@ -16000,7 +16947,96 @@ export const AgentEvent: MessageFns<AgentEvent> = {
         }
         break;
       }
+      case "operationCompleted": {
+        if (object.event?.operationCompleted !== undefined && object.event?.operationCompleted !== null) {
+          message.event = {
+            $case: "operationCompleted",
+            operationCompleted: OperationCompleted.fromPartial(object.event.operationCompleted),
+          };
+        }
+        break;
+      }
     }
+    return message;
+  },
+};
+
+function createBaseOperationCompleted(): OperationCompleted {
+  return { opId: "", exit: undefined };
+}
+
+export const OperationCompleted: MessageFns<OperationCompleted> = {
+  encode(message: OperationCompleted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.opId !== "") {
+      writer.uint32(10).string(message.opId);
+    }
+    if (message.exit !== undefined) {
+      OpExit.encode(message.exit, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OperationCompleted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOperationCompleted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.opId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.exit = OpExit.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OperationCompleted {
+    return {
+      opId: isSet(object.opId)
+        ? globalThis.String(object.opId)
+        : isSet(object.op_id)
+        ? globalThis.String(object.op_id)
+        : "",
+      exit: isSet(object.exit) ? OpExit.fromJSON(object.exit) : undefined,
+    };
+  },
+
+  toJSON(message: OperationCompleted): unknown {
+    const obj: any = {};
+    if (message.opId !== "") {
+      obj.opId = message.opId;
+    }
+    if (message.exit !== undefined) {
+      obj.exit = OpExit.toJSON(message.exit);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<OperationCompleted>, I>>(base?: I): OperationCompleted {
+    return OperationCompleted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OperationCompleted>, I>>(object: I): OperationCompleted {
+    const message = createBaseOperationCompleted();
+    message.opId = object.opId ?? "";
+    message.exit = (object.exit !== undefined && object.exit !== null) ? OpExit.fromPartial(object.exit) : undefined;
     return message;
   },
 };
@@ -16014,6 +17050,9 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
     switch (message.ack?.$case) {
       case "heartbeat":
         HeartbeatAck.encode(message.ack.heartbeat, writer.uint32(82).fork()).join();
+        break;
+      case "operationCompleted":
+        OperationCompletedAck.encode(message.ack.operationCompleted, writer.uint32(90).fork()).join();
         break;
     }
     return writer;
@@ -16034,6 +17073,17 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
           message.ack = { $case: "heartbeat", heartbeat: HeartbeatAck.decode(reader, reader.uint32()) };
           continue;
         }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.ack = {
+            $case: "operationCompleted",
+            operationCompleted: OperationCompletedAck.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -16047,6 +17097,13 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
     return {
       ack: isSet(object.heartbeat)
         ? { $case: "heartbeat", heartbeat: HeartbeatAck.fromJSON(object.heartbeat) }
+        : isSet(object.operationCompleted)
+        ? { $case: "operationCompleted", operationCompleted: OperationCompletedAck.fromJSON(object.operationCompleted) }
+        : isSet(object.operation_completed)
+        ? {
+          $case: "operationCompleted",
+          operationCompleted: OperationCompletedAck.fromJSON(object.operation_completed),
+        }
         : undefined,
     };
   },
@@ -16055,6 +17112,8 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
     const obj: any = {};
     if (message.ack?.$case === "heartbeat") {
       obj.heartbeat = HeartbeatAck.toJSON(message.ack.heartbeat);
+    } else if (message.ack?.$case === "operationCompleted") {
+      obj.operationCompleted = OperationCompletedAck.toJSON(message.ack.operationCompleted);
     }
     return obj;
   },
@@ -16071,7 +17130,80 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
         }
         break;
       }
+      case "operationCompleted": {
+        if (object.ack?.operationCompleted !== undefined && object.ack?.operationCompleted !== null) {
+          message.ack = {
+            $case: "operationCompleted",
+            operationCompleted: OperationCompletedAck.fromPartial(object.ack.operationCompleted),
+          };
+        }
+        break;
+      }
     }
+    return message;
+  },
+};
+
+function createBaseOperationCompletedAck(): OperationCompletedAck {
+  return { opId: "" };
+}
+
+export const OperationCompletedAck: MessageFns<OperationCompletedAck> = {
+  encode(message: OperationCompletedAck, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.opId !== "") {
+      writer.uint32(10).string(message.opId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OperationCompletedAck {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOperationCompletedAck();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.opId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OperationCompletedAck {
+    return {
+      opId: isSet(object.opId)
+        ? globalThis.String(object.opId)
+        : isSet(object.op_id)
+        ? globalThis.String(object.op_id)
+        : "",
+    };
+  },
+
+  toJSON(message: OperationCompletedAck): unknown {
+    const obj: any = {};
+    if (message.opId !== "") {
+      obj.opId = message.opId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<OperationCompletedAck>, I>>(base?: I): OperationCompletedAck {
+    return OperationCompletedAck.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OperationCompletedAck>, I>>(object: I): OperationCompletedAck {
+    const message = createBaseOperationCompletedAck();
+    message.opId = object.opId ?? "";
     return message;
   },
 };

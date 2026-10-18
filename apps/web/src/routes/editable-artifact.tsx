@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
 import { editableArtifactKernelRuntime as documentRuntime } from "@opengeni/artifact-kernel-wasm-document";
 import { editableArtifactKernelRuntime as presentationRuntime } from "@opengeni/artifact-kernel-wasm-presentation";
@@ -82,7 +83,7 @@ function EditableArtifactContent({
                 message: ARTIFACT_ACCESS_REQUIRED,
                 retryable: false,
               }
-            : artifactLoadErrorView(error, "editable")
+            : artifactLoadErrorView(t, error, "editable")
         }
         open={() =>
           loadArtifact({

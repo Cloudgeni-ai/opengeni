@@ -53,7 +53,10 @@ impl Drop for OwnedChild {
             return;
         }
         let reservation = self.reservation.take();
-        let failure_witness = reservation.clone();
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("PTY child {:?}", child.process_id()),
+        );
         // portable-pty kill only signals (and some platforms do not report its
         // errors). Retain ownership through a positive wait, even with no Tokio
         // runtime or after cancellation of the relay/registration task.
@@ -61,19 +64,23 @@ impl Drop for OwnedChild {
             .name("pty-cleanup".into())
             .spawn(move || {
                 crate::with_work_reservation_sync(reservation.clone(), || {
+                    let mut witness = witness;
                     let _ = child.kill();
-                    if child.wait().is_err() {
-                        if let Some(reservation) = &reservation {
-                            reservation.mark_unsettled();
+                    loop {
+                        match child.wait() {
+                            Ok(_) => {
+                                witness.settle();
+                                break;
+                            }
+                            Err(error) => witness.failed(&error),
                         }
+                        std::thread::sleep(std::time::Duration::from_secs(1));
                     }
                     drop(reservation);
                 });
             });
-        if cleanup.is_err() {
-            if let Some(reservation) = failure_witness {
-                reservation.mark_unsettled();
-            }
+        if let Err(error) = cleanup {
+            tracing::warn!(%error, "could not start PTY cleanup thread");
         }
     }
 }
@@ -227,6 +234,80 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, Clone)]
+    struct RecoveringChild(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl portable_pty::ChildKiller for RecoveringChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl portable_pty::Child for RecoveringChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            if self.0.load(std::sync::atomic::Ordering::Acquire) {
+                Ok(portable_pty::ExitStatus::with_exit_code(0))
+            } else {
+                Err(std::io::Error::other(
+                    "synthetic transient PTY wait failure",
+                ))
+            }
+        }
+        fn process_id(&self) -> Option<u32> {
+            Some(123)
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_pty_wait_failure_recovers_only_after_actual_exit() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let drain = Arc::new(UpdateDrain::default());
+        let exited = Arc::new(AtomicBool::new(false));
+        drop(OwnedChild {
+            child: Some(Box::new(RecoveringChild(exited.clone()))),
+            reservation: drain.reserve_work(None),
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while drain.unavailable_reason().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(drain
+            .unavailable_reason()
+            .unwrap()
+            .contains("PTY child Some(123)"));
+        assert_eq!(
+            drain.reserve_update("update"),
+            UpdateReservation::Unavailable
+        );
+        exited.store(true, Ordering::Release);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while drain.snapshot().is_none_or(|state| state.routed != 0) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
+        assert!(drain.seal_update("update"));
+    }
 
     /// The platform default-shell argv for the test host.
     fn default_shell() -> Vec<String> {

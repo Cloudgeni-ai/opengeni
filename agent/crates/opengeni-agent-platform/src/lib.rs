@@ -36,6 +36,8 @@ mod error;
 #[cfg(unix)]
 mod exec_handover;
 mod native;
+#[cfg(unix)]
+mod process_cleanup;
 mod pty;
 pub mod service;
 pub mod transactional_write;
@@ -70,7 +72,8 @@ pub use desktop::{
 };
 #[cfg(target_os = "linux")]
 pub use desktop::{
-    validate_linux_named_key_chord, LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
+    linux_layout_text_keysyms, linux_named_key_chord_keysyms, validate_linux_named_key_chord,
+    LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
 };
 pub use error::{PlatformError, PlatformResult};
 #[cfg(unix)]
@@ -89,7 +92,11 @@ pub use pty::{spawn_pty, PtyProcess};
 /// startup/enroll seam uses these to request display capability on a real Mac; a
 /// denied grant degrades cleanly to `display_unavailable`.
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
-pub use macos::{desktop_grants, request_desktop_grants, DesktopGrants};
+pub use macos::{
+    desktop_grants, request_desktop_grants, request_desktop_permission, DesktopGrants,
+};
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+pub use opengeni_agent_macos_ffi::DesktopPermission;
 
 /// Reported OS/arch identity of the host the agent runs on, folded into the
 /// connect [`Hello`](opengeni_agent_proto::v1::Hello).
@@ -101,12 +108,18 @@ pub struct HostIdentity {
     pub arch: v1::Arch,
 }
 
+/// Largest total size of the response headers a controller request may return.
+/// The reply body budget subtracts it, so headers never push a reply past the
+/// transport's negotiated payload.
+pub const BROWSER_CONTROL_HTTP_MAX_HEADER_BYTES: usize = 16 * 1024;
+
 /// Loopback endpoint of one agent-supervised browser controller sidecar.
 ///
 /// This is deliberately process-local: the control plane never receives the
 /// browserd authority or connects to this port directly. Browser control RPCs
-/// reach it through the connected-machine execution adapter, while frame bytes
-/// are copied into an authenticated relay channel by [`StreamRegistry`].
+/// reach it through the scope-resolved `browser_control_http` op (or, for an
+/// older control plane, the connected-machine execution adapter), while frame
+/// bytes are copied into an authenticated relay channel by [`StreamRegistry`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserControlEndpoint {
     /// Loopback TCP port selected by browserd.
@@ -155,6 +168,39 @@ pub trait BrowserControlBackend: Send + Sync {
         scope_id: &str,
         scope_generation: &str,
     ) -> PlatformResult<BrowserControlEndpoint>;
+
+    /// Whether [`Self::http`] and [`Self::http_read`] are served. Advertised to
+    /// the control plane, which otherwise keeps its legacy exec transport.
+    fn http_supported(&self) -> bool {
+        false
+    }
+
+    /// Sends one loopback request to the controller of the exact scope and
+    /// generation. A body larger than `inline_limit` is returned in part and the
+    /// remainder is spooled for [`Self::http_read`]; the request is never sent
+    /// twice. `None` means the reply size is unbounded.
+    async fn http(
+        &self,
+        req: &v1::BrowserControlHttpRequest,
+        inline_limit: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpResponse> {
+        let _ = (req, inline_limit);
+        Err(PlatformError::Unsupported(
+            "browser controller requests are unavailable".into(),
+        ))
+    }
+
+    /// Reads the next part of a spooled controller response.
+    async fn http_read(
+        &self,
+        req: &v1::BrowserControlHttpReadRequest,
+        max_bytes: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpReadResponse> {
+        let _ = (req, max_bytes);
+        Err(PlatformError::Unsupported(
+            "browser controller requests are unavailable".into(),
+        ))
+    }
 }
 
 /// The host-facing capability surface of a connected agent.
@@ -393,6 +439,40 @@ pub trait Platform: Send + Sync {
             port: u32::from(endpoint.port),
             sidecar_generation: endpoint.sidecar_generation,
         })
+    }
+
+    /// Whether this runner serves in-process controller requests.
+    fn browser_control_http_supported(&self) -> bool {
+        self.browser_control_backend()
+            .is_some_and(|backend| backend.http_supported())
+    }
+
+    /// Sends one request to a placement-scoped controller without a process.
+    async fn browser_control_http(
+        &self,
+        req: &v1::BrowserControlHttpRequest,
+        inline_limit: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpResponse> {
+        let backend = self.browser_control_backend().ok_or_else(|| {
+            PlatformError::Unsupported(
+                "browser_control_http: browser controller sidecar is unavailable".to_string(),
+            )
+        })?;
+        backend.http(req, inline_limit).await
+    }
+
+    /// Reads the next part of a spooled controller response.
+    async fn browser_control_http_read(
+        &self,
+        req: &v1::BrowserControlHttpReadRequest,
+        max_bytes: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpReadResponse> {
+        let backend = self.browser_control_backend().ok_or_else(|| {
+            PlatformError::Unsupported(
+                "browser_control_http_read: browser controller sidecar is unavailable".to_string(),
+            )
+        })?;
+        backend.http_read(req, max_bytes).await
     }
 
     /// Opens a browser-native frame subscription over the existing relay plane.

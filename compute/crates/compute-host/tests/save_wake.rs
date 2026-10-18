@@ -37,7 +37,10 @@ use tokio::time::Instant;
 
 #[path = "support/required.rs"]
 mod required;
+#[path = "support/state.rs"]
+mod state;
 use required::skip;
+use state::private_dir;
 
 const SHELL_PORT: u32 = 52;
 
@@ -116,7 +119,7 @@ async fn start_with<S: Store>(
 ) -> Agent {
     let root = lab.join("ht").join(name);
     let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    private_dir(&root);
     restart_with(lab, name, first_uid, store, setup).await
 }
 
@@ -145,9 +148,7 @@ async fn restart_with<S: Store>(
     let config = HostConfig {
         root: root.join("s"),
         kernel: lab.join("vmlinux"),
-        boot_args:
-            "console=ttyS0 reboot=k panic=1 quiet loglevel=1 page_reporting.page_reporting_order=0"
-                .into(),
+        boot_args: "console=ttyS0 reboot=k panic=1 quiet loglevel=1".into(),
         base_image: lab.join("base.ext4"),
         policy: HostPolicy::default(),
         sample_every: Duration::from_secs(1),
@@ -220,7 +221,7 @@ impl Process {
         record_for: Duration,
     ) -> Self {
         let root = lab.join("ht").join(name);
-        std::fs::create_dir_all(&root).unwrap();
+        private_dir(&root);
         let socket = root.join("agent.sock");
         let _ = std::fs::remove_file(&socket);
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_compute-host"));
@@ -532,6 +533,19 @@ echo later=$(cat /dev/shm/later)";
     };
     vmm_unpaged(id).await;
     awake.abort();
+    // It wrote what it learned as the VM's user, though the state root
+    // above its directory is root's alone.
+    let learned = lab
+        .join("ht")
+        .join(name)
+        .join("s/vm/firecracker")
+        .join(id.to_string())
+        .join("pager/learned.json");
+    assert!(
+        learned.exists(),
+        "the pager did not write {}",
+        learned.display()
+    );
     let output = exec(
         &agent.client,
         id,

@@ -16,6 +16,7 @@ import {
   type ArtifactLoadErrorView,
 } from "./artifact-chrome";
 import { EditableArtifactWorkbenchHost } from "./editable-artifact-workbench";
+import { useOpenGeniText } from "../../messages/runtime";
 
 /**
  * The browser kernels an editor needs, one per modality, plus the host-built
@@ -85,6 +86,7 @@ export function EditableArtifactView({
   loadingLabel,
   downloadSpreadsheet,
 }: EditableArtifactViewProps) {
+  const t = useOpenGeniText();
   const [loadEpoch, setLoadEpoch] = useState(0);
   const labels = useArtifactLabels();
   const loadKey = JSON.stringify([artifactId, authorityKey, baseUrl.href, workspaceId, loadEpoch]);
@@ -156,7 +158,7 @@ export function EditableArtifactView({
         view={
           describeError
             ? describeError(current.error)
-            : artifactLoadErrorView(current.error, "editable", labels)
+            : artifactLoadErrorView(t, current.error, "editable", labels)
         }
         onRetry={() => setLoadEpoch((value) => value + 1)}
       />

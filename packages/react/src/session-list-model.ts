@@ -14,6 +14,7 @@ import {
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { findPickerRow, type PickerModelRow } from "./model-policy";
 import { sessionDisplayStatus, type SessionDisplayStatus } from "./session-status-model";
+import { type OpenGeniText } from "./messages/runtime";
 
 /** A list row may be a compact page entry or a complete session response. */
 export type SessionListRow = Session | SessionListEntry;
@@ -63,12 +64,12 @@ export function resolveRenameSubmission(
 
 export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";
 
-export const SESSION_GROUP_LABELS: Record<SessionRecencyGroup, string> = {
-  today: "Today",
-  yesterday: "Yesterday",
-  previous7: "Previous 7 days",
-  older: "Older",
-};
+export const SESSION_GROUP_LABELS = (t: OpenGeniText): Record<SessionRecencyGroup, string> => ({
+  today: t("sessionListModel.today"),
+  yesterday: t("sessionListModel.yesterday"),
+  previous7: t("sessionListModel.previous7Days"),
+  older: t("sessionListModel.older"),
+});
 
 /** The render order of recency groups, top → bottom. */
 export const SESSION_GROUP_ORDER: SessionRecencyGroup[] = [
@@ -240,6 +241,7 @@ export type GroupedSessions<T extends SessionListRow = SessionListRow> = {
  * within each bucket. Empty groups are dropped.
  */
 export function groupSessionsForRail<T extends SessionListRow>(
+  t: OpenGeniText,
   sessions: T[],
   now: Date = new Date(),
 ): GroupedSessions<T> {
@@ -262,7 +264,7 @@ export function groupSessionsForRail<T extends SessionListRow>(
     if (list && list.length > 0) {
       grouped.push({
         group,
-        label: SESSION_GROUP_LABELS[group],
+        label: SESSION_GROUP_LABELS(t)[group],
         sessions: list,
       });
     }
@@ -270,7 +272,7 @@ export function groupSessionsForRail<T extends SessionListRow>(
   return { running, grouped };
 }
 
-export function relativeTimeLabel(value: string, now: Date = new Date()): string {
+export function relativeTimeLabel(t: OpenGeniText, value: string, now: Date = new Date()): string {
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) {
     return "";
@@ -291,7 +293,7 @@ export function relativeTimeLabel(value: string, now: Date = new Date()): string
   if (days < 7) {
     return `${days}d`;
   }
-  return new Date(timestamp).toLocaleDateString(undefined, {
+  return new Date(timestamp).toLocaleDateString(t.locale, {
     month: "short",
     day: "numeric",
   });
@@ -364,6 +366,7 @@ export function recentSessionModelPresentation<TCatalog extends ClientModel>(
  * its pins are removed before recombining the explicit pinned section.
  */
 export function recentSessionsForHome<T extends SessionListRow>(
+  t: OpenGeniText,
   sessions: T[],
   pinned: T[],
   limit = 6,
@@ -373,7 +376,7 @@ export function recentSessionsForHome<T extends SessionListRow>(
   // many sub-agents they would otherwise take every slot (they run often) and
   // push the person's own conversations out of the list.
   const ordinary = sessions.filter((session) => !session.pinned && !session.parentSessionId);
-  const { running, grouped } = groupSessionsForRail(ordinary, now);
+  const { running, grouped } = groupSessionsForRail(t, ordinary, now);
   const topLevelPinned = pinned.filter((session) => !session.parentSessionId);
   return [...topLevelPinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(
     0,

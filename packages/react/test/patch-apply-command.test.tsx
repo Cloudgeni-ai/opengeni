@@ -8,6 +8,9 @@ import {
   isPatchFilename,
   patchApplyCommand,
 } from "../src/timeline/patch-apply-command";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -42,7 +45,7 @@ describe("patch apply command", () => {
     expect(isPatchFilename("fix.DIFF")).toBe(true);
     expect(isPatchFilename("notes.txt")).toBe(false);
     expect(isPatchFilename("patch.zip")).toBe(false);
-    expect(patchApplyCommand("https://objects.example/p?a=1&b='x'")).toBe(
+    expect(patchApplyCommand(englishText, "https://objects.example/p?a=1&b='x'")).toBe(
       "curl -fsSL 'https://objects.example/p?a=1&b='\\''x'\\''' | git apply",
     );
   });

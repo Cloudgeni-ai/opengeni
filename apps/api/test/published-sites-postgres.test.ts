@@ -1,21 +1,39 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { OpenGeniClient } from "@opengeni/sdk";
 import {
   SITE_GATEWAY_BODY_SHA256_HEADER,
   SITE_GATEWAY_CALLBACK_PATH,
+  DEFAULT_SITE_LIMITS,
   type AccessGrant,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
+import { mcpAccountRouteId } from "@opengeni/core";
+import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   appendSessionEvents,
+  claimSessionWorkForAttempt,
   createDb,
+  createConnection,
+  encryptEnvironmentValue,
+  updateConnectorToolPermissionPolicies,
   createOrganizationApiKey,
   createSession,
   createSiteViewerSession,
   createWorkspace,
+  engageSitePlatformBrake,
   ensureExternalIdentity,
+  liftSitePlatformBrake,
+  readSitePlatformTotals,
+  readSessionUsageLimit,
+  recordSitePlatformUsage,
+  releaseSiteRuntimeConversationStart,
+  reserveSiteRuntimeConversationWork,
+  settleSiteRuntimeConversationSpend,
+  setSessionUsageLimitInTransaction,
+  withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
@@ -23,13 +41,21 @@ import {
   acquireSharedTestDatabase,
   MemoryEventBus,
   testSettings,
+  startTestMcpServer,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp, type AppDependencies } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { buildOrganizationMcpServer } from "../src/organization-mcp";
 import { sha256Hex, signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import type { SiteContentScanner } from "../src/site-publishing/content-scanner";
+import { siteRuntimeBudgetLimits } from "../src/site-publishing/runtime";
+import { SITE_AGENT_DEFAULTS_VERSION } from "../src/site-publishing/agent-session";
 import { moderateSiteAsPlatform } from "../src/site-publishing/platform";
+import {
+  evaluateSitePlatformLimit,
+  resetSitePlatformBrakeCache,
+} from "../src/site-publishing/platform-usage";
 import {
   configureSitePublishingEffects,
   scheduleSiteEdgeSync,
@@ -57,13 +83,287 @@ const DOMAIN = "sites.example.test";
 const SECRET = "c".repeat(40);
 const PREVIOUS_SECRET = "p".repeat(40);
 const noop = async () => undefined;
+/** No worker runs in this fixture: finish both canonical turns and the projection. */
+async function finishConversation(sessionId: string) {
+  await shared.admin`update session_turns set status = 'completed' where session_id = ${sessionId}`;
+  await shared.admin`update sessions set status = 'idle', active_turn_id = null where id = ${sessionId}`;
+}
+/** Inspect accounting through the trusted host, never a different viewer's HTTP identity. */
+async function hostSessionUsage(
+  f: { accountId: string; workspace: { id: string } },
+  sessionId: string,
+) {
+  const result = await readSessionUsageLimit(db.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    sessionId,
+  });
+  expect(result.outcome).toBe("ok");
+  if (result.outcome !== "ok") throw new Error("Missing session accounting");
+  return result.state;
+}
 const memberPermissions = [
   "workspace:read",
   "sessions:read",
   "sessions:create",
+  "sessions:control",
   "artifacts:read",
   "artifacts:publish",
 ] as const;
+
+test("Site members own native private work, while normal discovery and other viewers cannot expose it", async () => {
+  const f = await fixture();
+  const site = await f.live("Private app work", { access: "public", agent: { enabled: true } });
+  const session = await f.signIn(f.member, site.host);
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    session,
+    body: {
+      initialMessage: 'App-designed input: {"task":"choose a route"}',
+      idempotencyKey: crypto.randomUUID(),
+    },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(202);
+  const id = String(created.json.id);
+  const [row] = await shared.admin`select visibility, owner_subject_id, created_by_subject_id,
+    site_id, site_access_root_id, site_owner_subject_id from sessions where id=${id}`;
+  expect(row).toMatchObject({
+    visibility: "user_private",
+    owner_subject_id: f.member.subjectId,
+    created_by_subject_id: f.member.subjectId,
+    site_id: site.id,
+    site_access_root_id: id,
+    site_owner_subject_id: f.member.subjectId,
+  });
+  const [turn] =
+    await shared.admin`select initiator_subject_id from session_turns where session_id=${id}`;
+  expect(turn!.initiator_subject_id).toBe(f.member.subjectId);
+  expect(
+    (await f.api(f.member, "GET", `/v1/workspaces/${f.workspace.id}/sessions/${id}`)).status,
+  ).toBe(200);
+  for (const who of [f.owner, f.admin]) {
+    for (const [method, suffix, body] of [
+      ["GET", "", undefined],
+      ["GET", "/events", undefined],
+      ["GET", "/events/stream", undefined],
+      ["GET", "/queue", undefined],
+      ["GET", "/turns", undefined],
+      ["POST", "/fs/list", { path: "/workspace" }],
+      ["POST", "/control", { action: "cancel", operationId: crypto.randomUUID() }],
+      ["POST", "/events", { type: "user.message", payload: { text: "Injected" } }],
+    ] as const) {
+      const result = await f.api(
+        who,
+        method,
+        `/v1/workspaces/${f.workspace.id}/sessions/${id}${suffix}`,
+        body,
+      );
+      expect({ method, suffix, status: result.status }).toEqual({ method, suffix, status: 404 });
+    }
+  }
+  for (const who of [f.member, f.owner, f.admin]) {
+    for (const path of [
+      "/sessions",
+      "/sessions?summary=true",
+      "/session-message-search?query=App-designed",
+    ]) {
+      const listed = await f.api(who, "GET", `/v1/workspaces/${f.workspace.id}${path}`);
+      expect(listed.status, JSON.stringify(listed.json)).toBe(200);
+      expect(JSON.stringify(listed.json)).not.toContain(id);
+    }
+  }
+  const explicit = await f.api(
+    f.member,
+    "GET",
+    `/v1/workspaces/${f.workspace.id}/sessions?originSiteId=${site.id}`,
+  );
+  expect(explicit.status).toBe(200);
+  expect(JSON.stringify(explicit.json)).toContain(id);
+  const other = await f.signIn(f.owner, site.host);
+  expect((await f.gateway(site.host, "GET", `/sessions/${id}`, { session: other })).status).toBe(
+    404,
+  );
+  expect((await f.gateway(site.host, "GET", `/sessions/${id}`, { session })).status).toBe(200);
+  await expect(
+    Promise.resolve(
+      shared.admin`update sessions set site_owner_subject_id=${f.owner.subjectId} where id=${id}`,
+    ),
+  ).rejects.toMatchObject({ code: "42501" });
+  await expect(
+    Promise.resolve(shared.admin`update sessions set visibility='workspace_shared' where id=${id}`),
+  ).rejects.toMatchObject({ code: "42501" });
+}, 60_000);
+
+test("Site execution respects member control permission and explicitly refuses disabled private conversations", async () => {
+  const f = await fixture();
+  const site = await f.live("Policy", { access: "public", agent: { enabled: true } });
+  const limited = await f.person(
+    memberPermissions.filter((permission) => permission !== "sessions:control"),
+  );
+  const session = await f.signIn(limited, site.host);
+  const started = await f.gateway(site.host, "POST", "/sessions", {
+    session,
+    body: { initialMessage: "Begin" },
+  });
+  expect(started.status).toBe(202);
+  const denied = await f.gateway(site.host, "POST", `/sessions/${started.json.id}/events`, {
+    session,
+    body: { type: "user.message", payload: { text: "Continue" } },
+  });
+  expect(denied.status).toBe(403);
+  await shared.admin`insert into organization_private_session_settings (account_id,enabled,version)
+    values (${f.accountId},false,1) on conflict(account_id) do update set enabled=false`;
+  for (const viewer of [{ visitor: visitorId() }, { session }]) {
+    const refused = await f.gateway(site.host, "POST", "/sessions", {
+      ...viewer,
+      body: { initialMessage: "No shared fallback" },
+    });
+    expect(refused.status, JSON.stringify(refused.json)).toBeGreaterThanOrEqual(400);
+    expect(JSON.stringify(refused.json).toLowerCase()).toContain("private");
+  }
+  const [count] = await shared.admin`select count(*)::int n from sessions where site_id=${site.id}`;
+  expect(count!.n).toBe(1);
+});
+
+test("member Site AI needs session authority, not artifact publishing; data tools follow the live ceiling", async () => {
+  const f = await fixture();
+  const site = await f.live("Member capabilities", { access: "members", agent: { enabled: true } });
+  for (const canReadData of [true, false]) {
+    const permissions = memberPermissions.filter(
+      (permission) =>
+        permission !== "artifacts:publish" && (canReadData || permission !== "artifacts:read"),
+    );
+    const who = await f.person(permissions);
+    const session = await f.signIn(who, site.host);
+    const created = await f.gateway(site.host, "POST", "/sessions", {
+      session,
+      body: { initialMessage: "Answer from this app context" },
+    });
+    expect(created.status, JSON.stringify(created.json)).toBe(202);
+    const inspect = async () =>
+      (
+        await shared.admin`select first_party_mcp_tools tools,
+      first_party_mcp_permissions permissions from sessions where id=${created.json.id}`
+      )[0]!;
+    expect((await inspect()).tools).toEqual(canReadData ? ["site_data_query"] : []);
+    expect((await inspect()).permissions).not.toContain("artifacts:publish");
+    if (canReadData) {
+      // A later request must not retain even a read tool after the live ceiling narrows.
+      await shared.admin`update workspace_memberships set permissions=${shared.admin.json(
+        permissions.filter((permission) => permission !== "artifacts:read"),
+      )} where workspace_id=${f.workspace.id} and subject_id=${who.subjectId}`;
+    }
+    await finishConversation(String(created.json.id));
+    const continued = await f.gateway(site.host, "POST", `/sessions/${created.json.id}/events`, {
+      session,
+      body: { type: "user.message", payload: { text: "Continue without a data write" } },
+    });
+    expect(continued.status, JSON.stringify(continued.json)).toBe(202);
+    expect((await inspect()).tools).toEqual([]);
+    expect((await inspect()).permissions).not.toContain("artifacts:publish");
+    expect((await inspect()).permissions).not.toContain("artifacts:read");
+  }
+});
+
+test("Site Insights reconciles actual debits and frozen estimates without private viewer or Site identity leaks", async () => {
+  const f = await fixture();
+  const site = await f.live("Visible app", { access: "public", agent: { enabled: true } });
+  const privateSite = await f.publish("Secret owner-only app", "private");
+  const made = await f.gateway(site.host, "POST", "/sessions", {
+    visitor: visitorId(),
+    body: { initialMessage: "Private visitor content" },
+  });
+  expect(made.status).toBe(202);
+  const frame = await f.app.request(`/v1/workspaces/${f.workspace.id}/sessions`, {
+    method: "POST",
+    headers: {
+      ...f.owner.headers,
+      "x-opengeni-site-frame": "1",
+      "x-opengeni-site-frame-id": "private-test",
+      "x-opengeni-site-id": privateSite.id,
+      "x-opengeni-site-version": privateSite.versionId,
+    },
+    body: JSON.stringify({ initialMessage: "Owner-only content" }),
+  });
+  expect(frame.status, await frame.clone().text()).toBe(202);
+  const hiddenId = String(((await frame.json()) as { id: string }).id);
+  const fact = async (
+    sessionId: string,
+    provider: string,
+    billing: string,
+    estimate: number | null,
+    charged: number,
+  ) => {
+    const turn = crypto.randomUUID();
+    const key = crypto.randomUUID();
+    await shared.admin`insert into model_call_facts (account_id,workspace_id,session_id,turn_id,source_key,provider,
+      provider_api,model,billing_path,priced_cost_micros,estimated_provider_cost_micros,occurred_at,recorded_at)
+      values (${f.accountId},${f.workspace.id},${sessionId},${turn},${key},${provider},'test','fixture-model',${billing},
+        ${charged},${estimate},now(),now())`;
+    if (charged)
+      await shared.admin`insert into credit_ledger_entries
+      (account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,metadata,occurred_at)
+      values (${f.accountId},${f.workspace.id},'model_usage_debit',${-charged},'model_response',${`${turn}:${key}`},${key},
+        ${shared.admin.json({ sessionId, turnId: turn, sourceKey: key })},now())`;
+  };
+  await fact(made.json.id, "openai", "opengeni_credits", 100, 135);
+  await fact(made.json.id, "codex-subscription", "external", 80, 0);
+  await fact(made.json.id, "openai", "external", null, 0);
+  await fact(hiddenId, "openai", "external", 40, 0);
+  const usage = await f.api(
+    f.admin,
+    "GET",
+    `/v1/workspaces/${f.workspace.id}/insights/sites?range=month`,
+  );
+  expect(usage.status, JSON.stringify(usage.json)).toBe(200);
+  expect(usage.json.rows).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        siteId: site.id,
+        title: "Visible app",
+        calls: 3,
+        pricedCalls: 2,
+        chargedMicros: 135,
+        apiEquivalentMicros: 180,
+        subscriptionApiEquivalentMicros: 80,
+        ownKeyApiEquivalentMicros: 0,
+      }),
+      expect.objectContaining({
+        siteId: null,
+        kind: "restricted",
+        calls: 1,
+        chargedMicros: 0,
+        apiEquivalentMicros: 40,
+      }),
+    ]),
+  );
+  const serialized = JSON.stringify(usage.json);
+  for (const secret of [
+    made.json.id,
+    hiddenId,
+    privateSite.id,
+    "Secret owner-only app",
+    "Private visitor content",
+    f.owner.subjectId,
+  ])
+    expect(serialized).not.toContain(secret);
+  for (const path of [
+    "/insights/calls?range=month",
+    "/insights/usage?range=month&groupBy=rootSession",
+  ]) {
+    const result = await f.api(f.admin, "GET", `/v1/workspaces/${f.workspace.id}${path}`);
+    expect(result.status, JSON.stringify(result.json)).toBe(200);
+    expect(JSON.stringify(result.json)).not.toContain(made.json.id);
+    expect(JSON.stringify(result.json)).not.toContain(hiddenId);
+  }
+  const [stamps] =
+    await shared.admin`select count(*)::int n from model_call_facts where site_id=${site.id}`;
+  expect(stamps!.n).toBe(3);
+  await expect(
+    Promise.resolve(
+      shared.admin`update model_call_facts set site_id=${privateSite.id} where session_id=${made.json.id}`,
+    ),
+  ).rejects.toMatchObject({ code: "42501" });
+}, 60_000);
 
 function memoryObjectStorage() {
   const objects = new Map<string, Uint8Array>();
@@ -230,12 +530,17 @@ async function fixture(overrides: Partial<Settings> = {}) {
       }),
     );
   const sites = `/v1/workspaces/${workspace.id}/published-artifacts`;
-  const publish = async (title: string, visibility: "private" | "workspace" = "workspace") => {
+  const publish = async (
+    title: string,
+    visibility: "private" | "workspace" = "workspace",
+    requestedTools: Array<{ serverId: string; toolName: string }> = [],
+  ) => {
     const created = await api(owner, "POST", sites, {
       title,
       html: `<!doctype html><h1>${title}</h1><a href="https://example.com/${encodeURIComponent(title)}">x</a>`,
       idempotencyKey: crypto.randomUUID(),
       visibility,
+      requestedTools,
     });
     expect(created.status, JSON.stringify(created.json)).toBe(201);
     return { id: String(created.json.artifact.id), versionId: String(created.json.version.id) };
@@ -408,8 +713,14 @@ test("managers publish workspace Sites under globally unique, held hostnames", a
     status: "active",
     access: "members",
     noindex: true,
-    limitProfile: { kind: "free" },
-    effectiveLimits: { requestsPerMinutePerVisitor: 120, turnsPerConversation: 20 },
+    limitProfile: { kind: "standard", overrides: null },
+    effectiveLimits: {
+      requestsPerMinutePerVisitor: 120,
+      turnsPerConversation: 50,
+      agentMicrosPerSitePerMonth: 10_000_000,
+      agentMicrosPerVisitorPerDay: null,
+    },
+    warnings: [],
     moderation: { openReports: 0, suspendedAt: null },
   });
   expect(created.json.label).toMatch(/^team-crm-[a-z0-9]{4}$/u);
@@ -473,7 +784,10 @@ test("managers publish workspace Sites under globally unique, held hostnames", a
   expect((await f.api(f.member, "PUT", workspaceProfile, { kind: "credits" })).status).toBe(403);
   const credits = await f.api(f.admin, "PUT", workspaceProfile, { kind: "credits" });
   expect(credits.status).toBe(200);
-  expect(credits.json.effectiveLimits.conversationsPerVisitorPerDay).toBe(100);
+  // The standard guest guard of 20 conversations, times the credits multiplier.
+  expect(credits.json.effectiveLimits.conversationsPerVisitorPerDay).toBe(
+    20 * f.settings.sitesCreditsLimitMultiplier,
+  );
   expect((await f.api(f.member, "GET", workspaceProfile)).json.profile.kind).toBe("credits");
   // The sibling inherits the workspace default; the first Site keeps its own.
   expect((await f.publication(f.owner, sibling.id, "GET")).json.limitProfile.kind).toBe("credits");
@@ -672,17 +986,349 @@ test("site-runtime checks the gateway signature before anything else", async () 
   });
   expect(traversal.status).toBe(401);
 
-  // Minimal workspace and model views; tools are not available to published Sites.
+  // Minimal workspace and model views; guests have no workspace tools.
   const workspace = await f.gateway(site.host, "GET", "", { visitor });
   expect(workspace.json).toEqual({ id: f.workspace.id, name: "Signed" });
-  expect((await f.gateway(site.host, "GET", "/model-catalog", { visitor })).json).toMatchObject({
-    models: [],
-    defaultModel: null,
-  });
+  // People outside the workspace see the one concrete model they would use.
+  const catalog = (await f.gateway(site.host, "GET", "/model-catalog", { visitor })).json;
+  expect(catalog.defaultModel).toEqual(expect.any(String));
+  expect(catalog.models).toEqual([{ id: catalog.defaultModel }]);
   const tools = await f.gateway(site.host, "POST", "/tools/catalog", { visitor, body: {} });
   expect(tools.status).toBe(403);
-  expect(code(tools)).toBe("site_tools_unavailable");
+  expect(code(tools)).toBe("not_available_for_viewer");
 }, 60_000);
+
+/** Real account expansion, encrypted credentials and HTTP MCP; no gateway mocks. */
+async function pageToolsFixture() {
+  const authorizations: string[] = [];
+  const callAuthorizations: string[] = [];
+  let atProvider: (() => Promise<void>) | undefined;
+  const provider = startTestMcpServer({
+    validateAuthorization: async (value) => {
+      authorizations.push(value ?? "missing");
+      const callback = atProvider;
+      atProvider = undefined;
+      await callback?.();
+      return value?.startsWith("Bearer page-") === true;
+    },
+  });
+  const proxy = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async (request) => {
+      const body = (await request
+        .clone()
+        .json()
+        .catch(() => null)) as { method?: string } | null;
+      if (body?.method === "tools/call")
+        callAuthorizations.push(request.headers.get("authorization") ?? "missing");
+      return await fetch(new Request(provider.url, request));
+    },
+  });
+  try {
+    const f = await fixture({
+      environmentsEncryptionKey: randomBytes(32).toString("base64"),
+      mcpServers: [
+        {
+          id: "grafana",
+          url: `${proxy.url}mcp`,
+          cacheToolsList: false,
+          allowedTools: ["search_documents", "fetch_document"],
+          connectionRef: {
+            providerDomain: "127.0.0.1",
+            kind: "api_key",
+            accountSelection: "all_eligible",
+          },
+        },
+      ],
+    });
+    const connect = async (label: string, subjectId: string | null = null) => {
+      const connection = await createConnection(db.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspace.id,
+        subjectId,
+        providerDomain: "127.0.0.1",
+        kind: "api_key",
+        credentialEncrypted: encryptEnvironmentValue(
+          environmentsEncryptionKeyBytes(f.settings)!,
+          JSON.stringify({ headers: { authorization: `Bearer page-${label}` } }),
+        ),
+        metadata: { displayName: label },
+        createdBySubjectId: f.owner.subjectId,
+      });
+      const identity = {
+        serverId: mcpAccountRouteId("grafana", connection.id),
+        toolName: "search_documents",
+      };
+      await updateConnectorToolPermissionPolicies(db.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspace.id,
+        subjectId: f.owner.subjectId,
+        connectionId: connection.id,
+        serverId: "grafana",
+        toolNames: [identity.toolName],
+        policy: "allow",
+      });
+      return { connection, identity, label };
+    };
+    const prod = await connect("prod");
+    const staging = await connect("staging");
+    const personal = await connect("personal", f.member.subjectId);
+    const foreign = await connect("foreign", f.owner.subjectId);
+    const accounts = [prod, staging, personal, foreign];
+    // Page declarations remain available with the assistant entirely disabled.
+    const site = await f.publish(
+      "Page tools",
+      "workspace",
+      accounts.map((entry) => entry.identity),
+    );
+    const publication = await f.publication(f.owner, site.id, "PUT", { agent: { enabled: false } });
+    expect(publication.status, JSON.stringify(publication.json)).toBe(201);
+    const host = String(publication.json.hostname);
+    const session = await f.signIn(f.member, host);
+    const post = (method: string, body: unknown = {}, token = session) =>
+      f.gateway(host, "POST", `/tools/${method}`, { session: token, body });
+    return {
+      ...f,
+      site,
+      host,
+      session,
+      post,
+      provider,
+      authorizations,
+      callAuthorizations,
+      prod,
+      staging,
+      personal,
+      foreign,
+      atProvider: (callback: () => Promise<void>) => {
+        atProvider = callback;
+      },
+      close: () => {
+        proxy.stop(true);
+        provider.close();
+      },
+    };
+  } catch (error) {
+    proxy.stop(true);
+    provider.close();
+    throw error;
+  }
+}
+
+test("published page tools: legacy catalog/declarations/call and targeted resolve/invoke retain exact viewer accounts without an agent", async () => {
+  const f = await pageToolsFixture();
+  try {
+    const config = await f.gateway(f.host, "GET", "/site/config", { session: f.session });
+    expect(config.json.capabilities).toMatchObject({ agent: false, workspaceTools: true });
+    const catalog = await f.post("catalog");
+    expect(catalog.status, JSON.stringify(catalog.json)).toBe(200);
+    expect(catalog.headers.get("cache-control")).toBe("no-store");
+    expect(catalog.json.entries.map((entry: any) => entry.identity)).toEqual(
+      expect.arrayContaining([f.prod.identity, f.staging.identity, f.personal.identity]),
+    );
+    expect(catalog.json.entries).toHaveLength(3);
+    expect(JSON.stringify(catalog.json)).not.toContain(f.foreign.identity.serverId);
+    const declarations = await f.post("declarations");
+    expect(declarations.status).toBe(200);
+    expect(declarations.json.catalogDigest).toBe(catalog.json.digest);
+    expect(declarations.json.source).toContain("search_documents");
+    for (const account of [f.prod, f.staging, f.personal]) {
+      f.callAuthorizations.length = 0;
+      const called = await f.post("call", {
+        catalogDigest: catalog.json.digest,
+        identity: account.identity,
+        arguments: { query: account.label },
+      });
+      expect(called.status, JSON.stringify(called.json)).toBe(200);
+      expect(called.json.result.content[0].text).toBe(`found document for ${account.label}`);
+      expect(f.callAuthorizations).toEqual([`Bearer page-${account.label}`]);
+      const entry = catalog.json.entries.find(
+        (item: any) => item.identity.serverId === account.identity.serverId,
+      );
+      const resolved = await f.post("resolve", { target: { path: entry.codemodePath } });
+      expect(resolved.status, JSON.stringify(resolved.json)).toBe(200);
+      expect(resolved.json.entry.identity).toEqual(account.identity);
+      f.authorizations.length = 0;
+      const invoked = await f.post("invoke", {
+        target: { identity: account.identity },
+        operationId: crypto.randomUUID(),
+        expectedDefinitionDigest: resolved.json.definitionDigest,
+        arguments: { query: account.label },
+      });
+      expect(invoked.status, JSON.stringify(invoked.json)).toBe(200);
+      expect(invoked.json.result.content[0].text).toBe(`found document for ${account.label}`);
+      expect(f.authorizations.length).toBeGreaterThan(0);
+      expect(f.authorizations.every((value) => value === `Bearer page-${account.label}`)).toBe(
+        true,
+      );
+      expect(f.callAuthorizations).toEqual([
+        `Bearer page-${account.label}`,
+        `Bearer page-${account.label}`,
+      ]);
+    }
+    expect(f.provider.calls).toHaveLength(6);
+  } finally {
+    f.close();
+  }
+}, 180_000);
+
+test("published page tools: declarations, audiences, live membership and approval failures never widen page authority", async () => {
+  const f = await pageToolsFixture();
+  try {
+    const catalog = (await f.post("catalog")).json;
+    for (const identity of [
+      { serverId: "grafana", toolName: "search_documents" },
+      { ...f.prod.identity, toolName: "fetch_document" },
+    ]) {
+      for (const [method, body] of [
+        ["call", { identity, catalogDigest: catalog.digest, arguments: { query: "no" } }],
+        ["resolve", { target: { identity } }],
+        [
+          "invoke",
+          { target: { identity }, operationId: crypto.randomUUID(), arguments: { query: "no" } },
+        ],
+      ] as const) {
+        const requests = f.provider.requests.length;
+        expect((await f.post(method, body)).status).toBe(403);
+        expect(f.provider.requests.length).toBe(requests);
+      }
+    }
+    expect((await f.post("resolve", { target: { identity: f.foreign.identity } })).status).toBe(
+      404,
+    );
+    const forgedApproval = `ogta_${"a".repeat(43)}`;
+    await updateConnectorToolPermissionPolicies(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: f.owner.subjectId,
+      connectionId: f.prod.connection.id,
+      serverId: "grafana",
+      toolNames: [f.prod.identity.toolName],
+      policy: "ask",
+    });
+    const askedCatalog = (await f.post("catalog")).json;
+    for (const approvalToken of [undefined, forgedApproval]) {
+      const legacy = await f.post("call", {
+        catalogDigest: askedCatalog.digest,
+        identity: f.prod.identity,
+        arguments: { query: "no approval" },
+        approvalToken,
+      });
+      expect(legacy.status, JSON.stringify(legacy.json)).toBe(409);
+      expect(legacy.json.error.message).toBe("tool_gateway_approval_required");
+      const targeted = await f.post("invoke", {
+        target: { identity: f.prod.identity },
+        operationId: crypto.randomUUID(),
+        arguments: { query: "no approval" },
+        approvalToken,
+      });
+      expect(targeted.status, JSON.stringify(targeted.json)).toBe(409);
+      expect(targeted.json.error.message).toBe("tool_gateway_approval_required");
+    }
+    expect(f.provider.calls).toHaveLength(0);
+    const visitor = visitorId();
+    await f.publication(f.owner, f.site.id, "PUT", { access: "public", agent: { enabled: false } });
+    const outside = await fixture();
+    const outsider = await f.signIn(outside.owner, f.host);
+    const invited = randomBytes(32).toString("base64url");
+    await f.publication(f.owner, f.site.id, "PUT", { invitedEmails: ["page-guest@example.com"] });
+    await createSiteViewerSession(
+      db.db,
+      { accountId: f.accountId, workspaceId: f.workspace.id },
+      {
+        siteId: f.site.id,
+        tokenHash: createHash("sha256").update(invited).digest("hex"),
+        subjectId: outside.owner.subjectId,
+        kind: "invited",
+        email: "page-guest@example.com",
+        displayName: "Invited page viewer",
+        absoluteSeconds: 3_600,
+      },
+    );
+    expect(
+      (await f.gateway(f.host, "GET", "/site/config", { session: invited })).json.viewer.kind,
+    ).toBe("invited");
+    for (const method of ["catalog", "declarations", "resolve", "call", "invoke"]) {
+      expect(
+        (await f.gateway(f.host, "POST", `/tools/${method}`, { visitor, body: {} })).status,
+      ).toBe(403);
+      expect((await f.post(method, {}, outsider)).status).toBe(403);
+      expect((await f.post(method, {}, invited)).status).toBe(403);
+    }
+    const member = await f.signIn(f.member, f.host);
+    await shared.admin`delete from workspace_memberships where workspace_id = ${f.workspace.id} and subject_id = ${f.member.subjectId}`;
+    expect((await f.post("catalog", {}, member)).status).toBe(403);
+    expect(f.provider.calls).toHaveLength(0);
+  } finally {
+    f.close();
+  }
+}, 180_000);
+
+test("published page tools: current immutable version replaces old declarations without trusting page Site context", async () => {
+  const f = await pageToolsFixture();
+  try {
+    const catalog = (await f.post("catalog")).json;
+    const published = await f.api(f.owner, "POST", `${f.sites}/${f.site.id}/versions`, {
+      html: "<!doctype html><h1>No page tools</h1>",
+      expectedCurrentVersionId: f.site.versionId,
+      requestedTools: [],
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(published.status, JSON.stringify(published.json)).toBe(200);
+    const call = await f.post("call", {
+      catalogDigest: catalog.digest,
+      identity: f.prod.identity,
+      arguments: { query: "old page" },
+      siteArtifactId: f.site.id,
+      siteVersionId: f.site.versionId,
+    });
+    expect(call.status, JSON.stringify(call.json)).toBe(403);
+    expect((await f.post("catalog")).json.entries).toEqual([]);
+    expect(
+      (await f.gateway(f.host, "GET", "/site/config", { session: f.session })).json.capabilities
+        .workspaceTools,
+    ).toBe(false);
+    expect(f.provider.calls).toHaveLength(0);
+  } finally {
+    f.close();
+  }
+}, 180_000);
+
+test.each(["catalog", "declarations", "call", "resolve", "invoke"])(
+  "published page tools: %s rechecks membership between physical provider requests",
+  async (method) => {
+    const f = await pageToolsFixture();
+    try {
+      const catalog = method === "call" ? (await f.post("catalog")).json : null;
+      f.atProvider(async () => {
+        await shared.admin`delete from workspace_memberships where workspace_id = ${f.workspace.id} and subject_id = ${f.member.subjectId}`;
+      });
+      const result = await f.post(
+        method,
+        method === "catalog" || method === "declarations"
+          ? {}
+          : method === "call"
+            ? {
+                catalogDigest: catalog.digest,
+                identity: f.prod.identity,
+                arguments: { query: "revoked" },
+              }
+            : {
+                target: { identity: f.prod.identity },
+                ...(method === "invoke"
+                  ? { operationId: crypto.randomUUID(), arguments: { query: "revoked" } }
+                  : {}),
+              },
+      );
+      expect(result.status, JSON.stringify(result.json)).toBe(403);
+      expect(f.provider.calls).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  },
+  180_000,
+);
 
 test("viewer sign-in: one-time PKCE codes bound to their host, then revocable sessions", async () => {
   const f = await fixture();
@@ -927,7 +1573,12 @@ test("guests reach Site Data only through each collection's guest rule", async (
     });
   const hidden = await data("POST", "/data/query", { collection: "notes" });
   expect(hidden.status).toBe(403);
-  expect(hidden.json.error.details).toMatchObject({ reason: "guest_access" });
+  expect(hidden.json.error.details).toMatchObject({
+    code: "not_available_for_viewer",
+    feature: "site_data",
+    reason: "guest_access",
+    legacyCode: "forbidden",
+  });
   const board = await data("POST", "/data/query", { collection: "board" });
   expect(board.status, JSON.stringify(board.json)).toBe(200);
   expect(board.json.records.map((record: any) => record.data.title)).toEqual(["Welcome"]);
@@ -961,6 +1612,8 @@ test("guests reach Site Data only through each collection's guest rule", async (
     operations: [{ op: "delete", collection: "todo", id: theirs.json.results[0].record.id }],
   });
   expect(foreign.status).not.toBe(200);
+  // A record the guest does not own is not an audience refusal: it keeps its Site Data code.
+  expect(foreign.json.error?.details?.code).not.toBe("not_available_for_viewer");
   // Files are for signed-in viewers only.
   const files = await data("GET", "/files");
   expect(files.status).toBe(403);
@@ -1044,10 +1697,12 @@ test("agent conversations run as the Site, belong to one viewer and stay within 
     "GET",
     `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}`,
   );
-  expect(inspected.status, JSON.stringify(inspected.json)).toBe(200);
-  expect(JSON.stringify(inspected.json)).toContain('"agentAccess":"session"');
-  // Capped by its own task usage limit: the free per-conversation budget.
-  expect(inspected.json.usageLimit).toMatchObject({ limitMicros: 20_000 });
+  expect(inspected.status, JSON.stringify(inspected.json)).toBe(404);
+  const [agentScope] =
+    await shared.admin`select agent_access from sessions where id = ${sessionId}`;
+  expect(agentScope!.agent_access).toBe("session");
+  // Capped by its own task usage limit: the guest per-conversation guard.
+  expect(await hostSessionUsage(f, sessionId)).toMatchObject({ limitMicros: 250_000 });
 
   // Only the viewer who started it sees it, and only on its own Site.
   const own = await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
@@ -1124,8 +1779,11 @@ test("agent conversations run as the Site, belong to one viewer and stay within 
   const off = await start(sibling.host, { visitor, human: true });
   expect(off.status).toBe(403);
   expect(off.json.error.details).toMatchObject({
-    code: "site_agents_unavailable",
+    code: "not_available_for_viewer",
+    feature: "agent",
     reason: "agent_disabled",
+    // The code Site pages matched on before, until the next SDK major.
+    legacyCode: "site_agents_unavailable",
   });
   await f.publication(f.owner, sibling.id, "PUT", { agent: { enabled: true } });
   const noPublicAgents = f.appWith(sitesSettings({ sitesPublicAgentsEnabled: false }));
@@ -1582,9 +2240,10 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
     return { limit: Number(row!.limit_micros), reserved: Number(row!.reserved_micros) };
   };
 
-  // Each start reserves its whole cap against the Site's month in one
-  // transaction: the third gets what is left, the fourth is refused.
-  await setLimits({ agentMicrosPerSitePerMonth: 50_000 });
+  // Each start reserves its first turn (at most its cap) against the Site's
+  // month in one transaction: the third gets what is left, and the fourth
+  // finds only their reservations in the way (busy: nothing is spent yet).
+  await setLimits({ agentMicrosPerSitePerMonth: 50_000, agentMicrosPerConversation: 20_000 });
   const first = await start();
   expect(first.status, JSON.stringify(first.json)).toBe(202);
   expect(await reservation(first.json.id)).toEqual({ limit: 20_000, reserved: 20_000 });
@@ -1593,16 +2252,11 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   expect(third.status).toBe(202);
   expect(await reservation(third.json.id)).toEqual({ limit: 10_000, reserved: 10_000 });
   // The session's own usage limit was set when it was created.
-  const inspected = await f.api(
-    f.owner,
-    "GET",
-    `/v1/workspaces/${f.workspace.id}/sessions/${third.json.id}`,
-  );
-  expect(inspected.json.usageLimit).toMatchObject({ limitMicros: 10_000 });
+  expect(await hostSessionUsage(f, third.json.id)).toMatchObject({ limitMicros: 10_000 });
   const fourth = await start();
   expect(fourth.status).toBe(429);
   expect(fourth.json.error.details).toMatchObject({
-    code: "site_budget_exhausted",
+    code: "site_budget_busy",
     budget: "agent_micros_per_site_per_month",
   });
   // Starts per Site per day hold whatever the money budget.
@@ -1631,8 +2285,34 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   ])
     expect({ key, present: key in got.json }).toEqual({ key, present: false });
   const listed = await f.gateway(site.host, "GET", "/sessions", own);
-  expect(listed.json).toMatchObject({ pinned: [], nextCursor: null });
+  expect(listed.json).toMatchObject({
+    pinned: [],
+    nextCursor: null,
+    originSiteId: site.id,
+    filtersApplied: true,
+  });
   expect(Object.keys(listed.json.sessions[0]).sort()).toEqual(Object.keys(got.json).sort());
+  const sdk = new OpenGeniClient({
+    baseUrl: "https://site-sdk.example",
+    fetch: async (input) => {
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      );
+      const result = await f.gateway(
+        site.host,
+        "GET",
+        `${url.pathname.slice(url.pathname.indexOf("/sessions"))}${url.search}`,
+        own,
+      );
+      return Response.json(result.json, { status: result.status, headers: result.headers });
+    },
+  });
+  const page = await sdk.listSessionPage("site-host", { originSiteId: "current" });
+  expect(page.originSiteId).toBe(site.id);
+  expect(page.sessions.map((entry) => entry.id)).toEqual([first.json.id]);
+  await expect(
+    sdk.listSessionPage("site-host", { originSiteId: "current", search: "not implemented" }),
+  ).rejects.toThrow("does not support filtered session lists");
   const events = await f.gateway(
     site.host,
     "GET",
@@ -1656,16 +2336,22 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   const view = (visitor: string, clientIp: string) =>
     f.gateway(rated.host, "GET", "/site/config", { visitor, clientIp });
   const repeat = visitorId();
-  expect((await view(repeat, "203.0.113.1")).status).toBe(200);
-  expect((await view(repeat, "203.0.113.2")).status).toBe(200);
-  const limited = await view(repeat, "203.0.113.3");
-  expect(limited.status).toBe(429);
-  expect(code(limited)).toBe("site_rate_limited");
-  const fromOneAddress: number[] = [];
-  for (let index = 0; index < 9; index += 1)
-    fromOneAddress.push((await view(visitorId(), "203.0.113.9")).status);
-  expect(fromOneAddress).toEqual([200, 200, 200, 200, 200, 200, 200, 200, 429]);
-  expect((await view(visitorId(), "203.0.113.10")).status).toBe(200);
+  // All calls belong to one fixed window, even when the test starts at :59.
+  setSystemTime(new Date());
+  try {
+    expect((await view(repeat, "203.0.113.1")).status).toBe(200);
+    expect((await view(repeat, "203.0.113.2")).status).toBe(200);
+    const limited = await view(repeat, "203.0.113.3");
+    expect(limited.status).toBe(429);
+    expect(code(limited)).toBe("site_rate_limited");
+    const fromOneAddress: number[] = [];
+    for (let index = 0; index < 9; index += 1)
+      fromOneAddress.push((await view(visitorId(), "203.0.113.9")).status);
+    expect(fromOneAddress).toEqual([200, 200, 200, 200, 200, 200, 200, 200, 429]);
+    expect((await view(visitorId(), "203.0.113.10")).status).toBe(200);
+  } finally {
+    setSystemTime();
+  }
 
   // Bodies are capped before they are read or verified.
   const huge = await f.gateway(rated.host, "POST", "/site/reports", {
@@ -1675,17 +2361,19 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   expect(huge.status).toBe(413);
   expect(code(huge)).toBe("site_request_too_large");
 
-  // Workspace tools act with shared connections: only an admin gives them.
+  // Workspace tools act with shared connections: only an admin gives them,
+  // and only workspace members who may use connections get them.
   const agentChange = (who: Who, agent: Record<string, unknown>) =>
     f.publication(who, site.id, "PUT", { agent });
-  for (const agent of [{ tools: ["crm"] }, { guestTools: true }]) {
-    const refused = await agentChange(f.owner, agent);
-    expect({ agent, status: refused.status, code: code(refused) }).toEqual({
-      agent,
-      status: 403,
-      code: "site_admin_required",
-    });
-  }
+  const refused = await agentChange(f.owner, { tools: ["crm"] });
+  expect({ status: refused.status, code: code(refused) }).toEqual({
+    status: 403,
+    code: "site_admin_required",
+  });
+  // The retired opt-in for everyone is accepted and ignored.
+  const optIn = await agentChange(f.owner, { guestTools: true });
+  expect(optIn.status, JSON.stringify(optIn.json)).toBe(200);
+  expect(optIn.json.agent.guestTools).toBe(false);
   for (const tool of ["bad id!", "opengeni"]) {
     const invalid = await agentChange(f.admin, { tools: [tool] });
     expect({ tool, status: invalid.status, code: code(invalid) }).toEqual({
@@ -1694,14 +2382,22 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
       code: "site_tool_invalid",
     });
   }
-  const given = await agentChange(f.admin, { tools: ["crm"] });
+  const given = await agentChange(f.admin, { tools: ["crm"], guestTools: true });
   expect(given.status, JSON.stringify(given.json)).toBe(200);
   expect(given.json.agent).toMatchObject({ tools: ["crm"], guestTools: false });
+  // A public Site whose page or assistant uses workspace tools says so.
+  expect(given.json.warnings.map((warning: { code: string }) => warning.code)).toContain(
+    "agent_tools_members_only",
+  );
   // Tools are optional references: a connection the workspace does not have
   // (or no longer has) is skipped, never a failed conversation. Which viewers
   // get them is unit-tested with siteAgentToolRefs.
   await setLimits({ agentMicrosPerSitePerMonth: 10_000_000, conversationsPerSitePerDay: 10 });
-  expect((await start()).status).toBe(202);
+  const guestStart = await start();
+  expect(guestStart.status).toBe(202);
+  const [guestRow] = await shared.admin`select tool_ids from site_runtime_conversations
+    where session_id = ${guestStart.json.id}`;
+  expect(guestRow!.tool_ids).toEqual([]);
   const memberStart = await f.gateway(site.host, "POST", "/sessions", {
     session: await f.signIn(f.member, site.host),
     body: { initialMessage: "Hi" },
@@ -1716,89 +2412,24 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   expect(removed.status).toBe(200);
   expect(removed.json.agent.tools).toBeNull();
 
-  // Opening a members Site whose tools an admin gave to everyone gives them
-  // to people outside the workspace: only an admin may.
+  // People outside the workspace never get the tools, so opening a Site with
+  // tools or inviting people to it needs no admin.
   const internal = await f.live("Internal tools", { access: "members", agent: { enabled: true } });
-  const toEveryone = await f.publication(f.admin, internal.id, "PUT", {
-    agent: { tools: ["crm"], guestTools: true },
-  });
-  expect(toEveryone.status, JSON.stringify(toEveryone.json)).toBe(200);
+  expect(
+    (await f.publication(f.admin, internal.id, "PUT", { agent: { tools: ["crm"] } })).status,
+  ).toBe(200);
   const opened = await f.publication(f.owner, internal.id, "PUT", { access: "public" });
-  expect({ status: opened.status, code: code(opened) }).toEqual({
-    status: 403,
-    code: "site_admin_required",
-  });
-  expect(opened.json.error.message).toBe(
-    "Only a workspace admin can open a Site with tools to everyone",
-  );
-  // Without tools for everyone, the owner opens it.
-  const openedWithout = await f.publication(f.owner, internal.id, "PUT", {
+  expect(opened.status, JSON.stringify(opened.json)).toBe(200);
+  expect(opened.json).toMatchObject({
     access: "public",
-    agent: { guestTools: false },
+    agent: { tools: ["crm"], guestTools: false },
   });
-  expect(openedWithout.status, JSON.stringify(openedWithout.json)).toBe(200);
-  expect(openedWithout.json).toMatchObject({ access: "public", agent: { guestTools: false } });
-  expect((await f.publication(f.owner, internal.id, "PUT", { access: "members" })).status).toBe(
-    200,
-  );
-  expect(
-    (await f.publication(f.admin, internal.id, "PUT", { agent: { guestTools: true } })).status,
-  ).toBe(200);
-  // An admin opens it with the tools.
-  expect((await f.publication(f.admin, internal.id, "PUT", { access: "public" })).status).toBe(200);
-
-  // Invitees get the Site's tools whenever access isn't members-only (public
-  // Sites too), so while the agent has tools, giving them to more invitees
-  // needs an admin. Removing invitees or narrowing does not.
-  const team = await f.live("Team tools", { access: "members", agent: { enabled: true } });
-  const teamChange = (who: Who, body: Record<string, unknown>) =>
-    f.publication(who, team.id, "PUT", body);
-  const refusedInvite = async (body: Record<string, unknown>) => {
-    const refused = await teamChange(f.owner, body);
-    expect({ body, status: refused.status, code: code(refused) }).toEqual({
-      body,
-      status: 403,
-      code: "site_admin_required",
-    });
-    expect(refused.json.error.message).toBe(
-      "Only a workspace admin can invite people while the Site's assistant has tools",
-    );
-  };
-  expect((await teamChange(f.admin, { agent: { tools: ["crm"] } })).status).toBe(200);
-  await refusedInvite({ access: "invited", invitedEmails: ["outside@example.com"] });
-  // Switching to invited access with nobody new invited changes nobody's tools.
-  expect((await teamChange(f.owner, { access: "invited" })).status).toBe(200);
-  expect((await teamChange(f.owner, { access: "members" })).status).toBe(200);
-  // Invitees listed on a members Site get nothing until it opens, to invited
-  // or public access.
-  const unopened = await teamChange(f.owner, { invitedEmails: ["outside@example.com"] });
-  expect(unopened.status, JSON.stringify(unopened.json)).toBe(200);
-  await refusedInvite({ access: "invited" });
-  await refusedInvite({ access: "public" });
-  const openedByAdmin = await teamChange(f.admin, { access: "public" });
-  expect(openedByAdmin.status, JSON.stringify(openedByAdmin.json)).toBe(200);
-  // On a public Site, adding invitees gives them the tools.
-  await refusedInvite({ invitedEmails: ["outside@example.com", "ada@example.com"] });
-  // Narrowing to invited access, the same people however written, or fewer
-  // people: the owner may.
-  expect((await teamChange(f.owner, { access: "invited" })).status).toBe(200);
-  expect((await teamChange(f.owner, { invitedEmails: ["OUTSIDE@example.com"] })).status).toBe(200);
-  expect((await teamChange(f.owner, { invitedEmails: [] })).status).toBe(200);
-  // Once everyone on a public Site gets the tools, invitees gain nothing more.
-  expect(
-    (await teamChange(f.admin, { access: "public", agent: { guestTools: true } })).status,
-  ).toBe(200);
-  expect((await teamChange(f.owner, { invitedEmails: ["ada@example.com"] })).status).toBe(200);
-  // Without tools, the owner invites people.
-  expect(
-    (await teamChange(f.owner, { access: "invited", agent: { tools: null, guestTools: false } }))
-      .status,
-  ).toBe(200);
-  const withoutTools = await teamChange(f.owner, {
-    invitedEmails: ["ada@example.com", "outside@example.com"],
+  const invited = await f.publication(f.owner, internal.id, "PUT", {
+    access: "invited",
+    invitedEmails: ["outside@example.com"],
   });
-  expect(withoutTools.status, JSON.stringify(withoutTools.json)).toBe(200);
-  expect(withoutTools.json.invitedEmails).toEqual(["ada@example.com", "outside@example.com"]);
+  expect(invited.status, JSON.stringify(invited.json)).toBe(200);
+  expect(invited.json.invitedEmails).toEqual(["outside@example.com"]);
 }, 90_000);
 
 test("finished conversations free the Site budget; a lowered cap lowers running conversations", async () => {
@@ -1820,7 +2451,7 @@ test("finished conversations free the Site budget; a lowered cap lowers running 
     return { reserved: Number(row!.reserved_micros), limit: Number(row!.limit_micros) };
   };
   // Room for two conversations of 20_000 in the Site's month.
-  await setLimits({ agentMicrosPerSitePerMonth: 40_000 });
+  await setLimits({ agentMicrosPerSitePerMonth: 40_000, agentMicrosPerConversation: 20_000 });
   const [alice, bob, carol] = [visit(), visit(), visit()];
   const first = await start(alice);
   expect(first.status, JSON.stringify(first.json)).toBe(202);
@@ -1836,17 +2467,12 @@ test("finished conversations free the Site budget; a lowered cap lowers running 
   });
   expect(sent.status, JSON.stringify(sent.json)).toBeLessThan(300);
   expect(await reserved(second.json.id)).toEqual({ reserved: 5_000, limit: 5_000 });
-  const usage = await f.api(
-    f.owner,
-    "GET",
-    `/v1/workspaces/${f.workspace.id}/sessions/${second.json.id}`,
-  );
-  expect(usage.json.usageLimit).toMatchObject({ limitMicros: 5_000 });
-  await setLimits({ agentMicrosPerSitePerMonth: 25_000 });
+  expect(await hostSessionUsage(f, second.json.id)).toMatchObject({ limitMicros: 5_000 });
+  await setLimits({ agentMicrosPerSitePerMonth: 25_000, agentMicrosPerConversation: 20_000 });
 
   // The first conversation finished (its session went idle) without anyone
   // settling it: a refused start sweeps it and then succeeds.
-  await shared.admin`update sessions set status = 'idle' where id = ${first.json.id}`;
+  await finishConversation(first.json.id);
   const third = await start(carol);
   expect(third.status, JSON.stringify(third.json)).toBe(202);
   expect((await reserved(first.json.id)).reserved).toBe(0);
@@ -1876,7 +2502,9 @@ test("narrowing a Site's tools stops the conversations that hold tools they woul
   };
   await change({ tools: ["crm", "billing"], guestTools: true });
   const guest = { visitor: visitorId(), clientIp: "198.51.100.40" };
-  const member = { session: await f.signIn(f.member, site.host) };
+  // A member who may use connections (an admin), and one who may not.
+  const member = { session: await f.signIn(f.admin, site.host) };
+  const plainMember = { session: await f.signIn(f.member, site.host) };
   const start = async (who: Record<string, string>) => {
     const started = await f.gateway(site.host, "POST", "/sessions", {
       ...who,
@@ -1890,35 +2518,34 @@ test("narrowing a Site's tools stops the conversations that hold tools they woul
       ...who,
       body: { type: "user.message", payload: { text: "More" } },
     });
+  // People outside the workspace never hold workspace tools, whatever the
+  // retired opt-in said; members who may use connections hold the Site's.
   const guestChat = await start(guest);
   const memberChat = await start(member);
-  expect(await conversation(guestChat)).toEqual({
-    kind: "guest",
+  expect(await conversation(guestChat)).toEqual({ kind: "guest", tools: [], cancelled: false });
+  expect(await conversation(memberChat)).toEqual({
+    kind: "member",
     tools: ["crm", "billing"],
     cancelled: false,
   });
-  expect(await conversation(memberChat)).toMatchObject({ kind: "member", cancelled: false });
+  expect((await conversation(await start(plainMember))).tools).toEqual([]);
 
-  // Tools no longer for everyone: the guest's conversation stops and takes no
-  // more messages; the member's goes on. Nobody is signed out.
+  // The retired opt-in changes nothing.
   await change({ guestTools: false });
-  expect((await conversation(guestChat)).cancelled).toBe(true);
+  expect((await conversation(guestChat)).cancelled).toBe(false);
   expect((await conversation(memberChat)).cancelled).toBe(false);
-  const outdated = await send(guest, guestChat);
-  expect(outdated.status, JSON.stringify(outdated.json)).toBe(409);
-  expect(code(outdated)).toBe("site_conversation_outdated");
-  expect((await send(member, memberChat)).status).toBeLessThan(300);
-  // A new guest conversation starts without tools.
-  expect((await conversation(await start(guest))).tools).toEqual([]);
 
-  // A removed tool stops the member's conversation too; a new one gets what is left.
+  // A removed tool stops the member's conversation, not the guest's, which
+  // holds none; a new one gets what is left. Nobody is signed out.
   await change({ tools: ["crm"] });
   expect((await conversation(memberChat)).cancelled).toBe(true);
+  expect((await conversation(guestChat)).cancelled).toBe(false);
   expect(code(await send(member, memberChat))).toBe("site_conversation_outdated");
+  expect((await send(guest, guestChat)).status).toBeLessThan(300);
   expect((await conversation(await start(member))).tools).toEqual(["crm"]);
   const [signedIn] = await shared.admin`select count(*)::int as n from site_viewer_sessions
     where site_id = ${site.id} and revoked_at is null`;
-  expect(signedIn!.n).toBe(1);
+  expect(signedIn!.n).toBe(2);
 }, 60_000);
 
 test("abuse reports and flagged scans reach the platform, at most once an hour per Site", async () => {
@@ -2514,3 +3141,1576 @@ test("agent tools read and change a Site's publication with the person's authori
     await mcp.close();
   }
 }, 60_000);
+
+test("members are never capped by a Site; people outside the workspace meet its limits", async () => {
+  const f = await fixture();
+  const outsider = (await fixture()).owner;
+  const site = await f.live("Caps", { access: "public", agent: { enabled: true } });
+  const setLimits = async (siteId: string, overrides: Record<string, unknown>) => {
+    const changed = await f.publication(f.admin, siteId, "PUT", {
+      limitProfile: { kind: "custom", overrides },
+    });
+    expect(changed.status, JSON.stringify(changed.json)).toBe(200);
+  };
+  const start = (host: string, who: { visitor?: string; session?: string }) =>
+    f.gateway(host, "POST", "/sessions", { ...who, body: { initialMessage: "Hi" } });
+  const refusedBudget = (result: Result) => ({
+    status: result.status,
+    code: code(result),
+    budget: result.json?.error?.details?.budget,
+  });
+  const memberSession = await f.signIn(f.member, site.host);
+  const userSession = await f.signIn(outsider, site.host);
+
+  // The Site's money is spent: guests and signed-in outsiders are refused, members are not.
+  await setLimits(site.id, { agentMicrosPerSitePerMonth: 0 });
+  const siteMonth = {
+    status: 429,
+    code: "site_budget_exhausted",
+    budget: "agent_micros_per_site_per_month",
+  };
+  expect(refusedBudget(await start(site.host, { visitor: visitorId() }))).toEqual(siteMonth);
+  expect(refusedBudget(await start(site.host, { session: userSession }))).toEqual(siteMonth);
+  const asMember = await start(site.host, { session: memberSession });
+  expect(asMember.status, JSON.stringify(asMember.json)).toBe(202);
+  // Member conversations are kept out of the Site's windows.
+  const [memberRow] = await shared.admin`select viewer_kind, budget_key
+    from site_runtime_conversations where session_id = ${asMember.json.id}`;
+  expect(memberRow).toMatchObject({ viewer_kind: "member", budget_key: "*members" });
+  // No Site budget and no session usage limit on a member's conversation:
+  // only the workspace's normal limits apply. Also for the next one, after a
+  // previous conversation exists.
+  const memberUncapped = async (sessionId: string) => {
+    const inspected = await f.api(
+      f.member,
+      "GET",
+      `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}`,
+    );
+    expect(inspected.status, JSON.stringify(inspected.json)).toBe(200);
+    expect(inspected.json.usageLimit?.limitMicros ?? null).toBeNull();
+    expect(inspected.json.usageLimit?.status ?? "unlimited").toBe("unlimited");
+    const [row] = await shared.admin`select limit_micros from site_runtime_conversations
+      where session_id = ${sessionId}`;
+    expect(row!.limit_micros).toBeNull();
+  };
+  await memberUncapped(String(asMember.json.id));
+  const memberAgain = await start(site.host, { session: memberSession });
+  expect(memberAgain.status, JSON.stringify(memberAgain.json)).toBe(202);
+  await memberUncapped(String(memberAgain.json.id));
+
+  // The per-person limit refuses a signed-in outsider with its own budget code.
+  await setLimits(site.id, { agentMicrosPerVisitorPerDay: 0 });
+  expect(refusedBudget(await start(site.host, { session: userSession }))).toEqual({
+    status: 429,
+    code: "site_budget_exhausted",
+    budget: "agent_micros_per_visitor_per_day",
+  });
+  expect((await start(site.host, { session: memberSession })).status).toBe(202);
+  // Guests also meet the bot guards: conversations per visitor per day.
+  await setLimits(site.id, { conversationsPerVisitorPerDay: 1 });
+  const guest = visitorId();
+  expect((await start(site.host, { visitor: guest })).status).toBe(202);
+  expect(refusedBudget(await start(site.host, { visitor: guest }))).toEqual({
+    status: 429,
+    code: "site_budget_exhausted",
+    budget: "conversations_per_visitor_per_day",
+  });
+  // ...but a signed-in outsider does not.
+  expect((await start(site.host, { session: userSession })).status).toBe(202);
+  const outsiderStarted = await start(site.host, { session: userSession });
+  expect(outsiderStarted.status).toBe(202);
+  // People outside the workspace keep their caps, stamped on the session:
+  // signed-in outsiders the per-conversation flood brake, guests the guard.
+  const usageLimitOf = async (sessionId: string) =>
+    (await hostSessionUsage(f, sessionId)).limitMicros ?? null;
+  expect(await usageLimitOf(String(outsiderStarted.json.id))).toBe(250_000);
+  const guestStarted = await start(site.host, { visitor: visitorId() });
+  expect(guestStarted.status).toBe(202);
+  expect(await usageLimitOf(String(guestStarted.json.id))).toBe(250_000);
+
+  // Invited people: the same Site limit; switching the agent off for people
+  // outside the workspace leaves members theirs.
+  const invited = await f.live("Invited caps", {
+    access: "invited",
+    invitedEmails: ["guest@example.com"],
+    agent: { enabled: true },
+  });
+  const token = randomBytes(32).toString("base64url");
+  await createSiteViewerSession(
+    db.db,
+    { accountId: f.accountId, workspaceId: f.workspace.id },
+    {
+      siteId: invited.id,
+      tokenHash: createHash("sha256").update(token).digest("hex"),
+      subjectId: outsider.subjectId,
+      kind: "invited",
+      email: "guest@example.com",
+      displayName: "Invited Guest",
+      absoluteSeconds: 3_600,
+    },
+  );
+  const invitedMember = await f.signIn(f.member, invited.host);
+  await setLimits(invited.id, { agentMicrosPerSitePerMonth: 0 });
+  expect(refusedBudget(await start(invited.host, { session: token }))).toEqual(siteMonth);
+  await setLimits(invited.id, { agentsEnabled: false });
+  const off = await start(invited.host, { session: token });
+  expect(off.status).toBe(403);
+  expect(off.json.error.details).toMatchObject({
+    code: "not_available_for_viewer",
+    feature: "agent",
+    reason: "agent_disabled",
+  });
+  const config = await f.gateway(invited.host, "GET", "/site/config", { session: token });
+  expect(config.json.capabilities).toMatchObject({ agent: false, workspaceTools: false });
+  expect((await start(invited.host, { session: invitedMember })).status).toBe(202);
+  const memberConfig = await f.gateway(invited.host, "GET", "/site/config", {
+    session: invitedMember,
+  });
+  expect(memberConfig.json.capabilities).toMatchObject({ agent: true, viewAs: null });
+
+  // The publication reports outsiders' spend and the limits that govern them.
+  const reported = await f.publication(f.owner, site.id, "GET");
+  expect(reported.json.usage).toMatchObject({ agentMicrosThisMonth: 0, agentMicrosToday: 0 });
+  expect(reported.json.effectiveLimits.conversationsPerVisitorPerDay).toBe(1);
+}, 90_000);
+
+test("a member's conversation from before members were uncapped keeps working, uncapped", async () => {
+  const f = await fixture();
+  const site = await f.live("Legacy", { access: "public", agent: { enabled: true } });
+  const memberSession = await f.signIn(f.member, site.host);
+  const started = await f.gateway(site.host, "POST", "/sessions", {
+    session: memberSession,
+    body: { initialMessage: "Hi" },
+  });
+  expect(started.status, JSON.stringify(started.json)).toBe(202);
+  const sessionId = String(started.json.id);
+  // As the previous release left it: counted in the Site's windows, with the
+  // old $0.02 per-conversation cap stamped as its session usage limit.
+  await shared.admin`update site_runtime_conversations set budget_key = '*', limit_micros = 20000
+    where session_id = ${sessionId}`;
+  const stamped = await withWorkspaceSessionActivityRls(
+    db.db,
+    f.workspace.id,
+    async (tx) =>
+      await setSessionUsageLimitInTransaction(tx, {
+        accountId: f.accountId,
+        workspaceId: f.workspace.id,
+        sessionId,
+        limitMicros: 20_000,
+        expectedVersion: 0,
+        operationId: `legacy-${sessionId}`,
+        actor: { type: "host", subjectId: `site:${site.id}` },
+        producerEnabled: true,
+      }),
+  );
+  expect(stamped.outcome).toBe("ok");
+  const usageLimit = async () =>
+    (await f.api(f.member, "GET", `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}`)).json
+      .usageLimit?.limitMicros ?? null;
+  expect(await usageLimit()).toBe(20_000);
+  // A failed session-limit clear must not consume the conversation's retry
+  // marker. Inject a write failure at the real PostgreSQL boundary.
+  const faultName = `member_uncap_${sessionId.replaceAll("-", "")}`;
+  await shared.admin
+    .unsafe(`create function ${faultName}() returns trigger language plpgsql as $fault$
+    begin
+      if new.root_session_id = '${sessionId}'::uuid and new.limit_micros is null then
+        raise exception 'injected member uncap failure';
+      end if;
+      return new;
+    end $fault$`);
+  await shared.admin.unsafe(
+    `create trigger ${faultName} before update on opengeni_private.session_usage_limit_roots for each row execute function ${faultName}()`,
+  );
+  try {
+    const failed = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+      session: memberSession,
+      body: { type: "user.message", payload: { text: "Try during transient failure" } },
+    });
+    expect(failed.status, JSON.stringify(failed.json)).toBe(503);
+    const [pending] =
+      await shared.admin`select limit_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(Number(pending!.limit_micros)).toBe(20_000);
+    expect(await usageLimit()).toBe(20_000);
+  } finally {
+    await shared.admin.unsafe(
+      `drop trigger ${faultName} on opengeni_private.session_usage_limit_roots`,
+    );
+    await shared.admin.unsafe(`drop function ${faultName}()`);
+  }
+  // No site_conversation_outdated: the member keeps the conversation, and the
+  // Site's old cap is lifted.
+  const sent = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+    session: memberSession,
+    body: { type: "user.message", payload: { text: "More" } },
+  });
+  expect(sent.status, JSON.stringify(sent.json)).toBeLessThan(300);
+  const [row] = await shared.admin`select budget_key, limit_micros, reserved_micros
+    from site_runtime_conversations where session_id = ${sessionId}`;
+  expect(row).toMatchObject({ budget_key: "*", limit_micros: null });
+  expect(Number(row!.reserved_micros)).toBe(0);
+  expect(await usageLimit()).toBeNull();
+  await settleSiteRuntimeConversationSpend(
+    db.db,
+    { accountId: f.accountId, workspaceId: f.workspace.id },
+    { sessionId, usedMicros: 50_000, idle: true },
+  );
+  const windows = await shared.admin`select principal_key, agent_micros
+    from site_runtime_usage where site_id = ${site.id} and principal_key in ('*', '*members')`;
+  expect(
+    windows
+      .filter((window) => window.principal_key === "*")
+      .map((window) => Number(window.agent_micros)),
+  ).toEqual([0, 0]);
+  expect(
+    windows
+      .filter((window) => window.principal_key === "*members")
+      .map((window) => Number(window.agent_micros)),
+  ).toEqual([50_000, 50_000]);
+});
+
+test("the model follows the viewer: people outside the workspace never use a subscription", async () => {
+  const f = await fixture();
+  const site = await f.live("Models", { access: "public", agent: { enabled: true } });
+  const memberSession = await f.signIn(f.member, site.host);
+  const start = (who: { visitor?: string; session?: string }) =>
+    f.gateway(site.host, "POST", "/sessions", { ...who, body: { initialMessage: "Hi" } });
+  const send = (sessionId: string, who: { visitor?: string; session?: string }) =>
+    f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+      ...who,
+      body: { type: "user.message", payload: { text: "More" } },
+    });
+  const modelOf = async (sessionId: string) =>
+    String((await shared.admin`select model from sessions where id = ${sessionId}`)[0]!.model);
+  // A guest's conversation is created with an explicit, credit-billed model.
+  const visitor = visitorId();
+  const guest = await start({ visitor });
+  expect(guest.status, JSON.stringify(guest.json)).toBe(202);
+  const guestModel = await modelOf(String(guest.json.id));
+  expect(guestModel.length).toBeGreaterThan(0);
+  expect(guestModel.startsWith("codex/")).toBe(false);
+  // A conversation that holds a subscription model (one started before this
+  // rule) takes no more work from someone outside the workspace...
+  const subscription = "codex/gpt-6-astra";
+  await shared.admin`update sessions set model = ${subscription} where id = ${guest.json.id}`;
+  const refused = await send(String(guest.json.id), { visitor });
+  expect(refused.status, JSON.stringify(refused.json)).toBe(403);
+  expect(refused.json.error.details).toMatchObject({
+    code: "not_available_for_viewer",
+    feature: "agent_model",
+    reason: "subscription_model",
+  });
+  // ...while a member keeps using their subscription.
+  const member = await start({ session: memberSession });
+  expect(member.status, JSON.stringify(member.json)).toBe(202);
+  await shared.admin`update sessions set model = ${subscription} where id = ${member.json.id}`;
+  const memberSent = await send(String(member.json.id), { session: memberSession });
+  // The Site lets it through (this test deployment has no Codex connection,
+  // so the session itself may still say the model is unavailable).
+  expect(memberSent.json?.error?.details?.code ?? null).not.toBe("not_available_for_viewer");
+  expect(await modelOf(String(member.json.id))).toBe(subscription);
+
+  // Selecting a subscription on the Site resolves a concrete credit model for
+  // outsiders, rather than passing null to the subscription-preferring default.
+  const changed = await f.publication(f.admin, site.id, "PUT", {
+    agent: { model: subscription, enabled: true },
+  });
+  expect(changed.status, JSON.stringify(changed.json)).toBe(200);
+  const fallback = await start({ visitor: visitorId() });
+  expect(fallback.status, JSON.stringify(fallback.json)).toBe(202);
+  expect(await modelOf(String(fallback.json.id))).toBe(guestModel);
+
+  // A workspace policy with no credit-billed choices refuses before creating a session.
+  await shared.admin`insert into workspace_model_policies (account_id, workspace_id, allowed_models)
+    values (${f.accountId}, ${f.workspace.id}, ${[subscription]})`;
+  const unavailable = await start({ visitor: visitorId() });
+  expect(unavailable.status, JSON.stringify(unavailable.json)).toBe(403);
+  expect(unavailable.json.error.details).toMatchObject({
+    code: "not_available_for_viewer",
+    feature: "agent_model",
+  });
+});
+
+test("legacy three-window settlement, release and conversion preserve newer reservations", async () => {
+  for (const action of ["settle", "release", "convert"] as const) {
+    const f = await fixture();
+    const site = await f.live(`Legacy ${action}`, { access: "public", agent: { enabled: true } });
+    const visitor = visitorId();
+    const start = () =>
+      f.gateway(site.host, "POST", "/sessions", { visitor, body: { initialMessage: "Hello" } });
+    const legacy = await start();
+    const newer = await start();
+    expect(legacy.status).toBe(202);
+    expect(newer.status).toBe(202);
+    const estimate = f.settings.sitesAgentReservationMicrosPerTurn;
+    // 2fef1581b reserveSiteRuntimeConversationStart writes viewer-day, Site-day
+    // and Site-month (only viewer-month is absent).
+    await shared.admin`update site_runtime_conversations set reservation_windows_complete = false,
+      limit_micros = reserved_micros where session_id = ${legacy.json.id}`;
+    await shared.admin`update site_runtime_usage set reserved_micros = reserved_micros - ${estimate}, conversations = conversations - 1
+      where site_id = ${site.id} and principal_key = ${`guest:${visitor}`} and period = 'month'`;
+    const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+    await finishConversation(legacy.json.id);
+    if (action === "release")
+      await releaseSiteRuntimeConversationStart(db.db, scope, { sessionId: legacy.json.id });
+    else if (action === "settle")
+      await settleSiteRuntimeConversationSpend(db.db, scope, {
+        sessionId: legacy.json.id,
+        usedMicros: 0,
+        idle: true,
+      });
+    else {
+      const converted = await reserveSiteRuntimeConversationWork(db.db, scope, {
+        sessionId: legacy.json.id,
+        newTurn: true,
+        limits: siteRuntimeBudgetLimits(DEFAULT_SITE_LIMITS, f.settings),
+      });
+      expect(converted).toMatchObject({ ok: true, reservedMicros: estimate });
+      await releaseSiteRuntimeConversationStart(db.db, scope, { sessionId: legacy.json.id });
+    }
+    const windows =
+      await shared.admin`select reserved_micros from site_runtime_usage where site_id = ${site.id}`;
+    expect(windows).toHaveLength(4);
+    expect(windows.map((row) => Number(row.reserved_micros))).toEqual([
+      estimate,
+      estimate,
+      estimate,
+      estimate,
+    ]);
+  }
+});
+
+test("turns reserve an estimate, so open conversations don't use up a Site; busy is retryable", async () => {
+  const f = await fixture();
+  const site = await f.live("Reservations", { access: "public", agent: { enabled: true } });
+  const setLimits = async (overrides: Record<string, unknown>) => {
+    const changed = await f.publication(f.admin, site.id, "PUT", {
+      limitProfile: { kind: "custom", overrides },
+    });
+    expect(changed.status, JSON.stringify(changed.json)).toBe(200);
+  };
+  const start = (visitor: string) =>
+    f.gateway(site.host, "POST", "/sessions", { visitor, body: { initialMessage: "Hi" } });
+  const siteReserved = async () => {
+    const [row] = await shared.admin`select coalesce(sum(reserved_micros), 0)::bigint as reserved
+      from site_runtime_usage where site_id = ${site.id} and principal_key = '*'
+        and period = 'month'`;
+    return Number(row!.reserved);
+  };
+  // $1.50 a month for the Site and a $1 guest cap per conversation: holding
+  // the whole cap would let two open conversations use up the Site. Each
+  // holds one turn's estimate ($0.25) instead, so six start at once.
+  await setLimits({ agentMicrosPerSitePerMonth: 1_500_000 });
+  const started = await Promise.all(Array.from({ length: 6 }, () => start(visitorId())));
+  expect(started.map((result) => result.status)).toEqual(Array(6).fill(202));
+  expect(await siteReserved()).toBe(6 * f.settings.sitesAgentReservationMicrosPerTurn);
+  // Arrival order is nondeterministic: each cap is clipped to the budget
+  // remaining when admitted, while each reservation is only one estimate.
+  const conversations = await shared.admin`select limit_micros, reserved_micros
+    from site_runtime_conversations where site_id = ${site.id}`;
+  expect(conversations.map((row) => Number(row.limit_micros)).sort((a, b) => a - b)).toEqual([
+    250_000, 500_000, 750_000, 1_000_000, 1_000_000, 1_000_000,
+  ]);
+  for (const conversation of conversations)
+    expect(Number(conversation.reserved_micros)).toBe(
+      f.settings.sitesAgentReservationMicrosPerTurn,
+    );
+  // Executable ceilings, not just bookkeeping reservations, fit the Site budget.
+  const ceilings = await Promise.all(
+    started.map(
+      async (result) => (await hostSessionUsage(f, result.json.id)).limitMicros as number,
+    ),
+  );
+  expect(ceilings).toEqual(Array(6).fill(250_000));
+  expect(ceilings.reduce((sum, value) => sum + value, 0)).toBe(1_500_000);
+  // The next finds only the others' reservations in the way: busy, retry shortly.
+  const busy = await start(visitorId());
+  expect(busy.status, JSON.stringify(busy.json)).toBe(429);
+  expect(busy.json.error.details).toMatchObject({
+    code: "site_budget_busy",
+    budget: "agent_micros_per_site_per_month",
+    retryAfterSeconds: expect.any(Number),
+  });
+  // Concurrent starts never hold more than the Site limit between them.
+  const raced = await Promise.all(Array.from({ length: 6 }, () => start(visitorId())));
+  for (const result of raced) expect(result.status).toBe(429);
+  expect(await siteReserved()).toBeLessThanOrEqual(1_500_000);
+  // Spent money is exhausted, not busy.
+  await shared.admin`update site_runtime_usage set agent_micros = 1500000, reserved_micros = 0
+    where site_id = ${site.id} and principal_key = '*' and period = 'month'`;
+  const exhausted = await start(visitorId());
+  expect(exhausted.json.error.details).toMatchObject({
+    code: "site_budget_exhausted",
+    budget: "agent_micros_per_site_per_month",
+  });
+});
+
+test("Site agent sessions run without a sandbox, whatever the deployment default", async () => {
+  const f = await fixture({ sandboxBackend: "docker" });
+  const site = await f.live("No shell", { access: "public", agent: { enabled: true } });
+  const memberSession = await f.signIn(f.member, site.host);
+  for (const who of [{ visitor: visitorId() }, { session: memberSession }]) {
+    const created = await f.gateway(site.host, "POST", "/sessions", {
+      ...who,
+      body: { initialMessage: "Hi" },
+    });
+    expect(created.status, JSON.stringify(created.json)).toBe(202);
+    const [row] = await shared.admin`select sandbox_backend, first_party_mcp_tools
+      from sessions where id = ${created.json.id}`;
+    expect(row!.sandbox_backend).toBe("none");
+    // Only this Site's own data tools (Site SQL is off here), no management tools.
+    expect([...row!.first_party_mcp_tools].sort()).toEqual(["site_data_query", "site_data_write"]);
+  }
+});
+
+test("legacy Site continuations restore only viewer-bound data tools and no sandbox, atomically", async () => {
+  const f = await fixture({ sandboxBackend: "docker" });
+  const site = await f.live("Legacy board", { access: "public", agent: { enabled: true } });
+  const other = await f.live("Other board", { access: "public" });
+  for (const id of [site.id, other.id]) {
+    expect(
+      (
+        await f.api(f.owner, "PUT", `${f.sites}/${id}/data/collections/board`, {
+          accessMode: "shared_read",
+          guestAccess: "read",
+        })
+      ).status,
+    ).toBe(201);
+    expect(
+      (
+        await f.api(f.owner, "POST", `${f.sites}/${id}/data/write`, {
+          operations: [
+            {
+              op: "insert",
+              collection: "board",
+              data: { title: id === site.id ? "Real board row" : "Other Site row" },
+            },
+          ],
+        })
+      ).status,
+    ).toBe(200);
+  }
+  const member = await f.signIn(f.member, site.host);
+  for (const who of [{ session: member }, { visitor: visitorId() }]) {
+    const created = await f.gateway(site.host, "POST", "/sessions", {
+      ...who,
+      body: { initialMessage: "Hi" },
+    });
+    expect(created.status).toBe(202);
+    const id = String(created.json.id);
+    await finishConversation(id);
+    await shared.admin`update session_turns set sandbox_backend='docker' where session_id=${id}`;
+    // Actual previous-release create shape: empty tools, disabled artifacts,
+    // inherited backend, and only the Site service's session permissions.
+    await shared.admin`update sessions set first_party_mcp_tools = '[]'::jsonb,
+      first_party_mcp_permissions = '["sessions:read","sessions:control"]'::jsonb,
+      agent_config = jsonb_set(agent_config, '{capabilities,artifacts}', 'false'::jsonb),
+      tools = '[{"kind":"mcp","id":"docs","optional":true},{"kind":"mcp","id":"opengeni"}]'::jsonb,
+      tool_policy = '{"mode":"workspace_default","inheritedFromSessionId":null}'::jsonb,
+      sandbox_backend = 'docker', instructions = 'Old owner instructions',
+      metadata = metadata #- '{opengeniPublishedSite,agentDefaultsVersion}'
+      where id = ${id}`;
+    const snapshot = async () =>
+      (
+        await shared.admin`select first_party_mcp_tools,first_party_mcp_permissions,tools,tool_policy,
+      agent_config,sandbox_backend,instructions,metadata,tool_policy_version from sessions where id=${id}`
+      )[0]!;
+    const before = await snapshot();
+    const fault = `site_defaults_${id.replaceAll("-", "")}`;
+    await shared.admin.unsafe(`create function ${fault}() returns trigger language plpgsql as $f$
+      begin if new.id='${id}'::uuid and new.metadata #>> '{opengeniPublishedSite,agentDefaultsVersion}' = '${SITE_AGENT_DEFAULTS_VERSION}'
+      then raise exception 'injected defaults failure'; end if; return new; end $f$`);
+    await shared.admin.unsafe(
+      `create trigger ${fault} before update on sessions for each row execute function ${fault}()`,
+    );
+    const send = () =>
+      f.gateway(site.host, "POST", `/sessions/${id}/events`, {
+        ...who,
+        body: { type: "user.message", payload: { text: "Read the board" } },
+      });
+    try {
+      expect((await send()).status).toBeGreaterThanOrEqual(500);
+      expect(await snapshot()).toEqual(before);
+      const [count] =
+        await shared.admin`select count(*)::int n from session_turns where session_id=${id}`;
+      expect(count!.n).toBe(1);
+    } finally {
+      await shared.admin.unsafe(`drop trigger ${fault} on sessions`);
+      await shared.admin.unsafe(`drop function ${fault}()`);
+    }
+    const sent = await send();
+    expect(sent.status, JSON.stringify(sent.json)).toBeLessThan(300);
+    const after = await snapshot();
+    expect(after.first_party_mcp_tools).toEqual(["site_data_query", "site_data_write"]);
+    expect(after.first_party_mcp_permissions).toEqual(["artifacts:read", "artifacts:publish"]);
+    expect(after.tools).toEqual([{ kind: "mcp", id: "opengeni" }]);
+    expect(after.tool_policy).toEqual({
+      mode: "explicit",
+      firstPartyMode: "explicit",
+      inheritedFromSessionId: null,
+    });
+    expect(after.agent_config.capabilities).toMatchObject({
+      artifacts: true,
+      humanInput: false,
+      skills: false,
+      browser: false,
+      workspaceFiles: false,
+      workspaceAdmin: false,
+    });
+    expect(after.sandbox_backend).toBe("none");
+    expect(after.instructions).toContain(site.id);
+    expect(Number(after.tool_policy_version)).toBe(Number(before.tool_policy_version) + 1);
+    const [turn] =
+      await shared.admin`select * from session_turns where session_id=${id} and status='queued' order by position desc limit 1`;
+    expect(turn!.sandbox_backend).toBe("none");
+    // Exercise the actual first-party MCP boundary using the normalized stored
+    // tools/permissions. It must read real rows as this viewer, never another Site.
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db.db, f.workspace.id, {
+      sessionId: id,
+      workflowId: turn!.temporal_workflow_id,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("Site continuation was not claimable");
+    expect(claimed.turn.sandboxBackend).toBe("none");
+    const [historical] =
+      await shared.admin`select sandbox_backend from session_turns where session_id=${id} and status='completed' order by position limit 1`;
+    expect(historical!.sandbox_backend).toBe("docker");
+    const grant: AccessGrant = {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: "worker:first-party-mcp",
+      permissions: after.first_party_mcp_permissions,
+      principalKind: "agent_attempt",
+      metadata: {
+        sessionId: id,
+        turnId: turn!.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+        firstPartyMcpTools: after.first_party_mcp_tools,
+      },
+    };
+    const server = buildOpenGeniMcpServer(f.deps as unknown as ApiRouteDeps, grant);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "legacy-site-data", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tools = await client.listTools();
+      expect(
+        tools.tools.map((tool) => tool.name).filter((name) => name.startsWith("site_")),
+      ).toEqual(["site_data_query", "site_data_write"]);
+      const own = await client.callTool({
+        name: "site_data_query",
+        arguments: { siteId: site.id, collection: "board" },
+      });
+      expect(own.isError, JSON.stringify(own)).not.toBe(true);
+      expect(JSON.stringify(own)).toContain("Real board row");
+      const foreign = await client.callTool({
+        name: "site_data_query",
+        arguments: { siteId: other.id, collection: "board" },
+      });
+      expect(foreign.isError).toBe(true);
+      // Live audience revocation still wins even when cancellation never ran.
+      if ("visitor" in who) {
+        await shared.admin`update site_publications set access='members' where site_id=${site.id}`;
+        const denied = await client.callTool({
+          name: "site_data_query",
+          arguments: { siteId: site.id, collection: "board" },
+        });
+        expect(denied.isError).toBe(true);
+        await shared.admin`update site_publications set access='public' where site_id=${site.id}`;
+      }
+    } finally {
+      await client.close();
+    }
+    await shared.admin`update session_turn_attempts set state='closed',outcome='completed',closed_at=now() where id=${attemptId}`;
+    await finishConversation(id);
+    expect((await send()).status).toBeLessThan(300);
+    expect((await snapshot()).tool_policy_version).toBe(after.tool_policy_version);
+    const [events] =
+      await shared.admin`select count(*)::int n from session_events where session_id=${id} and type='session.agent.updated'`;
+    expect(events!.n).toBe(1);
+  }
+}, 90_000);
+
+test("a later turn reserves only the budget remaining below the estimate", async () => {
+  const f = await fixture();
+  const site = await f.live("Last turn", { access: "public", agent: { enabled: true } });
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    visitor: visitorId(),
+    body: { initialMessage: "Hi" },
+  });
+  expect(created.status).toBe(202);
+  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+  await finishConversation(created.json.id);
+  await settleSiteRuntimeConversationSpend(db.db, scope, {
+    sessionId: created.json.id,
+    usedMicros: 0,
+    idle: true,
+  });
+  await shared.admin`update site_runtime_usage set agent_micros = 9950000 where site_id = ${site.id} and principal_key = '*' and period = 'month'`;
+  const admitted = await reserveSiteRuntimeConversationWork(db.db, scope, {
+    sessionId: created.json.id,
+    newTurn: true,
+    limits: siteRuntimeBudgetLimits(DEFAULT_SITE_LIMITS, f.settings),
+  });
+  expect(admitted).toMatchObject({ ok: true, reservedMicros: 50_000 });
+});
+
+test("funded execution tops up cumulatively before sending, without multiplying the Site budget", async () => {
+  const f = await fixture();
+  const site = await f.live("Funded", { access: "public", agent: { enabled: true } });
+  await f.publication(f.admin, site.id, "PUT", {
+    limitProfile: { kind: "custom", overrides: { agentMicrosPerSitePerMonth: 600_000 } },
+  });
+  const visitors = [visitorId(), visitorId()];
+  const started = await Promise.all(
+    visitors.map((visitor) =>
+      f.gateway(site.host, "POST", "/sessions", {
+        visitor,
+        body: { initialMessage: "Hello" },
+      }),
+    ),
+  );
+  expect(started.map((result) => result.status)).toEqual([202, 202]);
+  const first = String(started[0]!.json.id);
+  const ceiling = async (id: string) => Number((await hostSessionUsage(f, id)).limitMicros);
+  expect(await ceiling(first)).toBe(250_000);
+  // Simulate the authoritative meter at the funded ceiling. The next send
+  // settles it and atomically buys only the remaining $0.10 before execution.
+  await shared.admin`update opengeni_private.session_usage_limit_roots set known_micros = 250000 where root_session_id = ${first}`;
+  const sent = await f.gateway(site.host, "POST", `/sessions/${first}/events`, {
+    visitor: visitors[0],
+    body: { type: "user.message", payload: { text: "Continue" } },
+  });
+  expect(sent.status, JSON.stringify(sent.json)).toBeLessThan(300);
+  expect(await ceiling(first)).toBe(350_000);
+  expect((await ceiling(first)) + (await ceiling(String(started[1]!.json.id)))).toBe(600_000);
+  const [row] =
+    await shared.admin`select metered_micros, reserved_micros from site_runtime_conversations where session_id = ${first}`;
+  expect(Number(row!.metered_micros)).toBe(250_000);
+  expect(Number(row!.reserved_micros)).toBe(100_000);
+});
+
+test("pending Site admission survives settling GET and competing funding before enqueue", async () => {
+  const f = await fixture();
+  const site = await f.live("Admission race", { access: "public", agent: { enabled: true } });
+  await f.publication(f.admin, site.id, "PUT", {
+    limitProfile: { kind: "custom", overrides: { agentMicrosPerSitePerMonth: 250_000 } },
+  });
+  const visitor = visitorId();
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    visitor,
+    body: { initialMessage: "First" },
+  });
+  expect(created.status).toBe(202);
+  const sessionId = String(created.json.id);
+  await finishConversation(sessionId);
+  let reached!: () => void;
+  let resume!: () => void;
+  const atEnqueue = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const original = f.app.fetch;
+  f.app.fetch = async (...args) => {
+    if (
+      new URL(args[0].url).pathname ===
+        `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}/events` &&
+      args[0].method === "POST"
+    ) {
+      reached();
+      await gate;
+    }
+    return await original(...args);
+  };
+  const sending = f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+    visitor,
+    body: { type: "user.message", payload: { text: "Next" } },
+  });
+  try {
+    await atEnqueue;
+    const [funded] = await shared.admin`select pending_admission_id, admissions, reserved_micros
+      from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(funded!.pending_admission_id).not.toBeNull();
+    expect(Number(funded!.admissions)).toBe(2);
+    expect((await hostSessionUsage(f, sessionId)).limitMicros).toBe(250_000);
+    // This sees the NEW admission counter and the OLD idle projection.
+    expect((await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor })).status).toBe(
+      200,
+    );
+    const competitor = await f.gateway(site.host, "POST", "/sessions", {
+      visitor: visitorId(),
+      body: { initialMessage: "Competing" },
+    });
+    expect(competitor.json.error.details.code).toBe("site_budget_busy");
+    const [held] =
+      await shared.admin`select reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(Number(held!.reserved_micros)).toBe(250_000);
+  } finally {
+    resume();
+    f.app.fetch = original;
+  }
+  expect((await sending).status).toBe(202);
+  // Even a stale idle label after enqueue is not proof that the queue is empty.
+  await shared.admin`update sessions set status = 'idle' where id = ${sessionId}`;
+  await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
+  const [retained] =
+    await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+  expect(retained!.pending_admission_id).toBeNull();
+  expect(Number(retained!.reserved_micros)).toBe(250_000);
+});
+
+test("definitive Site dispatch refusal releases idle funding", async () => {
+  const f = await fixture();
+  const site = await f.live("Refused admission", { access: "public", agent: { enabled: true } });
+  const visitor = visitorId();
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    visitor,
+    body: { initialMessage: "First" },
+  });
+  const sessionId = String(created.json.id);
+  await finishConversation(sessionId);
+  const original = f.app.fetch;
+  f.app.fetch = async (...args) =>
+    new URL(args[0].url).pathname ===
+      `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}/events` && args[0].method === "POST"
+      ? Response.json(
+          { error: { code: "validation_failed", message: "Definitive rejection" } },
+          { status: 400 },
+        )
+      : await original(...args);
+  try {
+    const refused = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+      visitor,
+      body: { type: "user.message", payload: { text: "Refuse" } },
+    });
+    expect(refused.status).toBe(400);
+    const [row] =
+      await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(row!.pending_admission_id).toBeNull();
+    expect(Number(row!.reserved_micros)).toBe(0);
+  } finally {
+    f.app.fetch = original;
+  }
+});
+
+test("unknown Site dispatch keeps funding; recovery fences a delayed enqueue before refund", async () => {
+  const f = await fixture();
+  const site = await f.live("Unknown admission", { access: "public", agent: { enabled: true } });
+  await f.publication(f.admin, site.id, "PUT", {
+    limitProfile: { kind: "custom", overrides: { agentMicrosPerSitePerMonth: 250_000 } },
+  });
+  const visitor = visitorId();
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    visitor,
+    body: { initialMessage: "First" },
+  });
+  const sessionId = String(created.json.id);
+  await finishConversation(sessionId);
+  let resume!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  let delayed: Promise<Response> | undefined;
+  const original = f.app.fetch;
+  f.app.fetch = async (...args) => {
+    if (
+      new URL(args[0].url).pathname ===
+        `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}/events` &&
+      args[0].method === "POST"
+    ) {
+      // Keep the dispatch's real async context alive after losing its response.
+      delayed = (async () => {
+        await gate;
+        return await original(...args);
+      })();
+      throw new Error("injected outcome unknown");
+    }
+    return await original(...args);
+  };
+  try {
+    const unknown = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+      visitor,
+      body: { type: "user.message", payload: { text: "Delayed" } },
+    });
+    expect(unknown.status).toBe(500);
+    await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
+    const [pending] =
+      await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(pending!.pending_admission_id).not.toBeNull();
+    expect(Number(pending!.reserved_micros)).toBe(250_000);
+    // Simulated crash recovery after the grace period, not a wall-clock sleep.
+    await shared.admin`update site_runtime_conversations set pending_admission_until = now() - interval '1 second' where session_id = ${sessionId}`;
+    await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
+    const [recovered] =
+      await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(recovered!.pending_admission_id).toBeNull();
+    expect(Number(recovered!.reserved_micros)).toBe(0);
+    const competitor = await f.gateway(site.host, "POST", "/sessions", {
+      visitor: visitorId(),
+      body: { initialMessage: "Now funded" },
+    });
+    expect(competitor.status).toBe(202);
+    resume();
+    expect((await delayed!).status).toBeGreaterThanOrEqual(400);
+    const [turns] =
+      await shared.admin`select count(*)::int as count from session_turns where session_id = ${sessionId}`;
+    expect(turns!.count).toBe(1); // The revoked late enqueue did not commit.
+  } finally {
+    resume();
+    f.app.fetch = original;
+    await delayed;
+  }
+});
+
+test("unknown post-commit Site dispatch reconciles queued work instead of refunding it", async () => {
+  const f = await fixture();
+  const site = await f.live("Committed admission", { access: "public", agent: { enabled: true } });
+  const visitor = visitorId();
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    visitor,
+    body: { initialMessage: "First" },
+  });
+  const sessionId = String(created.json.id);
+  await finishConversation(sessionId);
+  const original = f.app.fetch;
+  f.app.fetch = async (...args) => {
+    const response = await original(...args);
+    if (
+      new URL(args[0].url).pathname ===
+        `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}/events` &&
+      args[0].method === "POST"
+    ) {
+      expect(response.status).toBe(202);
+      throw new Error("injected response loss after commit");
+    }
+    return response;
+  };
+  try {
+    expect(
+      (
+        await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+          visitor,
+          body: { type: "user.message", payload: { text: "Committed" } },
+        })
+      ).status,
+    ).toBe(500);
+  } finally {
+    f.app.fetch = original;
+  }
+  await shared.admin`update site_runtime_conversations set pending_admission_until = now() - interval '1 second' where session_id = ${sessionId}`;
+  await shared.admin`update sessions set status = 'idle' where id = ${sessionId}`;
+  await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
+  const [row] =
+    await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+  expect(row!.pending_admission_id).toBeNull();
+  expect(Number(row!.reserved_micros)).toBe(250_000);
+  await finishConversation(sessionId);
+  await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
+  const [finished] =
+    await shared.admin`select reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+  expect(Number(finished!.reserved_micros)).toBe(0);
+});
+
+test("Site admission fencing covers start, steer, queued steer, composer submit and resume", async () => {
+  for (const operation of ["start", "steer", "queued-steer", "composer", "resume"] as const) {
+    const f = await fixture();
+    const site = await f.live(`Fence ${operation}`, { access: "public", agent: { enabled: true } });
+    const visitor = visitorId();
+    let sessionId = "";
+    let path = "/sessions";
+    let body: Record<string, unknown> = { initialMessage: "First" };
+    if (operation !== "start") {
+      const created = await f.gateway(site.host, "POST", path, { visitor, body });
+      expect(created.status).toBe(202);
+      sessionId = String(created.json.id);
+      if (operation === "steer") {
+        path = `/sessions/${sessionId}/steer`;
+        body = { text: "Steer", clientEventId: crypto.randomUUID() };
+      } else if (operation === "queued-steer") {
+        const [turn] =
+          await shared.admin`select id, version from session_turns where session_id = ${sessionId} limit 1`;
+        path = `/sessions/${sessionId}/queue/${turn!.id}/steer`;
+        body = { clientEventId: crypto.randomUUID(), expectedTurnVersion: Number(turn!.version) };
+      } else if (operation === "composer") {
+        const draft = await f.gateway(site.host, "GET", `/sessions/${sessionId}/composer-draft`, {
+          visitor,
+        });
+        const saved = await f.gateway(site.host, "PUT", `/sessions/${sessionId}/composer-draft`, {
+          visitor,
+          body: {
+            text: "Draft",
+            annotations: [],
+            resources: [],
+            model: draft.json.model,
+            reasoningEffort: draft.json.reasoningEffort,
+            latencyMode: draft.json.latencyMode,
+            expectedRevision: draft.json.revision,
+          },
+        });
+        expect(saved.status).toBe(200);
+        path = `/sessions/${sessionId}/composer-draft/submit`;
+        body = {
+          text: "Draft",
+          annotations: [],
+          resources: [],
+          model: draft.json.model,
+          reasoningEffort: draft.json.reasoningEffort,
+          latencyMode: draft.json.latencyMode,
+          expectedDraftRevision: saved.json.revision,
+          clientEventId: crypto.randomUUID(),
+          delivery: "send",
+        };
+      } else {
+        path = `/sessions/${sessionId}/control`;
+        expect(
+          (
+            await f.gateway(site.host, "POST", path, {
+              visitor,
+              body: { action: "pause", clientEventId: crypto.randomUUID() },
+            })
+          ).status,
+        ).toBeLessThan(300);
+        body = { action: "resume", clientEventId: crypto.randomUUID() };
+      }
+    }
+    const original = f.app.fetch;
+    let fenced = false;
+    let reached!: () => void;
+    let resume!: () => void;
+    const intercepted = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    f.app.fetch = async (...args) => {
+      if (
+        new URL(args[0].url).pathname === `/v1/workspaces/${f.workspace.id}${path}` &&
+        args[0].method === "POST"
+      ) {
+        if (operation === "start") sessionId = (await args[0].clone().json()).requestedSessionId;
+        const [pending] =
+          await shared.admin`select pending_admission_id from site_runtime_conversations where session_id = ${sessionId}`;
+        expect(pending!.pending_admission_id, operation).not.toBeNull();
+        fenced = true;
+        reached();
+        await gate;
+      }
+      return await original(...args);
+    };
+    const dispatching = f.gateway(site.host, "POST", path, { visitor, body });
+    try {
+      await Promise.race([
+        intercepted,
+        dispatching.then((response) => {
+          if (!fenced)
+            throw new Error(
+              `${operation} never reached dispatch: ${JSON.stringify(response.json)}`,
+            );
+        }),
+      ]);
+      // A separate caller wins recovery, not the pending dispatch's async context.
+      await shared.admin`update site_runtime_conversations set pending_admission_until = now() - interval '1 second' where session_id = ${sessionId}`;
+      await settleSiteRuntimeConversationSpend(
+        db.db,
+        { accountId: f.accountId, workspaceId: f.workspace.id },
+        { sessionId, usedMicros: 0, idle: true },
+      );
+      resume();
+      const response = await dispatching;
+      expect(fenced, operation).toBe(true);
+      expect(
+        response.status,
+        `${operation}: ${JSON.stringify(response.json)}`,
+      ).toBeGreaterThanOrEqual(400);
+      const [turns] =
+        await shared.admin`select count(*)::int as count from session_turns where session_id = ${sessionId}`;
+      expect(turns!.count, operation).toBe(operation === "start" ? 0 : 1);
+    } finally {
+      resume();
+      f.app.fetch = original;
+      await dispatching;
+    }
+  }
+}, 60_000);
+
+test("a crashed Site start recovers on its idempotent retry and fences the original dispatch", async () => {
+  const f = await fixture();
+  const site = await f.live("Start recovery", { access: "public", agent: { enabled: true } });
+  const visitor = visitorId();
+  const body = { initialMessage: "First", idempotencyKey: crypto.randomUUID() };
+  let resume!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  let delayed: Promise<Response> | undefined;
+  let sessionId = "";
+  const original = f.app.fetch;
+  let intercept = true;
+  f.app.fetch = async (...args) => {
+    if (
+      intercept &&
+      args[0].method === "POST" &&
+      new URL(args[0].url).pathname === `/v1/workspaces/${f.workspace.id}/sessions`
+    ) {
+      intercept = false;
+      sessionId = (await args[0].clone().json()).requestedSessionId;
+      delayed = (async () => {
+        await gate;
+        return await original(...args);
+      })();
+      throw new Error("injected unknown start");
+    }
+    return await original(...args);
+  };
+  try {
+    expect((await f.gateway(site.host, "POST", "/sessions", { visitor, body })).status).toBe(500);
+    const [pending] =
+      await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(pending!.pending_admission_id).not.toBeNull();
+    expect(Number(pending!.reserved_micros)).toBe(250_000);
+    await shared.admin`update site_runtime_conversations set created_at = now() - interval '11 minutes',
+      pending_admission_until = now() - interval '1 second' where session_id = ${sessionId}`;
+    const retry = await f.gateway(site.host, "POST", "/sessions", { visitor, body });
+    expect(retry.status, JSON.stringify(retry.json)).toBe(202);
+    expect(retry.json.id).toBe(sessionId);
+    resume();
+    await delayed;
+    const [turns] =
+      await shared.admin`select count(*)::int as count from session_turns where session_id = ${sessionId}`;
+    expect(turns!.count).toBe(1);
+    const [funding] =
+      await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(funding!.pending_admission_id).toBeNull();
+    expect(Number(funding!.reserved_micros)).toBe(250_000);
+    const windows =
+      await shared.admin`select conversations, reserved_micros from site_runtime_usage where site_id = ${site.id}`;
+    expect(windows.map((row) => Number(row.conversations))).toEqual([1, 1, 1, 1]);
+    expect(windows.map((row) => Number(row.reserved_micros))).toEqual([
+      250_000, 250_000, 250_000, 250_000,
+    ]);
+  } finally {
+    resume();
+    f.app.fetch = original;
+    await delayed;
+  }
+});
+
+test("a committed keyed Site shell repairs one funded initial turn after initialization fails", async () => {
+  const f = await fixture();
+  const site = await f.live("Shell repair", { access: "public", agent: { enabled: true } });
+  await f.publication(f.admin, site.id, "PUT", {
+    limitProfile: { kind: "custom", overrides: { agentMicrosPerSitePerMonth: 300_000 } },
+  });
+  const visitor = visitorId();
+  const body = {
+    initialMessage: "The original accepted prompt",
+    idempotencyKey: crypto.randomUUID(),
+  };
+  const fault = `site_shell_${crypto.randomUUID().replaceAll("-", "")}`;
+  await shared.admin.unsafe(`create function ${fault}() returns trigger language plpgsql as $fault$
+    begin
+      if new.workspace_id = '${f.workspace.id}'::uuid and new.type = 'session.created' then
+        raise exception 'injected failure after shell commit before initial turn';
+      end if;
+      return new;
+    end $fault$`);
+  await shared.admin.unsafe(
+    `create trigger ${fault} before insert on session_events for each row execute function ${fault}()`,
+  );
+  const original = f.app.fetch;
+  f.app.fetch = async (...args) => {
+    const response = await original(...args);
+    if (
+      args[0].method === "POST" &&
+      new URL(args[0].url).pathname === `/v1/workspaces/${f.workspace.id}/sessions`
+    ) {
+      expect(response.status).toBe(500);
+      throw new Error("injected lost response after shell commit");
+    }
+    return response;
+  };
+  try {
+    expect((await f.gateway(site.host, "POST", "/sessions", { visitor, body })).status).toBe(500);
+  } finally {
+    f.app.fetch = original;
+    await shared.admin.unsafe(`drop trigger ${fault} on session_events`);
+    await shared.admin.unsafe(`drop function ${fault}()`);
+  }
+  const [shell] = await shared.admin`select s.id, c.pending_admission_id, c.reserved_micros, c.turns
+    from sessions s join site_runtime_conversations c on c.session_id = s.id
+    where c.site_id = ${site.id}`;
+  expect(shell).toBeDefined(); // The creation transaction really committed.
+  const sessionId = String(shell!.id);
+  expect(shell!.pending_admission_id).not.toBeNull();
+  expect(Number(shell!.reserved_micros)).toBe(250_000);
+  const turnCount = async () =>
+    Number(
+      (
+        await shared.admin`select count(*)::int as count from session_turns where session_id = ${sessionId}`
+      )[0]!.count,
+    );
+  expect(await turnCount()).toBe(0);
+  // Unknown admission is not silently replayed as a successful initialized session.
+  const pending = await f.gateway(site.host, "POST", "/sessions", { visitor, body });
+  expect(pending.status).toBe(429);
+  expect(pending.json.error.details.code).toBe("site_budget_busy");
+  await shared.admin`update site_runtime_conversations set pending_admission_until = now() - interval '1 second' where session_id = ${sessionId}`;
+  await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
+  // Recovery refunds the empty shell; another viewer takes $0.25. Repair must
+  // fund and stamp only the remaining $0.05, not reuse its old $0.25 ceiling.
+  const competing = await f.gateway(site.host, "POST", "/sessions", {
+    visitor: visitorId(),
+    body: { initialMessage: "Competing" },
+  });
+  expect(competing.status).toBe(202);
+  const repaired = await f.gateway(site.host, "POST", "/sessions", {
+    visitor,
+    body: { ...body, initialMessage: "A retry must not replace the original prompt" },
+  });
+  expect(repaired.status, JSON.stringify(repaired.json)).toBe(202);
+  expect(repaired.json.id).toBe(sessionId);
+  expect(await turnCount()).toBe(1);
+  const [message] =
+    await shared.admin`select payload from session_events where session_id = ${sessionId} and type = 'user.message'`;
+  expect(message!.payload.text).toBe(body.initialMessage);
+  expect((await hostSessionUsage(f, sessionId)).limitMicros).toBe(50_000);
+  expect((await f.gateway(site.host, "POST", "/sessions", { visitor, body })).status).toBe(202);
+  expect(await turnCount()).toBe(1);
+  const [conversation] =
+    await shared.admin`select turns, reserved_micros, pending_admission_id from site_runtime_conversations where session_id = ${sessionId}`;
+  expect(conversation!.turns).toBe(1);
+  expect(Number(conversation!.reserved_micros)).toBe(50_000);
+  expect(conversation!.pending_admission_id).toBeNull();
+  const ownWindows =
+    await shared.admin`select conversations, reserved_micros from site_runtime_usage where site_id = ${site.id} and principal_key = ${`guest:${visitor}`}`;
+  expect(ownWindows.map((row) => Number(row.conversations))).toEqual([1, 1]);
+  expect(ownWindows.map((row) => Number(row.reserved_micros))).toEqual([50_000, 50_000]);
+  const siteWindows =
+    await shared.admin`select conversations, reserved_micros from site_runtime_usage where site_id = ${site.id} and principal_key = '*'`;
+  expect(siteWindows.map((row) => Number(row.conversations))).toEqual([2, 2]);
+  expect(siteWindows.map((row) => Number(row.reserved_micros))).toEqual([300_000, 300_000]);
+  // If initialization won after a repair caller's earlier read, the locked
+  // admission check returns a replay even though the Site is now fully funded.
+  const [beforeReplay] =
+    await shared.admin`select admissions from site_runtime_conversations where session_id = ${sessionId}`;
+  const lateRepair = await reserveSiteRuntimeConversationWork(
+    db.db,
+    { accountId: f.accountId, workspaceId: f.workspace.id },
+    {
+      sessionId,
+      limits: siteRuntimeBudgetLimits(DEFAULT_SITE_LIMITS, f.settings),
+      admissionId: crypto.randomUUID(),
+      newTurn: false,
+      repairStart: true,
+    },
+  );
+  expect(lateRepair).toMatchObject({ ok: true, alreadyStarted: true, reservedMicros: 50_000 });
+  const [afterReplay] =
+    await shared.admin`select admissions from site_runtime_conversations where session_id = ${sessionId}`;
+  expect(afterReplay).toEqual(beforeReplay);
+});
+
+test("view as visitor shows a member less, never anyone more", async () => {
+  const f = await fixture();
+  const outsider = (await fixture()).owner;
+  const site = await f.live("Preview", { access: "public", agent: { enabled: true } });
+  const member = await f.signIn(f.member, site.host);
+  const visitor = visitorId();
+  const viewAs = (who: { session?: string; visitor?: string }, role: string | null) =>
+    f.gateway(site.host, "POST", "/auth/view-as", { ...who, body: { viewAs: role } });
+
+  const started = await viewAs({ session: member, visitor }, "public");
+  expect(started.status, JSON.stringify(started.json)).toBe(200);
+  expect(started.json).toEqual({ viewAs: "public" });
+  // The member now meets the Site as an anonymous visitor would.
+  const previewing = await f.gateway(site.host, "GET", "/site/config", {
+    session: member,
+    visitor,
+  });
+  expect(previewing.json.viewer.kind).toBe("guest");
+  expect(previewing.json.capabilities).toMatchObject({
+    viewAs: "public",
+    workspaceTools: false,
+    siteData: "guest",
+    sqlQueryAudiences: ["everyone"],
+  });
+  await f.publication(f.admin, site.id, "PUT", {
+    limitProfile: { kind: "custom", overrides: { agentMicrosPerSitePerMonth: 0 } },
+  });
+  const capped = await f.gateway(site.host, "POST", "/sessions", {
+    session: member,
+    visitor,
+    body: { initialMessage: "Hi" },
+  });
+  expect(capped.status).toBe(429);
+  // Ending the preview restores the member.
+  expect((await viewAs({ session: member, visitor }, null)).json).toEqual({ viewAs: null });
+  const restored = await f.gateway(site.host, "GET", "/site/config", { session: member, visitor });
+  expect(restored.json.viewer.kind).toBe("member");
+  expect(restored.json.capabilities.viewAs).toBeNull();
+
+  // Nobody else may preview: signed-in outsiders and guests are refused.
+  const user = await f.signIn(outsider, site.host);
+  const asUser = await viewAs({ session: user }, "invited");
+  expect({ status: asUser.status, code: code(asUser) }).toEqual({
+    status: 403,
+    code: "site_view_as_members_only",
+  });
+  expect((await viewAs({ visitor }, "public")).status).toBeGreaterThanOrEqual(400);
+  // Previewing invited on a members-only Site would show nothing: refused on use.
+  const members = await f.live("Members only");
+  const inside = await f.signIn(f.member, members.host);
+  await f.gateway(members.host, "POST", "/auth/view-as", {
+    session: inside,
+    body: { viewAs: "invited" },
+  });
+  const denied = await f.gateway(members.host, "GET", "/site/config", { session: inside });
+  expect(denied.status).toBeGreaterThanOrEqual(400);
+}, 60_000);
+
+test("readiness warnings name what outsiders can't do and fixes apply through the ordinary APIs", async () => {
+  const f = await fixture();
+  const created = await f.api(f.owner, "POST", f.sites, {
+    title: "Deals",
+    html: `<!doctype html><h1>Deals</h1><script>
+      const rows = await site.data.collection("deals").query();
+      await site.sql.run("top_customers", {});
+    </script>`,
+    idempotencyKey: crypto.randomUUID(),
+    visibility: "workspace",
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  const siteId = String(created.json.artifact.id);
+  const defined = await f.api(f.owner, "PUT", `${f.sites}/${siteId}/data/collections/deals`, {
+    accessMode: "shared",
+  });
+  expect(defined.status, JSON.stringify(defined.json)).toBeLessThan(300);
+  const members = await f.publication(f.owner, siteId, "PUT", {});
+  expect(members.status, JSON.stringify(members.json)).toBe(201);
+  expect(members.json.warnings).toEqual([]);
+  const opened = await f.publication(f.owner, siteId, "PUT", { access: "public" });
+  expect(opened.status, JSON.stringify(opened.json)).toBe(200);
+  const found = opened.json.warnings.find(
+    (warning: { code: string }) => warning.code === "site_data_guest_read",
+  );
+  expect(found).toMatchObject({
+    fix: { kind: "site_data_guest_access", collection: "deals", guestAccess: "read" },
+  });
+  expect(found.message).toContain("deals");
+  // Describe and apply the actual readiness fix through organization MCP, not a
+  // hand-built HTTP payload. This must expose the route's required body schema.
+  const server = buildOrganizationMcpServer({
+    caller: { kind: "key", authorization: f.owner.headers.authorization!, accessKey: null },
+    origin: "http://localhost",
+    dispatch: async (request) => await f.app.fetch(request),
+  });
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverSide);
+  const client = new Client({ name: "publication-fixes-test", version: "1.0.0" });
+  await client.connect(clientSide);
+  try {
+    const id = "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes";
+    const described = await client.callTool({
+      name: "opengeni_action_describe",
+      arguments: { id },
+    });
+    expect(described.isError).not.toBe(true);
+    const description = JSON.parse((described.content as Array<{ text: string }>)[0]!.text);
+    expect(description.input).toHaveLength(1);
+    expect(description.input[0]).toMatchObject({ name: "SitePublishWarningFix", in: "body" });
+    expect(description.input[0].schema.oneOf).toHaveLength(2);
+    const invoked = await client.callTool({
+      name: "opengeni_action_call",
+      arguments: {
+        id,
+        pathParameters: { workspaceId: f.workspace.id, artifactId: siteId },
+        body: found.fix,
+      },
+    });
+    expect(invoked.isError, JSON.stringify(invoked)).not.toBe(true);
+    const result = JSON.parse((invoked.content as Array<{ text: string }>)[0]!.text);
+    expect(result.status).toBe(200);
+    expect(result.body.warnings.map((warning: { code: string }) => warning.code)).not.toContain(
+      "site_data_guest_read",
+    );
+  } finally {
+    await client.close();
+  }
+  // A members-only manager may not apply fixes; the Site's manager may.
+  const fixed = await f.publication(f.owner, siteId, "POST", found.fix, "/fixes");
+  expect(fixed.status, JSON.stringify(fixed.json)).toBe(200);
+  expect(fixed.json.warnings.map((warning: { code: string }) => warning.code)).not.toContain(
+    "site_data_guest_read",
+  );
+  const missing = await f.publication(
+    f.owner,
+    siteId,
+    "POST",
+    { kind: "site_data_guest_access", collection: "nope", guestAccess: "read" },
+    "/fixes",
+  );
+  expect({ status: missing.status, code: code(missing) }).toEqual({
+    status: 404,
+    code: "site_fix_target_missing",
+  });
+}, 60_000);
+
+test("platform usage: gateway counts once per report, billing modes, the quota error", async () => {
+  const report = (f: Awaited<ReturnType<typeof fixture>>, reportId: string, hosts: unknown[]) =>
+    f.gateway(DOMAIN, "POST", "/platform/requests", { body: { v: 1, reportId, hosts } });
+  const usage = async (f: Awaited<ReturnType<typeof fixture>>) => {
+    const res = await f.api(
+      f.member,
+      "GET",
+      `/v1/workspaces/${f.workspace.id}/site-platform-usage`,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    return res.json;
+  };
+  const meter = (view: any, name: string) =>
+    view.meters.find((entry: { meter: string }) => entry.meter === name);
+  const seedCredits = async (accountId: string, micros: number) => {
+    await shared.admin`insert into credit_ledger_entries (account_id, type, amount_micros, idempotency_key)
+      values (${accountId}, 'grant', ${micros}, ${`seed:${crypto.randomUUID()}`})`;
+  };
+
+  // usage_only (the default): counted, deduplicated per report id, never refused.
+  const f = await fixture({ sitesPlatformAllowanceRequests: 10 });
+  const site = await f.live("Counted", { access: "public" });
+  const first = await report(f, "report-0001", [
+    { host: site.host.toUpperCase(), requests: 7 },
+    { host: `gone.${DOMAIN}`, requests: 3 },
+  ]);
+  expect(first.status, JSON.stringify(first.json)).toBe(200);
+  expect(first.json).toEqual({ counted: 7 });
+  expect((await report(f, "report-0001", [{ host: site.host, requests: 7 }])).json).toEqual({
+    counted: 0,
+  });
+  await report(f, "report-0002", [{ host: site.host, requests: 20 }]);
+  const plain = await usage(f);
+  expect(plain).toMatchObject({ billingMode: "usage_only", chargedMicros: 0, shadowMicros: 0 });
+  expect(meter(plain, "requests")).toMatchObject({ used: 27, allowance: 10 });
+  expect((await f.live("Still publishes")).publication.status).toBe("active");
+  // Only the gateway reports, and only on the Sites apex.
+  expect(
+    (
+      await f.gateway(site.host, "POST", "/platform/requests", {
+        body: { v: 1, reportId: "report-0003", hosts: [{ host: site.host, requests: 1 }] },
+      })
+    ).status,
+  ).toBe(400);
+  const unsigned = await f.app.request("/v1/site-runtime/platform/requests", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ v: 1, reportId: "report-0004", hosts: [] }),
+  });
+  expect(unsigned.status).toBeGreaterThanOrEqual(400);
+
+  // shadow: records what credits would charge, refuses nothing.
+  const shadow = await fixture({
+    sitesPlatformBillingMode: "shadow",
+    sitesPlatformAllowanceRequests: 10,
+  });
+  const shadowSite = await shadow.live("Shadow", { access: "public" });
+  await report(shadow, "report-0101", [{ host: shadowSite.host, requests: 1_000_010 }]);
+  const shadowed = await usage(shadow);
+  expect(shadowed.chargedMicros).toBe(0);
+  // 1,000,000 requests over the allowance at $0.60 per million.
+  expect(shadowed.shadowMicros).toBe(600_000);
+  expect((await shadow.live("Shadow publishes")).publication.status).toBe("active");
+
+  // credits: the use above the allowance is charged from credits...
+  const credits = await fixture({
+    sitesPlatformBillingMode: "credits",
+    sitesPlatformAllowanceRequests: 10,
+  });
+  await seedCredits(credits.accountId, 5_000_000);
+  const paidSite = await credits.live("Paid", { access: "public" });
+  await report(credits, "report-0201", [{ host: paidSite.host, requests: 1_000_010 }]);
+  const charged = await usage(credits);
+  expect(charged.chargedMicros).toBe(600_000);
+  const [ledger] = await shared.admin`select coalesce(sum(amount_micros), 0)::bigint as balance
+    from credit_ledger_entries where account_id = ${credits.accountId}`;
+  expect(Number(ledger!.balance)).toBe(4_400_000);
+  // ...a retried report charges nothing more...
+  await report(credits, "report-0201", [{ host: paidSite.host, requests: 1_000_010 }]);
+  expect((await usage(credits)).chargedMicros).toBe(600_000);
+  expect((await credits.live("Paid publishes")).publication.status).toBe("active");
+
+  // ...and without credits, or with overage off, a used-up allowance refuses
+  // new publications with the quota error.
+  const broke = await fixture({
+    sitesPlatformBillingMode: "credits",
+    sitesPlatformAllowanceRequests: 10,
+  });
+  const brokeSite = await broke.live("Broke", { access: "public" });
+  await report(broke, "report-0301", [{ host: brokeSite.host, requests: 11 }]);
+  const next = await broke.publish("Next");
+  const refused = await broke.publication(broke.owner, next.id, "PUT", {});
+  expect(refused.status, JSON.stringify(refused.json)).toBe(402);
+  expect(refused.json.error.details).toMatchObject({
+    code: "site_platform_quota_exhausted",
+    meter: "requests",
+    allowance: 10,
+    used: 11,
+    reason: "no_credits",
+  });
+  expect(refused.json.error.message).toContain("no credits left");
+  // Already published Sites keep serving and can still change.
+  expect(
+    (await broke.publication(broke.owner, brokeSite.id, "PUT", { noindex: false })).status,
+  ).toBe(200);
+  const noOverage = await fixture({
+    sitesPlatformBillingMode: "credits",
+    sitesPlatformAllowanceRequests: 10,
+    sitesPlatformOverageEnabled: false,
+  });
+  await seedCredits(noOverage.accountId, 5_000_000);
+  const capped = await noOverage.live("Capped", { access: "public" });
+  await report(noOverage, "report-0401", [{ host: capped.host, requests: 10 }]);
+  const blocked = await noOverage.publication(
+    noOverage.owner,
+    (await noOverage.publish("Blocked")).id,
+    "PUT",
+    {},
+  );
+  expect(blocked.status).toBe(402);
+  expect(blocked.json.error.details).toMatchObject({
+    code: "site_platform_quota_exhausted",
+    reason: "overage_disabled",
+  });
+}, 120_000);
+
+test("platform storage: the Opengeni-wide level is each workspace's level, set rather than added", async () => {
+  const f = await fixture();
+  const site = await f.live("Stored", { access: "public" });
+  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+  const level = async () =>
+    Number(
+      (
+        await shared.admin`select storage_bytes from site_platform_storage
+          where workspace_id = ${f.workspace.id}`
+      )[0]?.storage_bytes ?? 0,
+    );
+  const before = (await readSitePlatformTotals(db.db)).storageBytes;
+  await shared.admin`insert into site_data_usage (account_id, workspace_id, site_id, record_bytes)
+    values (${f.accountId}, ${f.workspace.id}, ${site.id}, 1000)
+    on conflict (workspace_id, site_id) do update set record_bytes = 1000`;
+  // Refreshing the same level twice records it once.
+  await recordSitePlatformUsage(db.db, scope, { refreshStorage: true });
+  await recordSitePlatformUsage(db.db, scope, { refreshStorage: true });
+  expect(await level()).toBe(1000);
+  expect((await readSitePlatformTotals(db.db)).storageBytes).toBe(before + 1000);
+  // A smaller level replaces it.
+  await shared.admin`update site_data_usage set record_bytes = 400
+    where workspace_id = ${f.workspace.id} and site_id = ${site.id}`;
+  await recordSitePlatformUsage(db.db, scope, { refreshStorage: true });
+  expect(await level()).toBe(400);
+  expect((await readSitePlatformTotals(db.db)).storageBytes).toBe(before + 400);
+});
+
+test("repeated publication reads reuse the immutable version readiness scan", async () => {
+  const f = await fixture();
+  const site = await f.live("Cached readiness", { access: "public" });
+  const storage = f.deps.objectStorage!;
+  const original = storage.getObjectBytes;
+  let reads = 0;
+  storage.getObjectBytes = async (...args) => {
+    reads++;
+    return await original.apply(storage, args);
+  };
+  try {
+    for (let index = 0; index < 3; index++) {
+      const result = await f.publication(f.admin, site.id, "GET");
+      expect(result.status).toBe(200);
+      expect(result.json.warnings).toEqual(site.publication.warnings);
+    }
+    expect(reads).toBe(0);
+  } finally {
+    storage.getObjectBytes = original;
+  }
+});
+
+test("the platform brake: alert, engage at the monthly limit, refuse writes, operator lift", async () => {
+  // A tiny limit: $0.50 a month at $0.60 per million requests.
+  const f = await fixture({ sitesPlatformMonthlyLimitUsd: 0.5, sitesPlatformAlertPercent: 50 });
+  const site = await f.live("Busy", { access: "public", agent: { enabled: true } });
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+  try {
+    await f.gateway(DOMAIN, "POST", "/platform/requests", {
+      body: { v: 1, reportId: "brake-0001", hosts: [{ host: site.host, requests: 1_000_000 }] },
+    });
+    const evaluated = await evaluateSitePlatformLimit(f.deps as never);
+    expect(evaluated.limitMicros).toBe(500_000);
+    expect(evaluated.estimateMicros).toBeGreaterThanOrEqual(600_000);
+    expect(evaluated.brake.engagedBy).toBe("auto");
+    expect(warnings.some((line) => line.includes("site_platform_limit_alert"))).toBe(true);
+    expect(warnings.some((line) => line.includes("site_platform_brake_engaged"))).toBe(true);
+    resetSitePlatformBrakeCache();
+
+    // Engaged: new publications and guest agent turns are refused with 503;
+    // pages keep serving and members keep their agent.
+    const next = await f.publish("Next");
+    const publish = await f.publication(f.owner, next.id, "PUT", {});
+    expect(publish.status).toBe(503);
+    expect(code(publish)).toBe("site_platform_brake_engaged");
+    const guestTurn = await f.gateway(site.host, "POST", "/sessions", {
+      visitor: visitorId(),
+      body: { initialMessage: "Hi" },
+    });
+    expect(guestTurn.status).toBe(503);
+    expect(code(guestTurn)).toBe("site_platform_brake_engaged");
+    const brakedConfig = await f.gateway(site.host, "GET", "/site/config", {
+      visitor: visitorId(),
+    });
+    expect(brakedConfig.status).toBe(200);
+    // The page is told the assistant won't answer guests while the brake holds.
+    expect(brakedConfig.json.capabilities.agent).toBe(false);
+    expect(brakedConfig.json.agent.enabled).toBe(false);
+    expect((await usage()).brake.engaged).toBe(true);
+
+    // An operator lift holds for the rest of the month, even over the limit.
+    await liftSitePlatformBrake(db.db, { by: "operator@example.com", reason: "Reviewed" });
+    resetSitePlatformBrakeCache();
+    const again = await evaluateSitePlatformLimit(f.deps as never);
+    expect(again.brake.engagedAt).toBeNull();
+    resetSitePlatformBrakeCache();
+    expect(
+      (await f.gateway(site.host, "GET", "/site/config", { visitor: visitorId() })).json
+        .capabilities.agent,
+    ).toBe(true);
+    expect((await f.publication(f.owner, next.id, "PUT", {})).status).toBe(201);
+    // An operator can engage it by hand, and lift it again.
+    await engageSitePlatformBrake(db.db, { reason: "Manual check" });
+    resetSitePlatformBrakeCache();
+    const manual = await f.publication(f.owner, (await f.publish("Manual")).id, "PUT", {});
+    expect(manual.status).toBe(503);
+  } finally {
+    console.warn = warn;
+    await liftSitePlatformBrake(db.db, { by: "test", reason: "Test cleanup" });
+    resetSitePlatformBrakeCache();
+  }
+
+  async function usage() {
+    const res = await f.api(
+      f.member,
+      "GET",
+      `/v1/workspaces/${f.workspace.id}/site-platform-usage`,
+    );
+    return res.json;
+  }
+}, 90_000);

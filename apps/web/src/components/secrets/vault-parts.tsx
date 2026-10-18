@@ -6,6 +6,7 @@ import {
   KeyRoundIcon,
   LockKeyholeIcon,
   NotepadTextIcon,
+  RefreshCwIcon,
   RotateCcwIcon,
   ServerIcon,
   UserIcon,
@@ -19,10 +20,10 @@ import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { StatusBadge, type ProductStatus } from "@/components/ui/status-badge";
 import { apiErrorFacts } from "@/lib/api-error";
-import { cn } from "@/lib/utils";
 
+import { ProviderTile } from "./provider-marks";
 import {
   expiryLabel,
   expiryState,
@@ -30,27 +31,28 @@ import {
   vaultErrorText,
   type ExpiryState,
 } from "./vault-model";
+import {
+  everListed,
+  healthLabel,
+  isSelfHosted,
+  providerOfVault,
+  PROVIDERS,
+  sourceHome,
+  vaultHealth,
+  type VaultHealth,
+  type VaultProviderId,
+} from "./vault-providers";
 
 /* ----------------------------------------------------------------------------
    Small pieces shared by the Secrets pages: tiles, chips, provider status
    (S8), expiry badges and the load failure.
    -------------------------------------------------------------------------- */
 
-/** The 1Password mark, drawn as a keyhole in a ring (no bitmap asset). */
-export function OnePasswordMark({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" className={cn("size-full", className)} fill="none">
-      <circle cx="12" cy="12" r="10.25" fill="#0572EC" />
-      <circle cx="12" cy="12" r="6.6" stroke="#fff" strokeWidth="1.7" />
-      <rect x="10.85" y="7.6" width="2.3" height="8.8" rx="1.15" fill="#fff" />
-    </svg>
-  );
-}
+export { OnePasswordMark } from "./provider-marks";
 
 export function VaultTile({ vault }: { vault: VaultSummary }) {
-  if (vault.source === "onepassword") {
-    return <LogoTile icon={<OnePasswordMark />} label="1Password" />;
-  }
+  const provider = providerOfVault(vault);
+  if (provider) return <ProviderTile provider={provider} />;
   if (vault.source === "host") return <LogoTile icon={<ServerIcon />} />;
   const icon =
     vault.ownerKind === "user" ? (
@@ -74,19 +76,61 @@ export function VaultChips({
   vault: VaultSummary;
   /**
    * The vault page header: its meta line already says who can use the vault,
-   * so only the organization owner and the 1Password source get a chip.
+   * so only the organization owner and the password manager get a chip.
    */
   inHeader?: boolean;
 }) {
   const chips: ReactNode[] = [];
+  const provider = providerOfVault(vault);
   if (vault.ownerKind === "organization") chips.push(<MetaChip key="org">Organization</MetaChip>);
   else if (vault.ownerKind === "task" && !inHeader)
     chips.push(<MetaChip key="task">This task</MetaChip>);
-  if (vault.source === "onepassword" && inHeader)
-    chips.push(<MetaChip key="source">1Password</MetaChip>);
+  if (provider && inHeader)
+    chips.push(<MetaChip key="source">{PROVIDERS[provider].name}</MetaChip>);
   if (vault.mode === "read_only") chips.push(<MetaChip key="mode">Read-only</MetaChip>);
   if (chips.length === 0) return null;
   return <span className="inline-flex flex-wrap items-center gap-1.5">{chips}</span>;
+}
+
+const HEALTH_STATUS: Record<
+  Exclude<VaultHealth["kind"], "ok" | "stale">,
+  (provider: VaultProviderId | null) => ProductStatus
+> = {
+  syncing: () => "syncing",
+  rate_limited: () => "rate_limited",
+  auth_expired: (provider) =>
+    provider === "onepassword" || provider === "protonpass" ? "token_expired" : "needs_reconnect",
+  locked: () => "locked",
+  unavailable: (provider) => (isSelfHosted(provider) ? "offline" : "unavailable"),
+  incomplete: () => "incomplete",
+  failed: () => "sync_failed",
+};
+
+/** Why a linked vault's row shows its status, in one sentence. */
+function healthReason(vault: VaultSummary, health: VaultHealth): string | undefined {
+  const provider = providerOfVault(vault);
+  const home = sourceHome(vault);
+  const Home = home.charAt(0).toUpperCase() + home.slice(1);
+  switch (health.kind) {
+    case "failed":
+      return health.message ?? `${Home} didn't respond to the last sync.`;
+    case "auth_expired":
+      return provider === "onepassword"
+        ? "The 1Password service account token expired. Reconnect to keep syncing."
+        : `${Home} no longer accepts ${provider ? PROVIDERS[provider].credential : "its access"}. Reconnect to keep syncing.`;
+    case "locked":
+      return provider === "bitwarden"
+        ? "Bitwarden is locked on the bridge. Agents can't read these items until it's unlocked."
+        : `${Home} is locked. Agents can't read these items until it's unlocked.`;
+    case "unavailable":
+      return isSelfHosted(provider)
+        ? `Opengeni can't reach ${provider === "bitwarden" ? "your Bitwarden bridge" : "your vault service"}.`
+        : `${Home} isn't responding.`;
+    case "incomplete":
+      return `Not every item in ${home} could be listed, so some may be missing.`;
+    default:
+      return undefined;
+  }
 }
 
 /** A provider vault's state, only when it needs attention (S8). */
@@ -97,35 +141,58 @@ export function SyncStatus({
   vault: VaultSummary;
   variant?: "dot" | "outline";
 }) {
-  switch (vault.syncStatus) {
-    case "ok":
-      return null;
-    case "syncing":
-      return <StatusBadge status="syncing" variant={variant} />;
-    case "error":
-      return (
-        <StatusBadge
-          status="sync_failed"
-          variant={variant}
-          reason={vault.syncErrorMessage ?? "1Password didn't respond to the last sync."}
-        />
-      );
-    case "auth_expired":
-      return (
-        <StatusBadge
-          status="token_expired"
-          variant={variant}
-          reason="The 1Password service account token expired. Reconnect to keep syncing."
-        />
-      );
-    case "rate_limited": {
-      const until = formatClock(vault.rateLimitedUntil);
-      return (
-        <StatusBadge status="rate_limited" variant={variant}>
-          {until ? `Rate limited until ${until}` : "Rate limited"}
-        </StatusBadge>
-      );
-    }
+  const health = vaultHealth(vault);
+  if (health.kind === "ok" || health.kind === "stale") return null;
+  const provider = providerOfVault(vault);
+  const status = HEALTH_STATUS[health.kind](provider);
+  const reason = healthReason(vault, health);
+  if (health.kind === "rate_limited") {
+    return (
+      <StatusBadge status={status} variant={variant}>
+        {healthLabel(health, provider)}
+      </StatusBadge>
+    );
+  }
+  return (
+    <StatusBadge status={status} variant={variant} {...(reason ? { reason } : {})}>
+      {healthLabel(health, provider)}
+    </StatusBadge>
+  );
+}
+
+/** "Last synced 3 hours ago." while Opengeni has listed the vault before. */
+function LastSynced({ vault, lead = "Last synced" }: { vault: VaultSummary; lead?: string }) {
+  const at = vault.lastSyncedAt ?? vault.freshness?.lastCheckedAt ?? null;
+  if (!at) return null;
+  return (
+    <>
+      {" "}
+      {lead} <RelativeTime date={at} inSentence />.
+    </>
+  );
+}
+
+/** What agents get while the source can't be read: the last listing, or nothing yet. */
+function MirrorLine({ vault }: { vault: VaultSummary }) {
+  if (!everListed(vault)) return <> Nothing has been listed from it yet.</>;
+  return <LastSynced vault={vault} lead="Showing items from the last sync" />;
+}
+
+/** The renewal sentence for an expired or refused credential. */
+function renewSentence(provider: VaultProviderId | null): string {
+  switch (provider) {
+    case "onepassword":
+      return "Paste a new service account token to keep this vault in sync.";
+    case "protonpass":
+      return "Paste a new personal access token to keep this vault in sync.";
+    case "keeper":
+      return "Keeper no longer accepts this device. Reconnect with a new one-time access token to keep this vault in sync.";
+    case "bitwarden":
+      return "The bridge no longer accepts Opengeni's signing secret. Update the bridge to keep this vault in sync.";
+    case "external":
+      return "Your vault service no longer accepts Opengeni's signing secret. Update the service to keep this vault in sync.";
+    default:
+      return "The app that provides this vault no longer accepts Opengeni.";
   }
 }
 
@@ -138,22 +205,50 @@ export function VaultSyncNotice({
 }: {
   vault: VaultSummary;
   onRetry: () => void;
-  onReconnect: () => void;
+  /** Opens the connection's renewal page; absent when nobody here can renew it. */
+  onReconnect?: (() => void) | undefined;
   retrying?: boolean;
 }) {
   if (vault.source === "opengeni") return null;
-  const synced = vault.lastSyncedAt ? (
-    <>
-      {" "}
-      Last synced <RelativeTime date={vault.lastSyncedAt} inSentence />.
-    </>
-  ) : null;
-  switch (vault.syncStatus) {
+  const health = vaultHealth(vault);
+  const provider = providerOfVault(vault);
+  const home = sourceHome(vault);
+  const Home = home.charAt(0).toUpperCase() + home.slice(1);
+  const synced = <LastSynced vault={vault} />;
+  const checkAgain = (label: string) => (
+    <Button type="button" variant="outline" size="sm" onClick={onRetry} disabled={retrying}>
+      <RotateCcwIcon aria-hidden="true" />
+      {retrying ? "Checking…" : label}
+    </Button>
+  );
+  switch (health.kind) {
     case "ok":
       return null;
+    case "stale":
+      return (
+        <Notice
+          tone="muted"
+          actionLayout="responsive"
+          action={
+            <Button type="button" variant="outline" size="sm" onClick={onRetry} disabled={retrying}>
+              <RefreshCwIcon aria-hidden="true" />
+              {retrying ? "Syncing…" : "Sync now"}
+            </Button>
+          }
+        >
+          {health.checkedAt ? (
+            <>
+              Items as of <RelativeTime date={health.checkedAt} inSentence />. {Home} may have
+              changed since.
+            </>
+          ) : (
+            <>{Home} may have changed since these items were listed.</>
+          )}
+        </Notice>
+      );
     case "syncing":
-      return <Notice tone="waiting">Syncing with 1Password…</Notice>;
-    case "error":
+      return <Notice tone="waiting">Syncing with {home}…</Notice>;
+    case "failed":
       return (
         <Notice
           tone="failed"
@@ -166,35 +261,107 @@ export function VaultSyncNotice({
             </Button>
           }
         >
-          {vault.syncErrorMessage ?? "1Password didn't respond."} Agents use the last synced items.
-          {synced}
+          {health.message ?? `${Home} didn't respond.`}
+          {everListed(vault) ? (
+            <>
+              {" "}
+              Agents use the last synced items.
+              {synced}
+            </>
+          ) : (
+            " Nothing has been listed from it yet."
+          )}
         </Notice>
       );
     case "auth_expired":
       return (
         <Notice
           tone="waiting"
-          title="Token expired"
+          title={healthLabel(health, provider)}
           actionLayout="responsive"
           action={
-            <Button type="button" variant="outline" size="sm" onClick={onReconnect}>
-              Replace token
-            </Button>
+            onReconnect && provider ? (
+              <Button type="button" variant="outline" size="sm" onClick={onReconnect}>
+                {PROVIDERS[provider].renewLabel}
+              </Button>
+            ) : undefined
           }
         >
-          Paste a new service account token to keep this vault in sync.{synced}
+          {renewSentence(provider)}
+          {synced}
+        </Notice>
+      );
+    case "locked":
+      return (
+        <Notice
+          tone="waiting"
+          title="Locked"
+          actionLayout="responsive"
+          action={checkAgain("Check again")}
+        >
+          {provider === "bitwarden"
+            ? "Bitwarden is locked on the bridge, so agents can't read these items. Unlock it there; syncing picks up on its own."
+            : `${Home} is locked, so agents can't read these items. Unlock it; syncing picks up on its own.`}
+          <MirrorLine vault={vault} />
+        </Notice>
+      );
+    case "unavailable":
+      return (
+        <Notice
+          tone="failed"
+          title={isSelfHosted(provider) ? "Offline" : "Unavailable"}
+          actionLayout="responsive"
+          action={checkAgain("Check again")}
+        >
+          {provider === "bitwarden"
+            ? "Opengeni can't reach your Bitwarden bridge. Check that it's running."
+            : provider === "external"
+              ? "Opengeni can't reach your vault service. Check that it's running."
+              : `${Home} isn't responding, so agents can't read these items right now.`}
+          <MirrorLine vault={vault} />
+        </Notice>
+      );
+    case "incomplete":
+      return (
+        <Notice
+          tone="waiting"
+          title="Incomplete"
+          actionLayout="responsive"
+          action={checkAgain("Check again")}
+        >
+          Not every item in {home} could be listed, so some may be missing here.
+          <MirrorLine vault={vault} />
         </Notice>
       );
     case "rate_limited": {
-      const until = formatClock(vault.rateLimitedUntil);
+      const until = formatClock(health.until);
       return (
         <Notice tone="waiting" title="Rate limited">
-          1Password is limiting requests{until ? ` until ${until}` : ""}. Syncing resumes on its
-          own.{synced}
+          {Home} is limiting requests{until ? ` until ${until}` : ""}. Syncing resumes on its own.
+          {synced}
         </Notice>
       );
     }
   }
+}
+
+/**
+ * Where the items come from when the source serves a copy: a Bitwarden bridge
+ * reads its own synced vault, so its last sync with Bitwarden is a fact worth
+ * one quiet line. Nothing for live sources.
+ */
+export function SourceCopyLine({ vault }: { vault: VaultSummary }) {
+  const freshness = vault.freshness;
+  if (!freshness || freshness.source !== "cache" || !freshness.sourceSyncedAt) return null;
+  const provider = providerOfVault(vault);
+  return (
+    <p className="m-0 text-sm leading-5 text-fg-muted">
+      {provider === "bitwarden"
+        ? "Your bridge last synced with Bitwarden"
+        : "The source last synced"}{" "}
+      <RelativeTime date={freshness.sourceSyncedAt} inSentence />.
+    </p>
+  );
 }
 
 /* ------------------------------------------------------------- items */
@@ -246,10 +413,13 @@ export function SecretsLoadFailure({
   title,
   error,
   onRetry,
+  home,
 }: {
   title: string;
   error: unknown;
   onRetry: () => void;
+  /** The password manager the request went to, for its error copy. */
+  home?: string | undefined;
 }) {
   const facts = apiErrorFacts(error);
   return (
@@ -269,7 +439,7 @@ export function SecretsLoadFailure({
         </Button>
       }
     >
-      {vaultErrorText(error, "Check your connection, then try again.")}
+      {vaultErrorText(error, "Check your connection, then try again.", home)}
     </ErrorMessage>
   );
 }

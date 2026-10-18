@@ -2,6 +2,7 @@ import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge"
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
+import { mcpStreamableHttpClientOptions } from "./mcp-client";
 import {
   withPreparedCompactionRequest,
   deferCompactionToModelBoundary,
@@ -14,7 +15,12 @@ export {
   fitCompactionPrefix,
   compactionPrefixCuts,
 } from "./anthropic-compaction";
-export { AnthropicProviderRejection } from "./anthropic-messages";
+export { AnthropicProviderRejection, AnthropicStreamInterruptedError } from "./anthropic-messages";
+export {
+  createModelImageSizer,
+  type ModelImageSizerOptions,
+  type SizedImage,
+} from "./model-image-sizing";
 import { runSingleModelCall, type SingleModelCallTarget } from "./single-model-call";
 export {
   runSingleModelCall,
@@ -33,6 +39,7 @@ import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import {
+  mcpToolRecommendsApproval,
   normalizeCredentialProviderMcpUrl,
   toolPolicyActionName,
   toolReviewContextFromSchema,
@@ -111,6 +118,7 @@ import { createSecretArgumentResolver } from "./secret-argument-resolution";
 import {
   approvalIdentifier,
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+  RequestHumanInteractionToolInput,
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -297,6 +305,7 @@ import {
   applyDiff,
   RunContext,
   ToolGuardrailFunctionOutputFactory,
+  defineToolInputGuardrail,
   type AgentInputItem,
   type CallModelInputFilter,
   type MCPServer,
@@ -425,6 +434,15 @@ import {
 } from "./sandbox/codemode-client";
 import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
 export { InputWaitYield, modelResponseHasVisibleText } from "./input-wait-yield";
+import { withModelStepHandover } from "./model-step-handover";
+export { ModelStepHandover } from "./model-step-handover";
+export {
+  ModelPreemption,
+  isModelPreempted,
+  isPreemptedModelResponse,
+  preemptedResponseCutOffText,
+  preemptedResponseDone,
+} from "./model-preemption";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -615,6 +633,7 @@ export {
   normalizeVercelGatewayRequestBody,
   resolveTurnModel,
   vercelGatewayRoutingFetch,
+  warmCodexResponsesWebSocket,
 } from "./model-provider";
 export {
   appendWorkspaceGovernance,
@@ -786,6 +805,8 @@ export {
   type CompactionProviderRejection,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
+  compactionAttachmentFileIds,
+  type AttachmentUploadTimes,
   compactionReplacementFingerprint,
   compactionThresholdTokens,
   clampCompactionThresholdRatio,
@@ -2209,6 +2230,8 @@ export type BuildAgentOptions = {
    * may separately exempt an exact attempt-local tool below.
    */
   toolPreparationReady?: Promise<void>;
+  /** Start the owned deferred preparation if tool demand precedes provider dispatch. */
+  startToolPreparation?: () => void;
   /**
    * Exact attempt-local function names that remain visible and executable while
    * deferred catalog preparation is pending. This is a per-tool exception; it
@@ -3456,6 +3479,7 @@ function maybeInstallLazyToolTransport(
     },
     options.agentConfig != null,
     options.toolRouterInHistory === true,
+    options.startToolPreparation,
   );
 }
 
@@ -3582,6 +3606,7 @@ function installMcpApprovalPolicy(
         inputSchema: unknown;
         title?: string;
         accountLabel?: string | undefined;
+        recommendsApproval: boolean;
         readReview: ToolReviewReader;
       }
     >();
@@ -3600,6 +3625,7 @@ function installMcpApprovalPolicy(
           serverId: server.registryId,
           toolName: await server.unprefixedToolName(descriptor.name),
           inputSchema: descriptor.inputSchema,
+          recommendsApproval: mcpToolRecommendsApproval(descriptor),
           readReview: (name, args) => server.reviewContext(name, args),
           ...(descriptor.title ? { title: descriptor.title } : {}),
           ...(accountLabel ? { accountLabel } : {}),
@@ -3620,8 +3646,12 @@ function installMcpApprovalPolicy(
       const unprefixed = identity?.toolName ?? tool.name.slice(policy.prefix.length);
       const originalNeedsApproval = tool.needsApproval.bind(tool);
       const originalInvoke = tool.invoke.bind(tool);
-      const legacyApproval =
-        !policy.connectorBacked && mcpToolRequiresApproval(policy.requireApproval, unprefixed);
+      // The recommendation: the session's requireApproval or the tool's own
+      // tools/list `_meta`. Either one asking makes Ask the default.
+      const recommendsApproval =
+        mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
+        identity?.recommendsApproval === true;
+      const legacyApproval = !policy.connectorBacked && recommendsApproval;
       if (!policy.connectorBacked && !legacyApproval && !connectorActionPolicy) {
         return tool;
       }
@@ -3643,9 +3673,7 @@ function installMcpApprovalPolicy(
           }),
           actionName: toolPolicyActionName(unprefixed, identity?.inputSchema, args),
           ...(legacyApproval ? { approvalMode: "session_mcp" as const } : {}),
-          defaultDecision: mcpToolRequiresApproval(policy.requireApproval, unprefixed)
-            ? "ask"
-            : "allow",
+          defaultDecision: recommendsApproval ? "ask" : "allow",
         };
       };
       return {
@@ -3657,8 +3685,7 @@ function installMcpApprovalPolicy(
         ) => {
           if (!connectorActionPolicy) {
             return (
-              mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
-              (await originalNeedsApproval(runContext, parsedInput, callId))
+              recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
             );
           }
           if (!callId) {
@@ -3677,7 +3704,7 @@ function installMcpApprovalPolicy(
           // An explicit Allow is a decision, not an exemption from one of several floors.
           const requiresApproval = preparation.managed
             ? preparation.decision === "ask"
-            : mcpToolRequiresApproval(policy.requireApproval, unprefixed);
+            : recommendsApproval;
           if (requiresApproval) approvalRequiredCallIds.add(callId);
           else approvalRequiredCallIds.delete(callId);
           return requiresApproval;
@@ -3870,6 +3897,23 @@ function activeModelToolInvocation(modelName: string): ModelToolInvocation | nul
   return invocation?.modelName === modelName ? invocation : null;
 }
 
+/** Why interaction_request_human arguments cannot be recorded as an
+ * intervention, in words the model can act on, or null when they can. */
+export function interactionRequestArgumentsProblem(serialized: string): string | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(serialized);
+  } catch {
+    return "Invalid interaction_request_human arguments: they are not valid JSON. Nothing was requested; call it again with a JSON object matching its schema.";
+  }
+  const parsed = RequestHumanInteractionToolInput.safeParse(value);
+  if (parsed.success) return null;
+  const issues = parsed.error.issues
+    .slice(0, 5)
+    .map((issue) => `${issue.path.join(".") || "arguments"}: ${issue.message}`);
+  return `Invalid interaction_request_human arguments: ${issues.join("; ")}. Nothing was requested; call it again with corrected arguments.`;
+}
+
 /**
  * Turn the canonical interaction-request tool into a typed SDK interruption.
  * Its MCP/Codemode catalog entry and execution stay unchanged; this projection
@@ -3892,6 +3936,22 @@ function installInteractionInterventionPolicy(
       const originalInvoke = tool.invoke.bind(tool);
       return {
         ...tool,
+        // Runs before the approval pause, so invalid arguments come back to
+        // the model as a correctable tool result. Without it the call would
+        // pause first, the intervention could never be recorded, and the
+        // turn would fail.
+        inputGuardrails: [
+          ...(tool.inputGuardrails ?? []),
+          defineToolInputGuardrail({
+            name: "validate_interaction_request_human",
+            run: async ({ toolCall }) => {
+              const problem = interactionRequestArgumentsProblem(toolCall.arguments);
+              return problem
+                ? ToolGuardrailFunctionOutputFactory.rejectContent(problem)
+                : ToolGuardrailFunctionOutputFactory.allow();
+            },
+          }),
+        ],
         needsApproval: async (
           _runContext: Parameters<typeof originalNeedsApproval>[0],
           _parsedInput: Parameters<typeof originalNeedsApproval>[1],
@@ -3934,7 +3994,9 @@ function installInteractionInterventionPolicy(
 
 /**
  * Translate the canonical decision into the model SDK interruption protocol.
- * Legacy requireApproval is a recommendation only when no explicit choice exists.
+ * Legacy requireApproval and a tool's `opengeni/recommendedPermission` `_meta`
+ * are recommendations only when no explicit choice exists. Every external MCP
+ * server is wrapped so a tool's own recommendation holds even without hooks.
  * Standalone runtimes without policy hooks retain their configured behavior;
  * they cannot execute an approval-gated call without the durable authority.
  * Prepared server/tool identities take precedence over longest-prefix legacy
@@ -3951,7 +4013,7 @@ function applyMcpApprovalPolicy(
     .filter(
       (server) =>
         Boolean(server.connectionRef) ||
-        Boolean(connectorActionPolicy && attemptToolSource(server.id) === "mcp") ||
+        attemptToolSource(server.id) === "mcp" ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
@@ -4467,6 +4529,8 @@ export type PreparedAgentTools = {
    * promise; an ordinary first model response does not.
    */
   ready?: Promise<PreparedAgentTools>;
+  /** Start the same deferred preparation on first provider dispatch or earlier tool demand. */
+  startDeferredPreparation?: () => void;
 };
 
 /**
@@ -4644,6 +4708,11 @@ export type PrepareToolsOptions = {
   materializeConnectorFile?: (request: ConnectorFileMaterializationRequest) => Promise<unknown>;
   /** Overlap every non-eager MCP connection/catalog with the first model request. */
   deferNonEagerUntilToolDemand?: boolean;
+  /** When deferred preparation is enabled, keep its CPU/database work off the
+   * pre-request path. The host calls startDeferredPreparation at provider
+   * dispatch; real tool demand can start it earlier. Existing hosts start
+   * immediately unless they explicitly own this lifecycle. */
+  deferredPreparationStart?: "immediate" | "provider-dispatch";
   /** @internal Shared live cells used by deferred preparation handles. */
   deferredCodexConnectorNamespaces?: Set<string>;
   /** @internal Shared live cells used by deferred preparation handles. */
@@ -4702,43 +4771,61 @@ export type ConnectedMcpServerBatches = {
 };
 
 /**
- * Connect SDK-managed MCP servers in stable, bounded batches. The SDK cleans a
- * failing strict batch; this wrapper additionally closes every earlier batch
- * before rethrowing, so a later-batch failure cannot leak live connections.
+ * Connect SDK-managed MCP servers concurrently, at most
+ * MCP_MAX_CONCURRENT_SERVER_OPERATIONS at a time. Each server runs the SDK's
+ * awaited single-server path, so the turn's wall time is the slowest server
+ * rather than the sum of every handshake. Results keep the input order. A
+ * strict failure stops scheduling more servers, closes every server that did
+ * connect, and rethrows the failure of the earliest failing server.
  */
 export async function connectMcpServersInBatches(
   servers: MCPServer[],
   options: { strict: boolean; connectTimeoutMs?: number },
 ): Promise<ConnectedMcpServerBatches> {
   assertMcpServerSelectionWithinBounds(servers);
-  const batches: ConnectedMcpServerBatch[] = [];
-  try {
-    for (let offset = 0; offset < servers.length; offset += MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
-      const batchServers = servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS);
+  const connectedByIndex = new Array<ConnectedMcpServerBatch | undefined>(servers.length);
+  const failures: Array<{ index: number; error: Error }> = [];
+  let nextIndex = 0;
+  const connectNext = async (): Promise<void> => {
+    while (failures.length === 0) {
+      const index = nextIndex;
+      if (index >= servers.length) return;
+      nextIndex += 1;
+      const server = servers[index]!;
       try {
-        batches.push(
-          await connectMcpServers(batchServers, {
-            ...(options.connectTimeoutMs === undefined
-              ? {}
-              : { connectTimeoutMs: options.connectTimeoutMs }),
-            // Opengeni already bounds lifecycle work in batches. The Agents SDK
-            // parallel path additionally starts a detached `void drain()` task;
-            // a best-effort server rejection can escape that task as a process-
-            // level unhandled rejection even though the session records and
-            // degrades the failed server. Keep lifecycle ownership on the
-            // awaited serial path inside each bounded batch.
-            connectInParallel: false,
-            strict: options.strict,
-          }),
-        );
+        connectedByIndex[index] = await connectMcpServers([server], {
+          ...(options.connectTimeoutMs === undefined
+            ? {}
+            : { connectTimeoutMs: options.connectTimeoutMs }),
+          // Concurrency is owned here, one awaited server per slot. The Agents
+          // SDK parallel path additionally starts a detached `void drain()`
+          // task; a best-effort server rejection can escape that task as a
+          // process-level unhandled rejection even though the session records
+          // and degrades the failed server.
+          connectInParallel: false,
+          strict: options.strict,
+        });
       } catch (error) {
         const sdkError = error instanceof Error ? error : new Error(String(error));
-        throw unwrapMcpLifecycleErrorFromServers(batchServers, sdkError, "connect");
+        failures.push({
+          index,
+          error: unwrapMcpLifecycleErrorFromServers([server], sdkError, "connect"),
+        });
       }
     }
-  } catch (error) {
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(MCP_MAX_CONCURRENT_SERVER_OPERATIONS, servers.length) }, () =>
+      connectNext(),
+    ),
+  );
+  const batches = connectedByIndex.filter(
+    (batch): batch is ConnectedMcpServerBatch => batch !== undefined,
+  );
+  if (failures.length > 0) {
     await closeMcpServerBatches(batches).catch(() => undefined);
-    throw error;
+    failures.sort((left, right) => left.index - right.index);
+    throw failures[0]!.error;
   }
 
   const errors = new Map<MCPServer, Error>();
@@ -4824,7 +4911,8 @@ class DeferredPreparedMcpServer implements MCPServer {
   };
 
   async connect(): Promise<void> {
-    // Physical connection is already running inside resolveTarget.
+    // The preparation owner starts the physical connection; merely exposing
+    // this provisional server must not start it before provider dispatch.
   }
 
   async close(): Promise<void> {
@@ -5003,10 +5091,21 @@ export async function prepareAgentTools(
     "server_construction",
     async () =>
       await boundedParallelMap(refs, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (tool, index) => {
-        const config = registry.get(tool.id);
-        if (!config) {
+        const registeredConfig = registry.get(tool.id);
+        if (!registeredConfig) {
           throw new Error(`Unknown MCP server id: ${tool.id}`);
         }
+        const config =
+          tool.allowedTools === undefined
+            ? registeredConfig
+            : {
+                ...registeredConfig,
+                allowedTools: tool.allowedTools.filter(
+                  (name) =>
+                    registeredConfig.allowedTools === undefined ||
+                    registeredConfig.allowedTools.includes(name),
+                ),
+              };
         if (config.id === CODEX_APPS_MCP_SERVER_ID && !isCodexAppsMcpServer(config)) {
           throw new Error("Codex Apps server id is reserved for the canonical endpoint");
         }
@@ -5220,6 +5319,7 @@ export async function prepareAgentTools(
             // sanitize the response on the wire before validation. The namespace Set
             // also captures each tool's original connector namespace (P4 Part B.1).
             fetch: fetchImpl,
+            ...mcpStreamableHttpClientOptions({ firstParty }),
             ...(await mcpServerRequestInit(settings, config)),
             ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
             ...mcpSessionTimeoutOptions(config),
@@ -5386,6 +5486,10 @@ export async function prepareAgentTools(
     await connectedEagerBestEffort?.close().catch(() => undefined);
     await connectedEagerRequired?.close().catch(() => undefined);
   };
+  const closeUnstartedPreparation = async (): Promise<void> => {
+    await Promise.all(deferredEntries.map((entry) => entry.server.close().catch(() => undefined)));
+    await closePublishedServers();
+  };
   const completePreparation = async (): Promise<PreparedAgentTools> => {
     const execution = exposesDeferredPreparation ? "background" : "blocking";
     let attemptToolEnvironment: AttemptToolEnvironment | null = null;
@@ -5496,10 +5600,25 @@ export async function prepareAgentTools(
     return await completePreparation();
   }
 
-  // Non-eager connection/listing starts immediately but is not a first-request
-  // dependency. Search and direct deferred invocation join this exact promise.
-  const ready = completePreparation();
+  // One preparation and completion fence, regardless of whether provider
+  // dispatch or an earlier real tool demand starts it. Merely observing ready
+  // must not start synchronous catalog work on the first-request path.
+  let preparation: Promise<PreparedAgentTools> | null = null;
+  let preparationClosed = false;
+  let resolveReady!: (value: PreparedAgentTools) => void;
+  let rejectReady!: (reason: unknown) => void;
+  const ready = new Promise<PreparedAgentTools>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const startDeferredPreparation = (): void => {
+    if (preparation || preparationClosed) return;
+    preparation = Promise.resolve().then(completePreparation);
+    void preparation.then(resolveReady, rejectReady);
+  };
+  if (options.deferredPreparationStart !== "provider-dispatch") startDeferredPreparation();
   localToolServer?.bindAttemptToolEnvironmentProvider(async () => {
+    startDeferredPreparation();
     const prepared = await ready;
     if (!prepared.attemptToolEnvironment) {
       throw new Error("local model tool server has no exact attempt authority");
@@ -5529,9 +5648,13 @@ export async function prepareAgentTools(
     // Join the bounded deferred preparation and let its complete owner close
     // every server when available; if preparation itself failed, it already
     // released deferred resources and this scope still owns eager/local ones.
-    const fullyPrepared = await ready.catch(() => null);
+    preparationClosed = true;
+    if (!preparation) rejectReady(error);
+    const fullyPrepared = preparation ? await ready.catch(() => null) : null;
     if (fullyPrepared) {
       await fullyPrepared.close().catch(() => undefined);
+    } else if (!preparation) {
+      await closeUnstartedPreparation();
     } else {
       await closePublishedServers();
     }
@@ -5544,6 +5667,7 @@ export async function prepareAgentTools(
         entry.server.registryId,
         () => preparationSettled,
         async () => {
+          startDeferredPreparation();
           const prepared = await ready;
           return prepared.mcpServers.includes(entry.server) ? entry.server : null;
         },
@@ -5563,6 +5687,12 @@ export async function prepareAgentTools(
     inputWaitYield,
     resolvedMcpConnectionIds,
     close: async () => {
+      preparationClosed = true;
+      if (!preparation) {
+        rejectReady(new Error("Deferred tool preparation closed before it started"));
+        await closeUnstartedPreparation();
+        return;
+      }
       let prepared: PreparedAgentTools;
       try {
         prepared = await ready;
@@ -5578,6 +5708,7 @@ export async function prepareAgentTools(
     },
     codexConnectorNamespaces,
     ready,
+    startDeferredPreparation,
   };
 }
 
@@ -5820,10 +5951,7 @@ function installAttemptConnectorActionGatewayLifecycle(
                 definition.inputSchema,
                 arguments_,
               ),
-              defaultDecision:
-                attemptToolApproval(config!, definition.identity.toolName) === "human"
-                  ? "ask"
-                  : "allow",
+              defaultDecision: definition.approval === "human" ? "ask" : "allow",
             };
           }
         : (approvalId: string, arguments_: unknown): ConnectorActionToolCall => ({
@@ -6132,7 +6260,7 @@ async function prepareToolGatewayDefinitionsFromServers(
           ...(tool.annotations ? { annotations: tool.annotations } : {}),
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
-          approval: attemptToolApproval(config, toolName),
+          approval: attemptToolApproval(config, toolName, tool),
           effectAuthorityDigest: digestCanonicalJson({
             version: 1,
             serverId: server.registryId,
@@ -6300,10 +6428,12 @@ function attemptToolSource(serverId: string): ToolGatewayDefinition["source"] {
 function attemptToolApproval(
   config: Settings["mcpServers"][number],
   toolName: string,
+  tool: object,
 ): ToolGatewayDefinition["approval"] {
   if (
     config.requireApproval === true ||
-    (Array.isArray(config.requireApproval) && config.requireApproval.includes(toolName))
+    (Array.isArray(config.requireApproval) && config.requireApproval.includes(toolName)) ||
+    (attemptToolSource(config.id) === "mcp" && mcpToolRecommendsApproval(tool))
   ) {
     return "human";
   }
@@ -7400,6 +7530,18 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
 }
 
 /**
+ * An MCP connectivity failure whose server answered HTTP 503 Service
+ * Unavailable: it is reachable but refusing work for now, as a server does
+ * while it is being deployed or maintained. Callers wait such a server out
+ * for longer than a server that cannot be reached at all.
+ */
+export function isMcpServiceUnavailableError(error: unknown): boolean {
+  if (!isMcpTransportConnectivityError(error)) return false;
+  const inspection = inspectMcpTransportError(error as object);
+  return inspection.statuses.includes(503);
+}
+
+/**
  * Preserve the MCP SDK's exact request-timeout meaning. The numeric code is not sufficient:
  * Streamable HTTP also uses -32001 for "Session not found" and arbitrary
  * AbortSignal reasons, so only the SDK's two owned timeout messages qualify.
@@ -8428,7 +8570,10 @@ export class PrefixedMcpServer implements MCPServer {
           return {
             ...tool,
             name,
-            ...(this.accountLabel
+            // Name the account only when the turn has several accounts of this
+            // connector to tell apart. With one account the line adds nothing
+            // the model can act on, and it would repeat on every tool.
+            ...(this.accountLabel?.account
               ? {
                   description:
                     `Account: ${this.accountLabel.model}. Use only this account; if the intended account for a write is unclear, ask before calling.\n${tool.description ?? ""}`.trimEnd(),
@@ -8958,6 +9103,8 @@ export type RunAgentStreamOptions = {
   beforeModelRequest?: ModelCallLifecycle["beforeModelRequest"];
   /** Register terminal response settlement before the next producer model request. */
   onModelResponse?: ModelCallLifecycle["onModelResponse"];
+  /** Lets a Steer cut the in-flight model request short (see streamWithPreemption). */
+  modelPreemption?: ModelCallLifecycle["modelPreemption"];
   /** Abort the provider/tool loop when the owning activity is cancelled. */
   signal?: AbortSignal;
   /** Nonblocking phase measurements for request preparation before provider I/O. */
@@ -9212,6 +9359,7 @@ export async function runAgentStream(
           ? { beforeModelRequest: overrides.beforeModelRequest }
           : {}),
         ...(overrides.onModelResponse ? { onModelResponse: overrides.onModelResponse } : {}),
+        ...(overrides.modelPreemption ? { modelPreemption: overrides.modelPreemption } : {}),
       },
       () =>
         withPreparedCompactionRequest(agent, () =>
@@ -9451,7 +9599,7 @@ async function runAgentStreamInternal(
       toolExecution: { preApprovalInputGuardrails: true },
       ...lazyToolRunBindings(agent),
       callModelInputFilter: ownedFilter,
-      ...(inputWaitYield ? { errorHandlers: inputWaitYield.errorHandlers } : {}),
+      errorHandlers: withModelStepHandover(inputWaitYield?.errorHandlers),
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
     ownedRunOptions.sandbox = {
@@ -9617,7 +9765,7 @@ async function runAgentStreamInternal(
     // raise the proactive compaction signal. This runs for turn-start replay AND
     // every mid-turn follow-up.
     callModelInputFilter,
-    ...(inputWaitYield ? { errorHandlers: inputWaitYield.errorHandlers } : {}),
+    errorHandlers: withModelStepHandover(inputWaitYield?.errorHandlers),
     ...(overrides.signal ? { signal: overrides.signal } : {}),
   };
   if (client) {
