@@ -775,6 +775,97 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test("browser_open returns the opened tab's screenshot in the same call when includeScreenshot is set", async () => {
+    const session = discoveredBrowserSession(browserSessionId, sessionId);
+    session.lifecycle = "active";
+    session.controller = {
+      controllerId: "synthetic-controller",
+      controllerGeneration: "controller-1",
+      placementInstanceId: "placement-1",
+    };
+    const target = browserTarget();
+    const image = new Uint8Array([4, 5, 6]);
+    const order: string[] = [];
+    let captureFails = false;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getBrowserSession: async () => session,
+        listBrowserTargets: async () => ({
+          browserSessionId,
+          controllerGeneration: "controller-1",
+          targets: [target],
+        }),
+        observeBrowserTarget: async () => {
+          order.push("observe");
+          return browserObservation(target);
+        },
+        captureBrowserTarget: async (_workspaceId, capturedSessionId, targetId) => {
+          order.push(`capture:${capturedSessionId}:${targetId}`);
+          if (captureFails) throw new Error("synthetic capture failure");
+          return {
+            frameId: "captured-browser-frame",
+            browserSessionId,
+            controllerGeneration: target.controllerGeneration,
+            targetId: target.id,
+            targetGeneration: target.targetGeneration,
+            documentGeneration: target.documentGeneration!,
+            sequence: 1,
+            mediaType: "image/jpeg",
+            width: 1,
+            height: 1,
+            deviceScaleFactor: 1,
+            scrollX: 0,
+            scrollY: 0,
+            capturedAt: now,
+            data: image,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:control"],
+    });
+    const context = () => ({
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    });
+
+    const plain = await definitions[0]!.execute({ browserSessionId }, context());
+    expect(plain.content).toHaveLength(1);
+    expect(order).toEqual(["observe"]);
+
+    order.length = 0;
+    const visual = await definitions[0]!.execute(
+      { browserSessionId, includeScreenshot: true },
+      context(),
+    );
+    // The capture follows the settled open and targets the tab it observed.
+    expect(order).toEqual(["observe", `capture:${browserSessionId}:${target.id}`]);
+    expect(visual.isError).toBeFalsy();
+    expect(visual.content).toHaveLength(2);
+    expect(visual.content[0]).toMatchObject({ type: "text" });
+    expect(visual.content[1]).toEqual({
+      type: "image",
+      data: Buffer.from(image).toString("base64"),
+      mimeType: "image/jpeg",
+    });
+    expect(visual.structuredContent).toMatchObject({ session: { id: browserSessionId } });
+
+    // A failed capture keeps the opened browser's result and says why.
+    captureFails = true;
+    const failed = await definitions[0]!.execute(
+      { browserSessionId, includeScreenshot: true },
+      context(),
+    );
+    expect(failed.isError).toBeFalsy();
+    expect(failed.structuredContent).toMatchObject({ session: { id: browserSessionId } });
+    expect(failed.content).toHaveLength(2);
+    expect((failed.content[1] as { text: string }).text).toBe(
+      "The browser opened, but its screenshot could not be captured: synthetic capture failure",
+    );
+  });
+
   test.each([true, false])(
     "browser_open create uses the launch view instead of two more reads (view=%s)",
     async (withView) => {
