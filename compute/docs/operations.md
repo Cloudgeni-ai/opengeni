@@ -211,7 +211,9 @@ whose forward chain drops by default, such as Docker's `FORWARD` chain or
 ufw's, cuts every sandbox off from everything unless it accepts traffic
 from and to the sandboxes' links, `ogc*`. The agent warns when it starts
 of each such chain it finds through nftables (it cannot see
-iptables-legacy rules). On a host running Docker:
+iptables-legacy rules). On a host running Docker with its iptables
+backend (its default, including over iptables-nft; its nftables backend
+has no `DOCKER-USER` chain):
 
 ```sh
 sudo iptables -I DOCKER-USER -o 'ogc+' -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
