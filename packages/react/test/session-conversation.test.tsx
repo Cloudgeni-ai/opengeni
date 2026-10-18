@@ -12,6 +12,59 @@ import { archivedTranscriptEvents } from "./fixtures/archived-transcript";
 
 registerDom();
 
+test("computer offers use the embedding product's app flow", async () => {
+  const client = fakeClient({
+    listEvents: async () => [
+      {
+        id: "computer-offer",
+        sequence: 1,
+        type: "tool.auth_needed",
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        turnId: "turn",
+        clientEventId: null,
+        occurredAt: new Date(0).toISOString(),
+        payload: {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          reason: "missing_connection",
+          providerDomain: "opengeni.ai",
+          capability: {
+            id: "api:connected-machine",
+            name: "Computer",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Use the files on this computer",
+            requiredVariables: [],
+          },
+        },
+      },
+    ],
+    streamEvents: async function* () {},
+  });
+  const view = await renderComponent(
+    <SessionConversation
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      computerConnection={{
+        productName: "Acme",
+        downloads: [{ label: "Download Acme", url: "https://example.com/download" }],
+        openAppUrl: "acme://connect?destination=current",
+      }}
+    />,
+  );
+  await waitFor(
+    () => Boolean(view.container.querySelector('a[href="acme://connect?destination=current"]')),
+    "The product's computer flow did not render",
+  );
+  expect(view.container.textContent).toContain("Download Acme");
+  expect(view.container.textContent).not.toContain("curl");
+  expect(view.container.querySelector('a[href*="app.opengeni.ai"]')).toBeNull();
+  await view.unmount();
+});
+
 async function waitFor(condition: () => boolean, message: string): Promise<void> {
   const deadline = Date.now() + 3_000;
   while (!condition()) {
