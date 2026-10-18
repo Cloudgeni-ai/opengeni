@@ -98,6 +98,16 @@ function withOpperReportedCost<T extends { providerData?: Record<string, any> | 
   };
 }
 
+function chatInputTokenDetails(usage: unknown): Record<string, number> | undefined {
+  const details = (usage as { prompt_tokens_details?: unknown } | undefined)?.prompt_tokens_details;
+  // The SDK projects only cached_tokens, dropping cache writes and other input
+  // details. Preserve provider evidence; the shared usage normalizer owns bounded
+  // numeric validation, including diagnostics for malformed provider values.
+  return details && typeof details === "object" && !Array.isArray(details)
+    ? (details as Record<string, number>)
+    : undefined;
+}
+
 /** Reject ambiguous completion before the SDK can commit output or execute tools. */
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
@@ -105,6 +115,8 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
+    const inputTokensDetails = chatInputTokenDetails(response.providerData?.usage);
+    if (inputTokensDetails) response.usage.inputTokensDetails = [inputTokensDetails];
     return withOpperReportedCost(
       {
         ...response,
@@ -123,8 +135,12 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     let reasoning: ChatReasoning | undefined;
     let reasoningDetails: Record<string, unknown>[] | undefined;
     let reportedCostUsd: string | undefined;
+    let inputTokensDetails: Record<string, number> | undefined;
     for await (const event of super.getStreamedResponse(chatRequest(request))) {
       if (event.type === "model") {
+        const rawUsage = (event.event as { usage?: unknown } | undefined)?.usage;
+        // Mirror the SDK's last non-null usage snapshot, not a sum of chunks.
+        if (rawUsage) inputTokensDetails = chatInputTokenDetails(rawUsage);
         reportedCostUsd =
           opperReportedCostUsd((event.event as { usage?: unknown } | undefined)?.usage) ??
           reportedCostUsd;
@@ -150,6 +166,9 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
             response: withOpperReportedCost<typeof event.response>(
               {
                 ...event.response,
+                ...(inputTokensDetails
+                  ? { usage: { ...event.response.usage, inputTokensDetails } }
+                  : {}),
                 output: withChatReasoning(event.response.output, reasoning, reasoningDetails),
               },
               reportedCostUsd,
