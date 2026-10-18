@@ -192,12 +192,23 @@ describe("Connect a machine dialog", () => {
       expect(handoff.protocol).toBe("opengeni:");
       expect(handoff.searchParams.get("subject")).toBe("person");
       expect(handoff.searchParams.get("url")).toBe("https://app.example.test/workspaces/workspace");
+      expect(h.text()).not.toContain("replacing the old version");
+      await click(links.find((link) => link.textContent === "Open app and connect")!);
+      expect(h.text()).toContain("opens without connecting");
+      expect(h.text()).toContain("replacing the old version");
+      expect(h.text()).not.toContain("Machine connected");
+      expect(h.onConnected).not.toHaveBeenCalled();
+      expect(mintEnrollToken).not.toHaveBeenCalled();
       await click(h.button("Windows"));
       expect(h.text()).toContain("Download for Windows");
       await click(h.button("Linux"));
       expect(h.text()).toContain("Download .deb");
       expect(h.text()).toContain("Download AppImage");
       expect(mintEnrollToken).not.toHaveBeenCalled();
+      await h.update({ machines: [machine("new-computer", "My computer")] });
+      expect(h.text()).toContain("Machine connected");
+      expect(h.text()).not.toContain("replacing the old version");
+      expect(h.onConnected).toHaveBeenCalledTimes(1);
     } finally {
       await h.close();
     }

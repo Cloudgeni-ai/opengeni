@@ -340,6 +340,7 @@ function DesktopConnectSetup({
   const { accessContext } = useAppContext();
   const userAgent = typeof navigator === "undefined" ? undefined : navigator.userAgent;
   const [os, setOs] = useState<ConnectOs>(() => detectConnectOs(userAgent));
+  const [handoffAttempted, setHandoffAttempted] = useState(false);
   const mobile = /android|iphone|ipad|ipod/i.test(userAgent ?? "");
   const subjectId = accessContext?.subjectId;
   const webUrl = new URL(
@@ -386,12 +387,21 @@ function DesktopConnectSetup({
       </p>
       {appUrl && !mobile ? (
         <Button asChild variant="outline" className="pointer-coarse:min-h-11">
-          <a href={appUrl}>Open app and connect</a>
+          <a href={appUrl} onClick={() => setHandoffAttempted(true)}>
+            Open app and connect
+          </a>
         </Button>
       ) : !subjectId ? (
         <p role="status" className="text-xs text-fg-muted">
           Sign in to connect this computer to your account.
         </p>
+      ) : null}
+      {handoffAttempted ? (
+        <Notice live="polite">
+          If the app doesn't open or opens without connecting, install the latest app using a
+          download above, replacing the old version. Then return here and choose Open app and
+          connect again.
+        </Notice>
       ) : null}
     </div>
   );

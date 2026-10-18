@@ -255,6 +255,13 @@ apps look up the newest stable `desktop-v` tag and read that release's update
 files. Products configure their own feed (a fixed URL or a repository and tag
 prefix). The signing identity is a release-time setting.
 
+The browser cannot detect the installed desktop version or whether a custom
+protocol handler completed its work. After `Open app and connect`, the card
+shows update/download recovery guidance without claiming a failure or success.
+Apps before the computer-connect handoff support reveal their window and ignore
+that unknown link; the person installs the latest app and retries. Readiness
+still comes from the actual machine inventory, not a timer or browser focus.
+
 ### Distribution
 
 People get the app four ways, all from the same releases:
