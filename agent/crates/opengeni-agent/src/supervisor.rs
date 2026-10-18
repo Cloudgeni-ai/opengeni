@@ -2485,7 +2485,12 @@ impl<P: Platform + 'static> Supervisor<P> {
         let client = async_nats::connect_with_options(link.creds.nats_urls.clone(), opts)
             .await
             .map_err(|e| {
-                if is_authentication_error(&e) {
+                // A fabric host refuses a link it does not serve yet (a stale
+                // epoch, an invalid ticket, a sandbox it no longer holds) with
+                // the same authorization error. A fabric link has no credential
+                // to renew, so that refusal is a disconnect: the link backs off
+                // and dials again at once when its host asks it to reconnect.
+                if link.fabric.is_none() && is_authentication_error(&e) {
                     SupervisorError::Authentication(e.to_string())
                 } else {
                     SupervisorError::Connect(e.to_string())
@@ -5750,6 +5755,95 @@ mod tests {
             .expect("clean supervisor result");
     }
 
+    /// A fabric host refuses a link it does not serve yet (a stale epoch, an
+    /// invalid ticket) with the authorization error a control plane gives a
+    /// rejected credential. A fabric link has no credential to renew, so the
+    /// refusal must not park it: it reconnects as soon as its host asks, for
+    /// the control and the bulk connection alike.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fabric_link_refused_by_its_host_reconnects_when_asked() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!(
+                "SKIP a_fabric_link_refused_by_its_host_reconnects_when_asked: no nats-server"
+            );
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let upstream = format!("127.0.0.1:{port}");
+        let host =
+            it::connect_with_retry(&format!("nats://{upstream}"), Duration::from_secs(5)).await;
+        let mut gate = it::SilentGate::refusing(upstream).await;
+
+        let mut credentials = it::test_credentials(&format!("nats://{}", gate.addr));
+        credentials.nats_bearer = String::new();
+        let definition = SupervisorLink::new(
+            "fabric-refused-test",
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
+        .with_fabric(FabricLink {
+            relay: RelayCredential::pending(),
+        });
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let mut hellos = host
+            .subscribe(link.hello_subject())
+            .await
+            .expect("subscribe hello");
+        host.flush().await.expect("flush");
+
+        let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
+        let shutdown = supervisor.shutdown_handle();
+        let reconnect = supervisor.reconnect_handle();
+        let run = tokio::spawn(async move { supervisor.run().await });
+
+        // The host refuses the control connection, then serves it again.
+        gate.accepted().await;
+        gate.forward(1);
+        let asked = Instant::now();
+        reconnect.request();
+        let _ = it::next_hello(&mut hellos).await;
+        assert!(
+            asked.elapsed() < Duration::from_secs(2),
+            "control reconnected after {:?}",
+            asked.elapsed()
+        );
+
+        // The host refuses the bulk connection, then serves both again.
+        gate.accepted().await;
+        gate.forward(2);
+        let asked = Instant::now();
+        reconnect.request();
+        let _ = it::next_hello(&mut hellos).await;
+        assert!(
+            asked.elapsed() < Duration::from_secs(2),
+            "bulk reconnected after {:?}",
+            asked.elapsed()
+        );
+        let ping = it::ask(
+            &host,
+            link.rpc_subject(),
+            ControlRequest {
+                request_id: "after-refusal".to_string(),
+                epoch: 0,
+                resource_policy: None,
+                op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 9 })),
+            },
+        )
+        .await;
+        assert!(ping.error.is_none(), "{:?}", ping.error);
+
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("supervisor stops")
+            .expect("run task")
+            .expect("clean supervisor result");
+    }
+
     /// A stop that came while nothing waited for one (as while a hello is
     /// being prepared, between the control and the bulk dial) still ends a
     /// later dial the server never answers, whether the process or the
@@ -7146,6 +7240,16 @@ mod tests {
 
         impl SilentGate {
             pub async fn start(upstream: String) -> Self {
+                Self::start_with(upstream, false).await
+            }
+
+            /// Refuses the connections it is not allowed to pass with the
+            /// authorization error a host gives a link it does not serve.
+            pub async fn refusing(upstream: String) -> Self {
+                Self::start_with(upstream, true).await
+            }
+
+            async fn start_with(upstream: String, refuse: bool) -> Self {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
                     .expect("bind gate");
@@ -7169,6 +7273,19 @@ mod tests {
                                     let _ = tokio::io::copy_bidirectional(&mut socket, &mut server)
                                         .await;
                                 }
+                            } else if refuse {
+                                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                                let _ = socket
+                                    .write_all(
+                                        b"INFO {\"server_id\":\"refusing-host\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}\r\n",
+                                    )
+                                    .await;
+                                let mut connect = [0_u8; 4096];
+                                let _ = socket.read(&mut connect).await;
+                                let _ = socket
+                                    .write_all(b"-ERR 'Authorization Violation'\r\n")
+                                    .await;
+                                let _ = socket.shutdown().await;
                             } else {
                                 let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
                             }
