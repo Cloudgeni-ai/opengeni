@@ -872,6 +872,7 @@ from that commit. Results carry the commits as `backend+agent`.
 | r9 16:38 | 5ca485cef+734a3ba3a | ab08a672b | 8 | 12 | none before create: create (first turn 25.1 s), commands, files, git, browser pass; see below |
 | r10 18:28 | 746756d73+af0b4552f | a89c70f53 | 10 | 11 | none before create: create (first turn 28.2 s), commands, files, git, port, browser, sleep-paused pass; see below |
 | r11 20:23 | df78a13f3+af0b4552f | 53fe2cd59 | 13 | 10 | none before create: create (first turn 25.1 s), commands, egress, files, git, port, browser, sleep-paused (verified), move (32.3 s), connected-machine pass; see below |
+| r13 21:51 | cf5152969+5faf66b21+6270b6eae | a1972ae1a | 21 | 3 | ui (desktop view too small in the dock; the e2e now maximizes it), delete (409 for 10 minutes; the cleanup row fails with it); every other check passes, the four sleeps verified in the journals; see below |
 
 Checks after create were skipped through r6 because they need create.
 In r8 (every request now carries a nonzero agent epoch) create and most
@@ -1024,3 +1025,41 @@ the same replica; the web app's Terminal tab passed in the same run. From
 r12 the e2e runs one relay. The desktop failed as in r10c (the CUA SDK is
 not in the images). The Connected Machine passed again, listed online at
 every 5 s look through its 90 s idle with the same agent process.
+
+From r13 the e2e runs the chart's default two relays and gives Caddy
+(2.11.7) the channel affinity `docs/deployment.md` requires: a headless
+Service of the e2e resolves every relay pod and Caddy hashes each dial's
+`channel` query, so a stream's two dials meet in one replica. The chart's
+own ingress has no setting for that affinity. The fleet checkpoints running
+sandboxes every 60 s (`--checkpoint-every-s=60`), so every check runs
+across checkpoints, and `FRESH=1` deploys on a new database. r13 (fabric
+6eafd93af, where only a request wakes a sandbox) passed 21 checks:
+
+- Terminal through two relays (0.8 s), and the new checkpoint check: a
+  viewer terminal printed 150 ticks a second apart and a `terminal/exec`
+  command 110 alongside it while the host checkpointed the running sandbox
+  three times (journal, 70 s apart); every tick arrived, the terminal was
+  never quiet longer than 1.4 s, and the command's longest gap on the
+  guest's clock was 2 s.
+- All four sleeps, verified in the journals: each level reached (Paused
+  0.3 s, Saved 6.6 s, Archived 16.0 s, Remote 19.1 s), no step began
+  before the suite's request, and the wake that ended each (resume,
+  restore, restore, fetch) was asked for over the agent link
+  (`compute.wake.by=agent_link`), 0.03 to 0.07 s after the request. The
+  32 MiB process lived through each with the same boot generation; the
+  first command answered in 0.1 to 0.5 s, 10.6 s from Remote.
+- Move in 35.2 s; host loss came back on another host from the archived
+  copy under owner epoch 5 (stopped host fenced, 412 s in all); the
+  background command stopped 61 s after the API's stop; the desktop API
+  check decoded a 1024x640 frame; the Connected Machine passed.
+- The host journals show no agent-link connection limit, no early-EOF
+  restore notice, no "host full" refusal and no checkpoint loop; the
+  guests' consoles show the agent reconnecting at once twice, one per move
+  (move and host loss), not per restore.
+
+The UI's desktop step failed because the dock's width draws the desktop as
+a thumbnail; the suite now maximizes the dock first. Deleting the session
+stayed at 409 for 10 minutes: the lease still had the agent's browser and
+desktop holders (heartbeats stopped at 21:56 and 22:00) and a direct holder
+made during the host-loss recovery that kept its heartbeat 8 minutes after
+the check ended.
