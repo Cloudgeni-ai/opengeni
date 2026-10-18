@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createSiteToolBridge } from "@opengeni/sdk/site";
 import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
 import { SITE_NO_ORIGIN_ID } from "@opengeni/contracts/site-session-http";
 import { LEARNING_REFUSAL_META_KEY } from "@opengeni/contracts/learning-refusal";
@@ -297,6 +298,97 @@ async function fixture(overrides: { sandboxBackend?: "none" | "docker" } = {}) {
     liveAgentGrant,
   };
 }
+
+test("existing-chat search includes pinned private children", async () => {
+  const f = await fixture();
+  const rootResponse = await f.call(
+    "POST",
+    "/sessions",
+    {},
+    {
+      initialMessage: "Existing project",
+      visibility: "private",
+      sandboxBackend: "none",
+    },
+  );
+  expect(rootResponse.status, await rootResponse.clone().text()).toBe(202);
+  const root = ((await rootResponse.json()) as { id: string }).id;
+  const agent = await f.liveAgentGrant(root);
+  const child = await withSessionRlsActorContext({ subjectId: f.grant.subjectId }, () =>
+    createSession(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      parentSessionId: root,
+      visibility: "user_private",
+      createdByActor: {
+        type: "agent_attempt",
+        sessionId: root,
+        turnId: String(agent.metadata!.turnId),
+        attemptId: String(agent.metadata!.attemptId),
+        executionGeneration: 1,
+      },
+      initialMessage: "Existing specialist",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: f.grant.subjectId },
+      subjectId: f.grant.subjectId,
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    }),
+  );
+  const title = "Long-running specialist child";
+  const renamed = await f.call("PATCH", `/sessions/${child.id}`, {}, { title });
+  expect(renamed.status, await renamed.clone().text()).toBe(200);
+  expect((await f.call("PUT", `/sessions/${child.id}/pin`, {}, { pinned: true })).status).toBe(200);
+  const search = `/sessions?view=page&search=${encodeURIComponent(title)}`;
+  const omitted = await (await f.call("GET", `${search}&includePinned=false`)).json();
+  expect([...omitted.pinned, ...omitted.sessions]).toEqual([]);
+  const found = await (await f.call("GET", search)).json();
+  expect(found.pinned.map((s: { id: string }) => s.id)).toEqual([child.id]);
+  expect(found.pinned[0].tenancy.ownedByCurrentUser).toBe(true);
+});
+
+test("Site composer config binds the host workspace instead of querying the site-host alias", async () => {
+  const f = await fixture();
+  const site = await f.publish("Config dashboard", { visibility: "private" });
+  const bridge = createSiteToolBridge({
+    workspaceId: f.workspace.id,
+    artifactId: site.siteId,
+    siteVersionId: site.versionId,
+    requestedTools: [],
+    workspaceTools: {
+      $catalog: async () => {
+        throw new Error("unused");
+      },
+    },
+    callTool: async () => {
+      throw new Error("unused");
+    },
+    fetchResponse: (path, init) =>
+      f.app.request(path, {
+        ...init,
+        headers: { ...f.headers, ...Object.fromEntries(new Headers(init.headers)) },
+      }),
+  });
+  const response = await bridge.fetch!(
+    {
+      type: "opengeni.site.http",
+      requestId: "config",
+      method: "GET",
+      path: "/v1/config/client?workspaceId=site-host",
+      headers: [],
+    },
+    new AbortController().signal,
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect(await response.json()).toHaveProperty("allowedModels");
+  const invalid = await f.app.request("/v1/config/client?workspaceId=site-host", {
+    headers: f.headers,
+  });
+  expect(invalid.status).toBe(422);
+});
 
 test("an owner can allow an existing chat in one private console Site and revoke its live stream", async () => {
   const f = await fixture();

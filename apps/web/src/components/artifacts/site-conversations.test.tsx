@@ -58,12 +58,19 @@ test("owner can choose an existing chat, then revoke access without changing the
   let allowed: string[] = [];
   const changes: Array<[string, boolean]> = [];
   const client = {
-    listSessionPage: async (_ws: string, options: { siteAccessId?: string }) =>
-      page(
-        options.siteAccessId
-          ? allowed.map((id) => chat(id))
-          : [chat("mine"), chat("someone-else", false)],
-      ),
+    listSessionPage: async (
+      _ws: string,
+      options: { siteAccessId?: string; includePinned?: boolean },
+    ) => ({
+      ...page(options.siteAccessId ? [] : [chat("someone-else", false)]),
+      pinned:
+        options.includePinned === false
+          ? []
+          : (options.siteAccessId ? allowed : ["mine"]).map((id) => ({
+              ...chat(id),
+              parentSessionId: "parent",
+            })),
+    }),
     listSiteSessionAccess: async () => ({ sessionIds: [...allowed] }),
     setSiteSessionAccess: async (
       _ws: string,
