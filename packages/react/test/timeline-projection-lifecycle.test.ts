@@ -168,6 +168,25 @@ describe("projection lifecycle audit regressions", () => {
     expect(work(fold([streamed[0]!, streamed[1]!, handover]))[0]!.outcome).toBe("complete");
   });
 
+  test("a finished message completing after the cut-off one keeps stream order, without repeating it", () => {
+    // Claude settles completions only when the cut request ends, after the
+    // unfinished message's deltas.
+    const timeline = buildTimeline(englishText, [
+      event(1, "turn.started"),
+      event(2, "agent.message.delta", { messageId: "a", text: "Checking" }),
+      event(3, "agent.message.delta", { messageId: "b", text: "Next I wi" }),
+      event(4, "agent.message.completed", {
+        messageId: "a",
+        text: "Checking",
+        phase: "commentary",
+      }),
+      event(5, "turn.superseded", { reason: "steer", atModelStep: true, cutOffText: "Next I wi" }),
+    ]);
+    expect(
+      timeline.filter((item) => item.kind === "agent-message").map((item) => item.text),
+    ).toEqual(["Checking", "Next I wi"]);
+  });
+
   test("human Retry reopens the failed logical turn without prematurely folding its progress", () => {
     const failed = [
       event(1, "agent.message.completed", { messageId: "before", text: "Checking records" }),

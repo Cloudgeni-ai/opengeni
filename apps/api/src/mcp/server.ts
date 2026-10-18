@@ -5072,7 +5072,9 @@ function registerWorkspaceOrchestrationTools(
       listOwnPendingUpdates(ownSessionId),
       callerTurnSteerPending(ownSessionId),
     ]);
-    return [...updates.map((update) => update.kind), ...(steer ? ["steer"] : [])];
+    const kinds = updates.map((update) => update.kind);
+    // An agent Steer is already listed as its own pending update.
+    return steer && !kinds.includes("agent_steer_instruction") ? [...kinds, "steer"] : kinds;
   };
   if (callerSessionId && can("sessions:read")) {
     server.registerTool(

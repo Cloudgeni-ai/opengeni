@@ -1474,9 +1474,19 @@ function preemptedAnthropicMessage(
     add(runStart, block);
   });
   if (current) {
-    for (const [, state] of [...(partial.blocks?.entries() ?? [])].sort(([x], [y]) => x - y)) {
-      if (state.stopped && state.block?.type === "text") add(state.item, state.block);
+    // Adjacent text blocks are one message; it is finished only when every
+    // block of its run has closed, so a message never keeps part of its text.
+    const states = [...(partial.blocks?.entries() ?? [])].sort(([x], [y]) => x - y);
+    const open = new Set(
+      states
+        .filter(([, state]) => !state.stopped && state.block?.type === "text")
+        .map(([, state]) => state.item),
+    );
+    for (const [, state] of states) {
+      if (state.stopped && state.block?.type === "text" && !open.has(state.item))
+        add(state.item, state.block);
     }
+    for (const item of open) texts.delete(item);
   }
   const output = [...texts.entries()]
     .sort(([x], [y]) => x - y)

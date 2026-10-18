@@ -84,13 +84,18 @@ function keptPreemptedOutput(output: readonly unknown[]): OutputItem[] {
   return kept;
 }
 
-function messageIds(output: readonly OutputItem[]): Set<string> {
-  const ids = new Set<string>();
+/** Kept text per message id. */
+function keptTexts(output: readonly OutputItem[]): Map<string, string> {
+  const texts = new Map<string, string>();
   for (const item of output) {
-    const id = (item as { id?: unknown }).id;
-    if (typeof id === "string") ids.add(id);
+    const message = item as { id?: unknown; content?: Array<{ text?: unknown }> };
+    if (typeof message.id !== "string") continue;
+    const text = (message.content ?? [])
+      .map((part) => (typeof part?.text === "string" ? part.text : ""))
+      .join("");
+    texts.set(message.id, text);
   }
-  return ids;
+  return texts;
 }
 
 /**
@@ -153,9 +158,15 @@ export async function* streamWithPreemption(
   let anonymousText = "";
   let terminal = false;
   const cutOffText = (kept: readonly OutputItem[]): string => {
-    const keptIds = messageIds(kept);
+    const keptText = keptTexts(kept);
     let text = anonymousText;
-    for (const [itemId, itemText] of streamed) if (!keptIds.has(itemId)) text += itemText;
+    for (const [itemId, itemText] of streamed) {
+      const done = keptText.get(itemId);
+      // A kept message's streamed text beyond what was kept never completed.
+      if (done === undefined) text += itemText;
+      else if (itemText.length > done.length && itemText.startsWith(done))
+        text += itemText.slice(done.length);
+    }
     return text.length > CUT_OFF_TEXT_MAX_CHARS ? text.slice(0, CUT_OFF_TEXT_MAX_CHARS) : text;
   };
   const finish = (event: ResponseDone): ResponseDone => {

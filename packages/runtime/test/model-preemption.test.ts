@@ -134,6 +134,33 @@ describe("streamWithPreemption", () => {
     await expect(failing()).rejects.toThrow("provider down");
   });
 
+  test("a kept message's streamed text beyond what was kept is reported as cut off", async () => {
+    const { done } = await preemptAfter(
+      async function* (req) {
+        yield { type: "output_text_delta", delta: "Finished.", itemId: "m1" } as StreamEvent;
+        yield { type: "output_text_delta", delta: " Unfinished", itemId: "m1" } as StreamEvent;
+        await new Promise((resolve) => {
+          if (req.signal!.aborted) resolve(undefined);
+          req.signal!.addEventListener("abort", resolve, { once: true });
+        });
+        yield preemptedResponseDone({
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              id: "m1",
+              status: "completed",
+              content: [{ type: "output_text", text: "Finished." }],
+            },
+          ],
+        });
+      },
+      (event) => event.type === "output_text_delta" && (event as any).delta === " Unfinished",
+    );
+    expect(done.response.output).toHaveLength(1);
+    expect(preemptedResponseCutOffText(done)).toBe(" Unfinished");
+  });
+
   test("keeps only completed assistant messages, as plain text with their id and phase", () => {
     const done = preemptedResponseDone({
       id: "resp_1",
@@ -343,6 +370,55 @@ describe("Claude transport preemption", () => {
     expect(preemptedResponseCutOffText(done)).toBe("");
     expect(done.response.usage.inputTokens).toBe(1_005);
   });
+});
+
+test("a Claude message whose adjacent text block is still open is unfinished as a whole", async () => {
+  const provider = {
+    id: "claude",
+    label: "Claude",
+    kind: "api-key",
+    api: "anthropic-messages",
+    wireProfile: "openai",
+    builtin: false,
+    baseUrl: "https://api.anthropic.com/v1",
+    apiKey: "test-key",
+    credentialSource: { kind: "deployment", mechanism: "api_key" },
+    billing: { upstreamPayer: "deployment", metering: "external" },
+  } as ResolvedModelProvider;
+  const sse = (event: Record<string, unknown>) => `data: ${JSON.stringify(event)}\r\n\r\n`;
+  const frames = [
+    sse({
+      type: "message_start",
+      message: {
+        id: "msg_adj",
+        type: "message",
+        role: "assistant",
+        content: [],
+        stop_reason: null,
+        usage: { input_tokens: 3, output_tokens: 1 },
+      },
+    }),
+    sse({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+    sse({
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: "Finished." },
+    }),
+    sse({ type: "content_block_stop", index: 0 }),
+    sse({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } }),
+    sse({
+      type: "content_block_delta",
+      index: 1,
+      delta: { type: "text_delta", text: " Unfinished" },
+    }),
+  ];
+  const model = new AnthropicMessagesModel(provider, "claude", (async (_url, init) =>
+    openStream(frames, init?.signal)) as typeof fetch);
+  const { done } = await preemptAfter((req) => model.getStreamedResponse(req), { afterMs: 100 });
+  // Both blocks stream under one message id; keeping only its first block
+  // would replace the text the person saw with less of it.
+  expect(done.response.output).toEqual([]);
+  expect(preemptedResponseCutOffText(done)).toBe("Finished. Unfinished");
 });
 
 describe("phase of a preempted response", () => {

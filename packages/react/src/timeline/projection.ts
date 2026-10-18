@@ -207,6 +207,9 @@ export function buildTimeline(
   const pendingWaitOutcomeByTurn = new Map<string | null, PendingWaitOutcome>();
   const latestAgentResponseByTurn = new Map<string | null, TrackedAgentResponse>();
   const identifiedMessages = new Map<string, AgentMessageItem>();
+  // Messages drawn from streamed text that no completion has settled yet. A
+  // Steer that cuts the answer short leaves its unfinished text here.
+  const unsettledStreamedMessages = new Set<AgentMessageItem>();
   const humanInputRequests = humanInputRequestsById(events);
   const humanInputToolCallIds = new Set(
     [...humanInputRequests.values()]
@@ -703,6 +706,7 @@ export function buildTimeline(
           occurredAt: event.occurredAt,
         };
         items.push(item);
+        unsettledStreamedMessages.add(item);
         if (messageKey) identifiedMessages.set(messageKey, item);
         rememberAgentResponse(turnId, item, false);
         break;
@@ -771,6 +775,7 @@ export function buildTimeline(
             items.splice(openIndex, 1);
             items.push(open);
           }
+          unsettledStreamedMessages.delete(open);
           rememberAgentResponse(turnId, open, true);
           break;
         }
@@ -1627,16 +1632,28 @@ export function buildTimeline(
           event.type === "turn.superseded" &&
           (payload.atModelStep === true || payload.deferredUntilCompaction === true)
         ) {
-          const response = takeAgentResponse(turnId);
+          takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
-          // A Steer cut the model's answer short. Its streamed text normally
-          // stays where it was drawn; when those deltas are absent (an archived
-          // history) the recorded cut-off text stands in, as a plain progress
-          // note rather than an error.
+          // A Steer cut the model's answer short. Its unfinished streamed text
+          // stays visible, after the messages that did finish (their
+          // completions arrive only when the cut request ends). When those
+          // deltas are absent (an archived history) the recorded cut-off text
+          // stands in, as a plain progress note rather than an error.
           const cutOffText = stringValue(payload.cutOffText);
-          const streamedCutOff =
-            response !== undefined && !response.completed && items.includes(response.item);
-          if (cutOffText && !streamedCutOff) {
+          const unsettled = items.filter(
+            (item): item is AgentMessageItem =>
+              item.kind === "agent-message" &&
+              item.turnId === turnId &&
+              unsettledStreamedMessages.has(item),
+          );
+          if (cutOffText && unsettled.length > 0) {
+            for (const item of unsettled) {
+              items.splice(items.indexOf(item), 1);
+              items.push(item);
+              unsettledStreamedMessages.delete(item);
+            }
+          }
+          if (cutOffText && unsettled.length === 0) {
             closeStreamingTail();
             items.push({
               kind: "agent-message",
