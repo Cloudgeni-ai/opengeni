@@ -1706,6 +1706,8 @@ entry through body preparation/handshake to socket send) and
 `transport.timing.sendToFirstEventMs` (socket send to the first protocol response
 event). These intervals overlap; do not sum them. Receipts snapshot timing at
 their own phase, so later metadata never changes a previously emitted receipt.
+For a refused-continuation replacement, preparation restarts after fresh custody
+admission; the rejected request's provider wait and settlement are not preparation.
 `transport.timing.server` retains only finite, nonnegative, allowlisted fields
 from `responsesapi.websocket_timing.timing_metrics.critical_path` with
 `scope: "response"` and a matching response ID. Logical-turn cumulative totals

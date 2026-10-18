@@ -1052,6 +1052,7 @@ export function responsesTransport(
       let started = false;
       let finished = false;
       let continuationPending: Promise<void> | null = null;
+      let preparationStartedAt = startedAt;
       let sentAt: number | undefined;
       let responseId: string | undefined;
       const continuationAbort = new AbortController();
@@ -1152,7 +1153,7 @@ export function responsesTransport(
           });
           sentAt = performance.now();
           responseId = undefined;
-          transport.timing = { transportPreparationMs: Math.max(0, sentAt - startedAt) };
+          transport.timing = { transportPreparationMs: Math.max(0, sentAt - preparationStartedAt) };
           dispatchObservation.getStore()?.(transport);
           active.socket.send(encoded);
         } catch {
@@ -1202,6 +1203,9 @@ export function responsesTransport(
             continuationAbort.signal.throwIfAborted();
             if (finished) return;
             signal?.throwIfAborted();
+            // Like the first transport entry, replacement preparation begins
+            // after custody admission, not during the refused request's wait.
+            preparationStartedAt = performance.now();
             transport.input = "full";
             active.onEvent = resumeEvents;
             sendMessage(payload);

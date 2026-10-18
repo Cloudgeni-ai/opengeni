@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import {
   CODEX_TRANSPORT_HEADER,
   codexRequestStorage,
@@ -387,6 +387,111 @@ test("a Codex turn's warmed connection carries its first model request", async (
   }
   expect(sockets).toHaveLength(1);
   expect(httpCalls).toEqual([]);
+});
+
+test("replacement preparation excludes the refused request and custody settlement", async () => {
+  let now = 0;
+  const clock = spyOn(performance, "now").mockImplementation(() => now);
+  let socket!: FakeSocket;
+  const events: CodexModelRequestEvent[] = [];
+  let sequence = 0;
+  try {
+    const transport = codexResponsesTransport(
+      async () => {
+        throw new Error("unexpected HTTP");
+      },
+      {
+        createSocket: () => {
+          socket = new FakeSocket();
+          queueMicrotask(() => socket.open());
+          return socket;
+        },
+      },
+    );
+    const context: CodexRequestContext = {
+      clientVersion: "fixture",
+      sessionId: "replacement-timing",
+      getToken: async () => ({
+        accessToken: "fixture",
+        chatgptAccountId: "fixture",
+        isFedramp: false,
+      }),
+      refresh: async () => {
+        throw new Error("unexpected refresh");
+      },
+      resolveModel: (model) => model,
+      nextRequestId: () => `request-${++sequence}`,
+      beforeProviderDispatch: async (request) => {
+        if (request?.requestId === "request-2" && request.transportAttempt === 2) now = 170;
+      },
+      onProviderRequestSettled: async (request) => {
+        if (request.requestId === "request-2" && request.outcome === "refused") now = 160;
+      },
+      onModelRequestEvent: (event) => {
+        events.push(event);
+      },
+    };
+    const fetch = codexSubscriptionFetch(transport);
+    const user = { role: "user", content: "hello" };
+    const send = (input: unknown[]) =>
+      withCodexTurn(context, () =>
+        fetch("https://chatgpt.example/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "m", stream: true, input }),
+        }),
+      );
+    const first = send([user]);
+    for (let i = 0; i < 100 && !socket?.sent.length; i++) await Bun.sleep(1);
+    socket.emit({
+      type: "response.completed",
+      response: { id: "first", status: "completed", output: [] },
+    });
+    await (await first).text();
+    now = 10;
+    const second = send([user, { role: "user", content: "next" }]);
+    for (let i = 0; i < 100 && socket.sent.length < 2; i++) await Bun.sleep(1);
+    now = 110;
+    socket.emit({
+      type: "error",
+      status: 400,
+      error: { code: "previous_response_not_found", param: "previous_response_id" },
+    });
+    for (let i = 0; i < 100 && socket.sent.length < 3; i++) await Bun.sleep(1);
+    now = 190;
+    socket.emit({
+      type: "response.completed",
+      response: { id: "second", status: "completed", output: [] },
+    });
+    await (await second).text();
+    expect(
+      events.find(
+        (event) =>
+          event.requestId === "request-2" &&
+          event.transportAttempt === 2 &&
+          event.phase === "completed",
+      ),
+    ).toMatchObject({
+      dispatchDelayMs: 10,
+      transport: {
+        kind: "websocket",
+        input: "full",
+        timing: { transportPreparationMs: 0, sendToFirstEventMs: 20 },
+      },
+    });
+    expect(
+      events.find(
+        (event) =>
+          event.requestId === "request-2" &&
+          event.transportAttempt === 1 &&
+          event.phase === "failed",
+      ),
+    ).toMatchObject({
+      transport: { input: "incremental", timing: { transportPreparationMs: 0 } },
+    });
+  } finally {
+    socket?.close();
+    clock.mockRestore();
+  }
 });
 
 test.each([
