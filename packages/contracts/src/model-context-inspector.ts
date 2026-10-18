@@ -19,6 +19,7 @@ export const ModelContextInstructionLayerId = /* @__PURE__ */ defineSchema(() =>
     "workspace_memory",
     "codemode",
     "code_search",
+    "connected_machines",
     "git_bindings",
     "builtin_skills",
     "genesis_title",

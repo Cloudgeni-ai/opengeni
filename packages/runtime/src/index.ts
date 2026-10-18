@@ -2342,6 +2342,13 @@ export type BuildAgentOptions = {
    * short directive so the agent starts code investigation with it.
    */
   codeSearchAvailable?: boolean;
+  /**
+   * Whether the agent can reach the person's own Connected Machines from this
+   * attempt (the deployment allows them and the machine tools are offered).
+   * Adds one short directive so a request about the person's computer is met
+   * by using it, or by offering to connect it, instead of a refusal.
+   */
+  connectedMachinesAvailable?: boolean;
   // Sessions without a semantic title only: inject a one-shot instruction into
   // the FIRST model call telling it to title the session via
   // opengeni__set_session_title.
@@ -2602,6 +2609,9 @@ function inspectModularAgentInstructions(
     ...agentPromptExperimentsFor(settings),
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
+    ...(options.connectedMachinesAvailable
+      ? { connectedMachines: CONNECTED_MACHINES_DIRECTIVE }
+      : {}),
     ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
       ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
       : {}),
@@ -2670,6 +2680,13 @@ export function inspectPersistentAgentInstructions(
     if (options.codeSearchAvailable) {
       layers.push({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
     }
+    if (options.connectedMachinesAvailable) {
+      layers.push({
+        id: "connected_machines",
+        title: "Connected machines",
+        content: CONNECTED_MACHINES_DIRECTIVE,
+      });
+    }
     if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
       layers.push({
         id: "git_bindings",
@@ -2695,6 +2712,13 @@ export function inspectPersistentAgentInstructions(
     }
     if (options.codeSearchAvailable) {
       layers.push({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
+    }
+    if (options.connectedMachinesAvailable) {
+      layers.push({
+        id: "connected_machines",
+        title: "Connected machines",
+        content: CONNECTED_MACHINES_DIRECTIVE,
+      });
     }
     if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
       layers.push({
@@ -9188,6 +9212,14 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
  */
 export const CODE_SEARCH_DIRECTIVE =
   "To find where something is implemented, configured or decided in the code, start with one `code_search` call (a precise question plus 6-15 likely identifiers, file-name fragments, config keys or error strings) instead of a series of separate searches and file reads. When the question asks whether something is required, enforced or the default, add a subQuestion and keywords for what could skip, bypass or override it. Use the returned passages directly instead of re-reading them. Their evidence rating covers only what the search returned, so spend follow-up searches outside those passages: other entry points to the same outcome (API routes, automatic or self-service paths), defaults, flags, exceptions and its unfollowed leads.";
+
+/**
+ * Generic guidance for reaching the person's own computer. Its presence follows
+ * deployment settings and the attempt's tools, never which machines are online,
+ * so it does not change within a session as computers connect and disconnect.
+ */
+export const CONNECTED_MACHINES_DIRECTIVE =
+  'People can connect their own computers to this workspace. When a request needs the person\'s computer, such as files on it, its desktop, its apps or its screen, call `sandboxes_list` first, never say you cannot reach it without checking, and use a machine of theirs that is online: `run_on` for commands and files; to see and use the screen, including which apps and windows are open, move this chat onto that machine with `sandbox_swap`, then `computer_open`, instead of scripting other apps from a command (such as `osascript`), which makes the system ask them for extra permission; when you are done, swap back to `session` yourself before you answer, without asking them or mentioning the move. Do not ask which computer to use when they have only one, and do not ask permission again when they have already allowed it; if a use is refused, tell them in plain words what to allow. If none of their computers is connected, offer to connect one with `capability_authorization_request` for `api:connected-machine`, which shows them a setup card, instead of describing manual steps. When a command on their computer times out, it may be waiting for them to answer a system prompt on their screen; ask them to check the screen and allow it, then try again. When you tell them what you are doing, use plain words such as "looking at your Desktop", not tool names, commands or machine identifiers.';
 
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff. " +

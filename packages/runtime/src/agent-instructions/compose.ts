@@ -74,6 +74,7 @@ export type ComposeModularAgentInstructionsInput = {
   /** Per-attempt runtime directives, each already gated by its caller. */
   codemode?: string | undefined;
   codeSearch?: string | undefined;
+  connectedMachines?: string | undefined;
   gitBindings?: string | undefined;
   /** Rendered Skill index, only when it is not delivered in conversation history. */
   skillCatalog?: string | undefined;
@@ -190,6 +191,7 @@ export function composeModularAgentInstructions(input: ComposeModularAgentInstru
   };
   push("codemode", "Codemode", input.codemode);
   push("code_search", "Code search", input.codeSearch);
+  push("connected_machines", "Connected machines", input.connectedMachines);
   push("git_bindings", "Git credential bindings", input.gitBindings);
   push("skill_catalog", "Skills", input.skillCatalog);
   push("workspace_governance", "Workspace governance", input.workspaceGovernance);
@@ -208,7 +210,12 @@ export function composeModularAgentInstructions(input: ComposeModularAgentInstru
   if (contract.stableContent === contract.content) {
     // Deployment-level directives whose presence follows the agent configuration.
     for (const layer of layers.slice(2)) {
-      if (layer.id !== "codemode" && layer.id !== "code_search") break;
+      if (
+        layer.id !== "codemode" &&
+        layer.id !== "code_search" &&
+        layer.id !== "connected_machines"
+      )
+        break;
       stablePrefix += `${layer.joinBefore}${layer.content}`;
     }
   }

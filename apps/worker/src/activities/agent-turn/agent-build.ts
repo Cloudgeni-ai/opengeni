@@ -144,6 +144,8 @@ export type BuildTurnAgentDeps = {
   preparationIndependentToolNames: readonly string[];
   /** The attempt's tool catalog includes the Jev-backed code_search tool. */
   codeSearchAvailable: boolean;
+  /** The person's own Connected Machines are reachable from this attempt. */
+  connectedMachinesAvailable?: boolean;
   /**
    * Frozen clause availability for the modular instructions; undefined for
    * sessions without an agent configuration. Rendering input only.
@@ -208,6 +210,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     trigger,
     preparationIndependentToolNames,
     codeSearchAvailable,
+    connectedMachinesAvailable,
     promptToolAvailability,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
@@ -748,6 +751,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(sandboxCodemodeToken ? { codemodeAvailable: true } : {}),
         ...(codeSearchAvailable ? { codeSearchAvailable: true } : {}),
+        ...(connectedMachinesAvailable ? { connectedMachinesAvailable: true } : {}),
         // Managed boxes receive the bearer through their protected per-session
         // token file. Connected Machines use transient per-exec delivery above,
         // so they must not run the file-seeding lifecycle hook.

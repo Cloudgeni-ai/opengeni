@@ -6,6 +6,7 @@ import { testSettings } from "@opengeni/testing";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 import {
   CODE_SEARCH_DIRECTIVE,
+  CONNECTED_MACHINES_DIRECTIVE,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
   composeAgentInstructions,
   coreInstructions,
@@ -80,6 +81,39 @@ describe("model context inspector", () => {
       "code_search",
     ]);
     expect(governed.composed).toContain(CODE_SEARCH_DIRECTIVE);
+  });
+
+  test("adds the connected_machines directive only when the attempt can reach the person's computers", () => {
+    const without = inspectPersistentAgentInstructions(testSettings(), {
+      codeSearchAvailable: true,
+    });
+    expect(without.layers.map((layer) => layer.id)).not.toContain("connected_machines");
+    expect(without.composed).not.toContain(CONNECTED_MACHINES_DIRECTIVE);
+
+    const plain = inspectPersistentAgentInstructions(testSettings(), {
+      codeSearchAvailable: true,
+      connectedMachinesAvailable: true,
+    });
+    expect(plain.layers.map((layer) => layer.id)).toEqual([
+      "operational_contract",
+      "persona_and_core",
+      "code_search",
+      "connected_machines",
+    ]);
+    expect(plain.composed).toBe(joinPersistentAgentInstructionLayers(plain.layers));
+    // Appended after the existing layers, so it never rewrites earlier bytes.
+    expect(plain.composed.startsWith(without.composed)).toBe(true);
+
+    const governed = inspectPersistentAgentInstructions(testSettings(), {
+      workspaceGovernance: "Workspace global policy",
+      connectedMachinesAvailable: true,
+    });
+    expect(governed.layers.map((layer) => layer.id)).toEqual([
+      "operational_contract",
+      "persona_and_core",
+      "workspace_governance",
+      "connected_machines",
+    ]);
   });
 
   test("captured remainder after composed instructions is labeled as SDK capability text", () => {

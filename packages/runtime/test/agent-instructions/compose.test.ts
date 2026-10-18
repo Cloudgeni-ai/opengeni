@@ -14,6 +14,7 @@ import { testSettings } from "@opengeni/testing";
 import {
   AGENT_PROMPT_MODULES,
   CODE_SEARCH_DIRECTIVE,
+  CONNECTED_MACHINES_DIRECTIVE,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
   DEFAULT_AGENT_IDENTITY,
   INSTRUCTION_PRECEDENCE,
@@ -484,6 +485,7 @@ describe("modular composer: identity and precedence (AC12, AC14)", () => {
       agentConfig: config(allAgentCapabilities()),
       codemodeAvailable: true,
       codeSearchAvailable: true,
+      connectedMachinesAvailable: true,
       gitCredentialBindings: [
         { credentialBindingId: "a", provider: "github", token: "x" },
         { credentialBindingId: "b", provider: "github", token: "y" },
@@ -497,6 +499,7 @@ describe("modular composer: identity and precedence (AC12, AC14)", () => {
       "operational_contract",
       "codemode",
       "code_search",
+      "connected_machines",
       "git_bindings",
       "workspace_governance",
       "workspace_memory",
@@ -505,6 +508,7 @@ describe("modular composer: identity and precedence (AC12, AC14)", () => {
     expect(inspection.composed).toBe(joinPersistentAgentInstructionLayers(inspection.layers));
     expect(inspection.composed).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
     expect(inspection.composed).toContain(CODE_SEARCH_DIRECTIVE);
+    expect(inspection.composed).toContain(CONNECTED_MACHINES_DIRECTIVE);
     expect(
       inspection.composed.endsWith(
         `${SESSION_INSTRUCTIONS_PREAMBLE}Always answer in exactly one sentence.`,

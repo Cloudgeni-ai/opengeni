@@ -1215,6 +1215,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       "skill_read",
     ],
     codeSearchAvailable: codeSearchTools.length > 0,
+    // Deployment- and policy-stable, so the directive never flips mid-session
+    // as the person's computers come and go.
+    connectedMachinesAvailable:
+      runSettings.sandboxSelfhostedEnabled &&
+      selectedFirstPartyMcpTools.includes("sandboxes_list") &&
+      selectedFirstPartyMcpTools.includes("run_on"),
     promptToolAvailability,
     skillCatalog,
   };

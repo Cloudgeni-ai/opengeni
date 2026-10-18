@@ -4380,7 +4380,7 @@ function registerFleetTools(
     "sandbox_provision",
     {
       description:
-        "Provision a new sandbox for the fleet. kind=selfhosted posts the Connected Machine card in this chat: the person copies a one-line connect command, runs it on their own computer, and picks Use in this chat; the card also offers the Opengeni Browser Chrome extension once the machine is connected. When you can already run commands on the target machine, install it yourself with connected_machine_enroll_token instead. kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
+        "Provision a new sandbox for the fleet. kind=selfhosted posts the card for using their computer in this chat, where the person sets up their own computer; the card also offers the Opengeni Browser Chrome extension once the machine is connected. When you can already run commands on the target machine, install it yourself with connected_machine_enroll_token instead. kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
       inputSchema: {
         kind: z4.enum(["selfhosted", "modal"]),
         name: z4.string().min(1).max(120).optional(),
@@ -4421,8 +4421,8 @@ function registerFleetTools(
           eventId,
           message: `${
             setup.status === "ready"
-              ? `${setup.detail} The Connected Machine card lists them with Use in this chat and can connect another.`
-              : "The Connected Machine card was posted. The person copies its one-line connect command, runs it on their machine, and picks Use in this chat; nothing is connected yet."
+              ? `${setup.detail} The card for using their computer is in this chat, where the person can use one of them or set up another.`
+              : "The card for using their computer was posted in this chat, and the person sets it up from there; nothing is connected yet."
           } Check sandboxes_list after they confirm. Chrome needs the Opengeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on the connected machine.`,
         });
       }
@@ -6745,7 +6745,7 @@ function registerCapabilityDiscoveryTools(
           capabilityId: item.id,
           status: "ready",
           eventId,
-          message: `${setup.detail} The Connected Machine card is in this chat: the person can pick a machine with "Use in this chat" or connect another. Chrome needs the Opengeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on a connected machine.`,
+          message: `${setup.detail} The card for using their computer is in this chat, where the person can use a computer that is already connected or set up another; point them to it in plain words without naming its buttons. Chrome needs the Opengeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on a connected machine.`,
         });
       }
       if (githubCardWhenReady) {
@@ -6763,7 +6763,7 @@ function registerCapabilityDiscoveryTools(
         eventId,
         message:
           item.id === CONNECTED_MACHINE_CAPABILITY_ID
-            ? "The Connected Machine card was posted. The person copies its connect command, runs it on their machine, and picks Use in this chat; nothing is connected yet. Do not paste an enroll token into the chat."
+            ? "The card for using their computer was posted in this chat, and the person sets it up from there; nothing is connected yet. Point them to the card in plain words without naming its buttons, and do not paste an enroll token into the chat."
             : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
@@ -6982,8 +6982,7 @@ async function capabilitySetupProjection(
     return {
       status: "authorization_required",
       action: "connect",
-      detail:
-        "No machine is connected yet. The person copies a one-line connect command from the chat card and runs it on their machine.",
+      detail: "No machine is connected yet. The person connects one from the card in the chat.",
     };
   }
   if (item.id === "api:github-app" || item.surfaceType === "first_party_github") {

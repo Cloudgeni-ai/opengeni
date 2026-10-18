@@ -7,6 +7,7 @@ export type ModelContextInstructionLayerId =
   | "skill_catalog"
   | "codemode"
   | "code_search"
+  | "connected_machines"
   | "git_bindings"
   | "builtin_skills"
   | "genesis_title"

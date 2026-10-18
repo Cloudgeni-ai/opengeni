@@ -724,7 +724,8 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       expect(mcpJson(provision)).toMatchObject({ kind: "selfhosted", status: "card_posted" });
 
       // An enrolled machine makes the capability ready, but the card is still
-      // posted so the person can pick it with "Use in this chat".
+      // posted so the person can use it from there. Products render their own
+      // card for it, so the agent is not told any button names.
       await finalizeEnrollmentByToken(client.db, {
         accountId: workspace.accountId,
         workspaceId: workspace.workspaceId,
@@ -744,6 +745,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         capabilityId: "api:connected-machine",
         status: "ready",
       });
+      expect((mcpJson(ready) as { message: string }).message).not.toMatch(/Use in this chat/);
       expect((mcpJson(ready) as { eventId: string | null }).eventId).toEqual(expect.any(String));
 
       const events = (

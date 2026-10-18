@@ -1642,7 +1642,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "open"],
     title: "Open or reuse computer",
     description:
-      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. Returns exact apps/windows/screens. Call it first for any computer task; computer_observe and computer_act then work on the session it returns.",
+      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. The placement is the machine this chat runs on now: its own sandbox unless the chat has moved onto another machine, so this is not a person's own screen until then. Returns exact apps/windows/screens. Call it first for any computer task; computer_observe and computer_act then work on the session it returns.",
     input: ComputerOpenInput,
     output: ComputerOpenOutput,
     readOnly: false,

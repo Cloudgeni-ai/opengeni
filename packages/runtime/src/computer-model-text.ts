@@ -382,7 +382,7 @@ export function computerObservationText(observation: ComputerTextObservation): s
 }
 
 const PLACEMENT_LABELS: Record<string, string> = {
-  sandbox_group: "the managed sandbox",
+  sandbox_group: "this chat's own cloud sandbox, not a person's own computer",
   connected_machine: "a Connected Machine",
   external_provider: "a remote computer provider",
   attached_device: "the user's device",

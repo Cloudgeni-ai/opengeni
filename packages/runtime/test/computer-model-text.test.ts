@@ -257,6 +257,25 @@ describe("computer session and action text", () => {
     );
   });
 
+  test("says a sandbox session is the chat's own cloud sandbox, not a person's computer", () => {
+    const text = computerOpenText({
+      session: {
+        id: "c2",
+        lifecycle: "active",
+        placement: { kind: "sandbox_group" },
+        platform: "linux",
+        adapter: null,
+        displayId: null,
+        capabilities: null,
+        failureCode: null,
+      },
+      targets: [],
+    });
+    expect(text.split("\n")[0]).toBe(
+      "ComputerSession c2 (active): linux on this chat's own cloud sandbox, not a person's own computer",
+    );
+  });
+
   test("reports the action state, its error and the observation after it", () => {
     const text = computerActionText({
       operationId: "op-1",
