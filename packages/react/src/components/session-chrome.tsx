@@ -492,10 +492,8 @@ export function SessionChrome({
       : null);
   const stopping = stoppingKind !== null;
   const canMutateQueue = !readOnly && composer !== undefined;
-  // A Steer the agent reads after its current step; "Send now" interrupts it.
+  // A Steer on its way to the running agent, which reads it within moments.
   const pendingSteer = !stopping ? (queue.pendingSteer ?? null) : null;
-  const sendingSteerNow =
-    pendingSteer !== null && queue.mutationFor(pendingSteer.turnId) === "steer";
 
   const elapsed = useLiveElapsed(record?.createdAt, Boolean(record));
   const goalState = record
@@ -1242,21 +1240,7 @@ export function SessionChrome({
                     aria-hidden="true"
                     className="size-3 animate-og-spin motion-reduce:animate-none"
                   />
-                  {t("sessionChrome.readAfterCurrentStep")}
-                  {canMutateQueue && queue.steerNow ? (
-                    <button
-                      type="button"
-                      className="inline-flex min-h-7 items-center rounded-og-md px-1.5 font-medium text-og-fg outline-hidden hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-ring/40 disabled:opacity-60 pointer-coarse:min-h-11"
-                      aria-label={t("queueSurfaceState.steerNowAriaLabel")}
-                      title={t("queueSurfaceState.steerNowAriaLabel")}
-                      disabled={sendingSteerNow}
-                      onClick={() => void queue.steerNow?.()}
-                    >
-                      {sendingSteerNow
-                        ? t("queueSurfaceState.steerNowSending")
-                        : t("queueSurfaceState.steerNow")}
-                    </button>
-                  ) : null}
+                  {t("sessionChrome.steerDelivering")}
                 </span>
               ) : null}
             </div>

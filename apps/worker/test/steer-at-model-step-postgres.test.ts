@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, spyOn, test } from "bun:test";
-import { tool } from "@openai/agents";
+import {
+  tool,
+  type Model,
+  type ModelRequest,
+  type ModelResponse,
+  type StreamEvent,
+} from "@openai/agents";
 import * as opengeniDb from "@opengeni/db";
 import {
   acquireRestrictedRuntimeTestDatabase,
@@ -21,7 +27,12 @@ import {
   submitHumanPromptInTransaction,
   withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
-import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
+import {
+  createProductionAgentRuntime,
+  isModelPreempted,
+  preemptedResponseDone,
+  type OpenGeniRuntime,
+} from "@opengeni/runtime";
 import { createActivityTestHarness } from "../src/activities";
 
 // A Steer to a busy chat is read at the running turn's next model-step
@@ -111,7 +122,7 @@ async function send(
 }
 
 /** Offline runtime: the production SDK call flow over a ScriptedModel plus one local tool. */
-function scriptedRuntime(scripted: ScriptedModel, onTool: () => Promise<void>): OpenGeniRuntime {
+function scriptedRuntime(scripted: Model, onTool: () => Promise<void>): OpenGeniRuntime {
   const production = createProductionAgentRuntime({ model: scripted });
   return {
     ...production,
@@ -155,7 +166,12 @@ function scriptedRuntime(scripted: ScriptedModel, onTool: () => Promise<void>): 
   };
 }
 
-async function runTurn(ctx: Ctx, sessionId: string, runtime: OpenGeniRuntime) {
+async function runTurn(
+  ctx: Ctx,
+  sessionId: string,
+  runtime: OpenGeniRuntime,
+  bus = new MemoryEventBus(),
+) {
   const activities = createActivityTestHarness({
     settings: testSettings({
       databaseUrl: shared.appUrl,
@@ -163,7 +179,7 @@ async function runTurn(ctx: Ctx, sessionId: string, runtime: OpenGeniRuntime) {
       sandboxBackend: "none",
     }),
     db: app.db,
-    bus: new MemoryEventBus(),
+    bus,
     runtime,
   });
   return await activities.runAgentTurn({
@@ -439,7 +455,7 @@ test("two Steers during one step are read together by the next model request", a
   ]);
 });
 
-test("Send now on a waiting Steer interrupts the running attempt", async () => {
+test("an API caller's interrupt on a waiting Steer still stops the running attempt", async () => {
   const ctx = await fixture();
   const session = await startSession(ctx);
   let steered = false;
@@ -483,4 +499,188 @@ test("Send now on a waiting Steer interrupts the running attempt", async () => {
     false,
     true,
   ]);
+});
+
+/** Publish the session's events after `after` to the live bus, as the API does. */
+async function publishSince(ctx: Ctx, sessionId: string, bus: MemoryEventBus, after: number) {
+  const fresh = (await events(ctx, sessionId)).filter((event) => event.sequence > after);
+  await bus.publish(ctx.workspaceId, sessionId, fresh);
+}
+
+/**
+ * A provider stream that keeps generating until it is cut short. Like the
+ * real Responses and Claude transports, it ends a preempted request with the
+ * output items it had already completed.
+ */
+class StreamingModel implements Model {
+  calls = 0;
+  requests: ModelRequest[] = [];
+  preemptedAt: number[] = [];
+  constructor(
+    private readonly script: (call: number) => {
+      completed: ModelResponse["output"];
+      cutOff?: { itemId: string; text: string; unstarted?: ModelResponse["output"] };
+      onStreaming?: () => Promise<void>;
+    },
+  ) {}
+  async getResponse(): Promise<ModelResponse> {
+    throw new Error("streamed only");
+  }
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    this.requests.push(request);
+    const call = this.calls++;
+    const step = this.script(call);
+    yield { type: "response_started" };
+    for (const item of step.completed) {
+      const message = item as { type?: string; id?: string; content?: Array<{ text?: string }> };
+      if (message.type === "message")
+        yield {
+          type: "output_text_delta",
+          itemId: message.id,
+          delta: message.content?.[0]?.text ?? "",
+        } as StreamEvent;
+    }
+    if (step.cutOff) {
+      yield {
+        type: "output_text_delta",
+        itemId: step.cutOff.itemId,
+        delta: step.cutOff.text,
+      } as StreamEvent;
+      await step.onStreaming?.();
+      // Keep generating until the request is cut short.
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("the Steer never cut the stream")), 30_000);
+        const stop = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        if (request.signal?.aborted) stop();
+        else request.signal?.addEventListener("abort", stop, { once: true });
+      });
+      if (!isModelPreempted(request.signal)) throw request.signal?.reason;
+      this.preemptedAt.push(call);
+      yield preemptedResponseDone({
+        id: `cut-${call}`,
+        output: [...step.completed, ...(step.cutOff.unstarted ?? [])],
+        usage: { requests: 1, inputTokens: 40, outputTokens: 0, totalTokens: 40 },
+      } as never);
+      return;
+    }
+    yield {
+      type: "response_done",
+      response: {
+        id: `done-${call}`,
+        output: step.completed,
+        usage: { requests: 1, inputTokens: 40, outputTokens: 5, totalTokens: 45 },
+      },
+    } as StreamEvent;
+  }
+}
+
+test("a Steer while the model is still generating cuts that request short and keeps what finished", async () => {
+  const ctx = await fixture();
+  const session = await startSession(ctx);
+  const bus = new MemoryEventBus();
+  let steeredAt = 0;
+  const model = new StreamingModel((call) =>
+    call === 0
+      ? {
+          completed: [assistantMessage("Checking the logs.", "msg-done")],
+          cutOff: {
+            itemId: "msg-cut",
+            text: "Next I wi",
+            // A call the cut-off answer had not finished: it never ran.
+            unstarted: [functionCall("local_fixture", {}, "call-unstarted")],
+          },
+          onStreaming: async () => {
+            const before = (await events(ctx, session.id)).at(-1)?.sequence ?? 0;
+            await send(ctx, session.id, "What is the status?", "steer");
+            steeredAt = Date.now();
+            await publishSince(ctx, session.id, bus, before);
+          },
+        }
+      : { completed: [assistantMessage("Status: the logs are clean.", "msg-answer")] },
+  );
+  let toolRuns = 0;
+  const runtime = scriptedRuntime(model, async () => {
+    toolRuns += 1;
+  });
+
+  const first = await runTurn(ctx, session.id, runtime, bus);
+  expect(first.status).toBe("idle");
+  // The live notice reached the stream within moments, not at a step boundary.
+  expect(model.preemptedAt).toEqual([0]);
+  expect(model.calls).toBe(1);
+  expect(Date.now() - steeredAt).toBeLessThan(10_000);
+  expect(toolRuns).toBe(0);
+  expect(await interruptionCount(session.id)).toBe(0);
+  const timeline = await events(ctx, session.id);
+  expect(timeline.some((event) => event.type === "turn.failed")).toBe(false);
+  const superseded = timeline.filter((event) => event.type === "turn.superseded");
+  expect(superseded).toHaveLength(1);
+  expect(superseded[0]!.payload).toMatchObject({
+    reason: "steer",
+    atModelStep: true,
+    cutOffText: "Next I wi",
+  });
+  // The finished message stays, as a progress note; the call never started.
+  const completed = timeline.filter((event) => event.type === "agent.message.completed");
+  expect(completed.map((event) => event.payload)).toEqual([
+    expect.objectContaining({ text: "Checking the logs.", phase: "commentary" }),
+  ]);
+  expect(timeline.some((event) => event.type === "agent.toolCall.created")).toBe(false);
+
+  // The Steer runs next on the unchanged history plus the kept message.
+  const second = await runTurn(ctx, session.id, runtime, bus);
+  expect(second.status).toBe("idle");
+  expect(model.calls).toBe(2);
+  const nextInput = JSON.stringify(model.requests[1]!.input);
+  expect(nextInput).toContain("Checking the logs.");
+  expect(nextInput).toContain("What is the status?");
+  expect(nextInput).not.toContain("Next I wi");
+  expect(nextInput).not.toContain("call-unstarted");
+  // Earlier history is a prefix of the next request: nothing was rewritten.
+  const firstInput = JSON.stringify(model.requests[0]!.input);
+  expect(nextInput.startsWith(firstInput.slice(0, -1))).toBe(true);
+  const history = await getActiveSessionHistoryItemsPaged(app.db, ctx.workspaceId, session.id);
+  expect(historyShape(history)).toEqual(["user:task", "assistant", "user:status", "assistant"]);
+  expect((await turns(session.id)).map((turn) => turn.status)).toEqual(["superseded", "completed"]);
+});
+
+test("several quick Steers while the model generates are read in order by one request", async () => {
+  const ctx = await fixture();
+  const session = await startSession(ctx);
+  const bus = new MemoryEventBus();
+  const model = new StreamingModel((call) =>
+    call === 0
+      ? {
+          completed: [],
+          cutOff: { itemId: "msg-cut", text: "Let me" },
+          onStreaming: async () => {
+            const before = (await events(ctx, session.id)).at(-1)?.sequence ?? 0;
+            await send(ctx, session.id, "What is the status?", "steer");
+            await publishSince(ctx, session.id, bus, before);
+            const middle = (await events(ctx, session.id)).at(-1)?.sequence ?? 0;
+            await send(ctx, session.id, "Also keep notes", "steer");
+            await publishSince(ctx, session.id, bus, middle);
+          },
+        }
+      : { completed: [assistantMessage("Status, and noted.", "msg-answer")] },
+  );
+  const runtime = scriptedRuntime(model, async () => {});
+  expect((await runTurn(ctx, session.id, runtime, bus)).status).toBe("idle");
+  // One cut request, however many Steers arrived while it streamed.
+  expect(model.preemptedAt).toEqual([0]);
+  // The first Steer hands over to the second before any request of its own.
+  expect((await runTurn(ctx, session.id, runtime, bus)).status).toBe("idle");
+  expect(model.calls).toBe(1);
+  expect((await runTurn(ctx, session.id, runtime, bus)).status).toBe("idle");
+  expect(model.calls).toBe(2);
+  const history = await getActiveSessionHistoryItemsPaged(app.db, ctx.workspaceId, session.id);
+  expect(historyShape(history)).toEqual(["user:task", "user:status", "user:notes", "assistant"]);
+  const superseded = (await events(ctx, session.id)).filter(
+    (event) => event.type === "turn.superseded",
+  );
+  expect(superseded[0]!.payload).toMatchObject({ cutOffText: "Let me" });
+  expect(await interruptionCount(session.id)).toBe(0);
 });

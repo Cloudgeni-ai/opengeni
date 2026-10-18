@@ -140,29 +140,20 @@ function pendingSteerQueue(overrides: Partial<TurnQueue>): TurnQueue {
   } as TurnQueue;
 }
 
-test("a waiting Steer with no queued prompts shows Send now and its failure", async () => {
-  const steerNow = mock(async () => false);
+test("a waiting Steer with no queued prompts shows its delivery and a failure, with no Send now", async () => {
   const view = await renderComponent(
     <QueueDock
       queue={pendingSteerQueue({
-        steerNow,
-        mutationError: new Error("The message could not be sent now."),
+        mutationError: new Error("The message could not be sent."),
       })}
     />,
   );
-  expect(view.container.textContent).toContain(
-    "The agent reads your message after its current step.",
-  );
-  const sendNow = [...view.container.querySelectorAll("button")].find(
-    (button) =>
-      button.getAttribute("aria-label") === "Interrupt the current step and send your message now",
-  );
-  expect(sendNow).toBeDefined();
-  await act(async () => {
-    sendNow!.click();
-  });
-  expect(steerNow).toHaveBeenCalledTimes(1);
+  expect(view.container.textContent).toContain("Sending your message to the agent.");
+  // Delivery is already immediate; there is no separate interrupting action.
+  const buttons = [...view.container.querySelectorAll("button")];
+  expect(buttons.every((button) => button.getAttribute("data-role") === "alert")).toBe(true);
+  expect(view.container.textContent).not.toContain("Send now");
   const alert = view.container.querySelector('[data-role="alert"]');
-  expect(alert?.textContent).toBe("The message could not be sent now.");
+  expect(alert?.textContent).toBe("The message could not be sent.");
   await view.unmount();
 });

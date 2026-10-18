@@ -60,10 +60,8 @@ export function QueueDock({
   );
   // The compact signal chip text (goal, agents and the queue share one row).
   const small = { ...fontStyle(theme, 500), fontSize: 13, color: c.fg };
-  const pendingSteer = queue.pendingSteer ? (
-    <PendingSteerRow queue={queue} pendingSteerTurnId={queue.pendingSteer.turnId} />
-  ) : null;
-  // A failed queue action (including "Send now") stays visible until tapped,
+  const pendingSteer = queue.pendingSteer ? <PendingSteerRow /> : null;
+  // A failed queue action stays visible until tapped,
   // whether or not prompts are queued.
   const mutationError = queue.mutationError ? (
     <Pressable accessibilityRole="alert" onPress={queue.clearMutationError}>
@@ -352,20 +350,13 @@ function RowAction(props: {
 }
 
 /**
- * A Steer the agent reads after its current step, with "Send now" to
- * interrupt the step instead. Matches the web queue surface's status line.
+ * A Steer on its way to the running agent, which reads it within moments.
+ * Matches the web queue surface's status line.
  */
-function PendingSteerRow({
-  queue,
-  pendingSteerTurnId,
-}: {
-  queue: TurnQueue;
-  pendingSteerTurnId: string;
-}) {
+function PendingSteerRow() {
   const theme = useNativeTimelineTheme();
   const t = useOpenGeniText();
   const c = theme.colors;
-  const sending = queue.mutationFor(pendingSteerTurnId) === "steer";
   return (
     <View
       accessibilityRole="summary"
@@ -382,17 +373,8 @@ function PendingSteerRow({
     >
       <ActivityIndicator size="small" color={c["fg-muted"]} />
       <Text style={{ ...fontStyle(theme, 500), flex: 1, fontSize: 13, color: c.fg }}>
-        {t("queueSurfaceState.steerReadAfterStep")}
+        {t("queueSurfaceState.steerDelivering")}
       </Text>
-      {queue.steerNow ? (
-        <Button
-          label={t("queueSurfaceState.steerNow")}
-          busy={sending}
-          accessibilityLabel={t("queueSurfaceState.steerNowAriaLabel")}
-          disabled={sending}
-          onPress={() => void queue.steerNow?.()}
-        />
-      ) : null}
     </View>
   );
 }

@@ -1627,8 +1627,27 @@ export function buildTimeline(
           event.type === "turn.superseded" &&
           (payload.atModelStep === true || payload.deferredUntilCompaction === true)
         ) {
-          takeAgentResponse(turnId);
+          const response = takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
+          // A Steer cut the model's answer short. Its streamed text normally
+          // stays where it was drawn; when those deltas are absent (an archived
+          // history) the recorded cut-off text stands in, as a plain progress
+          // note rather than an error.
+          const cutOffText = stringValue(payload.cutOffText);
+          const streamedCutOff =
+            response !== undefined && !response.completed && items.includes(response.item);
+          if (cutOffText && !streamedCutOff) {
+            closeStreamingTail();
+            items.push({
+              kind: "agent-message",
+              id: `${event.id}:cut-off`,
+              turnId,
+              text: cutOffText,
+              phase: "commentary",
+              streaming: false,
+              occurredAt: event.occurredAt,
+            });
+          }
           finalizeOpen(turnId, "complete", event.occurredAt);
           items.push(turnEndItem(event, "complete", null));
           break;

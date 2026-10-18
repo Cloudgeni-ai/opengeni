@@ -76,15 +76,10 @@ export type UseTurnQueueResult = {
   /** The latest interrupted attempt has not yet durably proved physical quiescence. */
   stoppingPreviousAttempt: boolean;
   /**
-   * The Steer the running turn reads at its next model step, after the
-   * current step's tool calls finish. Null when none is waiting.
+   * A Steer on its way to the running turn, which reads it within moments
+   * without cutting off work in progress. Null when none is waiting.
    */
   pendingSteer?: { turnId: string; turnVersion: number } | null | undefined;
-  /**
-   * Deliver the waiting Steer now: interrupt the running turn, cutting off
-   * its current step. Resolves false when the Steer was already read.
-   */
-  steerNow?: (() => Promise<boolean>) | undefined;
   loading: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
@@ -436,54 +431,6 @@ export function useTurnQueue(
     [client, load, mutate, sessionId, targetKey, workspaceId, t],
   );
 
-  const steerNow = useCallback(async (): Promise<boolean> => {
-    const ownedTargetKey = targetKey;
-    const current = snapshotRef.current;
-    const pending = current?.pendingSteer ?? null;
-    if (!sessionId || !current || !pending || targetKeyRef.current !== ownedTargetKey) return false;
-    if (pendingRef.current[pending.turnId]) return false;
-    pendingRef.current = { ...pendingRef.current, [pending.turnId]: "steer" };
-    setStateTargetKey(ownedTargetKey);
-    setPendingByTurn(pendingRef.current);
-    setMutationError(null);
-    const clientEventId = operationKey();
-    const command = () =>
-      client.steerQueueItem(workspaceId, sessionId, pending.turnId, {
-        clientEventId,
-        expectedTurnVersion: pending.turnVersion,
-        controlEtag: current.effectiveControl.controlEtag,
-        interrupt: true,
-      });
-    try {
-      let result: SessionQueueMutationResponse;
-      try {
-        result = await command();
-      } catch (cause) {
-        if (!isOutcomeUnknownError(cause)) throw cause;
-        // Same-key replay is a fact check against the durable receipt.
-        result = await command();
-      }
-      if (targetKeyRef.current !== ownedTargetKey) return false;
-      acceptSnapshot(ownedTargetKey, result.snapshot);
-      return true;
-    } catch (cause) {
-      if (targetKeyRef.current !== ownedTargetKey) return false;
-      await load();
-      // The running turn reached its step boundary first and the Steer
-      // already started: that is the outcome the person asked for.
-      if (snapshotRef.current?.pendingSteer?.turnId !== pending.turnId) return true;
-      setMutationError(asError(cause));
-      return false;
-    } finally {
-      if (targetKeyRef.current === ownedTargetKey && pending.turnId in pendingRef.current) {
-        const next = { ...pendingRef.current };
-        delete next[pending.turnId];
-        pendingRef.current = next;
-        setPendingByTurn(next);
-      }
-    }
-  }, [acceptSnapshot, client, load, sessionId, targetKey, workspaceId]);
-
   const removeTurn = useCallback(
     async (turnId: string): Promise<boolean> => {
       const result = await mutate(turnId, "delete", (_current, turn, clientEventId) =>
@@ -519,7 +466,6 @@ export function useTurnQueue(
     effectiveControl: visibleSnapshot?.effectiveControl ?? null,
     stoppingPreviousAttempt: visibleSnapshot?.stoppingPreviousAttempt ?? false,
     pendingSteer: visibleSnapshot?.pendingSteer ?? null,
-    steerNow,
     loading: freshLoading && retainedSnapshot === null,
     error: identityMatches ? error : null,
     refresh: load,

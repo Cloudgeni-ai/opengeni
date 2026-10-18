@@ -1213,18 +1213,20 @@ export class AnthropicMessagesModel implements Model {
         yield preemptedResponseDone({ requestId: partial.requestId ?? requestId });
         return;
       }
+      // The response shape supplies only the id and usage; the kept text
+      // keeps the message ids its deltas were streamed under.
       const result = anthropicResponse(
-        preempted,
+        preempted.message,
         partial.requestId ?? requestId,
         names,
         searchQueries,
-        preempted.requestUsages,
+        preempted.message.requestUsages,
         accountScope,
       );
       yield preemptedResponseDone({
         id: result.responseId,
         requestId: result.requestId,
-        output: result.output,
+        output: preempted.output,
         usage: result.usage,
       });
       return;
@@ -1437,42 +1439,71 @@ export class AnthropicMessagesModel implements Model {
 /** What a stream had received when a Steer cut it short. */
 type AnthropicPartialMessage = {
   message?: Json | undefined;
-  blocks?: Map<number, { block: Json; stopped: boolean }> | undefined;
+  blocks?: Map<number, { block: Json; stopped: boolean; item: number }> | undefined;
   requestId?: string | undefined;
 };
 
 /**
- * The logical response a preempted stream leaves: the completed text blocks of
- * earlier paused requests and of the current one, with the usage Claude
- * reported for each request so far. `undefined` when no request had started.
+ * The logical response a preempted stream leaves: the closed text blocks of
+ * earlier paused requests and of the current one, as assistant messages under
+ * the same ids their streamed text used (adjacent text blocks are one message,
+ * as in {@link anthropicResponse}), with the usage Claude reported for each
+ * request so far. `undefined` when no request had started.
  */
 function preemptedAnthropicMessage(
   merged: Json | undefined,
   partial: AnthropicPartialMessage,
-): (Json & { requestUsages: Json[] }) | undefined {
-  const textOnly = (blocks: readonly Json[]) => blocks.filter((block) => block?.type === "text");
+): { message: Json & { requestUsages: Json[] }; output: unknown[] } | undefined {
   const current = partial.message;
   if (!merged && !current) return undefined;
-  const closed = current
-    ? [...(partial.blocks?.entries() ?? [])]
-        .filter(([, state]) => state.stopped)
-        .sort(([a], [b]) => a - b)
-        .map(([, state]) => state.block)
-    : [];
+  const id = (merged?.id ?? current?.id) as string;
+  // Merged-response index of each message -> its text parts, in order.
+  const texts = new Map<number, string[]>();
+  const add = (item: number, block: Json) => {
+    if (typeof block?.text !== "string" || block.text.length === 0) return;
+    texts.set(item, [...(texts.get(item) ?? []), block.text]);
+  };
+  const earlier = (merged?.content as Json[] | undefined) ?? [];
+  let runStart: number | undefined;
+  earlier.forEach((block, index) => {
+    if (block?.type !== "text") {
+      runStart = undefined;
+      return;
+    }
+    runStart ??= index;
+    add(runStart, block);
+  });
+  if (current) {
+    for (const [, state] of [...(partial.blocks?.entries() ?? [])].sort(([x], [y]) => x - y)) {
+      if (state.stopped && state.block?.type === "text") add(state.item, state.block);
+    }
+  }
+  const output = [...texts.entries()]
+    .sort(([x], [y]) => x - y)
+    .map(([item, parts]) => ({
+      type: "message",
+      role: "assistant",
+      id: `${id}:${item}`,
+      status: "completed",
+      content: parts.map((text) => ({ type: "output_text", text })),
+    }));
   const currentUsage = current ? ((current.usage as Json | undefined) ?? {}) : undefined;
   return {
-    ...(merged ?? current),
-    id: (merged?.id ?? current?.id) as string,
-    stop_reason: "end_turn",
-    content: [...textOnly((merged?.content as Json[] | undefined) ?? []), ...textOnly(closed)],
-    usage:
-      merged && currentUsage
-        ? addUsage(merged.usage ?? {}, currentUsage)
-        : (merged?.usage ?? currentUsage ?? {}),
-    requestUsages: [
-      ...((merged?.requestUsages as Json[] | undefined) ?? []),
-      ...(currentUsage ? [currentUsage] : []),
-    ],
+    message: {
+      ...(merged ?? current),
+      id,
+      stop_reason: "end_turn",
+      content: [],
+      usage:
+        merged && currentUsage
+          ? addUsage(merged.usage ?? {}, currentUsage)
+          : (merged?.usage ?? currentUsage ?? {}),
+      requestUsages: [
+        ...((merged?.requestUsages as Json[] | undefined) ?? []),
+        ...(currentUsage ? [currentUsage] : []),
+      ],
+    },
+    output,
   };
 }
 

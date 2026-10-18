@@ -145,7 +145,9 @@ export async function* streamWithPreemption(
   const controller = new AbortController();
   const cut = () => controller.abort(new ModelPreemption());
   preemption.addEventListener("abort", cut, { once: true });
-  const signal = request.signal ? AbortSignal.any([request.signal, controller.signal]) : controller.signal;
+  const signal = request.signal
+    ? AbortSignal.any([request.signal, controller.signal])
+    : controller.signal;
   // Streamed text per output item, to report what never completed.
   const streamed = new Map<string, string>();
   let anonymousText = "";
@@ -170,7 +172,8 @@ export async function* streamWithPreemption(
   try {
     for await (const event of open({ ...request, signal })) {
       if (event.type === "output_text_delta") {
-        if (event.itemId) streamed.set(event.itemId, (streamed.get(event.itemId) ?? "") + event.delta);
+        if (event.itemId)
+          streamed.set(event.itemId, (streamed.get(event.itemId) ?? "") + event.delta);
         else anonymousText += event.delta;
       }
       if (event.type === "response_done") {

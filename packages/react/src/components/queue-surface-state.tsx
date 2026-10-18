@@ -29,17 +29,15 @@ export function EmptyQueueStateSurface({ queue }: QueueStateProps) {
 }
 
 /**
- * A Steer the agent reads after its current step. Nothing is cut off while it
- * waits; "Send now" interrupts the step for people who cannot wait.
+ * A Steer on its way to the running agent, which reads it within moments.
+ * Nothing in progress is cut off: running tools finish or keep running.
  */
 export function QueuePendingSteerStatus({
   queue,
   dividerAfter = false,
 }: QueueStateProps & { dividerAfter?: boolean }) {
   const t = useOpenGeniText();
-  const pending = queue.pendingSteer;
-  if (!pending) return null;
-  const sending = queue.mutationFor(pending.turnId) === "steer";
+  if (!queue.pendingSteer) return null;
   return (
     <div
       role="status"
@@ -54,21 +52,9 @@ export function QueuePendingSteerStatus({
         className="size-3.5 shrink-0 animate-spin text-fg-muted motion-reduce:animate-none"
       />
       <span className="min-w-0 flex-1">
-        <span className="font-medium">{t("queueSurfaceState.steerReadAfterStep")}</span>{" "}
+        <span className="font-medium">{t("queueSurfaceState.steerDelivering")}</span>{" "}
         <span className="text-fg-muted">{t("queueSurfaceState.steerNothingCutOff")}</span>
       </span>
-      {queue.steerNow ? (
-        <button
-          type="button"
-          className="inline-flex h-7 shrink-0 items-center rounded-md px-2 text-og-control font-medium text-fg-muted outline-hidden transition-colors hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60 pointer-coarse:h-11"
-          aria-label={t("queueSurfaceState.steerNowAriaLabel")}
-          title={t("queueSurfaceState.steerNowAriaLabel")}
-          disabled={sending}
-          onClick={() => void queue.steerNow?.()}
-        >
-          {sending ? t("queueSurfaceState.steerNowSending") : t("queueSurfaceState.steerNow")}
-        </button>
-      ) : null}
     </div>
   );
 }

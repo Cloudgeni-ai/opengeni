@@ -141,6 +141,33 @@ describe("projection lifecycle audit regressions", () => {
     expect(timeline.some((item) => item.kind === "notice")).toBe(false);
   });
 
+  test("a Steer that cut the answer short keeps the streamed partial text once, never as an error", () => {
+    const handover = event(5, "turn.superseded", {
+      reason: "steer",
+      atModelStep: true,
+      cutOffText: "Looking through the",
+    });
+    const streamed = [
+      event(1, "turn.started"),
+      event(2, "agent.message.completed", { messageId: "before", text: "Checking" }),
+      event(3, "agent.message.delta", { messageId: "cut", text: "Looking through the" }),
+      handover,
+    ];
+    const live = buildTimeline(englishText, streamed);
+    const liveMessages = live.filter((item) => item.kind === "agent-message");
+    expect(liveMessages.map((item) => item.text)).toEqual(["Checking", "Looking through the"]);
+    expect(liveMessages.every((item) => !item.streaming)).toBe(true);
+    expect(live.some((item) => item.kind === "notice")).toBe(false);
+
+    // Without the deltas (an archived history) the recorded cut-off text
+    // stands in, as a finished progress note.
+    const archived = buildTimeline(englishText, [streamed[0]!, streamed[1]!, handover]);
+    const archivedMessages = archived.filter((item) => item.kind === "agent-message");
+    expect(archivedMessages.map((item) => item.text)).toEqual(["Checking", "Looking through the"]);
+    expect(archivedMessages[1]).toMatchObject({ phase: "commentary", streaming: false });
+    expect(work(fold([streamed[0]!, streamed[1]!, handover]))[0]!.outcome).toBe("complete");
+  });
+
   test("human Retry reopens the failed logical turn without prematurely folding its progress", () => {
     const failed = [
       event(1, "agent.message.completed", { messageId: "before", text: "Checking records" }),

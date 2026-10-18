@@ -224,7 +224,11 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     try {
       for await (const event of super.getStreamedResponse(request)) {
         if (event.type === "model") {
-          const raw = event.event as { type?: unknown; item?: unknown; response?: { id?: unknown } };
+          const raw = event.event as {
+            type?: unknown;
+            item?: unknown;
+            response?: { id?: unknown };
+          };
           if (raw?.type === "response.created" && typeof raw.response?.id === "string")
             responseId = raw.response.id;
           if (raw?.type === "response.output_item.done" && raw.item) completed.push(raw.item);

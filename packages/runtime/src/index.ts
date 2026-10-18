@@ -438,8 +438,10 @@ import { withModelStepHandover } from "./model-step-handover";
 export { ModelStepHandover } from "./model-step-handover";
 export {
   ModelPreemption,
+  isModelPreempted,
   isPreemptedModelResponse,
   preemptedResponseCutOffText,
+  preemptedResponseDone,
 } from "./model-preemption";
 import {
   createTurnToolCancellationController,
