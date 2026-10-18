@@ -1,5 +1,11 @@
 # @opengeni/agent-proto
 
+## 4.1.1
+
+### Patch Changes
+
+- c602300: Fix large Connected Machine writes for machine-addressed operations, including run_on. Negotiate epoch-zero transactional upload support without inventing session epochs or replaying mutations. Older transactional agents receive a preflight 256 KiB limit and update guidance; nonzero session transfers remain compatible. Large machine-addressed transfers require the corresponding native agent release.
+
 ## 4.0.4
 
 ### Patch Changes
