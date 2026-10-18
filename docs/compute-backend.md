@@ -86,8 +86,10 @@ skips sandbox enrollments, and machine routes list machines only.
   COMMIT, so the work runs its deferred commit-time work (constraint
   triggers) itself under the same limit just before committing. Work that
   finishes after the deadline, or after the activity is stopped, rolls back
-  instead of committing late. A stop, or a lost connection, while COMMIT is
-  in flight is reported as an unknown outcome rather than a rollback; every
+  instead of committing late. The call itself returns by its deadline even
+  when an answer or COMMIT is held up on the way. A deadline, a stop or a
+  lost connection while COMMIT is in flight is reported as an unknown outcome
+  rather than a rollback; every
   sweep step is idempotent and re-checked, so the next pass settles it either
   way. Each sandbox's database work gets at
   most five seconds of the pass. One stalled delete or lock
@@ -156,7 +158,9 @@ skips sandbox enrollments, and machine routes list machines only.
   only the deletion can end it. When nothing else holds the lease and none of
   those resources is mid-operation or mid-transition, the deletion marks them
   lost (`sandbox_deleted`), releases their holders and ends the group in the
-  same transaction; otherwise it refuses and the caller retries.
+  same transaction; otherwise it refuses and the caller retries. It locks
+  those browsers and desktops before it decides, so one that begins a
+  suspend, resume or end while the deletion waits keeps the group.
 - **Capture**: a portable tar only, to move a workspace to another backend
   (rotation and archive capture still drain with a capture). There are no
   warm checkpoints: the fabric persists the sandbox itself, so the turn-end

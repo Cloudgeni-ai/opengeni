@@ -282,6 +282,67 @@ describe("compute leases and idle drain", () => {
     }
   }, 60_000);
 
+  test("a browser that starts suspending while the deletion waits for it keeps the group", async () => {
+    if (!available) return;
+    const { grant, session, ids } = await fixture("compute");
+    await releaseLastHolder(ids);
+    const opened = await openInteractions(ids);
+    // A suspend prepares as the browser code does: it locks the browser, records
+    // its operation and moves it to suspending, and commits only once the
+    // deletion is waiting for that browser.
+    let commitPreparation!: () => void;
+    const preparationMayCommit = new Promise<void>((resolve) => {
+      commitPreparation = resolve;
+    });
+    let preparationLocked!: () => void;
+    const locked = new Promise<void>((resolve) => {
+      preparationLocked = resolve;
+    });
+    const preparation = admin.begin(async (tx) => {
+      await tx`select id from browser_sessions where id = ${opened.browserId} for update`;
+      await tx`insert into interaction_operations (operation_id, account_id, workspace_id,
+          resource_kind, resource_id, kind, request_digest, state, controller_generation,
+          actor_subject_id)
+        values (${crypto.randomUUID()}, ${ids.accountId}, ${ids.workspaceId}, 'browser_session',
+          ${opened.browserId}, 'suspend', ${"c".repeat(64)}, 'prepared',
+          ${opened.browserGeneration}, 'fixture-human')`;
+      await tx`update browser_sessions set lifecycle = 'suspending' where id = ${opened.browserId}`;
+      preparationLocked();
+      await preparationMayCommit;
+    });
+    await locked;
+    const deletion = deleteSessionTreeIfQuiescent(db, {
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+    });
+    const waitingStartedAt = Date.now();
+    for (;;) {
+      const [waiting] = await admin<{ n: number }[]>`
+        select count(*)::int as n from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock'
+          and query like '%browser_sessions%'`;
+      if (waiting!.n > 0) break;
+      if (Date.now() - waitingStartedAt > 10_000) throw new Error("the deletion never waited");
+      await Bun.sleep(20);
+    }
+    commitPreparation();
+    await preparation;
+    const result = await deletion;
+    expect(result.status).toBe("live_sandboxes");
+    expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("warm");
+    expect(await groupEndRequestedAt(ids)).toBeNull();
+    const [browser] = await admin<{ lifecycle: string }[]>`
+      select lifecycle from browser_sessions where id = ${opened.browserId}`;
+    expect(browser!.lifecycle).toBe("suspending");
+    const [computer] = await admin<{ lifecycle: string }[]>`
+      select lifecycle from computer_sessions where id = ${opened.computerId}`;
+    expect(computer!.lifecycle).toBe("active");
+    const [holders] = await admin<{ n: number }[]>`
+      select count(*)::int as n from sandbox_lease_holders where lease_id = ${opened.leaseId}`;
+    expect(holders!.n).toBe(2);
+  }, 60_000);
+
   test("a compute lease with a live holder is not ended by a deletion attempt", async () => {
     if (!available) return;
     const { grant, session, ids } = await fixture("compute");

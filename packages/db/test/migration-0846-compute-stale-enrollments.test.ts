@@ -478,6 +478,20 @@ test("a bounded call stopped or cut off while COMMIT is in flight reports an unk
     await pause(700);
     expect(await enrollmentStatus(held.enrollmentId)).toBe("revoked");
 
+    // The deadline passes while COMMIT is held, with no signal: the call
+    // still returns by its deadline, as an unknown outcome; here the commit
+    // went on to succeed.
+    const late = await freshStaleEnrollment();
+    onCommit = { hold: 700, seen: () => {} };
+    const lateStarted = Date.now();
+    const deadlinePassed = await revokeStaleComputeSandboxEnrollment(client.db, late, {
+      deadlineAtMs: lateStarted + 400,
+    }).catch((reason: unknown) => reason);
+    expect(deadlinePassed).toBeInstanceOf(DatabaseWorkOutcomeUnknownError);
+    expect(Date.now() - lateStarted).toBeLessThan(550);
+    await pause(900);
+    expect(await enrollmentStatus(late.enrollmentId)).toBe("revoked");
+
     // The connection lost with COMMIT unanswered: unknown, with no signal too.
     // (Here the server never saw the COMMIT, so the work rolled back.)
     const cut = await freshStaleEnrollment();

@@ -50000,12 +50000,8 @@ async function requestComputeGroupEndTx(
         sql`, `,
       )})`
     : sql``;
-  const interactionLeases = await rawRows<{ id: string }>(
-    tx,
-    sql`
-    select lease.id from sandbox_leases lease
-    where lease.workspace_id = ${input.workspaceId}
-      ${groupFilter}
+  // A lease held only by its browsers and desktops, none of them busy.
+  const interactionsOnlyAndSettled = sql`
       and lease.backend = 'compute'
       and lease.liveness = 'warm'
       and lease.turn_holders = 0 and lease.viewer_holders = 0
@@ -50038,10 +50034,56 @@ async function requestComputeGroupEndTx(
           and computer.workspace_id = h.workspace_id
         where h.lease_id = lease.id and h.kind = 'interaction'
           and computer.lifecycle in ('starting', 'suspending', 'restoring', 'ending'))
+  `;
+  const candidates = await rawRows<{ id: string }>(
+    tx,
+    sql`
+    select lease.id from sandbox_leases lease
+    where lease.workspace_id = ${input.workspaceId}
+      ${groupFilter}
+      ${interactionsOnlyAndSettled}
     order by lease.id
     for update of lease
   `,
   );
+  let interactionLeases: { id: string }[] = [];
+  if (candidates.length > 0) {
+    const candidateIds = sql`(${sql.join(
+      candidates.map((lease) => sql`${lease.id}::uuid`),
+      sql`, `,
+    )})`;
+    // A suspend, resume or end locks its browser or desktop while it prepares.
+    // Lock them all first, then decide again on what is committed now: one
+    // that began a transition while this deletion waited keeps its lease, and
+    // none can begin one before this deletion commits.
+    await tx.execute(sql`
+      select browser.id from browser_sessions browser
+      join sandbox_lease_holders h
+        on h.holder_id = 'browser-session:' || browser.id::text
+        and browser.workspace_id = h.workspace_id
+      where h.lease_id in ${candidateIds} and h.kind = 'interaction'
+      order by browser.id
+      for update of browser
+    `);
+    await tx.execute(sql`
+      select computer.id from computer_sessions computer
+      join sandbox_lease_holders h
+        on h.holder_id = 'computer-session:' || computer.id::text
+        and computer.workspace_id = h.workspace_id
+      where h.lease_id in ${candidateIds} and h.kind = 'interaction'
+      order by computer.id
+      for update of computer
+    `);
+    interactionLeases = await rawRows<{ id: string }>(
+      tx,
+      sql`
+      select lease.id from sandbox_leases lease
+      where lease.id in ${candidateIds}
+        ${interactionsOnlyAndSettled}
+      order by lease.id
+    `,
+    );
+  }
   if (interactionLeases.length > 0) {
     const leaseIds = sql`(${sql.join(
       interactionLeases.map((lease) => sql`${lease.id}::uuid`),
@@ -62972,15 +63014,18 @@ export async function releaseSandboxAgentLink(
  * commit-time work (deferred triggers) itself, under the same limit, just
  * before it; COMMIT then only makes the work durable. A call whose deadline
  * has passed, or that waited for a pooled connection until then, does nothing.
+ * The call itself always settles by the deadline (or the stop), even when
+ * COMMIT or a statement's answer is held up on the way.
  *
  * How a bounded call ends says what happened to its work:
  * - it returns: the work committed;
  * - {@link DatabaseWorkDeadlineError}, the stop signal's reason or any other
  *   error: the work rolled back, because COMMIT was never sent or the server
  *   refused it;
- * - {@link DatabaseWorkOutcomeUnknownError}: the call was stopped, or lost its
- *   connection, while COMMIT was in flight, so the work may or may not have
- *   committed. Read the state again before relying on either.
+ * - {@link DatabaseWorkOutcomeUnknownError}: the deadline passed, the call
+ *   was stopped, or it lost its connection, while COMMIT was in flight, so the
+ *   work may or may not have committed. Read the state again before relying on
+ *   either.
  */
 export type DatabaseWorkBound = { deadlineAtMs: number; signal?: AbortSignal | undefined };
 
@@ -63025,6 +63070,9 @@ async function withinWorkBound<T>(
   if (Date.now() >= deadlineAtMs) throw new DatabaseWorkDeadlineError();
   // Set once COMMIT may be on its way; until then every failure rolls back.
   let committing = false;
+  // Set when the deadline or the stop signal ends the call; checked in the
+  // same step that lets COMMIT go, so the two never both happen.
+  let ended = false;
   const work = (async () => {
     try {
       return await db.transaction(async (tx) => {
@@ -63038,7 +63086,7 @@ async function withinWorkBound<T>(
         // Checked in the same step that lets COMMIT go: a stop or deadline
         // seen here rolls back, and any later one finds `committing` set.
         signal?.throwIfAborted();
-        if (Date.now() >= deadlineAtMs) throw new DatabaseWorkDeadlineError();
+        if (ended || Date.now() >= deadlineAtMs) throw new DatabaseWorkDeadlineError();
         committing = true;
         return value;
       });
@@ -63057,21 +63105,33 @@ async function withinWorkBound<T>(
       throw error;
     }
   })();
-  if (!signal) return await work;
+  // The call settles by its deadline whatever the connection does, COMMIT
+  // included: PostgreSQL bounds the statements, and this bounds the wait for
+  // a pooled connection's answers and for COMMIT's.
   work.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   const stopped = new Promise<never>((_, reject) => {
-    onAbort = () => {
-      const reason = signal.reason ?? new Error("The maintenance work was stopped.");
+    const end = (reason: unknown) => {
+      if (ended) return;
+      ended = true;
       reject(committing ? new DatabaseWorkOutcomeUnknownError({ cause: reason }) : reason);
     };
-    signal.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(
+      () => end(new DatabaseWorkDeadlineError()),
+      Math.max(0, deadlineAtMs - Date.now()),
+    );
+    if (signal) {
+      onAbort = () => end(signal.reason ?? new Error("The maintenance work was stopped."));
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
   });
   stopped.catch(() => {});
   try {
     return await Promise.race([work, stopped]);
   } finally {
-    if (onAbort) signal.removeEventListener("abort", onAbort);
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
   }
 }
 
