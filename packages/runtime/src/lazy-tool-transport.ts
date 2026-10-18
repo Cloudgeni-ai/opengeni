@@ -19,6 +19,7 @@ import {
   searchToolPool,
 } from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
+import { toolDisclosureItem } from "./provider-history-adapter";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
 import {
   beforeModelRequest,
@@ -63,7 +64,6 @@ const DISPATCH_MARKER_KEY = "opengeni.lazy_dispatch.v1";
 const SEARCH_MARKER_KEY = "opengeni.lazy_search.v1";
 /** Frozen companion schemas an entry-tool call disclosed, kept on the call itself. */
 const FAMILY_DISCLOSURE_MARKER_KEY = "opengeni.family_disclosure.v1";
-const FAMILY_DISCLOSURE_CALL_PREFIX = "opengeni:family:";
 const INTERNAL_REGISTRATION_TOOL_MARKER_KEY = "opengeni.internal_lazy_registration.v1";
 const INTERNAL_DISPATCH_REGISTRATION_CALL_PREFIX = "opengeni:lazy-dispatch:register:";
 
@@ -133,12 +133,11 @@ type GenericSearchMarker = {
 /**
  * Written once when the model calls an interaction entry tool (browser_open,
  * computer_open). The schemas are frozen at that moment so the disclosure the
- * provider sees after the open result never changes on later requests, even
- * after a deploy changes the live catalog.
+ * provider sees after the step's results never changes on later requests,
+ * even after a deploy changes the live catalog.
  */
 type FamilyDisclosureMarker = {
   version: 1;
-  format: "native" | "generic";
   tools: Record<string, unknown>[];
 };
 
@@ -950,7 +949,7 @@ function transformResponseOutput(
 
 /**
  * Freeze the family an entry-tool call discloses onto the call. The provider
- * sees the disclosure right after that call's result (see
+ * sees the disclosure after that step's results (see
  * expandInteractionFamilyDisclosures), so the model's next step can observe
  * and act without first searching for the tools.
  */
@@ -967,30 +966,18 @@ function withFamilyDisclosure(candidate: unknown, runtime: LazyToolRuntime): unk
     ...candidate,
     providerData: {
       ...providerData,
-      [FAMILY_DISCLOSURE_MARKER_KEY]: {
-        version: 1,
-        format: runtime.transport === "generic_dispatch" ? "generic" : "native",
-        tools,
-      } satisfies FamilyDisclosureMarker,
+      [FAMILY_DISCLOSURE_MARKER_KEY]: { version: 1, tools } satisfies FamilyDisclosureMarker,
     },
   };
 }
 
-function familyDisclosureMarker(candidate: Record<string, unknown>): FamilyDisclosureMarker | null {
+function familyDisclosureTools(candidate: Record<string, unknown>): Record<string, unknown>[] {
   const providerData = isRecord(candidate.providerData) ? candidate.providerData : null;
   const marker = providerData?.[FAMILY_DISCLOSURE_MARKER_KEY];
-  if (
-    !isRecord(marker) ||
-    marker.version !== 1 ||
-    (marker.format !== "native" && marker.format !== "generic") ||
-    !Array.isArray(marker.tools)
-  ) {
-    return null;
-  }
-  const tools = marker.tools.filter(
+  if (!isRecord(marker) || marker.version !== 1 || !Array.isArray(marker.tools)) return [];
+  return marker.tools.filter(
     (tool): tool is Record<string, unknown> => isRecord(tool) && typeof tool.name === "string",
   );
-  return { version: 1, format: marker.format, tools };
 }
 
 function disclosedToolNames(tools: unknown): string[] {
@@ -1005,21 +992,42 @@ function genericSearchOutputNames(output: string): string[] {
   return parsed ? disclosedToolNames(parsed.tools) : [];
 }
 
+/** Items that answer a call of the model's previous step. */
+const STEP_RESULT_ITEM_TYPES = new Set([
+  "function_call_result",
+  "computer_call_result",
+  "shell_call_output",
+  "apply_patch_call_output",
+  "tool_search_output",
+]);
+
 /**
- * Show each entry-tool call's frozen family disclosure right after its result,
- * as the same search call and output a model-issued search would have produced
- * (native tool_search items, or a generic tool_search function call). Tools the
- * history already disclosed are not repeated. The expansion depends only on
- * earlier items, so every later request reproduces the identical prefix.
+ * Declare the tools an entry call (browser_open, computer_open) made available
+ * as one tool-disclosure item placed after that step's results, where a
+ * developer message would go. Each provider projection renders it in its own
+ * standard form (see projectHistoryForProvider). Tools the history already
+ * disclosed are not repeated. The item depends only on earlier items, so every
+ * later request reproduces the identical prefix.
  */
 export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
-  const pending = new Map<string, FamilyDisclosureMarker>();
+  const pending = new Map<string, Record<string, unknown>[]>();
   const disclosed = new Set<string>();
-  let expanded: T[] | null = null;
+  let ready: Record<string, unknown>[] = [];
+  let readyAfter: object | null = null;
+  let expanded = null as T[] | null;
+  const flush = (index: number) => {
+    if (!readyAfter || ready.length === 0) return;
+    expanded ??= input.slice(0, index);
+    expanded.push(cachedToolDisclosureItem(readyAfter, ready) as T);
+    ready = [];
+    readyAfter = null;
+  };
   for (let index = 0; index < input.length; index += 1) {
     const original = input[index]!;
-    expanded?.push(original);
     const candidate: unknown = original;
+    const result = isRecord(candidate) && STEP_RESULT_ITEM_TYPES.has(String(candidate.type));
+    if (!result) flush(index);
+    expanded?.push(original);
     if (!isRecord(candidate)) continue;
     if (candidate.type === "tool_search_output") {
       for (const name of disclosedToolNames(candidate.tools)) disclosed.add(name);
@@ -1032,88 +1040,51 @@ export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
         for (const name of genericSearchOutputNames(searchMarker.output)) disclosed.add(name);
       }
       const id = callId(candidate);
-      const marker = familyDisclosureMarker(candidate);
-      if (id && marker) pending.set(id, marker);
-      continue;
-    }
-    if (candidate.type === "function_call_result" && candidate.name === TOOL_SEARCH_NAME) {
-      if (typeof candidate.output === "string") {
-        for (const name of genericSearchOutputNames(candidate.output)) disclosed.add(name);
-      }
+      const tools = familyDisclosureTools(candidate);
+      if (id && tools.length > 0) pending.set(id, tools);
       continue;
     }
     if (candidate.type !== "function_call_result") continue;
+    if (candidate.name === TOOL_SEARCH_NAME && typeof candidate.output === "string") {
+      for (const name of genericSearchOutputNames(candidate.output)) disclosed.add(name);
+      continue;
+    }
     const id = callId(candidate);
-    const marker = id ? pending.get(id) : undefined;
-    if (!id || !marker) continue;
+    const tools = id ? pending.get(id) : undefined;
+    if (!id || !tools) continue;
     pending.delete(id);
-    const tools = marker.tools.filter((tool) => !disclosed.has(String(tool.name)));
-    if (tools.length === 0) continue;
-    for (const tool of tools) disclosed.add(String(tool.name));
-    expanded ??= input.slice(0, index + 1);
-    expanded.push(...(cachedFamilyDisclosureItems(candidate, id, marker.format, tools) as T[]));
+    for (const tool of tools) {
+      const name = String(tool.name);
+      if (disclosed.has(name)) continue;
+      disclosed.add(name);
+      ready.push(tool);
+    }
+    readyAfter = candidate;
   }
+  flush(input.length);
   return expanded ?? input;
 }
 
 /**
- * The SDK reuses item identities between requests. Returning the same synthetic
- * objects for the same result keeps later identity-memoized projections and
- * their append-only prefix reuse effective.
+ * The SDK reuses item identities between requests. Returning the same item for
+ * the same step keeps later identity-memoized projections and their
+ * append-only prefix reuse effective.
  */
-const familyDisclosureItemCache = new WeakMap<
+const toolDisclosureItemCache = new WeakMap<
   object,
-  { key: string; items: Record<string, unknown>[] }
+  { key: string; item: Record<string, unknown> }
 >();
 
-function cachedFamilyDisclosureItems(
-  result: Record<string, unknown>,
-  id: string,
-  format: FamilyDisclosureMarker["format"],
+function cachedToolDisclosureItem(
+  after: object,
   tools: Record<string, unknown>[],
-): Record<string, unknown>[] {
-  const key = `${format}\u0000${tools.map((tool) => String(tool.name)).join("\u0000")}`;
-  const cached = familyDisclosureItemCache.get(result);
-  if (cached?.key === key) return cached.items;
-  const items = familyDisclosureItems(`${FAMILY_DISCLOSURE_CALL_PREFIX}${id}`, format, tools);
-  familyDisclosureItemCache.set(result, { key, items });
-  return items;
-}
-
-function familyDisclosureItems(
-  id: string,
-  format: FamilyDisclosureMarker["format"],
-  tools: Record<string, unknown>[],
-): Record<string, unknown>[] {
-  const names = tools.map((tool) => String(tool.name));
-  if (format === "native") {
-    return [
-      {
-        type: "tool_search_call",
-        call_id: id,
-        status: "completed",
-        execution: "client",
-        arguments: { query: "", names },
-      },
-      { type: "tool_search_output", call_id: id, status: "completed", execution: "client", tools },
-    ];
-  }
-  return [
-    {
-      type: "function_call",
-      callId: id,
-      name: TOOL_SEARCH_NAME,
-      arguments: JSON.stringify({ query: "", names }),
-      status: "completed",
-    },
-    {
-      type: "function_call_result",
-      callId: id,
-      name: TOOL_SEARCH_NAME,
-      status: "completed",
-      output: JSON.stringify({ tools }),
-    },
-  ];
+): Record<string, unknown> {
+  const key = tools.map((tool) => String(tool.name)).join("\u0000");
+  const cached = toolDisclosureItemCache.get(after);
+  if (cached?.key === key) return cached.item;
+  const item = toolDisclosureItem(tools);
+  toolDisclosureItemCache.set(after, { key, item });
+  return item;
 }
 
 function prepareLazyToolRequest(request: ModelRequest, runtime: LazyToolRuntime): ModelRequest {

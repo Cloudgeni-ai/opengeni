@@ -12,7 +12,10 @@ import {
 import OpenAI, { APIError } from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { projectChatToolImages } from "./chat-tool-images";
-import { projectHistoryForProvider } from "./provider-history-adapter";
+import {
+  chatRouteHoistsSystemMessages,
+  projectHistoryForProvider,
+} from "./provider-history-adapter";
 import {
   appendChatReasoningDetails,
   chatReasoning,
@@ -56,11 +59,13 @@ function chatCompletionFinishReason(value: unknown): unknown {
     : undefined;
 }
 
-function chatRequest(request: ModelRequest): ModelRequest {
+function chatRequest(request: ModelRequest, modelId: string): ModelRequest {
   const input =
     typeof request.input === "string"
       ? request.input
-      : (projectHistoryForProvider(request.input, "chat") as ModelRequest["input"]);
+      : (projectHistoryForProvider(request.input, "chat", {
+          hoistsSystemMessages: chatRouteHoistsSystemMessages(modelId),
+        }) as ModelRequest["input"]);
   return projectChatReasoning(
     projectChatToolImages(input === request.input ? request : { ...request, input }),
   );
@@ -120,8 +125,15 @@ function sdkChatInputTokenDetails(details: Record<string, unknown>): Record<stri
 
 /** Reject ambiguous completion before the SDK can commit output or execute tools. */
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
+  private readonly modelId: string;
+
+  constructor(...args: ConstructorParameters<typeof OpenAIChatCompletionsModel>) {
+    super(...args);
+    this.modelId = args[1];
+  }
+
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await super.getResponse(chatRequest(request));
+    const response = await super.getResponse(chatRequest(request, this.modelId));
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
@@ -147,7 +159,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     let reasoningDetails: Record<string, unknown>[] | undefined;
     let reportedCostUsd: string | undefined;
     let inputTokensDetails: Record<string, unknown> | undefined;
-    for await (const event of super.getStreamedResponse(chatRequest(request))) {
+    for await (const event of super.getStreamedResponse(chatRequest(request, this.modelId))) {
       if (event.type === "model") {
         const rawUsage = (event.event as { usage?: unknown } | undefined)?.usage;
         // Mirror the SDK's last non-null usage snapshot, not a sum of chunks.
