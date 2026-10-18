@@ -8,10 +8,12 @@ import { singleSendText } from "./single-send";
  *
  * - Keys are stable, dot-separated identifiers (`composer.send`). `englishMessages` is the
  *   complete default catalog; export it to your translation tooling as is.
- * - Templates use single-brace interpolation: `"Start voice with {model}"`.
+ * - Templates use single-brace interpolation: `"Move queued prompt {index} up"`.
  * - Counted text uses plural-category suffixes (`_zero`, `_one`, `_two`, `_few`, `_many`,
  *   `_other`) selected with `Intl.PluralRules` for the active locale, so a language can supply
- *   exactly the forms it needs. `_other` is required for every counted key.
+ *   exactly the forms it needs. `_other` is required for every counted key. Where the
+ *   runtime has no `Intl.PluralRules` (Hermes on React Native), 1 selects `_one` and every
+ *   other count `_other`.
  * - A key a host does not supply falls back to an outer provider, then English, never to a
  *   raw key.
  */
@@ -70,19 +72,27 @@ export type OpenGeniMessageCatalog = Record<SingularKey<CatalogKey>, string> &
 type Lookup = Readonly<Record<string, string | undefined>>;
 type UntypedText = (key: string, params?: Record<string, MessageParamValue>) => string;
 
-const pluralRuleCache = new Map<string, Intl.PluralRules>();
-function pluralRules(locale: string | undefined): Intl.PluralRules {
+type PluralSelector = { select(count: number): string };
+/** One/other, for runtimes without `Intl.PluralRules`. */
+const ONE_OTHER: PluralSelector = { select: (count) => (count === 1 ? "one" : "other") };
+const pluralRuleCache = new Map<string, PluralSelector>();
+function pluralRules(locale: string | undefined): PluralSelector {
   const cacheKey = locale ?? "";
   let rules = pluralRuleCache.get(cacheKey);
   if (!rules) {
-    try {
-      rules = new Intl.PluralRules(locale);
-    } catch {
-      rules = new Intl.PluralRules("en");
-    }
+    rules = createPluralRules(locale) ?? createPluralRules("en") ?? ONE_OTHER;
     pluralRuleCache.set(cacheKey, rules);
   }
   return rules;
+}
+
+function createPluralRules(locale: string | undefined): PluralSelector | null {
+  if (typeof Intl === "undefined" || typeof Intl.PluralRules !== "function") return null;
+  try {
+    return new Intl.PluralRules(locale);
+  } catch {
+    return null;
+  }
 }
 
 function interpolate(template: string, params: Record<string, MessageParamValue> | undefined) {

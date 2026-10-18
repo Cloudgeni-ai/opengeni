@@ -44,6 +44,36 @@ describe("message runtime", () => {
     expect(pl.locale).toBe("pl");
   });
 
+  test("counted text still renders without Intl.PluralRules (Hermes)", async () => {
+    const original = Intl.PluralRules;
+    // Hermes on React Native ships Intl without PluralRules.
+    Reflect.deleteProperty(Intl, "PluralRules");
+    try {
+      // A fresh module instance, so no plural rules are cached from other tests.
+      const freshRuntime: string = "../src/messages/runtime.tsx?without-plural-rules";
+      const runtime = (await import(freshRuntime)) as typeof import("../src/messages/runtime");
+      const en = runtime.createOpenGeniText();
+      expect(en("counts.agents", { count: 1 })).toBe("1 agent");
+      expect(en("counts.agents", { count: 0 })).toBe("0 agents");
+      expect(en("counts.agents", { count: 4 })).toBe("4 agents");
+      const nb = runtime.createOpenGeniText({
+        locale: "nb",
+        messages: {
+          "counts.agents_one": "{count} agent",
+          "counts.agents_other": "{count} agenter",
+        },
+      });
+      expect(nb("counts.agents", { count: 1 })).toBe("1 agent");
+      expect(nb("counts.agents", { count: 2 })).toBe("2 agenter");
+    } finally {
+      Object.defineProperty(Intl, "PluralRules", {
+        value: original,
+        writable: true,
+        configurable: true,
+      });
+    }
+  });
+
   test("host text wins, missing keys fall back to English", () => {
     const t = createOpenGeniText({
       locale: "nb",

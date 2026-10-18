@@ -867,9 +867,7 @@ test("live voice is opt-in and needs an available voice model", async () => {
     try {
       if (shown) {
         await waitFor(() => voiceButton(view.container) !== null, `${label}: voice button`);
-        expect(voiceButton(view.container)!.getAttribute("aria-label")).toBe(
-          "Start voice with GPT Live 1",
-        );
+        expect(voiceButton(view.container)!.getAttribute("aria-label")).toBe("Start voice");
       } else {
         await flush(200);
         expect(voiceButton(view.container)).toBeNull();
