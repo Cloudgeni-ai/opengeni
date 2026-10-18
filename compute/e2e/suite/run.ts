@@ -1040,15 +1040,47 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
       if (boot !== null && awake.generation !== null && awake.generation !== boot) {
         throw new Error(`the sandbox rebooted across the sleep (generation ${boot} -> ${awake.generation})`);
       }
+      // A saved sleep's wake is a paged restore: this restore's pager, on
+      // the host that restored it, must leave learned.json (written at or
+      // after the suite's request) and not keep failing in pager.log.
+      const pager = level === "saved" ? await step("the restore's pager", () => pagerAfter(awake.host!, Date.parse(to))) : "";
       proofs.push({ kind: "level", sandbox: state.sandbox!, level, from, to });
       const moved = await sandbox();
       return (
         `${reached.state.level} in ${(reached.ms / 1000).toFixed(1)} s (${reached.seen.join(" -> ")}), held 3 s, ` +
         `then woke and answered in ${woke}; process ${after.pid} and its 32 MiB intact, generation ${boot}; ` +
-        `host ${before.host} -> ${moved.host}`
+        `host ${before.host} -> ${moved.host}${pager ? `; ${pager}` : ""}`
       );
     },
   );
+}
+
+/** Waits up to 60 s for the sandbox's pager on `host` to write learned.json
+ * at or after `since` (ms), and fails if pager.log says "Permission
+ * denied" more than once. */
+async function pagerAfter(host: string, since: number): Promise<string> {
+  const dir = vmDir(state.sandbox!);
+  const start = Date.now();
+  for (;;) {
+    const [learned = "", denied = ""] = onHost(
+      host,
+      `sudo stat -c %Y ${dir}/pager/learned.json 2>/dev/null || echo none; ` +
+        `sudo cat ${dir}/pager.log ${dir}/pager/pager.log 2>/dev/null | grep -c 'Permission denied' || true`,
+    ).trim().split("\n");
+    if (Number(denied) > 1) throw new Error(`pager.log on ${host} says "Permission denied" ${denied} times`);
+    // stat gives whole seconds.
+    if (learned !== "none" && Number(learned) >= Math.floor(since / 1000)) {
+      return `pager: learned.json on ${host} written ${(Number(learned) - since / 1000).toFixed(0)} s after the request, "Permission denied" ${denied} times`;
+    }
+    if (Date.now() - start > 60_000) {
+      throw new Error(
+        learned === "none"
+          ? `no learned.json in the sandbox's pager directory on ${host} within 60 s of the wake`
+          : `learned.json on ${host} is from before this wake (${new Date(Number(learned) * 1000).toISOString()})`,
+      );
+    }
+    await sleep(3_000);
+  }
 }
 
 // The agent's link through the guest is a set of resumable streams: they

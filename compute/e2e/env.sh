@@ -409,11 +409,21 @@ model_down() {
 }
 
 # --- suite ----------------------------------------------------------------
+# A run's name names its directory here and on the stack VM, which suite
+# empties first: one plain name (letters, digits, '.', '_', '-'; not '.'
+# or '..' and nothing else starting with a dot).
+safe_run() {
+  if [[ ! $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+    log "RUN must be one plain name (letters, digits, '.', '_', '-', starting with a letter or digit), not '$1'"
+    return 1
+  fi
+}
 suite() {
   resolve_refs
   push_scripts
   local run
   run=${RUN:-$(date -u +%Y%m%dT%H%M%SZ)}
+  safe_run "$run" || return 2
   log "suite run $run (against the deployed build)"
   # The remote suite's status (nonzero when a check failed or was skipped,
   # or it could not run), then the results are copied and verified against
@@ -425,7 +435,7 @@ suite() {
   # same name, here or on the stack VM.
   mkdir -p "$dir"
   rm -f "$dir/results.json" "$dir/results.md"
-  on "rm -rf e2e/runs/$run"
+  on "rm -rf -- 'e2e/runs/$run'"
   consoles_loop "$dir" "$(date -u +%s)" &
   collector=$!
   on "RUN=$run ONLY='${ONLY:-}' KEEP='${KEEP:-}' PROJECT=$PROJECT ZONE=$ZONE bash e2e/suite.sh" |
@@ -463,23 +473,14 @@ on_host() {
     -o "ProxyCommand=ssh ${SSH_OPTS[*]} -W %h:%p $USER_NAME@$(stack_ip)" "$user@$ip" "$@"
 }
 
-# Until killed: every 20 s, appends to <dir>/pager-<host>.log one line per
-# sandbox on the host saying whether its pager left learned.json and how
-# often pager.log says "Permission denied" (verify.ts reads them); every
-# minute, copies the guest console of every sandbox that wrote to it since
-# <epoch> into <dir>/consoles-<host>.log ("== <id>" before each), keeping the
-# last copy that had any.
+# Until killed: every minute, copies the guest console of every sandbox
+# that wrote to it since <epoch> into <dir>/consoles-<host>.log ("== <id>"
+# before each), keeping the last copy that had any.
 consoles_loop() {
-  local dir=$1 since=$2 user name ip round
+  local dir=$1 since=$2 user name ip
   user=$(os_login_user) || return 0
-  for ((round = 0; ; round++)); do
+  for (( ; ; )); do
     while read -r name ip; do
-      on_host "$user" "$ip" "for d in \$(sudo find /var/lib/compute/state/vm/firecracker -mindepth 1 -maxdepth 1 -type d); do \
-        p=no; sudo test -e \$d/pager && p=yes; l=no; sudo test -f \$d/pager/learned.json && l=yes; \
-        n=\$(sudo cat \$d/pager.log \$d/pager/pager.log 2>/dev/null | grep -c 'Permission denied'); \
-        echo \"@\$(date +%s) \$(basename \$d) pager=\$p learned=\$l denied=\$n\"; done" \
-        >>"$dir/pager-$name.log" 2>/dev/null || true
-      [ $((round % 3)) -eq 0 ] || continue
       on_host "$user" "$ip" "for f in \$(sudo find /var/lib/compute/state/vm/firecracker -mindepth 2 -maxdepth 2 \
         -name console.log -newermt @$since 2>/dev/null); do echo \"== \$(basename \$(dirname \$f))\"; sudo cat \$f; done" \
         >"$dir/.consoles-$name.log" 2>/dev/null || true
@@ -489,7 +490,7 @@ consoles_loop() {
         rm -f "$dir/.consoles-$name.log"
       fi
     done < <(g compute instances list --filter "name~^$PREFIX-host" --format 'value(name,networkInterfaces[0].networkIP)')
-    sleep 20
+    sleep 60
   done
 }
 
@@ -500,6 +501,7 @@ consoles_loop() {
 # from.
 host_logs() {
   local run=${RUN:-} dir since=() name
+  [ -z "$run" ] || safe_run "$run" || return 2
   dir=$STATE/runs/${run:-hosts-$(date -u +%Y%m%dT%H%M%SZ)}
   mkdir -p "$dir"
   # From a minute before the run began (results.json), or the whole journal.
