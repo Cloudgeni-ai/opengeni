@@ -1321,6 +1321,25 @@ export function registerComputerSessionRoutes(
           }
 
           const resolved = await handle.routingSession.prime();
+          // A request for another machine than the one this chat is routed to
+          // says so, before anything about the routed machine's own desktop.
+          if (expectedPlacement?.kind === "connected_machine") {
+            if (
+              resolved.kind !== "selfhosted" ||
+              resolved.sandboxId !== expectedPlacement.sandboxId
+            ) {
+              if (operation === "computer.create") {
+                throw new HTTPException(422, {
+                  message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
+                });
+              }
+              return await throwComputerSourcePlacementChanged(
+                grant,
+                sourceSession.id,
+                expectedPlacement.sandboxId,
+              );
+            }
+          }
           let screenControlAllowed = false;
           if (
             operation !== "computer.end" &&
@@ -1343,21 +1362,6 @@ export function registerComputerSessionRoutes(
             screenControlAllowed = enrollment.allowScreenControl === true;
           }
           if (expectedPlacement?.kind === "connected_machine") {
-            if (
-              resolved.kind !== "selfhosted" ||
-              resolved.sandboxId !== expectedPlacement.sandboxId
-            ) {
-              if (operation === "computer.create") {
-                throw new HTTPException(422, {
-                  message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
-                });
-              }
-              return await throwComputerSourcePlacementChanged(
-                grant,
-                sourceSession.id,
-                expectedPlacement.sandboxId,
-              );
-            }
             const placementInstanceId = resolved.providerInstanceId ?? expectedPlacement.sandboxId;
             assertPlacementInstance(expectedPlacementInstanceId, placementInstanceId);
             return await callback({
