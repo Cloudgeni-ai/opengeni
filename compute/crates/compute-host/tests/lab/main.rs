@@ -31,7 +31,7 @@ use compute_host::protocol::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{Instant, sleep, timeout, timeout_at};
 
 mod admission;
 mod disk;
@@ -298,8 +298,9 @@ async fn exec(client: &Client, sandbox: Id, script: &str) -> (String, Duration) 
     }
 }
 
-/// Like [`exec`], but a script that has not ended within `limit` is an
-/// error that says what it printed by then.
+/// Like [`exec`], but an error instead of a panic: a script that has not
+/// ended within `limit`, counted from the request, says what it printed by
+/// then, and a connection that fails or never comes says so.
 async fn try_exec(
     client: &Client,
     sandbox: Id,
@@ -307,15 +308,23 @@ async fn try_exec(
     limit: Duration,
 ) -> Result<(String, Duration), String> {
     let started = Instant::now();
-    let (reply, mut stream) = client
-        .connect(sandbox, None, PORT, PriorityName::Interactive)
-        .await
-        .unwrap();
+    let deadline = started + limit;
+    let late = || format!("no connection after {:?}", started.elapsed());
+    let (reply, mut stream) = timeout_at(
+        deadline,
+        client.connect(sandbox, None, PORT, PriorityName::Interactive),
+    )
+    .await
+    .map_err(|_| late())?
+    .map_err(|error| format!("connect: {error}"))?;
     let Reply::Connected { waited_us, .. } = reply else {
-        panic!("{sandbox}: {reply:?}");
+        return Err(format!("connect: {reply:?}"));
     };
     let input = format!("{script}\necho {DONE}\nexit\n");
-    stream.get_mut().write_all(input.as_bytes()).await.unwrap();
+    timeout_at(deadline, stream.get_mut().write_all(input.as_bytes()))
+        .await
+        .map_err(|_| late())?
+        .map_err(|error| format!("send the script: {error}"))?;
     // The script is done when its marker arrives; the guest's exec agent
     // lingers before closing the connection, which is not the guest's time.
     let end = format!("{DONE}\n");
@@ -323,21 +332,27 @@ async fn try_exec(
     let read = async {
         let mut chunk = [0_u8; 4096];
         loop {
-            let n = stream.read(&mut chunk).await.unwrap();
+            let n = stream.read(&mut chunk).await?;
             output.extend_from_slice(&chunk[..n]);
             if n == 0 || output.ends_with(end.as_bytes()) {
-                break;
+                return Ok::<(), std::io::Error>(());
             }
         }
     };
-    let finished = timeout(limit, read).await;
+    let finished = timeout_at(deadline, read).await;
     let output = String::from_utf8_lossy(&output);
     // What it printed tells which of its steps never ended.
-    if finished.is_err() {
-        return Err(format!(
-            "script timed out after {:?}; its output so far:\n{output}",
-            started.elapsed()
-        ));
+    match finished {
+        Err(_) => {
+            return Err(format!(
+                "script timed out after {:?}; its output so far:\n{output}",
+                started.elapsed()
+            ));
+        }
+        Ok(Err(error)) => {
+            return Err(format!("read: {error}; its output so far:\n{output}"));
+        }
+        Ok(Ok(())) => {}
     }
     let output = output.strip_suffix(&end).unwrap_or(&output).to_owned();
     Ok((output, Duration::from_micros(waited_us)))

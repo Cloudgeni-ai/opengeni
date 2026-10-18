@@ -950,6 +950,16 @@ impl Host {
             _ => DiskSpace::default(),
         };
         self.disk_spent = self.disk_spent.add(written);
+        if !wrote && flight.step == Step::Checkpoint {
+            // Nor did it clone the disk, so what it booked for the guest's
+            // writes over a clone stood for nothing: it is not kept until
+            // the next reading, as what a booking stops standing for is.
+            // What the guest may write to its own disk stays booked.
+            slot.local_disk.booked = slot
+                .local_disk
+                .booked
+                .saturating_sub(slot.checkpoint_need());
+        }
         let before = slot.state;
         let backoff = if flight.step.wakes() {
             &self.policy.wake_backoff
