@@ -137,9 +137,8 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg nats "$na
     api: {image: img("opengeni-api")},
     worker: {image: img("opengeni-worker")},
     web: {image: img("opengeni-web")},
-    # The default relays of the chart (two, autoscaled); Caddy below sends
-    # both dials of a channel to the same one (docs/deployment.md, "Ingress
-    # channel affinity").
+    # The default relays of the chart (two, autoscaled), behind Caddy as a
+    # stock install has them.
     relay: {enabled: true, image: img("opengeni-relay")},
     postgres: {enabled: true, auth: {existingSecret: "opengeni-postgres"},
       args: ["-c", "max_connections=500"],
@@ -212,28 +211,11 @@ done
 log "Caddy for $app, $relay, $files and $nats"
 ip() { k get svc "$1" -o jsonpath='{.spec.clusterIP}'; }
 port() { k get svc "$1" -o jsonpath="{.spec.ports[?(@.name==\"$2\")].port}"; }
-# The relay pairs a channel's two dials in one replica's memory, so Caddy
-# sends both to the same replica: it resolves every relay pod through a
-# headless Service of this environment (cluster DNS) and hashes the dial's
-# channel query (docs/deployment.md, "Ingress channel affinity").
-relay_pods=$release-e2e-relay-pods
-relay_port=$(k get deploy "$full-relay" -o jsonpath='{.spec.template.spec.containers[0].ports[?(@.name=="wss")].containerPort}')
-relay_selector=$(k get svc "$full-relay" -o json | jq -r '.spec.selector | to_entries[] | "    \(.key): \(.value)"')
-k apply -f - >/dev/null <<SVC
-apiVersion: v1
-kind: Service
-metadata:
-  name: $relay_pods
-spec:
-  clusterIP: None
-  selector:
-$relay_selector
-  ports:
-    - name: wss
-      port: $relay_port
-      targetPort: wss
-SVC
-dns=$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')
+# The chart's relay Service, as a stock install has it: any relay replica
+# forwards a terminal's dial to the replica that owns its channel, so the
+# front needs no channel affinity. (The headless Service earlier runs made
+# for that affinity goes.)
+k delete svc "$release-e2e-relay-pods" --ignore-not-found >/dev/null
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 $app {
 	@api path /v1/* /healthz /install.sh /install.ps1 /uninstall.sh /opengeni-agent-minisign.pub /agent/* /.well-known/*
@@ -241,15 +223,7 @@ $app {
 	reverse_proxy $(ip "$full-web"):$(port "$full-web" http)
 }
 $relay {
-	reverse_proxy {
-		dynamic a {
-			name $relay_pods.$ns.svc.cluster.local
-			port $relay_port
-			resolvers $dns
-			refresh 5s
-		}
-		lb_policy query channel
-	}
+	reverse_proxy $(ip "$full-relay"):$(k get svc "$full-relay" -o jsonpath='{.spec.ports[0].port}')
 }
 $files {
 	reverse_proxy $(ip "$full-garage"):3900

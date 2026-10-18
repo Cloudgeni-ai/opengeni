@@ -8,8 +8,7 @@ set -euo pipefail
 : "${REPO_URL:?}" "${OPENGENI_SHA:?}" "${COMPUTE_SHA:?}" "${E2E_USER:?}"
 HELM_VERSION=v3.22.1
 HELM_SHA256=896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
-# Caddy from its own release (Ubuntu's 2.6 has no query-hash load
-# balancing, which the relay's channel affinity needs); the package stays
+# Caddy from its own release, pinned (Ubuntu's is 2.6); the package stays
 # for its service unit and user.
 CADDY_VERSION=2.11.7
 CADDY_SHA256=727b91701a392de6ebc5027509f548bf39979e5216340d0faed8fa5e69c84f8b

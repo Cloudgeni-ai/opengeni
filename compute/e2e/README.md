@@ -46,9 +46,9 @@ the workstation only drives it.
    to the API's agent gateway); Caddy in front with Let's Encrypt
    certificates for `opengeni.`, `relay.` and `files.` names of the VM's
    address (sslip.io). It waits for `HOSTS` live hosts. The chart's default
-   two relays run; Caddy resolves the relay pods through a headless Service
-   and hashes each dial's `channel` query, the channel affinity
-   docs/deployment.md requires. The fleet checkpoints running sandboxes every
+   two relays run behind Caddy as a stock install has them, a plain reverse
+   proxy to the relay Service: any replica forwards a terminal's dial to the
+   one that owns its channel. The fleet checkpoints running sandboxes every
    60 s (`--checkpoint-every-s=60`), so every check runs across checkpoints.
    `FRESH=1 env.sh deploy` first removes the release and its volumes, for a
    new database, object store and NATS.
