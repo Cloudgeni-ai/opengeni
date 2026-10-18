@@ -3050,13 +3050,12 @@ export async function getWorkspace(db: Database, workspaceId: string): Promise<W
     .from(schema.workspaces)
     .where(eq(schema.workspaces.id, workspaceId))
     .limit(1);
-  return row
-    ? mapWorkspace(
-        row,
-        await workspaceControlProjection(db, row.id),
-        await workspaceKindProjection(db, row),
-      )
-    : null;
+  if (!row) return null;
+  // Bootstrap metadata is not RLS-protected. It does not by itself establish
+  // that the complete workspace is readable in the caller's database scope.
+  const control = await findWorkspaceControlProjection(db, row.id);
+  if (!control) return null;
+  return mapWorkspace(row, control, await workspaceKindProjection(db, row));
 }
 
 /**
@@ -86481,13 +86480,22 @@ async function workspaceControlProjection(
   db: Database,
   workspaceId: string,
 ): Promise<Workspace["inferenceControl"]> {
+  const control = await findWorkspaceControlProjection(db, workspaceId);
+  if (!control) throw new Error(`Workspace ${workspaceId} has no inference control`);
+  return control;
+}
+
+async function findWorkspaceControlProjection(
+  db: Database,
+  workspaceId: string,
+): Promise<Workspace["inferenceControl"] | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [control] = await scopedDb
       .select()
       .from(schema.workspaceInferenceControls)
       .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId))
       .limit(1);
-    if (!control) throw new Error(`Workspace ${workspaceId} has no inference control`);
+    if (!control) return null;
     return {
       timer: control.timerId
         ? {

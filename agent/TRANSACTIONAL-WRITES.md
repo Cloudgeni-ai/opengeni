@@ -94,8 +94,14 @@ begin, as the shell does (macOS `/tmp` is `/private/tmp`); the destination name
 itself is never followed. The transaction then uses only that physical path:
 traversal uses retained directory handles and refuses symlink components, so a
 symlink swapped in later fails closed. Parent traversal (`..`) is refused.
-Parent directories must already exist;
-`create_parents=true` does not permit visible directory creation during staging.
+For expected-absent creation, `create_parents=true` creates missing parent
+directories with ordinary mkdir/umask semantics through pinned directory handles.
+Existing parent symlinks resolve once before missing components are created;
+dangling links and newly substituted symlinks are refused. Without the option,
+parents must already exist. Created parents are visible before file publication
+and remain after failure or cancellation, because other actors may already use
+them. Commit never recreates a removed parent. Existing-base edits do not create
+missing directories even when the option is set.
 Observed parent-directory replacement is a conflict.
 
 Staging uses exclusive creation in a private mode-0700 directory under the
@@ -114,10 +120,14 @@ permissions are not repaired, and no `runAs` or expanded host authority is impli
 
 On macOS, descriptor-based extended ACL inspection lives in the small
 `opengeni-agent-files-ffi` crate, independent of desktop frameworks and TCC.
-ACLs and inode flags fail closed. The OS-generated `com.apple.provenance`
-attribute is permitted, but replacement requires identical bytes on the original
-and staged inode; other extended attributes remain unsupported. No protected
-metadata is removed or rewritten to make an upload succeed.
+Destination/staging ACLs and inode flags fail closed. Parent-directory
+metadata is not replaced: the standard home ACL (`group:everyone deny delete`)
+and other directory attributes remain untouched and kernel-enforced. Inherited
+ACLs on a staged file remain unsupported, rather than being silently stripped.
+The OS-generated `com.apple.provenance` attribute belongs to its inode; a
+replacement keeps whatever provenance macOS assigns to the new inode, without
+requiring it to match the original. Other file extended attributes remain
+unsupported. No protected metadata is removed or rewritten to make an upload succeed.
 
 For expected-absent creation, Linux `renameat2(RENAME_NOREPLACE)` or macOS
 `renameatx_np(RENAME_EXCL)` is the atomic
@@ -146,6 +156,12 @@ cd agent
 cargo test --locked -p opengeni-agent-platform transactional_write
 cargo test --locked -p opengeni-agent uploads::tests
 ```
+
+On macOS, set `OPENGENI_TEST_PROVENANCE_WRITER` to an installed provenance-tagged
+Node binary when running the platform tests to exercise an edit of a file created
+by that external application. The test requires real kernel-assigned provenance
+and never fabricates or alters the protected attribute. Without that fixture,
+the external-writer test reports its skip explicitly.
 
 Regenerate Rust protocol types with a Cargo build and TypeScript types with
 `bash packages/agent-proto/scripts/codegen.sh` from the repository root. Rollout

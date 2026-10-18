@@ -198,6 +198,11 @@ the independent capability gate, exact upload lifecycle, supported Linux file
 semantics, and restart/lost-ack restrictions. `op_stream` alone does not imply
 transactional filesystem support.
 
+Per-request `run_as` (exec, git, PTY and file operations as another local user)
+is gated by `Capabilities.run_as`, advertised only on Linux by a root agent; see
+[Run as another local user](../docs/connected-machines.md#run-as-another-local-user).
+The credential switches live in `opengeni-agent-linux-ffi`.
+
 The protocol is defined **once** in [`proto/opengeni_agent.proto`](proto/opengeni_agent.proto)
 (proto3, package `opengeni.agent.v1`) and code-generated to **both** stacks so the
 control plane (TypeScript) and the agent (Rust) can never drift:

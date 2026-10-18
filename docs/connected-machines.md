@@ -1424,12 +1424,17 @@ lost authority do not prove cleanup: private staging may remain until the link
 ends, and a process crash may leave an orphan. There is no automatic sweep or
 adoption of unknown transfers.
 
-The native implementation supports ordinary Linux and macOS APFS regular files
-with existing parent directories. It fails closed on unsupported symlinks, hard links,
+The native implementation supports ordinary Linux and macOS APFS regular files.
+Expected-absent creates honor `create_parents`: missing directories are created
+through pinned handles and remain after cancellation or failure; file publication
+is still atomic. Existing-base edits never create missing parents. It fails closed on unsupported symlinks, hard links,
 ownership, special modes, and extended metadata rather than silently discarding
 their semantics. Transactional editing does not implement `runAs` impersonation.
-macOS permits OS-generated provenance only when replacement preserves its exact
-bytes; extended ACLs, other attributes and inode flags remain unsupported.
+macOS leaves parent-directory ACLs and attributes untouched, including the standard
+home-directory ACL. The replacement inode keeps OS-assigned provenance; the old
+inode's provenance is not copied or required to match. Destination/staged-file
+ACLs, other file attributes and inode flags remain unsupported rather than being
+silently removed.
 Expected-base checks detect observed changes but are not a filesystem
 compare-and-swap against unrelated concurrent writers.
 
@@ -1456,6 +1461,29 @@ reporting does not add transactional transfer support to unsupported platforms.
 
 Deploy matching protocol/runtime packages and a compatible native agent before
 expecting transactional support. Changing transport limits is not required.
+
+## Run as another local user
+
+Exec (including op-stream and background commands), git, PTY open and every file
+request, transactional uploads included, carry an optional `run_as`: a local user
+name, else a decimal uid, which must exist in the machine's password database.
+The agent honors it only when it advertises `Capabilities.run_as`, which it does
+only on Linux while running as root (as in a managed sandbox); a Connected
+Machine agent running as its owner's account never does, and the control plane
+must not send `run_as` to an agent that does not advertise it. Such an agent
+refuses a non-empty `run_as` with `ERROR_CODE_UNSUPPORTED` rather than ignoring it,
+and an unknown user fails with `ERROR_CODE_RUN_AS_UNKNOWN_USER`.
+
+A process started for the request runs with the user's uid, primary gid and
+groups (real, effective and saved ids, no capabilities), with `HOME`, `USER`,
+`LOGNAME` and `SHELL` from the password database before the request's own
+environment. A PTY without a command starts the user's login shell, and the user
+owns the terminal device. File requests run on a dedicated agent thread switched
+to the user, so the kernel enforces the user's permissions and everything the
+request creates is the user's; `~` expands to the user's home. Transactional
+uploads stage as the user, so the published file is the user's. Exec and git
+children switch identity after their cgroup placement, which still uses the
+agent's privileges.
 
 ## Revoke / detach
 

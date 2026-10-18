@@ -39,6 +39,11 @@ export enum ErrorCode {
    * Not retryable — the same op would produce the same oversized reply.
    */
   ERROR_CODE_PAYLOAD_TOO_LARGE = 11,
+  /**
+   * ERROR_CODE_RUN_AS_UNKNOWN_USER - The request's run_as names no user in the runner's password database.
+   * Not retryable.
+   */
+  ERROR_CODE_RUN_AS_UNKNOWN_USER = 12,
 }
 
 export function errorCodeFromJSON(object: any): ErrorCode {
@@ -79,6 +84,9 @@ export function errorCodeFromJSON(object: any): ErrorCode {
     case 11:
     case "ERROR_CODE_PAYLOAD_TOO_LARGE":
       return ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE;
+    case 12:
+    case "ERROR_CODE_RUN_AS_UNKNOWN_USER":
+      return ErrorCode.ERROR_CODE_RUN_AS_UNKNOWN_USER;
     default:
       throw new globalThis.Error("Unrecognized enum value " + object + " for enum ErrorCode");
   }
@@ -110,6 +118,8 @@ export function errorCodeToJSON(object: ErrorCode): string {
       return "ERROR_CODE_FENCED";
     case ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE:
       return "ERROR_CODE_PAYLOAD_TOO_LARGE";
+    case ErrorCode.ERROR_CODE_RUN_AS_UNKNOWN_USER:
+      return "ERROR_CODE_RUN_AS_UNKNOWN_USER";
     default:
       throw new globalThis.Error("Unrecognized enum value " + object + " for enum ErrorCode");
   }
@@ -1118,6 +1128,12 @@ export interface Capabilities {
    * path (a shell + curl command per controller request).
    */
   browserControlHttp: boolean;
+  /**
+   * The runner honors `run_as` on exec, git, PTY open and file requests: it runs
+   * as root on Linux and switches to the named user per request. False (absent)
+   * runners MUST NOT receive a non-empty run_as.
+   */
+  runAs: boolean;
 }
 
 /** The three macOS Privacy & Security grants desktop capture and input need. */
@@ -1324,6 +1340,14 @@ export interface ExecRequest {
   stdin: Uint8Array;
   /** Optional hard wall-clock timeout; 0 means no process deadline. */
   timeoutMs: number;
+  /**
+   * Run this request as this local user instead of the agent's own account: a
+   * user name, else a decimal uid; it must exist in the password database (else
+   * ERROR_CODE_RUN_AS_UNKNOWN_USER). Empty = the agent's account. Honored only
+   * where Capabilities.run_as is advertised; elsewhere a non-empty value fails
+   * with ERROR_CODE_UNSUPPORTED.
+   */
+  runAs: string;
 }
 
 export interface ExecRequest_EnvEntry {
@@ -1348,6 +1372,8 @@ export interface FsReadRequest {
   /** Optional byte offset + length for ranged reads (0 length => to EOF). */
   offset: string;
   length: string;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsReadResponse {
@@ -1365,6 +1391,8 @@ export interface FsWriteRequest {
   append: boolean;
   /** POSIX mode for a newly created file (e.g. 0644); 0 => platform default. */
   mode: number;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsWriteResponse {
@@ -1375,6 +1403,8 @@ export interface FsListRequest {
   path: string;
   /** Recurse into subdirectories. */
   recursive: boolean;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsListResponse {
@@ -1397,6 +1427,8 @@ export interface FsMkdirRequest {
   /** Create intermediate directories (mkdir -p). */
   parents: boolean;
   mode: number;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsMkdirResponse {
@@ -1407,6 +1439,8 @@ export interface FsMoveRequest {
   to: string;
   /** Overwrite the destination if it exists. */
   overwrite: boolean;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsMoveResponse {
@@ -1414,6 +1448,8 @@ export interface FsMoveResponse {
 
 export interface FsStatRequest {
   path: string;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsStatResponse {
@@ -1426,6 +1462,8 @@ export interface FsRemoveRequest {
   path: string;
   /** Remove directories recursively. */
   recursive: boolean;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface FsRemoveResponse {
@@ -1442,6 +1480,8 @@ export interface GitRequest {
   cwd: string;
   /** Free-form args for ops that pass through (e.g. log/diff flags). */
   args: string[];
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface GitResponse {
@@ -1493,6 +1533,8 @@ export interface PtyOpenRequest {
    * on one machine remain isolated.
    */
   scopeId: string;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 export interface PtyOpenRequest_EnvEntry {
@@ -2103,6 +2145,8 @@ export interface FsWriteBegin {
    * Creation publishes atomically without replacing a concurrently created file.
    */
   expectedAbsent: boolean;
+  /** Run as this local user (see ExecRequest.run_as). */
+  runAs: string;
 }
 
 /**
@@ -3088,6 +3132,7 @@ function createBaseCapabilities(): Capabilities {
     credentialRenew: false,
     macPermissions: undefined,
     browserControlHttp: false,
+    runAs: false,
   };
 }
 
@@ -3143,6 +3188,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.browserControlHttp !== false) {
       writer.uint32(136).bool(message.browserControlHttp);
+    }
+    if (message.runAs !== false) {
+      writer.uint32(144).bool(message.runAs);
     }
     return writer;
   },
@@ -3290,6 +3338,14 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.browserControlHttp = reader.bool();
           continue;
         }
+        case 18: {
+          if (tag !== 144) {
+            break;
+          }
+
+          message.runAs = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3362,6 +3418,11 @@ export const Capabilities: MessageFns<Capabilities> = {
         : isSet(object.browser_control_http)
         ? globalThis.Boolean(object.browser_control_http)
         : false,
+      runAs: isSet(object.runAs)
+        ? globalThis.Boolean(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.Boolean(object.run_as)
+        : false,
     };
   },
 
@@ -3418,6 +3479,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.browserControlHttp !== false) {
       obj.browserControlHttp = message.browserControlHttp;
     }
+    if (message.runAs !== false) {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -3447,6 +3511,7 @@ export const Capabilities: MessageFns<Capabilities> = {
       ? MacDesktopPermissions.fromPartial(object.macPermissions)
       : undefined;
     message.browserControlHttp = object.browserControlHttp ?? false;
+    message.runAs = object.runAs ?? false;
     return message;
   },
 };
@@ -5240,7 +5305,7 @@ export const OperationResourcePolicy: MessageFns<OperationResourcePolicy> = {
 };
 
 function createBaseExecRequest(): ExecRequest {
-  return { command: [], shell: false, cwd: "", env: {}, stdin: new Uint8Array(0), timeoutMs: 0 };
+  return { command: [], shell: false, cwd: "", env: {}, stdin: new Uint8Array(0), timeoutMs: 0, runAs: "" };
 }
 
 export const ExecRequest: MessageFns<ExecRequest> = {
@@ -5262,6 +5327,9 @@ export const ExecRequest: MessageFns<ExecRequest> = {
     }
     if (message.timeoutMs !== 0) {
       writer.uint32(48).uint32(message.timeoutMs);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(58).string(message.runAs);
     }
     return writer;
   },
@@ -5324,6 +5392,14 @@ export const ExecRequest: MessageFns<ExecRequest> = {
           message.timeoutMs = reader.uint32();
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5353,6 +5429,11 @@ export const ExecRequest: MessageFns<ExecRequest> = {
         : isSet(object.timeout_ms)
         ? globalThis.Number(object.timeout_ms)
         : 0,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -5382,6 +5463,9 @@ export const ExecRequest: MessageFns<ExecRequest> = {
     if (message.timeoutMs !== 0) {
       obj.timeoutMs = Math.round(message.timeoutMs);
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -5404,6 +5488,7 @@ export const ExecRequest: MessageFns<ExecRequest> = {
     );
     message.stdin = object.stdin ?? new Uint8Array(0);
     message.timeoutMs = object.timeoutMs ?? 0;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -5648,7 +5733,7 @@ export const ExecResponse: MessageFns<ExecResponse> = {
 };
 
 function createBaseFsReadRequest(): FsReadRequest {
-  return { path: "", offset: "0", length: "0" };
+  return { path: "", offset: "0", length: "0", runAs: "" };
 }
 
 export const FsReadRequest: MessageFns<FsReadRequest> = {
@@ -5661,6 +5746,9 @@ export const FsReadRequest: MessageFns<FsReadRequest> = {
     }
     if (message.length !== "0") {
       writer.uint32(24).uint64(message.length);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(34).string(message.runAs);
     }
     return writer;
   },
@@ -5696,6 +5784,14 @@ export const FsReadRequest: MessageFns<FsReadRequest> = {
           message.length = reader.uint64().toString();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5710,6 +5806,11 @@ export const FsReadRequest: MessageFns<FsReadRequest> = {
       path: isSet(object.path) ? globalThis.String(object.path) : "",
       offset: isSet(object.offset) ? globalThis.String(object.offset) : "0",
       length: isSet(object.length) ? globalThis.String(object.length) : "0",
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -5724,6 +5825,9 @@ export const FsReadRequest: MessageFns<FsReadRequest> = {
     if (message.length !== "0") {
       obj.length = message.length;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -5735,6 +5839,7 @@ export const FsReadRequest: MessageFns<FsReadRequest> = {
     message.path = object.path ?? "";
     message.offset = object.offset ?? "0";
     message.length = object.length ?? "0";
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -5820,7 +5925,7 @@ export const FsReadResponse: MessageFns<FsReadResponse> = {
 };
 
 function createBaseFsWriteRequest(): FsWriteRequest {
-  return { path: "", content: new Uint8Array(0), createParents: false, append: false, mode: 0 };
+  return { path: "", content: new Uint8Array(0), createParents: false, append: false, mode: 0, runAs: "" };
 }
 
 export const FsWriteRequest: MessageFns<FsWriteRequest> = {
@@ -5839,6 +5944,9 @@ export const FsWriteRequest: MessageFns<FsWriteRequest> = {
     }
     if (message.mode !== 0) {
       writer.uint32(40).uint32(message.mode);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(50).string(message.runAs);
     }
     return writer;
   },
@@ -5890,6 +5998,14 @@ export const FsWriteRequest: MessageFns<FsWriteRequest> = {
           message.mode = reader.uint32();
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5910,6 +6026,11 @@ export const FsWriteRequest: MessageFns<FsWriteRequest> = {
         : false,
       append: isSet(object.append) ? globalThis.Boolean(object.append) : false,
       mode: isSet(object.mode) ? globalThis.Number(object.mode) : 0,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -5930,6 +6051,9 @@ export const FsWriteRequest: MessageFns<FsWriteRequest> = {
     if (message.mode !== 0) {
       obj.mode = Math.round(message.mode);
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -5943,6 +6067,7 @@ export const FsWriteRequest: MessageFns<FsWriteRequest> = {
     message.createParents = object.createParents ?? false;
     message.append = object.append ?? false;
     message.mode = object.mode ?? 0;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -6012,7 +6137,7 @@ export const FsWriteResponse: MessageFns<FsWriteResponse> = {
 };
 
 function createBaseFsListRequest(): FsListRequest {
-  return { path: "", recursive: false };
+  return { path: "", recursive: false, runAs: "" };
 }
 
 export const FsListRequest: MessageFns<FsListRequest> = {
@@ -6022,6 +6147,9 @@ export const FsListRequest: MessageFns<FsListRequest> = {
     }
     if (message.recursive !== false) {
       writer.uint32(16).bool(message.recursive);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(26).string(message.runAs);
     }
     return writer;
   },
@@ -6049,6 +6177,14 @@ export const FsListRequest: MessageFns<FsListRequest> = {
           message.recursive = reader.bool();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6062,6 +6198,11 @@ export const FsListRequest: MessageFns<FsListRequest> = {
     return {
       path: isSet(object.path) ? globalThis.String(object.path) : "",
       recursive: isSet(object.recursive) ? globalThis.Boolean(object.recursive) : false,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -6073,6 +6214,9 @@ export const FsListRequest: MessageFns<FsListRequest> = {
     if (message.recursive !== false) {
       obj.recursive = message.recursive;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -6083,6 +6227,7 @@ export const FsListRequest: MessageFns<FsListRequest> = {
     const message = createBaseFsListRequest();
     message.path = object.path ?? "";
     message.recursive = object.recursive ?? false;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -6292,7 +6437,7 @@ export const FsEntry: MessageFns<FsEntry> = {
 };
 
 function createBaseFsMkdirRequest(): FsMkdirRequest {
-  return { path: "", parents: false, mode: 0 };
+  return { path: "", parents: false, mode: 0, runAs: "" };
 }
 
 export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
@@ -6305,6 +6450,9 @@ export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
     }
     if (message.mode !== 0) {
       writer.uint32(24).uint32(message.mode);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(34).string(message.runAs);
     }
     return writer;
   },
@@ -6340,6 +6488,14 @@ export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
           message.mode = reader.uint32();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6354,6 +6510,11 @@ export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
       path: isSet(object.path) ? globalThis.String(object.path) : "",
       parents: isSet(object.parents) ? globalThis.Boolean(object.parents) : false,
       mode: isSet(object.mode) ? globalThis.Number(object.mode) : 0,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -6368,6 +6529,9 @@ export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
     if (message.mode !== 0) {
       obj.mode = Math.round(message.mode);
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -6379,6 +6543,7 @@ export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
     message.path = object.path ?? "";
     message.parents = object.parents ?? false;
     message.mode = object.mode ?? 0;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -6427,7 +6592,7 @@ export const FsMkdirResponse: MessageFns<FsMkdirResponse> = {
 };
 
 function createBaseFsMoveRequest(): FsMoveRequest {
-  return { from: "", to: "", overwrite: false };
+  return { from: "", to: "", overwrite: false, runAs: "" };
 }
 
 export const FsMoveRequest: MessageFns<FsMoveRequest> = {
@@ -6440,6 +6605,9 @@ export const FsMoveRequest: MessageFns<FsMoveRequest> = {
     }
     if (message.overwrite !== false) {
       writer.uint32(24).bool(message.overwrite);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(34).string(message.runAs);
     }
     return writer;
   },
@@ -6475,6 +6643,14 @@ export const FsMoveRequest: MessageFns<FsMoveRequest> = {
           message.overwrite = reader.bool();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6489,6 +6665,11 @@ export const FsMoveRequest: MessageFns<FsMoveRequest> = {
       from: isSet(object.from) ? globalThis.String(object.from) : "",
       to: isSet(object.to) ? globalThis.String(object.to) : "",
       overwrite: isSet(object.overwrite) ? globalThis.Boolean(object.overwrite) : false,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -6503,6 +6684,9 @@ export const FsMoveRequest: MessageFns<FsMoveRequest> = {
     if (message.overwrite !== false) {
       obj.overwrite = message.overwrite;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -6514,6 +6698,7 @@ export const FsMoveRequest: MessageFns<FsMoveRequest> = {
     message.from = object.from ?? "";
     message.to = object.to ?? "";
     message.overwrite = object.overwrite ?? false;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -6562,13 +6747,16 @@ export const FsMoveResponse: MessageFns<FsMoveResponse> = {
 };
 
 function createBaseFsStatRequest(): FsStatRequest {
-  return { path: "" };
+  return { path: "", runAs: "" };
 }
 
 export const FsStatRequest: MessageFns<FsStatRequest> = {
   encode(message: FsStatRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.path !== "") {
       writer.uint32(10).string(message.path);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(18).string(message.runAs);
     }
     return writer;
   },
@@ -6588,6 +6776,14 @@ export const FsStatRequest: MessageFns<FsStatRequest> = {
           message.path = reader.string();
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6598,13 +6794,23 @@ export const FsStatRequest: MessageFns<FsStatRequest> = {
   },
 
   fromJSON(object: any): FsStatRequest {
-    return { path: isSet(object.path) ? globalThis.String(object.path) : "" };
+    return {
+      path: isSet(object.path) ? globalThis.String(object.path) : "",
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
+    };
   },
 
   toJSON(message: FsStatRequest): unknown {
     const obj: any = {};
     if (message.path !== "") {
       obj.path = message.path;
+    }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
     }
     return obj;
   },
@@ -6615,6 +6821,7 @@ export const FsStatRequest: MessageFns<FsStatRequest> = {
   fromPartial<I extends Exact<DeepPartial<FsStatRequest>, I>>(object: I): FsStatRequest {
     const message = createBaseFsStatRequest();
     message.path = object.path ?? "";
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -6698,7 +6905,7 @@ export const FsStatResponse: MessageFns<FsStatResponse> = {
 };
 
 function createBaseFsRemoveRequest(): FsRemoveRequest {
-  return { path: "", recursive: false };
+  return { path: "", recursive: false, runAs: "" };
 }
 
 export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
@@ -6708,6 +6915,9 @@ export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
     }
     if (message.recursive !== false) {
       writer.uint32(16).bool(message.recursive);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(26).string(message.runAs);
     }
     return writer;
   },
@@ -6735,6 +6945,14 @@ export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
           message.recursive = reader.bool();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6748,6 +6966,11 @@ export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
     return {
       path: isSet(object.path) ? globalThis.String(object.path) : "",
       recursive: isSet(object.recursive) ? globalThis.Boolean(object.recursive) : false,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -6759,6 +6982,9 @@ export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
     if (message.recursive !== false) {
       obj.recursive = message.recursive;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -6769,6 +6995,7 @@ export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
     const message = createBaseFsRemoveRequest();
     message.path = object.path ?? "";
     message.recursive = object.recursive ?? false;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -6817,7 +7044,7 @@ export const FsRemoveResponse: MessageFns<FsRemoveResponse> = {
 };
 
 function createBaseGitRequest(): GitRequest {
-  return { op: 0, cwd: "", args: [] };
+  return { op: 0, cwd: "", args: [], runAs: "" };
 }
 
 export const GitRequest: MessageFns<GitRequest> = {
@@ -6830,6 +7057,9 @@ export const GitRequest: MessageFns<GitRequest> = {
     }
     for (const v of message.args) {
       writer.uint32(26).string(v!);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(34).string(message.runAs);
     }
     return writer;
   },
@@ -6865,6 +7095,14 @@ export const GitRequest: MessageFns<GitRequest> = {
           message.args.push(reader.string());
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6879,6 +7117,11 @@ export const GitRequest: MessageFns<GitRequest> = {
       op: isSet(object.op) ? gitOpFromJSON(object.op) : 0,
       cwd: isSet(object.cwd) ? globalThis.String(object.cwd) : "",
       args: globalThis.Array.isArray(object?.args) ? object.args.map((e: any) => globalThis.String(e)) : [],
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -6893,6 +7136,9 @@ export const GitRequest: MessageFns<GitRequest> = {
     if (message.args?.length) {
       obj.args = message.args;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -6904,6 +7150,7 @@ export const GitRequest: MessageFns<GitRequest> = {
     message.op = object.op ?? 0;
     message.cwd = object.cwd ?? "";
     message.args = object.args?.map((e) => e) || [];
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -7255,7 +7502,7 @@ export const GitFileStatus: MessageFns<GitFileStatus> = {
 };
 
 function createBasePtyOpenRequest(): PtyOpenRequest {
-  return { command: [], cwd: "", env: {}, cols: 0, rows: 0, term: "", scopeId: "" };
+  return { command: [], cwd: "", env: {}, cols: 0, rows: 0, term: "", scopeId: "", runAs: "" };
 }
 
 export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
@@ -7280,6 +7527,9 @@ export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
     }
     if (message.scopeId !== "") {
       writer.uint32(58).string(message.scopeId);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(66).string(message.runAs);
     }
     return writer;
   },
@@ -7350,6 +7600,14 @@ export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
           message.scopeId = reader.string();
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7379,6 +7637,11 @@ export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
         ? globalThis.String(object.scopeId)
         : isSet(object.scope_id)
         ? globalThis.String(object.scope_id)
+        : "",
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
         : "",
     };
   },
@@ -7412,6 +7675,9 @@ export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
     if (message.scopeId !== "") {
       obj.scopeId = message.scopeId;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -7435,6 +7701,7 @@ export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
     message.rows = object.rows ?? 0;
     message.term = object.term ?? "";
     message.scopeId = object.scopeId ?? "";
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };
@@ -13433,6 +13700,7 @@ function createBaseFsWriteBegin(): FsWriteBegin {
     contentDigest: "",
     contentSize: undefined,
     expectedAbsent: false,
+    runAs: "",
   };
 }
 
@@ -13458,6 +13726,9 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
     }
     if (message.expectedAbsent !== false) {
       writer.uint32(56).bool(message.expectedAbsent);
+    }
+    if (message.runAs !== "") {
+      writer.uint32(66).string(message.runAs);
     }
     return writer;
   },
@@ -13525,6 +13796,14 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
           message.expectedAbsent = reader.bool();
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.runAs = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -13563,6 +13842,11 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
         : isSet(object.expected_absent)
         ? globalThis.Boolean(object.expected_absent)
         : false,
+      runAs: isSet(object.runAs)
+        ? globalThis.String(object.runAs)
+        : isSet(object.run_as)
+        ? globalThis.String(object.run_as)
+        : "",
     };
   },
 
@@ -13589,6 +13873,9 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
     if (message.expectedAbsent !== false) {
       obj.expectedAbsent = message.expectedAbsent;
     }
+    if (message.runAs !== "") {
+      obj.runAs = message.runAs;
+    }
     return obj;
   },
 
@@ -13604,6 +13891,7 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
     message.contentDigest = object.contentDigest ?? "";
     message.contentSize = object.contentSize ?? undefined;
     message.expectedAbsent = object.expectedAbsent ?? false;
+    message.runAs = object.runAs ?? "";
     return message;
   },
 };

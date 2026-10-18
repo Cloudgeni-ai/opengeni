@@ -39,6 +39,7 @@ import {
   getWorkspaceGrant,
   subjectHasLiveWorkspaceAuthorityInScope,
   requireWorkspace,
+  getWorkspace,
   resolveNamedManagedPersonalWorkspaceGrant,
   type Database,
 } from "@opengeni/db";
@@ -1011,7 +1012,7 @@ export async function requireWorkspaceMemberManagementAuthority(
     if (!canonicalManagedCookieContexts.has(context) || !context.subjectId.startsWith("user:")) {
       throw error;
     }
-    const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+    const workspace = await getWorkspace(deps.db, workspaceId);
     if (!workspace || workspace.kind !== "shared") throw error;
     const organizationRole = context.accountGrants.find(
       (candidate) =>
@@ -1068,7 +1069,7 @@ async function provisionExternalMemberOnFirstUse(
     )
   )
     return false;
-  const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+  const workspace = await getWorkspace(deps.db, workspaceId);
   if (
     !workspace ||
     workspace.kind !== "shared" ||
@@ -1185,7 +1186,7 @@ async function accessGrantAuthorization(
   }
   const organizationKey = accountScopedApiKeyWorkspaceAuthority(context);
   if (organizationKey) {
-    const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+    const workspace = await getWorkspace(deps.db, workspaceId);
     if (!workspace) throw new HTTPException(404, { message: "workspace not found" });
     if (
       workspace.accountId !== organizationKey.accountId ||
@@ -1239,7 +1240,7 @@ async function accessGrantAuthorization(
     };
   }
   if (!grant) {
-    const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+    const workspace = await getWorkspace(deps.db, workspaceId);
     if (!workspace) {
       throw new HTTPException(404, { message: "workspace not found" });
     }

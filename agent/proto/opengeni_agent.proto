@@ -82,6 +82,9 @@ enum ErrorCode {
   // the oversized publish fail silently and the caller time out opaquely.
   // Not retryable — the same op would produce the same oversized reply.
   ERROR_CODE_PAYLOAD_TOO_LARGE = 11;
+  // The request's run_as names no user in the runner's password database.
+  // Not retryable.
+  ERROR_CODE_RUN_AS_UNKNOWN_USER = 12;
 }
 
 // The operating system family the agent runs on.
@@ -210,6 +213,10 @@ message Capabilities {
   // controller of an exact authority scope. Absent/false runners keep the legacy
   // path (a shell + curl command per controller request).
   bool browser_control_http = 17;
+  // The runner honors `run_as` on exec, git, PTY open and file requests: it runs
+  // as root on Linux and switches to the named user per request. False (absent)
+  // runners MUST NOT receive a non-empty run_as.
+  bool run_as = 18;
 }
 
 // The three macOS Privacy & Security grants desktop capture and input need.
@@ -430,6 +437,12 @@ message ExecRequest {
   bytes stdin = 5;
   // Optional hard wall-clock timeout; 0 means no process deadline.
   uint32 timeout_ms = 6;
+  // Run this request as this local user instead of the agent's own account: a
+  // user name, else a decimal uid; it must exist in the password database (else
+  // ERROR_CODE_RUN_AS_UNKNOWN_USER). Empty = the agent's account. Honored only
+  // where Capabilities.run_as is advertised; elsewhere a non-empty value fails
+  // with ERROR_CODE_UNSUPPORTED.
+  string run_as = 7;
 }
 
 message ExecResponse {
@@ -453,6 +466,8 @@ message FsReadRequest {
   // Optional byte offset + length for ranged reads (0 length => to EOF).
   uint64 offset = 2;
   uint64 length = 3;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 4;
 }
 
 message FsReadResponse {
@@ -470,6 +485,8 @@ message FsWriteRequest {
   bool append = 4;
   // POSIX mode for a newly created file (e.g. 0644); 0 => platform default.
   uint32 mode = 5;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 6;
 }
 
 message FsWriteResponse {
@@ -480,6 +497,8 @@ message FsListRequest {
   string path = 1;
   // Recurse into subdirectories.
   bool recursive = 2;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 3;
 }
 
 message FsListResponse {
@@ -509,6 +528,8 @@ message FsMkdirRequest {
   // Create intermediate directories (mkdir -p).
   bool parents = 2;
   uint32 mode = 3;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 4;
 }
 
 message FsMkdirResponse {}
@@ -518,12 +539,16 @@ message FsMoveRequest {
   string to = 2;
   // Overwrite the destination if it exists.
   bool overwrite = 3;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 4;
 }
 
 message FsMoveResponse {}
 
 message FsStatRequest {
   string path = 1;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 2;
 }
 
 message FsStatResponse {
@@ -536,6 +561,8 @@ message FsRemoveRequest {
   string path = 1;
   // Remove directories recursively.
   bool recursive = 2;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 3;
 }
 
 message FsRemoveResponse {}
@@ -553,6 +580,8 @@ message GitRequest {
   string cwd = 2;
   // Free-form args for ops that pass through (e.g. log/diff flags).
   repeated string args = 3;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 4;
 }
 
 enum GitOp {
@@ -619,6 +648,8 @@ message PtyOpenRequest {
   // capability/token refreshes reattach the same terminal while separate sessions
   // on one machine remain isolated.
   string scope_id = 7;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 8;
 }
 
 message PtyOpenResponse {
@@ -1203,6 +1234,8 @@ message FsWriteBegin {
   // Exactly one of expected_absent / expected_base_digest is required.
   // Creation publishes atomically without replacing a concurrently created file.
   bool expected_absent = 7;
+  // Run as this local user (see ExecRequest.run_as).
+  string run_as = 8;
 }
 
 // Start an op (server→runner). IDEMPOTENT by op_id (= ControlRequest.request_id):

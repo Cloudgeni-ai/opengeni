@@ -1144,6 +1144,9 @@ fn append_platform_error(error: PlatformError, diagnostic: &str) -> PlatformErro
             message: format!("{message}; {diagnostic}"),
             retryable,
         },
+        PlatformError::RunAsUnknownUser(message) => {
+            PlatformError::RunAsUnknownUser(format!("{message}; {diagnostic}"))
+        }
     }
 }
 

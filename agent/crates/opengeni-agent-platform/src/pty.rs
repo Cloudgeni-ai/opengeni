@@ -166,11 +166,14 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
         pixel_height: 0,
     };
 
+    let identity = crate::run_as::resolve(&req.run_as)?;
     let pair = NativePtySystem::default()
         .openpty(size)
         .map_err(|e| PlatformError::os(format!("openpty: {e}")))?;
 
-    let argv: Vec<String> = if req.command.is_empty() {
+    let argv: Vec<String> = if let (true, Some(identity)) = (req.command.is_empty(), &identity) {
+        vec![identity.shell.to_string_lossy().into_owned()]
+    } else if req.command.is_empty() {
         default_shell.to_vec()
     } else {
         req.command.clone()
@@ -184,6 +187,11 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
     if !req.cwd.is_empty() {
         cmd.cwd(&req.cwd);
     }
+    if let Some(identity) = &identity {
+        for (k, v) in identity.login_env() {
+            cmd.env(k, v);
+        }
+    }
     for (k, v) in &req.env {
         cmd.env(k, v);
     }
@@ -195,17 +203,29 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
     };
     cmd.env("TERM", term);
 
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| PlatformError::os(format!("pty spawn {}: {e}", argv[0])))?;
+    let slave = pair.slave;
+    let spawn = move || {
+        let child = slave
+            .spawn_command(cmd)
+            .map_err(|e| PlatformError::os(format!("pty spawn {}: {e}", argv[0])));
+        // The slave handle is no longer needed once the child holds it; dropping
+        // it lets the master see EOF when the child exits.
+        drop(slave);
+        child
+    };
+    let child = match &identity {
+        None => spawn()?,
+        Some(identity) => {
+            give_terminal_to(pair.master.as_ref(), identity)?;
+            // Forked from a thread already running as the user, so the shell
+            // never holds the agent's credentials.
+            crate::run_as::on_identity_thread(identity, spawn)?
+        }
+    };
     let child = OwnedChild {
         child: Some(child),
         reservation: crate::current_work_reservation(),
     };
-    // The slave handle is no longer needed once the child holds it; dropping it
-    // lets the master see EOF when the child exits.
-    drop(pair.slave);
 
     let reader = pair
         .master
@@ -222,6 +242,28 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
         reader: Some(reader),
         writer: Some(writer),
     })
+}
+
+/// Makes the user own their terminal device, as a login would, so programs that
+/// reopen it by name (or check its owner) work.
+#[cfg(unix)]
+fn give_terminal_to(
+    master: &(dyn portable_pty::MasterPty + Send),
+    identity: &crate::run_as::RunAsIdentity,
+) -> PlatformResult<()> {
+    let Some(name) = master.tty_name() else {
+        return Ok(());
+    };
+    std::os::unix::fs::chown(&name, Some(identity.uid), Some(identity.gid))
+        .map_err(|e| PlatformError::from_io(&format!("chown {}", name.display()), &e))
+}
+
+#[cfg(not(unix))]
+fn give_terminal_to(
+    _master: &(dyn portable_pty::MasterPty + Send),
+    _identity: &crate::run_as::RunAsIdentity,
+) -> PlatformResult<()> {
+    Ok(())
 }
 
 #[cfg(test)]

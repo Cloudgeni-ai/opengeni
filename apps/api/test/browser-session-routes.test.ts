@@ -1765,6 +1765,42 @@ test("working copy routes carry the browser record's exact authority, and only a
         exactAuthority: true,
         audits: [],
       })),
+      // A lost browser has no active binding. Its working copy is reached
+      // through the generation its last launch retained, as resume reaches it,
+      // with the same exact authority; a loss with no retained copy refuses.
+      {
+        scenario: "lost-inspect",
+        status: 200,
+        calls: ["POST /working-copy/inspection"],
+        exactAuthority: true,
+        audits: [],
+        adoptable: true,
+        explainsExclusions: true,
+        provisioned: 1,
+      },
+      {
+        scenario: "lost-adopt",
+        status: 200,
+        calls: ["POST /working-copy/adoptions"],
+        exactAuthority: true,
+        audits: [
+          "browserSession.working_copy.adoption_requested",
+          "controller",
+          "browserSession.working_copy.adoption_settled",
+        ],
+        phase: "adopted",
+        provisioned: 1,
+      },
+      {
+        scenario: "lost-no-copy",
+        status: 409,
+        calls: [],
+        exactAuthority: true,
+        audits: [],
+        message:
+          "This browser was lost without a working copy that its controller still keeps, so there is nothing to inspect or adopt. Resume it to restore its last saved state.",
+        provisioned: 0,
+      },
     ]);
   } finally {
     if (child.exitCode === null) child.kill();
@@ -1812,6 +1848,7 @@ async function workingCopyRoutesFixture() {
   let calls: string[] = [];
   let audits: string[] = [];
   let exactAuthority = true;
+  let provisioned = 0;
   const tokenGeneration = () => (scenario === "adopt-token-rotated" ? 2 : 1);
   mock.module(resolveFromApi("@opengeni/db"), () => ({
     ...db,
@@ -1823,13 +1860,17 @@ async function workingCopyRoutesFixture() {
       session: {
         id: browserSessionId,
         workspaceId,
-        lifecycle: "active",
+        lifecycle: scenario.startsWith("lost") ? "lost" : "active",
         placement,
-        controller: {
-          controllerId: "opengeni-browserd",
-          controllerGeneration,
-          placementInstanceId: instanceId,
-        },
+        // A lost browser keeps no active binding; its last launch's
+        // generation is retained by the expired resume instead.
+        controller: scenario.startsWith("lost")
+          ? null
+          : {
+              controllerId: "opengeni-browserd",
+              controllerGeneration,
+              placementInstanceId: instanceId,
+            },
         driverId: "opengeni.cdp.v1",
         engine: "chromium",
         headless: true,
@@ -1843,6 +1884,8 @@ async function workingCopyRoutesFixture() {
       activeSandboxId: scenario === "machine-moved" ? randomUUID() : machineId,
     }),
     touchBrowserSessionController: async () => scenario !== "holder-lost",
+    getExpiredBrowserSessionResume: async () =>
+      scenario === "lost-no-copy" ? null : { controllerGeneration, settleable: false },
     terminalizeStaleConnectedInteractionPlacement: async () => ({ sourcePlacementChanged: false }),
     getBrowserPrivateCheckpointAuthority: async () => null,
     recordAuditEvent: async (_db: unknown, event: { action: string }) => {
@@ -1977,6 +2020,27 @@ async function workingCopyRoutesFixture() {
       },
     });
   mock.module(channelHref, () => ({ ...channel, withChannelARead: routed, withChannelA: routed }));
+  // A lost browser's controller is ensured on its machine first, as for
+  // resume; the ensured controller is the same fake controller.
+  const sandboxRuntime = (await import(
+    resolveFromApi("@opengeni/runtime/sandbox")
+  )) as typeof import("@opengeni/runtime/sandbox");
+  mock.module(resolveFromApi("@opengeni/runtime/sandbox"), () => ({
+    ...sandboxRuntime,
+    provisionBrowserControlClient: async (
+      session: never,
+      input: { adminToken: string; nativeAuthority?: never },
+    ) => {
+      provisioned += 1;
+      return {
+        client: new sandboxRuntime.BrowserControlClient(session, {
+          adminToken: input.adminToken,
+          ...(input.nativeAuthority ? { nativeAuthority: input.nativeAuthority } : {}),
+        }),
+        server: { port: server.port, marker: "synthetic" },
+      };
+    },
+  }));
   const { registerBrowserSessionRoutes } = await import(routeHref);
   const app = new Hono();
   app.onError((error, context) =>
@@ -2006,13 +2070,17 @@ async function workingCopyRoutesFixture() {
       "holder-lost",
       "machine-moved",
       "access-revoked",
+      "lost-inspect",
+      "lost-adopt",
+      "lost-no-copy",
     ]) {
       scenario = next;
       calls = [];
       audits = [];
       exactAuthority = true;
+      provisioned = 0;
       const response =
-        next === "inspect"
+        next === "inspect" || next === "lost-inspect" || next === "lost-no-copy"
           ? await app.request(`${base}/inspection`, {
               method: "POST",
               headers: { "content-type": "application/json" },
@@ -2038,16 +2106,24 @@ async function workingCopyRoutesFixture() {
         calls,
         exactAuthority,
         audits: audits.filter(
-          (entry) => entry !== "controller" || next.startsWith("adopt") || next === "revert",
+          (entry) =>
+            entry !== "controller" ||
+            next.startsWith("adopt") ||
+            next === "revert" ||
+            next === "lost-adopt",
         ),
       };
-      if (response.status === 200 && next === "inspect") {
+      if (response.status === 200 && (next === "inspect" || next === "lost-inspect")) {
         result.adoptable = body.adoptable;
         result.explainsExclusions = String(body.explanation).includes(
           "chrome-launch, working-runtime.sqlite-shm",
         );
       } else if (response.status === 200) {
         result.phase = body.adoption?.phase;
+      }
+      if (next.startsWith("lost")) {
+        result.provisioned = provisioned;
+        if (response.status !== 200) result.message = body.message;
       }
       results.push(result);
     }
