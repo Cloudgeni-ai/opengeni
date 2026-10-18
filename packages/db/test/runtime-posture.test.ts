@@ -2444,6 +2444,16 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
   });
 
+  test("current readiness still requires the chat-visible machine access capability", () => {
+    const posture = safePosture();
+    posture.targetRoutines = posture.targetRoutines.filter(
+      (routine) => routine.name !== "get_session_machine_access(uuid, uuid, uuid)",
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "target-schema runtime capability get_session_machine_access(uuid, uuid, uuid) is missing or ambiguous",
+    );
+  });
+
   test("Knowledge capabilities must share their authority-table owner even in public", () => {
     const posture = safePosture();
     const routine = posture.targetRoutines.find(

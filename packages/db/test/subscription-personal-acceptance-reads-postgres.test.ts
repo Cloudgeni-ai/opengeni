@@ -648,11 +648,13 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "subscription plan maintenance inventory is missing",
       "subscription plan Free anniversary helper is missing",
     );
-    // 0805 (private actor visibility) and 0823 (personal machine consents).
+    // 0805 (private actor visibility), 0823 (personal machine consents), and
+    // 0841 (chat-visible machine access explanation) are also held back.
     heldBack.push(
       ...[
         "consent_session_turn_personal_machine(uuid, uuid, uuid, uuid)",
         "get_session_attempt_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, boolean, boolean)",
+        "get_session_machine_access(uuid, uuid, uuid)",
         "session_private_actor_visible_keys()",
       ].map((routine) => `target-schema runtime capability ${routine} is missing or ambiguous`),
       ...[
