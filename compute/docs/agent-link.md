@@ -111,7 +111,15 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
 - The agent registers activity as files `/run/compute/activity/<label>.<pid>`
   holding a decimal count; the guest adds the counts of files whose pid is
   alive to its answer to the host's `activity` question. The guest empties
-  the directory when it boots.
+  the directory when it boots. The agent's file, `agent.<pid>`, counts its
+  running and waiting operations and its streams that carried traffic within
+  the stream silence limit (600 s): anything a viewer sends, on any stream,
+  and what the agent sends on terminal, browser and computer streams. Desktop
+  frames do not count, since the agent captures them at a fixed rate whether
+  or not anything changed; a browser controller that is merely running does
+  not either, since each use of it is a message, which counts on the host.
+- The link file may also hold `activity_dir` and `stream_silence_secs`; the
+  agent refuses any other field.
 
 ## 3. Host and guest
 

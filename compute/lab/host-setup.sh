@@ -17,7 +17,10 @@ set -euo pipefail
 FC_VERSION="${FC_VERSION:-v1.17.0}"
 LAB_DIR="${LAB_DIR:-/lab}"
 ROOTFS_SIZE="${ROOTFS_SIZE:-6G}"
-SWAP_SIZE="${SWAP_SIZE:-256G}"
+# Empty: as large as the host's memory, but never more than a quarter of the
+# space free where it goes, so the lab's disk keeps room for sandboxes and
+# builds (a fixed 256G once filled a 300G disk).
+SWAP_SIZE="${SWAP_SIZE:-}"
 NODE_MAJOR="${NODE_MAJOR:-24}"
 ARCH="$(uname -m)"
 export DEBIAN_FRONTEND=noninteractive
@@ -341,6 +344,13 @@ fi
 log "swap and zswap"
 if ! swapon --show=NAME --noheadings | grep -q "$LAB_DIR/swapfile"; then
   if [ ! -f swapfile ]; then
+    if [ -z "$SWAP_SIZE" ]; then
+      memory_kib="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
+      free_kib="$(df -Pk . | awk 'NR == 2 { print $4 }')"
+      quarter_kib=$((free_kib / 4))
+      SWAP_SIZE="$(( memory_kib < quarter_kib ? memory_kib : quarter_kib ))K"
+    fi
+    log "swap file of $SWAP_SIZE"
     sudo fallocate -l "$SWAP_SIZE" swapfile
     sudo chmod 600 swapfile
     sudo mkswap -q swapfile
