@@ -241,26 +241,88 @@ describe("pending tool registration rollback retries", () => {
     expect(await receipts(input)).toHaveLength(0);
   });
 
-  test("transport failures at transaction admission are not retried", async () => {
-    const { input } = await fixture();
-    for (const code of ["CONNECTION_CLOSED", "ECONNRESET", "EPIPE", "ETIMEDOUT"]) {
+  test("unentered transaction admission retries without registering or admitting an effect twice", async () => {
+    for (const code of [
+      "53300",
+      "57P03",
+      "CONNECTION_CLOSED",
+      "ECONNRESET",
+      "EPIPE",
+      "ETIMEDOUT",
+    ]) {
+      const { input } = await fixture();
       let attempts = 0;
+      let callbacks = 0;
+      let effects = 0;
       const unavailable = new Proxy(client.db, {
         get(target, key, receiver) {
           if (key === "transaction")
-            return async () => {
+            return async (callback: Parameters<typeof target.transaction>[0]) => {
               attempts += 1;
-              throw Object.assign(new Error("transport failure"), { code });
+              if (attempts < 3) {
+                expect(callbacks).toBe(0);
+                expect(await receipts(input)).toHaveLength(0);
+                throw Object.assign(new Error("transport failure"), { code });
+              }
+              return await target.transaction(async (tx) => {
+                callbacks += 1;
+                return await callback(tx);
+              });
             };
           return Reflect.get(target, key, receiver);
         },
       });
-      await expect(registerPendingSessionToolCall(unavailable, input)).rejects.toMatchObject({
+      const result = await registerPendingSessionToolCall(unavailable, input);
+      if (result.accepted && result.registered) effects += 1;
+      expect(result).toEqual({ accepted: true, registered: true });
+      expect(attempts).toBe(3);
+      expect(callbacks).toBe(1);
+      expect(effects).toBe(1);
+      expect(await receipts(input)).toHaveLength(1);
+    }
+  }, 30_000);
+
+  test("lost commit acknowledgement never replays registration or authorizes an effect", async () => {
+    for (const code of ["CONNECTION_CLOSED", "ECONNRESET", "EPIPE", "ETIMEDOUT"]) {
+      const { input } = await fixture();
+      let attempts = 0;
+      let effects = 0;
+      const uncertain = new Proxy(client.db, {
+        get(target, key, receiver) {
+          if (key === "transaction")
+            return async (...args: Parameters<typeof target.transaction>) => {
+              attempts += 1;
+              // Commit the actual receipt, then lose the acknowledgement. A
+              // fake that never calls the callback cannot prove this boundary.
+              await target.transaction(...args);
+              throw Object.assign(new Error("commit acknowledgement lost"), { code });
+            };
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const error = await registerPendingSessionToolCall(uncertain, input).then(
+        (result) => {
+          if (result.accepted && result.registered) effects += 1;
+          return null;
+        },
+        (caught: unknown) => caught,
+      );
+      expect(error).toMatchObject({
         details: { attempts: 1, retryOutcome: "not_retryable", sqlState: null },
+        cause: { stage: "settlement" },
       });
       expect(attempts).toBe(1);
+      expect(await receipts(input)).toHaveLength(1);
+      expect(effects).toBe(0);
+      // A later explicit duplicate acknowledges the existing identity without
+      // claiming another registration or replacing its original receipt.
+      const before = await receipts(input);
+      expect(await registerPendingSessionToolCall(client.db, input)).toEqual({
+        accepted: true,
+        registered: false,
+      });
+      expect(await receipts(input)).toEqual(before);
     }
-    expect(await receipts(input)).toHaveLength(0);
   });
 
   test("compatible reordered content acknowledges a duplicate without replacing origin", async () => {
@@ -304,9 +366,9 @@ describe("pending tool registration rollback retries", () => {
     expect(await receipts(input)).toEqual(before);
   });
 
-  test("transport evidence wins over nested rollback codes", async () => {
-    const { input } = await fixture();
+  test("transport evidence after callback entry wins over nested rollback codes", async () => {
     for (const code of ["40P01", "40001"]) {
+      const { input } = await fixture();
       let attempts = 0;
       const failure = Object.assign(new Error("transport outcome unknown"), {
         code: "ECONNRESET",
@@ -315,8 +377,9 @@ describe("pending tool registration rollback retries", () => {
       const unavailable = new Proxy(client.db, {
         get(target, key, receiver) {
           if (key === "transaction")
-            return async () => {
+            return async (...args: Parameters<typeof target.transaction>) => {
               attempts += 1;
+              await target.transaction(...args);
               throw failure;
             };
           return Reflect.get(target, key, receiver);
@@ -324,14 +387,16 @@ describe("pending tool registration rollback retries", () => {
       });
       await expect(registerPendingSessionToolCall(unavailable, input)).rejects.toMatchObject({
         details: { attempts: 1, retryOutcome: "not_retryable", sqlState: null },
+        cause: { stage: "settlement" },
       });
       expect(attempts).toBe(1);
+      expect(await receipts(input)).toHaveLength(1);
     }
-    expect(await receipts(input)).toHaveLength(0);
   });
 
   test("mixed transport evidence stops after a prior rollback and under error arrays", async () => {
     const { input } = await fixture();
+    await inject(input, 1, "40P01");
     let attempts = 0;
     const failure = Object.assign(new Error("mixed failure"), {
       code: "40001",
@@ -340,9 +405,11 @@ describe("pending tool registration rollback retries", () => {
     const unavailable = new Proxy(client.db, {
       get(target, key, receiver) {
         if (key === "transaction")
-          return async () => {
+          return async (...args: Parameters<typeof target.transaction>) => {
             attempts += 1;
-            if (attempts === 1) throw Object.assign(new Error("rollback"), { code: "40P01" });
+            // The first real transaction rolls back in the fixture trigger.
+            // The second commits, then loses its acknowledgement.
+            await target.transaction(...args);
             throw failure;
           };
         return Reflect.get(target, key, receiver);
@@ -356,10 +423,11 @@ describe("pending tool registration rollback retries", () => {
     });
     const transaction = (error as Error).cause;
     expect(transaction).toBeInstanceOf(DatabaseTransactionError);
-    expect(transaction).toMatchObject({ stage: "admission" });
+    expect(transaction).toMatchObject({ stage: "settlement" });
     expect((transaction as Error).cause).toBe(failure);
     expect(attempts).toBe(2);
-    expect(await receipts(input)).toHaveLength(0);
+    expect(await attemptCount()).toBe(2);
+    expect(await receipts(input)).toHaveLength(1);
   });
 
   test("same identity with different call type or content fails closed", async () => {

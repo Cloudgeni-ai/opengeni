@@ -39518,8 +39518,10 @@ export async function registerPendingSessionToolCall(
       return { transportFailure: error, attempt };
     }
   };
-  // Only PostgreSQL-confirmed rollback is retryable. Re-enter RLS and acquire
-  // the complete attempt fence each time; never include inference or tools.
+  // Only PostgreSQL-confirmed rollback can replay this transaction callback.
+  // withRlsContext separately retries pool admission before callback entry,
+  // where no receipt or external effect could exist yet. Re-enter RLS and
+  // acquire the complete attempt fence each time; never include inference or tools.
   const result = await runIdempotentPersistenceTransaction(
     {
       stage: "pending_tool_registration",
