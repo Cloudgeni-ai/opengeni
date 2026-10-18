@@ -164,7 +164,7 @@ function agentActor(context: AgentSessionCommandContext) {
  */
 async function assertFreshAgentCommandAllowance(
   tx: SessionActivityDatabase,
-  deps: { settings?: Settings },
+  deps: { settings?: Settings; catalogSourceSettings?: Settings },
   context: AgentSessionCommandContext,
   targetSessionId: string,
 ): Promise<void> {
@@ -174,8 +174,13 @@ async function assertFreshAgentCommandAllowance(
   }
   let fundedWithoutCredits = false;
   const frozen = await frozenInitiatorForCommandActor(tx, context.workspaceId, agentActor(context));
-  if (deps.settings) {
-    const { settings } = await resolveWorkspaceCatalogSettings(tx, deps.settings, {
+  // Request adapters may hand over settings already resolved for the caller's
+  // workspace, with synthetic workspace providers overlaid. Resolve the
+  // target's catalog from the unoverlaid source; feeding the overlay back
+  // through deployment validation rejects its reserved provider kinds.
+  const catalogSource = deps.catalogSourceSettings ?? deps.settings;
+  if (catalogSource) {
+    const { settings } = await resolveWorkspaceCatalogSettings(tx, catalogSource, {
       accountId: target.accountId,
       workspaceId: context.workspaceId,
       retainedProductModelId: target.model,
@@ -402,6 +407,7 @@ export async function sendAgentSessionMessage(
   deps: {
     db: Database;
     settings?: Settings;
+    catalogSourceSettings?: Settings;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     sessionAuthorization?: SessionAuthorizationPort | null;
@@ -471,6 +477,7 @@ export async function steerAgentSession(
   deps: {
     db: Database;
     settings?: Settings;
+    catalogSourceSettings?: Settings;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     sessionAuthorization?: SessionAuthorizationPort | null;
