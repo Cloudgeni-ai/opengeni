@@ -73,7 +73,7 @@ if ! go_new_enough; then
   if [ ! -x "$TOOLS/go-$GO_VERSION/bin/go" ]; then
     log "fetching Go $GO_VERSION"
     mkdir -p "$TOOLS"
-    curl -fsSL -o "$work/go.tar.gz" "https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz"
+    curl -fsSL --retry 5 --retry-all-errors -o "$work/go.tar.gz" "https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz"
     echo "$GO_SHA256  $work/go.tar.gz" | sha256sum -c --quiet || fail "Go's checksum does not match"
     rm -rf "$TOOLS/go-$GO_VERSION.part" && mkdir "$TOOLS/go-$GO_VERSION.part"
     tar -xzf "$work/go.tar.gz" -C "$TOOLS/go-$GO_VERSION.part" --strip-components=1
@@ -103,7 +103,7 @@ if [ "$version" != "$ENVD_VERSION" ]; then
 fi
 
 log "bash $BASH_VERSION_PINNED"
-curl -fsSL -o "$work/bash.tar.gz" "https://ftp.gnu.org/gnu/bash/bash-$BASH_VERSION_PINNED.tar.gz"
+curl -fsSL --retry 5 --retry-all-errors -o "$work/bash.tar.gz" "https://ftp.gnu.org/gnu/bash/bash-$BASH_VERSION_PINNED.tar.gz"
 echo "$BASH_SHA256  $work/bash.tar.gz" | sha256sum -c --quiet
 tar -xzf "$work/bash.tar.gz" -C "$work"
 (cd "$work/bash-$BASH_VERSION_PINNED" &&
