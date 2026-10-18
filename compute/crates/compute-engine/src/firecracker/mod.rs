@@ -82,6 +82,14 @@ const REPORTING_ORDER: &str = "page_reporting.page_reporting_order";
 /// pages every free page (order 0), the most it can give back. Firecracker's
 /// ballooning guide gives the same advice: reported ranges should match the
 /// backing page size.
+///
+/// The order is the guest kernel's, set when it boots: a sandbox restored
+/// from a memory image keeps the order it booted with, whatever pages back
+/// it after the restore. A fleet whose hosts all run one memory profile
+/// never sees a difference. Were a guest booted on base pages restored
+/// onto huge pages, its reports smaller than a huge page would free
+/// nothing; one booted on huge pages and restored onto base pages gives
+/// back less than it could.
 fn reporting_order(pages: PageSize) -> u32 {
     (pages.bytes() / PageSize::Base.bytes()).trailing_zeros()
 }
