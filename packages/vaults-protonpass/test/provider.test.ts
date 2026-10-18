@@ -185,14 +185,19 @@ describe("process isolation", () => {
     expect(fake.state().logins).toBe(2);
   });
 
-  test("rejects malformed tokens and refuses ids that could be options", async () => {
+  test("rejects malformed tokens and never passes an id as a bare argument", async () => {
     expect(() => createProtonPassVaultProvider({ token: "has space ::x" })).toThrow(
       VaultProviderError,
     );
     const { fake, provider } = setup();
     const error = await errorOf(provider.readFields(ctx(), "--help", "x", ["@note"]));
     expect(error.code).toBe("provider_not_found");
-    expect(fake.log()).toEqual([]);
+    // Real base64url ids can start with "-"; they only ever travel as `--name=value`.
+    const argvs = fake.log().map((entry) => entry.argv);
+    expect(argvs.some((argv) => argv.includes("--share-id=--help"))).toBe(true);
+    expect(argvs.every((argv) => !argv.includes("--help"))).toBe(true);
+    const spaced = await errorOf(provider.readFields(ctx(), "a b", "x", ["@note"]));
+    expect(spaced.code).toBe("provider_not_found");
   });
 });
 
@@ -618,6 +623,21 @@ describe("writes", () => {
       field_type: "hidden",
       value: "sk_test_x",
     });
+  });
+
+  test("accepts created and existing item ids that start with a dash", async () => {
+    const { provider } = setup((state) => {
+      state.nextItemIds = ["-dashFirst_Id9"];
+    });
+    const note = await provider.writeItem(ctx(), RW, {
+      name: "Dash",
+      type: "note",
+      websites: [],
+      fields: [{ name: "note", kind: "concealed", value: "line 1" }],
+    });
+    expect(note.externalItemId).toBe("-dashFirst_Id9");
+    const [field] = await provider.readFields(ctx(), RW, "-dashFirst_Id9", ["@note"]);
+    expect(field!.material).toMatchObject({ value: "line 1" });
   });
 
   test("refuses updates, unsupported shapes and passkeys without running pass-cli", async () => {

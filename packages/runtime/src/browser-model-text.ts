@@ -336,8 +336,10 @@ export function browserOpenText(output: {
   observation?: BrowserTextObservation | undefined;
   attachedProfile?: AttachedProfileText | undefined;
   otherAttachedProfiles?: readonly AttachedProfileText[] | undefined;
+  notice?: string | undefined;
 }): string {
   const lines = [browserSessionLine(output.session)];
+  if (output.notice) lines.push(output.notice);
   if (output.attachedProfile) {
     lines.push(`Attached Chrome profile: ${attachedProfileText(output.attachedProfile)}`);
   }
