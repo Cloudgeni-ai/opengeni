@@ -75,7 +75,7 @@ async function claimWithCutover(
   const dispositionRead = spyOn(db, "readCodexCutoverDisposition");
   const cutoverRead = spyOn(db, "readSubscriptionProviderCutoverState").mockResolvedValue(cutover);
   let overlayCodexApps: unknown;
-  const overlay = spyOn(capabilities, "settingsWithCodexCredential").mockResolvedValue(settings);
+  const overlay = spyOn(core, "settingsWithModelProviderCredentials").mockResolvedValue(settings);
   const coreApps = spyOn(db, "resolveSubscriptionCoreCodexAppsDesignation").mockResolvedValue({
     connectionId: "core-apps-connection",
     status: "active",
@@ -121,11 +121,6 @@ async function claimWithCutover(
         return settings;
       },
     ),
-    spyOn(capabilities, "settingsWithWorkspaceGatewayCredential").mockResolvedValue(settings),
-    spyOn(capabilities, "settingsWithWorkspaceOpenRouterCredential").mockResolvedValue(settings),
-    spyOn(capabilities, "settingsWithWorkspaceOpperCredential").mockResolvedValue(settings),
-    spyOn(capabilities, "settingsWithOrganizationProviderCredentials").mockResolvedValue(settings),
-    spyOn(db, "loadDirectModelProviderConnection").mockResolvedValue(null),
     spyOn(db, "installOrReadTurnExecutionPolicyForAttempt").mockImplementation(async () => {
       throw stop;
     }),
@@ -154,7 +149,7 @@ async function claimWithCutover(
     workspaceLookups: workspaceLookup.mock.calls.length,
     dispositionReads: dispositionRead.mock.calls.length,
     overlayCodexApps,
-    codexActive: overlay.mock.calls[0]?.[3],
+    codexActive: overlay.mock.calls[0]?.[1].codexSubscriptionActive,
     subscriptionLeaseBusy: context.attempt.subscriptionLeaseBusy,
   };
 }

@@ -274,3 +274,75 @@ one-second saving or proof that all remaining latency is catalog CPU. The exact
 production pool/transaction contribution remains unmeasured. Keep the PR draft
 until the tool-timing change is reviewed, then compare new and existing chats,
 first byte, and first tool readiness on the same canary.
+
+## Follow-up: batch execution provider settings
+
+A later production cohort separated explicit Steer from queued messages. The
+three active Steer handovers took 144–194 ms, while the five explicit Steers
+reached request-start in a median 1,756 ms. Thirty-two immediate existing-chat
+Sends had a median of 1,873 ms; fourteen agent-created first turns had a median
+of 1,833 ms. These are not human new-chat measurements. One existing-chat
+sample included 38 seconds of compaction and remains in the raw cohort.
+
+Six exact Temporal histories showed 4–8 ms activity queue waits and 11–24 ms
+from activity start to the database transaction timestamp. For the three active
+Steers, the claim reached its queued-to-running update after another 33–64 ms;
+209–301 ms remained between that update and the durable `turn.started` event.
+The latter includes the rest of the claim and post-claim reads, not only SQL.
+Aggregate claim histograms mix turn sources and cannot be subtracted from these
+exact intervals to infer pool wait. Current connection counts, fresh round-trip
+probes and coarse event-loop maxima do not retrospectively attribute that wait.
+
+One unnecessary accepted-path cost is directly observable in source and local
+database traces: rebuilding provider settings opens 16–18 serial scoped
+transactions even when no customer provider connections are active. Four reads
+list the same workspace connections. Each transaction repeats admission,
+scope setup and commit. The worker also duplicates the API's overlay sequence.
+
+Read those inputs once in a fresh tenant-scoped transaction, then feed the same
+overlay functions in the same order. Keep the full catalog: compaction, title,
+auxiliary calls and model validation can need providers other than the selected
+one. Preserve the bounded workspace-model queries, connection tie-breaks and
+unchanged per-kind organization-model queries. Decrypt organization keys at
+their original overlay points. Workspace credential resolution, direct-model
+identity checks and selected-model access checks still run live through their
+existing readers. Retired selections still use their existing execution reads.
+The worker now calls the same aggregate function as stateless model calls.
+
+There is no cross-execution cache, speculative credential read, new dispatch
+path, policy bypass, worker hold or resource-control change. Prepared inputs
+record their subscription/key-presence flags, so incompatible derived settings
+fail instead of silently omitting a provider. Multiple invalid configurations
+can now fail in read order rather than the former interleaved read/decrypt
+order; the existing limit and credential errors remain fail-closed.
+
+### Verification and limits
+
+Real-PostgreSQL tests compare the entire settings object, including catalog JSON
+order and synthetic credentials, against the serial path. They cover all five
+provider families, mixed catalogs, retained retired models, disabled subscription
+support, missing encryption keys, direct OpenAI/Azure models, connection
+tie-breaks, revocation after the metadata read and tenant isolation. The empty
+provider case falls from 18 scoped transactions to one. Active credentials and
+selected-model checks legitimately add further transactions.
+
+A local full-stack comparison used ten first-turn/Steer pairs per cohort, a
+separate warm-up pair, a fixed 700 ms synthetic provider delay and no actual
+sandbox tool use. Explicit worker reload markers verified the candidate and both
+serial controls. An earlier run without verified reload is not a comparison.
+Each cell below is median / nearest-rank p90, in milliseconds.
+
+| Measurement | Serial control | Batch | Reverse serial control |
+| --- | ---: | ---: | ---: |
+| Provider settings, twenty observations | 11 / 16 | 4 / 5 | 14 / 24 |
+| First acceptance → request-start | 420 / 466 | 342 / 415 | 661 / 855 |
+| Steer acceptance → request-start | 486 / 589 | 435 / 471 | 707 / 817 |
+
+Provider-settings means were 12 / 4 / 15 ms. The directly supported component
+saving is therefore about 8–11 ms locally. Other phases moved substantially too,
+so the larger whole-turn change is not attributed to batching. This is a small
+structural improvement, not evidence that the production second has disappeared.
+The new `claim_provider_settings` phase makes that slice separately measurable
+after deployment. Production validation must also account for the earlier
+deferred-preparation change; a lean local fixture and a production subscription
+turn with real integrations are not matched controls.
