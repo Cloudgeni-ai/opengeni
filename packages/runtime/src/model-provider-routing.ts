@@ -28,6 +28,7 @@ import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
 import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
+import { modelUsageTokenCountOrNull } from "./usage-telemetry";
 import {
   ResponsesStreamingTerminalError,
   responsesStreamingTerminalError,
@@ -98,14 +99,23 @@ function withOpperReportedCost<T extends { providerData?: Record<string, any> | 
   };
 }
 
-function chatInputTokenDetails(usage: unknown): Record<string, number> | undefined {
+function chatInputTokenDetails(usage: unknown): Record<string, unknown> | undefined {
   const details = (usage as { prompt_tokens_details?: unknown } | undefined)?.prompt_tokens_details;
   // The SDK projects only cached_tokens, dropping cache writes and other input
-  // details. Preserve provider evidence; the shared usage normalizer owns bounded
-  // numeric validation, including diagnostics for malformed provider values.
+  // details. Keep the provider evidence separate from the SDK's numeric schema.
   return details && typeof details === "object" && !Array.isArray(details)
-    ? (details as Record<string, number>)
+    ? (details as Record<string, unknown>)
     : undefined;
+}
+
+function sdkChatInputTokenDetails(details: Record<string, unknown>): Record<string, number> {
+  // Runner validates response_done before our telemetry normalizer sees it.
+  // Missing/null/malformed details must not fail an otherwise successful turn.
+  return Object.fromEntries(
+    Object.entries(details).filter(
+      (entry): entry is [string, number] => modelUsageTokenCountOrNull(entry[1]) !== null,
+    ),
+  );
 }
 
 /** Reject ambiguous completion before the SDK can commit output or execute tools. */
@@ -116,7 +126,8 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
       throw new UnknownModelFinishReasonError();
     }
     const inputTokensDetails = chatInputTokenDetails(response.providerData?.usage);
-    if (inputTokensDetails) response.usage.inputTokensDetails = [inputTokensDetails];
+    if (inputTokensDetails)
+      response.usage.inputTokensDetails = [sdkChatInputTokenDetails(inputTokensDetails)];
     return withOpperReportedCost(
       {
         ...response,
@@ -135,7 +146,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     let reasoning: ChatReasoning | undefined;
     let reasoningDetails: Record<string, unknown>[] | undefined;
     let reportedCostUsd: string | undefined;
-    let inputTokensDetails: Record<string, number> | undefined;
+    let inputTokensDetails: Record<string, unknown> | undefined;
     for await (const event of super.getStreamedResponse(chatRequest(request))) {
       if (event.type === "model") {
         const rawUsage = (event.event as { usage?: unknown } | undefined)?.usage;
@@ -167,7 +178,19 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
               {
                 ...event.response,
                 ...(inputTokensDetails
-                  ? { usage: { ...event.response.usage, inputTokensDetails } }
+                  ? {
+                      usage: {
+                        ...event.response.usage,
+                        inputTokensDetails: sdkChatInputTokenDetails(inputTokensDetails),
+                      },
+                      // Match non-streaming Chat's providerData.usage evidence so
+                      // telemetry retains invalid-field diagnostics and unknowns
+                      // rather than mistaking SDK sanitization for provider zero.
+                      providerData: {
+                        ...event.response.providerData,
+                        usage: { prompt_tokens_details: inputTokensDetails },
+                      },
+                    }
                   : {}),
                 output: withChatReasoning(event.response.output, reasoning, reasoningDetails),
               },

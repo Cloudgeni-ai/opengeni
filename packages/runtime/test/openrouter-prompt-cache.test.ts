@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { ResolvedModelProvider } from "@opengeni/config";
 import type { ModelRequest } from "@openai/agents";
+import { Agent, Runner } from "@openai/agents";
 import { getOrCreateTrace, Usage } from "@openai/agents-core";
 import { modelRequestPolicyForProvider } from "../src/model-provider-request-policy";
 import { OpenGeniChatCompletionsModel } from "../src/model-provider-routing";
 import { ReplayableJsonOpenAI, requestBodyText } from "../src/replayable-json-body";
-import { modelResponseUsageFromResponse } from "../src/run-events";
+import { modelResponseUsageFromResponse, modelResponseUsageFromSdkEvent } from "../src/run-events";
 import { normalizeModelCallUsage } from "../src/usage-telemetry";
 
 const upstream = "anthropic/claude-sonnet-5.5";
@@ -180,6 +181,48 @@ function fixtureClient(
 
 describe("Chat cache usage survives SDK conversion", () => {
   for (const stream of [false, true]) {
+    test(`${stream ? "streamed" : "non-streamed"} actual Runner accepts nullable and malformed provider details`, async () => {
+      for (const details of [
+        { cached_tokens: 5000, cache_write_tokens: 17, audio_tokens: null },
+        { cached_tokens: 0, cache_write_tokens: null },
+        { cached_tokens: 0, cache_write_tokens: "17" },
+        { cached_tokens: null, cache_write_tokens: 0 },
+        { cached_tokens: "5000", cache_write_tokens: -1 },
+        { cached_tokens: 5000, cache_write_tokens: 0.5 },
+        { cached_tokens: 5000, cache_write_tokens: 1_000_000_001 },
+      ]) {
+        const model = new OpenGeniChatCompletionsModel(
+          fixtureClient(stream, details, []),
+          upstream,
+        );
+        const runner = new Runner({ tracingDisabled: true });
+        const agent = new Agent({ name: "Cache fixture", model });
+        let observed: ReturnType<typeof modelResponseUsageFromResponse> = null;
+        if (stream) {
+          const result = await runner.run(agent, "Hello", { stream: true });
+          for await (const event of result)
+            observed = modelResponseUsageFromSdkEvent(event) ?? observed;
+          await result.completed;
+          expect(result.finalOutput).toBe("OK");
+        } else {
+          const result = await runner.run(agent, "Hello");
+          observed = modelResponseUsageFromResponse(result.rawResponses[0]);
+          expect(result.finalOutput).toBe("OK");
+        }
+        expect(observed).not.toBeNull();
+        const actual = normalizeModelCallUsage(observed!.usage);
+        const expected = normalizeModelCallUsage({
+          inputTokens: 5200,
+          outputTokens: 4,
+          totalTokens: 5204,
+          inputTokensDetails: details,
+          outputTokensDetails: { reasoning_tokens: 2 },
+        });
+        expect(actual.telemetry).toEqual(expected.telemetry);
+        expect(actual.rejectedFields).toEqual(expected.rejectedFields);
+      }
+    });
+
     test(`${stream ? "streamed" : "non-streamed"} reads and writes reach model usage and run aggregation`, async () => {
       const seen: any[] = [];
       const model = new OpenGeniChatCompletionsModel(
