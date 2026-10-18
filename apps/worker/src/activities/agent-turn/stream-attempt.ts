@@ -1839,10 +1839,10 @@ export async function runTurnStreamAttempt(
     await eventing.preparedTools?.inputWaitYield?.drainForHandoff(runtimeCancellationSignal);
     if (
       options.requireTerminalModelResponse &&
+      !eventing.preparedTools?.inputWaitYield?.yielded &&
       // A handover to a queued prompt deliberately ends this stream before
       // its first request; it is settled below, not recovered.
       !queuedPromptHandover &&
-      !eventing.preparedTools?.inputWaitYield?.yielded &&
       eventing.stream.interruptions.length === 0 &&
       modelResponseState.responseCount === responseCountBeforeStream
     ) {
