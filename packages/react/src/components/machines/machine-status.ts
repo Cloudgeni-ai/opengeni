@@ -39,6 +39,7 @@ export function isPostponedUpdate(errorCode: string | null | undefined): boolean
 }
 
 const FAILURE_REASON = (t: OpenGeniText): Record<string, string> => ({
+  update_cleanup_unconfirmed: t("machines.machineStatus.previousWorkCleanupUnconfirmed"),
   update_state_unavailable: t("machines.machineStatus.theAgentCouldnTCheck"),
   agent_offline: t("machines.machineStatus.theMachineWasOffline"),
   update_dispatch_rejected: t("machines.machineStatus.theAgentRefusedTheRequest"),

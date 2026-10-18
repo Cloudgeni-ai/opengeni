@@ -571,18 +571,9 @@ struct PendingCommand {
 
 struct ControllerReply {
     bytes: Vec<u8>,
-    reservation: Option<WorkReservation>,
-    settled: bool,
-}
-
-impl Drop for ControllerReply {
-    fn drop(&mut self) {
-        if !self.settled {
-            if let Some(reservation) = &self.reservation {
-                reservation.mark_unsettled();
-            }
-        }
-    }
+    // PendingCommand independently retains physical work through a late result.
+    // An undeliverable reply must not permanently poison update admission.
+    _reservation: Option<WorkReservation>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1265,10 +1256,9 @@ async fn serve_controller(
 ) -> Result<(), BrowserBridgeError> {
     let (responses, mut response_rx) = mpsc::channel::<ControllerReply>(128);
     let writer_task = tokio::spawn(async move {
-        while let Some(mut response) = response_rx.recv().await {
+        while let Some(response) = response_rx.recv().await {
             write_native_frame_bounded(&mut writer, &response.bytes, MAX_RESPONSE_MESSAGE_BYTES)
                 .await?;
-            response.settled = true;
         }
         Ok::<(), BrowserBridgeError>(())
     });
@@ -1294,6 +1284,9 @@ async fn serve_controller(
         // Reserve before spawn/first await. A controller peer's disappearing
         // waiter cannot cancel an accepted extension command or its publisher.
         let reservation = inventory.update_drain.reserve_work(None);
+        if let Some(reservation) = &reservation {
+            reservation.describe(format!("attached-browser request {request_id}"));
+        }
         let accepted = reservation.is_some();
         let reply_reservation = reservation.clone();
         let actual = tokio::spawn(opengeni_agent_platform::with_work_reservation(
@@ -1321,12 +1314,11 @@ async fn serve_controller(
                     let _ = request_responses
                         .send(ControllerReply {
                             bytes,
-                            reservation: reply_reservation,
-                            settled: false,
+                            _reservation: reply_reservation,
                         })
                         .await;
-                } else if let Some(reservation) = reply_reservation {
-                    reservation.mark_unsettled();
+                } else {
+                    tracing::warn!(%request_id, "attached-browser controller reply could not be encoded");
                 }
             },
         ));
@@ -1760,6 +1752,21 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lost_controller_reply_keeps_physical_work_but_does_not_poison_updates() {
+        use crate::uploads::update_drain::{UpdateDrain, UpdateReservation};
+        let drain = std::sync::Arc::new(UpdateDrain::default());
+        let physical = drain.reserve_work(None).unwrap();
+        drop(ControllerReply {
+            bytes: b"reply".to_vec(),
+            _reservation: Some(physical.clone()),
+        });
+        assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
+        assert!(!drain.seal_update("update"));
+        drop(physical);
+        assert!(drain.seal_update("update"));
+    }
+
     use super::*;
     use base64::engine::general_purpose::STANDARD;
     use serde_json::json;

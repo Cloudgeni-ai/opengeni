@@ -59,6 +59,22 @@ function update(overrides: Partial<Update>): Update {
 }
 
 describe("describeAgentRuntime", () => {
+  test("lost cleanup explains the cause and recovery without hiding the retry", () => {
+    for (const errorCode of ["update_cleanup_unconfirmed", "update_state_unavailable"]) {
+      const status = describeAgentRuntime(
+        englishText,
+        runtime({
+          update: update({ errorCode }),
+        }),
+        NOW,
+      );
+      expect(status.note).toContain("agent log");
+      expect(status.note).toContain("active commands");
+      expect(status.note).toContain("restart the agent service");
+      expect(status.action?.kind).toBe("retry");
+      expect(status.note).not.toContain("update_cleanup_unconfirmed");
+    }
+  });
   test("waiting for idle promises the update truthfully, with no action", () => {
     const status = describeAgentRuntime(
       englishText,

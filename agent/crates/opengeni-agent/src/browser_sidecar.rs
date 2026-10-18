@@ -186,7 +186,9 @@ impl BrowserSidecarManager {
             }
         }
         let _ = process_group;
-        self.update_drain.mark_unsettled();
+        self.update_drain.mark_unsettled(format!(
+            "browser controller {process_group:?} exited without observable process-group cleanup"
+        ));
     }
 
     /// Whether nothing remains of any controller that ended uncleanly.
@@ -210,7 +212,6 @@ impl BrowserSidecarManager {
                 Ok(None) => {}
                 Ok(Some(_)) => exited.push(scope_id.clone()),
                 Err(_) => {
-                    self.update_drain.mark_unsettled();
                     return Err(PlatformError::os(
                         "browser controller process state unavailable",
                     ));
@@ -566,7 +567,6 @@ impl BrowserControlBackend for BrowserSidecarManager {
             let live = existing
                 .try_wait_logged()
                 .map_err(|error| {
-                    self.update_drain.mark_unsettled();
                     PlatformError::from_io("inspect browser controller sidecar", &error)
                 })?
                 .is_none();
@@ -630,10 +630,7 @@ impl BrowserControlBackend for BrowserSidecarManager {
         }
         if sidecar
             .try_wait_logged()
-            .map_err(|error| {
-                self.update_drain.mark_unsettled();
-                PlatformError::from_io("inspect browser controller sidecar", &error)
-            })?
+            .map_err(|error| PlatformError::from_io("inspect browser controller sidecar", &error))?
             .is_some()
         {
             sidecar.stderr_task.abort();

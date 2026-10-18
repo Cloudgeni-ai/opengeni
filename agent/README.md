@@ -117,6 +117,10 @@ pages or guarantee graceful completion for a permanently stuck controller.
   connection, operation, and epoch may continue or cancel. Uploads retain their
   existing reconnect behavior and have no invented expiry. Completion, failure,
   cancellation, or removal of the owning link releases the upload reservation.
+  Failed command setup and cancelled commands retain cleanup until their children
+  exit. Transient exit-observation failures recover per producer rather than
+  permanently disabling updates. Unconfirmed cleanup reports its producer and
+  recovery steps in the response and agent log; no blanket reset bypasses it.
 - **Background service** — `opengeni-agent start|stop|status` is the normal simple
   lifecycle; `service install|uninstall|...` is the advanced surface. It uses a
   systemd user/system unit, a macOS LaunchAgent, or a per-user Windows logon task

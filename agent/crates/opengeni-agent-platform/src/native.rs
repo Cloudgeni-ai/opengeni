@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use opengeni_agent_proto::v1;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::cgroup::{OpCgroupConfig, OpCgroups};
@@ -345,50 +346,44 @@ impl ExecProcessGroup {
         if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
             cgroups.configure_process_cgroup_before_exec(prepared, &mut anchor_command)?;
         }
-        let mut anchor = anchor_command.spawn()?;
-        let Some(runner_lease) = anchor.stdin.take() else {
-            mark_unsettled_work();
-            let _ = anchor.start_kill();
-            return Err(std::io::Error::other(
-                "exec anchor did not expose its runner-death lease",
-            ));
+        let anchor = anchor_command.spawn()?;
+        let pgid = i32::try_from(anchor.id().expect("new anchor must have a pid"))
+            .expect("a Unix PID fits pid_t");
+        // Own cleanup as soon as the first child exists, including every later
+        // setup/spawn error. Signaling a child is not an exit receipt.
+        let mut group = Self {
+            anchor: crate::exec_handover::UnixProc::Owned(anchor),
+            runner_lease: None,
+            child: crate::exec_handover::UnixProc::released(),
+            pgid,
+            running: true,
+            reservation: crate::current_work_reservation(),
+            wait_killed_group: false,
+            background_children_stopped: false,
+            termination_requested: false,
+            op_cgroup: None,
         };
-        let runner_lease = match runner_lease.into_owned_fd() {
-            Ok(lease) => lease,
-            Err(error) => {
-                mark_unsettled_work();
-                let _ = anchor.start_kill();
-                return Err(error);
-            }
+        let crate::exec_handover::UnixProc::Owned(anchor) = &mut group.anchor else {
+            unreachable!("new anchor is owned");
         };
-        let pgid =
-            i32::try_from(anchor.id().expect("new anchor must have a pid")).map_err(|_| {
-                mark_unsettled_work();
-                std::io::Error::other("exec anchor PID exceeds i32")
-            })?;
+        group.runner_lease = Some(
+            anchor
+                .stdin
+                .take()
+                .ok_or_else(|| {
+                    std::io::Error::other("exec anchor did not expose its runner-death lease")
+                })?
+                .into_owned_fd()?,
+        );
 
         command.process_group(pgid);
         #[cfg(target_os = "linux")]
         let child_oom_score = crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut command);
         #[cfg(target_os = "linux")]
         if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
-            if let Err(error) = cgroups.configure_process_cgroup_before_exec(prepared, &mut command)
-            {
-                mark_unsettled_work();
-                let _ = terminate_unix_process_group(pgid);
-                let _ = anchor.start_kill();
-                return Err(error);
-            }
+            cgroups.configure_process_cgroup_before_exec(prepared, &mut command)?;
         }
-        let child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                mark_unsettled_work();
-                let _ = terminate_unix_process_group(pgid);
-                let _ = anchor.start_kill();
-                return Err(error);
-            }
-        };
+        group.child = crate::exec_handover::UnixProc::Owned(command.spawn()?);
 
         // Give this child (and its inheriting descendants) the smallest higher
         // global OOM victim bias when the kernel ABI can represent one. A
@@ -396,7 +391,7 @@ impl ExecProcessGroup {
         // independent of, and composing with, the per-op cgroup below (which
         // bounds systemd-oomd's scope).
         #[cfg(target_os = "linux")]
-        if let Some(child_pid) = child.id() {
+        if let Some(child_pid) = group.child.id() {
             crate::cgroup::raise_exec_oom_score_adj(child_pid, child_oom_score);
         }
 
@@ -406,39 +401,27 @@ impl ExecProcessGroup {
         // returns an error. This is a no-op when isolation is unavailable/off Linux.
         #[cfg(target_os = "linux")]
         let op_cgroup = if let (Some(cg), Some(prepared)) = (cgroups, prepared_op) {
-            let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
-            match cg.place_process_group(pgid, &pids, prepared) {
-                Ok(handle) => Some(handle),
-                Err(error) => {
-                    mark_unsettled_work();
-                    let _ = terminate_unix_process_group(pgid);
-                    let _ = anchor.start_kill();
-                    return Err(error);
-                }
-            }
+            let pids: Vec<u32> = [group.anchor.id(), group.child.id()]
+                .into_iter()
+                .flatten()
+                .collect();
+            Some(cg.place_process_group(pgid, &pids, prepared)?)
         } else {
             None
         };
         #[cfg(not(target_os = "linux"))]
         let op_cgroup = if let Some(cg) = cgroups {
-            let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
+            let pids: Vec<u32> = [group.anchor.id(), group.child.id()]
+                .into_iter()
+                .flatten()
+                .collect();
             cg.place_op(&pids, requested_policy)?
         } else {
             None
         };
 
-        Ok(Self {
-            anchor: crate::exec_handover::UnixProc::Owned(anchor),
-            runner_lease: Some(runner_lease),
-            child: crate::exec_handover::UnixProc::Owned(child),
-            pgid,
-            running: true,
-            reservation: crate::current_work_reservation(),
-            wait_killed_group: false,
-            background_children_stopped: false,
-            termination_requested: false,
-            op_cgroup,
-        })
+        group.op_cgroup = op_cgroup;
+        Ok(group)
     }
 
     /// Removes the child's stdio handles for the streaming [`ContainedExec`]; after
@@ -501,6 +484,11 @@ impl ExecProcessGroup {
             self.background_children_stopped = had_children;
             self.wait_killed_group = true;
         }
+        // A successful signal (including macOS EPERM for a zombie) is not a
+        // completed tree. Keep the anchor unreaped while observing descendants.
+        while crate::process_cleanup::group_has_live_children(self.pgid)? {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         // Reap the fence only after the group kill. Tokio wait is cancel-safe; if
         // this future is dropped after reaping, anchor.id() is None and Drop will
         // not signal the now-recyclable numeric PGID.
@@ -520,13 +508,10 @@ impl ExecProcessGroup {
 #[cfg(unix)]
 impl Drop for ExecProcessGroup {
     fn drop(&mut self) {
-        if self.running {
-            if let Some(reservation) = &self.reservation {
-                // Drop signals cleanup but cannot await its exit receipt.
-                reservation.mark_unsettled();
-            }
+        if !self.running {
+            return;
         }
-        if self.running && self.anchor.id().is_some() {
+        if self.anchor.id().is_some() {
             if let Err(error) = self.terminate() {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!(
@@ -537,12 +522,39 @@ impl Drop for ExecProcessGroup {
                 }
             }
         }
-        // A cancelled/timed-out/task-aborted exec drops here with its op leaf still
-        // present. Dropping the handle schedules event-driven removal after the
-        // group becomes unpopulated. On the normal path the handle was already
-        // taken and torn down in wait(), so this is a no-op there.
-        if let Some(handle) = self.op_cgroup.take() {
-            drop(handle);
+        let reservation = self.reservation.take();
+        let mut cleanup = Self {
+            anchor: std::mem::replace(&mut self.anchor, crate::exec_handover::UnixProc::released()),
+            child: std::mem::replace(&mut self.child, crate::exec_handover::UnixProc::released()),
+            runner_lease: self.runner_lease.take(),
+            pgid: self.pgid,
+            // This cleanup owner must not recursively schedule itself on drop.
+            running: false,
+            reservation: None,
+            wait_killed_group: self.wait_killed_group,
+            background_children_stopped: self.background_children_stopped,
+            termination_requested: true,
+            op_cgroup: self.op_cgroup.take(),
+        };
+        self.running = false;
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("exec process group {}", self.pgid),
+        );
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(crate::with_work_reservation(reservation, async move {
+                let mut witness = witness;
+                loop {
+                    match cleanup.wait().await {
+                        Ok(_) => {
+                            witness.settle();
+                            break;
+                        }
+                        Err(error) => witness.failed(&error),
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }));
         }
     }
 }
@@ -669,7 +681,6 @@ fn terminate_unix_process_group(pgid: i32) -> std::io::Result<()> {
             // A successful command result does not establish that every member
             // exited. Keep ordinary exec behavior, but refuse an update whose
             // process-tree cleanup could not be proved.
-            mark_unsettled_work();
             tracing::debug!(
                 group_id = pgid,
                 "group kill reported EPERM (unsignalable member); owned members were signaled"
@@ -705,7 +716,26 @@ impl ExecProcessGroup {
             .spawn()?;
         if let Err(error) = job.assign_and_resume(child.id().expect("new child has a pid")) {
             let _ = child.start_kill();
-            mark_unsettled_work();
+            let reservation = crate::current_work_reservation();
+            let witness = crate::work_scope::CleanupWitness::new(
+                reservation.clone(),
+                format!("Windows suspended child {:?}", child.id()),
+            );
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(crate::with_work_reservation(reservation, async move {
+                    let mut witness = witness;
+                    loop {
+                        match child.wait().await {
+                            Ok(_) => {
+                                witness.settle();
+                                break;
+                            }
+                            Err(error) => witness.failed(&error),
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }));
+            }
             return Err(error);
         }
         Ok(Self {
@@ -762,9 +792,6 @@ impl Drop for ExecProcessGroup {
         if !self.running {
             return;
         }
-        if let Some(reservation) = &self.reservation {
-            reservation.mark_unsettled();
-        }
         let group_id = self.child.id();
         if let Err(error) = self.job.terminate() {
             if !matches!(
@@ -774,13 +801,27 @@ impl Drop for ExecProcessGroup {
                 tracing::warn!(?group_id, %error, "failed to terminate cancelled exec process group");
             }
         }
-    }
-}
-
-#[cfg(any(unix, windows))]
-fn mark_unsettled_work() {
-    if let Some(reservation) = crate::current_work_reservation() {
-        reservation.mark_unsettled();
+        let job = self.job.clone();
+        let reservation = self.reservation.take();
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("Windows exec job for {group_id:?}"),
+        );
+        let _ = std::thread::Builder::new()
+            .name("exec-job-cleanup".into())
+            .spawn(move || {
+                let mut witness = witness;
+                loop {
+                    match job.wait_empty() {
+                        Ok(()) => {
+                            witness.settle();
+                            break;
+                        }
+                        Err(error) => witness.failed(&error),
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            });
     }
 }
 
@@ -2103,6 +2144,72 @@ mod tests {
             .await
             .expect("exec external PATH fixture");
         assert_eq!(&resp.stdout[..], b"external-program");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_spawn_does_not_permanently_disable_updates() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        let drain = Arc::new(UpdateDrain::default());
+        let (platform, _dir) = rooted();
+        crate::with_work_reservation(Some(drain.reserve_work(None).unwrap()), async {
+            let error = platform
+                .exec(&ExecRequest {
+                    command: vec!["opengeni-command-that-does-not-exist".into()],
+                    shell: false,
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(error, PlatformError::NotFound(_)));
+        })
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if drain.snapshot().is_some_and(|state| state.routed == 0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("failed spawn cleanup must settle without restarting the agent");
+        assert_eq!(
+            drain.reserve_update("after-failed-spawn"),
+            UpdateReservation::Started
+        );
+        assert!(drain.seal_update("after-failed-spawn"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropped_exec_retains_cleanup_until_updates_can_safely_resume() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        let drain = Arc::new(UpdateDrain::default());
+        let work = drain.reserve_work(None).unwrap();
+        work.mark_handover();
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 30"]);
+        let group = crate::with_work_reservation_sync(Some(work), || {
+            spawn_contained(command, None).unwrap()
+        });
+        drop(group);
+        assert_eq!(
+            drain.reserve_update("after-drop"),
+            UpdateReservation::Started
+        );
+        assert!(!drain.seal_update_with_handover("after-drop"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if drain.snapshot().is_some_and(|state| state.routed == 0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("owned cancellation cleanup must settle");
+        assert!(drain.seal_update_with_handover("after-drop"));
     }
 
     #[cfg(unix)]

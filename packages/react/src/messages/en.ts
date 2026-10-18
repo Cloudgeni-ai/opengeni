@@ -1508,7 +1508,9 @@ export const englishMessages = {
   "machines.machineStatus.sendAgain": "Send again",
   "machines.machineStatus.sendingTheUpdateToTarget": "Sending the update to {target}…",
   "machines.machineStatus.theAgentCouldnTCheck":
-    "the agent couldn't check whether the machine was idle",
+    "the agent couldn't confirm whether previous work has finished. Check the agent log and try again. If this persists, finish active commands, restart the agent service, then retry the update",
+  "machines.machineStatus.previousWorkCleanupUnconfirmed":
+    "the agent couldn't confirm cleanup of earlier work. The agent log identifies the affected command or helper. Try again after cleanup; if it cannot recover, finish active commands and restart the agent service before retrying",
   "machines.machineStatus.theAgentHasnTConfirmed":
     "The agent hasn't confirmed the update to {target}",
   "machines.machineStatus.theAgentRefusedTheRequest": "the agent refused the request",
