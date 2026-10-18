@@ -29,7 +29,10 @@ every 5 s while the session is open, asleep or not. A sleeping sandbox stays
 reachable; a message to it makes the host wake it.
 
 Nothing in Opengeni may message a compute agent on a timer: every message
-wakes the sandbox. Liveness comes from the gateway's session and claim.
+wakes the sandbox. Liveness comes from the gateway's session and claim. A
+background command on a compute sandbox settles from the agent's pushed
+completion; the reconciler claims it only after that push or once it is
+retired (connection replaced, enrollment revoked), never to poll it (0841).
 
 ## Lifecycle
 
