@@ -780,6 +780,8 @@ pub struct Supervisor<P: Platform> {
     /// Process-global update admission fence + idempotency key. One binary backs
     /// every workspace link, so concurrent per-link updates cannot be independent.
     update_drain: Arc<UpdateDrain>,
+    /// Upload requests being served and when the last one began or ended.
+    upload_activity: Arc<UploadActivity>,
     /// Keep exact-scope receipts even if a credential file temporarily disappears.
     /// Re-adding that same process subject must never re-admit an old delivery.
     reply_journals: std::sync::Mutex<HashMap<ReplyScope, ReplyJournal>>,
@@ -793,6 +795,52 @@ pub struct Supervisor<P: Platform> {
 
 type ReplyScope = (Option<String>, String, String);
 type ReplyJournal = Arc<std::sync::Mutex<crate::rpc_replay::Registry>>;
+
+/// What the agent counts of its uploads as in use: every upload request
+/// being served, and the accepted transactions while their clients keep
+/// sending. An abandoned transaction stops counting once uploads have been
+/// silent for the window, so it cannot keep its sandbox awake for ever.
+#[derive(Default)]
+struct UploadActivity {
+    serving: std::sync::atomic::AtomicUsize,
+    last: std::sync::Mutex<Option<Instant>>,
+}
+
+impl UploadActivity {
+    /// Counts one upload request from its admission until it is served.
+    fn serve(self: &Arc<Self>) -> ServingUpload {
+        self.serving.fetch_add(1, Ordering::AcqRel);
+        self.touch();
+        ServingUpload(self.clone())
+    }
+
+    fn touch(&self) {
+        *self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
+    }
+
+    /// The uploads in use at `now`, given how many transactions are accepted.
+    fn in_use_at(&self, now: Instant, accepted: usize, silence: Duration) -> usize {
+        let recent = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|at| now.saturating_duration_since(at) <= silence);
+        self.serving.load(Ordering::Acquire) + if recent { accepted } else { 0 }
+    }
+}
+
+/// One upload request being served; its end also counts as upload traffic.
+struct ServingUpload(Arc<UploadActivity>);
+
+impl Drop for ServingUpload {
+    fn drop(&mut self) {
+        self.0.touch();
+        self.0.serving.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 impl<P: Platform + 'static> Supervisor<P> {
     /// Builds a supervisor over a platform + persisted credentials. The op
@@ -838,6 +886,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             shutdown: ShutdownSignal::default(),
             reconnect: ReconnectSignal::default(),
             update_drain: Arc::new(UpdateDrain::default()),
+            upload_activity: Arc::default(),
             reply_journals: std::sync::Mutex::new(HashMap::new()),
             frame_lanes: Arc::new(std::sync::Mutex::new(FrameLanes::default())),
             #[cfg(unix)]
@@ -918,15 +967,25 @@ impl<P: Platform + 'static> Supervisor<P> {
     }
 
     /// How much host work is running or waiting to run: what the agent reports
-    /// as in use in a fabric sandbox.
-    pub fn work_in_progress(&self) -> impl Fn() -> usize + Send + Sync + 'static {
+    /// as in use in a fabric sandbox. That is admitted engine work, every
+    /// upload request being served, and accepted upload transactions while
+    /// their clients keep sending within `silence` (a sleep between chunks
+    /// would reconnect the agent and fence the transaction).
+    pub fn work_in_progress(
+        &self,
+        silence: Duration,
+    ) -> impl Fn() -> usize + Send + Sync + 'static {
         let engine = self.engine.clone();
+        let drain = self.update_drain.clone();
+        let uploads = self.upload_activity.clone();
         move || {
             let admission = engine.admission_snapshot();
+            let accepted = drain.snapshot().map_or(0, |snapshot| snapshot.uploads);
             admission.light_running
                 + admission.light_queued
                 + admission.heavy_running
                 + admission.heavy_queued
+                + uploads.in_use_at(Instant::now(), accepted, silence)
         }
     }
 
@@ -1203,11 +1262,10 @@ impl<P: Platform + 'static> Supervisor<P> {
         reconnect: &mut tokio::sync::watch::Receiver<u64>,
     ) -> ConnectionOutcome {
         // The dial has no client yet, so a shutdown here just exits (nothing to
-        // announce) — but race it so a hung/slow dial cannot delay a clean stop.
-        let connect = tokio::select! {
-            biased;
-            () = self.link_stop_notified(link) => return ConnectionOutcome::CleanShutdown,
-            result = self.connect(link) => result,
+        // announce).
+        let connect = match self.dial(link, reconnect).await {
+            Ok(result) => result,
+            Err(outcome) => return outcome,
         };
         let ConnectedNats {
             client,
@@ -1284,9 +1342,9 @@ impl<P: Platform + 'static> Supervisor<P> {
         let ConnectedNats {
             client: bulk_client,
             transport_lost: bulk_transport_lost,
-        } = match self.connect(link).await {
+        } = match self.dial_bulk(link, &client, reconnect).await {
             Ok(connection) => connection,
-            Err(e) => return ConnectionOutcome::Disconnected(format!("bulk dial failed: {e}")),
+            Err(outcome) => return outcome,
         };
         let (bulk_tx, bulk_rx) =
             tokio::sync::mpsc::channel::<(String, Vec<u8>)>(BULK_CHANNEL_DEPTH);
@@ -1595,9 +1653,11 @@ impl<P: Platform + 'static> Supervisor<P> {
             let client = client.clone();
             let reply_reservation = reservation.expect("upload reservation");
             let worker_reservation = reply_reservation.clone();
+            let serving = self.upload_activity.serve();
             spawn_admitted_rpc(rpc_tasks, reply_reservation, async move {
                 // A blocking filesystem call outlives cancellation of its reply task.
                 let response = opengeni_agent_platform::spawn_blocking_reserved(move || {
+                    let _serving = serving;
                     uploads.lock().expect("upload registry").serve_reserved(
                         platform.as_ref(),
                         &request,
@@ -2235,6 +2295,44 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// as a connect error → [`SupervisorError::Connect`], which the supervise loop
     /// treats as a transient disconnect and backs off + retries with the SAME
     /// (possibly rotated, on re-enroll) bearer — never a panic.
+    /// Dials one connection unless the link stops or a reconnect is asked
+    /// for first. A server that accepts the socket but never sends `INFO`
+    /// holds a dial indefinitely, so neither waits behind one; a reconnect
+    /// abandons the dial and the link dials afresh at once.
+    async fn dial(
+        &self,
+        link: &WorkspaceLink<P>,
+        reconnect: &mut tokio::sync::watch::Receiver<u64>,
+    ) -> Result<Result<ConnectedNats, SupervisorError>, ConnectionOutcome> {
+        tokio::select! {
+            biased;
+            () = self.link_stop_notified(link) => Err(ConnectionOutcome::CleanShutdown),
+            Ok(()) = reconnect.changed() => Err(ConnectionOutcome::Reconnect),
+            result = self.connect(link) => Ok(result),
+        }
+    }
+
+    /// Dials a generation's bulk connection after its hello is out, so a
+    /// stop during the dial is announced like any other.
+    async fn dial_bulk(
+        &self,
+        link: &WorkspaceLink<P>,
+        control: &async_nats::Client,
+        reconnect: &mut tokio::sync::watch::Receiver<u64>,
+    ) -> Result<ConnectedNats, ConnectionOutcome> {
+        match self.dial(link, reconnect).await {
+            Ok(Ok(connection)) => Ok(connection),
+            Ok(Err(e)) => Err(ConnectionOutcome::Disconnected(format!(
+                "bulk dial failed: {e}"
+            ))),
+            Err(ConnectionOutcome::CleanShutdown) => {
+                self.announce_going_offline(link, control).await;
+                Err(ConnectionOutcome::CleanShutdown)
+            }
+            Err(outcome) => Err(outcome),
+        }
+    }
+
     async fn connect(&self, link: &WorkspaceLink<P>) -> Result<ConnectedNats, SupervisorError> {
         // A fabric agent dials its own host, which authenticates the sandbox
         // on its link; it presents no credential.
@@ -3027,6 +3125,74 @@ mod tests {
         assert!(messages.next().await.is_none());
         let mut messages = rpc_messages(futures::stream::pending(), futures::stream::empty());
         assert!(messages.next().await.is_none());
+    }
+
+    #[test]
+    fn uploads_count_while_served_and_while_their_clients_keep_sending() {
+        let activity = Arc::new(UploadActivity::default());
+        let silence = Duration::from_secs(30);
+        assert_eq!(
+            activity.in_use_at(Instant::now(), 1, silence),
+            0,
+            "no upload traffic yet"
+        );
+        let serving = activity.serve();
+        // A request being served counts however long it takes.
+        assert_eq!(
+            activity.in_use_at(Instant::now() + silence * 4, 0, silence),
+            1
+        );
+        drop(serving);
+        let ended = Instant::now();
+        assert_eq!(activity.in_use_at(ended, 0, silence), 0);
+        assert_eq!(
+            activity.in_use_at(ended, 2, silence),
+            2,
+            "accepted transactions count while their clients keep sending"
+        );
+        assert_eq!(
+            activity.in_use_at(ended + silence * 2, 2, silence),
+            0,
+            "an abandoned transaction stops counting after the silence"
+        );
+    }
+
+    /// An accepted upload transaction is work in progress between its
+    /// requests, and stops being so once its client goes silent.
+    #[tokio::test]
+    async fn an_accepted_upload_is_work_in_progress_while_its_client_sends() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let definition = SupervisorLink::new(
+            "upload-activity",
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            it::test_credentials("nats://127.0.0.1:9"),
+        );
+        let supervisor = Supervisor::new_links(&[definition], "0.0.0");
+        let work = supervisor.work_in_progress(Duration::from_secs(30));
+        let silent = supervisor.work_in_progress(Duration::ZERO);
+        assert_eq!(work(), 0);
+
+        let begin = supervisor
+            .update_drain
+            .reserve_work(Some(crate::uploads::update_drain::UploadIdentity {
+                connection: "upload-activity".into(),
+                operation: "fsw-activity".into(),
+                epoch: 1,
+            }))
+            .expect("admitted");
+        let accepted = begin.retain_upload();
+        drop(supervisor.upload_activity.serve());
+        drop(begin);
+        assert_eq!(
+            work(),
+            1,
+            "the accepted upload is in use between its requests"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(silent(), 0, "a silent upload is not in use");
+        drop(accepted);
+        assert_eq!(work(), 0, "a settled upload is not in use");
     }
 
     /// A real async-nats client over TCP with its actual writer backpressured.
@@ -5219,6 +5385,99 @@ mod tests {
             .expect("clean supervisor result");
     }
 
+    /// A dial the server never answers (it accepts the socket but sends no
+    /// `INFO`, as a host restored under its agent may) gives way to a
+    /// reconnect, for the control and the bulk connection alike, and a stop
+    /// during the bulk dial is still announced.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reconnect_abandons_a_dial_the_server_never_answers() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!("SKIP a_reconnect_abandons_a_dial_the_server_never_answers: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let upstream = format!("127.0.0.1:{port}");
+        let host =
+            it::connect_with_retry(&format!("nats://{upstream}"), Duration::from_secs(5)).await;
+        let mut gate = it::SilentGate::start(upstream).await;
+
+        let mut credentials = it::test_credentials(&format!("nats://{}", gate.addr));
+        credentials.nats_bearer = String::new();
+        let definition = SupervisorLink::new(
+            "fabric-stalled-dial-test",
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
+        .with_fabric(FabricLink {
+            relay: RelayCredential::pending(),
+        });
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let mut hellos = host
+            .subscribe(link.hello_subject())
+            .await
+            .expect("subscribe hello");
+        let mut events = host
+            .subscribe(link.events_subject())
+            .await
+            .expect("subscribe events");
+        host.flush().await.expect("flush");
+
+        let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
+        let shutdown = supervisor.shutdown_handle();
+        let reconnect = supervisor.reconnect_handle();
+        let run = tokio::spawn(async move { supervisor.run().await });
+
+        // The control dial waits on a server that never speaks.
+        gate.accepted().await;
+        let asked = Instant::now();
+        reconnect.request();
+        gate.accepted().await;
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "control dial abandoned after {:?}",
+            asked.elapsed()
+        );
+
+        // The control connection gets through; the bulk dial is held.
+        gate.forward(1);
+        reconnect.request();
+        gate.accepted().await;
+        let _ = it::next_hello(&mut hellos).await;
+        gate.accepted().await;
+        gate.forward(1);
+        let asked = Instant::now();
+        reconnect.request();
+        gate.accepted().await;
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "bulk dial abandoned after {:?}",
+            asked.elapsed()
+        );
+        let _ = it::next_hello(&mut hellos).await;
+        gate.accepted().await;
+
+        // A stop during the held bulk dial follows a hello, so it is
+        // announced, and the run ends.
+        shutdown.request();
+        assert!(
+            it::wait_for_event(&mut events, Duration::from_secs(5), |e| matches!(
+                e.event,
+                Some(Event::GoingOffline(_))
+            ))
+            .await,
+            "a stop during the bulk dial must publish GoingOffline"
+        );
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("supervisor stops")
+            .expect("run task")
+            .expect("clean supervisor result");
+    }
+
     /// The op-stream wire round trip against a REAL nats-server + real
     /// supervisor: OpStart over rpc → OpFrames on the op subject (via the bulk
     /// connection) → cumulative + final OpAck on the ack subject → OpQuery.
@@ -6420,6 +6679,7 @@ mod tests {
     mod it {
         use std::path::{Path, PathBuf};
         use std::process::{Child, Command, Stdio};
+        use std::sync::{Arc, Mutex};
         use std::time::{Duration, Instant};
 
         use futures::StreamExt as _;
@@ -6429,8 +6689,20 @@ mod tests {
         use crate::config::StoredCredentials;
 
         /// Locates a `nats-server` binary on `$PATH`, else scans `/nix/store`
-        /// (this project's dev/CI hosts are NixOS). `None` → the caller skips.
+        /// (this project's dev/CI hosts are NixOS). `None` → the caller skips,
+        /// except where `OPENGENI_AGENT_REQUIRE_NATS=1` (CI's Linux leg): there
+        /// a missing server fails the test.
         pub fn find_nats_server() -> Option<PathBuf> {
+            let found = search_nats_server();
+            assert!(
+                found.is_some()
+                    || std::env::var("OPENGENI_AGENT_REQUIRE_NATS").as_deref() != Ok("1"),
+                "OPENGENI_AGENT_REQUIRE_NATS=1 but no nats-server is on PATH or in /nix/store"
+            );
+            found
+        }
+
+        fn search_nats_server() -> Option<PathBuf> {
             if let Some(path) = std::env::var_os("PATH") {
                 for dir in std::env::split_paths(&path) {
                     let candidate = dir.join("nats-server");
@@ -6459,6 +6731,75 @@ mod tests {
                 .local_addr()
                 .expect("local addr")
                 .port()
+        }
+
+        /// A listener that passes the connections it is allowed through to a
+        /// real server and holds the rest open in silence, like a server that
+        /// accepts a socket and never sends `INFO`.
+        pub struct SilentGate {
+            pub addr: std::net::SocketAddr,
+            accepted: tokio::sync::mpsc::UnboundedReceiver<()>,
+            forwards: Arc<Mutex<usize>>,
+            task: tokio::task::JoinHandle<()>,
+        }
+
+        impl SilentGate {
+            pub async fn start(upstream: String) -> Self {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind gate");
+                let addr = listener.local_addr().expect("gate address");
+                let (tell, accepted) = tokio::sync::mpsc::unbounded_channel();
+                let forwards = Arc::new(Mutex::new(0_usize));
+                let allowed = forwards.clone();
+                let task = tokio::spawn(async move {
+                    while let Ok((mut socket, _)) = listener.accept().await {
+                        let forward = {
+                            let mut left = allowed.lock().expect("gate forwards");
+                            left.checked_sub(1).map(|rest| *left = rest).is_some()
+                        };
+                        let _ = tell.send(());
+                        let upstream = upstream.clone();
+                        tokio::spawn(async move {
+                            if forward {
+                                if let Ok(mut server) =
+                                    tokio::net::TcpStream::connect(upstream).await
+                                {
+                                    let _ = tokio::io::copy_bidirectional(&mut socket, &mut server)
+                                        .await;
+                                }
+                            } else {
+                                let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
+                            }
+                        });
+                    }
+                });
+                Self {
+                    addr,
+                    accepted,
+                    forwards,
+                    task,
+                }
+            }
+
+            /// Lets the next `n` connections through to the server.
+            pub fn forward(&self, n: usize) {
+                *self.forwards.lock().expect("gate forwards") += n;
+            }
+
+            /// Waits, within five seconds, for the next connection.
+            pub async fn accepted(&mut self) {
+                tokio::time::timeout(Duration::from_secs(5), self.accepted.recv())
+                    .await
+                    .expect("a dial in time")
+                    .expect("gate open");
+            }
+        }
+
+        impl Drop for SilentGate {
+            fn drop(&mut self) {
+                self.task.abort();
+            }
         }
 
         /// A no-auth `nats-server` child, killed on drop.
