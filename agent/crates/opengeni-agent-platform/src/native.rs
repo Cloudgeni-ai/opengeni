@@ -486,14 +486,16 @@ impl ExecProcessGroup {
                 false
             } else {
                 #[cfg(target_os = "linux")]
-                let observed = self
-                    .op_cgroup
-                    .as_ref()
-                    .map(|group| group.has_live_children(self.pgid));
+                {
+                    self.op_cgroup.as_ref().map_or_else(
+                        || crate::process_cleanup::group_has_live_children(self.pgid),
+                        |group| group.has_live_children(self.pgid),
+                    )?
+                }
                 #[cfg(not(target_os = "linux"))]
-                let observed: Option<std::io::Result<bool>> = None;
-                observed
-                    .unwrap_or_else(|| crate::process_cleanup::group_has_live_children(self.pgid))?
+                {
+                    crate::process_cleanup::group_has_live_children(self.pgid)?
+                }
             };
             self.terminate()?;
             self.background_children_stopped = had_children;
