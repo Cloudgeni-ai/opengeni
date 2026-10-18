@@ -775,7 +775,7 @@ describe("interaction attempt tools", () => {
     },
   );
 
-  test("browser_open returns the opened tab's screenshot in the same call when includeScreenshot is set", async () => {
+  test("browser_open returns the opened tab's screenshot in the same call for a URL or when includeScreenshot is set", async () => {
     const session = discoveredBrowserSession(browserSessionId, sessionId);
     session.lifecycle = "active";
     session.controller = {
@@ -834,6 +834,24 @@ describe("interaction attempt tools", () => {
     const plain = await definitions[0]!.execute({ browserSessionId }, context());
     expect(plain.content).toHaveLength(1);
     expect(order).toEqual(["observe"]);
+
+    // Opening a URL includes the screenshot by default; includeScreenshot=false opts out.
+    order.length = 0;
+    const opened = await definitions[0]!.execute(
+      { browserSessionId, initialUrl: target.url },
+      context(),
+    );
+    expect(order).toEqual(["observe", `capture:${browserSessionId}:${target.id}`]);
+    expect(opened.content).toHaveLength(2);
+    expect(opened.content[1]).toMatchObject({ type: "image", mimeType: "image/jpeg" });
+
+    order.length = 0;
+    const optedOut = await definitions[0]!.execute(
+      { browserSessionId, initialUrl: target.url, includeScreenshot: false },
+      context(),
+    );
+    expect(order).toEqual(["observe"]);
+    expect(optedOut.content).toHaveLength(1);
 
     order.length = 0;
     const visual = await definitions[0]!.execute(
