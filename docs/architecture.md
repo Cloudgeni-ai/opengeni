@@ -631,6 +631,12 @@ token/probe path. Successful durable composer saves can prepare those facts via
 turn, starts a workflow, acquires a turn lease, calls a model, or wakes compute.
 Its credential read is fresh-only: renewal and connection-health changes are
 left to normal access, so preparing a draft cannot revoke its own readiness.
+The worker can start the same fresh-only hint after atomic claim of a valid
+frozen Codex turn, alongside settings and policy preparation. Cross-provider
+failover and compaction retain the ordinary path. The activity owns and drains
+the hint; account placement still runs its original live entitlement check,
+which alone may renew credentials and consumes only generation-matched,
+unexpired stored facts. No model-input projection moves with this hint.
 See [typing preparation](design/typing-turn-preparation.md).
 
 Claude projects system inputs at native phase boundaries, adding a labeled

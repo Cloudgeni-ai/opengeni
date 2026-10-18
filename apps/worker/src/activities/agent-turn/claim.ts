@@ -2,6 +2,7 @@ import { assertTurnServingPolicyMatchesConfigV1 } from "@opengeni/config";
 import { claimServingAttempt, type ServingAttempt } from "./subscription-serving-claim";
 import { servingTurnProviders } from "./subscription-serving-providers";
 import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
+import { measureClaimDatabaseScopes } from "./claim-database-timing";
 import {
   claimCodexActiveFromCutover,
   claimMayResolveCoreCodexApps,
@@ -98,6 +99,8 @@ import type {
 } from "./turn-context";
 
 export type ClaimTurnDeps = {
+  /** Optional read-only hint; run owns its promise even if admission later exits. */
+  startCodexEntitlementPreparation?: (turn: SessionTurnForExecution) => void;
   input: RunAgentTurnInput;
   settings: Settings;
   catalogSourceSettings: Settings;
@@ -216,26 +219,44 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const validatePendingSystemUpdateAuthority: NonNullable<
     ClaimSessionWorkForAttemptInput["validatePendingSystemUpdateAuthority"]
   > = async (tx, update) =>
-    await validateIncidentTelemetrySystemUpdateAuthority({
-      db: tx,
-      settings: deploymentCatalogSettings,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      update,
-    });
+    await measureTurnStartupPhase(
+      observability,
+      {
+        phase: "claim_update_authority",
+        provider: "unresolved",
+        backend: "unresolved",
+      },
+      () =>
+        validateIncidentTelemetrySystemUpdateAuthority({
+          db: tx,
+          settings: deploymentCatalogSettings,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          update,
+        }),
+    );
   // Work that continues a person's turn resolves that person's current
   // accounts again inside the claim, as their next message would.
   const resolveContinuedAccounts: NonNullable<
     ClaimSessionWorkForAttemptInput["resolveContinuedConnectionAccounts"]
   > = async (tx, { sessionId, intent }) =>
-    await resolveContinuedConnectionAccounts({
-      db: tx,
-      settings: deploymentCatalogSettings,
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId,
-      intent,
-    });
+    await measureTurnStartupPhase(
+      observability,
+      {
+        phase: "claim_continued_accounts",
+        provider: "unresolved",
+        backend: "unresolved",
+      },
+      () =>
+        resolveContinuedConnectionAccounts({
+          db: tx,
+          settings: deploymentCatalogSettings,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId,
+          intent,
+        }),
+    );
   const claim = await measureTurnStartupPhase(
     observability,
     {
@@ -244,17 +265,19 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       backend: "unresolved",
     },
     () =>
-      claimSessionWorkForAttempt(db, input.workspaceId, {
-        filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
-        sessionId: input.sessionId,
-        workflowId: input.workflowId,
-        workflowRunId: input.workflowRunId,
-        attemptId: input.attemptId,
-        dispatchId,
-        trigger: input.trigger,
-        validatePendingSystemUpdateAuthority,
-        resolveContinuedConnectionAccounts: resolveContinuedAccounts,
-      }),
+      measureClaimDatabaseScopes(observability, () =>
+        claimSessionWorkForAttempt(db, input.workspaceId, {
+          filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
+          sessionId: input.sessionId,
+          workflowId: input.workflowId,
+          workflowRunId: input.workflowRunId,
+          attemptId: input.attemptId,
+          dispatchId,
+          trigger: input.trigger,
+          validatePendingSystemUpdateAuthority,
+          resolveContinuedConnectionAccounts: resolveContinuedAccounts,
+        }),
+      ),
   );
   if (claim.action === "unclaimed") {
     control.activityStatus = "unclaimed";
@@ -282,6 +305,14 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     (turn.metadata as { workerDeathRedispatches?: number } | null)?.workerDeathRedispatches ?? 0,
   );
   const claimedPolicy = readTurnExecutionPolicyV1(turn.metadata);
+  if (
+    claimedPolicy.kind === "valid" &&
+    turnExecutionPolicyBillingIdentity(claimedPolicy.policy).codexSubscription &&
+    !settings.subscriptionCrossProviderFailoverEnabled &&
+    turn.source !== "compaction"
+  ) {
+    deps.startCodexEntitlementPreparation?.(turn);
+  }
   // Establish durable attempt ownership before any later read can fail.
   // Therefore every failure with no turnId came from the one atomic claim
   // transaction and can be classified without conflating ordinary runtime
