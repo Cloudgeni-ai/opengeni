@@ -96,6 +96,10 @@ export type TurnSummaryStatus = Readonly<{
   kind: "working" | "waiting" | "worked";
   /** Replaces the default "Working" / "Waiting" wording. */
   label?: string | undefined;
+  /** Who the wait is on: `you` when it needs the reader. */
+  waitingOn?: "you" | undefined;
+  /** For a `worked` row folding quiet cycles: how many updates it spans. */
+  updates?: number | undefined;
   /** Live clock start for `working` and `waiting`. */
   since?: string | undefined;
   /** Settled span for `worked`. */

@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { agentAssetName, signedHash, verifyAgentSignature } from "../src/main/agent-download";
+import { agentAssetName, signedHash, verifyAgentSignature } from "../src/agent-download";
 
 /** A minisign key pair and signer, the way the release signs agent files. */
 function signer() {

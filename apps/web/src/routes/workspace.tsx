@@ -19,6 +19,7 @@ import { toast } from "sonner";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { RailProvider } from "@/components/rail/rail-context";
+import { DesktopThisComputerProvider } from "@/components/desktop/this-computer";
 import { RailShell } from "@/components/rail/rail-shell";
 import { webSecretsUi } from "@/lib/secrets-ui";
 import { workspaceManagementLocation } from "@/lib/workspace-management-location";
@@ -559,23 +560,25 @@ function AuthorizedWorkspaceShell({
       {/* Secret reference chips and the ask card's Generate use the contracts
           tokenizer and generator. */}
       <SecretsUiProvider value={webSecretsUi}>
-        {/* Settings mode swaps the rail: workspace and organization settings
+        <DesktopThisComputerProvider workspaceId={workspaceId}>
+          {/* Settings mode swaps the rail: workspace and organization settings
           share one settings shell that draws the settings rail, and "Back to
           sessions" returns to the main rail. */}
-        {managementLocation ? (
-          <WorkspaceManagementShell
-            workspaceId={workspaceId}
-            workspaceName={activeWorkspace?.name}
-            organizationName={organizationName}
-            location={managementLocation}
-          >
-            {children}
-          </WorkspaceManagementShell>
-        ) : (
-          <RailProvider workspaceId={workspaceId}>
-            <RailShell>{children}</RailShell>
-          </RailProvider>
-        )}
+          {managementLocation ? (
+            <WorkspaceManagementShell
+              workspaceId={workspaceId}
+              workspaceName={activeWorkspace?.name}
+              organizationName={organizationName}
+              location={managementLocation}
+            >
+              {children}
+            </WorkspaceManagementShell>
+          ) : (
+            <RailProvider workspaceId={workspaceId}>
+              <RailShell>{children}</RailShell>
+            </RailProvider>
+          )}
+        </DesktopThisComputerProvider>
       </SecretsUiProvider>
     </OpenGeniProvider>
   );

@@ -9,6 +9,13 @@ import { createPublicKey, verify } from "node:crypto";
 
 import type { AgentPlatform } from "./agent-cli";
 
+/**
+ * The minisign public key Opengeni's agent releases are signed with. Pass it as
+ * `agentSigningKey` unless your server serves agents you sign yourself.
+ */
+export const OPENGENI_AGENT_SIGNING_KEY =
+  "RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2Pn";
+
 /** The release file of the agent for this system, as servers serve it under `/agent/latest/`. */
 export function agentAssetName(platform: AgentPlatform, arch: string): string | null {
   const cpu = arch === "arm64" ? "aarch64" : arch === "x64" ? "x86_64" : null;

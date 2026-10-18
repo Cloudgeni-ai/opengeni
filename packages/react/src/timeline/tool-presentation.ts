@@ -15,6 +15,7 @@ import {
   v4aToGitFileDiff,
   type ApplyPatchOperation,
 } from "./parsers";
+import { invokedToolCall } from "./invoked-tool";
 import { rawTypeOf } from "./registry";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
 import type { ToolCallItem } from "./types";
@@ -141,6 +142,7 @@ export type PresentedToolKind =
   | "tool_search"
   | "docs_search"
   | "session_title"
+  | "machine"
   | "generic";
 
 export type ToolRowPresentation = {
@@ -865,6 +867,83 @@ export function runOnPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowP
 }
 
 /**
+ * Finding machines, moving onto one and back, and using its screen, said the
+ * way a person would describe it: "Looked at the screen", "Typed “hello”".
+ */
+export function machinePresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
+  const leaf = mcpToolLeaf(item.name);
+  const args = parseToolArgs(item.arguments);
+  const action = leaf === "computer_act" ? computerActAction(args) : null;
+  const preview = (action && computerActPreview(action)) ?? null;
+  return mcpRowPresentation(t, item, {
+    tool: "machine",
+    icon: leaf.startsWith("computer_") ? "panels" : "server",
+    title: machineTitle(t, leaf, args, action, item.output),
+    runningPreview: preview,
+    runningFallback: t("timeline.toolPresentation.running"),
+    settledPreview: preview,
+    settledFallback: t("timeline.toolPresentation.done"),
+    plainRunningPreview: true,
+  });
+}
+
+type ComputerActAction = { type?: unknown; value?: unknown; locator?: unknown };
+
+function computerActAction(args: Record<string, unknown>): ComputerActAction | null {
+  const action = args.action;
+  return action && typeof action === "object" ? (action as ComputerActAction) : null;
+}
+
+function machineTitle(
+  t: OpenGeniText,
+  leaf: string,
+  args: Record<string, unknown>,
+  action: ComputerActAction | null,
+  output: unknown,
+): string {
+  switch (leaf) {
+    case "sandboxes_list":
+      return t("timeline.toolPresentation.lookedForMachines");
+    case "sandbox_swap": {
+      if (args.target === "session") return t("timeline.toolPresentation.movedBack");
+      const targetName = runOnTargetName(output);
+      return targetName
+        ? t("timeline.toolPresentation.movedToTargetname", { targetName })
+        : t("timeline.toolPresentation.movedToAMachine");
+    }
+    case "computer_open":
+      return t("timeline.toolPresentation.openedTheScreen");
+    case "computer_act":
+      return action?.type === "pointer"
+        ? t("timeline.toolPresentation.clickedOnTheScreen")
+        : action?.type === "keyboard"
+          ? t("timeline.toolPresentation.typedOnTheKeyboard")
+          : t("timeline.toolPresentation.usedTheScreen");
+    default:
+      return t("timeline.toolPresentation.lookedAtTheScreen");
+  }
+}
+
+/** What a screen action typed or chose, when it says so: “hello”, “Save”. */
+function computerActPreview(action: ComputerActAction): string | undefined {
+  const locator =
+    action.locator && typeof action.locator === "object"
+      ? (action.locator as { name?: unknown; text?: unknown })
+      : undefined;
+  const named =
+    typeof locator?.name === "string"
+      ? locator.name
+      : typeof locator?.text === "string"
+        ? locator.text
+        : undefined;
+  const shown = (
+    action.type === "keyboard" && typeof action.value === "string" ? action.value : named
+  )?.trim();
+  if (!shown) return undefined;
+  return `\u201c${shown.length > 60 ? `${shown.slice(0, 59)}…` : shown}\u201d`;
+}
+
+/**
  * Baseline craft for unmatched tools: family icon + title-cased leaf + honest
  * status preview (Running… / Done / error snippet).
  */
@@ -1330,6 +1409,11 @@ const PRESENTERS_BY_NAME: Record<string, PresentedToolKind> = {
   knowledge_search: "docs_search",
   set_session_title: "session_title",
   set_other_session_title: "session_title",
+  sandboxes_list: "machine",
+  sandbox_swap: "machine",
+  computer_open: "machine",
+  computer_observe: "machine",
+  computer_act: "machine",
 };
 
 /**
@@ -1359,6 +1443,7 @@ export function toolRowPresentation(
   item: ToolCallItem,
   context: ToolPresentationContext = {},
 ): ToolRowPresentation {
+  item = invokedToolCall(item);
   switch (presentedToolKind(item)) {
     case "exec":
       return execPresentation(t, item, context);
@@ -1378,6 +1463,8 @@ export function toolRowPresentation(
       return docsSearchPresentation(t, item);
     case "session_title":
       return sessionTitlePresentation(t, item);
+    case "machine":
+      return machinePresentation(t, item);
     default:
       return genericToolPresentation(t, item);
   }

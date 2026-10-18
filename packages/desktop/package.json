@@ -39,7 +39,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@noble/hashes": "1.8.0",
+    "@opengeni/agent-host": "workspace:*",
     "@opengeni/sdk": "workspace:*"
   },
   "devDependencies": {

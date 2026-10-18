@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
-import type { UserResourceAuthorityGrant, UserResourceAuthoritySummary } from "@opengeni/sdk";
+import type { UserResourceAuthorityGrant, UserResourceAuthoritySummary } from "../src/types";
 
-import { allowAgentsOnComputer, type ComputerGrantClient } from "../src/main/computer-grants";
+import { allowAgentsOnComputer, type ComputerGrantClient } from "../src/this-computer";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const MACHINE = "22222222-2222-4222-8222-222222222222";

@@ -28,6 +28,7 @@ import {
 } from "@opengeni/sdk";
 
 import { apiBaseUrl } from "@/api";
+import { DesktopThisComputerPanel } from "@/components/desktop/this-computer";
 import { ConnectMachineDialog } from "@/components/machines/connect-machine-dialog";
 import { MachineAudienceDialog } from "@/components/machines/machine-audience-dialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -294,29 +295,33 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             now={now}
           />
         ) : (
-          <MachinesDashboard
-            machines={machines.machines}
-            activeSandboxId={machines.activeSandboxId}
-            loading={machines.loading}
-            error={machines.error}
-            seriesByMachine={cardSeries}
-            onOpenDetail={(m) => setDetailId(m.sandboxId)}
-            now={now}
-            onRefresh={() => void machines.refresh()}
-            onEnroll={machines.canManage ? () => setEnrollOpen(true) : undefined}
-            {...(machines.canUpdateAgent
-              ? {
-                  onUpdateAgent: requestAgentUpdate,
-                  updatingEnrollmentId: machines.updatingEnrollmentId,
-                }
-              : {})}
-            {...(machines.canAttach
-              ? {
-                  onAttach: (m) => void machines.attach(m.sandboxId),
-                  attachingSandboxId: machines.attachingSandboxId,
-                }
-              : {})}
-          />
+          <>
+            {/* Inside the desktop app: this computer, ahead of the rest. */}
+            <DesktopThisComputerPanel className="mb-6" />
+            <MachinesDashboard
+              machines={machines.machines}
+              activeSandboxId={machines.activeSandboxId}
+              loading={machines.loading}
+              error={machines.error}
+              seriesByMachine={cardSeries}
+              onOpenDetail={(m) => setDetailId(m.sandboxId)}
+              now={now}
+              onRefresh={() => void machines.refresh()}
+              onEnroll={machines.canManage ? () => setEnrollOpen(true) : undefined}
+              {...(machines.canUpdateAgent
+                ? {
+                    onUpdateAgent: requestAgentUpdate,
+                    updatingEnrollmentId: machines.updatingEnrollmentId,
+                  }
+                : {})}
+              {...(machines.canAttach
+                ? {
+                    onAttach: (m) => void machines.attach(m.sandboxId),
+                    attachingSandboxId: machines.attachingSandboxId,
+                  }
+                : {})}
+            />
+          </>
         )}
       </div>
 

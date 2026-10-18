@@ -345,6 +345,18 @@
         "typescript": "7.0.2",
       },
     },
+    "packages/agent-host": {
+      "name": "@opengeni/agent-host",
+      "version": "3.4.0",
+      "dependencies": {
+        "@noble/hashes": "1.8.0",
+        "@opengeni/sdk": "workspace:*",
+      },
+      "devDependencies": {
+        "tsup": "^8.5.0",
+        "typescript": "7.0.2",
+      },
+    },
     "packages/agent-proto": {
       "name": "@opengeni/agent-proto",
       "version": "3.4.0",
@@ -546,7 +558,7 @@
       "name": "@opengeni/desktop",
       "version": "0.1.7",
       "dependencies": {
-        "@noble/hashes": "1.8.0",
+        "@opengeni/agent-host": "workspace:*",
         "@opengeni/sdk": "workspace:*",
       },
       "devDependencies": {
@@ -1809,6 +1821,8 @@
     "@openai/agents-openai": ["@openai/agents-openai@0.14.3", "", { "dependencies": { "@openai/agents-core": "0.14.3", "debug": "^4.4.0", "openai": "^6.46.0" }, "peerDependencies": { "zod": "^4.0.0" } }, "sha512-ctJhe/scinyUGtv+MCkkHH+QEza96UmeeUPGNKT3ZFWlz1OCj+xC6YxvwX0WBaZQz0BYAgl6m0aIRnfTgBMO9A=="],
 
     "@openai/agents-realtime": ["@openai/agents-realtime@0.14.3", "", { "dependencies": { "@openai/agents-core": "0.14.3", "@types/ws": "^8.18.1", "debug": "^4.4.0", "ws": "^8.21.0" }, "peerDependencies": { "zod": "^4.0.0" } }, "sha512-eeoc49ti7Pi+GPrivUE7M6PGOQAI6jK3UG82aZtwhi6IHj0uHxzNEK33NQODKag1W40ZJm/R0JWxMWS+lQrjDQ=="],
+
+    "@opengeni/agent-host": ["@opengeni/agent-host@workspace:packages/agent-host"],
 
     "@opengeni/agent-proto": ["@opengeni/agent-proto@workspace:packages/agent-proto"],
 

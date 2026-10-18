@@ -2,6 +2,11 @@
 // constants: the web app imports this without Electron, and the preload script
 // implements it. The shell and the server update independently, so the web app
 // reads `version` and `capabilities` and degrades when something is missing.
+import type {
+  ThisComputerConnectOptions,
+  ThisComputerPermissionId,
+  ThisComputerStatus,
+} from "@opengeni/sdk/this-computer";
 
 /** Bumped only for incompatible changes; additions are new capabilities. */
 export const DESKTOP_BRIDGE_VERSION = 1;
@@ -18,6 +23,8 @@ export type DesktopCapability =
   | "thisComputer"
   /** Report and ask for the system permissions screen control needs. */
   | "thisComputerPermissions"
+  /** Disconnect this computer from a workspace. */
+  | "thisComputerDisconnect"
   /** Open a URL in the default browser. */
   | "openExternal"
   /** Menu bar and keyboard commands for the web app to carry out. */
@@ -50,51 +57,14 @@ export interface DesktopAccountsSnapshot {
   activeId: string | null;
 }
 
-/**
- * Where this computer stands for one workspace.
- *
- * - `unavailable`: the shell can't connect computers on this platform.
- * - `not_installed`: the agent isn't on this computer yet.
- * - `not_connected`: the agent is installed but not linked to this workspace.
- * - `connected`: linked to this workspace and running.
- * - `paused`: linked, but the agent is stopped.
- */
-export type ThisComputerState =
-  | "unavailable"
-  | "not_installed"
-  | "not_connected"
-  | "connected"
-  | "paused";
-
-/** A system permission screen control needs on this computer. */
-export type ThisComputerPermissionId = "screenRecording" | "accessibility" | "inputMonitoring";
-
-export interface ThisComputerPermission {
-  id: ThisComputerPermissionId;
-  granted: boolean;
-}
-
-export interface ThisComputerStatus {
-  state: ThisComputerState;
-  /** A connect, pause or resume is in progress. */
-  busy: boolean;
-  /** The last failure, in plain words, until the next successful action. */
-  error: string | null;
-  /** The computer's name as agents see it. */
-  machineName: string;
-  /** While the agent downloads during setup, how much has arrived, from 0 to 1. */
-  setupProgress?: number;
-  /**
-   * When connected with screen control on a system that asks for permissions
-   * (macOS), each one in the order to ask for it. Absent elsewhere.
-   */
-  permissions?: ThisComputerPermission[];
-}
-
-export interface ThisComputerConnectOptions {
-  /** Let agents see and control the screen, not only run commands. */
-  screenControl: boolean;
-}
+export type {
+  ThisComputerConnectOptions,
+  ThisComputerErrorCode,
+  ThisComputerPermission,
+  ThisComputerPermissionId,
+  ThisComputerState,
+  ThisComputerStatus,
+} from "@opengeni/sdk/this-computer";
 
 export type Unsubscribe = () => void;
 
@@ -131,6 +101,8 @@ export interface DesktopBridge {
      * in System Settings. With the `thisComputerPermissions` capability.
      */
     requestPermission?(id: ThisComputerPermissionId): Promise<void>;
+    /** Stop agents using this computer in the workspace. With the `thisComputerDisconnect` capability. */
+    disconnect?(workspaceId: string): Promise<void>;
     onChange(listener: () => void): Unsubscribe;
   };
   /** Open a page in the default browser. Only http(s) URLs are accepted. */
@@ -172,6 +144,7 @@ export const DESKTOP_IPC = {
   computerPause: "og:computer:pause",
   computerResume: "og:computer:resume",
   computerRequestPermission: "og:computer:request-permission",
+  computerDisconnect: "og:computer:disconnect",
   computerChanged: "og:computer:changed",
   openExternal: "og:open-external",
   command: "og:command",

@@ -611,6 +611,7 @@ export function Thumbnail({
 export function ScreenshotFigure({
   src,
   caption,
+  showCaption = true,
   alt = "screenshot",
   expandLabel: expandLabelProp,
   lightboxLabel: lightboxLabelProp,
@@ -618,6 +619,8 @@ export function ScreenshotFigure({
 }: {
   src: string;
   caption?: string | undefined;
+  /** Off when the row above already says the same; the lightbox keeps it. */
+  showCaption?: boolean | undefined;
   alt?: string;
   expandLabel?: string | undefined;
   lightboxLabel?: string | undefined;
@@ -661,7 +664,7 @@ export function ScreenshotFigure({
       ) : (
         <div className={surface}>{img}</div>
       )}
-      {caption ? (
+      {caption && showCaption ? (
         <figcaption className="mt-1.5 font-og-mono text-og-xs text-og-fg-subtle">
           {caption}
         </figcaption>

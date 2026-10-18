@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { installLinuxAutostart, removeLinuxAutostart } from "../src/main/linux-integration";
-import { ThisComputer } from "../src/main/this-computer";
+import { ThisComputer } from "@opengeni/agent-host";
 
 const folders: string[] = [];
 function folder(): string {
@@ -115,6 +115,61 @@ describe.skipIf(process.platform === "win32")("noticing a disconnect", () => {
     machine.invalidate();
     expect((await machine.summary()).connected).toBe(true);
     expect(changes).toBe(2);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("running the app's own agent", () => {
+  test("runs it with the app's own config folder", async () => {
+    const home = folder();
+    const configDir = join(home, "agent-config");
+    const seen = join(home, "run-config-dir.txt");
+    const agent = join(home, "agent", "opengeni-agent");
+    mkdirSync(join(home, "agent"), { recursive: true });
+    // A stand-in agent: a version, one connection, and `run` records its config folder and stays up.
+    writeFileSync(
+      agent,
+      [
+        "#!/bin/sh",
+        'case "$*" in',
+        '  *--version*) echo "opengeni-agent 0.1.90" ;;',
+        "  *connections*) printf 'Configured Opengeni connections (1):\\n  abc  https://server.example  workspace=w1  agent=a1\\n' ;;",
+        `  *run*) echo "$OPENGENI_CONFIG_DIR" > "${seen}"; exec sleep 30 ;;`,
+        "esac",
+      ].join("\n"),
+    );
+    chmodSync(agent, 0o755);
+    const unused = () => {
+      throw new Error("not used");
+    };
+    const machine = new ThisComputer({
+      platform: "linux",
+      arch: "x64",
+      home,
+      env: {},
+      agentSigningKey: "",
+      fetch: unused,
+      dataDir: home,
+      logDir: home,
+      agentPath: agent,
+      agentConfigDir: configDir,
+      adoptStandaloneAgent: false,
+      mintEnrollToken: unused,
+      allowAgents: unused,
+      openSystemSettings: () => undefined,
+      trash: async () => undefined,
+      onChange: () => undefined,
+    });
+    try {
+      await machine.boot();
+      for (let i = 0; i < 50 && !existsSync(seen); i++) await Bun.sleep(20);
+      // Not the default folder, where another agent on this computer may hold the lock.
+      expect(readFileSync(seen, "utf8").trim()).toBe(configDir);
+      const running = await machine.status("https://server.example", "w1");
+      expect(running.state).toBe("connected");
+      expect(running.reconnecting).toBeUndefined();
+    } finally {
+      await machine.shutdown();
+    }
   });
 });
 

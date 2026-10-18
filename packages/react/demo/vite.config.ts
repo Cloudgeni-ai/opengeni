@@ -25,6 +25,7 @@ const demoInputs = {
   artifactViewer: resolve(__dirname, "artifact-viewer.html"),
   browser: resolve(__dirname, "browser.html"),
   computer: resolve(__dirname, "computer.html"),
+  thisComputer: resolve(__dirname, "this-computer.html"),
   composerResponsive: resolve(__dirname, "composer-responsive.html"),
   commandUx: resolve(__dirname, "command-ux.html"),
   sessionHistoryImport: resolve(__dirname, "session-history-import.html"),

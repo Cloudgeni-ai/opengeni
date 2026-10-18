@@ -16,6 +16,7 @@ export default defineConfig({
     "src/allowance-refusal.ts",
     "src/learning-refusal.ts",
     "src/app-links.ts",
+    "src/this-computer.ts",
     "src/chat/index.ts",
     "src/tenant-workspaces.ts",
     "src/session-proxy.ts",
