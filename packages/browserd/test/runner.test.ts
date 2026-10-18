@@ -3,6 +3,8 @@ import { spawnSync } from "node:child_process";
 import { constants } from "node:fs";
 import {
   chmod,
+  copyFile,
+  link,
   mkdtemp,
   mkdir,
   open,
@@ -26,6 +28,8 @@ import {
   MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT,
   parseMacosDisplayGeometry,
   reapManagedBrowserProcesses,
+  reapOrphanedAgentBrowserDaemons,
+  stopEndedManagedBrowserProcess,
   inspectOwnedManagedBrowserProcess,
 } from "../src/runner";
 
@@ -857,10 +861,9 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       expect(() => process.kill(child.pid, 0)).toThrow();
       // Complete Linux absence/relaunch proof belongs to the isolated inventory
       // fixture above: a CI host may have unrelated, unreadable procfs entries.
+      // On macOS one full process listing proves nothing runs the profile.
       if (process.platform === "darwin") {
-        await expect(inspectOwnedManagedBrowserProcess(receipt!)).rejects.toThrow(
-          "absence is unproven",
-        );
+        expect(await inspectOwnedManagedBrowserProcess(receipt!)).toBe("exited");
       }
     } finally {
       if (child.exitCode === null) {
@@ -871,4 +874,87 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
     }
   },
   20_000,
+);
+
+test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
+  "agent-browser daemons whose browser is gone are found by the profile they serve and stopped",
+  async () => {
+    const directory = await mkdtemp("/tmp/og-orphaned-daemon-");
+    // A daemon is recognized by its executable name and its own environment,
+    // so the fixture runs this Bun under the agent-browser name.
+    const executable = join(directory, "agent-browser");
+    await link(process.execPath, executable).catch(
+      async () => await copyFile(process.execPath, executable),
+    );
+    await chmod(executable, 0o700);
+    const sessions = join(directory, "root", "sessions");
+    const profile = (name: string) =>
+      join(sessions, `00000000-0000-4000-8000-00000000000${name}`, "profile");
+    const children: ReturnType<typeof Bun.spawn>[] = [];
+    const daemon = (profileDirectory: string, script: string) => {
+      const child = Bun.spawn([executable, "-e", script], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "ignore",
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          AGENT_BROWSER_DAEMON: "1",
+          AGENT_BROWSER_PROFILE: profileDirectory,
+          AGENT_BROWSER_SOCKET_DIR: join(directory, "socket"),
+        },
+      });
+      children.push(child);
+      return child;
+    };
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      for (const name of ["1", "2"]) await mkdir(profile(name), { recursive: true });
+      const idle = "setInterval(() => {}, 60000)";
+      const ended = daemon(profile("1"), idle);
+      // A daemon whose browser still runs is never stopped.
+      const serving = daemon(
+        profile("2"),
+        `const c = require("node:child_process").spawn("/bin/sh", ["-c", "exec sleep 60"], { stdio: "ignore" }); console.log(c.pid); ${idle}`,
+      );
+      const outside = daemon(join(directory, "elsewhere", "profile"), idle);
+      const reader = serving.stdout!.getReader();
+      const servingChild = Number(new TextDecoder().decode((await reader.read()).value).trim());
+      reader.releaseLock();
+      expect(servingChild).toBeGreaterThan(1);
+
+      // Ending a session whose browser already exited stops its daemon too.
+      await stopEndedManagedBrowserProcess(profile("1"), null);
+      await ended.exited;
+      expect(alive(serving.pid)).toBe(true);
+      expect(alive(outside.pid)).toBe(true);
+
+      // Startup reconciliation leaves a daemon with a running child and one
+      // that serves a profile outside this controller's sessions.
+      expect(await reapOrphanedAgentBrowserDaemons(join(directory, "root"), { minAgeMs: 0 })).toBe(
+        0,
+      );
+      expect(alive(serving.pid)).toBe(true);
+      process.kill(servingChild, "SIGKILL");
+      for (let attempt = 0; attempt < 50 && alive(servingChild); attempt++) await Bun.sleep(20);
+      // A daemon too young to have started its browser is left as well.
+      expect(await reapOrphanedAgentBrowserDaemons(join(directory, "root"))).toBe(0);
+      expect(await reapOrphanedAgentBrowserDaemons(join(directory, "root"), { minAgeMs: 0 })).toBe(
+        1,
+      );
+      await serving.exited;
+      expect(alive(outside.pid)).toBe(true);
+    } finally {
+      for (const child of children) if (child.exitCode === null) child.kill("SIGKILL");
+      await Promise.all(children.map(async (child) => await child.exited));
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  30_000,
 );
