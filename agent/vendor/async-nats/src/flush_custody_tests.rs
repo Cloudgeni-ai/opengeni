@@ -129,7 +129,6 @@ fn paused_handler_at(
             reconnect_delay_callback: options.reconnect_delay_callback,
             auth_callback: options.auth_callback,
             max_reconnects: options.max_reconnects,
-            dialer: options.dialer,
         },
         events_tx,
         state_tx,
