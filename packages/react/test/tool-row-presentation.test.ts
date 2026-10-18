@@ -117,6 +117,71 @@ describe("shared tool row presentation", () => {
     );
   });
 
+  test("screen-driver and discovery steps read as plain steps too", () => {
+    const row = (partial: Partial<ToolCallItem> & Pick<ToolCallItem, "name">) =>
+      toolRowPresentation(englishText, call(partial));
+    expect(row({ name: "interaction__interaction_discover" })).toMatchObject({
+      tool: "machine",
+      title: "Looked for a screen to use",
+      icon: "panels",
+    });
+    expect(row({ name: "interaction__cua_get_desktop_state" }).title).toBe("Looked at the screen");
+    expect(row({ name: "interaction__cua_click" }).title).toBe("Clicked on the screen");
+    expect(row({ name: "interaction__cua_type_text" }).title).toBe("Typed on the keyboard");
+    expect(row({ name: "interaction__cua_launch_app" }).title).toBe("Used the screen");
+  });
+
+  test("a screen step that didn't work says so without a raw error preview", () => {
+    const failedOpen = toolRowPresentation(
+      englishText,
+      call({
+        name: "interaction__computer_open",
+        output: JSON.stringify({
+          error: { code: "validation_failed", message: "Opengeni API 422: not placed here." },
+        }),
+        status: "failed",
+      }),
+    );
+    expect(failedOpen.title).toBe("Couldn't open the screen");
+    expect(failedOpen.chip).toEqual({ tone: "bad", text: "error" });
+    expect(failedOpen.preview).toBeUndefined();
+    expect(failedOpen.body).toMatchObject({
+      kind: "payloads",
+      blocks: [{ label: "Arguments" }, { label: "Error", failed: true }],
+    });
+    expect(
+      toolRowPresentation(englishText, call({ name: "sandbox_swap", status: "failed" })).title,
+    ).toBe("Couldn't move to the machine");
+    expect(
+      toolRowPresentation(
+        englishText,
+        call({ name: "interaction__cua_get_desktop_state", status: "failed" }),
+      ).title,
+    ).toBe("Couldn't use the screen");
+  });
+
+  test("platform plumbing tools get plain names", () => {
+    expect(toolRowPresentation(englishText, call({ name: "tool_list" })).title).toBe(
+      "Looked up tools",
+    );
+    expect(
+      toolRowPresentation(englishText, call({ name: "opengeni__sandbox_file_publish" })).title,
+    ).toBe("Publish file");
+  });
+
+  test("error previews show the readable message, not the transport wrapper", () => {
+    const wrapped = toolRowPresentation(
+      englishText,
+      call({
+        name: "issues_create",
+        status: "failed",
+        output:
+          'An error occurred while running the tool. Please try again. Error: Example API 409: {"error":{"code":"conflict","message":"The issue already exists. Reference: 0f2c1a7e-1111-4222-8333-944445555666."}}',
+      }),
+    );
+    expect(wrapped.preview).toEqual({ kind: "text", text: "The issue already exists." });
+  });
+
   test("a tool_invoke call reads as the tool it ran", () => {
     const row = toolRowPresentation(
       englishText,
