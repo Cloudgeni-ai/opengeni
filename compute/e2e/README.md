@@ -1,7 +1,7 @@
 # The end-to-end environment and suite
 
 Real agent sessions on a real fabric: a full Opengeni stack built from one
-commit, with `OPENGENI_SANDBOX_BACKEND=compute`, against compute-control
+commit (or several branches merged), with `OPENGENI_SANDBOX_BACKEND=compute`, against compute-control
 and a fleet of nested-virtualization hosts on Google Cloud, driven through
 Opengeni's public API with a real model. Everything runs in one project;
 the workstation only drives it.
@@ -25,10 +25,14 @@ the workstation only drives it.
    account, with Docker, k3s, Helm, Caddy, Rust and Bun, and checkouts of
    `OPENGENI_REF` and `COMPUTE_REF`.
 4. **build** (`stack/build.sh`): Opengeni's api, worker, web and relay
-   images from `OPENGENI_REF` (the API's artifact runtime bundle is copied
-   from a published canary API image, since release automation builds it);
-   the sandbox and desktop images, with Opengeni's agent added when an image
-   lacks it; compute-control's image and the host bundle from
+   images from `OPENGENI_REF`, merged on the VM with each ref in
+   `OPENGENI_MERGE_REFS` (for branches that are not yet on one branch; a
+   fixed identity and date make the same inputs give the same commit). The
+   API's artifact runtime bundle is copied from a published canary API
+   image, since release automation builds it. The sandbox and desktop
+   images come from the same checkout and must install
+   `/usr/local/bin/opengeni-agent`, which the guest runs in fabric mode
+   (ADR 21); the build fails otherwise. Then compute-control's image and the host bundle from
    `COMPUTE_REF`; the stored sandbox images, made with
    `compute-host build-image` into the archive.
 5. **fleet** again, now naming the real host bundle.
@@ -50,7 +54,9 @@ gateway and relay over HTTPS through the NAT. NATS stays inside the cluster.
 (`MODEL_NAME`, `MODEL_VERSION`); `deploy` hands it to Opengeni; `suite` runs
 `suite/run.ts` on the stack VM and copies the results to
 `$STATE/runs/<run>/` (results.json, results.md, logs, screenshots);
-`model-down` deletes the deployment. `ONLY=create,git env.sh suite` runs a
+`model-down` deletes the deployment. The deployment runs turns with the
+managed deployment's sandbox rollout controls (turns own their sandbox's
+lease, lazy provisioning), which the compute backend needs. `ONLY=create,git env.sh suite` runs a
 subset with what it needs.
 
 | check | what it does |
@@ -65,7 +71,7 @@ subset with what it needs.
 | port | an HTTP server in the sandbox answers through the fabric's `connect` stream |
 | browser | the agent opens a page with the in-sandbox browser and reports its title |
 | desktop | the agent opens a computer session, takes a screenshot and describes it |
-| run-as | not applicable while Opengeni never runs commands as another user |
+| run-as | runs a command and writes a file as a non-root user of the image, then checks the uid and the file's owner; not applicable while Opengeni has no way to ask for a sandbox's commands to run as another user |
 | sleep-paused, -saved, -archived, -remote | the fabric puts the sandbox to sleep at that level; the next Opengeni request wakes it, with its files |
 | move | the fabric moves the sandbox to another host; its files come along |
 | host-loss | after a sleep to remote, the sandbox's host is stopped; the sandbox wakes on another host from that copy |

@@ -404,7 +404,7 @@ check("ui", "the web UI: file browser, terminal and desktop (Playwright)", ["fil
 
 check("run-as", "commands as another user", ["create"], async () => {
   throw new NotApplicable(
-    "the compute backend does not support runAs yet (it waits on the agent's run_as), and Opengeni's sandboxRunAs sets none",
+    "the compute backend and the agent support runAs, but Opengeni offers no way to ask for it: sandboxRunAs sets none and no API request carries it",
   );
 });
 
