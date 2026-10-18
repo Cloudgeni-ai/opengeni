@@ -57,6 +57,86 @@ async function render(overrides: Partial<Parameters<typeof SessionAdmissionNotic
 }
 
 describe("session admission notice", () => {
+  test("a confirmed pointer change offers recheck without claiming the saved message ran", async () => {
+    const onRecheck = await render({
+      session: { ...session(), activeSandboxId: "machine" },
+      machineAccess: {
+        sandboxId: "machine",
+        machineName: "Build box",
+        ownerName: "Alex",
+        isOwner: false,
+        queuedTurnBlocked: true,
+      },
+    });
+    await act(async () =>
+      root!.render(
+        <SessionAdmissionNotice
+          session={{ ...session(), activeSandboxId: "workspace-machine" }}
+          canControl
+          paused={false}
+          busy={false}
+          machineAccess={null}
+          onRecheck={onRecheck}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("Machine changed");
+    expect(container.textContent).toContain("The saved message has not started yet");
+    expect(container.querySelector("button")?.disabled).toBe(false);
+    expect(onRecheck).not.toHaveBeenCalled();
+  });
+  test("known owner mismatch names the machine and disables a futile recheck", async () => {
+    const onRecheck = await render({
+      machineAccess: {
+        sandboxId: "machine",
+        machineName: "Build box",
+        ownerName: "Alex",
+        isOwner: false,
+        queuedTurnBlocked: true,
+      },
+      machineAction: <button>Choose machine</button>,
+    });
+    expect(container.textContent).toContain("This message needs a different machine");
+    expect(container.textContent).toContain("Alex’s personal machine");
+    expect(container.textContent).toContain("The queued message is saved");
+    const recheck = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Recheck access",
+    )!;
+    expect(recheck.disabled).toBe(true);
+    await act(async () => recheck.click());
+    expect(onRecheck).not.toHaveBeenCalled();
+  });
+
+  test("machine owner sees why somebody else's queued message cannot start", async () => {
+    await render({
+      machineAccess: {
+        sandboxId: "machine",
+        machineName: "Build box",
+        ownerName: "Alex",
+        isOwner: true,
+        queuedTurnBlocked: true,
+      },
+    });
+    expect(container.textContent).toContain("your personal machine");
+    expect(container.textContent).toContain("Messages from other people cannot start");
+    expect(container.textContent).toContain("ask a workspace admin to share this machine");
+    expect(container.textContent).not.toContain("Copy request");
+  });
+
+  test("a new machine or a non-permission failure retains ordinary recheck guidance", async () => {
+    await render({
+      machineAccess: {
+        sandboxId: "new-machine",
+        machineName: "My machine",
+        ownerName: "Sam",
+        isOwner: true,
+        queuedTurnBlocked: false,
+      },
+    });
+    expect(container.textContent).not.toContain("This message needs a different machine");
+    expect(container.querySelector("button")?.disabled).toBe(false);
+  });
+
   function control(state: "active" | "paused", version: number) {
     return {
       state,

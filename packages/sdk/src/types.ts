@@ -9966,10 +9966,19 @@ export type MachineView = {
 
 /** GET /v1/workspaces/:ws/machines — the dashboard list + the active-sandbox
  *  pointer (null activeSandboxId == the session's own group box is active). */
+export type SessionMachineAccess = {
+  sandboxId: string;
+  machineName: string;
+  ownerName: string | null;
+  isOwner: boolean;
+  queuedTurnBlocked: boolean;
+};
+
 export type MachinesResponse = {
   activeSandboxId: string | null;
   activeEpoch: number;
   machines: MachineView[];
+  sessionMachineAccess?: SessionMachineAccess | null | undefined;
 };
 
 /** GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series — the downsampled
