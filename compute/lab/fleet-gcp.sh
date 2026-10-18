@@ -87,7 +87,7 @@ image() {
     --create-disk "name=$build-lab,size=20GB,type=pd-ssd,device-name=lab,auto-delete=yes" \
     --labels "$LABELS" --tags "$PREFIX" --metadata "ssh-keys=$SSH_KEY_META"
   until_ssh "$build"
-  copy "$build" "$HERE/host-setup.sh"
+  copy "$build" "$HERE/host-setup.sh" "$HERE/../deploy/host/pins.env"
   log "host-setup.sh on $build"
   on "$build" 'set -e
     sudo apt-get update -qq && sudo apt-get install -y -qq xfsprogs >/dev/null

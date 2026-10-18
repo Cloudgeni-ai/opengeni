@@ -12,9 +12,17 @@
 #                           small exec agent listening on vsock port 52 and
 #                           the guest services below
 #   swapfile                backing swap so zswap can be measured
+#
+# Firecracker, the kernel and the root filesystem it starts from are the
+# pins in ../deploy/host/pins.env (or a pins.env beside this script, for a
+# copy of it on its own), each checked against its SHA-256.
 set -euo pipefail
 
-FC_VERSION="${FC_VERSION:-v1.17.0}"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+pins="$here/../deploy/host/pins.env"
+[ -f "$pins" ] || pins="$here/pins.env"
+# shellcheck source=../deploy/host/pins.env
+source "$pins"
 LAB_DIR="${LAB_DIR:-/lab}"
 ROOTFS_SIZE="${ROOTFS_SIZE:-6G}"
 SWAP_SIZE="${SWAP_SIZE:-256G}"
@@ -23,6 +31,17 @@ ARCH="$(uname -m)"
 export DEBIAN_FRONTEND=noninteractive
 
 log() { printf '[host-setup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+# fetch URL FILE SHA256: downloads URL to FILE and fails unless it has that
+# SHA-256.
+fetch() {
+  curl -fsSL -o "$2.part" "$1"
+  if ! echo "$3  $2.part" | sha256sum -c --quiet -; then
+    rm -f "$2.part"
+    echo "host-setup: $1 does not have the pinned SHA-256 $3" >&2
+    exit 1
+  fi
+  mv "$2.part" "$2"
+}
 
 # The guest's side of the host agent's identity contract: a booted guest
 # finds its sandbox id on the kernel command line (`opengeni.sandbox=`), a
@@ -252,7 +271,11 @@ mkdir -p bin vms snapshots results
 
 log "firecracker $FC_VERSION"
 if [ ! -x bin/firecracker ]; then
-  curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${ARCH}.tgz" | tar -xz
+  [ "$ARCH" = x86_64 ] || { echo "host-setup: Firecracker is pinned for x86_64 only" >&2; exit 1; }
+  fetch "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${ARCH}.tgz" \
+    firecracker.tgz "$FC_SHA256_X86_64"
+  tar -xzf firecracker.tgz
+  rm -f firecracker.tgz
   cp "release-${FC_VERSION}-${ARCH}/firecracker-${FC_VERSION}-${ARCH}" bin/firecracker
   cp "release-${FC_VERSION}-${ARCH}/jailer-${FC_VERSION}-${ARCH}" bin/jailer
   rm -rf "release-${FC_VERSION}-${ARCH}"
@@ -264,21 +287,12 @@ if ! command -v bun >/dev/null && [ ! -x "$HOME/.bun/bin/bun" ]; then
 fi
 sudo ln -sf "$HOME/.bun/bin/bun" /usr/local/bin/bun
 
-S3="https://s3.amazonaws.com/spec.ccfc.min"
 if [ ! -f vmlinux ] || [ ! -f ubuntu.squashfs ]; then
-  log "guest kernel and base image from Firecracker CI"
-  # CI_PREFIX pins the artifact set so several hosts run an identical guest.
-  prefix="${CI_PREFIX:-$(curl -fsSL "$S3?list-type=2&prefix=firecracker-ci/&delimiter=/" |
-    grep -oP "(?<=<Prefix>)firecracker-ci/[0-9]{8}-[^/]+/(?=</Prefix>)" | sort | tail -1)}"
-  kernel_key=$(curl -fsSL "$S3?list-type=2&prefix=${prefix}${ARCH}/vmlinux-" |
-    grep -oP "(?<=<Key>)(${prefix}${ARCH}/vmlinux-[0-9]+\.[0-9]+\.[0-9]{1,3})(?=</Key>)" | sort -V | tail -1)
-  ubuntu_key=$(curl -fsSL "$S3?list-type=2&prefix=${prefix}${ARCH}/ubuntu-" |
-    grep -oP "(?<=<Key>)(${prefix}${ARCH}/ubuntu-[0-9]+\.[0-9]+\.squashfs)(?=</Key>)" | sort -V | tail -1)
-  curl -fsSL -o vmlinux "$S3/$kernel_key"
-  curl -fsSL -o ubuntu.squashfs "$S3/$ubuntu_key"
-  printf '%s\n%s\n' "$kernel_key" "$ubuntu_key" > ci-artifacts.txt
-  # Keep the matching kernel config when CI publishes it, to check guest features.
-  curl -fsSL -o vmlinux.config "$S3/${kernel_key}.config" 2>/dev/null || true
+  log "guest kernel and base image from Firecracker CI ($GUEST_KERNEL, $LAB_ROOTFS)"
+  fetch "$GUEST_ARTIFACTS/$GUEST_KERNEL" vmlinux "$GUEST_KERNEL_SHA256"
+  fetch "$GUEST_ARTIFACTS/$GUEST_KERNEL.config" vmlinux.config "$GUEST_KERNEL_CONFIG_SHA256"
+  fetch "$GUEST_ARTIFACTS/$LAB_ROOTFS" ubuntu.squashfs "$LAB_ROOTFS_SHA256"
+  printf '%s\n%s\n' "$GUEST_ARTIFACTS/$GUEST_KERNEL" "$GUEST_ARTIFACTS/$LAB_ROOTFS" > ci-artifacts.txt
 fi
 
 if [ -f base.ext4 ] && {

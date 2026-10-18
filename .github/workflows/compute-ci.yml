@@ -1,0 +1,171 @@
+name: Compute CI
+
+# Checks for compute/, the sandbox fabric (Rust). Runs on pull requests and
+# pushes to main that touch compute/, and on demand; the path filters keep it
+# off every other change. Nothing else in the repository depends on it.
+#
+#   lint      rustfmt, clippy with the workspace's pedantic lints as errors,
+#             and the structure rules (cargo arch)
+#   test      every test that needs no KVM: unit, the seeded simulations of
+#             the core and the fleet protocol, property and crash-boundary
+#             tests, the fleet store against Postgres, checkpoints on XFS,
+#             and the smoke framework's own tests
+#   kvm       real Firecracker VMs on the runner's KVM through the gate
+#             script (compute/ci/gate.sh): the pager's kernel tests, the
+#             per-sandbox network, the engine, save and wake with an agent
+#             restart, many sandboxes through an agent kill, real sandbox
+#             images with our init, the smoke suite and the E2B conformance
+#             suite
+#
+# GitHub's hosted x64 Linux runners expose /dev/kvm on a nested-virtualization
+# VM; the kvm job uses the `nested` memory profile. What it cannot cover (bare
+# metal, object storage in the cloud, several hosts) runs in the opt-in cloud
+# gate described in compute/docs/operations.md#testing.
+
+on:
+  pull_request:
+    paths:
+      - "compute/**"
+      - ".github/workflows/compute-ci.yml"
+  push:
+    branches:
+      - main
+      # Until this branch merges: proves the workflow on its own pushes.
+      - feat/compute-prod
+    paths:
+      - "compute/**"
+      - ".github/workflows/compute-ci.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: compute-ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: compute
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  lint:
+    name: fmt, clippy, structure
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compute
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy (pedantic, warnings are errors)
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: cargo arch
+        run: cargo arch
+
+  test:
+    name: unit, simulation and property tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: fleet
+          POSTGRES_PASSWORD: fleet
+          POSTGRES_DB: fleet_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fleet" --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compute
+      - name: An XFS directory for the checkpoint tests
+        run: |
+          sudo apt-get install -y -qq xfsprogs >/dev/null
+          truncate -s 4G "$RUNNER_TEMP/xfs.img"
+          mkfs.xfs -q "$RUNNER_TEMP/xfs.img"
+          sudo mkdir -p /mnt/xfs
+          sudo mount -o loop "$RUNNER_TEMP/xfs.img" /mnt/xfs
+          sudo chown "$(id -u):$(id -g)" /mnt/xfs
+      - name: cargo test --workspace
+        env:
+          COMPUTE_TEST_POSTGRES: host=127.0.0.1 user=fleet password=fleet dbname=fleet_test
+          COMPUTE_TEST_SHARED_EXTENTS_DIR: /mnt/xfs
+          COMPUTE_TEST_REQUIRE: shared-extents
+        run: cargo test --locked --workspace
+      - name: Smoke framework tests
+        working-directory: compute/smoke
+        run: python3 -m unittest discover -s compute_smoke/tests -t .
+
+  kvm:
+    name: real Firecracker on KVM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compute
+      - name: Room on the runner
+        working-directory: .
+        run: |
+          # The hosted image carries toolchains this job never uses.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / /mnt
+      - name: An XFS lab directory, and access to KVM
+        working-directory: .
+        run: |
+          sudo apt-get install -y -qq xfsprogs >/dev/null
+          sudo truncate -s 60G /mnt/lab.img
+          sudo mkfs.xfs -q /mnt/lab.img
+          sudo mkdir -p /lab
+          sudo mount -o loop,noatime /mnt/lab.img /lab
+          sudo chown "$(id -u):$(id -g)" /lab
+          # The lab is a file, not a disk for host-setup.sh to format.
+          touch /lab/.scratch-ready
+          sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          grep -c -E 'vmx|svm' /proc/cpuinfo
+          stat -fc %T /sys/fs/cgroup
+          free -m
+      - name: Cache the prepared lab (Firecracker, guest kernel, base image)
+        uses: actions/cache@v4
+        with:
+          path: |
+            /lab/bin
+            /lab/vmlinux
+            /lab/base.ext4
+            /lab/ci-artifacts.txt
+          key: compute-lab-${{ hashFiles('compute/lab/host-setup.sh', 'compute/deploy/host/pins.env') }}
+      - name: Huge pages for the nested profile
+        run: |
+          # A quarter of the runner's memory, in 2 MiB pages.
+          pages=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 4 / 2048 ))
+          echo "$pages" | sudo tee /proc/sys/vm/nr_hugepages
+          grep -i hugepages_total /proc/meminfo
+      - name: The KVM gate
+        env:
+          STEPS: lab-setup pager networking engine save_wake lab guest smoke conformance
+          LAB: /lab
+          PROFILE: nested
+          SANDBOXES: "4"
+        run: bash ci/gate.sh
