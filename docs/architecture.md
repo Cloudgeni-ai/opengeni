@@ -705,6 +705,13 @@ killed-runner heartbeats cannot repeatedly renew its short ownership lease.
 Canonical:
 `apps/api/src/sandbox/metrics-ingestion.ts`.
 
+Transport authentication refusal suspends only its exact saved machine connection.
+`agent/crates/opengeni-agent/src/credential_renewal.rs` owns recovery through the
+existing signed enrollment renewal protocol; only an explicit permanent denial
+persists reconnect-required state. File reconciliation resumes renewed credentials
+without replacing host work. Machine diagnostics never attribute unsigned bearer
+claims or expose another workspace's saved connections.
+
 Canonical: `packages/runtime/src/sandbox/selfhosted/`,
 `apps/worker/src/activities/agent-turn/sandbox-establish.ts`,
 `packages/core/src/domain/scheduled-tasks.ts`,

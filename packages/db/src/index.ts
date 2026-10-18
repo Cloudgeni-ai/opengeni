@@ -61293,6 +61293,44 @@ export async function setEnrollmentWentOffline(
   );
 }
 
+/** An authenticated but expired bearer is diagnostic evidence, not live runner
+ * authority. Never let an old credential or racing denial mark a healthy/newly
+ * enrolled machine offline. Repeated denials do not repeatedly write the row. */
+export async function recordEnrollmentExpiredCredentials(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    credentialGeneration: number;
+  },
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .update(schema.enrollments)
+        .set({
+          wentOfflineAt: new Date(),
+          wentOfflineReason: "credentials_expired",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.credentialGeneration, input.credentialGeneration),
+            sql`(${schema.enrollments.connectionLeaseExpiresAt} IS NULL OR ${schema.enrollments.connectionLeaseExpiresAt} <= now())`,
+            sql`(${schema.enrollments.lastSeenAt} IS NULL OR ${schema.enrollments.lastSeenAt} < now() - interval '20 seconds')`,
+            sql`${schema.enrollments.wentOfflineReason} IS DISTINCT FROM 'credentials_expired'`,
+          ),
+        );
+    },
+  );
+}
+
 // Clear a pending clean going-offline marker: a reconnect Hello re-announced the
 // machine, so the goodbye no longer holds. CHANGE-GUARDED (`went_offline_at IS NOT
 // NULL`) so a steady-state Hello — the overwhelmingly common case — issues NO

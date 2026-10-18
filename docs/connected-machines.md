@@ -1047,6 +1047,31 @@ The signed `/v1/enrollments/renew` machine protocol is outside the browser API
 contract-revision fence, like device polling and token exchange. Its install-key,
 enrollment-generation and revocation checks still apply in production.
 
+A NATS authentication refusal suspends dialing for that exact saved connection;
+it is not treated as an ordinary network outage. The existing renewal loop checks
+it even when its bearer is not near expiration. A successful renewal clears the
+suspension and the live file reconciler resumes that link. An explicit
+`enrollment_reconnect_required` renewal response persists a terminal state across
+agent restarts: no more NATS or renewal requests until an authorized reconnect
+replaces the connection. `opengeni-agent connections` shows pending renewal versus
+reconnect-required state and the deployment-specific recovery command. Removing
+an obsolete saved connection is also supported. Other workspace links and retained
+host operations remain independent.
+
+Clock skew, transport failure, disabled renewal and older APIs' generic 401/404
+responses are not terminal proof. They allow another transport attempt on the
+existing jittered renewal cadence, so an older API or a temporary callout outage
+cannot strand a still-valid connection. Deploy the typed renewal response before the
+agent update to stop retries for permanently rejected grants completely. An older
+agent does not gain this behavior from a server deployment alone.
+
+Machines shows expired credentials only when the server can verify the bearer
+signature and match its current enrollment generation, and never over a live
+runner. Fresh Hello/heartbeat clears the diagnostic. Invalid signatures and
+removed enrollments cannot safely identify a dashboard row; inspect the local
+connection inventory instead. Saved links to other deployments/workspaces are
+never disclosed through a healthy workspace's machine status.
+
 Deploy the API renewal endpoint before upgrading agents. An older API returns
 404 and the agent retries with jitter while retaining its existing credentials.
 Older agents still need a one-time authorized reconnect after expiration; a

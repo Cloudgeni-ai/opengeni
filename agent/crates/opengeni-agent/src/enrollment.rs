@@ -87,6 +87,12 @@ pub struct EnrollmentRequest {
 /// Errors raised during enrollment.
 #[derive(Debug, Error)]
 pub enum EnrollmentError {
+    /// The deployment cannot verify a proof from the machine's current clock.
+    #[error("machine clock differs from the deployment; correct it before credential renewal")]
+    ClockSkew,
+    /// The authoritative deployment explicitly rejected this credential grant.
+    #[error("enrollment requires an explicit reconnect")]
+    ReconnectRequired,
     /// The HTTP client could not be built or a request failed at the transport
     /// level (DNS, TLS, connection).
     #[error("enrollment transport error: {0}")]
@@ -273,7 +279,7 @@ pub(crate) async fn renew_connection(
         .timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let response = client
+    let mut response = client
         .post(join_url(&connection.api_url, "/v1/enrollments/renew"))
         .json(&serde_json::json!({
             "bearer": bearer, "signedAt": now,
@@ -283,9 +289,38 @@ pub(crate) async fn renew_connection(
         .await?;
     // Do not include an untrusted response body (potential credential echo) in logs.
     if !response.status().is_success() {
+        let status = response.status().as_u16();
+        // Older servers' generic 401 also covers clock skew and configuration
+        // outages. Only the new closed code is a definitive terminal decision.
+        if status == 401 {
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                if body.len() + chunk.len() > 4096 {
+                    body.clear();
+                    break;
+                }
+                body.extend_from_slice(&chunk);
+            }
+            match serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("code")
+                        .and_then(|code| code.as_str())
+                        .map(str::to_owned)
+                })
+                .as_deref()
+            {
+                Some("enrollment_reconnect_required") => {
+                    return Err(EnrollmentError::ReconnectRequired)
+                }
+                Some("enrollment_clock_skew") => return Err(EnrollmentError::ClockSkew),
+                _ => {}
+            }
+        }
         return Err(EnrollmentError::Status {
             path: "/v1/enrollments/renew".into(),
-            status: response.status().as_u16(),
+            status,
             body: "credential renewal unavailable".into(),
         });
     }
@@ -307,6 +342,7 @@ pub(crate) async fn renew_connection(
     credentials.last_known_epoch = connection.credentials.last_known_epoch;
     let mut renewed = connection.clone();
     renewed.credentials = credentials;
+    renewed.authentication_state = None;
     Ok(renewed)
 }
 

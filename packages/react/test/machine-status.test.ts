@@ -137,7 +137,26 @@ describe("runnerConflict and describeAgentConnection", () => {
       describeAgentConnection(englishText, { ...authority, state: "expired", supersededCount: 0 }),
     ).toEqual({
       label: "Agent connection lapsed",
-      detail: null,
+      detail: expect.stringContaining("opengeni-agent connections"),
     });
+  });
+
+  test("expired credentials have actionable status, but stale diagnostics never override a live connection", () => {
+    expect(
+      describeAgentConnection(englishText, {
+        ...authority,
+        state: "expired",
+        authenticationError: "credentials_expired",
+      }),
+    ).toEqual({
+      label: "Agent credentials expired",
+      detail: expect.stringContaining("reconnection is required"),
+    });
+    expect(
+      describeAgentConnection(englishText, {
+        ...authority,
+        authenticationError: "credentials_expired",
+      }).label,
+    ).toBe("Agent connected");
   });
 });

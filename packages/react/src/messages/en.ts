@@ -1483,6 +1483,11 @@ export const englishMessages = {
   "machines.machineOperationPolicy.unlimited": "Unlimited",
   "machines.machineStatus.agentConnected": "Agent connected",
   "machines.machineStatus.agentConnectionLapsed": "Agent connection lapsed",
+  "machines.machineStatus.credentialsExpired": "Agent credentials expired",
+  "machines.machineStatus.credentialsRecovery":
+    "The agent will try to renew its credentials. If it stays offline, run opengeni-agent connections on the machine to check whether reconnection is required.",
+  "machines.machineStatus.offlineRecovery":
+    "On the machine, run opengeni-agent connections to check for rejected credentials. Reconnect that saved connection if requested; other workspace connections are independent.",
   "machines.machineStatus.agentNotConnectedYet": "Agent not connected yet",
   "machines.machineStatus.agentVersionUnknown": "Agent version unknown",
   "machines.machineStatus.agentVInstalled": "Agent v{installed}",

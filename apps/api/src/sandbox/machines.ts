@@ -188,6 +188,9 @@ function connectionAuthorityFor(
     leaseExpiresAt: enrollment.connectionLeaseExpiresAt,
     duplicateRunnerDeniedCount: enrollment.connectionDuplicateDeniedCount,
     duplicateRunnerDeniedAt: enrollment.connectionDuplicateDeniedAt,
+    ...(!liveConnection && enrollment.wentOfflineReason === "credentials_expired"
+      ? { authenticationError: "credentials_expired" as const }
+      : {}),
   };
 }
 
