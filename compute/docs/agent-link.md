@@ -306,9 +306,12 @@ What the host does, exactly (`compute-link`, its `core` module):
   a gateway silent that long, whatever is being written. What the gateway
   sends is read while up to 16 MiB of it waits for the host.
 - **Messages wait for 120 s.** A message for a subscription no connection
-  holds waits that long for the agent to subscribe again, and wakes the
-  sandbox at most every 250 ms. Messages that arrive count as activity;
-  what the agent sends does not.
+  holds waits that long for the agent to subscribe again. Every message
+  that arrives wakes its sandbox, at most once every 250 ms: one that comes
+  sooner wakes it when the 250 ms are over, since the sandbox may have
+  gone to sleep in between (a request delivered to a connection whose VM
+  was just paused runs once that wake resumes it). Messages that arrive
+  count as activity; what the agent sends does not.
 - **Subscriptions not taken up within 10 s end.** After the agent
   reconnects, the host unsubscribes those it did not subscribe to again;
   after one of its connections ends while others stay, those it held end

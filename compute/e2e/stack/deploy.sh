@@ -182,10 +182,11 @@ jq -n --arg app "$app" --arg relay "$relay" --arg files "$files" --arg ogtag "$O
   }' >"$HOME/e2e/values.json"
 
 log "helm upgrade --install $release ($chart at $COMPUTE_SHA, images $OPENGENI_TAG)"
-# No --wait: the chart migrates (and makes compute-control's schema) in
-# post-install hooks, which Helm would only run once every pod is ready,
-# and the pods are not ready before the schema exists. Helm still waits
-# for the hook Jobs; the rollouts are awaited after.
+# No --wait: the chart migrates Opengeni's database in a post-install hook,
+# which Helm would only run once every pod is ready, and the pods are not
+# ready before the migrations. Helm still waits for the hook Jobs; the
+# rollouts are awaited after. (compute-control's role and schema come from
+# an ordinary Job of the release, which its pods wait for.)
 helm upgrade --install "$release" "$chart" -n "$ns" -f "$HOME/e2e/values.json" --timeout 25m
 for name in $(k get deploy -o name); do
   k rollout status "$name" --timeout 15m

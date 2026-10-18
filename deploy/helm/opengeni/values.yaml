@@ -1301,20 +1301,32 @@ computeControl:
   database:
     # Secret holding the role's password (passwordKey), or a whole
     # connection string (urlKey) for a database the chart does not run.
+    # The password reaches the service in a variable of its own, so any
+    # password works unquoted.
     existingSecret: ""
     passwordKey: COMPUTE_DATABASE_PASSWORD
     urlKey: ""
+    # Pods read the password only at start: after changing it in the
+    # Secret, raise the revision (a whole number) so the upgrade rolls them
+    # and runs a new database Job, which gives the role the new password;
+    # the new pods wait for it before they start. A Job of a lower revision
+    # never sets the role's password after a higher one's has.
+    passwordRevision: 0
     role: compute
     schema: compute
     # Defaults: the chart's Postgres, its database, and sslmode disable.
+    # host is required when the chart runs no Postgres.
     host: ""
     port: 5432
     name: ""
     sslmode: ""
-    # A hook Job creates the role (login, password from the Secret, search
-    # path the schema) and the schema it owns, before installs and upgrades
-    # finish, with the migration owner URL (OPENGENI_MIGRATIONS_DATABASE_URL
-    # in the migration Secret). Turn off where a DBA provisions them.
+    # A Job creates the role (login, password from the Secret, search path
+    # the schema) and the schema it owns, with the migration owner URL
+    # (OPENGENI_MIGRATIONS_DATABASE_URL in the migration Secret), as an
+    # ordinary resource of the release, never a hook: the service's pods
+    # wait until the role can log in with their password. Only for the
+    # chart's own Postgres; turn it off for any other database, or where a
+    # DBA provisions them.
     provision: true
     connections: 16
   # Keys of the API, one `team key` per line, from a Secret's `keys` entry.
@@ -1404,7 +1416,8 @@ computeControl:
     annotations: {}
     loadBalancerSourceRanges: []
   # The store's daily sweep (`compute-host sweep --delete`, ADR 17), from the
-  # same image, with the same identity.
+  # same image, with the same identity. Deleting sweeps are for Google Cloud
+  # Storage archives only: turn it off for az:// and s3://.
   sweep:
     enabled: true
     schedule: "17 3 * * *"

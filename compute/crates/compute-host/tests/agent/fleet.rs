@@ -5,6 +5,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use std::time::Duration;
 
@@ -126,6 +127,57 @@ async fn a_sandbox_handed_off_by_one_host_wakes_on_another_with_its_files_and_pr
         ["kept", "on-disk"],
         "programs and files moved with it"
     );
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// A guest's memory keeps the latest restore notice it applied, and moves
+/// with the sandbox; the new host's record of it starts afresh, with a
+/// fence lower than the old host's. Its notices still come after the old
+/// host's, by the new owner's higher epoch, so the guest takes them: it
+/// sets its clock, keeps its identity and has its agent reconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_moved_sandbox_takes_its_new_hosts_restore_notices() {
+    let a = Lab::root();
+    let shelf = a.join("shelf");
+    let one = Lab::start_stored_configured(a, Arc::default(), Directory::new(&shelf), |config| {
+        config.restore_notice_port = Some(53);
+    })
+    .await;
+    let two = Lab::start_stored_configured(
+        Lab::root(),
+        Arc::default(),
+        Directory::new(&shelf),
+        |config| config.restore_notice_port = Some(53),
+    )
+    .await;
+    let sandbox = id(3);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set kept"]).await;
+    // Restores on the first host raise its record's fence above where the
+    // second host's starts, and each tells the guest.
+    for _ in 0..3 {
+        assert_eq!(one.sleep_to(sandbox, LevelName::Saved).await, Reply::Done);
+        one.wait_level(sandbox, LevelName::Saved).await;
+        assert_eq!(
+            one.run(sandbox, &["told-restored?", "get"]).await,
+            ["true", "kept"]
+        );
+    }
+    assert_eq!(one.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+    one.wait_level(sandbox, LevelName::Paused).await;
+    assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(
+        two.run(sandbox, &["told-restored?", "get", "sandbox?"])
+            .await,
+        ["true".to_owned(), "kept".to_owned(), sandbox.to_string()],
+        "the new host's notice was taken"
+    );
+    for lab in [&one, &two] {
+        assert_eq!(lab.world.notices_turned_down.load(Ordering::Relaxed), 0);
+        assert_eq!(lab.world.notices_out_of_order.load(Ordering::Relaxed), 0);
+    }
     one.assert_clean();
     two.assert_clean();
 }

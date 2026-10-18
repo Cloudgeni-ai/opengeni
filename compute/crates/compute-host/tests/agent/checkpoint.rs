@@ -404,6 +404,45 @@ async fn use_during_a_checkpoint_neither_waits_for_it_nor_cancels_it() {
     one.assert_clean();
 }
 
+/// A command running in the guest keeps an idle sandbox from sleeping, not
+/// from being checkpointed: the host takes a checkpoint without asking the
+/// guest, once each time it is due, rather than starting and cancelling it
+/// over and over while the command runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_command_does_not_hold_up_a_checkpoint() {
+    let Some(dir) = shared_extents() else {
+        return;
+    };
+    let root = Lab::root_in(&dir);
+    let shelf = root.join("shelf");
+    let mut config = Lab::config(&root, HostPolicy::default());
+    config.restore_notice_port = Some(53);
+    let one = Lab::launch(
+        root,
+        Arc::default(),
+        Delays::default(),
+        config,
+        Directory::new(&shelf),
+    )
+    .await;
+    let sandbox = id(6);
+    one.create(sandbox, CHECKPOINTED).await;
+    assert_eq!(one.run(sandbox, &["start-command"]).await, ["ok"]);
+    let written = unix_ms();
+    let done = checkpointed_since(&one, sandbox, written).await;
+    assert_eq!(done.level, LevelName::Running);
+    let status = one.status().await;
+    let (_, checkpoints) = status
+        .steps
+        .iter()
+        .find(|(name, _)| name == "checkpoint")
+        .expect("checkpoint statistics");
+    assert_eq!(checkpoints.cancelled, 0, "{checkpoints:?}");
+    assert!(checkpoints.started <= 2, "{checkpoints:?}");
+    assert_eq!(one.run(sandbox, &["end-command"]).await, ["ok"]);
+    one.assert_clean();
+}
+
 /// A guest working on its own throughout a checkpoint whose upload takes
 /// longer than its pause delay is not taken for idle: it runs on once the
 /// checkpoint ends, and sleeps only once it goes quiet.

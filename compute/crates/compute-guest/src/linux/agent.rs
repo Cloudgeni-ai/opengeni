@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::io::{self, Write as _};
-use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::Path;
 use std::process::Stdio;
@@ -82,7 +82,8 @@ fn write_link(wanted: &AgentInit) -> io::Result<()> {
 }
 
 /// Forwards each connection to the agent's local NATS port to the host's
-/// agent link, byte for byte. Whether it listens.
+/// agent link, byte for byte (see [`crate::relay`]: the host learns at once
+/// that the agent closed one). Whether it listens.
 fn forward() -> bool {
     let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, NATS_PORT)) {
         Ok(listener) => listener,
@@ -110,8 +111,8 @@ fn forward() -> bool {
 /// Relays `tcp` to a new connection to the host's agent link, both ways,
 /// until both sides are done. With no host to reach, `tcp` closes and the
 /// agent dials again.
-fn relay(mut tcp: TcpStream) {
-    let mut host = match Stream::connect_host(AGENT_LINK_PORT) {
+fn relay(tcp: TcpStream) {
+    let host = match Stream::connect_host(AGENT_LINK_PORT) {
         Ok(host) => host,
         Err(error) => {
             log(&format!("the host's agent link: {error}"));
@@ -119,17 +120,8 @@ fn relay(mut tcp: TcpStream) {
         }
     };
     let _ = tcp.set_nodelay(true);
-    let (Ok(mut host_out), Ok(mut tcp_in)) = (host.try_clone(), tcp.try_clone()) else {
-        return;
-    };
-    let outbound = spawn("agent-link", move || {
-        let _ = io::copy(&mut tcp_in, &mut host_out);
-        let _ = host_out.shutdown(Shutdown::Write);
-    });
-    let _ = io::copy(&mut host, &mut tcp);
-    let _ = tcp.shutdown(Shutdown::Write);
-    if let Some(outbound) = outbound {
-        let _ = outbound.join();
+    if !crate::relay::relay(tcp, host) {
+        log("the agent link's relay did not start");
     }
 }
 

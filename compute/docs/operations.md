@@ -41,14 +41,34 @@ enabling it changes no session's backend.
 
 1. **Its database.** It keeps its state in its own schema and login role
    in Opengeni's Postgres (`computeControl.database`, role and schema
-   `compute`). With `database.provision` (the default) a hook Job creates
-   the role with the password from `database.existingSecret`, sets its
-   search path to the schema, creates the schema it owns and grants it
-   `connect`, using the migration owner URL; nothing of Opengeni's is
-   granted to it. Where a DBA owns roles, turn `provision` off and give a
-   whole connection string with `database.urlKey`. The service creates its
-   tables at start. It also takes two Postgres advisory locks (7231401 for
-   its schema, and its leader lock); keep them free in a shared database.
+   `compute`). With `database.provision` (the default, for the chart's
+   own Postgres only) a Job creates the role with the password from
+   `database.existingSecret`, sets its search path to the schema, creates
+   the schema it owns and grants it `connect`, using the migration owner
+   URL; nothing of Opengeni's is granted to it. The Job is an ordinary
+   part of the release, never a hook, so it is applied together with what
+   it needs (the chart's Postgres and, under `networkPolicy`, the rule
+   that admits it), on an install and on the upgrade that first enables
+   the service alike, and the service's pods wait for it, so `--wait`
+   completes. Its name follows its inputs: an upgrade that changes none of
+   them leaves it alone, and one that does runs a new Job.
+   For any other database (`database.host`, required
+   when the chart runs no Postgres, or a whole connection string in
+   `database.urlKey`), turn `provision` off and have its owner run the
+   same statements:
+
+   ```sql
+   create role compute login password '…';
+   alter role compute set search_path = compute;
+   create schema if not exists compute authorization compute;
+   grant connect on database <database> to compute;
+   ```
+
+   The password reaches the service in a variable of its own, so it needs
+   no quoting. The service creates its tables at start and upgrades them
+   in place, recording their version. It also takes two Postgres advisory
+   locks (7231401 for its schema, and its leader lock); keep them free in
+   a shared database.
 2. **Its keys.** API keys are `team key` lines in a Secret
    (`computeControl.keys.existingSecret`, entry `keys`); the service
    stores their digests at every start. Make one key for Opengeni's team
@@ -152,7 +172,9 @@ computeControl:
 ```
 
 The daily sweep of the store (ADR 17) runs as a CronJob from the same
-image and identity (`computeControl.sweep`).
+image and identity (`computeControl.sweep`). It deletes only from Google
+Cloud Storage; with an `az://` or `s3://` archive turn it off
+(`sweep.enabled: false`), which the chart requires.
 
 ### Hosts
 
@@ -178,7 +200,8 @@ unique in the fleet, and the bundle:
 ```sh
 tar -xzf compute-host-0.1.0-x86_64-linux.tar.gz && cd compute-host-0.1.0-x86_64-linux
 cp host.env.example host.env   # fill in the service, name, address, zone, store
-install -m 600 host.pem host.key ca.pem -t /etc/compute/
+sudo install -d -m 700 /etc/compute
+sudo install -m 600 host.pem host.key ca.pem -t /etc/compute/
 sudo ./install.sh --config host.env --state-device /dev/nvme1n1
 ```
 
@@ -290,16 +313,32 @@ authority alone for agent links.
 - **Host certificates** are 30 days, from the fleet's authority, renewed by
   each host's daily timer when fewer than 10 days are left (the agent is
   restarted to use it; its VMs keep running).
-- **The service's certificate.** Renew it before it expires
-  (`terraform apply -replace='google_privateca_certificate.control[0]'`,
-  update the Secret, restart the service). Hosts keep their connection
-  until it breaks and dial again.
+- **The service's certificate** lasts 30 days. Run `terraform apply` at
+  least every 10 days: from 20 days after an issue it makes a new key and
+  a certificate of a new name (the authority keeps every name it issued,
+  revoked ones too), and revokes the old one only after. Put the new
+  `control_certificate_pem` and `control_private_key_pem` outputs in the
+  Secret and restart the service. Hosts keep their connection until it
+  breaks and dial again.
 - **The authority.** To replace it, add the new authority to the pool, let
   hosts renew under it (they trust the pool's certificates, read at each
   renewal), give the service both authorities in `ca.crt`, then retire
   the old one.
-- **The database password**: change it in the Secret and upgrade the
-  release; the hook Job sets it on the role, and the new pods use it.
+- **The database password.** Change it in the Secret, set a new
+  `computeControl.database.passwordRevision`, a whole number above the
+  last, and upgrade the release: the revision runs a new database Job,
+  which gives the role the new password, and rolls the pods, which read it
+  only at start; each new pod waits at its database init container until
+  it can log in with the new password, so the old pods keep serving until
+  then. Each Job records its revision on the role (as the role's comment)
+  and changes nothing once a Job of a higher revision has run, so a Job
+  left running by an earlier, failed upgrade cannot give the role the
+  earlier password back. So never lower the revision, and on a new
+  installation over an existing database keep the last one. Once the role
+  has the new password, the old pods' open connections keep working but
+  new ones fail until each is replaced, so do it outside busy hours.
+  Without `provision`, change the role's password yourself before the
+  upgrade.
 - **The link signing key.** Make a new key, add it to the link Secret
   under a new entry, and make the new entry `link.key` and the old one a
   `link.previousKeys` entry: the service signs with the new key and still

@@ -368,8 +368,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Whether `step` would only take the running sandbox to sleep for
     /// being idle: not for memory pressure, nor because it was asked to.
+    /// A checkpoint never asks: it is for a sandbox in use and leaves it
+    /// running, and one cancelled for a running command would be due again
+    /// at once, so it would be started and cancelled over and over.
     fn sleeps_for_idleness(&self, id: Id, step: Step) -> bool {
-        !step.wakes()
+        step == Step::Pause
             && self.core.sandbox(id.0).is_some_and(|view| {
                 view.state.level == Level::Running
                     && view.floor == Level::Running

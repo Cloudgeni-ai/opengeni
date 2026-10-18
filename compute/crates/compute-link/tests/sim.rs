@@ -126,6 +126,9 @@ struct Sandbox {
     shut_out: bool,
     agent: Agent,
     last_wake: Option<u64>,
+    /// When a message the core took came too soon after `last_wake` to
+    /// wake it at once: it owes a wake when the interval is over.
+    owed_wake: Option<u64>,
     /// The state the host last gave for it.
     running: Option<Running>,
 }
@@ -244,6 +247,7 @@ impl Sim {
                         asleep: false,
                     },
                     last_wake: None,
+                    owed_wake: None,
                     running: None,
                 })
                 .collect(),
@@ -332,17 +336,23 @@ impl Sim {
             Input::LinkDown { link } => self.host_sessions.retain(|(l, _)| l != link),
             _ => {}
         }
+        let tick = matches!(input, Input::Tick);
         self.core.on(self.now, input);
         let effects = self.core.take();
         // Only a message wakes a sandbox: a relay credential, a state
-        // change or anything the agent sends never does.
-        if message_for.is_none() {
-            assert!(
-                !effects
-                    .iter()
-                    .any(|effect| matches!(effect, Effect::Wake { .. })),
-                "a sandbox was woken by something other than a message"
-            );
+        // change or anything the agent sends never does. A tick wakes only
+        // a sandbox owed a wake for a message that came too soon after its
+        // last.
+        for effect in &effects {
+            if let Effect::Wake { sandbox } = effect
+                && message_for.as_ref() != Some(sandbox)
+            {
+                let n = self.index(sandbox);
+                assert!(
+                    tick && self.sandboxes[n].owed_wake.is_some(),
+                    "{sandbox} was woken by something other than a message"
+                );
+            }
         }
         if let Some(sandbox) = message_for {
             let woke = effects
@@ -356,10 +366,27 @@ impl Sim {
                     "a message for {sandbox} at {} did not wake it (last at {last:?})",
                     self.now
                 );
+                self.sandboxes[n].owed_wake.get_or_insert(self.now);
             }
         }
         for effect in effects {
             self.effect(effect);
+        }
+        // A wake that is owed is due when the interval since the last one
+        // ends, and the core's next tick comes by then.
+        for sandbox in &self.sandboxes {
+            if sandbox.attached
+                && sandbox.owed_wake.is_some()
+                && let Some(last) = sandbox.last_wake
+            {
+                let due = last + self.settings.wake_every_ms;
+                assert!(
+                    self.core.deadline().is_some_and(|at| at <= due),
+                    "{} owes a wake at {due}, but the core's next tick is {:?}",
+                    sandbox.id,
+                    self.core.deadline()
+                );
+            }
         }
     }
 
@@ -437,6 +464,7 @@ impl Sim {
                     "{sandbox} woken twice within the interval"
                 );
                 self.sandboxes[n].last_wake = Some(self.now);
+                self.sandboxes[n].owed_wake = None;
                 self.sandboxes[n].agent.asleep = false;
             }
             Effect::Save { sandbox, saved } => {
@@ -1181,6 +1209,7 @@ impl Sim {
         self.host_instance.clear();
         for sandbox in &mut self.sandboxes {
             sandbox.last_wake = None;
+            sandbox.owed_wake = None;
         }
         self.core = Core::new(self.settings.clone());
         for n in 0..SANDBOXES {
@@ -1308,6 +1337,7 @@ impl Sim {
                 if self.sandboxes[n].attached {
                     self.sandboxes[n].attached = false;
                     self.sandboxes[n].last_wake = None;
+                    self.sandboxes[n].owed_wake = None;
                     let id = self.sandboxes[n].id.clone();
                     self.input(Input::Detach { sandbox: id });
                     self.agent_hangs_up(n);

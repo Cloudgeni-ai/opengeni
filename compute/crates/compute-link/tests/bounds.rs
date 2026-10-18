@@ -216,12 +216,65 @@ fn messages_that_waited_too_long_go_and_make_room() {
     msg(&mut core, 0, s, 1, Bytes::from_static(b"old"));
     msg(&mut core, 10, s, 1, Bytes::from_static(b"older"));
     msg(&mut core, 20, s, 1, Bytes::from_static(b"dropped"));
+    assert_eq!(wakes(&core.take()), 1);
+    // The two that came within a wake's interval of the first wake the
+    // sandbox once more when it ends.
+    let every = Settings::default().wake_every_ms;
+    assert_eq!(core.deadline(), Some(every));
+    core.on(every, Input::Tick);
+    assert_eq!(wakes(&core.take()), 1);
     assert_eq!(core.deadline(), Some(hold));
     core.on(hold, Input::Tick);
     msg(&mut core, hold, s, 1, Bytes::from_static(b"new"));
     connect(&mut core, hold + 1, 2);
     sub(&mut core, hold + 1, 2, "rpc", "9");
     assert_eq!(delivered(&core.take(), 2), ["older", "new"]);
+    assert_eq!(core.deadline(), None);
+}
+
+fn wakes(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Wake { .. }))
+        .count()
+}
+
+#[test]
+fn a_message_too_soon_after_a_wake_wakes_its_sandbox_when_the_interval_ends() {
+    // The agent is connected and holds its subscription, as in a VM that
+    // was paused: the host delivers to it, and only a wake runs it.
+    let every = 250;
+    let mut core = core(Settings {
+        wake_every_ms: every,
+        ..Settings::default()
+    });
+    connect(&mut core, 0, 1);
+    let s = open(&mut core, 0);
+    sub(&mut core, 0, 1, "rpc", "1");
+    core.take();
+    msg(&mut core, 0, s, 1, Bytes::from_static(b"write"));
+    assert_eq!(wakes(&core.take()), 1);
+    // It is put to sleep at once, and the next request follows within the
+    // interval: not woken now, but not left asleep either.
+    core.on(
+        5,
+        Input::Running {
+            sandbox: SANDBOX.into(),
+            running: Running::Asleep,
+        },
+    );
+    msg(&mut core, 10, s, 1, Bytes::from_static(b"exec"));
+    msg(&mut core, 20, s, 1, Bytes::from_static(b"again"));
+    assert_eq!(delivered(&core.take(), 1), ["exec", "again"]);
+    assert_eq!(core.deadline(), Some(every));
+    core.on(every - 1, Input::Tick);
+    assert_eq!(wakes(&core.take()), 0);
+    core.on(every, Input::Tick);
+    assert_eq!(wakes(&core.take()), 1, "woken once for both");
+    assert_eq!(core.deadline(), None);
+    // A message after a quiet interval wakes it at once.
+    msg(&mut core, 2 * every, s, 1, Bytes::from_static(b"later"));
+    assert_eq!(wakes(&core.take()), 1);
     assert_eq!(core.deadline(), None);
 }
 

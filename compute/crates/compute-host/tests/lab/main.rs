@@ -316,10 +316,14 @@ async fn exec(client: &Client, sandbox: Id, script: &str) -> (String, Duration) 
             }
         }
     };
-    timeout(Duration::from_secs(120), read)
-        .await
-        .unwrap_or_else(|_| panic!("{sandbox}: script timed out after {:?}", started.elapsed()));
+    let finished = timeout(Duration::from_secs(120), read).await;
     let output = String::from_utf8_lossy(&output);
+    // What it printed tells which of its steps never ended.
+    assert!(
+        finished.is_ok(),
+        "{sandbox}: script timed out after {:?}; its output so far:\n{output}",
+        started.elapsed()
+    );
     let output = output.strip_suffix(&end).unwrap_or(&output).to_owned();
     (output, Duration::from_micros(waited_us))
 }

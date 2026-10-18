@@ -166,14 +166,19 @@ fi
 install -d -m 700 /var/lib/compute/state
 
 log "base image ${COMPUTE_BASE_IMAGE_REF:?COMPUTE_BASE_IMAGE_REF is not set}"
-if [ "$(cat /var/lib/compute/base.ref 2>/dev/null)" != "$COMPUTE_BASE_IMAGE_REF" ] || [ ! -f /var/lib/compute/base.ext4 ]; then
+# The base image is the OCI image with the bundle's guest programs (init,
+# envd, bash) put in, so it is built again when either changes.
+guest_digest=$(cd /opt/compute/current/guest && find . -type f -print0 | LC_ALL=C sort -z |
+  xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+base_id="$COMPUTE_BASE_IMAGE_REF guest-sha256:$guest_digest"
+if [ "$(cat /var/lib/compute/base.ref 2>/dev/null)" != "$base_id" ] || [ ! -f /var/lib/compute/base.ext4 ]; then
   rm -f /var/lib/compute/base.ext4.part
   /opt/compute/current/compute-host build-image "$COMPUTE_BASE_IMAGE_REF" \
     --guest /opt/compute/current/guest --output /var/lib/compute/base.ext4.part
   # A running agent keeps the base image it opened; the new one is used
   # from its next start.
   mv /var/lib/compute/base.ext4.part /var/lib/compute/base.ext4
-  echo "$COMPUTE_BASE_IMAGE_REF" >/var/lib/compute/base.ref
+  echo "$base_id" >/var/lib/compute/base.ref
 fi
 
 log "systemd units"

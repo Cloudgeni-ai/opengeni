@@ -31,7 +31,18 @@ on:
     paths:
       - "compute/**"
       - "deploy/terraform/gcp-compute/**"
+      # The chart's computeControl: its own templates, its values and render
+      # tests, and the shared templates it adds to.
       - "deploy/helm/opengeni/templates/*compute-control*"
+      - "deploy/helm/opengeni/templates/_helpers.tpl"
+      - "deploy/helm/opengeni/templates/api-deployment.yaml"
+      - "deploy/helm/opengeni/templates/configmap.yaml"
+      - "deploy/helm/opengeni/templates/dependency-networkpolicy.yaml"
+      - "deploy/helm/opengeni/templates/postgres-statefulset.yaml"
+      - "deploy/helm/opengeni/templates/worker-deployment.yaml"
+      - "deploy/helm/opengeni/templates/worker-turns-deployment.yaml"
+      - "deploy/helm/opengeni/values.yaml"
+      - "deploy/helm/opengeni/test/compute-control.test.ts"
       - ".github/workflows/compute-ci.yml"
   push:
     branches:
@@ -42,6 +53,15 @@ on:
       - "compute/**"
       - "deploy/terraform/gcp-compute/**"
       - "deploy/helm/opengeni/templates/*compute-control*"
+      - "deploy/helm/opengeni/templates/_helpers.tpl"
+      - "deploy/helm/opengeni/templates/api-deployment.yaml"
+      - "deploy/helm/opengeni/templates/configmap.yaml"
+      - "deploy/helm/opengeni/templates/dependency-networkpolicy.yaml"
+      - "deploy/helm/opengeni/templates/postgres-statefulset.yaml"
+      - "deploy/helm/opengeni/templates/worker-deployment.yaml"
+      - "deploy/helm/opengeni/templates/worker-turns-deployment.yaml"
+      - "deploy/helm/opengeni/values.yaml"
+      - "deploy/helm/opengeni/test/compute-control.test.ts"
       - ".github/workflows/compute-ci.yml"
   workflow_dispatch:
 

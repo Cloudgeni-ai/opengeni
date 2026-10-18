@@ -22,7 +22,7 @@
 //! host connects to the guest's notice port and sends one line:
 //!
 //! ```text
-//! restored <unix time in nanoseconds> sandbox=<sandbox id> seed=<hex> order=<generation>.<revision>
+//! restored <unix time in nanoseconds> sandbox=<sandbox id> seed=<hex> order=<generation>.<revision> owner=<owner epoch>
 //! ```
 //!
 //! The guest sets its clock, drops connections it opened before the
@@ -43,17 +43,20 @@
 //! same notice and must answer `ok seeded` before it is used: its disk
 //! carries the template's machine identity, which the guest replaces.
 //!
-//! A guest applies notices one at a time and ignores one whose `order` is
-//! below the latest it applied, so an attempt the host gave up on that
-//! arrives late never takes back a newer identity. The order is the
-//! sandbox's record fence when the notice is sent (its generation, then its
-//! revision, compared as numbers in that order), which every restore, claim
-//! and boot raises with a durable write before it tells the guest, and which
-//! never goes back across agent restarts. The attempts of one notice share
-//! it, so a retry is applied again; the time sets only the clock, and a
-//! host clock that steps back orders nothing. A template's guest is told no
-//! notice before its snapshot, so a clone's first notice is the first its
-//! memory knows of.
+//! A guest applies notices one at a time and ignores one ordered below the
+//! latest it applied, answering `stale`, so an attempt the host gave up on
+//! that arrives late never takes back a newer identity. The order is the
+//! sandbox's owner epoch (`owner`), then its record fence when the notice
+//! is sent (`order`: its generation, then its revision), compared as
+//! numbers in that order. Every restore, claim and boot raises the fence
+//! with a durable write before it tells the guest, and the fence never goes
+//! back across agent restarts; but it is this host's record's, and a
+//! sandbox that moves starts afresh on its new host. Its new owner's epoch
+//! is higher, and the epoch is what a moved guest's memory is ordered by.
+//! The attempts of one notice share the order, so a retry is applied
+//! again; the time sets only the clock, and a host clock that steps back
+//! orders nothing. A template's guest is told no notice before its
+//! snapshot, so a clone's first notice is the first its memory knows of.
 //!
 //! The same port answers one more question, asked before a running sandbox
 //! sleeps only for being idle: the line `activity`,
@@ -71,14 +74,18 @@ use compute_engine::vsock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Where a notice stands among those sent to one sandbox's guest: the
-/// sandbox record's generation, then its revision, when it was sent.
-pub type Order = (u64, u64);
+/// sandbox's owner epoch, then its record's generation and revision, when
+/// it was sent.
+pub type Order = (u64, u64, u64);
 
 /// The line a guest sends back once it has acted on the notice, without
 /// a newline.
 const ACK: &[u8] = b"ok";
 /// The same, from a guest that also applied the seed.
 const SEEDED: &[u8] = b"ok seeded";
+/// The line from a guest that applied a later notice, and so ignored this
+/// one.
+const STALE: &[u8] = b"stale";
 
 /// How a guest answered a notice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,11 +110,11 @@ fn notice(
     now: SystemTime,
     sandbox: impl fmt::Display,
     seed: &str,
-    (generation, revision): Order,
+    (owner, generation, revision): Order,
 ) -> io::Result<String> {
     let nanos = unix_nanos(now)?;
     Ok(format!(
-        "restored {nanos} sandbox={sandbox} seed={seed} order={generation}.{revision}\n"
+        "restored {nanos} sandbox={sandbox} seed={seed} order={generation}.{revision} owner={owner}\n"
     ))
 }
 
@@ -146,8 +153,8 @@ const RETRY_PAUSE: Duration = Duration::from_millis(5);
 ///
 /// # Errors
 ///
-/// The guest answered something else, or did not answer before `deadline`
-/// (the last attempt's error).
+/// The guest answered something else (also that it applied a later
+/// notice), or did not answer before `deadline` (the last attempt's error).
 pub async fn tell_restored(
     vsock_socket: &Path,
     port: u32,
@@ -212,6 +219,12 @@ async fn exchange(
             if answer == SEEDED {
                 return Ok(true);
             }
+            if answer == STALE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the guest applied a later restore notice than this one",
+                ));
+            }
             break;
         }
         answer.push(byte[0]);
@@ -267,14 +280,14 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::net::UnixListener;
 
-    const ORDER: Order = (4, 9);
+    const ORDER: Order = (2, 4, 9);
 
     #[test]
     fn the_notice_carries_unix_nanoseconds_and_the_record_fence() {
         let at = UNIX_EPOCH + Duration::new(1_700_000_000, 5);
         assert_eq!(
             notice(at, "00ab", "5eed", ORDER).unwrap(),
-            "restored 1700000000000000005 sandbox=00ab seed=5eed order=4.9\n"
+            "restored 1700000000000000005 sandbox=00ab seed=5eed order=4.9 owner=2\n"
         );
     }
 
@@ -300,7 +313,7 @@ mod tests {
                 assert!(line.starts_with("restored "), "{line}");
                 assert!(line.contains(" sandbox=7 seed="), "{line}");
                 // Every attempt carries the record's fence.
-                assert!(line.ends_with(" order=4.9"), "{line}");
+                assert!(line.ends_with(" order=4.9 owner=2"), "{line}");
                 let seed = line
                     .split_whitespace()
                     .find_map(|field| field.strip_prefix("seed="))
@@ -356,6 +369,7 @@ mod tests {
             ("wrong", b"no\n" as &[u8]),
             ("seedy", b"ok seedy\n"),
             ("long", b"ok seeded and more\n"),
+            ("stale", b"stale\n"),
         ] {
             let socket = guest(name, Box::leak(Box::new([Some(answer), Some(b"ok\n")])));
             let error = tell_restored(&socket, 53, 7, ORDER, Duration::from_secs(5))
