@@ -66,6 +66,19 @@ const MAX_CACHE_ITEMS: usize = 50_000;
 const MAX_ENRICH_CONCURRENCY: usize = 32;
 const MAX_DETAILED_ENRICHMENT_NODES: usize = 64;
 const MAX_APPLICATION_SNAPSHOTS: usize = 128;
+/// Chromium and Electron register an AT-SPI root with empty top-level frames
+/// and build the rest of their tree only after an assistive client queries a
+/// frame. These delays bound how long one observation waits for that build.
+const TREE_ACTIVATION_SETTLE_DELAYS: [Duration; 2] =
+    [Duration::from_millis(150), Duration::from_millis(350)];
+/// Environment that makes toolkits which otherwise wait for an assistive
+/// client (Chromium/Electron, Firefox and GTK2, Qt) expose their tree from
+/// startup when launched through computer use.
+const LINUX_APPLICATION_ACCESSIBILITY_ENVIRONMENT: [(&str, &str); 3] = [
+    ("ACCESSIBILITY_ENABLED", "1"),
+    ("GNOME_ACCESSIBILITY", "1"),
+    ("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1"),
+];
 const WINDOW_CAPTURE_RESIZE_ERROR: &str = "X11 window resized during capture";
 const WINDOW_CAPTURE_RETRY_DELAYS: [Duration; 4] = [
     Duration::ZERO,
@@ -300,6 +313,7 @@ impl LinuxApplicationLauncher {
         let mut command = Command::new(&self.executable);
         command
             .arg(application_id)
+            .envs(LINUX_APPLICATION_ACCESSIBILITY_ENVIRONMENT)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -361,10 +375,20 @@ pub(crate) struct AtspiComputerAdapter {
     semantic_generation: Arc<AtomicU64>,
     application_snapshots: RwLock<BTreeMap<String, CachedApplicationSnapshot>>,
     semantic_event_cache: Arc<AtomicBool>,
+    /// Applications whose dormant tree this adapter already tried to wake.
+    activated_applications: Mutex<BTreeSet<String>>,
 }
 
 impl AtspiComputerAdapter {
     pub(crate) async fn open() -> NativeAdapterResult<Self> {
+        // Toolkits only register with AT-SPI while the session reports
+        // accessibility as enabled. This is the IsEnabled flag alone; the
+        // screen-reader flag stays untouched so no screen reader starts.
+        let _ = tokio::time::timeout(
+            CACHE_TIMEOUT,
+            atspi::connection::set_session_accessibility(true),
+        )
+        .await;
         let connection = tokio::time::timeout(CACHE_TIMEOUT, AccessibilityConnection::new())
             .await
             .map_err(|_| {
@@ -422,6 +446,7 @@ impl AtspiComputerAdapter {
             semantic_generation,
             application_snapshots: RwLock::new(BTreeMap::new()),
             semantic_event_cache,
+            activated_applications: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -545,27 +570,19 @@ impl AtspiComputerAdapter {
                 return Ok(snapshot.items.clone());
             }
         }
-        let proxy = CacheProxy::builder(self.connection.connection())
-            .destination(root.name().ok_or_else(null_object)?.clone())
-            .map_err(|error| driver_error("construct application cache destination", error))?
-            .build()
-            .await
-            .map_err(|error| driver_error("construct application cache proxy", error));
-        let cached = match proxy {
-            Ok(proxy) => match cache_call(proxy.get_items()).await {
-                Ok(items) => Ok(items),
-                Err(error) if is_signature_mismatch(&error) => cache_call(proxy.get_legacy_items())
-                    .await
-                    .map_err(|error| driver_error("read legacy application AT-SPI cache", error))
-                    .and_then(convert_legacy_cache),
-                Err(error) => Err(driver_error("read application AT-SPI cache", error)),
-            },
-            Err(error) => Err(error),
-        };
-        let items = match cached {
-            Ok(items) if !items.is_empty() && cache_snapshot_complete(&items) => Ok(items),
-            Ok(_) | Err(_) => self.crawl_application(root).await,
-        }?;
+        let mut items = self.read_application_items(root).await?;
+        if dormant_application_tree(&items) && self.claim_tree_activation(&cache_key).await {
+            self.wake_application_tree(&items).await;
+            for delay in TREE_ACTIVATION_SETTLE_DELAYS {
+                tokio::time::sleep(delay).await;
+                if let Ok(woken) = self.read_application_items(root).await {
+                    items = woken;
+                    if !dormant_application_tree(&items) {
+                        break;
+                    }
+                }
+            }
+        }
         if self.semantic_event_cache.load(Ordering::Acquire)
             && self.semantic_generation.load(Ordering::Acquire) == start_generation
         {
@@ -583,6 +600,59 @@ impl AtspiComputerAdapter {
             );
         }
         Ok(items)
+    }
+
+    async fn read_application_items(
+        &self,
+        root: &ObjectRefOwned,
+    ) -> NativeAdapterResult<Vec<CacheItem>> {
+        let proxy = CacheProxy::builder(self.connection.connection())
+            .destination(root.name().ok_or_else(null_object)?.clone())
+            .map_err(|error| driver_error("construct application cache destination", error))?
+            .build()
+            .await
+            .map_err(|error| driver_error("construct application cache proxy", error));
+        let cached = match proxy {
+            Ok(proxy) => match cache_call(proxy.get_items()).await {
+                Ok(items) => Ok(items),
+                Err(error) if is_signature_mismatch(&error) => cache_call(proxy.get_legacy_items())
+                    .await
+                    .map_err(|error| driver_error("read legacy application AT-SPI cache", error))
+                    .and_then(convert_legacy_cache),
+                Err(error) => Err(driver_error("read application AT-SPI cache", error)),
+            },
+            Err(error) => Err(error),
+        };
+        match cached {
+            Ok(items) if !items.is_empty() && cache_snapshot_complete(&items) => Ok(items),
+            Ok(_) | Err(_) => self.crawl_application(root).await,
+        }
+    }
+
+    /// Records one wake attempt per application root, so a genuinely empty
+    /// window costs the settle delay once rather than on every observation.
+    async fn claim_tree_activation(&self, cache_key: &str) -> bool {
+        let mut activated = self.activated_applications.lock().await;
+        if activated.len() >= MAX_APPLICATION_SNAPSHOTS {
+            activated.clear();
+        }
+        activated.insert(cache_key.to_owned())
+    }
+
+    /// Querying a top-level frame's attributes is the assistive-client
+    /// signal that makes Chromium and Electron build their accessibility tree.
+    async fn wake_application_tree(&self, items: &[CacheItem]) {
+        let mut frames = Vec::new();
+        for item in items {
+            if is_top_level_window_role(item.role) {
+                frames.push(item.object.clone());
+            }
+        }
+        for frame in frames {
+            if let Ok(proxy) = self.accessible_proxy(&frame).await {
+                let _ = timed(proxy.get_attributes()).await;
+            }
+        }
     }
 
     fn invalidate_semantic_cache(&self) {
@@ -2921,6 +2991,28 @@ fn is_target_role(role: Role) -> bool {
     )
 }
 
+fn is_top_level_window_role(role: Role) -> bool {
+    matches!(role, Role::Frame | Role::Window | Role::Dialog)
+}
+
+fn dormant_application_tree(items: &[CacheItem]) -> bool {
+    dormant_tree_shape(items.iter().map(|item| (item.role, item.children)))
+}
+
+/// An application whose snapshot is only its root plus top-level windows
+/// without any children has registered with AT-SPI but not built its tree.
+fn dormant_tree_shape(nodes: impl IntoIterator<Item = (Role, i32)>) -> bool {
+    let mut windows = 0_usize;
+    for (role, children) in nodes {
+        if is_top_level_window_role(role) && children == 0 {
+            windows += 1;
+        } else if role != Role::Application {
+            return false;
+        }
+    }
+    windows > 0
+}
+
 const fn target_kind_rank(kind: NativeTargetKind) -> u8 {
     match kind {
         NativeTargetKind::App => 0,
@@ -3524,6 +3616,56 @@ mod live_tests {
         .await
         .expect("launch returns after startup grace")
         .expect("long-running launcher accepted");
+    }
+
+    #[tokio::test]
+    async fn application_launch_requests_toolkit_accessibility() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let executable = directory.path().join("gtk-launch");
+        let environment = directory.path().join("environment");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s %s %s' \"$ACCESSIBILITY_ENABLED\" \"$GNOME_ACCESSIBILITY\" \"$QT_LINUX_ACCESSIBILITY_ALWAYS_ON\" > '{}'\n",
+                environment.display()
+            ),
+        )
+        .expect("write launcher");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("make launcher executable");
+        let launcher = LinuxApplicationLauncher { executable };
+
+        launcher
+            .launch("opengeni-browser.desktop")
+            .await
+            .expect("launcher accepted");
+        assert_eq!(
+            fs::read_to_string(&environment).expect("launcher environment"),
+            "1 1 1"
+        );
+    }
+
+    #[test]
+    fn only_empty_top_level_windows_mark_a_dormant_tree() {
+        assert!(dormant_tree_shape([
+            (Role::Application, 1),
+            (Role::Frame, 0)
+        ]));
+        assert!(dormant_tree_shape([
+            (Role::Application, 2),
+            (Role::Frame, 0),
+            (Role::Dialog, 0),
+        ]));
+        assert!(!dormant_tree_shape([(Role::Application, 0)]));
+        assert!(!dormant_tree_shape([
+            (Role::Application, 1),
+            (Role::Frame, 1)
+        ]));
+        assert!(!dormant_tree_shape([
+            (Role::Application, 1),
+            (Role::Frame, 1),
+            (Role::Button, 0),
+        ]));
     }
 
     #[tokio::test]
