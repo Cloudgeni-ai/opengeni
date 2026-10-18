@@ -172,6 +172,22 @@ redirect large output to a file and read only needed ranges.
 It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
 
+Native `codemode call` accepts inline JSON (default `{}`), `-` to read one UTF-8
+JSON object from stdin through EOF, or `@path` to read it from a local file.
+Use stdin or a file for large arguments so the operating system's argv limit
+does not apply to the JSON payload:
+
+```sh
+"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call server.tool - < arguments.json
+"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call server.tool '@arguments with spaces.json'
+```
+
+Relative file paths resolve from the command's working directory. Input is read
+once and validated before catalog lookup or submission; errors do not echo the
+file's contents. Omitting arguments does not consume stdin. These input forms
+require an updated native agent; API/tool payload limits and the existing
+attempt journal, approval and recovery semantics are unchanged.
+
 Vault secrets reach a machine only per command. When an `exec_command` or
 `run_on` command contains `{{secret:…}}` references, Opengeni runs it with
 `/bin/sh -c` on POSIX hosts or `powershell -NoProfile -NonInteractive -Command`
