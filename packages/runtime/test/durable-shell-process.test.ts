@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { Manifest } from "@openai/agents/sandbox";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readlinkSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, readlinkSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -243,6 +243,42 @@ describe("session-owned Docker/local processes", () => {
     // The blocked writer ends with the command instead of lingering.
     await Bun.sleep(200);
     expect(() => process.kill(writer, 0)).toThrow();
+  });
+
+  test("input never stays on disk, whether the command read it or not", async () => {
+    // write_stdin carries secret values and streamed secret files.
+    const filesHolding = (dir: string, value: string) =>
+      readdirSync(dir).filter((name) => {
+        try {
+          const path = join(dir, name);
+          // Never open the input FIFO: that would block.
+          return statSync(path).isFile() && readFileSync(path, "utf8").includes(value);
+        } catch {
+          return false; // a status file renamed in the meantime
+        }
+      });
+    const session = await workspace();
+    const reader = await session.execCommand({
+      cmd: 'IFS= read -r v; printf %s "$v" | wc -c',
+      yieldTimeMs: 100,
+    });
+    const readerId = parseExecBannerSessionId(reader)!;
+    expect(readerId).toBeGreaterThanOrEqual(DURABLE_PROCESS_ID_MIN);
+    const read = await readUntilExit(session, readerId, "read-input-canary\n");
+    expect(read.split("\n@@")[1]?.trim()).toBe("17");
+    expect(filesHolding(runDir(session, readerId), "read-input-canary")).toEqual([]);
+
+    // A command that never reads keeps its input pending in the writer.
+    const idle = await session.execCommand({ cmd: "sleep 30", yieldTimeMs: 100 });
+    const idleId = parseExecBannerSessionId(idle)!;
+    const pending = await session.writeStdin({
+      sessionId: idleId,
+      chars: `pending-input-canary${"x".repeat(256 * 1024)}`,
+      yieldTimeMs: 100,
+    });
+    expect(parseExecBannerSessionId(pending)).toBe(idleId);
+    expect(filesHolding(runDir(session, idleId), "pending-input-canary")).toEqual([]);
+    expect(await session.stopDurableProcess(idleId)).toBe(true);
   });
 
   test("a multibyte character split across reads is never torn", async () => {
