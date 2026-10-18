@@ -1553,6 +1553,16 @@ export function channelAOperationFailureDiagnostic(
       errorCode: "sandbox_channel_a_operation_failed",
     };
   }
+  // A browser or computer controller that refuses a request (a stale target,
+  // an ended session) answers with its own 4xx, and the route returns exactly
+  // that status. Count it as the rejection it is, not as an unexpected 500.
+  if (error instanceof BrowserControlRequestError) {
+    return {
+      reason: error.status >= 500 ? "unexpected" : "request_rejected",
+      status: error.status,
+      errorCode: "sandbox_channel_a_operation_failed",
+    };
+  }
   // An authority fence is a deliberate rejection, not a fault: keep it out of
   // the unexpected-failure signal that operators page on.
   const authorityFence = workspaceMutationAuthorityFenceCode(error);
