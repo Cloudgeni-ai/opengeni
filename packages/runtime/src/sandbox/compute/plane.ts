@@ -12,6 +12,17 @@
 import type { ControlRpc } from "../selfhosted/control-rpc";
 import type { OpStreamTransport } from "../selfhosted/op-transport";
 
+/**
+ * Whether a backend's provider session is the machine agent reached over NATS
+ * and the relay (a Connected Machine, or the agent inside a compute sandbox).
+ * Transport points (relay terminal and desktop frames, the agent's error
+ * grammar) key on this; lease and provisioning points still treat compute as
+ * a managed sandbox.
+ */
+export function usesAgentTransport(backend: string | null | undefined): boolean {
+  return backend === "selfhosted" || backend === "compute";
+}
+
 /** One authoritative snapshot of the box agent's live connection. */
 export interface ComputeAgentConnection {
   /** Control-plane workspace segment of the agent subject. */

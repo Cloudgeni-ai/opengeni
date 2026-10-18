@@ -41,7 +41,10 @@ import {
   isVerifiedDelegatedHumanAuthorization,
   withSiteSessionOrigin,
 } from "@opengeni/core";
-import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
+import {
+  freezeSessionRealtimeConnectionAccounts,
+  managedSessionGroupBackend,
+} from "@opengeni/core";
 import {
   createRealtimeVoiceBilling,
   RealtimeVoiceUnavailableError,
@@ -4507,8 +4510,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       },
     };
     if (capabilities.DesktopStream.transport !== null) {
+      // A compute group box serves its agent's relay framebuffer, like a
+      // Connected Machine; a Modal swap target keeps noVNC.
+      const computeGroupActive =
+        activeSandbox === null &&
+        managedSessionGroupBackend(settings.sandboxBackend, session.sandboxBackend) === "compute";
       const wire = resolveActiveDesktopTransport(
-        selfhostedActive,
+        selfhostedActive || computeGroupActive,
         settings.sandboxDesktopInteractive !== false,
       );
       responseCapabilities = {

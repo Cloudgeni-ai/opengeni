@@ -174,6 +174,14 @@ export function classifyProviderSandboxFailure(
     return { kind: "transient_transport", diagnostic };
   }
   if (signals.incomplete) return { kind: "other", diagnostic };
+  // A compute sandbox's operations are answered by its agent, whose not-found
+  // and offline replies concern files and connections, never the sandbox. Only
+  // the provider's own proof that the fabric has no such sandbox counts.
+  if (backendId === "compute") {
+    return signals.codes.includes("SANDBOX_NOT_FOUND")
+      ? { kind: "not_found", diagnostic }
+      : { kind: "other", diagnostic };
+  }
   if (
     signals.numbers.some((status) => status === 404) ||
     signals.codes.some((code) => NOT_FOUND_CODES.has(code))

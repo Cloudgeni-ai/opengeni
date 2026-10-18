@@ -32,6 +32,7 @@ import {
 import { createObjectStorage } from "@opengeni/storage";
 import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/development";
 import {
+  installComputeAgentPlane,
   resolveCatalogSettings,
   SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID,
@@ -425,6 +426,8 @@ export async function startApi(
     await dbClient.close();
     throw new Error("Opengeni API startup dependencies were not initialized");
   }
+  // Compute sandboxes reach their agent over this process's bus and database.
+  installComputeAgentPlane({ db: dbClient.db, bus, settings });
   const objectStorage = createObjectStorage(settings);
   let editableArtifactComposition: StandaloneEditableArtifactApplication | undefined;
   if (objectStorage && isArtifactRuntimeConfigured()) {

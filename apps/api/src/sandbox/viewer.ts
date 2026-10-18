@@ -74,6 +74,7 @@ import {
   TERMINAL_STREAM_PORT,
   DisplayStackUnsupportedError,
   TerminalServerUnsupportedError,
+  usesAgentTransport,
   verifySandboxExecReadiness,
   StreamPortUnavailableError,
   renewSandboxProviderExpiration,
@@ -971,6 +972,21 @@ export async function mintDesktopStream(
       return null;
     }
 
+    // A compute sandbox's agent owns its display and serves the framebuffer
+    // over the relay, fenced by the lease epoch. Nothing runs over exec.
+    if (usesAgentTransport(established.backendId)) {
+      const relayed = await mintSelfhostedStream(services, {
+        workspaceId,
+        sessionId: session.id,
+        viewerId: input.viewerId,
+        activeEpoch: lease.leaseEpoch,
+        viewerAuthority,
+        port: DESKTOP_STREAM_PORT,
+        session: established.session as RelayResolvableSession,
+      });
+      return relayed ? { ...relayed, resolution: defaultResolution(settings) } : null;
+    }
+
     // Idempotent display stack (flock-guarded; a no-op when already up). A box
     // that genuinely can't run the stack degrades to transport:null, not a throw.
     try {
@@ -1235,6 +1251,21 @@ export async function mintTerminalStream(
     } catch (error) {
       await retireMissingWarmLease(services, { accountId, workspaceId, session, lease }, error);
       return null;
+    }
+
+    // A compute sandbox's agent serves its terminal as a relay PTY, fenced by
+    // the lease epoch. Nothing runs over exec.
+    if (usesAgentTransport(established.backendId)) {
+      const relayed = await mintSelfhostedStream(services, {
+        workspaceId,
+        sessionId: session.id,
+        viewerId: input.viewerId,
+        activeEpoch: lease.leaseEpoch,
+        viewerAuthority,
+        port: TERMINAL_STREAM_PORT,
+        session: established.session as RelayResolvableSession,
+      });
+      return relayed ? { ...relayed, transport: "relay-pty" } : null;
     }
 
     // Idempotent ttyd launch (flock-guarded; a no-op when already up). A box that

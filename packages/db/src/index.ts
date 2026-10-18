@@ -4361,6 +4361,9 @@ export async function deleteWorkspaceIfQuiescent(
             .from(schema.sandboxLeases)
             .where(eq(schema.sandboxLeases.workspaceId, input.workspaceId))
             .for("update", { noWait: true });
+          // The workspace's compute sandboxes stay warm while idle; deleting it
+          // ends their groups, so ask the reaper to tear them down now.
+          await requestComputeGroupEndTx(tx, { workspaceId: input.workspaceId });
           if (
             leases.some(
               (lease) =>
@@ -30780,6 +30783,13 @@ export async function deleteSessionTreeIfQuiescent(
               ),
             )
             .for("update", { noWait: true });
+          // A compute sandbox stays warm while idle; deleting the chat ends its
+          // group, so ask the reaper to tear it down now. The caller retries
+          // while it shuts down, as for any live sandbox.
+          await requestComputeGroupEndTx(tx, {
+            workspaceId: input.workspaceId,
+            sandboxGroupIds: groupIds,
+          });
           if (
             leases.some(
               (lease) =>
@@ -49938,6 +49948,60 @@ export async function failWarmingToCold(
   );
 }
 
+// Opengeni compute's fabric sleeps an idle sandbox itself and keeps its memory
+// and disk, so a compute lease is never drained for being idle (0840): it stays
+// warm without holders until its group ends or it rotates. A rotation or an
+// archive capture still drains it.
+function computeLeaseStaysWarmWhenIdle(
+  row: Pick<LeaseRow, "backend" | "rotation_requested_at" | "archive_capture_id">,
+): boolean {
+  return (
+    row.backend === "compute" &&
+    row.rotation_requested_at === null &&
+    row.archive_capture_id === null
+  );
+}
+
+/**
+ * End the groups of idle compute leases: a warm compute lease with no holder,
+ * hold or capture becomes drainable now, so the reaper deletes its sandbox and
+ * revokes its agent's enrollment. Runs inside a deletion transaction that has
+ * already locked the leases; a lease with any holder is left alone and the
+ * deletion keeps refusing until it drains.
+ */
+async function requestComputeGroupEndTx(
+  tx: Database,
+  input: { workspaceId: string; sandboxGroupIds?: readonly string[] },
+): Promise<void> {
+  if (input.sandboxGroupIds && input.sandboxGroupIds.length === 0) return;
+  await tx.execute(sql`
+    update sandbox_leases lease set
+      liveness = 'draining',
+      expires_at = now() - interval '1 millisecond',
+      updated_at = now()
+    where lease.workspace_id = ${input.workspaceId}
+      ${
+        input.sandboxGroupIds
+          ? sql`and lease.sandbox_group_id in (${sql.join(
+              input.sandboxGroupIds.map((id) => sql`${id}::uuid`),
+              sql`, `,
+            )})`
+          : sql``
+      }
+      and lease.backend = 'compute'
+      and lease.liveness = 'warm'
+      and lease.refcount = 0 and lease.turn_holders = 0 and lease.viewer_holders = 0
+      and lease.reaper_hold_id is null
+      and lease.archive_capture_id is null
+      and not exists (select 1 from sandbox_lease_holders h where h.lease_id = lease.id)
+  `);
+}
+
+/** The SQL twin of {@link computeLeaseStaysWarmWhenIdle} over alias `L`. */
+const COMPUTE_IDLE_DRAINABLE_SQL = sql.raw(
+  "(L.backend <> 'compute' or L.rotation_requested_at is not null or L.archive_capture_id is not null)",
+);
+
 // §4.4 — idempotent delete-my-row (+ opportunistic warm->draining guarded
 // refcount=0 AND turn_holders=0, so a paying turn is never drained).
 export async function releaseLeaseHolder(
@@ -50076,7 +50140,11 @@ export async function releaseLeaseHolder(
         // warm + dropped to 0 (AND no turn holders) -> draining, stamp grace deadline.
         // Release during warming decrements only, NEVER touches liveness (the
         // spawner owns warming->warm and re-checks refcount after committing).
-        const enterDraining = row.liveness === "warm" && c.total === 0 && c.turns === 0;
+        const enterDraining =
+          row.liveness === "warm" &&
+          c.total === 0 &&
+          c.turns === 0 &&
+          !computeLeaseStaysWarmWhenIdle(row);
         // A capture claim is already the durable teardown fence. Once its final
         // holder leaves, waiting through the ordinary idle grace only creates an
         // avoidable availability outage; dispatch recovery on the next sweep.
@@ -50750,9 +50818,11 @@ export async function reapStaleLeaseHolders(
           viewer_holders = c.viewers,
           liveness = case when L.liveness = 'warm' and c.total = 0 and c.turns = 0
                             and (L.reaper_hold_id is null or L.reaper_hold_until <= now())
+                            and ${COMPUTE_IDLE_DRAINABLE_SQL}
                           then 'draining' else L.liveness end,
           expires_at = case when L.liveness = 'warm' and c.total = 0 and c.turns = 0
                             and (L.reaper_hold_id is null or L.reaper_hold_until <= now())
+                            and ${COMPUTE_IDLE_DRAINABLE_SQL}
                           then case when L.rotation_requested_at is not null
                               or L.archive_capture_id is not null
                             then now() - interval '1 millisecond'
@@ -64082,6 +64152,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
       select lease.id from sandbox_leases lease
       where lease.workspace_id = ${input.workspaceId}
         and lease.liveness = 'warm' and lease.refcount = 0
+        and lease.backend <> 'compute'
         and not exists (select 1 from sandbox_lease_holders h where h.lease_id = lease.id)
       order by id
       for update
@@ -64098,6 +64169,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
         updated_at = now()
       where lease.workspace_id = ${input.workspaceId}
         and lease.liveness = 'warm' and lease.refcount = 0
+        and lease.backend <> 'compute'
         and not exists (select 1 from sandbox_lease_holders h where h.lease_id = lease.id)
       returning lease.sandbox_group_id
     `,

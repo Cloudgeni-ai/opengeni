@@ -12,7 +12,11 @@ import {
 } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
-import { createRemoteExternalVaultFactories, resolveCatalogSettings } from "@opengeni/core";
+import {
+  createRemoteExternalVaultFactories,
+  installComputeAgentPlane,
+  resolveCatalogSettings,
+} from "@opengeni/core";
 import { createObjectStorage } from "@opengeni/storage";
 import type { ActivityDependencies, SharedActivityServices } from "./activities/types";
 import { observabilityEventBusOptions } from "./observability-metrics";
@@ -65,19 +69,22 @@ export function createSharedActivityServices(
           reason: webSearchProvider.reason,
         });
       }
+      const bus =
+        dependencies.bus ??
+        (await createNatsEventBus(
+          settings.natsUrl,
+          controlPlaneAuth
+            ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
+            : undefined,
+          observabilityEventBusOptions(observability),
+        ));
+      // Compute sandboxes reach their agent over this process's bus and database.
+      installComputeAgentPlane({ db, bus, settings });
       return {
         settings: resolvedSettings,
         catalogSourceSettings: settings,
         db,
-        bus:
-          dependencies.bus ??
-          (await createNatsEventBus(
-            settings.natsUrl,
-            controlPlaneAuth
-              ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
-              : undefined,
-            observabilityEventBusOptions(observability),
-          )),
+        bus,
         objectStorage: dependencies.objectStorage ?? createObjectStorage(settings),
         observability,
         wakeSessionWorkflow: dependencies.wakeSessionWorkflow ?? null,

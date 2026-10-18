@@ -10,6 +10,10 @@ import { SandboxConfigError } from "../errors";
 import { resolveRelayConfig } from "./selfhosted";
 import { REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
 
+/** A request window that outlasts a wake from disk (the host holds a message
+ * for up to 120 s) plus the agent's reply. */
+export const COMPUTE_MIN_REQUEST_TIMEOUT_MS = 130_000;
+
 export const computeProvider: ProviderRegistration = {
   backend: "compute",
   exactResumeMode: "custom",
@@ -44,7 +48,13 @@ export const computeProvider: ProviderRegistration = {
         ? { cpuRequestMillis: settings.computeCpuRequestMillis }
         : {}),
       readyTimeoutMs: settings.computeAgentReadyTimeoutMs,
-      controlTimeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
+      // The first request after idle takes the sandbox's wake: its host holds
+      // the message for up to 120 s while the sandbox wakes and its agent
+      // reconnects, so every compute request window covers that.
+      controlTimeoutMs: Math.max(
+        settings.sandboxSelfhostedControlTimeoutMs,
+        COMPUTE_MIN_REQUEST_TIMEOUT_MS,
+      ),
       execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
       environment,
     });

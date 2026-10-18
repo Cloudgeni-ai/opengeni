@@ -8,7 +8,12 @@ import {
   MockAgentResponder,
   SandboxConfigError,
   SandboxExactResumeInstanceUnavailableError,
+  SelfhostedControlError,
+  classifyProviderSandboxFailure,
+  isProviderSandboxGoneDuringRoutedOperation,
+  negotiateCapabilities,
   offlineControlResponse,
+  usesAgentTransport,
   type ComputeAgentConnection,
   type ComputeAgentPlane,
   type ControlRpc,
@@ -547,5 +552,58 @@ describe("compute fabric client", () => {
     await client.delete(view.id);
     expect(await client.lookupRequest("req-2")).toEqual({ state: "gone" });
     expect(await client.linkKeys()).toEqual({ team: "opengeni", keys: [] });
+  });
+});
+
+describe("compute at the transport points", () => {
+  test("compute and Connected Machines use the agent transport; managed providers do not", () => {
+    expect(usesAgentTransport("compute")).toBe(true);
+    expect(usesAgentTransport("selfhosted")).toBe(true);
+    expect(usesAgentTransport("modal")).toBe(false);
+    expect(usesAgentTransport(null)).toBe(false);
+  });
+
+  test("only the fabric's proof that the sandbox is gone counts as provider loss", () => {
+    const gone = new SandboxExactResumeInstanceUnavailableError("compute", "sbx-1");
+    expect(classifyProviderSandboxFailure("compute", gone).kind).toBe("not_found");
+    expect(isProviderSandboxGoneDuringRoutedOperation("compute", gone)).toBe(true);
+    // The agent's own not-found and offline answers concern files and
+    // connections, never the sandbox.
+    const fileMissing = Object.assign(new Error("No such file"), {
+      status: 404,
+      code: "NOT_FOUND",
+    });
+    expect(classifyProviderSandboxFailure("compute", fileMissing).kind).toBe("other");
+    const offline = new SelfhostedControlError({
+      message: "agent offline",
+      code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+      reason: "agent_offline",
+      retryable: false,
+    });
+    expect(classifyProviderSandboxFailure("compute", offline).kind).toBe("other");
+    expect(isProviderSandboxGoneDuringRoutedOperation("compute", offline)).toBe(false);
+  });
+
+  test("a compute desktop is the agent's relay framebuffer", () => {
+    const caps = negotiateCapabilities({
+      sessionId: "00000000-0000-0000-0000-000000000001",
+      backend: "compute",
+      os: "linux",
+      liveness: "warm",
+      leaseEpoch: 1,
+      desktopEnabled: true,
+    });
+    expect(caps.DesktopStream.transport).toBe("relay-frames");
+    expect(caps.DesktopStream.client).toBe("frames");
+    expect(caps.DesktopStream.mode).toBe("read-only");
+    const modal = negotiateCapabilities({
+      sessionId: "00000000-0000-0000-0000-000000000001",
+      backend: "modal",
+      os: "linux",
+      liveness: "warm",
+      leaseEpoch: 1,
+      desktopEnabled: true,
+    });
+    expect(modal.DesktopStream.transport).toBe("vnc-ws");
   });
 });

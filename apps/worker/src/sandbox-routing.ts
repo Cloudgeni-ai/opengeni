@@ -93,6 +93,7 @@ import {
   type SelfhostedRelayConfig,
   type OpStreamJournal,
   type SelfhostedOpStreamDeps,
+  type SelfhostedSessionDeps,
 } from "@opengeni/runtime";
 import { sandboxLeaseHolderIdForAttempt } from "./sandbox-resume";
 
@@ -1688,6 +1689,99 @@ async function resolveRoutedMachineConnection(
   );
 }
 
+/**
+ * The background-command ledger hooks of an agent session (a Connected
+ * Machine, or the agent inside a compute sandbox): a yielded command is
+ * adopted into the session's ledger, its output captured, and its exit settled.
+ */
+export function agentBackgroundCommandDeps(
+  db: Database,
+  bus: EventBus | undefined,
+  args: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    backgroundCommandAttempt?: {
+      turnId: string;
+      executionGeneration: number;
+      attemptId: string;
+    };
+  },
+): Pick<
+  SelfhostedSessionDeps,
+  "adoptBackgroundCommand" | "captureBackgroundCommandOutput" | "settleBackgroundCommand"
+> {
+  return {
+    ...(args.backgroundCommandAttempt
+      ? {
+          adoptBackgroundCommand: async (command) => {
+            const adopted = await adoptConnectedMachineSessionBackgroundCommand(db, {
+              accountId: args.accountId,
+              workspaceId: args.workspaceId,
+              sessionId: args.sessionId,
+              turnId: args.backgroundCommandAttempt!.turnId,
+              executionGeneration: args.backgroundCommandAttempt!.executionGeneration,
+              attemptId: args.backgroundCommandAttempt!.attemptId,
+              commandId: crypto.randomUUID(),
+              controlWorkspaceId: command.controlWorkspaceId,
+              enrollmentId: command.enrollmentId,
+              connectionInstanceId: command.connectionInstanceId,
+              opId: command.opId,
+              command: command.command,
+              ...(command.abandoned ? { abandoned: true } : {}),
+            });
+            return { commandId: adopted.id };
+          },
+        }
+      : {}),
+    captureBackgroundCommandOutput: captureConnectedCommandOutput(
+      db,
+      {
+        accountId: args.accountId,
+        workspaceId: args.workspaceId,
+        sessionId: args.sessionId,
+      },
+      bus,
+    ),
+    settleBackgroundCommand: async (command) => {
+      const settlement = await settleConnectedMachineSessionBackgroundCommand(db, {
+        accountId: args.accountId,
+        workspaceId: args.workspaceId,
+        sessionId: args.sessionId,
+        commandId: command.commandId,
+        controlWorkspaceId: command.controlWorkspaceId,
+        enrollmentId: command.enrollmentId,
+        connectionInstanceId: command.connectionInstanceId,
+        opId: command.opId,
+        outcome: command.outcome,
+        exitCode: command.exitCode,
+        reason: command.reason,
+        backgroundChildrenStopped: command.backgroundChildrenStopped,
+        ...(command.failure ? { failure: command.failure } : {}),
+      });
+      if (command.outputReceipt && command.outcome === "exited" && command.exitCode !== null) {
+        await recordConnectedCommandOutputConsumption(db, {
+          accountId: args.accountId,
+          workspaceId: args.workspaceId,
+          sessionId: args.sessionId,
+          commandId: command.commandId,
+          controlWorkspaceId: command.controlWorkspaceId,
+          enrollmentId: command.enrollmentId,
+          connectionInstanceId: command.connectionInstanceId,
+          opId: command.opId,
+          receipt: command.outputReceipt,
+          exitCode: command.exitCode,
+        });
+      }
+      if (settlement && bus) {
+        await bus
+          .publish(args.workspaceId, args.sessionId, settlement.events)
+          .catch(() => undefined);
+      }
+    },
+  };
+}
+
 export async function establishSelfhostedTurnSession(
   services: RoutingWiringServices,
   args: SelfhostedTurnSessionArgs,
@@ -1757,73 +1851,14 @@ export async function establishSelfhostedTurnSession(
         workspaceRoot: resolveConnectedMachineWorkspaceRoot(binding.workspaceRoot, args.workingDir),
       };
     },
-    ...(args.backgroundCommandAttempt
-      ? {
-          adoptBackgroundCommand: async (command) => {
-            const adopted = await adoptConnectedMachineSessionBackgroundCommand(db, {
-              accountId: args.accountId,
-              workspaceId: args.workspaceId,
-              sessionId: args.sessionId,
-              turnId: args.backgroundCommandAttempt!.turnId,
-              executionGeneration: args.backgroundCommandAttempt!.executionGeneration,
-              attemptId: args.backgroundCommandAttempt!.attemptId,
-              commandId: crypto.randomUUID(),
-              controlWorkspaceId: command.controlWorkspaceId,
-              enrollmentId: command.enrollmentId,
-              connectionInstanceId: command.connectionInstanceId,
-              opId: command.opId,
-              command: command.command,
-              ...(command.abandoned ? { abandoned: true } : {}),
-            });
-            return { commandId: adopted.id };
-          },
-        }
-      : {}),
-    captureBackgroundCommandOutput: captureConnectedCommandOutput(
-      db,
-      {
-        accountId: args.accountId,
-        workspaceId: args.workspaceId,
-        sessionId: args.sessionId,
-      },
-      bus,
-    ),
-    settleBackgroundCommand: async (command) => {
-      const settlement = await settleConnectedMachineSessionBackgroundCommand(db, {
-        accountId: args.accountId,
-        workspaceId: args.workspaceId,
-        sessionId: args.sessionId,
-        commandId: command.commandId,
-        controlWorkspaceId: command.controlWorkspaceId,
-        enrollmentId: command.enrollmentId,
-        connectionInstanceId: command.connectionInstanceId,
-        opId: command.opId,
-        outcome: command.outcome,
-        exitCode: command.exitCode,
-        reason: command.reason,
-        backgroundChildrenStopped: command.backgroundChildrenStopped,
-        ...(command.failure ? { failure: command.failure } : {}),
-      });
-      if (command.outputReceipt && command.outcome === "exited" && command.exitCode !== null) {
-        await recordConnectedCommandOutputConsumption(db, {
-          accountId: args.accountId,
-          workspaceId: args.workspaceId,
-          sessionId: args.sessionId,
-          commandId: command.commandId,
-          controlWorkspaceId: command.controlWorkspaceId,
-          enrollmentId: command.enrollmentId,
-          connectionInstanceId: command.connectionInstanceId,
-          opId: command.opId,
-          receipt: command.outputReceipt,
-          exitCode: command.exitCode,
-        });
-      }
-      if (settlement && bus) {
-        await bus
-          .publish(args.workspaceId, args.sessionId, settlement.events)
-          .catch(() => undefined);
-      }
-    },
+    ...agentBackgroundCommandDeps(db, bus, {
+      accountId: args.accountId,
+      workspaceId: args.workspaceId,
+      sessionId: args.sessionId,
+      ...(args.backgroundCommandAttempt
+        ? { backgroundCommandAttempt: args.backgroundCommandAttempt }
+        : {}),
+    }),
     // Meter every control op (out-of-band telemetry) — no-op when unwired.
     ...(onOp !== undefined ? { onOp } : {}),
     // The streaming exec transport — present iff the machine advertised the

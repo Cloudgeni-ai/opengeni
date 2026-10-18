@@ -104,6 +104,7 @@ import { sandboxCommandExitCode, sandboxCommandStillRunning } from "./command-re
 import { parseExecBannerSessionId } from "./exec-banner";
 import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
 import type { ExposedPortEndpoint } from "./stream-port";
+import type { ComputeCreateIdentity } from "./compute/session";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
@@ -622,6 +623,7 @@ export {
 export {
   getComputeAgentPlane,
   setComputeAgentPlane,
+  usesAgentTransport,
   type ComputeAgentConnection,
   type ComputeAgentPlane,
 } from "./compute/plane";
@@ -1983,6 +1985,9 @@ export async function establishSandboxSessionFromEnvelope(
     loadHostWorkspaceArchive?: (ref: WorkspaceArchiveObjectRef) => Promise<WorkspaceArchiveSpool>;
     backendOverride?: SandboxBackend;
     environment?: Record<string, string>;
+    /** The lease a created box belongs to. A compute sandbox's agent is
+     * enrolled under it, so creating one requires it; other backends ignore it. */
+    createIdentity?: ComputeCreateIdentity;
     onSandboxCreated?: SandboxCreatedCallback;
     /** Durable lease owners fence the attempt before invoking a provider create.
      * Called for each physical attempt, including logical-image fallback. A
@@ -2207,6 +2212,12 @@ export async function establishSandboxSessionFromEnvelope(
         // Non-Modal providers and isolated client-factory fixtures retain their
         // ordinary admission hook. Production Modal requires the wire intent.
         await opts.onBeforeSandboxCreate?.(createSettings);
+        if (backend === "compute") {
+          return await candidate.create!(
+            { manifest: createManifest },
+            opts.createIdentity ? { opengeniCreateIdentity: opts.createIdentity } : undefined,
+          );
+        }
         return await candidate.create!({ manifest: createManifest });
       };
       const createStarted = Date.now();
