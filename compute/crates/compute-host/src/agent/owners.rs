@@ -245,13 +245,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// still give it a sandbox is under way; otherwise how many such are.
     /// Hand-offs that have not begun their removal end now, unfinished:
     /// the sandbox stays this host's, listed, and the service asks again
-    /// under the new registration. None of these can start meanwhile, with
-    /// no registration held.
+    /// under the new registration. Creates and fetches waiting for a disk
+    /// reading are refused now, unstarted, and asked again too: with no
+    /// lease held no reading comes (see [`HostAgent::run`]), so they would
+    /// keep the list waiting for good. None of these can start meanwhile,
+    /// with no registration held.
     pub(super) fn inventory(&mut self) -> Result<crate::protocol::HostStatus, usize> {
         let handing_off: Vec<SandboxId> = self.handing_off.keys().copied().collect();
         for id in handing_off {
             self.fail_hand_off(Id(id), &HostError::NotAdmitted);
         }
+        self.refuse_after_reading(&HostError::NotAdmitted);
         let unsettled =
             self.preparing.len() + self.owning.values().sum::<usize>() + self.then_adopt.len();
         if unsettled > 0 {

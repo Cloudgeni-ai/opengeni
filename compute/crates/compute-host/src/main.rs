@@ -720,6 +720,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         base_image: args.base_image,
         policy,
         sample_every,
+        disk_reading: None,
         stream_idle: Duration::from_secs(args.stream_idle_secs),
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,

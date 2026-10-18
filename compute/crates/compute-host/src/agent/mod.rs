@@ -56,6 +56,8 @@ mod steps;
 mod usage;
 mod warm;
 
+pub use sample::DiskGauge;
+
 /// Takes the host's lock at `path` for state root `root`; see
 /// [`HostConfig::host_lock`].
 async fn claim(path: PathBuf, root: PathBuf) -> Result<std::fs::File, HostError> {
@@ -94,6 +96,10 @@ pub struct HostConfig {
     pub policy: HostPolicy,
     /// How often to sample host and VM memory.
     pub sample_every: Duration,
+    /// Readings of the local disk given to the agent instead of its own of
+    /// the state root's filesystem, as tests give (see [`DiskGauge`]).
+    /// `None` reads the filesystem every sample.
+    pub disk_reading: Option<DiskGauge>,
     /// Ports every sandbox may connect to on this host, and where they lead.
     pub guest_ports: Vec<GuestPort>,
     /// Guest vsock port told about every restore from a memory image, so the
@@ -871,6 +877,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// window, so they count as busy; see [`HostAgent::sample_busy`].
     unseen_activity: usize,
     sample_every: Duration,
+    /// Readings given in place of the agent's own; see
+    /// [`HostConfig::disk_reading`].
+    disk_gauge: Option<DiskGauge>,
     /// When memory pressure frees memory, if it does.
     memory_policy: Option<MemoryPolicy>,
     /// Ready sandboxes, kept for creates to claim (see [`ready`]).
@@ -1146,6 +1155,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             available_memory: None,
             unseen_activity: 0,
             sample_every: config.sample_every,
+            disk_gauge: config.disk_reading,
             guest_ports: config.guest_ports.into(),
             restore_notice_port: config.restore_notice_port,
             link: config.agent_link,

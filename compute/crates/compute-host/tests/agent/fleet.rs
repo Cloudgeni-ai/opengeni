@@ -184,46 +184,65 @@ async fn a_moved_sandbox_takes_its_new_hosts_restore_notices() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sandbox_being_handed_off_takes_no_wake() {
-    let (one, _two, _shelf) = hosts().await;
-    let sandbox = id(2);
-    one.create(sandbox, NEVER).await;
-    one.run(sandbox, &["set first"]).await;
-    one.sleep_to(sandbox, LevelName::Paused).await;
-    one.wait_level(sandbox, LevelName::Paused).await;
-    let handle = one.handle.clone();
-    let handing = tokio::spawn(async move { handle.hand_off(sandbox, OwnerEpoch::FIRST).await });
-    // A wake the agent takes before the hand-off wakes the sandbox and
-    // turns the hand-off down, so probe only once the hand-off has begun
-    // its sleep (nothing else would, with sleep left to requests) or ended.
-    one.wait_until("the hand-off to begin", |status| {
-        handing.is_finished()
-            || status
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let root = Lab::root();
+        // The store holds the hand-off's archive until a wake has been
+        // refused, so the two always overlap.
+        let archives = Arc::new(Semaphore::new(0));
+        let gated = Gated {
+            inner: Directory::new(root.join("shelf")),
+            claims: Arc::new(Semaphore::new(OPEN)),
+            archives: Arc::clone(&archives),
+        };
+        let one = Lab::start_stored(root, Arc::default(), gated).await;
+        let sandbox = id(2);
+        one.create(sandbox, NEVER).await;
+        one.run(sandbox, &["set first"]).await;
+        one.sleep_to(sandbox, LevelName::Paused).await;
+        one.wait_level(sandbox, LevelName::Paused).await;
+        let handle = one.handle.clone();
+        let handing =
+            tokio::spawn(async move { handle.hand_off(sandbox, OwnerEpoch::FIRST).await });
+        // A wake the agent takes before the hand-off wakes the sandbox and
+        // turns the hand-off down, so probe only once the hand-off has
+        // begun its sleep: nothing else would, with sleep left to requests.
+        one.wait_until("the hand-off to begin", |status| {
+            status
                 .sandboxes
                 .iter()
-                .find(|held| held.id == sandbox)
-                .is_none_or(|held| held.step.is_some())
+                .any(|held| held.id == sandbox && held.step.is_some())
+        })
+        .await;
+        assert_eq!(
+            code(&one.wake(sandbox).await),
+            Some(ErrorCode::Busy),
+            "a wake during the hand-off is refused"
+        );
+        assert!(!handing.is_finished(), "the archive is still held");
+        archives.add_permits(OPEN);
+        // Until it is gone, every wake is refused; once gone, none finds it.
+        loop {
+            match one.wake(sandbox).await {
+                Reply::Error {
+                    code: ErrorCode::Busy,
+                    ..
+                } => {}
+                Reply::Error {
+                    code: ErrorCode::NotFound,
+                    ..
+                } => break,
+                other => panic!("a wake reached a sandbox being handed off: {other:?}"),
+            }
+            if handing.is_finished() {
+                break;
+            }
+            sleep(Duration::from_millis(1)).await;
+        }
+        handing.await.unwrap().unwrap();
+        one.assert_clean();
     })
-    .await;
-    // Until it is gone, every wake is refused; once gone, none finds it.
-    loop {
-        match one.wake(sandbox).await {
-            Reply::Error {
-                code: ErrorCode::Busy,
-                ..
-            } => {}
-            Reply::Error {
-                code: ErrorCode::NotFound,
-                ..
-            } => break,
-            other => panic!("a wake reached a sandbox being handed off: {other:?}"),
-        }
-        if handing.is_finished() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
-    handing.await.unwrap().unwrap();
-    one.assert_clean();
+    .await
+    .expect("the hand-off and the wakes end");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -534,11 +553,15 @@ async fn a_request_that_waited_past_its_admission_does_nothing() {
     lab.assert_clean();
 }
 
-/// A store whose claims each take a permit for good, so an adopt stays
-/// under way until the test adds one.
+/// Permits enough for every claim or archive a test makes.
+const OPEN: usize = 1 << 20;
+
+/// A store whose claims and archives each take a permit for good, so an
+/// adopt or a sleep to the store stays under way until the test adds one.
 struct Gated {
     inner: Directory,
     claims: Arc<Semaphore>,
+    archives: Arc<Semaphore>,
 }
 
 impl Store for Gated {
@@ -549,7 +572,11 @@ impl Store for Gated {
         files: &SavedFiles,
         cancel: &CancellationToken,
     ) -> impl Future<Output = Result<Archive, EngineError>> + Send {
-        self.inner.archive(id, save, files, cancel)
+        let archives = Arc::clone(&self.archives);
+        async move {
+            archives.acquire().await.expect("never closed").forget();
+            self.inner.archive(id, save, files, cancel).await
+        }
     }
 
     fn verify(
@@ -615,6 +642,7 @@ async fn a_registering_host_lists_an_adopt_under_way_once_it_lands() {
     let gated = Gated {
         inner: Directory::new(&shelf),
         claims: Arc::clone(&claims),
+        archives: Arc::new(Semaphore::new(OPEN)),
     };
     let two = Lab::start_stored(Lab::root(), Arc::default(), gated).await;
     let owned = two.handle.owned(OwnerEpoch(2));
@@ -818,6 +846,7 @@ async fn a_hand_off_during_an_adopts_removal_is_told_to_try_again() {
     let gated = Gated {
         inner: Directory::new(&shelf),
         claims: Arc::clone(&claims),
+        archives: Arc::new(Semaphore::new(OPEN)),
     };
     let two_root = Lab::root();
     let slow_stop = Delays {
