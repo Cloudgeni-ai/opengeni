@@ -220,12 +220,20 @@ host_login_condition() {
   printf 'expression=resource.name.startsWith("projects/%s/zones/%s/instances/%s-host-"),title=%s-host-login' \
     "$PROJECT" "$ZONE" "$PREFIX" "$PREFIX"
 }
-# Whether the project still grants <account> that OS Login.
+# Whether the project still grants <account> that OS Login: 0 it does,
+# 1 it does not, 2 unknown (the policy could not be read), which callers
+# must report rather than take as absent.
 host_login_bound() {
-  g projects get-iam-policy "$PROJECT" --flatten bindings --format json |
-    jq -e --arg member "serviceAccount:$1" --arg title "$PREFIX-host-login" \
-      'any(.[]; .bindings.role == "roles/compute.osAdminLogin" and (.bindings.members | index($member)) and .bindings.condition.title == $title)' \
-      >/dev/null
+  local policy found
+  policy=$(g projects get-iam-policy "$PROJECT" --flatten bindings --format json) || return 2
+  found=$(jq --arg member "serviceAccount:$1" --arg title "$PREFIX-host-login" \
+    'any(.[]; .bindings.role == "roles/compute.osAdminLogin" and ((.bindings.members // []) | index($member)) != null and .bindings.condition.title == $title)' \
+    <<<"$policy") || return 2
+  case $found in
+    true) return 0 ;;
+    false) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 # --- stack: the VM Opengeni and the fleet service run on -----------------
@@ -536,11 +544,19 @@ down() {
   fi
   local login_sa
   login_sa=$(cat "$STATE/fleet/control_service_account" 2>/dev/null || true)
-  if [ -n "$login_sa" ] && host_login_bound "$login_sa"; then
-    log "the stack VM's OS Login on the hosts"
-    g projects remove-iam-policy-binding "$PROJECT" --member "serviceAccount:$login_sa" \
-      --role roles/compute.osAdminLogin --condition "$(host_login_condition)" >/dev/null ||
-      left+=("OS Login binding for $login_sa")
+  if [ -n "$login_sa" ]; then
+    local bound=0
+    host_login_bound "$login_sa" || bound=$?
+    case $bound in
+      0)
+        log "the stack VM's OS Login on the hosts"
+        g projects remove-iam-policy-binding "$PROJECT" --member "serviceAccount:$login_sa" \
+          --role roles/compute.osAdminLogin --condition "$(host_login_condition)" >/dev/null ||
+          left+=("OS Login binding for $login_sa")
+        ;;
+      1) ;;
+      *) left+=("OS Login binding for $login_sa (could not read the project's IAM policy)") ;;
+    esac
   fi
   local dir=$STATE/terraform
   if [ -f "$dir/terraform.tfstate" ]; then
@@ -588,8 +604,14 @@ status() {
   g iam roles list --project "$PROJECT" --filter "name~${PREFIX//-/_}" --format 'value(name,deleted)'
   local login_sa
   login_sa=$(cat "$STATE/fleet/control_service_account" 2>/dev/null || true)
-  if [ -n "$login_sa" ] && host_login_bound "$login_sa"; then
-    printf 'project IAM: roles/compute.osAdminLogin for %s on %s hosts\n' "$login_sa" "$PREFIX"
+  if [ -n "$login_sa" ]; then
+    local bound=0
+    host_login_bound "$login_sa" || bound=$?
+    case $bound in
+      0) printf 'project IAM: roles/compute.osAdminLogin for %s on %s hosts\n' "$login_sa" "$PREFIX" ;;
+      1) ;;
+      *) printf 'project IAM: could not read the policy; roles/compute.osAdminLogin for %s may remain\n' "$login_sa" ;;
+    esac
   fi
   # A certificate authority's pool stays until its authorities are gone
   # (they wait out their deletion period).
