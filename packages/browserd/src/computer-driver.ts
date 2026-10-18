@@ -88,6 +88,9 @@ export class ComputerDriver implements ComputerInteractionDriver {
   private closed = false;
   private closePromise: Promise<void> | null = null;
   private readonly cleanupFailures: unknown[] = [];
+  /** Set once a failed helper could not be shut down. No replacement may
+   * start beside it, so every later call fails with this clear reason. */
+  private helperLost: InteractionControllerError | null = null;
 
   constructor(options: ComputerDriverOptions) {
     this.computerSessionId = options.computerSessionId;
@@ -612,6 +615,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
   private assertOpen(): void {
     if (this.closed)
       throw new InteractionControllerError("controller_lost", "computer driver closed");
+    if (this.helperLost) throw this.helperLost;
   }
 
   private async activeClient(): Promise<ComputerBackend> {
@@ -654,7 +658,11 @@ export class ComputerDriver implements ComputerInteractionDriver {
         replacement = await this.clientFactory!();
       } catch (error) {
         if (error instanceof UnsettledCleanupError) this.cleanupFailures.push(error);
-        throw error;
+        throw new InteractionControllerError(
+          "resource_unavailable",
+          "The computer helper stopped and could not be restarted. Retry, or end this ComputerSession and open a new one.",
+          true,
+        );
       }
       if (
         replacement.identity.platform !== this.platform ||
@@ -682,8 +690,16 @@ export class ComputerDriver implements ComputerInteractionDriver {
     try {
       await client.close();
     } catch (error) {
+      // A helper that crashed or had to be killed is gone and its executable
+      // was removed, so nothing of it remains and its replacement can start.
+      // A helper that may still run cannot be replaced.
+      if (error instanceof UnsettledCleanupError && error.processExited) return;
       this.cleanupFailures.push(error);
-      throw new UnsettledCleanupError([error], "retired native computer helper cleanup failed");
+      this.helperLost = new InteractionControllerError(
+        "controller_lost",
+        "The computer helper stopped responding and could not be shut down, so this ComputerSession cannot continue. End it and open a new one.",
+      );
+      throw this.helperLost;
     }
   }
 }
