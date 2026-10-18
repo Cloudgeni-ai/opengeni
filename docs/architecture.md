@@ -183,6 +183,10 @@ quiescence or replay unknown commands.
 Unavailable control reads/owned attempts retain bounded, interruptible waits,
 not idle/settlement, writer revocation or successor dispatch. Temporal metadata
 never proves writer quiescence.
+Pool-backed RLS transaction admission retries connection refusal (including
+SQLSTATE 53300) up to eight times with jittered exponential backoff, before
+entering any callback. Savepoints and entered callbacks are never replayed for
+connection loss: uncertain writes use the existing exact-attempt recovery lane.
 Settled-owner recovery re-inspects original dispatch and atomically closes
 only the exact current owner under control and physical/inference writer fences,
 committing quiescence receipt, same-turn recovery and durable wake.
