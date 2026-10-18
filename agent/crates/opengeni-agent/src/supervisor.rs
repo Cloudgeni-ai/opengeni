@@ -44,6 +44,7 @@ use opengeni_agent_proto::v1::{
     self, agent_event::Event, AgentEvent, ControlRequest, ControlResponse, GoingOffline,
     GoingOfflineReason, Heartbeat, Hello,
 };
+use opengeni_agent_stream::RelayCredential;
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -81,6 +82,46 @@ const BULK_CHANNEL_DEPTH: usize = 1024;
 /// The current generation's bulk frame channel: (subject, encoded OpFrame)
 /// pairs toward the bulk publisher task. `None` between generations.
 type BulkLane = Arc<std::sync::RwLock<Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>>>;
+
+/// Keeps a fabric link's relay credential current with what its host sends
+/// on [`crate::fabric::RELAY_SUBJECT`], for as long as the generation lasts.
+/// The host sends the latest credential on each subscription, so a new
+/// generation starts with one.
+async fn follow_relay_credential(
+    mut subscription: async_nats::Subscriber,
+    credential: RelayCredential,
+) {
+    while let Some(message) = subscription.next().await {
+        match crate::fabric::parse_relay_credential(&message.payload) {
+            Ok(endpoint) => {
+                debug!(expires_at_ms = ?endpoint.expires_at_ms, "relay credential from the host");
+                credential.set(endpoint);
+            }
+            Err(error) => warn!(%error, "ignoring a relay credential the host sent"),
+        }
+    }
+}
+
+/// A fabric agent's relay credential comes from its host, on a subject only
+/// the host answers: follow it for the generation on `client`.
+async fn follow_fabric_relay(
+    fabric: Option<&FabricLink>,
+    client: &async_nats::Client,
+) -> Result<Option<AbortOnDrop>, ConnectionOutcome> {
+    let Some(fabric) = fabric else {
+        return Ok(None);
+    };
+    let subscription = client
+        .subscribe(crate::fabric::RELAY_SUBJECT)
+        .await
+        .map_err(|e| {
+            ConnectionOutcome::Disconnected(format!("relay credential subscribe failed: {e}"))
+        })?;
+    Ok(Some(AbortOnDrop(tokio::spawn(follow_relay_credential(
+        subscription,
+        fabric.relay.clone(),
+    )))))
+}
 
 async fn publish_bulk_lane(
     engine: Arc<Engine>,
@@ -406,6 +447,57 @@ enum TransportLossKind {
     CredentialRotation = 2,
 }
 
+/// Asks every link to drop its connection and dial again at once, without
+/// the back-off it uses for an outage. An agent in a fabric sandbox gets this
+/// after a restore: its connections went with the old host process, and the
+/// new one answers at once. A request that arrives while a link is dialing is
+/// kept, so that link redials once more after it connects.
+#[derive(Clone)]
+pub struct ReconnectSignal {
+    generation: Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+impl Default for ReconnectSignal {
+    fn default() -> Self {
+        let (generation, _) = tokio::sync::watch::channel(0);
+        Self {
+            generation: Arc::new(generation),
+        }
+    }
+}
+
+impl ReconnectSignal {
+    /// Asks every link to reconnect now.
+    pub fn request(&self) {
+        self.generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.generation.subscribe()
+    }
+}
+
+/// What a link needs when the agent runs in a fabric sandbox (see
+/// [`crate::fabric`]): it dials its host with no credential, and the relay
+/// credential arrives from the host on [`crate::fabric::RELAY_SUBJECT`].
+#[derive(Clone, Debug)]
+pub struct FabricLink {
+    /// The credential the link's relay hub presents, kept current from the
+    /// host's messages.
+    pub relay: RelayCredential,
+}
+
+/// Aborts a generation's helper task when the generation ends, however it
+/// ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// A level-triggered signal that one NATS client in the current connection
 /// generation lost its transport.
 ///
@@ -461,6 +553,14 @@ struct ConnectedNats {
     transport_lost: TransportLossSignal,
 }
 
+/// What ends a live connection generation besides a shutdown and its own
+/// subscriptions: either lane losing its transport, or a reconnect request.
+struct GenerationEnds<'a> {
+    control_lost: TransportLossSignal,
+    bulk_lost: TransportLossSignal,
+    reconnect: &'a mut tokio::sync::watch::Receiver<u64>,
+}
+
 /// Ending either half retires the generation, rather than silently serving
 /// only half of the advertised control surface.
 fn rpc_messages(
@@ -495,6 +595,8 @@ pub struct SupervisorLink<P: Platform> {
     /// Random for this daemon process and stable across control/bulk reconnects.
     /// Auth-callout leases this exact value and operational subjects include it.
     pub connection_instance_id: String,
+    /// Set when the agent runs in a fabric sandbox behind its host.
+    pub fabric: Option<FabricLink>,
 }
 
 impl<P: Platform> Clone for SupervisorLink<P> {
@@ -505,6 +607,7 @@ impl<P: Platform> Clone for SupervisorLink<P> {
             credentials: self.credentials.clone(),
             api_url: self.api_url.clone(),
             connection_instance_id: self.connection_instance_id.clone(),
+            fabric: self.fabric.clone(),
         }
     }
 }
@@ -523,7 +626,15 @@ impl<P: Platform> SupervisorLink<P> {
             credentials,
             api_url: None,
             connection_instance_id: uuid::Uuid::new_v4().to_string(),
+            fabric: None,
         }
+    }
+
+    /// Serve this link as an agent in a fabric sandbox.
+    #[must_use]
+    pub fn with_fabric(mut self, fabric: FabricLink) -> Self {
+        self.fabric = Some(fabric);
+        self
     }
 
     /// Attach the deployment origin that this exact link enrolled against.
@@ -550,6 +661,7 @@ struct WorkspaceLink<P: Platform> {
     creds: StoredCredentials,
     api_url: Option<String>,
     connection_instance_id: String,
+    fabric: Option<FabricLink>,
     epoch: Arc<EpochCell>,
     shutdown: ShutdownSignal,
     /// The CURRENT generation's bulk frame channel (op-frame publishes ride a
@@ -574,6 +686,7 @@ impl<P: Platform> WorkspaceLink<P> {
             creds: definition.credentials,
             api_url: definition.api_url,
             connection_instance_id: definition.connection_instance_id,
+            fabric: definition.fabric,
             epoch: Arc::new(EpochCell::default()),
             shutdown: ShutdownSignal::default(),
             bulk_tx: Arc::new(std::sync::RwLock::new(None)),
@@ -662,6 +775,8 @@ pub struct Supervisor<P: Platform> {
     browser_bridge: Option<BrowserBridgeInventory>,
     /// Latched once a clean shutdown (SIGINT/SIGTERM) is requested.
     shutdown: ShutdownSignal,
+    /// Asks every link to reconnect at once (a fabric sandbox's restore).
+    reconnect: ReconnectSignal,
     /// Process-global update admission fence + idempotency key. One binary backs
     /// every workspace link, so concurrent per-link updates cannot be independent.
     update_drain: Arc<UpdateDrain>,
@@ -721,6 +836,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             metrics: Arc::new(std::sync::RwLock::new(v1::MetricsSample::default())),
             browser_bridge: None,
             shutdown: ShutdownSignal::default(),
+            reconnect: ReconnectSignal::default(),
             update_drain: Arc::new(UpdateDrain::default()),
             reply_journals: std::sync::Mutex::new(HashMap::new()),
             frame_lanes: Arc::new(std::sync::Mutex::new(FrameLanes::default())),
@@ -792,6 +908,26 @@ impl<P: Platform + 'static> Supervisor<P> {
     #[must_use]
     pub fn shutdown_handle(&self) -> ShutdownSignal {
         self.shutdown.clone()
+    }
+
+    /// A handle that asks every link to drop its connection and dial again at
+    /// once. Wired to `SIGUSR1` in fabric mode.
+    #[must_use]
+    pub fn reconnect_handle(&self) -> ReconnectSignal {
+        self.reconnect.clone()
+    }
+
+    /// How much host work is running or waiting to run: what the agent reports
+    /// as in use in a fabric sandbox.
+    pub fn work_in_progress(&self) -> impl Fn() -> usize + Send + Sync + 'static {
+        let engine = self.engine.clone();
+        move || {
+            let admission = engine.admission_snapshot();
+            admission.light_running
+                + admission.light_queued
+                + admission.heavy_running
+                + admission.heavy_queued
+        }
     }
 
     fn retain_reply_scope(&self, mut link: WorkspaceLink<P>) -> Arc<WorkspaceLink<P>> {
@@ -994,6 +1130,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// shutdown is requested.
     async fn run_link(&self, link: &WorkspaceLink<P>) {
         let mut backoff = Backoff::standard();
+        let mut reconnect = self.reconnect.subscribe();
         info!(
             connection_id = %link.connection_id,
             agent_id = %link.creds.agent_id,
@@ -1014,12 +1151,23 @@ impl<P: Platform + 'static> Supervisor<P> {
                 return;
             }
 
-            match self.serve_one_connection(link, &mut backoff).await {
+            // The dial that follows answers every reconnect asked for so far.
+            reconnect.mark_unchanged();
+            match self
+                .serve_one_connection(link, &mut backoff, &mut reconnect)
+                .await
+            {
                 ConnectionOutcome::CleanShutdown => return,
                 ConnectionOutcome::CredentialRotation => {
                     info!(
                         connection_id = %link.connection_id,
                         "NATS user credential rotated; reconnecting immediately"
+                    );
+                }
+                ConnectionOutcome::Reconnect => {
+                    info!(
+                        connection_id = %link.connection_id,
+                        "reconnecting at once, as asked"
                     );
                 }
                 ConnectionOutcome::Disconnected(reason) => {
@@ -1037,6 +1185,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     tokio::select! {
                         biased;
                         () = self.link_stop_notified(link) => return,
+                        Ok(()) = reconnect.changed() => {}
                         () = tokio::time::sleep(delay) => {}
                     }
                 }
@@ -1051,6 +1200,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         &self,
         link: &WorkspaceLink<P>,
         backoff: &mut Backoff,
+        reconnect: &mut tokio::sync::watch::Receiver<u64>,
     ) -> ConnectionOutcome {
         // The dial has no client yet, so a shutdown here just exits (nothing to
         // announce) — but race it so a hung/slow dial cannot delay a clean stop.
@@ -1088,6 +1238,13 @@ impl<P: Platform + 'static> Supervisor<P> {
         if self.link_stop_requested(link) {
             return ConnectionOutcome::CleanShutdown;
         }
+
+        // Following the relay credential before the hello means the first
+        // stream Opengeni asks for finds it.
+        let _relay_follower = match follow_fabric_relay(link.fabric.as_ref(), &client).await {
+            Ok(follower) => follower,
+            Err(outcome) => return outcome,
+        };
 
         // Send the connect hello. A failure here is just a disconnect (retry).
         if let Err(e) = self.send_hello(link, &client).await {
@@ -1155,8 +1312,11 @@ impl<P: Platform + 'static> Supervisor<P> {
                 &client,
                 subscription,
                 ack_subscription,
-                control_transport_lost,
-                bulk_transport_lost,
+                GenerationEnds {
+                    control_lost: control_transport_lost,
+                    bulk_lost: bulk_transport_lost,
+                    reconnect,
+                },
             )
             .await;
 
@@ -1181,9 +1341,13 @@ impl<P: Platform + 'static> Supervisor<P> {
         client: &async_nats::Client,
         mut subscription: impl futures::Stream<Item = async_nats::Message> + Unpin,
         mut ack_subscription: async_nats::Subscriber,
-        control_transport_lost: TransportLossSignal,
-        bulk_transport_lost: TransportLossSignal,
+        ends: GenerationEnds<'_>,
     ) -> ConnectionOutcome {
+        let GenerationEnds {
+            control_lost: control_transport_lost,
+            bulk_lost: bulk_transport_lost,
+            reconnect,
+        } = ends;
         let mut heartbeat = tokio::time::interval(DEFAULT_HEARTBEAT);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut hb_seq: u64 = 0;
@@ -1216,6 +1380,9 @@ impl<P: Platform + 'static> Supervisor<P> {
                 }
                 () = bulk_transport_lost.notified() => {
                     break transport_loss_outcome("bulk", &bulk_transport_lost);
+                }
+                Ok(()) = reconnect.changed() => {
+                    break ConnectionOutcome::Reconnect;
                 }
                 // Heartbeat is deliberately ahead of inbound work in this biased
                 // select. A ready subscription can never starve the liveness tick.
@@ -1278,6 +1445,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             let reason = match &outcome {
                 ConnectionOutcome::CleanShutdown => "shutdown",
                 ConnectionOutcome::CredentialRotation => "credential_rotation",
+                ConnectionOutcome::Reconnect => "reconnect",
                 ConnectionOutcome::Disconnected(_) => "disconnect",
             };
             info!(
@@ -1509,11 +1677,16 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // Bounded by the renewal HTTP timeout. Detached so adopting the
                 // renewed file (which restarts this link) cannot cut the reply.
                 let connection_id = link.connection_id.clone();
+                let fabric = link.fabric.is_some();
                 let client = client.clone();
                 let receipt = crate::rpc_replay::current();
                 tokio::spawn(crate::rpc_replay::scope(receipt, async move {
-                    let response =
-                        credential_renew_response(request_id, renew_now(&connection_id).await);
+                    let renewed = if fabric {
+                        Err(RenewNowError::Unsupported)
+                    } else {
+                        renew_now(&connection_id).await
+                    };
+                    let response = credential_renew_response(request_id, renewed);
                     publish_response(&client, reply, response, label, max_payload).await;
                     // Adopting the renewed file restarts this link; send first.
                     let _ = client.flush().await;
@@ -1575,6 +1748,19 @@ impl<P: Platform + 'static> Supervisor<P> {
     ) {
         let max_payload = client.server_info().max_payload;
         let request_id = request.request_id.clone();
+        if link.fabric.is_some() {
+            // A sandbox's image pins its agent; a new agent comes with a new
+            // image, never by replacing the running one.
+            publish_response(
+                client,
+                reply,
+                update_error_response(request_id, "update_unsupported", false),
+                "agent_update_apply",
+                max_payload,
+            )
+            .await;
+            return;
+        }
         if request.epoch != 0 && request.epoch < link.epoch.load() {
             publish_response(
                 client,
@@ -2050,7 +2236,9 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// treats as a transient disconnect and backs off + retries with the SAME
     /// (possibly rotated, on re-enroll) bearer — never a panic.
     async fn connect(&self, link: &WorkspaceLink<P>) -> Result<ConnectedNats, SupervisorError> {
-        if link.creds.nats_bearer.is_empty() {
+        // A fabric agent dials its own host, which authenticates the sandbox
+        // on its link; it presents no credential.
+        if link.fabric.is_none() && link.creds.nats_bearer.is_empty() {
             // No bearer means the control plane never minted one (an enrollment from
             // before the credential plane was configured). Surface a clear, typed
             // disconnect rather than dial with an empty token the callout will deny.
@@ -2061,8 +2249,12 @@ impl<P: Platform + 'static> Supervisor<P> {
         let connection_id = link.connection_id.clone();
         let transport_lost = TransportLossSignal::default();
         let event_transport_lost = transport_lost.clone();
-        let opts = async_nats::ConnectOptions::new()
-            .token(link.creds.nats_bearer.clone())
+        let opts = if link.fabric.is_some() {
+            async_nats::ConnectOptions::new()
+        } else {
+            async_nats::ConnectOptions::new().token(link.creds.nats_bearer.clone())
+        };
+        let opts = opts
             .name(format!(
                 "opengeni-agent/connection/{}",
                 link.connection_instance_id
@@ -2216,7 +2408,9 @@ impl<P: Platform + 'static> Supervisor<P> {
             operation_resource_policy: link.platform.operation_resource_policy_supported(),
             operation_cpu_quota: link.platform.operation_cpu_quota_supported(),
             transactional_fs_write: link.platform.transactional_fs_write_supported(),
-            credential_renew: true,
+            // The fabric keeps a sandbox's enrollment; its agent has nothing
+            // to renew.
+            credential_renew: link.fabric.is_none(),
             mac_permissions,
             browser_control_http: link.platform.browser_control_http_supported(),
             // Linux agents running as root switch user per request.
@@ -2649,6 +2843,8 @@ enum ConnectionOutcome {
     /// The short-lived NATS user credential expired as designed. Reconnect with
     /// the durable enrollment bearer immediately to mint its successor.
     CredentialRotation,
+    /// A reconnect was asked for ([`ReconnectSignal`]): dial again at once.
+    Reconnect,
     /// A clean shutdown was requested; the run loop should exit.
     CleanShutdown,
 }
@@ -4161,8 +4357,7 @@ mod tests {
                 .with_stream_registry(Arc::new(RelayHub::new(RelayHubConfig {
                     workspace_id: "fixture".into(),
                     agent_id: "fixture".into(),
-                    relay_url: "ws://127.0.0.1:1".into(),
-                    agent_token: "unused".into(),
+                    credential: RelayCredential::fixed("ws://127.0.0.1:1", "unused"),
                     allow_screen_control: false,
                 }))),
         );
@@ -4555,13 +4750,17 @@ mod tests {
             .await
             .expect("subscribe ack");
 
+        let mut reconnect = supervisor.reconnect.subscribe();
         let generation = supervisor.serve_connection_generation(
             &link,
             &control_client,
             subscription,
             ack_subscription,
-            control_transport_lost,
-            bulk_transport_lost.clone(),
+            GenerationEnds {
+                control_lost: control_transport_lost,
+                bulk_lost: bulk_transport_lost.clone(),
+                reconnect: &mut reconnect,
+            },
         );
         let sever_bulk = async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -4630,13 +4829,17 @@ mod tests {
             .expect("subscribe ack");
 
         let control_to_sever = control_client.clone();
+        let mut reconnect = supervisor.reconnect.subscribe();
         let generation = supervisor.serve_connection_generation(
             &link,
             &control_client,
             subscription,
             ack_subscription,
-            control_transport_lost,
-            bulk_transport_lost,
+            GenerationEnds {
+                control_lost: control_transport_lost,
+                bulk_lost: bulk_transport_lost,
+                reconnect: &mut reconnect,
+            },
         );
         let sever_control = async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -4819,6 +5022,202 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), run)
             .await
             .expect("multi-link supervisor stops")
+            .expect("run task")
+            .expect("clean supervisor result");
+    }
+
+    /// Fabric mode over a real nats-server playing the sandbox's host: the
+    /// link dials with no credential, advertises nothing to renew, follows the
+    /// relay credential the host sends, refuses renewal and self-update, and
+    /// reconnects at once when asked (a restore).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::too_many_lines)] // one linear wire scenario
+    async fn a_fabric_link_serves_through_its_host_without_a_credential() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!(
+                "SKIP a_fabric_link_serves_through_its_host_without_a_credential: no nats-server"
+            );
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let host = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+
+        let mut credentials = it::test_credentials(&url);
+        credentials.nats_bearer = String::new();
+        let relay = RelayCredential::pending();
+        let definition = SupervisorLink::new(
+            "fabric-test",
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
+        .with_fabric(FabricLink {
+            relay: relay.clone(),
+        });
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let mut hellos = host
+            .subscribe(link.hello_subject())
+            .await
+            .expect("subscribe hello");
+        let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
+        let shutdown = supervisor.shutdown_handle();
+        let reconnect = supervisor.reconnect_handle();
+        let run = tokio::spawn(async move { supervisor.run().await });
+
+        let hello = it::next_hello(&mut hellos).await;
+        let capabilities = hello.capabilities.expect("capabilities");
+        assert!(!capabilities.credential_renew, "nothing to renew");
+        assert!(capabilities.consented_whole_machine);
+
+        // The host sends the relay credential; the link's streams then use it.
+        host.publish(
+            crate::fabric::RELAY_SUBJECT,
+            br#"{"url": "wss://relay.example/stream", "token": "ogr_from_host", "expires_at_ms": 18446744073709551615}"#
+                .as_slice()
+                .into(),
+        )
+        .await
+        .expect("publish relay credential");
+        let endpoint = relay
+            .current_within(Duration::from_secs(5))
+            .await
+            .expect("credential from the host");
+        assert_eq!(endpoint.token, "ogr_from_host");
+        assert_eq!(endpoint.url, "wss://relay.example/stream");
+
+        let request = |id: &str, op| ControlRequest {
+            request_id: id.to_string(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(op),
+        };
+        let renewal = it::ask(
+            &host,
+            link.rpc_subject(),
+            request(
+                "renew",
+                v1::control_request::Op::CredentialRenew(v1::CredentialRenewRequest {}),
+            ),
+        )
+        .await;
+        let error = renewal.error.expect("renewal refused");
+        assert!(!error.retryable);
+        assert!(
+            error.message.contains("renewal_unsupported"),
+            "{}",
+            error.message
+        );
+
+        let update = it::ask(
+            &host,
+            link.rpc_subject(),
+            request(
+                "update",
+                v1::control_request::Op::AgentUpdateApply(v1::AgentUpdateApplyRequest {
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    target_version: "9.9.9".to_string(),
+                    channel: "stable".to_string(),
+                    expected_current_version: "test-0.0.0".to_string(),
+                    expected_current_sha256: String::new(),
+                    release_base_url: "https://releases.example".to_string(),
+                }),
+            ),
+        )
+        .await;
+        let error = update.error.expect("update refused");
+        assert!(!error.retryable);
+        assert_eq!(
+            error.detail.get("failure_code").map(String::as_str),
+            Some("update_unsupported")
+        );
+
+        // A restore: the link drops its connection and says hello again at
+        // once, far inside the outage back-off.
+        let asked = Instant::now();
+        reconnect.request();
+        let _ = it::next_hello(&mut hellos).await;
+        assert!(
+            asked.elapsed() < Duration::from_secs(2),
+            "reconnected in {:?}",
+            asked.elapsed()
+        );
+        let ping = it::ask(
+            &host,
+            link.rpc_subject(),
+            request(
+                "after-reconnect",
+                v1::control_request::Op::Ping(v1::PingRequest { nonce: 7 }),
+            ),
+        )
+        .await;
+        assert!(ping.error.is_none(), "{:?}", ping.error);
+
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("fabric supervisor stops")
+            .expect("run task")
+            .expect("clean supervisor result");
+    }
+
+    /// A reconnect asked for while a link waits out its outage back-off
+    /// dials at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reconnect_cuts_the_outage_back_off_short() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!("SKIP a_reconnect_cuts_the_outage_back_off_short: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let url = format!("nats://127.0.0.1:{port}");
+        let mut credentials = it::test_credentials(&url);
+        credentials.nats_bearer = String::new();
+        let definition = SupervisorLink::new(
+            "fabric-backoff-test",
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
+        .with_fabric(FabricLink {
+            relay: RelayCredential::pending(),
+        });
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
+        let shutdown = supervisor.shutdown_handle();
+        let reconnect = supervisor.reconnect_handle();
+        // No server yet: the link fails its dials and backs off further each
+        // time.
+        let run = tokio::spawn(async move { supervisor.run().await });
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let host = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let mut hellos = host
+            .subscribe(link.hello_subject())
+            .await
+            .expect("subscribe hello");
+        host.flush().await.expect("flush");
+        let asked = Instant::now();
+        reconnect.request();
+        let _ = it::next_hello(&mut hellos).await;
+        // The fast-phase back-off waits up to 3 s; a natural retry beats this
+        // bound rarely.
+        assert!(
+            asked.elapsed() < Duration::from_millis(400),
+            "dialed in {:?}",
+            asked.elapsed()
+        );
+
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("supervisor stops")
             .expect("run task")
             .expect("clean supervisor result");
     }
@@ -6106,6 +6505,49 @@ mod tests {
                     Err(e) => panic!("could not connect to test nats-server: {e}"),
                 }
             }
+        }
+
+        /// The next `Hello` on a hello subject, within ten seconds.
+        pub async fn next_hello(
+            hellos: &mut async_nats::Subscriber,
+        ) -> opengeni_agent_proto::v1::Hello {
+            let message = tokio::time::timeout(Duration::from_secs(10), hellos.next())
+                .await
+                .expect("a hello in time")
+                .expect("hello subscription open");
+            opengeni_agent_proto::v1::Hello::decode(message.payload.as_ref()).expect("hello")
+        }
+
+        /// Sends one control request and decodes its answer, within five
+        /// seconds. An agent says hello before it subscribes to its RPC
+        /// subject, so a request sent right after a hello may find no one
+        /// yet: that is retried until the deadline.
+        pub async fn ask(
+            client: &async_nats::Client,
+            subject: String,
+            request: opengeni_agent_proto::v1::ControlRequest,
+        ) -> opengeni_agent_proto::v1::ControlResponse {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let reply = loop {
+                let sent = tokio::time::timeout_at(
+                    deadline,
+                    client.request(subject.clone(), request.encode_to_vec().into()),
+                )
+                .await
+                .expect("an answer in time");
+                match sent {
+                    Ok(reply) => break reply,
+                    Err(error)
+                        if error.kind() == async_nats::RequestErrorKind::NoResponders
+                            && tokio::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("request: {error}"),
+                }
+            };
+            opengeni_agent_proto::v1::ControlResponse::decode(reply.payload.as_ref())
+                .expect("response")
         }
 
         /// Waits until an `AgentEvent` matching `pred` arrives, or `timeout` elapses.
