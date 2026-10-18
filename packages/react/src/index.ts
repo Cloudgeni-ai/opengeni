@@ -64,6 +64,8 @@ export type {
   PluralCategory,
 } from "./messages/runtime";
 export { englishMessages } from "./messages/en";
+export { SINGLE_SEND_WORDING, singleSendText } from "./messages/single-send";
+export { SingleSendWording } from "./messages/runtime";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";

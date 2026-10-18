@@ -1,5 +1,6 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { englishMessages } from "./en";
+import { singleSendText } from "./single-send";
 
 /**
  * Every user-visible string the components render comes from one catalog, so a host can
@@ -167,6 +168,27 @@ export function OpenGeniMessagesProvider({
 /** The translation function of the nearest messages provider (English without one). */
 export function useOpenGeniText(): OpenGeniText {
   return useContext(MessagesContext).text;
+}
+
+/**
+ * Words for one Send: while `enabled`, every Opengeni component below reads
+ * the single-Send wording (`singleSendText`) instead of Queue and Steer
+ * phrases. The stock conversation screens apply it themselves under
+ * `busySend: "steer"`; use it around your own composition of the parts.
+ */
+export function SingleSendWording({
+  enabled = true,
+  children,
+}: {
+  enabled?: boolean | undefined;
+  children?: ReactNode;
+}) {
+  const outer = useContext(MessagesContext);
+  const value = useMemo<MessagesContextValue>(
+    () => (enabled ? { text: singleSendText(outer.text), locale: outer.locale } : outer),
+    [enabled, outer],
+  );
+  return <MessagesContext.Provider value={value}>{children}</MessagesContext.Provider>;
 }
 
 /** The host locale for formatting, or `undefined` for the runtime default. */

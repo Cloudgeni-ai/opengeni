@@ -42,8 +42,11 @@ while the agent works is then read as soon as the agent can, usually within
 seconds, instead of waiting for the whole turn: a reply it is still writing
 stops and it answers with your message in mind, and running tools are not cut
 off. The message simply
-appears in the conversation. While the agent works, the shared session screen
-shows the other choice (Queue, or Steer when Send queues) next to Send.
+appears in the conversation. People see one Send and nothing to learn: the
+shared session screen shows no Queue choice beside it and no Queue or Steer
+words (a message sent while the workstream is paused waits and shows as a
+waiting message). Pass `offerQueue: true` as well to offer Queue next to Send.
+Under the default `busySend: "queue"` the screen offers Steer next to Send.
 
 ### Labels and languages
 

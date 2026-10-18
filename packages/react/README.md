@@ -120,6 +120,18 @@ import "@opengeni/react/compiled.css";
 // or one conversation: <SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} />
 ```
 
+To give people one Send and nothing to learn, pass `busySend: "steer"`:
+
+```tsx
+<SessionConversation sessionId={sessionId} composerOptions={{ busySend: "steer" }} />
+// OpenGeniChat: conversationProps={{ composerOptions: { busySend: "steer" } }}
+```
+
+A message sent while the agent works is then read as soon as it can, usually
+within seconds. There is no Queue choice beside Send and no Queue or Steer
+words; a message sent while the workstream is paused waits and shows as a
+waiting message. Add `offerQueue: true` to offer Queue beside Send again.
+
 Bearer-token apps pass `headers` (a function runs per request) or a custom
 `fetch`; a `client` passed with `baseUrl` replaces the one the component
 creates:
@@ -1015,7 +1027,10 @@ state remains application-owned; durable draft and session state remain in
   while paused) and `sendToQueue()` always queues; the default `"queue"` keeps
   Send queueing. `alternateSend` names the other choice while Send takes that
   busy path (`null` otherwise) and `sendAlternate()` performs it; hosts show it
-  beside Send exactly when it is not `null`. Resume is always an
+  beside Send exactly when it is not `null`. Under `busySend: "steer"` there is
+  no other choice unless `offerQueue: true` is set (`singleSend` is then
+  false): `alternateSend` stays `null`, Cmd/Ctrl+Enter sends, and the stock
+  surfaces use `SingleSendWording` for queue-free copy. Resume is always an
   explicit control action and never an implicit side effect of Send. Drafts
   autosave with optimistic concurrency, survive failed sends, and reuse one
   `clientEventId` across retries so the server dedupes. Draft reads retry transient

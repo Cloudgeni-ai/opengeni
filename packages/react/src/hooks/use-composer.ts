@@ -84,11 +84,20 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
      * `sendDestination` reports `queue`). `queue` (default) runs the message
      * after the current turn. `steer` delivers it as a Steer instead: the
      * agent reads it as soon as it can, usually within seconds (a reply still
-     * being written stops; running tools are not cut off). `sendToQueue`,
-     * `sendAlternate` and `steer` stay explicit
-     * either way.
+     * being written stops; running tools are not cut off). `sendToQueue`
+     * and `steer` stay explicit either way.
+     *
+     * Under `steer` the person has one Send and nothing to learn: no Queue
+     * choice beside it, no Queue or Steer words (`singleSend`). Set
+     * `offerQueue` to also offer Queue beside Send.
      */
     busySend?: ComposerBusySend | undefined;
+    /**
+     * Under `busySend: "steer"`, also offer Queue beside Send while the agent
+     * works (and on Cmd/Ctrl+Enter), for people who line up follow-ups. Off
+     * by default; under `busySend: "queue"` Steer is always offered.
+     */
+    offerQueue?: boolean | undefined;
     /** Disable remote composer-draft reads and writes for embedded hosts. */
     draftPersistence?: "durable" | "disabled" | undefined;
     /** Required explicit authority when durable draft persistence is disabled. */
@@ -534,6 +543,12 @@ export type ComposerState = {
   /** What an ordinary Send does while the agent is working. */
   busySend?: ComposerBusySend | undefined;
   /**
+   * One Send and nothing to choose (`busySend: "steer"` without
+   * `offerQueue`): no alternate beside Send, Cmd/Ctrl+Enter sends normally,
+   * and stock surfaces avoid Queue and Steer words.
+   */
+  singleSend?: boolean | undefined;
+  /**
    * The other way to send right now, or `null` when Send is not taking its
    * busy path (nothing running or waiting, or the workstream is paused):
    * `steer` when Send queues, `queue` when Send steers. Hosts offer it next to
@@ -862,6 +877,7 @@ export function useComposer(
   const busySend: ComposerBusySend = options.busySend ?? "queue";
   const busySendRef = useRef(busySend);
   busySendRef.current = busySend;
+  const singleSend = busySend === "steer" && options.offerQueue !== true;
   const sendBlockedRef = useRef(options.sendBlocked);
   sendBlockedRef.current = options.sendBlocked;
   const effectiveControlRef = useRef<EffectiveSessionControl | null>(
@@ -2317,11 +2333,8 @@ export function useComposer(
       busySendRef.current === "steer" ? await sendToQueue(explicit) : await steer(explicit),
     [sendToQueue, steer],
   );
-  const alternateSend: ComposerBusySend | null = takesBusyPath()
-    ? busySend === "steer"
-      ? "queue"
-      : "steer"
-    : null;
+  const alternateSend: ComposerBusySend | null =
+    !singleSend && takesBusyPath() ? (busySend === "steer" ? "queue" : "steer") : null;
 
   const retryOptimisticMessage = useCallback(
     (clientEventId: string): void => {
@@ -2909,8 +2922,9 @@ export function useComposer(
     send,
     sendToQueue,
     busySend,
+    singleSend,
     alternateSend: identityMatches ? alternateSend : null,
-    sendAlternate,
+    sendAlternate: singleSend ? undefined : sendAlternate,
     optimisticMessages: visibleOptimisticMessages,
     retryOptimisticMessage,
     restoreOptimisticMessage:

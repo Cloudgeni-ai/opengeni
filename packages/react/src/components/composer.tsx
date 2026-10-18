@@ -54,6 +54,7 @@ import {
 } from "../lib/composer-responsive-context";
 import { composerSubmissionErrorMessage } from "../lib/format";
 import { defaultChatComposerMessages, type ChatComposerMessages } from "../composer-messages";
+import { singleSendText } from "../messages/single-send";
 import type { PickerModelRow } from "../model-policy";
 import { useLightboxOptional } from "../timeline/screenshot-lightbox";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
@@ -83,6 +84,7 @@ export type ComposerDelivery = Pick<
   | "send"
   | "sendToQueue"
   | "busySend"
+  | "singleSend"
   | "alternateSend"
   | "sendAlternate"
   | "steer"
@@ -268,9 +270,13 @@ export function useChatComposerController({
   const t = useOpenGeniText();
   const commands = useMemo(() => commandsProp ?? defaultCommands(t), [commandsProp, t]);
   const formatError = useErrorMessage();
+  const singleSend = delivery.singleSend === true;
   const messages = useMemo(
-    () => ({ ...defaultChatComposerMessages(t), ...messageOverrides }),
-    [messageOverrides, t],
+    () => ({
+      ...defaultChatComposerMessages(singleSend ? singleSendText(t) : t),
+      ...messageOverrides,
+    }),
+    [messageOverrides, singleSend, t],
   );
   const id = useId();
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -516,7 +522,8 @@ export function useChatComposerController({
       setSubmittingMode(mode);
       try {
         if (resumesOnSend) return await delivery.steer();
-        if (mode !== "steer") return await delivery.send();
+        // With one Send, Cmd/Ctrl+Enter is just Send.
+        if (mode !== "steer" || singleSend) return await delivery.send();
         // Cmd/Ctrl+Enter and the button beside Send send the other way:
         // Steer when Send queues, queue when Send steers.
         return delivery.sendAlternate ? await delivery.sendAlternate() : await delivery.steer();
@@ -537,6 +544,7 @@ export function useChatComposerController({
       messages.annotationNotesRequired,
       messages.slashCommandBlocked,
       resumesOnSend,
+      singleSend,
     ],
   );
 
@@ -699,6 +707,7 @@ export function useChatComposerController({
     submitBlocker,
     submit,
     busySend: delivery.busySend ?? "queue",
+    singleSend,
     alternateSend: delivery.sendAlternate ? (delivery.alternateSend ?? null) : null,
     submittingMode,
     handleKeyDown,
