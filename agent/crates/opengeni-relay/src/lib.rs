@@ -59,6 +59,7 @@ pub mod metrics;
 pub mod rate_limit;
 pub mod registry;
 pub mod ring;
+mod routing;
 pub mod server;
 pub mod token;
 

@@ -1725,7 +1725,12 @@ transport tests on every supported host.
 
 One agent independently connects multiple deployments/workspaces within shared
 host containment. The relay carries terminal/desktop bytes, never durable session
-or lease state. Install `latest` may serve baked binaries; pinned versions resolve
+or lease state. Producer registration selects a relay owner and returns a signed,
+channel-bound route in the stream descriptor. Any ingress-selected replica can
+authenticate and proxy one private WebSocket hop to that owner; the existing
+registry remains the only pairing/replay/epoch state. No shared channel store or
+ingress affinity is needed. The chart wires pod-IP advertisement and same-release
+peer access. Install `latest` may serve baked binaries; pinned versions resolve
 binaries/signatures from the immutable release archive.
 
 Canonical: [`../agent/README.md`](../agent/README.md) and

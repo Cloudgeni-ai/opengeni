@@ -3418,14 +3418,37 @@ annotations (read/send timeouts of at least `3600` seconds, buffering off). Flip
 `selfhosted.enabled=true` together with `relay.enabled=true` and the NATS
 callout.
 
-### Ingress channel affinity
+### Multi-replica relay routing
 
-The relay pairs a channel's producer and consumer in a per-replica in-memory
-registry, so both dials for a given channel must reach the SAME relay replica.
-When running more than one relay replica behind an L7 ingress, configure the
-ingress to route both dials for a channel to the same backend (consistent-hash or
-session affinity keyed on the channel); otherwise a producer and consumer can
-land on different replicas and never pair.
+No ingress affinity, cookie stickiness, query hashing, or headless ingress backend
+is required. The producer's initial registration selects a relay owner and returns
+a signed, channel-bound routing hint. The agent includes that hint in the stream
+descriptor; the API carries it in the viewer's public relay URL. A different relay
+receiving that dial verifies the ordinary stream token and the hint, then proxies
+one WebSocket hop to the owner. Pairing, replay rings, epoch fences and rate
+accounting remain in the owner's existing registry. Stream bytes do not traverse
+Postgres or the control-plane broker.
+
+The chart automatically advertises each pod's IP with
+`OPENGENI_RELAY_ADVERTISE_IP` and allows only same-release relay-to-relay traffic
+on the stream port. Other deployments should set that variable to each replica's
+private, peer-reachable IP and allow peers to reach its `OPENGENI_RELAY_BIND` port.
+IP literals support IPv4 and IPv6; no peer DNS service is needed. Leaving it unset
+retains standalone operation. Do not advertise an ingress or load-balancer IP.
+
+A route names a process incarnation as well as an address, so a recycled pod IP
+cannot accept the previous owner's channel. Producer reconnects retain a live
+owner. If that owner is unavailable, the producer registers a replacement and
+updates its stream descriptor; scoped terminal refreshes return the new route
+without creating another shell. Viewers rejected by the old route refresh their
+existing stream grant. As before, losing a relay owner loses its in-memory replay
+tail; this is not durable terminal output storage.
+
+Roll out the matching relay image and server/runtime first, then the agent release
+that understands the additive owner-route fields. Older agents remain compatible
+with standalone relays but do not supply routes for affinity-free multi-replica
+pairing. Existing pre-upgrade producer channels acquire routes when re-registered.
+No frontend protocol change or special ingress-controller configuration is needed.
 
 ### Runtime-secret keys
 
