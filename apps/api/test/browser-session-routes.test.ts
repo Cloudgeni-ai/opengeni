@@ -1452,6 +1452,25 @@ describe("BrowserSession route discipline", () => {
     const resume = source.slice(resumeStart, endStart);
     expect(suspend).toContain("if (isTerminalOperation(prepared.operation.state))");
     expect(resume).toContain("if (isTerminalOperation(prepared.operation.state))");
+    // A controller that restarted is recovered from the browser's working copy
+    // before the suspension is prepared, so the capture saves the intact
+    // profile instead of recording the browser as lost.
+    expect(suspend.indexOf("recoverRestartedBrowserControllerBeforeSuspend(")).toBeGreaterThan(0);
+    expect(suspend.indexOf("recoverRestartedBrowserControllerBeforeSuspend(")).toBeLessThan(
+      suspend.indexOf("prepareBrowserSessionSuspend("),
+    );
+    const recoveryStart = source.indexOf(
+      "async function recoverRestartedBrowserControllerBeforeSuspend(",
+    );
+    const recovery = source.slice(
+      recoveryStart,
+      source.indexOf("async function recoverActiveBrowserController(", recoveryStart),
+    );
+    expect(recovery).toContain('browserSessionStorageMode(before.session) !== "private_profile"');
+    expect(recovery).toContain("await withActiveBrowserController(");
+    expect(recovery).toContain("await sessionClient.listTargets();");
+    // Recovery that fails leaves suspension to record the loss as before.
+    expect(recovery).toContain('console.warn("browser.suspend_controller_recovery_failed"');
     expect(suspend.indexOf("dispatchBrowserSessionOperation")).toBeLessThan(
       suspend.indexOf("stateUpload"),
     );
