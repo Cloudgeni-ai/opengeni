@@ -20,6 +20,9 @@
 //! - A message for a subscription no connection holds waits, and wakes the
 //!   sandbox, until a connection subscribes to it again or it has waited
 //!   [`Settings::hold_ms`]. Every message that arrives counts as activity.
+//!   Every message wakes its sandbox, at most once per
+//!   [`Settings::wake_every_ms`]; one that comes sooner wakes it once that
+//!   interval is over, since the sandbox may have gone to sleep in between.
 //!   What waits for a sandbox is bounded ([`Settings::max_waiting`] and
 //!   [`Settings::waiting_bytes`]); one more is dropped, as a NATS server
 //!   drops a message for a slow consumer, and its sender times out.
@@ -67,7 +70,8 @@ pub struct Settings {
     /// refusal; it doubles up to `retry_max_ms`.
     pub retry_min_ms: u64,
     pub retry_max_ms: u64,
-    /// Arriving messages wake a sandbox at most this often.
+    /// Arriving messages wake a sandbox at most this often; one that
+    /// arrives sooner wakes it when the interval is over.
     pub wake_every_ms: u64,
     /// What a connection may send before its session opens, by
     /// [`ClientOp::cost`]; past it, the connection ends as a slow consumer.
@@ -213,7 +217,11 @@ struct Sandbox {
     retry_delay: u64,
     /// The earliest time a subscription no connection took up ends.
     grace_until: Option<u64>,
+    /// When it was last woken.
     woke_at: Option<u64>,
+    /// A message came too soon after the last wake for another: it is
+    /// woken again at this time.
+    wake_due: Option<u64>,
     /// Whether it runs, as the host last said; every session that opens is
     /// told.
     running: Option<Running>,
@@ -407,6 +415,7 @@ impl Core {
                         .map(|at| at + self.settings.hold_ms),
                     sandbox.grace_until,
                     sandbox.retry_at,
+                    sandbox.wake_due,
                 ]
             })
             .flatten()
@@ -512,6 +521,7 @@ impl Core {
                 retry_delay: self.settings.retry_min_ms,
                 grace_until: None,
                 woke_at: None,
+                wake_due: None,
                 running: None,
             },
         );
@@ -759,6 +769,7 @@ impl Core {
         let hold = self.settings.hold_ms;
         let mut retry = Vec::new();
         let mut graced = Vec::new();
+        let mut woken = Vec::new();
         for (id, sandbox) in &mut self.sandboxes {
             if let Some(at) = now.checked_sub(hold) {
                 sandbox.waiting.expire(at);
@@ -770,6 +781,14 @@ impl Core {
                 sandbox.retry_at = None;
                 retry.push(id.clone());
             }
+            if sandbox.wake_due.is_some_and(|at| at <= now) {
+                sandbox.wake_due = None;
+                sandbox.woke_at = Some(now);
+                woken.push(id.clone());
+            }
+        }
+        for sandbox in woken {
+            self.effects.push(Effect::Wake { sandbox });
         }
         for id in graced {
             self.end_unclaimed(now, &id);
@@ -862,13 +881,24 @@ impl Core {
 
     fn wake(&mut self, now: u64, id: &str) {
         let every = self.settings.wake_every_ms;
-        if let Some(sandbox) = self.sandboxes.get_mut(id)
-            && sandbox.woke_at.is_none_or(|at| now >= at + every)
-        {
-            sandbox.woke_at = Some(now);
-            self.effects.push(Effect::Wake {
-                sandbox: id.to_owned(),
-            });
+        let Some(sandbox) = self.sandboxes.get_mut(id) else {
+            return;
+        };
+        match sandbox.woke_at {
+            // Too soon for another wake: it comes when the interval is
+            // over, so that a sandbox that went to sleep since the last
+            // one (an explicit sleep right after a request, say) is not
+            // left asleep with this message.
+            Some(at) if now < at.saturating_add(every) => {
+                sandbox.wake_due.get_or_insert(at.saturating_add(every));
+            }
+            _ => {
+                sandbox.woke_at = Some(now);
+                sandbox.wake_due = None;
+                self.effects.push(Effect::Wake {
+                    sandbox: id.to_owned(),
+                });
+            }
         }
     }
 }
