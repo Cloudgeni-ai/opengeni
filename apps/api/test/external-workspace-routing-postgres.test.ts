@@ -196,7 +196,32 @@ test("allowance writes and reads use the resolved tenant and preserve organizati
     expect(result.status, await result.clone().text()).toBe(200);
     const denied = await f.app.request(`${f.externalBase}${suffix}`, { headers: other.headers });
     expect(denied.status, await denied.clone().text()).toBe(404);
+    const nativeDenied = await f.app.request(`/v1/workspaces/${f.workspace.id}${suffix}`, {
+      headers: other.headers,
+    });
+    expect(nativeDenied.status, await nativeDenied.clone().text()).toBe(403);
   }
+  expect(invalidLookups).toEqual([]);
+}, 60_000);
+
+test("first-use membership refuses an incomplete workspace without creating membership", async () => {
+  if (!shared) return;
+  const f = await fixture();
+  const [incomplete] = await shared.admin`
+    insert into workspaces (account_id, name) values (${f.accountId}, 'Incomplete tenant') returning id`;
+  const response = await f.app.request(`/v1/workspaces/${incomplete!.id}/sessions`, {
+    headers: {
+      ...f.headers,
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { source: "host", externalId: "alice" } }),
+      ),
+    },
+  });
+  expect(response.status, await response.clone().text()).toBe(403);
+  const [members] = await shared.admin`
+    select count(*)::int as count from workspace_memberships where workspace_id = ${incomplete!.id}`;
+  expect(members!.count).toBe(0);
+  expect(f.diagnosticStates.filter(Boolean)).toEqual([]);
   expect(invalidLookups).toEqual([]);
 }, 60_000);
 
