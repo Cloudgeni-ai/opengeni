@@ -18,6 +18,10 @@ pub const MAX_CONTROL_LINE: usize = 4096;
 /// The version line of a header block.
 const HEADER_VERSION: &[u8] = b"NATS/1.0";
 
+/// What keeping any one operation costs beyond the bytes it carries, so
+/// that even an empty one counts against a limit.
+pub const OP_OVERHEAD: usize = 64;
+
 /// An operation a client sends.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientOp {
@@ -52,6 +56,29 @@ impl Publish {
     #[must_use]
     pub fn size(&self) -> usize {
         self.payload.len() + self.headers.as_ref().map_or(0, header_block_len)
+    }
+}
+
+impl ClientOp {
+    /// What keeping it costs: every byte it holds, plus [`OP_OVERHEAD`].
+    #[must_use]
+    pub fn cost(&self) -> usize {
+        OP_OVERHEAD
+            + match self {
+                Self::Connect(connect) => connect.name.as_ref().map_or(0, String::len),
+                Self::Ping | Self::Pong => 0,
+                Self::Sub {
+                    subject,
+                    queue,
+                    sid,
+                } => subject.len() + queue.as_ref().map_or(0, String::len) + sid.len(),
+                Self::Unsub { sid, .. } => sid.len(),
+                Self::Pub(publish) => {
+                    publish.subject.len()
+                        + publish.reply.as_ref().map_or(0, String::len)
+                        + publish.size()
+                }
+            }
     }
 }
 
@@ -392,6 +419,26 @@ pub struct Delivery {
 }
 
 impl ServerOp {
+    /// What keeping it until it is written costs: every byte it holds,
+    /// plus [`OP_OVERHEAD`].
+    #[must_use]
+    pub fn cost(&self) -> usize {
+        OP_OVERHEAD
+            + match self {
+                // An `INFO` is a few hundred bytes at most.
+                Self::Info(_) => 512,
+                Self::Ping | Self::Pong | Self::Ok => 0,
+                Self::Err(text) => text.len(),
+                Self::Msg(delivery) => {
+                    delivery.subject.len()
+                        + delivery.sid.len()
+                        + delivery.reply.as_ref().map_or(0, String::len)
+                        + delivery.headers.as_ref().map_or(0, header_block_len)
+                        + delivery.payload.len()
+                }
+            }
+    }
+
     /// Appends its bytes to `out`.
     pub fn write(&self, out: &mut BytesMut) {
         match self {

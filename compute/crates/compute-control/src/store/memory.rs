@@ -59,6 +59,17 @@ impl Inner {
             .and_then(|owner| self.hosts.get(&owner))
             .is_some_and(|host| host.row.state == HostState::Lost)
     }
+
+    fn insert(&mut self, row: &SandboxRow) -> Write {
+        if self.owner_lost(row) {
+            return Write::OwnerLost;
+        }
+        if self.sandboxes.contains_key(&row.id) {
+            return Write::Conflict;
+        }
+        self.sandboxes.insert(row.id, row.clone());
+        Write::Done
+    }
 }
 
 /// Everything in memory, behind one lock.
@@ -252,14 +263,16 @@ impl MemoryStore {
 
     fn insert_now(&self, row: &SandboxRow) -> Write {
         let mut inner = self.lock();
-        if inner.owner_lost(row) {
-            return Write::OwnerLost;
+        inner.insert(row)
+    }
+
+    fn insert_requested_now(&self, row: &SandboxRow, request_id: &str) -> Option<Write> {
+        let mut inner = self.lock();
+        let key = (row.team.clone(), request_id.to_owned());
+        if inner.requests.get(&key).is_none_or(RequestRow::gone) {
+            return None;
         }
-        if inner.sandboxes.contains_key(&row.id) {
-            return Write::Conflict;
-        }
-        inner.sandboxes.insert(row.id, row.clone());
-        Write::Done
+        Some(inner.insert(row))
     }
 
     fn sandbox_now(&self, id: Id) -> Option<SandboxRow> {
@@ -282,16 +295,23 @@ impl MemoryStore {
         Write::Done
     }
 
-    fn delete_now(&self, id: Id, version: u64) -> bool {
+    fn delete_now(&self, id: Id, version: u64, retire_at: Option<u64>) -> bool {
         let mut inner = self.lock();
-        if inner
-            .sandboxes
-            .get(&id)
-            .is_none_or(|row| row.version != version)
-        {
+        let Some(row) = inner.sandboxes.get(&id) else {
+            return false;
+        };
+        if row.version != version {
             return false;
         }
+        let team = row.team.clone();
         inner.sandboxes.remove(&id);
+        if let Some(at) = retire_at {
+            for request in inner.requests.values_mut() {
+                if request.id == id && request.team == team && request.gone_ms.is_none() {
+                    request.gone_ms = Some(at);
+                }
+            }
+        }
         true
     }
 
@@ -336,20 +356,12 @@ impl MemoryStore {
             .clone()
     }
 
-    fn retire_requests_now(&self, team: &str, id: Id) {
-        for request in self.lock().requests.values_mut() {
-            if request.id == id && request.team == team {
-                request.gone = true;
-            }
-        }
-    }
-
     fn prune_requests_now(&self, before_ms: u64) -> u64 {
         let mut inner = self.lock();
         let before = inner.requests.len();
         inner
             .requests
-            .retain(|_, request| !(request.gone && request.created_ms < before_ms));
+            .retain(|_, request| request.gone_ms.is_none_or(|at| at >= before_ms));
         u64::try_from(before - inner.requests.len()).unwrap_or(u64::MAX)
     }
 
@@ -500,6 +512,14 @@ impl Store for MemoryStore {
         ready(Ok(self.sandbox_now(id)))
     }
 
+    fn insert_requested(
+        &self,
+        row: &SandboxRow,
+        request_id: &str,
+    ) -> impl Future<Output = Result<Option<Write>>> + Send {
+        ready(Ok(self.insert_requested_now(row, request_id)))
+    }
+
     fn agents(&self, ids: &[Id]) -> impl Future<Output = Result<Vec<Linked>>> + Send {
         let inner = self.lock();
         let found = ids
@@ -521,7 +541,16 @@ impl Store for MemoryStore {
     }
 
     fn delete(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send {
-        ready(Ok(self.delete_now(id, version)))
+        ready(Ok(self.delete_now(id, version, None)))
+    }
+
+    fn delete_retiring(
+        &self,
+        id: Id,
+        version: u64,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.delete_now(id, version, Some(at_ms))))
     }
 
     fn list(
@@ -556,11 +585,6 @@ impl Store for MemoryStore {
     ) -> impl Future<Output = Result<Option<RequestRow>>> + Send {
         let key = (team.to_owned(), request_id.to_owned());
         ready(Ok(self.lock().requests.get(&key).cloned()))
-    }
-
-    fn retire_requests(&self, team: &str, id: Id) -> impl Future<Output = Result<()>> + Send {
-        self.retire_requests_now(team, id);
-        ready(Ok(()))
     }
 
     fn prune_requests(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send {

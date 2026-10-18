@@ -50,7 +50,7 @@ use crate::tls::Tls;
 use crate::view::View;
 
 /// How long a create's request id keeps answering that its sandbox is
-/// gone, counted from the create.
+/// gone, counted from the deletion.
 pub const REQUESTS_KEPT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// How a replica runs.
@@ -168,9 +168,9 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
     })
 }
 
-/// Forgets, once an hour, the requests whose sandboxes were deleted and
-/// that were made more than [`REQUESTS_KEPT`] ago. Every replica does it;
-/// deleting twice is harmless.
+/// Forgets, once an hour, the requests whose sandboxes were deleted more
+/// than [`REQUESTS_KEPT`] ago. Every replica does it; deleting twice is
+/// harmless.
 async fn prune_requests<S: Store>(service: Arc<Service<S>>) {
     let keep = u64::try_from(REQUESTS_KEPT.as_millis()).unwrap_or(u64::MAX);
     let mut every = tokio::time::interval(Duration::from_secs(60 * 60));

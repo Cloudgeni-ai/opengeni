@@ -117,7 +117,12 @@ pub struct Linked {
 }
 
 /// A create its caller named with a request id, which makes retrying it
-/// safe: the same id answers the sandbox it made.
+/// safe: the same id answers the sandbox it made, and, once that sandbox
+/// was deleted, that it is gone, never a new one. It is how "made and then
+/// deleted" is told from "never made": deleting a sandbox retires its
+/// requests in the same write ([`Store::delete_retiring`]), and a sandbox
+/// is inserted for a request only while the request is not retired
+/// ([`Store::insert_requested`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestRow {
     pub team: String,
@@ -128,8 +133,16 @@ pub struct RequestRow {
     /// something else.
     pub digest: String,
     pub created_ms: u64,
-    /// The sandbox it made was deleted.
-    pub gone: bool,
+    /// When the sandbox it made was deleted, if it was.
+    pub gone_ms: Option<u64>,
+}
+
+impl RequestRow {
+    /// Whether the sandbox it made was deleted.
+    #[must_use]
+    pub fn gone(&self) -> bool {
+        self.gone_ms.is_some()
+    }
 }
 
 /// A sandbox as the store holds it.
@@ -301,6 +314,16 @@ pub trait Store: Send + Sync + 'static {
     /// up on; see [`Write::OwnerLost`].
     fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send;
 
+    /// As [`Store::insert`], for `row.team`'s create request `request_id`,
+    /// and only while that request is not retired, ordered with
+    /// [`Store::delete_retiring`]: `None` when it is, as its sandbox was
+    /// made and deleted.
+    fn insert_requested(
+        &self,
+        row: &SandboxRow,
+        request_id: &str,
+    ) -> impl Future<Output = Result<Option<Write>>> + Send;
+
     /// One sandbox.
     fn sandbox(&self, id: Id) -> impl Future<Output = Result<Option<SandboxRow>>> + Send;
 
@@ -315,6 +338,17 @@ pub trait Store: Send + Sync + 'static {
 
     /// Deletes a sandbox's row on condition that it is at `version`.
     fn delete(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send;
+
+    /// As [`Store::delete`], and in the same write retires the create
+    /// requests of its team that made it, as deleted at `at_ms`. For a
+    /// sandbox deleted for good; a create that left nothing uses
+    /// [`Store::delete`], so retrying its request creates it again.
+    fn delete_retiring(
+        &self,
+        id: Id,
+        version: u64,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<bool>> + Send;
 
     /// A team's sandboxes whose metadata holds every pair in `metadata`.
     fn list(
@@ -343,10 +377,8 @@ pub trait Store: Send + Sync + 'static {
         request_id: &str,
     ) -> impl Future<Output = Result<Option<RequestRow>>> + Send;
 
-    /// Marks the requests of `team` that made sandbox `id` gone.
-    fn retire_requests(&self, team: &str, id: Id) -> impl Future<Output = Result<()>> + Send;
-
-    /// Forgets the gone requests made before `before_ms`. Answers how many.
+    /// Forgets the requests whose sandbox was deleted before `before_ms`.
+    /// Answers how many.
     fn prune_requests(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send;
 
     /// Inserts a sandbox's E2B lifecycle at the version it carries. False

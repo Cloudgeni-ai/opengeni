@@ -5,7 +5,10 @@ use std::collections::{HashMap, VecDeque};
 use bytes::Bytes;
 use compute_protocol::link::{HostFrame, RELAY_SUBJECT, may_publish, may_subscribe};
 
-use super::{CONNECTION_NAME, Conn, ConnId, Core, Effect, Queued, Session, Stage, Sub, Target};
+use super::{
+    CONNECTION_NAME, Conn, ConnId, Core, Effect, MAX_CONNS, MAX_SUBS, Queued, Session, Stage, Sub,
+    Target,
+};
 use crate::nats::{ClientOp, Connect, Delivery, Info, Publish, ServerOp, is_token};
 
 impl Core {
@@ -14,10 +17,18 @@ impl Core {
     }
 
     pub(super) fn accepted(&mut self, conn: ConnId, id: String) {
-        let Some(sandbox) = self.sandboxes.get(&id) else {
+        let max_conns = self.settings.max_conns;
+        let Some(sandbox) = self.sandboxes.get_mut(&id) else {
             self.effects.push(Effect::CloseGuest { conn });
             return;
         };
+        if sandbox.accepted >= max_conns {
+            tracing::warn!(sandbox = %id, conn, "a guest opened more agent-link connections than a sandbox may hold");
+            self.send(conn, ServerOp::Err(MAX_CONNS.to_owned()));
+            self.effects.push(Effect::CloseGuest { conn });
+            return;
+        }
+        sandbox.accepted += 1;
         let max_payload = self
             .links
             .get(&sandbox.gateway)
@@ -72,7 +83,7 @@ impl Core {
 
     /// Forgets a connection that ended. Its subscriptions wait for a
     /// connection to take them up: the agent's next one, or, while others
-    /// of its agent stay, one within the grace period.
+    /// of its agent stay, one within the grace period from now.
     pub(super) fn drop_conn(&mut self, now: u64, conn: ConnId) {
         let Some(state) = self.conns.remove(&conn) else {
             return;
@@ -81,10 +92,12 @@ impl Core {
         let Some(sandbox) = self.sandboxes.get_mut(&state.sandbox) else {
             return;
         };
+        sandbox.accepted -= 1;
         if !sandbox.conns.remove(&conn) {
             return;
         }
-        let mut released = false;
+        let others = !sandbox.conns.is_empty();
+        let open = matches!(sandbox.session, Session::Open { .. });
         for sub in sandbox.subs.values_mut() {
             if sub
                 .guest
@@ -92,14 +105,13 @@ impl Core {
                 .is_some_and(|(holder, _)| *holder == conn)
             {
                 sub.guest = None;
-                released = true;
+                sub.ends_at = (others && open).then_some(now + grace);
+            } else if !others {
+                // Its agent is gone: what it left waits for it to return.
+                sub.ends_at = None;
             }
         }
-        if sandbox.conns.is_empty() {
-            sandbox.grace_until = None;
-        } else if released && matches!(sandbox.session, Session::Open { .. }) {
-            sandbox.grace_until.get_or_insert(now + grace);
-        }
+        sandbox.regrace();
     }
 
     pub(super) fn guest(&mut self, now: u64, conn: ConnId, op: ClientOp) {
@@ -124,10 +136,7 @@ impl Core {
         let Some(state) = self.conns.get_mut(&conn) else {
             return;
         };
-        state.pending_bytes += match &op {
-            ClientOp::Pub(publish) => publish.size(),
-            _ => 64,
-        };
+        state.pending_bytes += op.cost();
         state.pending.push(op);
         if state.pending_bytes > limit {
             self.close_conn(now, conn, Some("Slow Consumer"));
@@ -172,6 +181,7 @@ impl Core {
             sandbox.relay = None;
             sandbox.retry_at = None;
             sandbox.retry_delay = self.settings.retry_min_ms;
+            sandbox.grace_until = None;
             self.save(&id);
         }
         let sandbox = self.sandboxes.get_mut(&id).expect("checked above");
@@ -198,7 +208,8 @@ impl Core {
     }
 
     /// `conn`'s session opened: it does what it sent meanwhile, its pings
-    /// answered in turn.
+    /// answered in turn, and the subscriptions no connection holds have
+    /// the grace period, from now, to be taken up.
     pub(super) fn ready(&mut self, now: u64, conn: ConnId) {
         let Some(state) = self.conns.get_mut(&conn) else {
             return;
@@ -215,9 +226,13 @@ impl Core {
         let grace = self.settings.grace_ms;
         if let Some(sandbox) = self.sandboxes.get_mut(&id)
             && sandbox.conns.contains(&conn)
-            && sandbox.subs.values().any(|sub| sub.guest.is_none())
         {
-            sandbox.grace_until = Some(now + grace);
+            for sub in sandbox.subs.values_mut() {
+                if sub.guest.is_none() {
+                    sub.ends_at.get_or_insert(now + grace);
+                }
+            }
+            sandbox.regrace();
         }
     }
 
@@ -258,19 +273,16 @@ impl Core {
             // A sid used again replaces its subscription.
             self.unsubscribe(conn, &guest, None);
         }
+        if self
+            .conns
+            .get(&conn)
+            .is_some_and(|state| state.sids.len() >= self.settings.max_subs)
+        {
+            self.send(conn, ServerOp::Err(MAX_SUBS.to_owned()));
+            return;
+        }
         if subject == RELAY_SUBJECT {
-            let relay = self
-                .sandboxes
-                .get(&id)
-                .and_then(|sandbox| sandbox.relay.clone());
-            if let Some(state) = self.conns.get_mut(&conn) {
-                state.sids.insert(guest.clone(), Target::Relay);
-            }
-            self.ok(conn);
-            if let Some(relay) = relay {
-                let payload = Bytes::from(serde_json::to_vec(&relay).unwrap_or_default());
-                self.send(conn, relay_delivery(guest, payload));
-            }
+            self.subscribe_relay(conn, &id, guest);
             return;
         }
         let Some(scope) = self.scope_of(conn) else {
@@ -285,16 +297,25 @@ impl Core {
             );
             return;
         }
+        let max_subs = self.settings.max_subs;
         let sandbox = self.sandboxes.get_mut(&id).expect("a scope has a sandbox");
         let taken = sandbox
             .subs
             .iter_mut()
-            .find(|(_, sub)| sub.guest.is_none() && sub.subject == subject && sub.queue == queue);
-        let sid = if let Some((sid, sub)) = taken {
-            sub.guest = Some((conn, guest.clone()));
-            sub.delivered = 0;
-            sub.max = None;
-            *sid
+            .find(|(_, sub)| sub.guest.is_none() && sub.subject == subject && sub.queue == queue)
+            .map(|(sid, sub)| {
+                sub.guest = Some((conn, guest.clone()));
+                sub.delivered = 0;
+                sub.max = None;
+                sub.ends_at = None;
+                *sid
+            });
+        let sid = if let Some(sid) = taken {
+            sid
+        } else if sandbox.subs.len() >= max_subs {
+            tracing::warn!(sandbox = %id, "a guest's agent subscribed more than a sandbox may");
+            self.send(conn, ServerOp::Err(MAX_SUBS.to_owned()));
+            return;
         } else {
             let sid = sandbox.next_sid;
             sandbox.next_sid += 1;
@@ -306,6 +327,7 @@ impl Core {
                     guest: Some((conn, guest.clone())),
                     delivered: 0,
                     max: None,
+                    ends_at: None,
                 },
             );
             if let Some((link, s)) = sandbox.session.on() {
@@ -324,9 +346,7 @@ impl Core {
             sid
         };
         let sandbox = self.sandboxes.get_mut(&id).expect("a scope has a sandbox");
-        if sandbox.subs.values().all(|sub| sub.guest.is_some()) {
-            sandbox.grace_until = None;
-        }
+        sandbox.regrace();
         let (waiting, rest): (VecDeque<Queued>, VecDeque<Queued>) =
             std::mem::take(&mut sandbox.queued)
                 .into_iter()
@@ -338,6 +358,23 @@ impl Core {
         self.ok(conn);
         for queued in waiting {
             self.deliver(&id, queued);
+        }
+    }
+
+    /// A subscription to the host's own relay subject: the credential
+    /// comes on it at once, if there is one, and with each new one.
+    fn subscribe_relay(&mut self, conn: ConnId, id: &str, guest: String) {
+        let relay = self
+            .sandboxes
+            .get(id)
+            .and_then(|sandbox| sandbox.relay.clone());
+        if let Some(state) = self.conns.get_mut(&conn) {
+            state.sids.insert(guest.clone(), Target::Relay);
+        }
+        self.ok(conn);
+        if let Some(relay) = relay {
+            let payload = Bytes::from(serde_json::to_vec(&relay).unwrap_or_default());
+            self.send(conn, relay_delivery(guest, payload));
         }
     }
 
