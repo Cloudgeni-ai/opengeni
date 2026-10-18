@@ -369,6 +369,19 @@ impl<S: Store> Service<S> {
         spec: Spec,
         metadata: BTreeMap<String, String>,
     ) -> Result<SandboxRow, Failure> {
+        self.create_for(id, team, spec, metadata, None).await
+    }
+
+    /// As [`Self::create_as`], for `team`'s create request `request` when
+    /// given: its row is inserted only while that request is not retired.
+    pub(crate) async fn create_for(
+        &self,
+        id: Id,
+        team: &str,
+        spec: Spec,
+        metadata: BTreeMap<String, String>,
+        request: Option<&str>,
+    ) -> Result<SandboxRow, Failure> {
         let (mut row, demand) = self.new_row(id, team, spec, metadata)?;
         let id = row.id;
         let mut exclude = Vec::new();
@@ -394,7 +407,7 @@ impl<S: Store> Service<S> {
             let written = if inserted {
                 replace(&*self.store, &mut row).await?
             } else {
-                self.store.insert(&row).await?
+                self.insert(&row, request).await?
             };
             match written {
                 Write::Done => inserted = true,
@@ -501,6 +514,18 @@ impl<S: Store> Service<S> {
         Ok((row, demand))
     }
 
+    /// Inserts `row`, for create request `request` when given: refused as
+    /// gone when that request's sandbox was made and deleted meanwhile.
+    async fn insert(&self, row: &SandboxRow, request: Option<&str>) -> Result<Write, Failure> {
+        let Some(request) = request else {
+            return Ok(self.store.insert(row).await?);
+        };
+        self.store
+            .insert_requested(row, request)
+            .await?
+            .ok_or_else(|| Failure::Gone(request.to_owned()))
+    }
+
     /// Deletes the row of a sandbox whose create its owner refused
     /// outright: that host holds nothing of it, and no other create was
     /// sent under its epoch.
@@ -539,12 +564,10 @@ impl<S: Store> Service<S> {
     /// Deletes a team's sandbox: its owner removes it, or, with no owner,
     /// the service raises its epoch, leaves a tombstone in object storage
     /// under that epoch, so no former owner's archive lands after, and
-    /// deletes the row. A create's request that made it then answers that
-    /// it is gone.
+    /// deletes the row, retiring in the same write the create requests that
+    /// made it, which then answer that it is gone.
     pub async fn delete(&self, team: &str, id: Id) -> Result<(), Failure> {
-        self.delete_row(team, id).await?;
-        self.store.retire_requests(team, id).await?;
-        Ok(())
+        self.delete_row(team, id).await
     }
 
     async fn delete_row(&self, team: &str, id: Id) -> Result<(), Failure> {
@@ -572,7 +595,11 @@ impl<S: Store> Service<S> {
                         Err(error) => return Err(Failure::Archive(error.to_string())),
                     }
                 }
-                if self.store.delete(id, row.version).await? {
+                if self
+                    .store
+                    .delete_retiring(id, row.version, now_ms())
+                    .await?
+                {
                     return Ok(());
                 }
                 continue;
@@ -615,6 +642,9 @@ impl<S: Store> Service<S> {
                 "its host may still be creating it; try again in a few seconds".into(),
             ));
         }
-        Ok(self.store.delete(row.id, row.version).await?)
+        Ok(self
+            .store
+            .delete_retiring(row.id, row.version, now_ms())
+            .await?)
     }
 }

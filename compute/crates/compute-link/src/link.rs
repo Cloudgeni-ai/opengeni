@@ -1,6 +1,13 @@
 //! Keeps one gateway's link: dials it with the host's token, waits for its
 //! hello, then moves frames between it and the hub, pinging, until it goes;
 //! then dials again after a back-off.
+//!
+//! A writer task sends what the hub asks and the pings; the reader hands
+//! what arrives to the hub. Neither waits for the other: the reader keeps
+//! the silence deadline and the hangup however long a write takes, and a
+//! write that takes longer than [`Timing::silence`] ends the link. What
+//! the reader hands the hub holds [`CREDIT`] until the hub handled it, so a
+//! gateway that sends faster than the hub takes is not read meanwhile.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +21,7 @@ use http::header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
 use rustls_pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::Instant;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
@@ -29,6 +36,17 @@ use crate::hub::{Command, HostToken, Timing, Tokens};
 const MAX_MESSAGE: usize = 64 << 20;
 /// A link up this long starts its next back-off from the shortest.
 const STEADY: Duration = Duration::from_secs(30);
+/// What a link may have in flight to the hub, in bytes. One frame larger
+/// than this takes all of it.
+const CREDIT: usize = 16 << 20;
+
+/// A frame for the gateway, with the credit of the guest operation it came
+/// from, given back once it is written.
+#[derive(Debug)]
+pub(crate) struct Outgoing {
+    pub bytes: Vec<u8>,
+    pub credit: Option<OwnedSemaphorePermit>,
+}
 
 pub(crate) struct Keep {
     pub gateway: String,
@@ -58,6 +76,8 @@ enum LinkError {
     Protocol(String),
     #[error("the gateway was silent too long")]
     Silent,
+    #[error("a write to the gateway took too long")]
+    Blocked,
     #[error("the gateway closed the link")]
     Closed,
 }
@@ -168,7 +188,7 @@ async fn once(keep: &Keep, cached: &mut Option<(HostToken, u64)>) -> Result<(), 
         return Ok(());
     };
     let link = keep.ids.fetch_add(1, Ordering::Relaxed);
-    let (writer, outgoing) = mpsc::unbounded_channel();
+    let (writer, outgoing) = mpsc::unbounded_channel::<Outgoing>();
     if hub
         .send(Command::LinkUp {
             gateway: keep.gateway.clone(),
@@ -234,64 +254,126 @@ async fn dial(keep: &Keep, token: &str) -> Result<WebSocketStream<Box<dyn Io>>, 
     Ok(socket)
 }
 
+type Sink = futures::stream::SplitSink<WebSocketStream<Box<dyn Io>>, Message>;
+
 async fn serve(
     keep: &Keep,
     socket: WebSocketStream<Box<dyn Io>>,
-    mut outgoing: mpsc::UnboundedReceiver<Vec<u8>>,
+    outgoing: mpsc::UnboundedReceiver<Outgoing>,
     hub: &mpsc::UnboundedSender<Command>,
     link: LinkId,
 ) -> Result<(), LinkError> {
-    let (mut sink, mut stream) = socket.split();
+    let (sink, mut stream) = socket.split();
+    let mut writer = tokio::spawn(write(
+        sink,
+        outgoing,
+        keep.cancel.clone(),
+        keep.timing.clone(),
+    ));
+    let credit = Arc::new(Semaphore::new(CREDIT));
     let mut heard = Instant::now();
-    let mut ping = tokio::time::interval_at(
+    let mut check = tokio::time::interval_at(
         Instant::now() + keep.timing.ping_every,
         keep.timing.ping_every,
     );
+    let result = loop {
+        tokio::select! {
+            // On a hangup the writer sends what the hub sent before, then
+            // the close, and ends.
+            written = &mut writer => {
+                break written.unwrap_or_else(|error| Err(LinkError::Io(std::io::Error::other(error))));
+            }
+            message = stream.next() => {
+                heard = Instant::now();
+                let handled = match message {
+                    None | Some(Ok(Message::Close(_))) => Err(LinkError::Closed),
+                    Some(Err(error)) => Err(error.into()),
+                    Some(Ok(Message::Binary(bytes))) => received(keep, hub, link, &credit, &bytes).await,
+                    Some(Ok(Message::Text(_))) => Err(LinkError::Protocol("a text message".into())),
+                    Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => Ok(()),
+                };
+                if let Err(error) = handled {
+                    break Err(error);
+                }
+            }
+            _ = check.tick() => {
+                if heard.elapsed() >= keep.timing.silence {
+                    break Err(LinkError::Silent);
+                }
+            }
+        }
+    };
+    writer.abort();
+    result
+}
+
+/// Writes what the hub sends, and pings, until the hub hangs up; then the
+/// rest of what it sent and the close.
+async fn write(
+    mut sink: Sink,
+    mut outgoing: mpsc::UnboundedReceiver<Outgoing>,
+    hangup: CancellationToken,
+    timing: Timing,
+) -> Result<(), LinkError> {
+    let mut ping = tokio::time::interval_at(Instant::now() + timing.ping_every, timing.ping_every);
+    let mut written = Vec::new();
     loop {
         tokio::select! {
-            () = keep.cancel.cancelled() => {
+            () = hangup.cancelled() => {
                 // What the hub sent before it hung up still goes, ahead of
                 // the close: a session's `close` is the last thing its
                 // gateway hears.
-                while let Ok(frame) = outgoing.try_recv() {
-                    sink.feed(Message::Binary(frame.into())).await?;
-                }
-                let _ = sink.send(Message::Close(None)).await;
-                return Ok(());
-            }
-            frame = outgoing.recv() => match frame {
-                Some(frame) => {
-                    // Everything already waiting goes in one flush.
-                    sink.feed(Message::Binary(frame.into())).await?;
+                return within(&timing, async {
                     while let Ok(frame) = outgoing.try_recv() {
-                        sink.feed(Message::Binary(frame.into())).await?;
+                        sink.feed(Message::Binary(frame.bytes.into())).await?;
                     }
-                    sink.flush().await?;
-                }
-                None => return Ok(()),
-            },
-            message = stream.next() => {
-                heard = Instant::now();
-                match message.ok_or(LinkError::Closed)?? {
-                    Message::Binary(bytes) => received(hub, link, &bytes)?,
-                    Message::Text(_) => return Err(LinkError::Protocol("a text message".into())),
-                    Message::Close(_) => return Err(LinkError::Closed),
-                    Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
-                }
+                    // A gateway that went first needs no close.
+                    let _ = sink.send(Message::Close(None)).await;
+                    Ok(())
+                })
+                .await;
+            }
+            frame = outgoing.recv() => {
+                let Some(frame) = frame else {
+                    return Ok(());
+                };
+                // Everything already waiting goes in one flush.
+                within(&timing, async {
+                    let mut next = Some(frame);
+                    while let Some(frame) = next {
+                        sink.feed(Message::Binary(frame.bytes.into())).await?;
+                        written.push(frame.credit);
+                        next = outgoing.try_recv().ok();
+                    }
+                    sink.flush().await
+                })
+                .await?;
+                // Their guests may send again.
+                written.clear();
             }
             _ = ping.tick() => {
-                if heard.elapsed() >= keep.timing.silence {
-                    return Err(LinkError::Silent);
-                }
-                sink.send(Message::Ping(Bytes::new())).await?;
+                within(&timing, sink.send(Message::Ping(Bytes::new()))).await?;
             }
         }
     }
 }
 
-fn received(
+/// `write`, unless it takes longer than the link may be silent.
+async fn within(
+    timing: &Timing,
+    write: impl Future<Output = Result<(), tungstenite::Error>>,
+) -> Result<(), LinkError> {
+    tokio::time::timeout(timing.silence, write)
+        .await
+        .map_err(|_| LinkError::Blocked)?
+        .map_err(LinkError::from)
+}
+
+async fn received(
+    keep: &Keep,
     hub: &mpsc::UnboundedSender<Command>,
     link: LinkId,
+    credit: &Arc<Semaphore>,
     bytes: &Bytes,
 ) -> Result<(), LinkError> {
     let (frame, payload) =
@@ -300,10 +382,20 @@ fn received(
         return Err(LinkError::Protocol("a second hello".into()));
     }
     let start = bytes.len() - payload.len();
-    let _ = hub.send(Command::Input(Input::Gateway {
-        link,
-        frame,
-        payload: bytes.slice(start..),
-    }));
+    let cost = u32::try_from(bytes.len().clamp(1, CREDIT)).unwrap_or(u32::MAX);
+    let credit = tokio::select! {
+        () = keep.cancel.cancelled() => return Ok(()),
+        permit = Arc::clone(credit).acquire_many_owned(cost) => {
+            permit.expect("the semaphore is never closed")
+        }
+    };
+    let _ = hub.send(Command::Credited {
+        input: Input::Gateway {
+            link,
+            frame,
+            payload: bytes.slice(start..),
+        },
+        credit,
+    });
     Ok(())
 }

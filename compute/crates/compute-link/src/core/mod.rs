@@ -22,7 +22,15 @@
 //!   [`Settings::hold_ms`]. Every message that arrives counts as activity.
 //! - Subscriptions a reconnected agent did not take up within
 //!   [`Settings::grace_ms`] end, and so do those of a connection that
-//!   ended while others of its agent stay.
+//!   ended while others of its agent stay, each counted from when it was
+//!   left.
+//! - What a guest can make the host keep is bounded: its connections
+//!   ([`Settings::max_conns`]), the subscriptions of its sandbox and of
+//!   each connection ([`Settings::max_subs`]), and what a connection sends
+//!   before its session opens ([`Settings::pending_bytes`], every
+//!   operation counted by [`ClientOp::cost`]). The [`crate::Hub`] bounds
+//!   the rest: what is in flight from a connection and what waits to be
+//!   written to it.
 
 mod conns;
 mod frames;
@@ -57,8 +65,16 @@ pub struct Settings {
     pub retry_max_ms: u64,
     /// Arriving messages wake a sandbox at most this often.
     pub wake_every_ms: u64,
-    /// Bytes a connection may send before its session opens.
+    /// What a connection may send before its session opens, by
+    /// [`ClientOp::cost`]; past it, the connection ends as a slow consumer.
     pub pending_bytes: usize,
+    /// Connections a sandbox's guest may hold open at once; one past it
+    /// is refused. Opengeni's agent holds two.
+    pub max_conns: usize,
+    /// Subscriptions a sandbox's session, and each of its connections,
+    /// may hold; one past it is refused, as a NATS server refuses one past
+    /// its limit. Opengeni's agent holds a handful.
+    pub max_subs: usize,
     /// Seeds the jitter of retries.
     pub seed: u64,
 }
@@ -72,10 +88,17 @@ impl Default for Settings {
             retry_max_ms: 30_000,
             wake_every_ms: 250,
             pending_bytes: 4 << 20,
+            max_conns: 16,
+            max_subs: 1024,
             seed: 0x9e37_79b9_7f4a_7c15,
         }
     }
 }
+
+/// The `-ERR` a NATS server sends for a subscription past its limit.
+pub(crate) const MAX_SUBS: &str = "Maximum Subscriptions Exceeded";
+/// The `-ERR` a NATS server sends for a connection past its limit.
+pub(crate) const MAX_CONNS: &str = "maximum connections exceeded";
 
 /// Something that happened.
 #[derive(Clone, Debug)]
@@ -170,16 +193,25 @@ struct Sandbox {
     relay: Option<Relay>,
     /// The connections of its instance that said `CONNECT`.
     conns: BTreeSet<ConnId>,
+    /// Its connections the host holds, whatever their stage.
+    accepted: usize,
     /// The gateway refused it for good, until a new ticket.
     refused: bool,
     retry_at: Option<u64>,
     retry_delay: u64,
-    /// When the subscriptions no connection took up end.
+    /// The earliest time a subscription no connection took up ends.
     grace_until: Option<u64>,
     woke_at: Option<u64>,
     /// Whether it runs, as the host last said; every session that opens is
     /// told.
     running: Option<Running>,
+}
+
+impl Sandbox {
+    /// Keeps [`Sandbox::grace_until`] the earliest of its subscriptions'.
+    fn regrace(&mut self) {
+        self.grace_until = self.subs.values().filter_map(|sub| sub.ends_at).min();
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,6 +240,9 @@ struct Sub {
     delivered: u64,
     /// Unsubscribe once that many were delivered.
     max: Option<u64>,
+    /// When it ends if no connection takes it up: set while no connection
+    /// holds it and others of its agent's connections stay.
+    ends_at: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -364,6 +399,7 @@ impl Core {
                                 guest: None,
                                 delivered: 0,
                                 max: None,
+                                ends_at: None,
                             },
                         )
                     })
@@ -385,6 +421,7 @@ impl Core {
                 queued: VecDeque::new(),
                 relay: None,
                 conns: BTreeSet::new(),
+                accepted: 0,
                 refused: false,
                 retry_at: None,
                 retry_delay: self.settings.retry_min_ms,
@@ -624,6 +661,12 @@ impl Core {
                 payload: Bytes::new(),
             });
         }
+        if running == Running::Asleep {
+            // A sleeping agent changes nothing, so its session is kept
+            // once more: if an earlier save was lost, this one is what a
+            // restarted host opens.
+            self.save(id);
+        }
     }
 
     fn tick(&mut self, now: u64) {
@@ -639,7 +682,6 @@ impl Core {
                 sandbox.queued.pop_front();
             }
             if sandbox.grace_until.is_some_and(|at| at <= now) {
-                sandbox.grace_until = None;
                 graced.push(id.clone());
             }
             if sandbox.retry_at.is_some_and(|at| at <= now) {
@@ -648,32 +690,43 @@ impl Core {
             }
         }
         for id in graced {
-            self.end_unclaimed(&id);
+            self.end_unclaimed(now, &id);
         }
         for id in retry {
             self.try_open(now, &id);
         }
     }
 
-    /// Ends the subscriptions no connection of the session took up.
-    fn end_unclaimed(&mut self, id: &str) {
-        let Some(sandbox) = self.sandboxes.get(id) else {
+    /// Ends the subscriptions no connection of the session took up in
+    /// time.
+    fn end_unclaimed(&mut self, now: u64, id: &str) {
+        let Some(sandbox) = self.sandboxes.get_mut(id) else {
             return;
         };
         if sandbox.conns.is_empty() || !matches!(sandbox.session, Session::Open { .. }) {
+            // They wait again for the agent: their time starts once its
+            // session is open and it is connected.
+            for sub in sandbox.subs.values_mut() {
+                sub.ends_at = None;
+            }
+            sandbox.grace_until = None;
             return;
         }
         let unclaimed: Vec<u32> = sandbox
             .subs
             .iter()
-            .filter(|(_, sub)| sub.guest.is_none())
+            .filter(|(_, sub)| sub.guest.is_none() && sub.ends_at.is_some_and(|at| at <= now))
             .map(|(sid, _)| *sid)
             .collect();
+        sandbox.regrace();
         if unclaimed.is_empty() {
             return;
         }
         for sid in unclaimed {
             self.remove_sub(id, sid, true);
+        }
+        if let Some(sandbox) = self.sandboxes.get_mut(id) {
+            sandbox.regrace();
         }
         self.save(id);
     }

@@ -59,18 +59,23 @@ impl<S: Store> Service<S> {
             id: new_id()?,
             digest: digest.to_owned(),
             created_ms: now_ms(),
-            gone: false,
+            gone_ms: None,
         };
         let claimed = self.store.claim_request(&asked).await?;
         if claimed.digest != digest {
             return Err(Failure::Mismatch(request_id.to_owned()));
         }
-        if claimed.gone {
+        if claimed.gone() {
             return Err(Failure::Gone(request_id.to_owned()));
         }
         match self.store.sandbox(claimed.id).await? {
-            // The first attempt, or one after a create that left nothing.
-            None => self.create_as(claimed.id, team, spec, metadata).await,
+            // The first attempt, or one after a create that left nothing;
+            // if its sandbox was deleted since the request was read, the
+            // insert finds the request retired.
+            None => {
+                self.create_for(claimed.id, team, spec, metadata, Some(request_id))
+                    .await
+            }
             Some(row) if row.team == team => {
                 let reached = self
                     .wake(team, claimed.id, PriorityName::Interactive)
@@ -93,14 +98,14 @@ impl<S: Store> Service<S> {
             .request(team, request_id)
             .await?
             .ok_or(Failure::NotFound)?;
-        if request.gone {
+        if request.gone() {
             return Err(Failure::Gone(request_id.to_owned()));
         }
         self.get(team, request.id).await
     }
 
-    /// Forgets requests whose sandbox was deleted at least `keep_ms` ago
-    /// by when they were made. Answers how many.
+    /// Forgets requests whose sandbox was deleted at least `keep_ms` ago.
+    /// Answers how many.
     ///
     /// # Errors
     ///

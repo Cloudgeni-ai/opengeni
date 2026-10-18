@@ -1,11 +1,28 @@
 //! What the host keeps of a sandbox's session on disk, so that after the
 //! host agent restarts it opens the session again, with its subscriptions,
 //! before the sandbox's guest runs.
+//!
+//! A session is kept durably (the file and its directory are synced) and
+//! replaced at once, never torn. One [`Saver`] writes them, the latest
+//! asked for each file first superseding any older one not yet written,
+//! and tries a failed write again until it succeeds or is superseded.
+//!
+//! What is lost if the host stops before a change is written: a
+//! subscription the agent made just before, which a restarted host does
+//! not hold for it. While the agent runs it subscribes again as it
+//! reconnects; while its sandbox sleeps, a request for that subscription
+//! finds no responder, and the sender wakes the sandbox through the fleet
+//! ([agent link](../../docs/agent-link.md), section 5).
 
-use std::io;
-use std::path::Path;
+use std::collections::HashMap;
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 /// A session as kept on disk.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,53 +68,213 @@ impl Saved {
         }
     }
 
-    /// Keeps `saved` at `path`, replacing what was there at once, or
-    /// removes it for `None`.
+    /// Keeps `saved` at `path` durably, replacing what was there at once,
+    /// or removes it for `None`.
     ///
     /// # Errors
     ///
-    /// When the file cannot be written or removed.
+    /// When the file cannot be written or removed; what was there stays.
     pub async fn store(path: &Path, saved: Option<&Self>) -> io::Result<()> {
-        let Some(saved) = saved else {
-            return match tokio::fs::remove_file(path).await {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                result => result,
-            };
-        };
-        let mut temporary = path.as_os_str().to_owned();
-        temporary.push(".new");
-        let bytes = serde_json::to_vec(saved).map_err(io::Error::other)?;
-        tokio::fs::write(&temporary, bytes).await?;
-        tokio::fs::rename(&temporary, path).await
+        let bytes = saved
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(io::Error::other)?;
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || store(&path, bytes.as_deref()))
+            .await
+            .map_err(io::Error::other)?
     }
+}
+
+fn store(path: &Path, bytes: Option<&[u8]>) -> io::Result<()> {
+    match bytes {
+        None => match std::fs::remove_file(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            result => result?,
+        },
+        Some(bytes) => {
+            let mut temporary = path.as_os_str().to_owned();
+            temporary.push(".new");
+            let temporary = PathBuf::from(temporary);
+            let mut file = std::fs::File::create(&temporary)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temporary, path)?;
+        }
+    }
+    // The rename or removal lasts once the directory is synced.
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::File::open(directory)?.sync_all()
+}
+
+/// Writes kept sessions in the background, see the [module](self).
+#[derive(Clone, Debug)]
+pub(crate) struct Saver {
+    shared: Arc<Shared>,
+}
+
+#[derive(Debug, Default)]
+struct Shared {
+    /// What is to be written to each file, the latest asked.
+    dirty: Mutex<HashMap<PathBuf, Option<Saved>>>,
+    asked: Notify,
+}
+
+/// The first wait before a failed write is tried again; it doubles up to
+/// [`RETRY_MAX`].
+const RETRY_MIN: Duration = Duration::from_millis(500);
+const RETRY_MAX: Duration = Duration::from_secs(30);
+
+impl Saver {
+    /// Starts the saver; it writes what it was asked once more and ends
+    /// when `stop` is cancelled. Must run inside a Tokio runtime.
+    pub(crate) fn start(stop: CancellationToken) -> Self {
+        let shared = Arc::new(Shared::default());
+        tokio::spawn(run(Arc::clone(&shared), stop));
+        Self { shared }
+    }
+
+    /// Asks for `saved` to be kept at `path`, or removed for `None`.
+    pub(crate) fn put(&self, path: PathBuf, saved: Option<Saved>) {
+        self.shared.lock().insert(path, saved);
+        self.shared.asked.notify_one();
+    }
+}
+
+impl Shared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Option<Saved>>> {
+        self.dirty.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+async fn run(shared: Arc<Shared>, stop: CancellationToken) {
+    let mut retry = RETRY_MIN;
+    let mut failed = false;
+    loop {
+        let stopping = tokio::select! {
+            () = stop.cancelled() => true,
+            () = shared.asked.notified() => false,
+            () = tokio::time::sleep(retry), if failed => false,
+        };
+        failed = write_dirty(&shared).await;
+        if stopping {
+            return;
+        }
+        retry = if failed {
+            (retry * 2).min(RETRY_MAX)
+        } else {
+            RETRY_MIN
+        };
+    }
+}
+
+/// Writes what is dirty; what fails stays dirty unless it was asked again
+/// meanwhile. Whether any failed.
+async fn write_dirty(shared: &Shared) -> bool {
+    let dirty = std::mem::take(&mut *shared.lock());
+    let mut failed = false;
+    for (path, saved) in dirty {
+        if let Err(error) = Saved::store(&path, saved.as_ref()).await {
+            tracing::error!(path = %path.display(), %error, "could not keep an agent-link session; trying again");
+            failed = true;
+            shared.lock().entry(path).or_insert(saved);
+        }
+    }
+    failed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn a_session_is_kept_replaced_and_removed() {
-        let dir = std::env::temp_dir().join(format!("compute-link-saved-{}", std::process::id()));
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("compute-link-saved-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("link.json");
-        assert_eq!(Saved::load(&path).unwrap(), None);
-        let saved = Saved {
+        dir
+    }
+
+    fn session(next_sid: u32) -> Saved {
+        Saved {
             instance: "i1".into(),
             subs: vec![SavedSub {
                 sid: 1,
                 subject: "agent.w.a.connection.i1.rpc".into(),
                 queue: None,
             }],
-            next_sid: 2,
-        };
-        Saved::store(&path, Some(&saved)).await.unwrap();
-        assert_eq!(Saved::load(&path).unwrap(), Some(saved));
+            next_sid,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_is_kept_replaced_and_removed() {
+        let dir = scratch("kept");
+        let path = dir.join("link.json");
+        assert_eq!(Saved::load(&path).unwrap(), None);
+        Saved::store(&path, Some(&session(2))).await.unwrap();
+        assert_eq!(Saved::load(&path).unwrap(), Some(session(2)));
         std::fs::write(&path, b"{").unwrap();
         assert_eq!(Saved::load(&path).unwrap(), None, "a torn file is none");
         Saved::store(&path, None).await.unwrap();
         Saved::store(&path, None).await.unwrap();
         assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_write_leaves_the_last_session_whole() {
+        let dir = scratch("interrupted");
+        let path = dir.join("link.json");
+        Saved::store(&path, Some(&session(2))).await.unwrap();
+        // A host that stopped while writing the next one left part of it
+        // beside the file.
+        std::fs::write(dir.join("link.json.new"), b"{\"instance\":").unwrap();
+        assert_eq!(Saved::load(&path).unwrap(), Some(session(2)));
+        // The next write replaces both.
+        Saved::store(&path, Some(&session(3))).await.unwrap();
+        assert_eq!(Saved::load(&path).unwrap(), Some(session(3)));
+        assert!(!dir.join("link.json.new").exists());
+        // A write that cannot happen leaves what was there.
+        let missing = dir.join("gone").join("link.json");
+        assert!(Saved::store(&missing, Some(&session(4))).await.is_err());
+        assert_eq!(Saved::load(&path).unwrap(), Some(session(3)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn the_saver_writes_the_latest_and_tries_a_failed_write_again() {
+        let dir = scratch("saver");
+        let stop = CancellationToken::new();
+        let saver = Saver::start(stop.clone());
+        // Its directory is not there yet, so the first writes fail.
+        let later = dir.join("later");
+        let path = later.join("link.json");
+        saver.put(path.clone(), Some(session(2)));
+        saver.put(path.clone(), Some(session(3)));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!path.exists());
+        std::fs::create_dir_all(&later).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while Saved::load(&path).unwrap() != Some(session(3)) {
+            assert!(tokio::time::Instant::now() < deadline, "never retried");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // What is asked last before it stops is still written.
+        saver.put(path.clone(), Some(session(4)));
+        stop.cancel();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while Saved::load(&path).unwrap() != Some(session(4)) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "not written at stop"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 }

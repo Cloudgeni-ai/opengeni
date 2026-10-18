@@ -13,7 +13,7 @@ use compute_protocol::host::Id;
 use deadpool_postgres::{ClientWrapper, Manager, ManagerConfig, Pool, RecyclingMethod};
 use serde_json::Value;
 use tokio_postgres::Row;
-use tokio_postgres::types::Json;
+use tokio_postgres::types::{Json, ToSql};
 
 use super::{
     Admission, Admits, AgentRef, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow,
@@ -81,12 +81,12 @@ create table if not exists compute_create_requests (
     id text not null,
     digest text not null,
     created_ms bigint not null,
-    gone boolean not null,
+    gone_ms bigint,
     primary key (team, request_id)
 );
 create index if not exists compute_create_requests_id on compute_create_requests (id);
-create index if not exists compute_create_requests_gone on compute_create_requests (created_ms)
-    where gone;
+create index if not exists compute_create_requests_gone_ms on compute_create_requests (gone_ms)
+    where gone_ms is not null;
 commit;
 ";
 
@@ -137,8 +137,17 @@ pub struct PostgresStore {
 #[derive(Debug)]
 pub struct PostgresLead(ClientWrapper);
 
-fn database(error: impl std::fmt::Display) -> StoreError {
-    StoreError::Database(error.to_string())
+/// A database error, with its causes: what Postgres said is the source of
+/// the client's error.
+fn database(error: impl std::error::Error) -> StoreError {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    StoreError::Database(text)
 }
 
 fn corrupt(error: impl std::fmt::Display) -> StoreError {
@@ -171,7 +180,7 @@ fn lifecycle_row(row: &Row) -> Result<LifecycleRow> {
     })
 }
 
-const REQUEST_COLUMNS: &str = "team, request_id, id, digest, created_ms, gone";
+const REQUEST_COLUMNS: &str = "team, request_id, id, digest, created_ms, gone_ms";
 
 fn request_row(row: &Row) -> Result<RequestRow> {
     let id: String = row.get(2);
@@ -181,7 +190,7 @@ fn request_row(row: &Row) -> Result<RequestRow> {
         id: Id::from_str(&id).map_err(corrupt)?,
         digest: row.get(3),
         created_ms: small(row.get(4))?,
-        gone: row.get(5),
+        gone_ms: row.get::<_, Option<i64>>(5).map(small).transpose()?,
     })
 }
 
@@ -357,6 +366,76 @@ impl PostgresStore {
 
     async fn client(&self) -> Result<deadpool_postgres::Object> {
         self.pool.get().await.map_err(database)
+    }
+
+    /// Inserts `row`, for `row.team`'s create request `request_id` when
+    /// given: then only while the request is not retired, with its row
+    /// locked against [`Store::delete_retiring`], which retires it. Answers
+    /// how the write went and whether the request was live.
+    async fn insert_for(
+        &self,
+        row: &SandboxRow,
+        request_id: Option<&str>,
+    ) -> Result<(Write, bool)> {
+        let fields = Fields::of(row)?;
+        // A retired request's row is locked by the delete that retires it,
+        // so this waits for that delete and then reads the row again.
+        let request = "request as (select 1 from compute_create_requests \
+             where team = $2 and request_id = $16 and gone_ms is null for share)";
+        let (request, live) = if request_id.is_some() {
+            (
+                format!("{request}, "),
+                " and exists (select 1 from request)",
+            )
+        } else {
+            (String::new(), "")
+        };
+        let version = big(row.version)?;
+        let mut params: Vec<&(dyn ToSql + Sync)> = vec![
+            &fields.id,
+            &row.team,
+            &fields.spec,
+            &fields.metadata,
+            &fields.owner,
+            &fields.epoch,
+            &fields.taken,
+            &fields.unanswered.0,
+            &fields.unanswered.1,
+            &fields.landed.0,
+            &fields.landed.1,
+            &fields.landed.2,
+            &row.class,
+            &fields.created_ms,
+            &version,
+        ];
+        if let Some(request_id) = &request_id {
+            params.push(request_id);
+        }
+        let written = self
+            .client()
+            .await?
+            .query_one(
+                &format!(
+                    "with {request}{}, written as ( \
+                     insert into compute_sandboxes ({SANDBOX_COLUMNS}) \
+                     select $1::text, $2::text, $3::jsonb, $4::jsonb, $5::bigint, $6::bigint, \
+                     $7::bigint, $8::bigint, $9::bigint, $10::bigint, $11::bigint, $12::bigint, \
+                     $13::text, $14::bigint, $15::bigint \
+                     where not exists (select 1 from owner where lost){live} \
+                     on conflict (id) do nothing returning 1) {WRITTEN}{}",
+                    owner_lost(5),
+                    if request_id.is_some() {
+                        ", exists (select 1 from request) as live"
+                    } else {
+                        ""
+                    },
+                ),
+                &params,
+            )
+            .await
+            .map_err(database)?;
+        let live = request_id.is_none() || written.get::<_, bool>("live");
+        Ok((write_of(&written), live))
     }
 
     /// Applies a registration that meets no live one, in `tx`.
@@ -622,42 +701,12 @@ impl Store for PostgresStore {
     }
 
     async fn insert(&self, row: &SandboxRow) -> Result<Write> {
-        let fields = Fields::of(row)?;
-        let written = self
-            .client()
-            .await?
-            .query_one(
-                &format!(
-                    "with {}, written as ( \
-                     insert into compute_sandboxes ({SANDBOX_COLUMNS}) \
-                     select $1::text, $2::text, $3::jsonb, $4::jsonb, $5::bigint, $6::bigint, \
-                     $7::bigint, $8::bigint, $9::bigint, $10::bigint, $11::bigint, $12::bigint, \
-                     $13::text, $14::bigint, $15::bigint \
-                     where not exists (select 1 from owner where lost) \
-                     on conflict (id) do nothing returning 1) {WRITTEN}",
-                    owner_lost(5)
-                ),
-                &[
-                    &fields.id,
-                    &row.team,
-                    &fields.spec,
-                    &fields.metadata,
-                    &fields.owner,
-                    &fields.epoch,
-                    &fields.taken,
-                    &fields.unanswered.0,
-                    &fields.unanswered.1,
-                    &fields.landed.0,
-                    &fields.landed.1,
-                    &fields.landed.2,
-                    &row.class,
-                    &fields.created_ms,
-                    &big(row.version)?,
-                ],
-            )
-            .await
-            .map_err(database)?;
-        Ok(write_of(&written))
+        self.insert_for(row, None).await.map(|(write, _)| write)
+    }
+
+    async fn insert_requested(&self, row: &SandboxRow, request_id: &str) -> Result<Option<Write>> {
+        let (write, live) = self.insert_for(row, Some(request_id)).await?;
+        Ok(live.then_some(write))
     }
 
     async fn sandbox(&self, id: Id) -> Result<Option<SandboxRow>> {
@@ -747,6 +796,30 @@ impl Store for PostgresStore {
         Ok(deleted == 1)
     }
 
+    async fn delete_retiring(&self, id: Id, version: u64, at_ms: u64) -> Result<bool> {
+        // One statement: the requests retire only if the row went, and an
+        // insert for one of them waits on its row and then sees it retired.
+        let deleted = self
+            .client()
+            .await?
+            .query_one(
+                "with deleted as ( \
+                 delete from compute_sandboxes where id = $1 and version = $2 \
+                 returning id, team), \
+                 retired as ( \
+                 update compute_create_requests set gone_ms = $3 \
+                 from deleted \
+                 where compute_create_requests.id = deleted.id \
+                 and compute_create_requests.team = deleted.team \
+                 and gone_ms is null) \
+                 select exists (select 1 from deleted) as deleted",
+                &[&id.to_string(), &big(version)?, &big(at_ms)?],
+            )
+            .await
+            .map_err(database)?;
+        Ok(deleted.get("deleted"))
+    }
+
     async fn list(
         &self,
         team: &str,
@@ -824,7 +897,7 @@ impl Store for PostgresStore {
                     &row.id.to_string(),
                     &row.digest,
                     &big(row.created_ms)?,
-                    &row.gone,
+                    &row.gone_ms.map(big).transpose()?,
                 ],
             )
             .await
@@ -862,24 +935,11 @@ impl Store for PostgresStore {
             .transpose()
     }
 
-    async fn retire_requests(&self, team: &str, id: Id) -> Result<()> {
-        self.client()
-            .await?
-            .execute(
-                "update compute_create_requests set gone = true \
-                 where id = $1 and team = $2 and not gone",
-                &[&id.to_string(), &team],
-            )
-            .await
-            .map_err(database)?;
-        Ok(())
-    }
-
     async fn prune_requests(&self, before_ms: u64) -> Result<u64> {
         self.client()
             .await?
             .execute(
-                "delete from compute_create_requests where gone and created_ms < $1",
+                "delete from compute_create_requests where gone_ms < $1",
                 &[&big(before_ms)?],
             )
             .await

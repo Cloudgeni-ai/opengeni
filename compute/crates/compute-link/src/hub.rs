@@ -12,14 +12,14 @@ use std::time::Duration;
 use compute_protocol::link::{AgentLink, Running, encode};
 use futures::future::BoxFuture;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::core::{ConnId, Core, Effect, Input, LinkId, Settings};
-use crate::guest::{self, Out};
-use crate::link;
-use crate::saved::Saved;
+use crate::guest;
+use crate::link::{self, Outgoing};
+use crate::saved::{Saved, Saver};
 
 /// A host token for one gateway, from the fleet.
 #[derive(Clone)]
@@ -108,6 +108,12 @@ pub struct Hub {
 
 pub(crate) enum Command {
     Input(Input),
+    /// An input that holds `credit` from its sender until it is handled,
+    /// or, for the frame it leads to, until that frame is written.
+    Credited {
+        input: Input,
+        credit: OwnedSemaphorePermit,
+    },
     Attach {
         sandbox: String,
         link: AgentLink,
@@ -121,13 +127,13 @@ pub(crate) enum Command {
     Conn {
         conn: ConnId,
         sandbox: String,
-        writer: mpsc::UnboundedSender<Out>,
+        guest: guest::Handle,
     },
     LinkUp {
         gateway: String,
         link: LinkId,
         max_payload: u32,
-        writer: mpsc::UnboundedSender<Vec<u8>>,
+        writer: mpsc::UnboundedSender<Outgoing>,
     },
 }
 
@@ -136,8 +142,6 @@ impl Hub {
     #[must_use]
     pub fn start(config: HubConfig) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
-        let (saves, to_save) = mpsc::unbounded_channel();
-        tokio::spawn(save_all(to_save));
         let stop = CancellationToken::new();
         let actor = Actor {
             core: Core::new(config.settings),
@@ -151,7 +155,7 @@ impl Hub {
             conns: HashMap::new(),
             links: HashMap::new(),
             writers: HashMap::new(),
-            saves,
+            saver: Saver::start(stop.clone()),
             link_ids: Arc::new(AtomicU64::new(1)),
         };
         tokio::spawn(actor.run(receiver, stop.clone()));
@@ -215,11 +219,11 @@ struct Actor {
     commands: mpsc::WeakUnboundedSender<Command>,
     wakers: HashMap<String, Arc<dyn Wake>>,
     save_paths: HashMap<String, PathBuf>,
-    conns: HashMap<ConnId, mpsc::UnboundedSender<Out>>,
+    conns: HashMap<ConnId, guest::Handle>,
     /// The task keeping each gateway's link.
     links: HashMap<String, CancellationToken>,
-    writers: HashMap<LinkId, mpsc::UnboundedSender<Vec<u8>>>,
-    saves: mpsc::UnboundedSender<(PathBuf, Option<Saved>)>,
+    writers: HashMap<LinkId, mpsc::UnboundedSender<Outgoing>>,
+    saver: Saver,
     link_ids: Arc<AtomicU64>,
 }
 
@@ -247,31 +251,28 @@ impl Actor {
                 () = sleep_until(deadline), if deadline.is_some() => {
                     let now = self.now();
                     self.core.on(now, Input::Tick);
-                    self.apply();
+                    self.apply(None);
                 }
             }
         }
         for cancel in self.links.values() {
             cancel.cancel();
         }
-        // Dropping their writers ends the guest connections.
+        // Dropping their handles ends the guest connections.
         self.conns.clear();
     }
 
     fn command(&mut self, command: Command) {
         let now = self.now();
+        let mut credit = None;
         match command {
-            Command::Input(input) => {
-                match &input {
-                    Input::LinkDown { link } => {
-                        self.writers.remove(link);
-                    }
-                    Input::GuestClosed { conn } => {
-                        self.conns.remove(conn);
-                    }
-                    _ => {}
-                }
-                self.core.on(now, input);
+            Command::Input(input) => self.input(now, input),
+            Command::Credited {
+                input,
+                credit: held,
+            } => {
+                credit = Some(held);
+                self.input(now, input);
             }
             Command::Attach {
                 sandbox,
@@ -298,7 +299,7 @@ impl Actor {
                         sandbox: sandbox.clone(),
                     },
                 );
-                self.apply();
+                self.apply(None);
                 self.wakers.remove(&sandbox);
                 self.save_paths.remove(&sandbox);
                 return;
@@ -306,9 +307,9 @@ impl Actor {
             Command::Conn {
                 conn,
                 sandbox,
-                writer,
+                guest,
             } => {
-                self.conns.insert(conn, writer);
+                self.conns.insert(conn, guest);
                 self.core.on(now, Input::Accepted { conn, sandbox });
             }
             Command::LinkUp {
@@ -328,51 +329,94 @@ impl Actor {
                 );
             }
         }
-        self.apply();
+        self.apply(credit);
     }
 
-    fn apply(&mut self) {
-        for effect in self.core.take() {
-            match effect {
-                Effect::Dial { gateway } => self.dial(gateway),
-                Effect::Hangup { gateway } => {
-                    if let Some(cancel) = self.links.remove(&gateway) {
-                        cancel.cancel();
-                    }
+    fn input(&mut self, now: u64, input: Input) {
+        match &input {
+            Input::LinkDown { link } => {
+                self.writers.remove(link);
+            }
+            Input::GuestClosed { conn } => {
+                self.conns.remove(conn);
+            }
+            _ => {}
+        }
+        self.core.on(now, input);
+    }
+
+    /// Does what the core asks. `credit`, held by the input that led to
+    /// it, goes with the first frame to be written, if any.
+    fn apply(&mut self, mut credit: Option<OwnedSemaphorePermit>) {
+        loop {
+            let effects = self.core.take();
+            if effects.is_empty() {
+                return;
+            }
+            let mut slow = Vec::new();
+            for effect in effects {
+                self.effect(effect, &mut credit, &mut slow);
+            }
+            // A connection that fell too far behind ends; what the core
+            // does for that is done in turn.
+            let now = self.now();
+            for conn in slow {
+                tracing::warn!(conn, "a guest connection ended as a slow consumer");
+                self.core.on(now, Input::GuestClosed { conn });
+            }
+        }
+    }
+
+    fn effect(
+        &mut self,
+        effect: Effect,
+        credit: &mut Option<OwnedSemaphorePermit>,
+        slow: &mut Vec<ConnId>,
+    ) {
+        match effect {
+            Effect::Dial { gateway } => self.dial(gateway),
+            Effect::Hangup { gateway } => {
+                if let Some(cancel) = self.links.remove(&gateway) {
+                    cancel.cancel();
                 }
-                Effect::Frame {
-                    link,
-                    frame,
-                    payload,
-                } => {
-                    if let Some(writer) = self.writers.get(&link) {
-                        match encode(&frame, &payload) {
-                            Ok(bytes) => {
-                                let _ = writer.send(bytes);
-                            }
-                            Err(error) => tracing::error!(%error, "a frame did not encode"),
+            }
+            Effect::Frame {
+                link,
+                frame,
+                payload,
+            } => {
+                if let Some(writer) = self.writers.get(&link) {
+                    match encode(&frame, &payload) {
+                        Ok(bytes) => {
+                            let _ = writer.send(Outgoing {
+                                bytes,
+                                credit: credit.take(),
+                            });
                         }
+                        Err(error) => tracing::error!(%error, "a frame did not encode"),
                     }
                 }
-                Effect::ToGuest { conn, op } => {
-                    if let Some(writer) = self.conns.get(&conn) {
-                        let _ = writer.send(Out::Op(op));
-                    }
+            }
+            Effect::ToGuest { conn, op } => {
+                if let Some(guest) = self.conns.get(&conn)
+                    && guest.send(op).is_err()
+                {
+                    self.conns.remove(&conn);
+                    slow.push(conn);
                 }
-                Effect::CloseGuest { conn } => {
-                    if let Some(writer) = self.conns.remove(&conn) {
-                        let _ = writer.send(Out::Close);
-                    }
+            }
+            Effect::CloseGuest { conn } => {
+                // Dropping its handle ends it, after what it was sent.
+                self.conns.remove(&conn);
+            }
+            Effect::Wake { sandbox } => {
+                if let Some(wake) = self.wakers.get(&sandbox) {
+                    wake.wake();
                 }
-                Effect::Wake { sandbox } => {
-                    if let Some(wake) = self.wakers.get(&sandbox) {
-                        wake.wake();
-                    }
-                }
-                Effect::Save { sandbox, saved } => {
-                    if let Some(path) = self.save_paths.get(&sandbox) {
-                        let _ = self.saves.send((path.clone(), saved));
-                    }
+            }
+            Effect::Save { sandbox, saved } => {
+                if let Some(path) = self.save_paths.get(&sandbox) {
+                    self.saver.put(path.clone(), saved);
                 }
             }
         }
@@ -400,15 +444,5 @@ async fn sleep_until(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
-    }
-}
-
-/// Writes kept sessions one at a time, so the last one written for a
-/// sandbox is the last one asked for.
-async fn save_all(mut saves: mpsc::UnboundedReceiver<(PathBuf, Option<Saved>)>) {
-    while let Some((path, saved)) = saves.recv().await {
-        if let Err(error) = Saved::store(&path, saved.as_ref()).await {
-            tracing::warn!(path = %path.display(), %error, "could not keep an agent-link session");
-        }
     }
 }

@@ -150,7 +150,10 @@ server would, for the subset the agent's client uses:
   reaches the gateway. The host sends the session's relay credential on it,
   as a `MSG` whose payload is `{"url": "...", "token": "...", "expires_at_ms": ...}`,
   as soon as both the subscription and a credential exist, and again for
-  each fresh credential.
+  each fresh credential. A fresh credential neither wakes a sleeping
+  sandbox nor counts as activity: the host keeps it, and a sandbox that
+  slept through it receives it once it runs again, on its existing
+  subscription or when its agent subscribes again.
 
 ## 4. The link
 
@@ -246,7 +249,13 @@ Until `opened`, the host keeps what the guest sends for the session.
   connection to take them up, then end.
 - **Records.** The host keeps each sandbox's instance and subscriptions in
   its record, and opens those sessions again when it starts or its link comes
-  back, before any guest runs.
+  back, before any guest runs. It writes the record after each change and
+  again when the sandbox falls asleep, synced to disk and replaced at once,
+  and tries a failed write again until it succeeds. A host that stops
+  between a change and its write loses only that change: a running agent
+  subscribes again as it reconnects, and for a sleeping one a request on
+  the lost subscription gets "no responders" (section 6), whose sender
+  wakes it through the fleet.
 - **Ending.** The host closes a session when it hands off or removes the
   sandbox. Revoking the enrollment, when the sandbox is deleted, makes the
   gateway end it with `revoked`.
@@ -257,17 +266,43 @@ What the host does, exactly (`compute-link`, its `core` module):
   its gateway's link is up, and the `PONG` for the agent's first `PING`
   only once its session is open, so a client that counts itself connected
   is reachable end to end. What the agent sends before that waits, in
-  order, up to 4 MiB; beyond it the connection ends with `Slow Consumer`.
+  order, up to 4 MiB, each operation counted as the bytes it holds plus 64;
+  beyond it the connection ends with `Slow Consumer`.
+- **What a guest can make the host keep is bounded,** as a NATS server
+  bounds a client, so one sandbox cannot grow its host's memory:
+  - at most 16 connections at once; one more gets
+    `-ERR 'maximum connections exceeded'` and is closed;
+  - at most 1024 subscriptions for the session and for each connection;
+    one more gets `-ERR 'Maximum Subscriptions Exceeded'`, and the
+    connection stays open;
+  - a payload larger than `INFO`'s `max_payload` is refused before it is
+    read;
+  - at most 4 MiB of a connection's operations in flight to the gateway:
+    past that the host stops reading the connection until the link has
+    written them, so a guest that sends faster than its gateway takes is
+    slowed by its own socket;
+  - at most 64 MiB waiting to be written to a connection: a guest that does
+    not read its socket ends as a slow consumer, as with a NATS server.
+
+  Opengeni's agent holds two connections and a handful of subscriptions.
+  The host's own record of a session is written by one writer that keeps
+  only the latest for each sandbox.
 - **A link that goes ends its guests' connections,** as a NATS server that
   goes would, so each agent reconnects to a session that opens again on the
   next link. The host dials again with full-jitter back-off from 100 ms to
   10 s, back to the shortest after a link that stayed up 30 s.
+- **A link's reads and writes do not wait for each other.** A write that
+  takes longer than the link may be silent (60 s) ends the link, and so does
+  a gateway silent that long, whatever is being written. What the gateway
+  sends is read while up to 16 MiB of it waits for the host.
 - **Messages wait for 120 s.** A message for a subscription no connection
   holds waits that long for the agent to subscribe again, and wakes the
   sandbox at most every 250 ms. Messages that arrive count as activity;
   what the agent sends does not.
 - **Subscriptions not taken up within 10 s end.** After the agent
-  reconnects, the host unsubscribes those it did not subscribe to again.
+  reconnects, the host unsubscribes those it did not subscribe to again;
+  after one of its connections ends while others stay, those it held end
+  10 s after it ended, each counted from its own connection's end.
 - **Refusals.** `duplicate` and `unavailable` are retried with jittered
   back-off from 1 s doubling to 30 s; any other refusal, and `closed` with
   `revoked` or `superseded`, shuts the agent out until the fleet gives the

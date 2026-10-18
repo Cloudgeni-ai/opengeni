@@ -72,6 +72,9 @@ struct Gateway {
     live: Arc<Mutex<Option<Live>>>,
     /// Answers a link's dial with this status instead, while set.
     reject: Arc<AtomicBool>,
+    /// Stops reading and writing its links, while set, as a gateway that
+    /// hangs.
+    stall: Arc<AtomicBool>,
 }
 
 impl Gateway {
@@ -81,17 +84,20 @@ impl Gateway {
         let (events, receiver) = mpsc::unbounded_channel();
         let live = Arc::new(Mutex::new(None));
         let reject = Arc::new(AtomicBool::new(false));
+        let stall = Arc::new(AtomicBool::new(false));
         tokio::spawn(accept_links(
             listener,
             events,
             Arc::clone(&live),
             Arc::clone(&reject),
+            Arc::clone(&stall),
         ));
         Self {
             url,
             events: receiver,
             live,
             reject,
+            stall,
         }
     }
 
@@ -198,6 +204,7 @@ async fn accept_links(
     events: mpsc::UnboundedSender<Event>,
     live: Arc<Mutex<Option<Live>>>,
     reject: Arc<AtomicBool>,
+    stall: Arc<AtomicBool>,
 ) {
     let mut links = 0;
     loop {
@@ -253,8 +260,14 @@ async fn accept_links(
             bearer,
         });
         let events = events.clone();
+        let stall = Arc::clone(&stall);
         tokio::spawn(async move {
             loop {
+                if stall.load(Ordering::SeqCst) {
+                    // Holds the socket, reading nothing.
+                    cut.cancelled().await;
+                    break;
+                }
                 tokio::select! {
                     () = cut.cancelled() => break,
                     message = outgoing.recv() => match message {
@@ -310,6 +323,16 @@ impl Wake for Wakes {
 }
 
 fn hub() -> Hub {
+    hub_with(Timing {
+        ping_every: Duration::from_millis(500),
+        silence: Duration::from_secs(5),
+        backoff_min: Duration::from_millis(10),
+        backoff_max: Duration::from_millis(200),
+        connect_timeout: Duration::from_secs(2),
+    })
+}
+
+fn hub_with(timing: Timing) -> Hub {
     let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -321,13 +344,7 @@ fn hub() -> Hub {
         tokens: Arc::new(Fleet::default()),
         tls: Arc::new(tls),
         settings: Settings::default(),
-        timing: Timing {
-            ping_every: Duration::from_millis(500),
-            silence: Duration::from_secs(5),
-            backoff_min: Duration::from_millis(10),
-            backoff_max: Duration::from_millis(200),
-            connect_timeout: Duration::from_secs(2),
-        },
+        timing,
     })
 }
 
@@ -1211,5 +1228,53 @@ async fn an_agents_control_and_bulk_connections_share_its_session() {
     control.disconnected().await;
     gateway.open("inst-2", "ticket-1", SCOPE_2, "relay-2").await;
     let _second = timeout(WAIT, connecting).await.unwrap().unwrap();
+    port.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gateway_that_stops_reading_loses_its_link_by_the_silence_deadline() {
+    let mut gateway = Gateway::start().await;
+    let hub = hub_with(Timing {
+        ping_every: Duration::from_millis(100),
+        silence: Duration::from_secs(1),
+        backoff_min: Duration::from_millis(10),
+        backoff_max: Duration::from_millis(200),
+        connect_timeout: Duration::from_secs(2),
+    });
+    hub.attach(
+        SANDBOX.into(),
+        link(&gateway, "t1"),
+        scratch("stalled"),
+        Arc::new(Wakes::default()),
+    );
+    gateway.up().await;
+    let port = Port::start(hub.clone()).await;
+    let connecting = tokio::spawn(connect(port.addr, "inst-1"));
+    gateway.open("inst-1", "t1", SCOPE_1, "r1").await;
+    let mut agent = connecting.await.unwrap();
+    gateway.stall.store(true, Ordering::SeqCst);
+    // Far more than the link's socket buffers and the agent's credit
+    // hold, so the host's writes to the gateway block.
+    let started = tokio::time::Instant::now();
+    let client = agent.client.clone();
+    let flood = tokio::spawn(async move {
+        let payload = Bytes::from(vec![0; 512 << 10]);
+        for _ in 0..256 {
+            if client
+                .publish(format!("{SCOPE_1}.out"), payload.clone())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+    agent.disconnected().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "the link outlived its silence deadline by {:?}",
+        started.elapsed()
+    );
+    flood.abort();
     port.stop();
 }

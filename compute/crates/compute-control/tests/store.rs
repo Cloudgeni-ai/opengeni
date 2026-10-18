@@ -349,16 +349,21 @@ async fn keys_name_their_team() {
     each(keys, keys).await;
 }
 
-async fn requests<S: Store>(store: S) {
-    let team = format!("team-{:x}", random());
-    let first = RequestRow {
-        team: team.clone(),
-        request_id: "lease-1".into(),
-        id: Id(SandboxId(u128::from(random()))),
+fn request(row: &SandboxRow, request_id: &str) -> RequestRow {
+    RequestRow {
+        team: row.team.clone(),
+        request_id: request_id.into(),
+        id: row.id,
         digest: "d1".into(),
         created_ms: 10,
-        gone: false,
-    };
+        gone_ms: None,
+    }
+}
+
+async fn requests<S: Store>(store: S) {
+    let row = sandbox(HostId(1));
+    let team = row.team.clone();
+    let first = request(&row, "lease-1");
     assert_eq!(store.claim_request(&first).await.unwrap(), first);
     let again = RequestRow {
         id: Id(SandboxId(u128::from(random()))),
@@ -372,7 +377,7 @@ async fn requests<S: Store>(store: S) {
     );
     let other_team = RequestRow {
         team: format!("team-{:x}", random()),
-        ..again.clone()
+        ..first.clone()
     };
     assert_eq!(store.claim_request(&other_team).await.unwrap(), other_team);
     assert_eq!(
@@ -380,20 +385,52 @@ async fn requests<S: Store>(store: S) {
         Some(first.clone())
     );
     assert_eq!(store.request(&team, "lease-2").await.unwrap(), None);
-    store
-        .retire_requests(&other_team.team, first.id)
-        .await
-        .unwrap();
+
+    // Made for its request, while the request is live.
+    assert_eq!(
+        store.insert_requested(&row, "lease-1").await.unwrap(),
+        Some(Write::Done)
+    );
+    // A delete for a create that left nothing retires nothing.
+    let stale = row.version + 1;
+    assert!(!store.delete_retiring(row.id, stale, 50).await.unwrap());
     assert!(
-        !store.request(&team, "lease-1").await.unwrap().unwrap().gone,
+        !store
+            .request(&team, "lease-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .gone()
+    );
+    // Deleted for good: its team's requests retire with it, in one write.
+    assert!(
+        store
+            .delete_retiring(row.id, row.version, 50)
+            .await
+            .unwrap()
+    );
+    let gone = store.request(&team, "lease-1").await.unwrap().unwrap();
+    assert_eq!(gone.gone_ms, Some(50));
+    assert!(store.claim_request(&first).await.unwrap().gone());
+    assert!(
+        !store
+            .request(&other_team.team, "lease-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .gone(),
         "only the deleting team's requests retire"
     );
-    store.retire_requests(&team, first.id).await.unwrap();
-    let gone = store.request(&team, "lease-1").await.unwrap().unwrap();
-    assert!(gone.gone);
-    assert!(store.claim_request(&first).await.unwrap().gone);
-    assert_eq!(store.prune_requests(10).await.unwrap(), 0);
-    assert!(store.prune_requests(11).await.unwrap() >= 1);
+    // A replay that read the request before it retired cannot make the
+    // sandbox again.
+    assert_eq!(store.insert_requested(&row, "lease-1").await.unwrap(), None);
+    assert_eq!(store.sandbox(row.id).await.unwrap(), None);
+    // Nor can a request no create claimed.
+    assert_eq!(store.insert_requested(&row, "lease-9").await.unwrap(), None);
+
+    // Kept for as long from the deletion, however old the create.
+    assert_eq!(store.prune_requests(50).await.unwrap(), 0);
+    assert!(store.prune_requests(51).await.unwrap() >= 1);
     assert_eq!(store.request(&team, "lease-1").await.unwrap(), None);
     assert!(
         store
@@ -407,6 +444,39 @@ async fn requests<S: Store>(store: S) {
 #[tokio::test]
 async fn create_requests_answer_their_first_sandbox_until_it_is_gone() {
     each(requests, requests).await;
+}
+
+async fn replay_racing_delete<S: Store>(store: S) {
+    // A replay that finds no row creates the sandbox again only if it was
+    // never made: one that races its deletion never brings it back.
+    for _ in 0..30 {
+        let row = sandbox(HostId(1));
+        store.claim_request(&request(&row, "lease")).await.unwrap();
+        assert_eq!(
+            store.insert_requested(&row, "lease").await.unwrap(),
+            Some(Write::Done)
+        );
+        let replay = async {
+            loop {
+                if store.sandbox(row.id).await.unwrap().is_none() {
+                    return store.insert_requested(&row, "lease").await.unwrap();
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+        let (deleted, replayed) =
+            tokio::join!(store.delete_retiring(row.id, row.version, 99), replay);
+        assert!(deleted.unwrap());
+        assert_eq!(replayed, None, "a deleted sandbox was made again");
+        assert_eq!(store.sandbox(row.id).await.unwrap(), None);
+        let request = store.request(&row.team, "lease").await.unwrap().unwrap();
+        assert_eq!(request.gone_ms, Some(99));
+    }
+}
+
+#[tokio::test]
+async fn a_replayed_create_never_brings_back_a_deleted_sandbox() {
+    each(replay_racing_delete, replay_racing_delete).await;
 }
 
 async fn agents<S: Store>(store: S) {
