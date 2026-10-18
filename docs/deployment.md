@@ -2768,6 +2768,25 @@ that CA through a private ConfigMap/Secret before running
 `bun run deployment:temporal-values`. That database-to-Temporal-server TLS is
 separate from the Opengeni-to-Temporal client settings below.
 
+Budget PostgreSQL connections across processes, not just current activity:
+each API has a runtime pool (`OPENGENI_API_DATABASE_POOL_MAX`, default 32) and
+a separate managed-auth pool (maximum 10); each worker has the default runtime
+pool (10) plus one readiness connection. Web and relay do not open SQL pools.
+Include each deployment's independent surge, old terminating pods that are
+still draining, Temporal's per-service default and visibility pools, one-shot
+migration/provisioning jobs, catalog import (default pool 10), and operator
+connections. Subtract PostgreSQL's reserved slots from `max_connections`.
+Pools are lazy; observed idle/active counts are not the rollout upper bound.
+Set server capacity against that budget and measured backend memory rather
+than shrinking application pools to fit an accidental server default.
+
+Scoped transactions retry transient connection acquisition up to eight times
+with exponential equal-jitter backoff (250 ms to 4 s, at most 15.75 s total
+sleep, plus driver connection time). This never replays a callback that has
+started or a failed savepoint. Running turns whose database connection remains
+unavailable, including SQLSTATE 53300, use the existing fenced exact-attempt
+recovery lane; ordinary data/authentication failures remain failures.
+
 After the upstream Temporal chart is running, the stack wrapper applies
 `deploy/stacks/official-temporal-namespace-job.yaml` to register the Temporal
 namespace used by Opengeni (`default` by default). The Opengeni worker cannot
