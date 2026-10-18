@@ -293,7 +293,10 @@ export type ProviderTerminationOutcome = {
   providerMissingBeforeCapture: boolean;
 };
 
-export type DrainCaptureDisposition = "capture_required" | "archive_published";
+/** `discard`: the group ended (a compute sandbox whose chat or workspace was
+ * deleted), so the box is deleted under the same capture fence without
+ * capturing a workspace nothing will restore. */
+export type DrainCaptureDisposition = "capture_required" | "archive_published" | "discard";
 
 /** The provider-terminate seam. Production wires the real resume-by-id ->
  *  persistWorkspace -> persist-onto-lease (epoch-fenced) -> snapshot-GC ->
@@ -4083,6 +4086,20 @@ async function terminateDrainableBox(
     }
   }
 
+  // A compute sandbox whose group ended (its chat or workspace was deleted) is
+  // deleted without a capture: nothing will restore it, and the fabric's own
+  // memory and disk were its persistence. The capture claim above still fences
+  // new holders until the cold commit. A rotation always captures.
+  if (
+    captureDisposition === "capture_required" &&
+    captureClaim &&
+    backend === "compute" &&
+    lease.groupEndRequestedAt !== null &&
+    lease.rotationRequestedAt === null
+  ) {
+    captureDisposition = "discard";
+  }
+
   // The epoch-fenced PERSIST-onto-lease CAS the terminate seam calls AFTER it has
   // snapshotted the live box and BEFORE it terminates (sandbox-file-persistence).
   // Same exact lease/capture guard as confirmDrainCold. A stale capture owner or
@@ -4753,7 +4770,7 @@ export async function terminateProviderBox(
       });
       return {
         terminated: true,
-        providerMissingBeforeCapture: captureDisposition !== "archive_published",
+        providerMissingBeforeCapture: captureDisposition === "capture_required",
       };
     }
     // Re-throw a non-NotFound resume failure so the caller SKIPS (the lease stays
@@ -4794,7 +4811,7 @@ export async function terminateProviderBox(
   // and its spool are settled, or by the late path that inherits them.
   let releaseSettlingCapture: () => void = () => undefined;
   try {
-    if (captureDisposition !== "archive_published" && session?.persistWorkspace) {
+    if (captureDisposition === "capture_required" && session?.persistWorkspace) {
       releaseSettlingCapture = trackSettlingDrainCapture(lease);
       // The budget bounds only this attempt's wait, never the capture: a slow
       // but finite capture keeps reading and publishes late, and the retry
@@ -4888,6 +4905,17 @@ export async function terminateProviderBox(
     observability.info("sandbox reaper: resuming teardown from durable archive publication", {
       ...logIdentity,
     });
+  } else if (captureDisposition === "discard") {
+    // The group ended: no capture, only the exact capture-claim CAS before the
+    // delete. A miss means the lease was re-armed; leave the box running.
+    const { wrote } = await persistArchive(null);
+    if (!wrote) {
+      observability.info(
+        "sandbox reaper: lease re-armed before a group-end delete — leaving box RUNNING",
+        { ...logIdentity },
+      );
+      return { terminated: false, providerMissingBeforeCapture: false };
+    }
   } else if (verifiedArchive) {
     let wrote: boolean;
     try {

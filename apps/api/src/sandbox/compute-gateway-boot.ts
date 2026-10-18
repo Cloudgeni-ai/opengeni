@@ -15,6 +15,7 @@ import { signRelayToken } from "@opengeni/contracts";
 import { relayDialBaseFromSettings } from "@opengeni/core";
 import {
   openSandboxAgentLink,
+  recordComputeSandboxPower,
   releaseSandboxAgentLink,
   renewSandboxAgentLink,
   type Database,
@@ -45,6 +46,9 @@ export function databaseComputeAgentLinkStore(db: Database): ComputeAgentLinkSto
       await renewSandboxAgentLink(db, { ...claim, leaseMs: AGENT_CONNECTION_LEASE_MS }),
     release: async (claim) => {
       await releaseSandboxAgentLink(db, claim);
+    },
+    power: async ({ workspaceId, agentId, sandboxId, asleep }) => {
+      await recordComputeSandboxPower(db, { workspaceId, agentId, sandboxId, asleep });
     },
   };
 }

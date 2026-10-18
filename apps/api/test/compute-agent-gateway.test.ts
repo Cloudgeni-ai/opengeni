@@ -292,6 +292,12 @@ class FakeStore implements ComputeAgentLinkStore {
     this.calls.push(`release:${claim.connectionInstanceId}`);
     this.release_?.();
   }
+  /** Power records wait on this (to prove they apply in order). */
+  powerGate: Promise<void> = Promise.resolve();
+  async power(input: ComputeAgentLinkClaim & { sandboxId: string; asleep: boolean }) {
+    await this.powerGate;
+    this.calls.push(`power:${input.sandboxId}:${input.asleep ? "asleep" : "awake"}`);
+  }
 }
 
 class FakeSocket {
@@ -510,6 +516,37 @@ describe("agent gateway sessions", () => {
     // Only the stale open's own claim is released.
     expect(store.calls).toContain(`release:${older}`);
     expect(store.calls).not.toContain(`release:${newer}`);
+  });
+
+  test("sleep and wake are recorded once per change, in order, for the ticket's sandbox", async () => {
+    const { send, settle, store } = await gatewayWithLink();
+    let openGate!: () => void;
+    store.powerGate = new Promise((resolve) => (openGate = resolve));
+    send({ t: "open", s: 1, sandbox: "sbx-1", ticket: "t", connection: INSTANCE });
+    send({ t: "state", s: 1, state: "awake" });
+    send({ t: "state", s: 1, state: "asleep" });
+    send({ t: "state", s: 1, state: "asleep" });
+    send({ t: "state", s: 1, state: "awake" });
+    await settle();
+    expect(store.calls.filter((call) => call.startsWith("power:"))).toEqual([]);
+    openGate();
+    await settle();
+    expect(store.calls.filter((call) => call.startsWith("power:"))).toEqual([
+      "power:sbx-1:awake",
+      "power:sbx-1:asleep",
+      "power:sbx-1:awake",
+    ]);
+  });
+
+  test("a session past its lease deadline records no power state", async () => {
+    let now = 1_000_000;
+    const { send, settle, store } = await gatewayWithLink({ now: () => now });
+    send({ t: "open", s: 1, sandbox: "sbx-1", ticket: "t", connection: INSTANCE });
+    await settle();
+    now += 60_000;
+    send({ t: "state", s: 1, state: "asleep" });
+    await settle();
+    expect(store.calls.some((call) => call.startsWith("power:"))).toBe(false);
   });
 
   test("the relay credential is refreshed before it expires", async () => {

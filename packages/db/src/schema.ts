@@ -10368,6 +10368,12 @@ export const sandboxLeases = pgTable(
     rotationReason: text("rotation_reason", {
       enum: ["provider_deadline", "operator", "teardown_claim"],
     }),
+    // A chat or workspace deletion ended this compute lease's group: its
+    // sandbox is deleted without a workspace capture (0842).
+    groupEndRequestedAt: timestamp("group_end_requested_at", { withTimezone: true }),
+    // The agent gateway reported the current compute sandbox asleep since then;
+    // warm time does not accrue while it sleeps (0842).
+    computeAsleepSince: timestamp("compute_asleep_since", { withTimezone: true }),
     // The SQL migration owns the two DEFERRABLE foreign keys and deferred
     // scope/state constraint triggers. Drizzle does not model deferrability, so
     // these remain bare UUIDs here rather than generating a stricter wrong FK.

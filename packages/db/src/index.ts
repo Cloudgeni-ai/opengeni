@@ -42142,6 +42142,8 @@ type LeaseRow = {
   provider_deadline_at: Date | string | null;
   rotation_requested_at: Date | string | null;
   rotation_reason: "provider_deadline" | "operator" | "teardown_claim" | null;
+  group_end_requested_at?: Date | string | null;
+  compute_asleep_since?: Date | string | null;
   current_checkpoint_artifact_id: string | null;
   previous_checkpoint_artifact_id: string | null;
   shared_preparation_lease_epoch: number | string | null;
@@ -42242,6 +42244,9 @@ export interface LeaseSnapshot {
    * current holders quiesce and the reaper creates a successor. */
   rotationRequestedAt: Date | null;
   rotationReason: "provider_deadline" | "operator" | "teardown_claim" | null;
+  /** A chat or workspace deletion ended this compute lease's group: its
+   * sandbox is deleted without a workspace capture. */
+  groupEndRequestedAt: Date | null;
   currentCheckpointArtifactId: string | null;
   previousCheckpointArtifactId: string | null;
   expiresAt: Date;
@@ -43015,6 +43020,8 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
           ? row.rotation_requested_at
           : new Date(row.rotation_requested_at),
     rotationReason: row.rotation_reason,
+    groupEndRequestedAt:
+      row.group_end_requested_at == null ? null : new Date(row.group_end_requested_at),
     currentCheckpointArtifactId: row.current_checkpoint_artifact_id,
     previousCheckpointArtifactId: row.previous_checkpoint_artifact_id,
     expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(row.expires_at),
@@ -44064,6 +44071,13 @@ async function acquireLeaseOnce(
               update sandbox_leases
               set resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
                   updated_at = now()
+              where id = ${row.id}
+            `);
+          }
+          if (row.group_end_requested_at) {
+            // Re-armed: whatever group end was requested did not happen.
+            await tx.execute(sql`
+              update sandbox_leases set group_end_requested_at = null, updated_at = now()
               where id = ${row.id}
             `);
           }
@@ -46565,7 +46579,7 @@ export async function failSandboxRematerialization(
             resume_state = ${resumeStateJson}::jsonb,
             provider_created_at = null,
             provider_deadline_at = null,
-            rotation_requested_at = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
             rotation_reason = null,
             archive_capture_id = null,
             archive_capture_operation_id = null,
@@ -47297,7 +47311,7 @@ export async function recordWarmingSandboxCreated(
             resume_state      = ${resumeStateJson}::jsonb,
             provider_created_at = ${providerCreatedAt?.toISOString() ?? null}::timestamptz,
             provider_deadline_at = ${providerDeadlineAt?.toISOString() ?? null}::timestamptz,
-            rotation_requested_at = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
             rotation_reason = null,
             expires_at        = now() + (${String(warmingTtlMs)} || ' milliseconds')::interval,
             updated_at        = now()
@@ -49408,7 +49422,7 @@ export async function markWarmLeaseInstanceLost(
             resume_backend_id = coalesce(resume_backend_id, backend),
             provider_created_at = null,
             provider_deadline_at = null,
-            rotation_requested_at = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
             rotation_reason = null,
             archive_capture_id = null,
             archive_capture_operation_id = null,
@@ -49923,7 +49937,7 @@ export async function failWarmingToCold(
             resume_backend_id = case when ${hasRecovery} then coalesce(resume_backend_id, backend) else null end,
             provider_created_at = null,
             provider_deadline_at = null,
-            rotation_requested_at = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
             rotation_reason = null,
             archive_capture_id = null,
             archive_capture_operation_id = null,
@@ -49976,6 +49990,7 @@ async function requestComputeGroupEndTx(
   await tx.execute(sql`
     update sandbox_leases lease set
       liveness = 'draining',
+      group_end_requested_at = now(),
       expires_at = now() - interval '1 millisecond',
       updated_at = now()
     where lease.workspace_id = ${input.workspaceId}
@@ -50910,7 +50925,7 @@ export async function reapStaleLeaseHolders(
             data_plane_url = null, terminal_data_plane_url = null,
             controller_data_plane_url = null,
             provider_created_at = null, provider_deadline_at = null,
-            rotation_requested_at = null, rotation_reason = null,
+            rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null, rotation_reason = null,
             archive_capture_id = null, archive_capture_operation_id = null,
             archive_capture_provider_request_id = null,
             archive_capture_provider_replay_safe = false,
@@ -52449,6 +52464,8 @@ export async function reArmDrainingLease(
         const rows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'warm',
+          -- Re-armed: whatever group end was requested did not happen.
+          group_end_requested_at = null,
           resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
           expires_at = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
           updated_at = now()
@@ -52826,7 +52843,7 @@ export async function confirmDrainCold(
           resume_backend_id = case when ${preserveRecovery} then coalesce(resume_backend_id, backend) else null end,
           provider_created_at = null,
           provider_deadline_at = null,
-          rotation_requested_at = null,
+          rotation_requested_at = null, group_end_requested_at = null, compute_asleep_since = null,
           rotation_reason = null,
           archive_capture_id = null,
           archive_capture_operation_id = null,
@@ -62612,6 +62629,78 @@ export async function renewSandboxAgentLink(
   });
 }
 
+/**
+ * RECORD that a compute sandbox went to sleep or woke, as its host reports it
+ * through the agent gateway. Warm time accrues only while the sandbox is awake:
+ * asleep stamps `compute_asleep_since` (no tick accrues past it), and awake
+ * moves the meter cursor forward by exactly the time asleep, so the awake time
+ * before the sleep is still billed and the sleep is not. Only the lease whose
+ * current box is this sandbox changes; anything else is a no-op.
+ */
+export async function recordComputeSandboxPower(
+  db: Database,
+  input: { workspaceId: string; agentId: string; sandboxId: string; asleep: boolean },
+): Promise<{ changed: boolean }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const rows = await tx.execute<LeaseRow>(sql`
+        select lease.* from sandbox_leases lease
+        join enrollments e
+          on e.workspace_id = lease.workspace_id
+         and e.sandbox_group_id = lease.sandbox_group_id
+        where lease.workspace_id = ${input.workspaceId}
+          and e.id = ${input.agentId}
+          and e.kind = 'sandbox'
+          and lease.backend = 'compute'
+          and lease.instance_id = ${input.sandboxId}
+        for update of lease
+      `);
+      const row = rows[0];
+      if (!row) return { changed: false };
+      const asleepSince = row.compute_asleep_since ? new Date(row.compute_asleep_since) : null;
+      if (input.asleep) {
+        if (asleepSince) return { changed: false };
+        await tx.execute(sql`
+          update sandbox_leases set compute_asleep_since = clock_timestamp(), updated_at = now()
+          where id = ${row.id}
+        `);
+        return { changed: true };
+      }
+      if (!asleepSince) return { changed: false };
+      // The cursor accrual starts from: the last tick, else the warm instant.
+      const recovery = row.resume_state?.opengeniRecovery as
+        | { restore?: { completedAt?: unknown } }
+        | undefined;
+      const warmStartMs =
+        typeof recovery?.restore?.completedAt === "string"
+          ? Date.parse(recovery.restore.completedAt)
+          : Number.NaN;
+      const cursorMs = row.last_meter_at ? new Date(row.last_meter_at).getTime() : Number.NaN;
+      const startMs = Number.isFinite(warmStartMs)
+        ? Math.max(Number.isFinite(cursorMs) ? cursorMs : 0, warmStartMs)
+        : cursorMs;
+      if (Number.isFinite(startMs) && startMs <= asleepSince.getTime()) {
+        // Shift the unbilled awake interval [start, asleep) to end now.
+        await tx.execute(sql`
+          update sandbox_leases set
+            last_meter_at = ${new Date(startMs).toISOString()}::timestamptz
+              + (clock_timestamp() - compute_asleep_since),
+            compute_asleep_since = null,
+            updated_at = now()
+          where id = ${row.id}
+        `);
+      } else {
+        await tx.execute(sql`
+          update sandbox_leases set compute_asleep_since = null, updated_at = now()
+          where id = ${row.id}
+        `);
+      }
+      return { changed: true };
+    }),
+  );
+}
+
 /** RELEASE a link session's claim when its host closes it, so the agent's next
  * instance can open at once. Only the exact epoch and instance release. */
 export async function releaseSandboxAgentLink(
@@ -63949,10 +64038,18 @@ export async function accrueWarmSeconds(
         if (input.finalDrain && !snapshot?.stopChargeAt) {
           throw new Error("sandbox final tick has no durable stop cutoff");
         }
-        const upperBound =
+        const chargeUntil =
           snapshot?.stopChargeAt && input.finalDrain
             ? sql`${snapshot.stopChargeAt}::timestamptz`
             : sql`clock_timestamp()`;
+        // A sleeping compute sandbox runs no VM: nothing accrues past the moment
+        // it fell asleep (recordComputeSandboxPower moves the cursor on waking).
+        const asleepSince = row.compute_asleep_since
+          ? new Date(row.compute_asleep_since).toISOString()
+          : null;
+        const upperBound = asleepSince
+          ? sql`least(${chargeUntil}, ${asleepSince}::timestamptz)`
+          : chargeUntil;
         const elapsedRows = await tx.execute<{ elapsed_ms: number | string }>(sql`
           select greatest(0, floor(extract(epoch from (${upperBound} -
             ${new Date(startMs).toISOString()}::timestamptz)) * 1000))::bigint as elapsed_ms

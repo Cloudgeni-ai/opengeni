@@ -41,6 +41,12 @@ retired (connection replaced, enrollment revoked), never to poll it (0841).
 A stopping command (Stop, Pause or Cancel) is still claimed, because that
 claim delivers the cancellation to the agent.
 
+The only timers that message an agent are the op stream's credit acks and
+silence probes, and they run only while a call is attached to a running
+command; they stop when the call returns or yields. Screen-control renewal
+needs `credential_renew` (false for compute agents), the automatic updater
+skips sandbox enrollments, and machine routes list machines only.
+
 ## Lifecycle
 
 - **Create** (`ComputeSandboxClient.create`): Opengeni creates the sandbox's
@@ -64,13 +70,24 @@ claim delivers the cancellation to the agent.
   `ComputeWakingControlRpc` asks the fabric to wake it and resends under the
   same request id until the agent answers. Every operation re-resolves the
   agent's connection instance.
-- **Idle**: the fabric sleeps the sandbox and keeps memory and disk. Opengeni
-  never drains a compute lease for being idle (migration 0840 and the drain
-  points in `packages/db/src/index.ts`); it stays warm without holders.
-- **Group end**: deleting the chat or workspace drains its idle compute lease
-  at once; the reaper deletes the sandbox and revokes its enrollment, and the
-  deletion succeeds on retry. Rotation and archive capture still drain.
-- **Capture**: a portable tar only, to move a workspace to another backend.
+- **Idle**: when the last holder releases a compute lease, nothing is
+  captured or deleted. The fabric sleeps the sandbox by its own rules and
+  keeps memory and disk; Opengeni never drains a compute lease for being idle
+  (migration 0840 and the drain points in `packages/db/src/index.ts`). The
+  next turn finds the same sandbox and its first request wakes it.
+- **Group end**: deleting the chat or workspace marks the lease
+  (`group_end_requested_at`, migration 0842) and drains it at once. The reaper
+  then deletes the sandbox on the fabric without a tar capture and revokes its
+  enrollment; the lease's capture fence still decides who may terminate it,
+  and a fence loss leaves the box for its new owner. The marker is cleared
+  when the lease re-arms or goes cold, and the deletion succeeds on retry.
+- **Capture**: a portable tar only, to move a workspace to another backend
+  (rotation and archive capture still drain with a capture).
+- **Metering**: warm seconds count only while the sandbox is awake. The
+  gateway records each `state` change (`recordComputeSandboxPower`): asleep
+  stamps `compute_asleep_since`, which caps accrual; awake moves the meter
+  cursor past the time asleep. A tick that accrued before the asleep frame
+  arrived may bill at most one tick of sleep.
 
 Request windows on compute are at least 130 s, because the host holds a
 message up to 120 s while a sandbox wakes from disk.
@@ -117,4 +134,4 @@ otherwise. See "Run as another local user" in `docs/connected-machines.md`.
 Canonical code: `packages/runtime/src/sandbox/compute/`,
 `packages/runtime/src/sandbox/providers/compute.ts`,
 `packages/core/src/sandbox/compute-plane.ts`,
-`apps/api/src/sandbox/compute-gateway*.ts`, migrations 0839 to 0841.
+`apps/api/src/sandbox/compute-gateway*.ts`, migrations 0839 to 0842.

@@ -2,16 +2,19 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
+  accrueWarmSeconds,
   acquireLease,
   bootstrapWorkspace,
   commitWarmingToWarm,
   createDb,
+  createSandboxEnrollment,
   createSession,
   deleteSessionTreeIfQuiescent,
   forceDrainOverLimitViewerOnlyBoxes,
   releaseLeaseHolder,
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
+  recordComputeSandboxPower,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -188,6 +191,8 @@ describe("compute leases and idle drain", () => {
     const row = await readRow(ids.workspaceId, ids.sandboxGroupId);
     expect(row?.liveness).toBe("draining");
     expect(row!.expires_at.getTime()).toBeLessThan(Date.now());
+    // The drain is marked as a group end, so the reaper deletes without capture.
+    expect(await groupEndRequestedAt(ids)).not.toBeNull();
     // The reaper's teardown deletes the sandbox and settles the lease cold.
     await admin`
       update sandbox_leases set liveness = 'cold', instance_id = null
@@ -210,5 +215,111 @@ describe("compute leases and idle drain", () => {
     });
     expect(result.status).not.toBe("deleted");
     expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("warm");
+  }, 60_000);
+
+  test("a lease re-armed after a deletion attempt forgets the group end", async () => {
+    if (!available) return;
+    const { grant, session, ids } = await fixture("compute");
+    await releaseLastHolder(ids);
+    await deleteSessionTreeIfQuiescent(db, {
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+    });
+    expect(await groupEndRequestedAt(ids)).not.toBeNull();
+    // A verified live box (as the turn that warmed it records).
+    await admin`
+      update sandbox_leases set resume_state = jsonb_set(
+        jsonb_set(resume_state, '{opengeniRecovery,workspace,status}', '"ready"'),
+        '{opengeniRecovery,provider}',
+        jsonb_build_object('status', 'exists', 'instanceId', instance_id, 'observedAt', now()::text))
+        || jsonb_build_object('opengeniProviderInstanceId', instance_id)
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+    const arrival = await acquireLease(db, {
+      ...ids,
+      kind: "turn",
+      holderId: "turn-2",
+      backend: "compute",
+      leaseTtlMs: 45_000,
+    });
+    expect(arrival.role).toBe("rearmed");
+    expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("warm");
+    expect(await groupEndRequestedAt(ids)).toBeNull();
+  }, 60_000);
+});
+
+async function groupEndRequestedAt(ids: { workspaceId: string; sandboxGroupId: string }) {
+  const [row] = await admin<{ group_end_requested_at: Date | null }[]>`
+    select group_end_requested_at from sandbox_leases
+    where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+  return row?.group_end_requested_at ?? null;
+}
+
+describe("compute warm time follows the sandbox's sleep", () => {
+  async function sleepingFixture() {
+    const { ids } = await fixture("compute");
+    const agentId = crypto.randomUUID();
+    await createSandboxEnrollment(db, {
+      ...ids,
+      enrollmentId: agentId,
+      hasDisplay: false,
+      workspaceRoot: "/workspace",
+    });
+    // Warm since 300 s ago, never metered.
+    await admin`
+      update sandbox_leases set
+        last_meter_at = null,
+        resume_state = jsonb_set(resume_state, '{opengeniRecovery,restore,completedAt}',
+          to_jsonb(${new Date(Date.now() - 300_000).toISOString()}::text))
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+    const [lease] = await admin<{ lease_epoch: string }[]>`
+      select lease_epoch from sandbox_leases
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+    const power = (asleep: boolean, sandboxId = "compute-box") =>
+      recordComputeSandboxPower(db, { workspaceId: ids.workspaceId, agentId, sandboxId, asleep });
+    const accrue = () =>
+      accrueWarmSeconds(db, {
+        ...ids,
+        expectedEpoch: Number(lease!.lease_epoch),
+        warmRateMicrosPerSecond: 0,
+        billingMode: "usage_only",
+      });
+    /** Pretend the sandbox fell asleep this many seconds ago. */
+    const backdateSleep = (seconds: number) => admin`
+      update sandbox_leases set compute_asleep_since = now() - make_interval(secs => ${seconds})
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+    return { ids, power, accrue, backdateSleep };
+  }
+
+  test("no warm time accrues while asleep; the awake time before it still does", async () => {
+    if (!available) return;
+    const { power, accrue, backdateSleep } = await sleepingFixture();
+    expect(await power(true)).toEqual({ changed: true });
+    expect(await power(true)).toEqual({ changed: false });
+    await backdateSleep(200);
+    // Awake 100 s, then asleep 200 s: only the 100 s accrue.
+    const first = await accrue();
+    expect(first.seconds).toBeGreaterThanOrEqual(99);
+    expect(first.seconds).toBeLessThanOrEqual(101);
+    expect((await accrue()).accrued).toBe(false);
+    expect(await power(false)).toEqual({ changed: true });
+    expect((await accrue()).seconds).toBeLessThanOrEqual(1);
+  }, 60_000);
+
+  test("waking moves the cursor past the sleep, keeping unbilled awake time", async () => {
+    if (!available) return;
+    const { power, accrue, backdateSleep } = await sleepingFixture();
+    await power(true);
+    await backdateSleep(200);
+    await power(false);
+    const tick = await accrue();
+    expect(tick.seconds).toBeGreaterThanOrEqual(99);
+    expect(tick.seconds).toBeLessThanOrEqual(101);
+  }, 60_000);
+
+  test("only the lease's current sandbox reports for it", async () => {
+    if (!available) return;
+    const { power } = await sleepingFixture();
+    expect(await power(true, "another-box")).toEqual({ changed: false });
   }, 60_000);
 });
