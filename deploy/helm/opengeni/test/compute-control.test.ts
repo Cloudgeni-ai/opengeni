@@ -87,6 +87,10 @@ describe("computeControl", () => {
     const names = container.env.map((e: any) => e.name);
     expect(names.indexOf("COMPUTE_DATABASE_PASSWORD")).toBeLessThan(names.indexOf("COMPUTE_CONTROL_DATABASE"));
     expect(deployment.spec.template.spec.serviceAccountName).toBe("cc-opengeni-compute-control");
+    // Its secrets are mounted 0440, readable through the pod's group.
+    expect(deployment.spec.template.spec.securityContext.fsGroup).toBe(
+      deployment.spec.template.spec.securityContext.runAsUser,
+    );
 
     find(manifests, "Service", "cc-opengeni-compute-control");
     find(manifests, "Service", "cc-opengeni-compute-control-hosts");

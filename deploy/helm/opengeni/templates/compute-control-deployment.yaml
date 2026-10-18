@@ -51,6 +51,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        # Its secrets are mounted 0440: the group makes them its own.
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
         {{- with $cc.podSecurityContext }}

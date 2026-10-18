@@ -235,6 +235,10 @@ so the backend also uses Opengeni's agent gateway (in the API, at the
 | hosts | object storage | the archive and stored images |
 
 Guests never reach Opengeni's NATS; it stays inside Opengeni's network.
+Hosts check the gateway's certificate against the system's authorities;
+for a gateway with a certificate of a private authority, give each host
+`--agent-link-ca <pem>` in `COMPUTE_HOST_ARGS`, and it trusts that
+authority alone for agent links.
 
 ## Hosts
 
