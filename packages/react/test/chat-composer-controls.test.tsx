@@ -400,6 +400,51 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     expect(spy.sends).toEqual(["send"]);
   });
 
+  test("one Send: no other choice, Cmd/Ctrl+Enter sends, and no Queue or Steer words", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    const single: ComposerState = {
+      ...composer(spy),
+      busySend: "steer",
+      singleSend: true,
+      alternateSend: null,
+    };
+    mounted = await renderComponent(<ChatComposer composer={single} running />);
+    expect(mounted.container.querySelector("[data-og-composer-alternate-send]")).toBeNull();
+    const textarea = mounted.container.querySelector("textarea")!;
+    await press(textarea, {});
+    await press(textarea, { metaKey: true });
+    await press(textarea, { ctrlKey: true });
+    expect(spy.sends).toEqual(["send", "send", "send"]);
+    const words = (root: HTMLElement) =>
+      [
+        root.textContent ?? "",
+        ...[...root.querySelectorAll("*")].flatMap((node) =>
+          ["aria-label", "title", "placeholder", "data-og-tip"].map(
+            (name) => node.getAttribute(name) ?? "",
+          ),
+        ),
+      ].join(" ");
+    expect(words(mounted.container)).not.toMatch(/queue|steer/i);
+
+    const paused: EffectiveSessionControl = {
+      state: "paused",
+      controlVersion: 1,
+      controlEtag: "paused",
+      directState: "paused",
+      primaryBlocker: null,
+      additionalBlockerCount: 0,
+      blockers: [],
+      resumeOptions: [],
+      override: null,
+      settlement: null,
+    };
+    await mounted.rerender(
+      <ChatComposer composer={single} effectiveControl={paused} queuedAheadCount={2} />,
+    );
+    expect(textarea.placeholder).toBe("Message the agent — it reads it when it resumes…");
+    expect(words(mounted.container)).not.toMatch(/queue|steer/i);
+  });
+
   test.each([false, true])("annotation review survives custom footer: %s", async (customFooter) => {
     const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
     let reviewRequests = 0;

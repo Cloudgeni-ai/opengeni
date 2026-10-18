@@ -167,3 +167,38 @@ test("a waiting Steer shows nothing in the queue dock, only a failed action, and
   expect(alert?.textContent).toBe("The message could not be sent.");
   await view.unmount();
 });
+
+test("one Send: waiting messages without Queue or Steer words and no Steer actions", async () => {
+  const { SingleSendWording } = await import("@opengeni/react/messages");
+  const Dock = QueueDock as ComponentType<{ queue: TurnQueue; singleSend?: boolean }>;
+  const waiting = (id: string, prompt: string) =>
+    ({
+      id,
+      version: 1,
+      status: "queued",
+      prompt,
+      metadata: { delivery: "send" },
+    }) as unknown as TurnQueue["queue"][number];
+  const turns = [waiting("turn-1", "First follow-up"), waiting("turn-2", "Second follow-up")];
+  const words = (root: HTMLElement) =>
+    [
+      root.textContent ?? "",
+      ...[...root.querySelectorAll("[aria-label]")].map((node) => node.getAttribute("aria-label")),
+    ].join(" ");
+
+  const single = await renderComponent(
+    <SingleSendWording>
+      <Dock queue={steerQueue({ queue: turns })} singleSend />
+    </SingleSendWording>,
+  );
+  expect(single.container.textContent).toContain("2 waiting");
+  expect(single.container.textContent).toContain("First follow-up");
+  expect(words(single.container)).not.toMatch(/queue|steer/i);
+  await single.unmount();
+
+  // Without one Send the dock still offers Steer.
+  const choice = await renderComponent(<Dock queue={steerQueue({ queue: turns })} />);
+  expect(choice.container.textContent).toContain("2 queued");
+  expect(words(choice.container)).toMatch(/steer/i);
+  await choice.unmount();
+});

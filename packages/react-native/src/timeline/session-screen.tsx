@@ -38,7 +38,7 @@ import type { ClientModel, OpenGeniClient, SessionBackgroundCommand } from "@ope
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
-import { useOpenGeniText } from "@opengeni/react/messages";
+import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
 
 /* ----------------------------------------------------------------------------
    The web session page body at phone width: timeline (with the question card
@@ -113,25 +113,29 @@ export function NativeSessionScreen({
   renderMessageActions: hostMessageActions,
   ...timelineProps
 }: NativeSessionScreenProps) {
+  // One Send (`busySend: "steer"` without `offerQueue`): waiting messages,
+  // not a queue, and no Steer to learn.
   return (
-    <NativeTimelineMessagesProvider messages={timelineMessages}>
-      <SessionScreenBody
-        controller={controller}
-        composer={composerSlots}
-        trailing={trailing}
-        topBar={topBar}
-        bottomInset={bottomInset}
-        keyboardBottomOffset={keyboardBottomOffset}
-        feedback={feedback}
-        humanInputMessages={humanInputMessages}
-        approvalMessages={approvalMessages}
-        client={client}
-        models={models}
-        renderComposer={renderComposer}
-        renderMessageActions={hostMessageActions}
-        {...timelineProps}
-      />
-    </NativeTimelineMessagesProvider>
+    <SingleSendWording enabled={controller.composer.singleSend === true}>
+      <NativeTimelineMessagesProvider messages={timelineMessages}>
+        <SessionScreenBody
+          controller={controller}
+          composer={composerSlots}
+          trailing={trailing}
+          topBar={topBar}
+          bottomInset={bottomInset}
+          keyboardBottomOffset={keyboardBottomOffset}
+          feedback={feedback}
+          humanInputMessages={humanInputMessages}
+          approvalMessages={approvalMessages}
+          client={client}
+          models={models}
+          renderComposer={renderComposer}
+          renderMessageActions={hostMessageActions}
+          {...timelineProps}
+        />
+      </NativeTimelineMessagesProvider>
+    </SingleSendWording>
   );
 }
 
@@ -314,6 +318,7 @@ function SessionScreenBody({
             <QueueDock
               queue={queue}
               composer={composer}
+              singleSend={composer.singleSend === true}
               onComposerFocus={() => composerInput.current?.focus()}
               leading={
                 <SessionSignals

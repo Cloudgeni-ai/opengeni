@@ -2622,6 +2622,8 @@ function SessionChatPane(props: {
     sendDestination: () =>
       props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
     busySend: resolveWorkspaceBusySend(workspace?.settings),
+    // The console always offers the other choice beside Send.
+    offerQueue: true,
     // Ordinary Send is acknowledged locally. Clear only resources captured in
     // that immutable optimistic operation; later additions belong to the next
     // draft, while retry keeps the original resource refs in the failed bubble.

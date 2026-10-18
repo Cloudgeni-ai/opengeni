@@ -7,8 +7,10 @@
    `?theme=dark` puts the host in dark mode (`class="dark"` on <html> and a dark
    page background), `&host=navy` uses a tinted dark palette, and
    `&scenario=` selects the conversation state (approval, question, running,
-   steer-waiting, steered, long, empty, error). `&explicit=1` pins the legacy `data-og-theme` wrapper;
-   `&hostile=1` adds global host element CSS. */
+   steer-waiting, steered, waiting, long, empty, error). `&explicit=1` pins the legacy `data-og-theme` wrapper;
+   `&hostile=1` adds global host element CSS. `&send=one` mounts the chat with
+   one Send (`busySend: "steer"`); `waiting` is a paused workstream with two
+   messages waiting. */
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import type { SendMessageInput, Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
@@ -19,7 +21,7 @@ import {
   SessionConversationView,
   useSessionConversation,
 } from "@opengeni/react";
-import { fakeClient, WORKSPACE_ID } from "../test/fake-client";
+import { fakeClient, fakeTurn, WORKSPACE_ID } from "../test/fake-client";
 import "@opengeni/react/compiled.css";
 
 const SELECTED = "5a1c0000-0000-4000-8000-000000000001";
@@ -31,6 +33,7 @@ const theme = params.get("theme") === "dark" ? "dark" : "light";
 const host = params.get("host") === "navy" ? "navy" : "plain";
 const scenario = params.get("scenario") ?? "approval";
 const explicit = params.get("explicit") === "1";
+const oneSend = params.get("send") === "one";
 // A host with global element CSS (as Django/Spectre-style apps ship): lists,
 // paragraphs, buttons and line-height must not leak into the chat.
 if (params.get("hostile") === "1") {
@@ -62,7 +65,7 @@ function chat(id: string, title: string, minutes: number, status = "idle"): Sess
 const STEER_TURN = "5a1c0000-0000-4000-8000-0000000000b1";
 const steering = scenario === "steer-waiting" || scenario === "steered";
 const selectedStatus =
-  scenario === "running" || steering
+  scenario === "running" || scenario === "waiting" || steering
     ? "running"
     : scenario === "approval" || scenario === "question"
       ? "requires_action"
@@ -233,6 +236,8 @@ if (scenario === "approval") {
 } else if (scenario === "running") {
   investigation();
   push("agent.message.delta", { delta: "Both payments hit the same invoice. Checking the " }, 0);
+} else if (scenario === "waiting") {
+  investigation();
 } else if (steering) {
   // The person steers while the agent works. The Steer is only their message:
   // it waits for the next model step, then takes over as the next turn.
@@ -298,8 +303,8 @@ if (scenario === "approval") {
 }
 
 const control: SessionQueueSnapshot["effectiveControl"] = {
-  state: "active",
-  directState: "active",
+  state: scenario === "waiting" ? "paused" : "active",
+  directState: scenario === "waiting" ? "paused" : "active",
   controlVersion: 1,
   controlEtag: "demo",
   primaryBlocker: null,
@@ -309,6 +314,22 @@ const control: SessionQueueSnapshot["effectiveControl"] = {
   override: null,
   settlement: null,
 };
+const waitingItems =
+  scenario === "waiting"
+    ? [
+        fakeTurn({
+          id: "5a1c0000-0000-4000-8000-0000000000c1",
+          sessionId: SELECTED,
+          prompt: "Also check whether October was double charged.",
+        }),
+        fakeTurn({
+          id: "5a1c0000-0000-4000-8000-0000000000c2",
+          sessionId: SELECTED,
+          position: 2,
+          prompt: "Then draft a short reply to the customer.",
+        }),
+      ]
+    : [];
 
 const base = fakeClient({});
 const controllerFixture = { streams: 0, sent: [] as SendMessageInput[] };
@@ -338,7 +359,7 @@ const client = fakeClient({
       activePersonalConnections: [],
       stoppingPreviousAttempt: false,
       // The queue snapshot never lists a prompt accepted for steering.
-      items: [],
+      items: waitingItems,
       pendingInputs: [],
       pendingInputAttachment: null,
     }) as never,
@@ -534,7 +555,12 @@ function HostApp() {
           ) : params.get("controller") === "1" ? (
             <PersistentConversationDemo />
           ) : (
-            <OpenGeniChat defaultSessionId={scenario === "empty" ? null : SELECTED} />
+            <OpenGeniChat
+              defaultSessionId={scenario === "empty" ? null : SELECTED}
+              {...(oneSend
+                ? { conversationProps: { composerOptions: { busySend: "steer" as const } } }
+                : {})}
+            />
           )}
         </OpenGeniProvider>
       </div>
