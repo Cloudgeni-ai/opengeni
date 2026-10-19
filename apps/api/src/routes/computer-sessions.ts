@@ -1271,6 +1271,9 @@ export function registerComputerSessionRoutes(
       );
       const built = await buildSelfhostedBackendSession({
         workspaceId: sourceSession.workspaceId,
+        // Addressed where the machine is enrolled, which can be another
+        // workspace its owner allowed it in.
+        controlWorkspaceId: enrollment.workspaceId,
         agentId: device.enrollmentId,
         connectionInstanceId: enrollment.connectionInstanceId,
         workspaceRoot: enrollment.workspaceRoot,
