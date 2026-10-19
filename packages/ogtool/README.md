@@ -44,7 +44,7 @@ Commands:
 - `ogtool list [--json] [--query <substring>] [--limit <1..100>] [--offset <integer>]`
 - `ogtool list --full` — the previous full catalog JSON, including identity and schemas
 - `ogtool show <tool-path-or-model-name>` — one tool's details and schemas as JSON
-- `ogtool call <tool-path-or-model-name> [json-object] [--full]` — the tool result as JSON. A text block that only repeats `structuredContent` as JSON is omitted, so the payload prints once; prose, differing text, annotated text, and non-text blocks stay. `--full` prints the exact result.
+- `ogtool call <tool-path-or-model-name> [json-object] [--full] [--save-image <path>]` — the tool result as JSON. A text block that only repeats `structuredContent` as JSON is omitted, so the payload prints once; prose, differing text, annotated text, and non-text blocks stay. Image blocks (such as a browser screenshot) are written to private temporary files and printed as `{type, mimeType, path, sizeBytes}` instead of base64; `--save-image` saves the result's single image at that path (never overwriting). `--full` prints the exact result. The native `codemode call` behaves the same.
 - `ogtool declarations [output-file]`
 - `ogtool doctor`
 - `ogtool --version`

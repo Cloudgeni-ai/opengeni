@@ -2414,6 +2414,75 @@ describe("interaction attempt tools", () => {
     );
   });
 
+  test("navigate waitUntil dispatches the navigation and a wait; viewport defaults to desktop", async () => {
+    const target = browserTarget();
+    const observation = browserObservation(target);
+    const dispatched: BrowserActionRequest[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, value) => {
+          dispatched.push(value);
+          return browserReceipt(value.operationId, observation);
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+    });
+    const act = async (action: unknown) =>
+      await definitions[0]!.execute(
+        { browserSessionId, targetId: target.id, action },
+        { operationId: randomUUID(), caller: { kind: "model" as const, subjectId: "model:test" } },
+      );
+
+    expect(
+      (await act({ type: "navigate", url: "https://example.com/a", waitUntil: "network_idle" }))
+        .isError,
+    ).toBeFalsy();
+    expect(dispatched.at(-1)!.action).toEqual({
+      type: "batch",
+      actions: [
+        { type: "navigate", url: "https://example.com/a" },
+        { type: "wait", condition: "network_idle" },
+      ],
+    });
+    expect((await act({ type: "navigate", url: "https://example.com/b" })).isError).toBeFalsy();
+    expect(dispatched.at(-1)!.action).toEqual({ type: "navigate", url: "https://example.com/b" });
+
+    expect(
+      (
+        await act({
+          type: "batch",
+          actions: [
+            { type: "viewport", width: 390, height: 844 },
+            { type: "navigate", url: "https://example.com/c", waitUntil: "load" },
+            { type: "viewport", width: 390, height: 844, mobile: true },
+          ],
+        })
+      ).isError,
+    ).toBeFalsy();
+    expect(dispatched.at(-1)!.action).toEqual({
+      type: "batch",
+      actions: [
+        { type: "viewport", width: 390, height: 844, mobile: false },
+        { type: "navigate", url: "https://example.com/c" },
+        { type: "wait", condition: "load" },
+        { type: "viewport", width: 390, height: 844, mobile: true },
+      ],
+    });
+
+    const tooMany = Array.from({ length: 17 }, (_, index) => ({
+      type: "navigate",
+      url: `https://example.com/${index}`,
+      waitUntil: "load",
+    }));
+    await expect(act({ type: "batch", actions: tooMany })).rejects.toThrow("split the batch");
+    const schema = JSON.stringify(definitions[0]!.inputSchema);
+    expect(schema).toContain("waitUntil");
+    expect(schema).toContain("navigate: url, waitUntil?");
+  });
+
   test("skips the pre-action AX read with all explicit fences and omits post-action AX on request", async () => {
     const target = browserTarget();
     let request: BrowserActionRequest | null = null;

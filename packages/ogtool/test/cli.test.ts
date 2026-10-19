@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAttemptToolEnvironment, digestAttemptToolCatalog } from "@opengeni/codemode";
@@ -275,6 +276,43 @@ describe("ogtool CLI", () => {
     structuredContent: duplicatedStructuredContent,
     isError: false,
   };
+
+  test("call writes images to files and prints their paths instead of base64", async () => {
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const imageResult = {
+      content: [{ type: "image", data: png.toString("base64"), mimeType: "image/png" }],
+      structuredContent: { kind: "browser_screenshot" },
+      isError: false,
+    };
+    const mock = codemodeServer({ result: imageResult });
+    const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+    const directory = mkdtempSync(join(tmpdir(), "ogtool-save-image-"));
+    try {
+      const printed = await run(["call", "docs.search", "{}"], environment);
+      expect(printed.exitCode).toBe(0);
+      const block = JSON.parse(printed.stdout).content[0];
+      expect(block).toMatchObject({ type: "image", mimeType: "image/png", sizeBytes: png.length });
+      expect(block.data).toBeUndefined();
+      expect(readFileSync(block.path)).toEqual(png);
+
+      const target = join(directory, "shots", "home.png");
+      const saved = await run(["call", "docs.search", "{}", "--save-image", target], environment);
+      expect(saved.exitCode).toBe(0);
+      expect(JSON.parse(saved.stdout).content[0].path).toBe(target);
+      expect(readFileSync(target)).toEqual(png);
+      const again = await run(["call", "docs.search", "{}", `--save-image=${target}`], environment);
+      expect(again.exitCode).not.toBe(0);
+
+      const full = await run(["call", "docs.search", "{}", "--full"], environment);
+      expect(JSON.parse(full.stdout)).toEqual(imageResult);
+    } finally {
+      mock.server.stop(true);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 
   test("call prints the payload once by default and the exact result with --full", async () => {
     const mock = codemodeServer({ result: duplicatedResult });

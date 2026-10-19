@@ -213,7 +213,13 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
         }
         CodemodeAction::Call(args) => {
             let full = args.full;
+            let save_image = args.save_image.clone();
             let result = client.call(args).await?;
+            let result = if full && save_image.is_none() {
+                result
+            } else {
+                materialize_images(result, save_image.as_deref(), !full)?
+            };
             let printed = if full {
                 result
             } else {
@@ -245,6 +251,171 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
 /// IEEE-754 safe-integer bound shared with the JavaScript clients.
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 const MAX_SAFE_INTEGER_F64: f64 = 9_007_199_254_740_991.0;
+
+const TEMP_IMAGE_PREFIX: &str = "opengeni-codemode-image-";
+
+/// Mirrors `materializeCodemodeImages` in `packages/codemode/src/images.ts`:
+/// write each image block (such as a browser screenshot) to a file and, when
+/// `replace` is set, print `{type, mimeType, path, sizeBytes}` in place of its
+/// base64 pixels so a script's output stays small. `save_to` names the file
+/// for a result with exactly one image and never overwrites; otherwise the
+/// images go to a new private temporary directory.
+fn materialize_images(
+    mut result: Value,
+    save_to: Option<&std::path::Path>,
+    replace: bool,
+) -> Result<Value, CodemodeError> {
+    use base64::Engine as _;
+    let local = |message: String| CodemodeError::InvalidResponse(message);
+    let Some(Value::Array(content)) = result.get_mut("content") else {
+        return match save_to {
+            Some(_) => Err(local("the result has no image to save".to_string())),
+            None => Ok(result),
+        };
+    };
+    let indexes: Vec<usize> = content
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.get("type").and_then(Value::as_str) == Some("image"))
+        .map(|(index, _)| index)
+        .collect();
+    if save_to.is_some() && indexes.len() != 1 {
+        return Err(local(format!(
+            "--save-image needs a result with exactly one image; this one has {}",
+            indexes.len()
+        )));
+    }
+    if indexes.is_empty() {
+        return Ok(result);
+    }
+    let directory = if save_to.is_none() {
+        prune_expired_private_images();
+        // Same shape as the JavaScript client's mkdtemp directories, so either
+        // client's cleanup removes the other's expired images.
+        let suffix: String = Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(6)
+            .collect();
+        let directory = std::env::temp_dir().join(format!("{TEMP_IMAGE_PREFIX}{suffix}"));
+        create_private_directory(&directory)
+            .map_err(|error| local(format!("could not create an image directory: {error}")))?;
+        Some(directory)
+    } else {
+        None
+    };
+    for (position, index) in indexes.iter().enumerate() {
+        let block = &content[*index];
+        let mime_type = block
+            .get("mimeType")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let extension = match mime_type.as_str() {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            other => return Err(local(format!("unsupported image type {other:?}"))),
+        };
+        let data = block
+            .get("data")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .ok()
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(|| local("the image bytes are invalid".to_string()))?;
+        let path = match (save_to, &directory) {
+            (Some(path), _) => {
+                if let Some(parent) = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                {
+                    std::fs::create_dir_all(parent).map_err(|error| {
+                        local(format!("could not create {}: {error}", parent.display()))
+                    })?;
+                }
+                path.to_path_buf()
+            }
+            (None, Some(directory)) => directory.join(if indexes.len() == 1 {
+                format!("frame.{extension}")
+            } else {
+                format!("image-{}.{extension}", position + 1)
+            }),
+            (None, None) => unreachable!("a temporary directory exists without save_to"),
+        };
+        write_new_file(&path, &bytes)
+            .map_err(|error| local(format!("could not save {}: {error}", path.display())))?;
+        let absolute = std::path::absolute(&path).unwrap_or(path);
+        if replace {
+            content[*index] = json!({
+                "type": "image",
+                "mimeType": mime_type,
+                "path": absolute.to_string_lossy(),
+                "sizeBytes": bytes.len(),
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn create_private_directory(path: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+/// Best-effort removal of this client's temporary image directories older
+/// than a day. Paths named with --save-image are never touched.
+fn prune_expired_private_images() {
+    const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(TEMP_IMAGE_PREFIX))
+        else {
+            continue;
+        };
+        if suffix.len() != 6 || !suffix.chars().all(|c| c.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let expired = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= MAX_AGE);
+        if metadata.is_dir() && expired && std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+            if removed >= 64 {
+                return;
+            }
+        }
+    }
+}
+
+fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
 
 /// Mirrors `omitStructuredContentTextDuplicates` in
 /// `packages/contracts/src/mcp-structured-content.ts` so `codemode call` and
@@ -1008,6 +1179,7 @@ mod tests {
                 tool: "mail.change".to_string(),
                 arguments: "{}".to_string(),
                 full: false,
+                save_image: None,
             }),
         )
         .await
@@ -1019,6 +1191,68 @@ mod tests {
         assert!(!receipt.to_string().contains("\"arguments\":"));
         let request = server.await.expect("server");
         assert!(request.contains("\"durableApproval\":true"));
+    }
+
+    #[test]
+    fn images_are_written_to_files_instead_of_printed_as_base64() {
+        // A 1x1 PNG signature-prefixed payload; the client does not re-encode it.
+        let png = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3];
+        let data = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(png)
+        };
+        let screenshot = json!({
+            "content": [
+                { "type": "text", "text": "frame" },
+                { "type": "image", "data": data, "mimeType": "image/png" }
+            ],
+            "structuredContent": { "kind": "browser_screenshot" }
+        });
+
+        // Default: a private temporary file, and the printed block names it.
+        let printed = materialize_images(screenshot.clone(), None, true).expect("temp image");
+        let block = &printed["content"][1];
+        assert_eq!(block["sizeBytes"], json!(png.len()));
+        assert!(block.get("data").is_none());
+        let path = std::path::PathBuf::from(block["path"].as_str().expect("path"));
+        assert!(path.ends_with("frame.png"));
+        assert_eq!(std::fs::read(&path).expect("written"), png);
+        assert_eq!(
+            printed["content"][0],
+            json!({ "type": "text", "text": "frame" })
+        );
+        std::fs::remove_dir_all(path.parent().expect("dir")).expect("cleanup");
+
+        // --save-image: the exact path, parents created, never overwritten.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("shots/home.png");
+        let saved = materialize_images(screenshot.clone(), Some(&target), true).expect("saved");
+        assert_eq!(std::fs::read(&target).expect("saved file"), png);
+        assert_eq!(
+            saved["content"][1]["path"].as_str(),
+            Some(target.to_string_lossy().as_ref())
+        );
+        let again = materialize_images(screenshot.clone(), Some(&target), true);
+        assert!(again.is_err());
+
+        // --full with --save-image keeps the exact base64 and still saves.
+        let full_target = directory.path().join("full.png");
+        let full = materialize_images(screenshot.clone(), Some(&full_target), false).expect("full");
+        assert_eq!(full, screenshot);
+        assert!(full_target.exists());
+
+        // --save-image on a result without exactly one image is refused.
+        let text_only = json!({ "content": [{ "type": "text", "text": "no image" }] });
+        assert!(materialize_images(
+            text_only.clone(),
+            Some(&directory.path().join("x.png")),
+            true
+        )
+        .is_err());
+        assert_eq!(
+            materialize_images(text_only.clone(), None, true).expect("unchanged"),
+            text_only
+        );
     }
 
     #[test]
@@ -1721,6 +1955,7 @@ mod tests {
                 tool: "demo.lookup".to_string(),
                 arguments: r#"{"query":"hello"}"#.to_string(),
                 full: false,
+                save_image: None,
             })
             .await
             .expect("call");
@@ -1823,6 +2058,7 @@ mod tests {
                 tool: "demo.mutate".to_string(),
                 arguments: "{}".to_string(),
                 full: false,
+                save_image: None,
             })
             .await
             .expect("recovered call");
@@ -1885,6 +2121,7 @@ mod tests {
                     tool: "demo.write".into(),
                     arguments: "{}".into(),
                     full: false,
+                    save_image: None,
                 })
                 .await
                 .unwrap_err();
