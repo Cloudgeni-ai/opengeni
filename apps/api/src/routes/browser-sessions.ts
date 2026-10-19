@@ -109,6 +109,7 @@ import {
   failBrowserRevisionPublication,
   findBrowserSessionControlRecordByOperation,
   findBrowserDownloadSave,
+  getBrowserDownloadPrivateOwner,
   getBrowserSessionControlRecord,
   getRetainedBrowserDownload,
   listRetainedBrowserDownloads,
@@ -174,7 +175,6 @@ import {
   type ApiRouteDeps,
   type ResolvedSessionAuthorization,
   retainCompletedBrowserDownloads,
-  browserDownloadPrivateOwner,
   withBrowserDownloadFileOwner,
 } from "@opengeni/core";
 import {
@@ -932,11 +932,12 @@ export function registerBrowserSessionRoutes(
           browserSessionId,
         });
         await authorizeSourceSession(deps, grant, ownerRecord.sourceSessionId, "session.control");
-        const owner = await browserDownloadPrivateOwner(
-          deps.db,
+        const owner = await getBrowserDownloadPrivateOwner(deps.db, {
+          accountId: grant.accountId,
           workspaceId,
-          ownerRecord.sourceSessionId,
-        );
+          browserSessionId,
+          sourceSessionId: ownerRecord.sourceSessionId,
+        });
         return await withBrowserDownloadFileOwner(owner, async () => {
           let save = await findBrowserDownloadSave(deps.db, identity);
           if (save?.response) {
@@ -3347,14 +3348,11 @@ export function registerBrowserSessionRoutes(
                 cleanupAfter: new Date(Date.now() + BROWSER_STATE_UPLOAD_CLEANUP_GRACE_MS),
               },
             });
-            // Suspension removes the browser's working directory, and with
-            // it every download. Keep completed ones as files, private to the
-            // chat's owner when the chat is private.
-            await retainBrowserDownloads(grant, workspaceId, record, binding, placement, client, {
-              subjectId: checkpoint.capacityFor ? null : grant.subjectId,
-            });
             let receipt: PlacementBrowserStateCaptureReceipt;
             try {
+              // The heartbeat covers everything after dispatch, including
+              // keeping downloads, so slow exports never let the transition
+              // expire before capture.
               receipt = await withInteractionHolderHeartbeat(
                 deps,
                 {
@@ -3366,8 +3364,21 @@ export function registerBrowserSessionRoutes(
                   resourceId: browserSessionId,
                   controllerGeneration: binding.controllerGeneration,
                 },
-                async () =>
-                  await client.captureState({
+                async () => {
+                  // Suspension removes the browser's working directory, and
+                  // with it every download. Keep completed ones as files,
+                  // private to the chat's owner when the chat is private.
+                  // Best effort: never throws.
+                  await retainBrowserDownloads(
+                    grant,
+                    workspaceId,
+                    record,
+                    binding,
+                    placement,
+                    client,
+                    { subjectId: checkpoint.capacityFor ? null : grant.subjectId },
+                  );
+                  return await client.captureState({
                     browserSessionId,
                     controllerGeneration: binding.controllerGeneration,
                     operationId: operationId,
@@ -3380,7 +3391,8 @@ export function registerBrowserSessionRoutes(
                       requiredHeaders: signed.requiredHeaders,
                       expiresAt: signed.expiresAt.toISOString(),
                     },
-                  }),
+                  });
+                },
               );
             } catch (error) {
               const failed = await settleBrowserSessionSuspensionCaptureFailure(
@@ -3874,12 +3886,15 @@ export function registerBrowserSessionRoutes(
       browserSessionId,
     });
     const notRunning = record.session.lifecycle !== "active" || !record.session.controller;
-    if (notRunning) {
-      await authorizeSourceSession(deps, grant, record.sourceSessionId, "session.read");
-    }
+    // Kept downloads may be private to the chat's owner: authorize the chat
+    // before reading them as that owner, running or not.
+    await authorizeSourceSession(deps, grant, record.sourceSessionId, "session.read");
     const scope = { accountId: grant.accountId, workspaceId, browserSessionId };
     // A private chat's kept downloads are files private to its owner.
-    const owner = await browserDownloadPrivateOwner(deps.db, workspaceId, record.sourceSessionId);
+    const owner = await getBrowserDownloadPrivateOwner(deps.db, {
+      ...scope,
+      sourceSessionId: record.sourceSessionId,
+    });
     const downloads = await withBrowserDownloadFileOwner(owner, async () =>
       downloadId
         ? [await getRetainedBrowserDownload(deps.db, { ...scope, downloadId })].filter(

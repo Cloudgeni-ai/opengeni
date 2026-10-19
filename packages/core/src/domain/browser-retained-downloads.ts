@@ -4,8 +4,8 @@ import {
   completeFileUpload,
   createFileUpload,
   currentSessionRlsActorContext,
+  getBrowserDownloadPrivateOwner,
   getFileUpload,
-  getSessionAuthorityProjection,
   listRetainedBrowserDownloads,
   recordRetainedBrowserDownload,
   withSessionRlsActorContext,
@@ -44,22 +44,6 @@ export function sanitizeWorkspaceFilename(filename: string): string {
     .replace(/\s+/g, " ")
     .trim();
   return safe || "file";
-}
-
-/**
- * Whose private files a browser's kept downloads are: the owner of a private
- * chat, or null for a shared chat, whose downloads are workspace files.
- */
-export async function browserDownloadPrivateOwner(
-  db: Database,
-  workspaceId: string,
-  sourceSessionId: string,
-): Promise<string | null> {
-  const authority = await getSessionAuthorityProjection(db, workspaceId, sourceSessionId);
-  if (!authority) throw new Error("the browser's chat is unavailable");
-  if (authority.visibility !== "user_private") return null;
-  if (!authority.ownerSubjectId) throw new Error("the browser's private chat has no owner");
-  return authority.ownerSubjectId;
 }
 
 /**
@@ -103,7 +87,7 @@ export async function retainCompletedBrowserDownloads(
 ): Promise<RetainBrowserDownloadsResult> {
   let owner: string | null;
   try {
-    owner = await browserDownloadPrivateOwner(deps.db, input.workspaceId, input.sourceSessionId);
+    owner = await getBrowserDownloadPrivateOwner(deps.db, input);
   } catch (error) {
     return {
       retained: [],

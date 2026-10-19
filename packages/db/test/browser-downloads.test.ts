@@ -10,6 +10,10 @@ import {
   createSession,
   dispatchBrowserDownloadSave,
   dispatchBrowserSessionOperation,
+  ensureManagedAccessForUser,
+  getOrganizationPrivateSessionSettings,
+  transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   findBrowserDownloadSave,
   getRetainedBrowserDownload,
   InteractionResourceConflictError,
@@ -19,6 +23,8 @@ import {
   prepareBrowserSessionCreate,
   recordRetainedBrowserDownload,
   settleBrowserDownloadSaveFailure,
+  getBrowserDownloadPrivateOwner,
+  BrowserDownloadOwnerUnavailableError,
   withSessionRlsActorContext,
 } from "../src";
 
@@ -41,29 +47,76 @@ afterAll(async () => {
   await shared?.release();
 });
 
-async function fixture() {
-  const suffix = crypto.randomUUID();
-  const access = await bootstrapWorkspace(client.db, {
-    accountExternalSource: "test",
-    accountExternalId: `browser-download-account-${suffix}`,
-    accountName: "Browser download test",
-    workspaceExternalSource: "test",
-    workspaceExternalId: `browser-download-workspace-${suffix}`,
-    workspaceName: "Browser download test",
-    subjectId: `user:browser-download-${suffix}`,
+/** A person's workspace with private chats enabled, as a signed-in human gets. */
+async function privateChatWorkspace() {
+  const userId = `browser-download-${crypto.randomUUID()}`;
+  const subjectId = `user:${userId}`;
+  const context = await ensureManagedAccessForUser(client.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Browser download owner",
   });
-  const grant = access.workspaceGrants[0]!;
+  const grant = context.workspaceGrants.find(
+    (candidate) => candidate.workspaceId !== context.defaultWorkspaceId,
+  );
+  if (!grant?.workspaceId) throw new Error("managed human has no personal workspace");
+  const settings = await getOrganizationPrivateSessionSettings(client.db, {
+    organizationId: grant.accountId,
+    actorSubjectId: subjectId,
+  });
+  if (!settings.enabled) {
+    await updateOrganizationPrivateSessionSettings(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: subjectId,
+      enabled: true,
+      expectedVersion: settings.version,
+      operationId: crypto.randomUUID(),
+    });
+  }
+  return { ...grant, subjectId };
+}
+
+async function fixture(visibility: "user_private" | "workspace_shared" = "workspace_shared") {
+  const suffix = crypto.randomUUID();
+  const grant =
+    visibility === "user_private"
+      ? await privateChatWorkspace()
+      : (
+          await bootstrapWorkspace(client.db, {
+            accountExternalSource: "test",
+            accountExternalId: `browser-download-account-${suffix}`,
+            accountName: "Browser download test",
+            workspaceExternalSource: "test",
+            workspaceExternalId: `browser-download-workspace-${suffix}`,
+            workspaceName: "Browser download test",
+            subjectId: `user:browser-download-${suffix}`,
+          })
+        ).workspaceGrants[0]!;
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
     initialMessage: "initial",
     resources: [],
     metadata: {},
+    ...(visibility === "user_private"
+      ? { createdBy: { kind: "subject" as const, subjectId: grant.subjectId } }
+      : {}),
     model: "scripted-model",
     reasoningEffort: "medium" as const,
     latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
+  if (visibility === "user_private") {
+    // The person makes the chat "Only me".
+    await transitionSessionVisibility(client.db, {
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      actorSubjectId: grant.subjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `visibility-${crypto.randomUUID()}`,
+    });
+  }
   const createOperationId = crypto.randomUUID();
   const prepared = await prepareBrowserSessionCreate(client.db, {
     accountId: grant.accountId,
@@ -275,6 +328,33 @@ describe("retained browser downloads", () => {
     if (ready) await completeFileUpload(client.db, scope.workspaceId, created.uploadId);
     return { fileId, uploadId: created.uploadId };
   }
+
+  test("resolves a private chat's owner for kept downloads, whoever saves the browser", async () => {
+    if (!available) return;
+    const scope = await fixture("user_private");
+    const other = `user:browser-download-other-${crypto.randomUUID()}`;
+    // The request saving the browser may be someone else's, who cannot see
+    // the private chat; ownership is still resolved from the browser's chat.
+    for (const actor of [
+      { subjectId: other, privateFileOwnerSubjectId: other },
+      { subjectId: scope.actorSubjectId },
+    ]) {
+      expect(
+        await withSessionRlsActorContext(actor, () =>
+          getBrowserDownloadPrivateOwner(client.db, scope),
+        ),
+      ).toBe(scope.actorSubjectId);
+    }
+    const sharedChat = await fixture();
+    expect(await getBrowserDownloadPrivateOwner(client.db, sharedChat)).toBeNull();
+    // Only the chat that created the browser decides.
+    await expect(
+      getBrowserDownloadPrivateOwner(client.db, {
+        ...scope,
+        sourceSessionId: sharedChat.sourceSessionId,
+      }),
+    ).rejects.toBeInstanceOf(BrowserDownloadOwnerUnavailableError);
+  });
 
   test("keeps a private chat's download visible only to that chat's owner", async () => {
     if (!available) return;

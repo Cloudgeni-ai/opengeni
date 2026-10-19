@@ -3570,7 +3570,9 @@ may see the browser `suspending`, then resume it.
 **Full browser controllers.** One browser controller runs per workspace and
 placement (a Connected Machine or a box). Its browser limit defaults to half
 of the machine's memory (or the tightest memory limit on the controller's own
-cgroup or any of its ancestors, cgroup v1 or v2, when lower) at
+cgroup or any of its ancestors, cgroup v1 or v2, when lower; each hierarchy is
+found through `/proc/self/mountinfo`, so a mount of a non-root cgroup or at
+another mount point is read correctly) at
 300 MiB per browser, about the p90 resident size of live agent browsers, and
 never under 8: 27 browsers on 16 GiB, 81 on 48 GiB, 147 on 86 GiB.
 `OPENGENI_BROWSERD_MAX_SESSIONS` overrides it. When a create reaches a full
@@ -3594,9 +3596,13 @@ copy on its next open.
 Downloads kept when a browser is saved (by capacity, an explicit suspend or a
 deadline checkpoint) follow the browser's chat, whoever's request stops it:
 a private chat's downloads become files private to that chat's owner, and a
-shared chat's become workspace files. Listing and saving kept downloads read
-them as the chat's owner only after the request is authorized for that chat,
-and nobody is charged for the capacity save's kept downloads.
+shared chat's become workspace files. The owner is read with system authority
+from the chat that created the browser, since a capacity save may come from a
+person who cannot see that private chat; the read only decides file
+ownership. Keeping downloads runs inside the save's heartbeat, so slow exports
+never let the transition expire before capture. Listing and saving kept
+downloads read them as the chat's owner only after the request is authorized
+for that chat, and nobody is charged for the capacity save's kept downloads.
 
 **Idle command containment.** An unsupervised retained command (a legacy Modal
 command, or any Docker or local background command) keeps its box warm through
