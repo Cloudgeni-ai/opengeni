@@ -84,6 +84,7 @@ import type {
 } from "./downloads";
 import type { AgentBrowserJsonCommand, OwnedManagedBrowserProcess } from "./runner";
 import type { BrowserPasskeyManager } from "./passkeys";
+import { TypedSecretMemory } from "./typed-secrets";
 import {
   completeClientHints,
   hasEmptiedHighEntropyHints,
@@ -606,6 +607,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly autoSessions = new Map<string, string>();
   /** Page target last brought to the front by this controller, when known. */
   private frontTargetId: string | null = null;
+  /** Secret values this controller typed; redacted from everything it returns. */
+  private readonly typedSecrets: TypedSecretMemory;
 
   constructor(options: AgentBrowserDriverOptions) {
     if (
@@ -619,6 +622,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     this.browserContextId = options.browserContextId;
     this.browserSessionId = options.browserSessionId;
+    this.typedSecrets = TypedSecretMemory.forSession("browser", options.browserSessionId);
     this.controllerGeneration = options.controllerGeneration;
     this.runner = options.runner;
     this.now = options.now ?? (() => new Date());
@@ -765,13 +769,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return process;
   }
 
+  /** Tab inventory with typed secrets hidden in titles and URLs. Saved
+   * snapshots take their tabs from here, so they never keep a typed secret
+   * either; a tab whose address carried one reopens without it. */
   async listTargets(): Promise<BrowserTargetValue[]> {
     const connection = await this.ensureConnection();
     const infos = visibleTargets(await this.targetInfos(connection));
-    return infos.map((info) => {
-      const state = this.states.get(info.targetId);
-      return this.targetFromInfo(info, state ?? null);
-    });
+    return this.typedSecrets.redact(
+      infos.map((info) => this.targetFromInfo(info, this.states.get(info.targetId) ?? null)),
+    );
   }
 
   async openTarget(
@@ -1069,10 +1075,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // dialog is handled; otherwise the controller's generic pre-dispatch
     // target validation can fail before `handle_dialog` reaches Chromium.
     if (!state.dialog) await this.refreshFrame(state);
-    return this.targetFromInfo(info, state);
+    return this.typedSecrets.redact(this.targetFromInfo(info, state));
   }
 
   async observe(targetId: string): Promise<BrowserObservationValue> {
+    return this.typedSecrets.redact(await this.observeTarget(targetId));
+  }
+
+  private async observeTarget(targetId: string): Promise<BrowserObservationValue> {
     return await this.withTarget(targetId, async (state, info) => {
       if (state.dialog) return await this.observeUnlocked(state, info);
       try {
@@ -1112,10 +1122,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (state.dialog) {
         throw new InteractionDefiniteDriverError(
           "resource_unavailable",
-          `${dialogSummary(state.dialog)} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
+          `${dialogSummary(state.dialog, this.typedSecrets.merged())} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
         );
       }
-      return await this.untilDialog(state, async () => await this.readDomUnlocked(state, request));
+      return this.typedSecrets.redact(
+        await this.untilDialog(state, async () => await this.readDomUnlocked(state, request)),
+      );
     });
   }
 
@@ -1245,7 +1257,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state.diagnosticEntries.length > 0 &&
         state.diagnosticEntries[0]!.sequence > afterSequence + 1;
       const limited = available.length > entries.length;
-      return BrowserDiagnosticBatch.parse({
+      const batch = BrowserDiagnosticBatch.parse({
         browserSessionId: this.browserSessionId,
         controllerGeneration: this.controllerGeneration,
         targetId,
@@ -1256,6 +1268,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           : Math.max(afterSequence, state.diagnosticSequence),
         truncated: droppedBeforeCursor || limited,
       });
+      return this.typedSecrets.redact(batch);
     });
   }
 
@@ -1487,7 +1500,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue | null> {
     const parsed = BrowserActionCommand.parse(commandInput);
-    const secretValues = parsed.secretValues;
+    // Remembered before dispatch: a failed action can still leave the value typed.
+    this.typedSecrets.remember(parsed.secretValues);
+    const secretValues = this.typedSecrets.merged(parsed.secretValues);
     const command = materializeCommandSecrets(parsed);
     // Input counts as sent once an effectful command left browserd, so a later
     // unresponsive-tab deadline must keep the action's outcome uncertain.
@@ -1791,6 +1806,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   readClipboard(): BrowserClipboardValue {
+    return this.typedSecrets.redact(this.clipboardValue());
+  }
+
+  private clipboardValue(): BrowserClipboardValue {
     return BrowserClipboard.parse({
       browserSessionId: this.browserSessionId,
       controllerGeneration: this.controllerGeneration,
@@ -2466,7 +2485,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           this.appendDiagnostic(state, {
             kind: "console",
             level,
-            message: consoleMessage(event.params.args),
+            message: consoleMessage(event.params.args, (text) => this.typedSecrets.redact(text)),
             url: null,
             method: null,
             status: null,
@@ -2485,7 +2504,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           this.appendDiagnostic(state, {
             kind: "page_error",
             level: "error",
-            message: exceptionMessage(details),
+            message: exceptionMessage(details, (text) => this.typedSecrets.redact(text)),
             url: boundedUrlField(details.url),
             method: null,
             status: null,
@@ -7133,33 +7152,46 @@ function consoleLevel(value: unknown): BrowserDiagnosticEntry["level"] {
   return "info";
 }
 
-function consoleMessage(value: unknown): string {
+/** Console text with each argument redacted before it is clipped and joined:
+ * a secret clipped mid-argument and followed by more text would otherwise
+ * survive as an unrecognizable prefix. */
+function consoleMessage(value: unknown, redact: (text: string) => string): string {
   if (!Array.isArray(value) || value.length === 0) return "Console event";
-  const text = value.slice(0, 100).map(remoteObjectText).filter(Boolean).join(" ").slice(0, 8_192);
+  const text = value
+    .slice(0, 100)
+    .map((entry) => remoteObjectText(entry, redact))
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 8_192);
   return text || "Console event";
 }
 
-function remoteObjectText(value: unknown): string {
+function remoteObjectText(value: unknown, redact: (text: string) => string): string {
   if (!isRecord(value)) return "";
   if (value.value !== undefined) {
-    if (typeof value.value === "string") return value.value.slice(0, 4_096);
+    if (typeof value.value === "string") return redact(value.value).slice(0, 4_096);
     try {
-      return JSON.stringify(value.value).slice(0, 4_096);
+      return redact(JSON.stringify(value.value)).slice(0, 4_096);
     } catch {
       return "[unserializable value]";
     }
   }
-  if (typeof value.description === "string") return value.description.slice(0, 4_096);
+  if (typeof value.description === "string") return redact(value.description).slice(0, 4_096);
   return typeof value.type === "string" ? `[${value.type.slice(0, 128)}]` : "";
 }
 
-function exceptionMessage(details: Record<string, unknown>): string {
+function exceptionMessage(
+  details: Record<string, unknown>,
+  redact: (text: string) => string,
+): string {
   const exception = isRecord(details.exception) ? details.exception : {};
-  return (
-    boundedTextField(exception.description, 8_192) ??
-    boundedTextField(details.text, 8_192) ??
-    "Unhandled page exception"
-  );
+  const text =
+    typeof exception.description === "string"
+      ? exception.description
+      : typeof details.text === "string"
+        ? details.text
+        : null;
+  return text === null ? "Unhandled page exception" : redact(text).slice(0, 8_192);
 }
 
 function boundedTextField(value: unknown, maxLength: number): string | null {

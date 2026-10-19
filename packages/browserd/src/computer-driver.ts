@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { UnsettledCleanupError } from "./cleanup-error";
+import { TypedSecretMemory } from "./typed-secrets";
 import {
   INTERACTION_MAX_CLIPBOARD_BYTES,
   ComputerNativeResult,
@@ -92,8 +93,13 @@ export class ComputerDriver implements ComputerInteractionDriver {
    * start beside it, so every later call fails with this clear reason. */
   private helperLost: InteractionControllerError | null = null;
 
+  /** Secret values typed in this session; redacted from everything it returns,
+   * since desktop accessibility trees and window titles show field values. */
+  private readonly typedSecrets: TypedSecretMemory;
+
   constructor(options: ComputerDriverOptions) {
     this.computerSessionId = options.computerSessionId;
+    this.typedSecrets = TypedSecretMemory.forSession("computer", options.computerSessionId);
     this.controllerGeneration = options.controllerGeneration;
     this.client = options.client;
     this.clientFactory = options.clientFactory;
@@ -106,8 +112,10 @@ export class ComputerDriver implements ComputerInteractionDriver {
   async listTargets(): Promise<ComputerTargetValue[]> {
     this.assertOpen();
     try {
-      return (await this.readWithRecovery(async (client) => await client.targets())).map((target) =>
-        this.projectTarget(target),
+      return this.typedSecrets.redact(
+        (await this.readWithRecovery(async (client) => await client.targets())).map((target) =>
+          this.projectTarget(target),
+        ),
       );
     } catch (error) {
       throw predispatchError(error);
@@ -148,7 +156,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
         }
         return { ...observed, frameId: frame.frameId };
       });
-      return this.projectObservation(observation);
+      return this.typedSecrets.redact(this.projectObservation(observation));
     } catch (error) {
       throw predispatchError(error);
     }
@@ -171,7 +179,8 @@ export class ComputerDriver implements ComputerInteractionDriver {
 
   async dispatchNative(command: ComputerNativeCommand): Promise<ComputerNativeResult> {
     this.assertOpen();
-    const secretValues = command.secretValues;
+    this.typedSecrets.remember(command.secretValues);
+    const secretValues = this.typedSecrets.merged(command.secretValues);
     const materialized = materializeNativeCommandSecrets(command);
     try {
       const client = await this.activeClient();
@@ -215,7 +224,8 @@ export class ComputerDriver implements ComputerInteractionDriver {
 
   async dispatch(command: ComputerActionCommand): Promise<ComputerObservationValue | null> {
     this.assertOpen();
-    const secretValues = command.secretValues;
+    this.typedSecrets.remember(command.secretValues);
+    const secretValues = this.typedSecrets.merged(command.secretValues);
     const materialized = materializeActionCommandSecrets(command);
     try {
       const client = await this.activeClient();
@@ -225,7 +235,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
         // A pasted value stays on the seat clipboard, where clipboard reads
         // would expose it; text with resolved secrets is never pasted.
         const text =
-          this.capabilities.clipboard && secretValues === undefined
+          this.capabilities.clipboard && command.secretValues === undefined
             ? untypeableText(materialized, error)
             : null;
         if (text === null) throw error;
@@ -274,12 +284,14 @@ export class ComputerDriver implements ComputerInteractionDriver {
   async clipboard(): Promise<ComputerClipboardValue> {
     this.assertOpen();
     try {
-      return ComputerClipboard.parse({
-        computerSessionId: this.computerSessionId,
-        controllerGeneration: this.controllerGeneration,
-        ...(await this.readWithRecovery(async (client) => await client.clipboard())),
-        observedAt: this.now().toISOString(),
-      });
+      return this.typedSecrets.redact(
+        ComputerClipboard.parse({
+          computerSessionId: this.computerSessionId,
+          controllerGeneration: this.controllerGeneration,
+          ...(await this.readWithRecovery(async (client) => await client.clipboard())),
+          observedAt: this.now().toISOString(),
+        }),
+      );
     } catch (error) {
       throw predispatchError(error);
     }
