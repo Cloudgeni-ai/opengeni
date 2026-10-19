@@ -24,6 +24,10 @@ test("file visibility migration is rolling and keeps the trigger as the only own
   // The lookup answers only yes or no: it never returns a name or an owner.
   expect(source).toContain("RETURNS boolean");
   expect(source).not.toMatch(/GRANT\s+(SELECT|INSERT|UPDATE|DELETE)\b/);
+  // Rolling on a large, hot table: no row rewrite and no full scan under its lock.
+  expect(source).not.toContain("NO FORCE ROW LEVEL SECURITY");
+  expect(source).not.toMatch(/^\s*UPDATE\s+files\b/imu);
+  expect(source).toMatch(/files_owner_is_private_owner CHECK \([^;]+\) NOT VALID;/u);
 });
 
 const postgresTest =
@@ -215,28 +219,25 @@ postgresTest(
       expect(grants[0]!.proconfig).toContain("search_path=pg_catalog, public, pg_temp");
       expect(String(grants[0]!.acl)).not.toMatch(/(^|[{,])=X/);
 
-      // The backfill gives each existing single-owner private file its owner.
-      const legacy = await insertFile({ privateTo: ["user:alice"], owner: "user:alice" });
-      const legacyShared = await insertFile({ privateTo: ["user:alice", "user:bob"] });
-      await owned.admin.begin(async (tx) => {
-        await tx`SET LOCAL session_replication_role = replica`;
-        await tx`UPDATE files SET owner_subject_id=NULL WHERE id=${legacy}`;
+      // Existing private files are not rewritten: one with a single private
+      // owner reads as theirs, and sharing it records that owner.
+      const legacy = await insertFile({ privateTo: ["user:alice"] });
+      const legacyJoint = await insertFile({ privateTo: ["user:alice", "user:bob"] });
+      const ownerOf = async (id: string) =>
+        (
+          await as(alice, () =>
+            getFilesForSubject(db, { ...scope, subjectId: alice.subjectId, fileIds: [id] }),
+          )
+        )[0]?.ownerSubjectId;
+      expect(await ownerOf(legacy)).toBe("user:alice");
+      expect(await ownerOf(legacyJoint)).toBeNull();
+      expect(await change(alice, legacy, "workspace")).toMatchObject({
+        kind: "changed",
+        file: { scope: "workspace", ownerSubjectId: "user:alice" },
       });
-      const backfill = (await readFile(migration, "utf8")).match(
-        /UPDATE files SET owner_subject_id = [^;]+;/u,
-      )?.[0];
-      expect(backfill).toBeDefined();
-      // The migration runs it before it replaces the trigger, which would refuse it.
-      await owned.admin.begin(async (tx) => {
-        await tx`SET LOCAL session_replication_role = replica`;
-        await tx.unsafe(backfill!);
-      });
-      const backfilled =
-        await owned.admin`SELECT id, owner_subject_id FROM files WHERE id IN (${legacy},${legacyShared})`;
-      expect(Object.fromEntries(backfilled.map((row) => [row.id, row.owner_subject_id]))).toEqual({
-        [legacy]: "user:alice",
-        [legacyShared]: null,
-      });
+      const [recorded] = await owned.admin`SELECT owner_subject_id FROM files WHERE id=${legacy}`;
+      expect(recorded!.owner_subject_id).toBe("user:alice");
+      expect((await change(alice, legacy, "private")).kind).toBe("changed");
     } finally {
       await client?.close();
       await owned.release();

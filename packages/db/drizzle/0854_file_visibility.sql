@@ -13,22 +13,21 @@ SET LOCAL statement_timeout = '5min';
 
 -- The person a file belongs to. A private file's owner is one of its private
 -- owners; a shared file remembers who shared or made it, so only they can
--- limit it again. NULL means nobody (older shared files and service output).
+-- limit it again. NULL on a shared file means nobody (older shared files and
+-- service output); NULL on a private file with one private owner means that
+-- owner, which readers resolve and a share records, so no existing row is
+-- rewritten.
 ALTER TABLE files ADD COLUMN owner_subject_id text;
 ALTER TABLE files ALTER COLUMN owner_subject_id SET DEFAULT coalesce(
   nullif(current_setting('opengeni.private_file_owner',true),''),
   nullif(current_setting('opengeni.initiating_human_subject_id',true),''));
 
--- Existing private files belong to their single private owner. The posture
--- window lets the non-superuser migration owner see every tenant's rows.
-ALTER TABLE files NO FORCE ROW LEVEL SECURITY;
-UPDATE files SET owner_subject_id = private_owner_subject_ids[1]
-  WHERE private_owner_subject_ids IS NOT NULL AND cardinality(private_owner_subject_ids) = 1;
-ALTER TABLE files FORCE ROW LEVEL SECURITY;
-
+-- NOT VALID skips a full scan under this migration's table lock. Every existing
+-- row has a NULL owner, so the check already holds for all of them, and it is
+-- enforced on every insert and update from here on.
 ALTER TABLE files ADD CONSTRAINT files_owner_is_private_owner CHECK (
   owner_subject_id IS NULL OR private_owner_subject_ids IS NULL
-  OR owner_subject_id = ANY(private_owner_subject_ids));
+  OR owner_subject_id = ANY(private_owner_subject_ids)) NOT VALID;
 
 -- Account, workspace and owner stay immutable. Who can open a file changes
 -- only for a finished file that is not a short-lived session screenshot or

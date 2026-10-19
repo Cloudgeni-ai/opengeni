@@ -86308,7 +86308,10 @@ async function latestStartedSessionTurnRow(
 function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
   return {
     scope: row.privateOwnerSubjectIds ? "personal" : "workspace",
-    ownerSubjectId: row.ownerSubjectId ?? null,
+    // Private files made before owners were recorded belong to their one private owner.
+    ownerSubjectId:
+      row.ownerSubjectId ??
+      (row.privateOwnerSubjectIds?.length === 1 ? row.privateOwnerSubjectIds[0]! : null),
     id: row.id,
     workspaceId: row.workspaceId,
     status: row.status as FileStatus,
