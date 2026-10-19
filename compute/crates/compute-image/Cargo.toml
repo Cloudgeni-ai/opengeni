@@ -15,6 +15,7 @@ base64 = "0.22"
 compute-guest = { path = "../compute-guest" }
 flate2 = "1"
 futures = "0.3"
+httpdate = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
 rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }

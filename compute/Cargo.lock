@@ -601,6 +601,7 @@ dependencies = [
  "compute-guest",
  "flate2",
  "futures",
+ "httpdate",
  "proptest",
  "reqwest",
  "rustix",

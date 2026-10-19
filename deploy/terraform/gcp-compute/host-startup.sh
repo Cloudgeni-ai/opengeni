@@ -38,7 +38,10 @@ BUNDLE_SHA256=$(attr compute-bundle-sha256)
 
 # --- The state volume: local NVMe SSDs, striped, or the "state" disk.
 state_device=
-if [ ! -f /etc/compute/state-volume.uuid ]; then
+# install.sh records the volume it set up; a record with no UUID in it
+# is none (the same test as install.sh's).
+recorded=$(tr -d '[:space:]' 2>/dev/null </etc/compute/state-volume.uuid || true)
+if [ -z "$recorded" ]; then
   mapfile -t nvme < <(ls /dev/disk/by-id/google-local-nvme-ssd-* 2>/dev/null || true)
   if [ "${#nvme[@]}" -eq 1 ]; then
     state_device=${nvme[0]}
@@ -59,7 +62,11 @@ fi
 # --- The bundle.
 bundle=/opt/compute/bundles/$BUNDLE_SHA256
 if [ ! -f "$bundle/install.sh" ]; then
-  work=$(mktemp -d)
+  # One fixed place, emptied first, so failed attempts leave at most one
+  # partial download behind.
+  work=/opt/compute/bundles/.download
+  rm -rf "$work" "$bundle.part"
+  install -d -m 700 "$work"
   case "$BUNDLE_URL" in
     gs://*) gcloud storage cp --quiet "$BUNDLE_URL" "$work/bundle.tar.gz" ;;
     *) curl -fsSL --retry 5 -o "$work/bundle.tar.gz" "$BUNDLE_URL" ;;
