@@ -5797,6 +5797,22 @@ export function browserTabDiagnosisError(error: unknown): unknown {
 
 /** Keep a definite read timeout useful without publishing driver diagnostics. */
 export function browserScreenshotError(error: unknown): unknown {
+  // The controller refuses at once while a JavaScript dialog blocks the page.
+  if (
+    error instanceof BrowserControlRequestError &&
+    error.error.code === "invalid_action" &&
+    error.error.message.startsWith("A JavaScript ")
+  ) {
+    const failure = new ApiHttpError(409, {
+      code: "conflict",
+      message:
+        "A JavaScript dialog is open in this tab, so it cannot be captured. Handle it first with browser_act action {type:'handle_dialog'}.",
+      retryable: false,
+      outcomeUnknown: false,
+    });
+    failure.cause = error;
+    return failure;
+  }
   if (error instanceof BrowserControlRequestError && error.error.code === "timeout") {
     const failure = new ApiHttpError(504, {
       code: "upstream_unavailable",

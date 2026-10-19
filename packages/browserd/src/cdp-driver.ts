@@ -213,6 +213,28 @@ const USER_AGENT_METADATA_EXPRESSION = `(async () => {
 
 class DialogOpenedSignal extends Error {}
 
+/** Page reads cannot complete while a JavaScript dialog is open: the page's
+ * renderer is blocked until the dialog is answered. */
+class DialogBlockedError extends InteractionControllerError {
+  constructor(readonly dialog: BrowserDialog | null) {
+    super("invalid_action", `${dialogSummary(dialog)} ${DIALOG_GUIDANCE}`, false);
+    this.name = "DialogBlockedError";
+  }
+}
+
+/** How long work that noticed a dialog itself gets to report it. */
+const DIALOG_WORK_SETTLE_MS = 250;
+
+const DIALOG_GUIDANCE =
+  'Accept or dismiss it with browser_act action {type:"handle_dialog"} before anything else in this tab.';
+
+function dialogSummary(dialog: BrowserDialog | null): string {
+  if (!dialog) return "A JavaScript dialog is open in this tab.";
+  const message = dialog.message.replace(/\s+/gu, " ").trim();
+  const shown = message.length > 300 ? `${message.slice(0, 300)}…` : message;
+  return `A JavaScript ${dialog.type} dialog is open in this tab${shown ? `: "${shown}"` : ""}.`;
+}
+
 export type BrowserCommandRunner = {
   run: AgentBrowserJsonCommand;
   daemonPid?: () => Promise<number | null>;
@@ -1020,16 +1042,28 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async observe(targetId: string): Promise<BrowserObservationValue> {
-    return await this.withTarget(
-      targetId,
-      async (state, info) => await this.observeUnlocked(state, info),
-    );
+    return await this.withTarget(targetId, async (state, info) => {
+      if (state.dialog) return await this.observeUnlocked(state, info);
+      try {
+        return await this.untilDialog(state, async () => await this.observeUnlocked(state, info));
+      } catch (error) {
+        // A dialog opened while the page was being read: report it.
+        if (!(error instanceof DialogBlockedError)) throw error;
+        return await this.observeUnlocked(state, info);
+      }
+    });
   }
 
   /** Refresh only the main-frame generation. No accessibility tree is read. */
   async targetState(targetId: string): Promise<BrowserTargetStateValue> {
     return await this.withTarget(targetId, async (state) => {
-      if (!state.dialog) await this.refreshFrame(state);
+      if (!state.dialog) {
+        try {
+          await this.untilDialog(state, async () => await this.refreshFrame(state));
+        } catch (error) {
+          if (!(error instanceof DialogBlockedError)) throw error;
+        }
+      }
       return this.targetStateFrom(state);
     });
   }
@@ -1047,44 +1081,51 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (state.dialog) {
         throw new InteractionDefiniteDriverError(
           "resource_unavailable",
-          "browser DOM reads are unavailable while a dialog is open",
+          `${dialogSummary(state.dialog)} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
         );
       }
-      await this.refreshFrame(state);
-      this.assertReadGenerations(request, state);
-      let result: Record<string, unknown>;
-      if (request.kind === "count") {
-        const count = await this.domSelectorCount(state, request.selector);
-        result = { kind: "count", count, truncated: false };
-      } else {
-        const entry = await this.resolveLocator(state, request.locator);
-        const value = await this.callOnNode(
-          state,
-          entry.backendDOMNodeId,
-          DOM_READ_FUNCTION,
-          [{ value: request.maxChars ?? 4_096 }, { value: request.attributes ?? [] }],
-          { isolatedFrameId: entry.frameId ?? state.frame.id },
-        );
-        if (!isRecord(value) || value.ok !== true) {
-          throw new InteractionDefiniteDriverError(
-            "locator_not_found",
-            "browser DOM element is no longer available",
-          );
-        }
-        result = {
-          kind: "element",
-          count: 1,
-          text: value.text,
-          value: value.value,
-          attributes: value.attributes,
-          redacted: value.redacted,
-          truncated: value.truncated,
-        };
-      }
-      await this.refreshFrame(state);
-      this.assertReadGenerations(request, state);
-      return BrowserDomReadResponse.parse({ ...this.targetStateFrom(state), ...result });
+      return await this.untilDialog(state, async () => await this.readDomUnlocked(state, request));
     });
+  }
+
+  private async readDomUnlocked(
+    state: TargetState,
+    request: BrowserDomReadRequestValue,
+  ): Promise<BrowserDomReadResponseValue> {
+    await this.refreshFrame(state);
+    this.assertReadGenerations(request, state);
+    let result: Record<string, unknown>;
+    if (request.kind === "count") {
+      const count = await this.domSelectorCount(state, request.selector);
+      result = { kind: "count", count, truncated: false };
+    } else {
+      const entry = await this.resolveLocator(state, request.locator);
+      const value = await this.callOnNode(
+        state,
+        entry.backendDOMNodeId,
+        DOM_READ_FUNCTION,
+        [{ value: request.maxChars ?? 4_096 }, { value: request.attributes ?? [] }],
+        { isolatedFrameId: entry.frameId ?? state.frame.id },
+      );
+      if (!isRecord(value) || value.ok !== true) {
+        throw new InteractionDefiniteDriverError(
+          "locator_not_found",
+          "browser DOM element is no longer available",
+        );
+      }
+      result = {
+        kind: "element",
+        count: 1,
+        text: value.text,
+        value: value.value,
+        attributes: value.attributes,
+        redacted: value.redacted,
+        truncated: value.truncated,
+      };
+    }
+    await this.refreshFrame(state);
+    this.assertReadGenerations(request, state);
+    return BrowserDomReadResponse.parse({ ...this.targetStateFrom(state), ...result });
   }
 
   private targetStateFrom(state: TargetState): BrowserTargetStateValue {
@@ -1200,96 +1241,107 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const normalized = normalizeScreenshotOptions(options);
-    return await this.withTarget(targetId, async (state) => {
-      const deadline = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
-      await this.screenshotRead(
-        "Page.getFrameTree",
-        deadline,
-        async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
-      );
-      const metrics = await this.screenshotRead(
-        "Page.getLayoutMetrics",
-        deadline,
-        async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
-      );
-      const capture: Record<string, unknown> = {
-        format: normalized.format,
-        fromSurface: true,
-        captureBeyondViewport: normalized.fullPage,
-        ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
-      };
-      let cssWidth = metrics.viewport.width;
-      let cssHeight = metrics.viewport.height;
-      let scrollX = metrics.viewport.x;
-      let scrollY = metrics.viewport.y;
-      if (normalized.fullPage) {
-        cssWidth = metrics.content.width;
-        cssHeight = metrics.content.height;
-        scrollX = 0;
-        scrollY = 0;
-        assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
-        capture.clip = {
-          x: 0,
-          y: 0,
-          width: cssWidth,
-          height: cssHeight,
-          scale: 1,
-        };
-      }
-      const captureOnce = async () => {
-        const response = await this.screenshotRead(
-          "Page.captureScreenshot",
-          deadline,
-          async (timeoutMs) =>
-            await this.sendTarget<{ data?: unknown }>(state, "Page.captureScreenshot", capture, {
-              timeoutMs,
-            }),
-        );
-        const data = decodeBoundedBase64Image(response.data);
-        return { data, dimensions: imageDimensions(data, normalized.format) };
-      };
-      let { data, dimensions } = await captureOnce();
-      // Chromium applies a new device-metrics override asynchronously, so a
-      // capture right after a viewport change can still return the previous
-      // surface. A viewport capture of an emulated device has an exact size;
-      // wait briefly for the compositor instead of publishing the stale frame.
-      const expected = normalized.fullPage ? undefined : state.emulatedViewport;
-      if (expected) {
-        const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
-        const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
-        const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
-        let pause = 16;
-        while (
-          (Math.abs(dimensions.width - expectedWidth) > 1 ||
-            Math.abs(dimensions.height - expectedHeight) > 1) &&
-          Date.now() + pause < settleDeadline
-        ) {
-          await delay(pause);
-          pause = Math.min(pause * 2, 200);
-          const refreshed = await this.screenshotRead(
+    // A JavaScript dialog blocks capture until it is answered: fail at once,
+    // naming it, instead of waiting out the capture deadline.
+    return await this.withTarget(
+      targetId,
+      async (state) =>
+        await this.untilDialog(state, async () => {
+          const deadline = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
+          await this.screenshotRead(
+            "Page.getFrameTree",
+            deadline,
+            async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
+          );
+          const metrics = await this.screenshotRead(
             "Page.getLayoutMetrics",
             deadline,
             async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
           );
-          cssWidth = refreshed.viewport.width;
-          cssHeight = refreshed.viewport.height;
-          scrollX = refreshed.viewport.x;
-          scrollY = refreshed.viewport.y;
-          ({ data, dimensions } = await captureOnce());
-        }
-      }
-      return this.imageFrame({
-        state,
-        sequence: 0,
-        format: normalized.format,
-        data,
-        width: dimensions.width,
-        height: dimensions.height,
-        deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
-        scrollX,
-        scrollY,
-      });
-    });
+          const capture: Record<string, unknown> = {
+            format: normalized.format,
+            fromSurface: true,
+            captureBeyondViewport: normalized.fullPage,
+            ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
+          };
+          let cssWidth = metrics.viewport.width;
+          let cssHeight = metrics.viewport.height;
+          let scrollX = metrics.viewport.x;
+          let scrollY = metrics.viewport.y;
+          if (normalized.fullPage) {
+            cssWidth = metrics.content.width;
+            cssHeight = metrics.content.height;
+            scrollX = 0;
+            scrollY = 0;
+            assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
+            capture.clip = {
+              x: 0,
+              y: 0,
+              width: cssWidth,
+              height: cssHeight,
+              scale: 1,
+            };
+          }
+          const captureOnce = async () => {
+            const response = await this.screenshotRead(
+              "Page.captureScreenshot",
+              deadline,
+              async (timeoutMs) =>
+                await this.sendTarget<{ data?: unknown }>(
+                  state,
+                  "Page.captureScreenshot",
+                  capture,
+                  {
+                    timeoutMs,
+                  },
+                ),
+            );
+            const data = decodeBoundedBase64Image(response.data);
+            return { data, dimensions: imageDimensions(data, normalized.format) };
+          };
+          let { data, dimensions } = await captureOnce();
+          // Chromium applies a new device-metrics override asynchronously, so a
+          // capture right after a viewport change can still return the previous
+          // surface. A viewport capture of an emulated device has an exact size;
+          // wait briefly for the compositor instead of publishing the stale frame.
+          const expected = normalized.fullPage ? undefined : state.emulatedViewport;
+          if (expected) {
+            const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
+            const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
+            const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
+            let pause = 16;
+            while (
+              (Math.abs(dimensions.width - expectedWidth) > 1 ||
+                Math.abs(dimensions.height - expectedHeight) > 1) &&
+              Date.now() + pause < settleDeadline
+            ) {
+              await delay(pause);
+              pause = Math.min(pause * 2, 200);
+              const refreshed = await this.screenshotRead(
+                "Page.getLayoutMetrics",
+                deadline,
+                async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+              );
+              cssWidth = refreshed.viewport.width;
+              cssHeight = refreshed.viewport.height;
+              scrollX = refreshed.viewport.x;
+              scrollY = refreshed.viewport.y;
+              ({ data, dimensions } = await captureOnce());
+            }
+          }
+          return this.imageFrame({
+            state,
+            sequence: 0,
+            format: normalized.format,
+            data,
+            width: dimensions.width,
+            height: dimensions.height,
+            deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
+            scrollX,
+            scrollY,
+          });
+        }),
+    );
   }
 
   async subscribeFrames(
@@ -1430,35 +1482,55 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       };
       for (const [actionIndex, action] of actions.entries()) {
         state.actionTrace = trace ? { actionIndex, trace } : undefined;
+        const effectsBeforeAction = state.actionEffectCount;
         try {
-          if (
-            completedActions > 0 &&
-            command.action.type === "batch" &&
-            command.action.fenceEachAction
-          ) {
-            await this.refreshFrame(state);
-            this.assertExpectedGenerations(command, state);
+          if (action.type === "handle_dialog") {
+            await this.dispatchAction(state, action, command.operationId);
+          } else {
+            // A dialog the previous action opened, or one that opens while
+            // this action reads the page, ends the batch here: the page
+            // cannot answer until the dialog is handled.
+            await this.untilDialog(state, async () => {
+              if (
+                completedActions > 0 &&
+                command.action.type === "batch" &&
+                command.action.fenceEachAction
+              ) {
+                await this.refreshFrame(state);
+                this.assertExpectedGenerations(command, state);
+              }
+              await this.dispatchAction(state, action, command.operationId);
+            });
           }
-          await this.dispatchAction(state, action, command.operationId);
           state.nodeRoute = null;
           state.actionTrace = undefined;
           completedActions += 1;
           if (state.dialog) {
-            if (completedActions < actions.length) {
-              throw new Error("browser action batch paused on a JavaScript dialog");
-            }
+            if (completedActions < actions.length)
+              throw await this.dialogPause(
+                state,
+                info.targetId,
+                secretValues,
+                actions.length,
+                completedActions,
+              );
             break;
           }
         } catch (error) {
           state.nodeRoute = null;
           state.actionTrace = undefined;
-          if (error instanceof DialogOpenedSignal) {
-            completedActions += 1;
-            if (completedActions < actions.length) {
-              throw new Error("browser action batch paused on a JavaScript dialog", {
-                cause: error,
-              });
-            }
+          if (error instanceof DialogBlockedError || error instanceof DialogOpenedSignal) {
+            // This action counts as run once it sent input: that input is
+            // what opened the dialog, or it may have had effects before it.
+            if (state.actionEffectCount !== effectsBeforeAction) completedActions += 1;
+            if (completedActions < actions.length || state.actionEffectCount === initialEffectCount)
+              throw await this.dialogPause(
+                state,
+                info.targetId,
+                secretValues,
+                actions.length,
+                completedActions,
+              );
             break;
           }
           if (
@@ -1489,6 +1561,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           );
         }
       }
+      // An open dialog is the page's state, whatever view was asked for: the
+      // caller must handle it before anything else works in this tab. Its
+      // observation reads nothing from the blocked page.
+      if (state.dialog)
+        return await this.observeUnlocked(
+          state,
+          await this.requireTargetInfo(await this.ensureConnection(), info.targetId),
+        );
       if (command.observationMode === "none") return null;
       if (command.observationMode === "input") {
         // A live viewer already has pixels. Only native dropdowns need the
@@ -1600,11 +1680,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       !(
         error instanceof InteractionDefiniteDriverError ||
         error instanceof InteractionOutcomeUnknownDriverError
-      ) ||
-      (command.observationMode !== undefined && command.observationMode !== "full") ||
-      state.dialog
+      )
     )
       return error;
+    // An open dialog is shown whatever view was asked for: the caller has to
+    // answer it next. Its observation reads nothing from the blocked page.
+    if (state.dialog) {
+      try {
+        const info = await this.requireTargetInfo(await this.ensureConnection(), targetId);
+        error.observation = redactInteractionSecretValues(
+          await this.observeUnlocked(state, info),
+          secretValues,
+        );
+      } catch {
+        // Optional context only.
+      }
+      return error;
+    }
+    if (command.observationMode !== undefined && command.observationMode !== "full") return error;
     try {
       if (settleAfter) {
         await this.settleActionRequests(state, settleAfter);
@@ -1617,6 +1710,39 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     } catch {
       // Optional context only; never replace the action's own failure.
+    }
+    return error;
+  }
+
+  /** The failure for a batch a JavaScript dialog stopped before its end, or
+   * for an action a dialog blocked before it sent any input. It carries the
+   * page's observation, with the dialog, so the caller can answer it next. */
+  private async dialogPause(
+    state: TargetState,
+    targetId: string,
+    secretValues: BrowserActionCommandValue["secretValues"],
+    total: number,
+    completed: number,
+  ): Promise<Error> {
+    const summary = dialogSummary(state.dialog);
+    const error =
+      completed === 0
+        ? new InteractionDefiniteDriverError(
+            "invalid_action",
+            `${summary} ${total > 1 ? "No action in this batch ran." : "The action did not run."} ${DIALOG_GUIDANCE}`,
+          )
+        : new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            `${summary} ${completed} of ${total} actions ran; the last of them opened the dialog or was interrupted by it, and the remaining actions did not run. ${DIALOG_GUIDANCE} Then check the page before continuing; do not replay the actions that ran.`,
+          );
+    try {
+      const info = await this.requireTargetInfo(await this.ensureConnection(), targetId);
+      error.observation = redactInteractionSecretValues(
+        await this.observeUnlocked(state, info),
+        secretValues,
+      );
+    } catch {
+      // Optional context only; the failure itself names the dialog.
     }
     return error;
   }
@@ -5690,6 +5816,54 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         throw new DialogOpenedSignal("browser action opened a JavaScript dialog");
       }
       return result.value;
+    } finally {
+      unsubscribe();
+    }
+  }
+
+  /**
+   * Runs page work that a JavaScript dialog would block, ending it as soon as
+   * a dialog is open instead of waiting out command deadlines: until the
+   * dialog is answered the page cannot reply. Work that notices the dialog
+   * itself (input that opened it) settles right away, and its own account of
+   * what happened stands; otherwise it is abandoned and settles later.
+   */
+  private async untilDialog<T>(state: TargetState, work: () => Promise<T>): Promise<T> {
+    if (state.dialog) throw new DialogBlockedError(state.dialog);
+    const connection = await this.ensureConnection();
+    let unsubscribe: () => void = () => undefined;
+    const opened = new Promise<{ kind: "dialog" }>((resolve) => {
+      unsubscribe = connection.on(
+        "Page.javascriptDialogOpening",
+        () => resolve({ kind: "dialog" }),
+        state.sessionId,
+      );
+    });
+    const settled = work().then(
+      (value) => ({ kind: "result" as const, value }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    );
+    try {
+      let outcome = await Promise.race([settled, opened]);
+      if (outcome.kind === "dialog") {
+        const dialog = outcome;
+        outcome = await Promise.race([settled, delay(DIALOG_WORK_SETTLE_MS).then(() => dialog)]);
+      }
+      if (outcome.kind === "dialog") throw new DialogBlockedError(state.dialog);
+      if (outcome.kind === "result") return outcome.value;
+      const error = outcome.error;
+      // A typed driver outcome already says what happened. Anything else that
+      // failed while a dialog is open failed because of it.
+      if (
+        state.dialog &&
+        !(
+          error instanceof DialogBlockedError ||
+          error instanceof InteractionDefiniteDriverError ||
+          error instanceof InteractionOutcomeUnknownDriverError
+        )
+      )
+        throw new DialogBlockedError(state.dialog);
+      throw error;
     } finally {
       unsubscribe();
     }

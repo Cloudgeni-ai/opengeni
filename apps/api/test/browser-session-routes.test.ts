@@ -840,6 +840,26 @@ describe("BrowserSession route discipline", () => {
       expect(browserScreenshotError(error)).toBe(error);
   });
 
+  test("names an open JavaScript dialog as the reason a tab cannot be captured, without page text", async () => {
+    const internal = new BrowserControlRequestError(409, {
+      code: "invalid_action",
+      message: 'A JavaScript confirm dialog is open in this tab: "PRIVATE page text".',
+      retryable: false,
+    });
+    const projected = browserScreenshotError(internal);
+    expect(projected).toBeInstanceOf(HTTPException);
+    expect((projected as HTTPException).status).toBe(409);
+    expect((projected as Error).cause).toBe(internal);
+    expect((projected as Error).message).toContain("handle_dialog");
+    expect((projected as Error).message).not.toContain("PRIVATE");
+    const other = new BrowserControlRequestError(400, {
+      code: "invalid_action",
+      message: "screenshot quality is out of range",
+      retryable: false,
+    });
+    expect(browserScreenshotError(other)).toBe(other);
+  });
+
   test("existing managed browser control retains the durable provider instance across image upgrades", async () => {
     const source = await readFile(routeUrl, "utf8");
     const placement = source.slice(source.indexOf("async function withBrowserPlacement"));
