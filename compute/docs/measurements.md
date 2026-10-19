@@ -1596,3 +1596,80 @@ journal `host-sbx-p4-e-host-745g@5571071858708082430.log`, the wake lines
 in `api.log`, and the UI screenshots in `ui-*.png`. The in-flight check
 still reads the API's answer, not a model turn's tool result; both carry
 the same text.
+
+### r22: every check on the final code
+
+r22 (2026-10-19; the suite ran from 12:00:40 to 12:19:52) is the run of
+every check, in full order, on the code that goes into the pull
+requests: compute f1f6c9c82 (feat/compute-lab, after the rename; the
+guest starts the agent with `run --compute`) and the backend 221bf022b
+(feat/compute-backend: the agent-driven output recovery, the rename and
+follow-up B, with main ac63730e6 merged and its migrations renumbered to
+0847-0852). The hosts' bundle, the guest image and the control service
+were rebuilt from f1f6c9c82, the hosts were replaced with the new
+template, and the deploy ran with `FRESH=1`: new Opengeni and
+control-service databases, so the run saw exactly the schema that ships
+(the earlier database had applied a migration this backend removes). The
+model was the existing gpt-6.1-sol deployment. The chain ran as one
+launchd job:
+
+```sh
+. p4.env
+export OPENGENI_REF=221bf022b COMPUTE_REF=f1f6c9c82
+compute/e2e/env.sh build && compute/e2e/env.sh fleet &&
+  FRESH=1 compute/e2e/env.sh deploy && RUN=r22 compute/e2e/env.sh suite
+```
+
+26 checks passed, none failed and one was not applicable (run-as:
+Opengeni offers no way to ask for it), with the verifier's agreement.
+
+| check | r22 |
+| --- | --- |
+| create | first turn in 28.2 s |
+| background | read back by id with exit status 3; the stopped one unlisted and its process gone after the stop |
+| checkpoint | the terminal showed all 150 ticks and the command returned all 110 in order, across 1 checkpoint (12:03:01.70); longest quiet 1.7 s |
+| ui | file browser, terminal and desktop pass (Playwright) |
+| sleep-paused | paused in 0.3 s, woke in 0.1 s |
+| sleep-saved | saved in 6.6 s, woke in 0.4 s |
+| sleep-archived | archived in 20.8 s, woke in 0.5 s |
+| sleep-remote | remote in 24.1 s, woke in 8.7 s |
+| link-stream | 87 cycles in 181 s, 348 MiB in and 696 MiB out, every sha256 matching; saved in 11.5 s, woken by a read in 1.7 s |
+| vm-crash | the next command answered 5.1 s after the kill, generation 2 -> 3 on the same host, both writes kept, the program lost and reported |
+| move | 7rhk -> 5bw3 in 31.2 s |
+| host-loss | back on 7rhk 150.9 s after the stop, booted from files, the in-flight request ended as outcome unknown (HTTP 409) after 138.7 s |
+| delete | the compute sandbox gone 15.4 s after the delete |
+| connected-machine | online 3.1 s after connecting; exec in 0.1 s after 90 s idle |
+| cleanup | nothing left |
+
+The sleeps ran after the background check, whose stored output the
+backend now releases in one answered exchange; none was woken by
+anything but the suite's own requests.
+
+host-loss began at 12:13:14 and asked for sbx-p4-e-host-5bw3, where the
+sandbox had just moved, to stop at 12:15:22. sbx-p4-e-host-7rhk logged
+"adopted from its files" and the `programs_lost` alarm for the sandbox
+at 12:17:38.76, then fetched the copy and booted it with one VMM launch
+and no restore: a new guest boot id and agent connection instance, owner
+epoch 3 -> 5, the program and the command in flight gone and not run
+again, and the archived and checkpointed files kept. The late write was
+lost; either outcome was allowed for it, as the stop operation finished
+167.2 s after the last checkpoint began. The request in flight came back
+as HTTP 409 with the outcome-unknown answer. No run logged a warning
+that the guest did not write its disks out before a pause.
+
+One host needed a hand before the run. On sbx-p4-e-host-5bw3, freshly
+made from the new template, the install's pull of the base image from
+Docker Hub failed once at 11:52:00 (a connection error on the token
+request). The startup script has no retry, so the machine stayed running
+without registering, and the instance group, which has no health check,
+kept it. A reset at 11:59:43 reran the install, which succeeded at
+12:00:33, before the suite began. This is a gap in host installation,
+not in a check.
+
+The figures are the rows of `runs/r22/results.md` (and `results.json`);
+the stop is in its `suite.log`, the adoption and the alarm in
+`host-sbx-p4-e-host-7rhk.log`, the lost host's journal in
+`host-sbx-p4-e-host-5bw3@3994006257558862528.log`, the wake lines in
+`api.log`, and the UI screenshots in `ui-*.png`; the failed install is
+in that host's serial console. The in-flight check still reads the API's
+answer, not a model turn's tool result; both carry the same text.

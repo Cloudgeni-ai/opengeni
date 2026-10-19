@@ -13,6 +13,22 @@ meta() { curl -fsS -H Metadata-Flavor:Google "http://metadata.google.internal/co
 attr() { meta "instance/attributes/$1"; }
 log() { echo "compute-startup: $*"; }
 
+# Every step below is safe to run again, and several reach the network
+# (the bundle's store, the certificate authority, the base image's
+# registry), so a failed attempt runs again, after a wait growing to five
+# minutes, until the host is installed. A host whose one attempt failed
+# would otherwise run without ever registering, and nothing would replace
+# it: the instance group has no health check (main.tf).
+if [ -z "${COMPUTE_STARTUP_ATTEMPT:-}" ]; then
+  attempt=1 wait=15
+  until COMPUTE_STARTUP_ATTEMPT=$attempt bash "$0"; do
+    log "attempt $attempt failed; trying again in ${wait}s"
+    sleep "$wait"
+    attempt=$((attempt + 1)) wait=$((wait * 2 > 300 ? 300 : wait * 2))
+  done
+  exit 0
+fi
+
 NAME=$(meta instance/name)
 ADDRESS=$(meta instance/network-interfaces/0/ip)
 ZONE=$(meta instance/zone)
