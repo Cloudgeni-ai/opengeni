@@ -879,6 +879,7 @@ const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
   "close_private_session_create_capability(uuid)",
 ] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
+  "record_session_agent_creation(uuid, uuid, uuid, uuid, uuid, uuid, integer)",
   "lock_live_native_original_origin_v2(jsonb)",
   "modal_native_origin_member_read_active(uuid, text)",
   LEGACY_FORK_SESSION_CONTENT_ROUTINE,
@@ -1470,6 +1471,7 @@ export const BILLING_SUBSCRIPTION_OPERATION_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "record_session_agent_creation(uuid, uuid, uuid, uuid, uuid, uuid, integer)",
   ...BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
   ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
   "scheduled_task_is_exhausted(uuid)",
@@ -1543,6 +1545,7 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  "guard_session_agent_creation_provenance()",
   "personal_machine_grant_covers_descendant(uuid, uuid, uuid, uuid)",
   "personal_machine_turn_consent_covers_descendant(uuid, uuid, uuid)",
   "live_session_turn_machine_consent(uuid)",
@@ -1576,6 +1579,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "guard_session_agent_creation_provenance()",
   "set_subscription_plan_catalog(jsonb, text, text)",
   "scheduled_task_is_exhausted(uuid)",
   "set_credit_promotion_policy(jsonb, text, text)",

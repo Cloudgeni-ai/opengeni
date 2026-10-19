@@ -5,6 +5,109 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
+-- Parent IDs alone are app-writable on INSERT. Only the exact agent-create
+-- seam may add the attempt witness, and only in the child's creation transaction.
+-- Existing/old-binary children have no witness and do not gain tree consent.
+ALTER TABLE sessions ADD COLUMN agent_creation_transaction_id xid8,
+  ADD COLUMN agent_creation_attempt_id uuid;
+
+CREATE FUNCTION guard_session_agent_creation_provenance() RETURNS trigger
+LANGUAGE plpgsql SECURITY INVOKER SET search_path FROM CURRENT AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.agent_creation_attempt_id IS NOT NULL THEN
+      RAISE EXCEPTION 'agent creation witness requires the exact creation seam' USING ERRCODE = '42501';
+    END IF;
+    NEW.agent_creation_transaction_id := pg_current_xact_id();
+  ELSE
+    IF NEW.agent_creation_transaction_id IS DISTINCT FROM OLD.agent_creation_transaction_id
+      OR (OLD.agent_creation_attempt_id IS NOT NULL AND (
+        NEW.parent_session_id IS DISTINCT FROM OLD.parent_session_id
+        OR NEW.parent_turn_id IS DISTINCT FROM OLD.parent_turn_id)) THEN
+      RAISE EXCEPTION 'agent creation provenance is immutable' USING ERRCODE = '42501';
+    END IF;
+    IF NEW.agent_creation_attempt_id IS DISTINCT FROM OLD.agent_creation_attempt_id THEN
+      IF OLD.agent_creation_attempt_id IS NOT NULL OR NEW.agent_creation_attempt_id IS NULL
+        OR OLD.agent_creation_transaction_id IS DISTINCT FROM pg_current_xact_id()
+        OR current_user IS DISTINCT FROM pg_get_userbyid((
+          SELECT relowner FROM pg_class WHERE oid = TG_RELID)) THEN
+        RAISE EXCEPTION 'agent creation witness requires the exact creation seam' USING ERRCODE = '42501';
+      END IF;
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+REVOKE ALL ON FUNCTION guard_session_agent_creation_provenance() FROM PUBLIC;
+CREATE TRIGGER session_agent_creation_provenance_guard BEFORE INSERT OR UPDATE ON sessions
+FOR EACH ROW EXECUTE FUNCTION guard_session_agent_creation_provenance();
+
+CREATE FUNCTION record_session_agent_creation(
+  p_account uuid, p_workspace uuid, p_child uuid, p_parent uuid,
+  p_turn uuid, p_attempt uuid, p_generation integer
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+DECLARE cap_added integer;
+BEGIN
+  IF p_account IS DISTINCT FROM opengeni_private.current_account_id()
+    OR p_workspace IS DISTINCT FROM opengeni_private.current_workspace_id()
+    OR p_account IS NULL OR p_workspace IS NULL OR p_child = p_parent
+    OR p_generation IS NULL OR p_generation < 1 THEN
+    RAISE EXCEPTION 'exact agent creation scope required' USING ERRCODE = '42501';
+  END IF;
+  INSERT INTO opengeni_private.scoped_compute_capabilities(backend_pid,transaction_id,capability_kind)
+    VALUES (pg_backend_pid(),pg_current_xact_id(),'write') ON CONFLICT DO NOTHING;
+  GET DIAGNOSTICS cap_added = ROW_COUNT;
+  -- Use the same live attempt/turn/epoch/interruption fences as agent commands.
+  -- These locks are already held by createSession's frozen-creator check.
+  PERFORM 1 FROM sessions parent
+  JOIN session_turns turn_value ON turn_value.account_id = parent.account_id
+    AND turn_value.workspace_id = parent.workspace_id AND turn_value.session_id = parent.id
+  JOIN session_turn_attempts attempt ON attempt.account_id = parent.account_id
+    AND attempt.workspace_id = parent.workspace_id AND attempt.session_id = parent.id
+    AND attempt.turn_id = turn_value.id
+  WHERE parent.account_id = p_account AND parent.workspace_id = p_workspace AND parent.id = p_parent
+    AND parent.active_turn_id = p_turn AND turn_value.id = p_turn
+    AND turn_value.active_attempt_id = p_attempt AND attempt.id = p_attempt
+    AND turn_value.execution_generation = p_generation AND attempt.execution_generation = p_generation
+    AND turn_value.status IN ('running','requires_action','recovering','waiting_capacity')
+    AND attempt.state IN ('claimed','running')
+    AND attempt.authority_epoch BETWEEN parent.execution_authority_epoch AND parent.authority_epoch
+    AND NOT EXISTS (SELECT 1 FROM session_attempt_interruptions interruption
+      WHERE interruption.workspace_id = p_workspace AND interruption.attempt_id = p_attempt
+        AND interruption.state IN ('pending','delivered','acknowledged'))
+  FOR UPDATE OF turn_value, attempt;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'agent creation attempt is stale or unauthorized' USING ERRCODE = '42501';
+  END IF;
+  UPDATE sessions child SET agent_creation_attempt_id = p_attempt
+  WHERE child.account_id = p_account AND child.workspace_id = p_workspace AND child.id = p_child
+    AND child.parent_session_id = p_parent AND child.parent_turn_id = p_turn
+    AND child.agent_creation_transaction_id = pg_current_xact_id()
+    AND child.agent_creation_attempt_id IS NULL AND child.active_turn_id IS NULL AND child.status = 'idle'
+    AND NOT EXISTS (SELECT 1 FROM session_turns accepted WHERE accepted.session_id = child.id);
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'agent creation witness requires a fresh exact child' USING ERRCODE = '42501';
+  END IF;
+  IF cap_added = 1 THEN
+    DELETE FROM opengeni_private.scoped_compute_capabilities
+      WHERE backend_pid = pg_backend_pid() AND transaction_id = pg_current_xact_id() AND capability_kind = 'write';
+  END IF;
+END
+$$;
+REVOKE ALL ON FUNCTION record_session_agent_creation(uuid,uuid,uuid,uuid,uuid,uuid,integer) FROM PUBLIC;
+DO $creation_acl$
+DECLARE role_name text;
+BEGIN
+  EXECUTE format('ALTER FUNCTION guard_session_agent_creation_provenance() SET search_path=pg_catalog,%I,pg_temp',current_schema());
+  EXECUTE format('ALTER FUNCTION record_session_agent_creation(uuid,uuid,uuid,uuid,uuid,uuid,integer) SET search_path=pg_catalog,%I,pg_temp',current_schema());
+  FOR role_name IN SELECT rolname FROM pg_roles WHERE rolname <> current_user
+    AND has_function_privilege(oid,'open_private_child_session_create_capability(uuid,uuid,uuid,uuid,uuid,uuid,integer)','EXECUTE')
+  LOOP
+    EXECUTE format('GRANT EXECUTE ON FUNCTION record_session_agent_creation(uuid,uuid,uuid,uuid,uuid,uuid,integer) TO %I',role_name);
+  END LOOP;
+END
+$creation_acl$;
+
 CREATE FUNCTION personal_machine_grant_covers_descendant(
   p_grant_id uuid, p_session_id uuid, p_turn_id uuid, p_enrollment_id uuid
 ) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
@@ -64,11 +167,9 @@ BEGIN
 
   LOOP
     IF child_row.id = ANY(visited) OR child_row.parent_session_id IS NULL
-      OR child_row.parent_turn_id IS NULL THEN RETURN false; END IF;
+      OR child_row.parent_turn_id IS NULL OR child_row.agent_creation_attempt_id IS NULL THEN RETURN false; END IF;
     visited := array_append(visited, child_row.id);
-    -- parent_turn_id is frozen only by exact agent-attempt child creation.
-    -- A plain parent ID, group ID, fork, sibling, or another human's turn is
-    -- not a delegation edge, even if the machine owner can read that chat.
+    -- Parent IDs need a protected creation witness, not just immutable values.
     SELECT parent.* INTO parent_row FROM sessions parent
     JOIN session_turns causal ON causal.id = child_row.parent_turn_id
       AND causal.session_id = parent.id AND causal.account_id = parent.account_id
@@ -88,6 +189,7 @@ BEGIN
         AND sandbox.account_id = grant_row.account_id AND sandbox.enrollment_id = p_enrollment_id
       WHERE snapshot.account_id = grant_row.account_id AND snapshot.workspace_id = grant_row.workspace_id
         AND snapshot.session_id = parent_row.id AND snapshot.turn_id = child_row.parent_turn_id
+        AND snapshot.attempt_id = child_row.agent_creation_attempt_id
         AND snapshot.enrollment_id = p_enrollment_id
         AND snapshot.initiating_human_subject_id = owner_row.subject_id
         AND snapshot.owner_organization_membership_id = owner_row.id
@@ -98,17 +200,6 @@ BEGIN
         AND snapshot.session_authority_epoch BETWEEN parent_row.execution_authority_epoch AND parent_row.authority_epoch
         AND snapshot.grant_id = grant_row.id AND snapshot.grant_generation = grant_row.generation
         AND snapshot.grant_mode = grant_row.mode
-    ) AND NOT EXISTS (
-      -- A human move onto a machine (0823) can bind the originating turn
-      -- through its live owner-click receipt instead of an ordinary snapshot.
-      SELECT 1 FROM session_turn_machine_consents consent
-      WHERE grant_row.mode = 'session' AND consent.account_id = grant_row.account_id
-        AND consent.workspace_id = grant_row.workspace_id AND consent.session_id = parent_row.id
-        AND consent.turn_id = child_row.parent_turn_id AND consent.enrollment_id = p_enrollment_id
-        AND consent.consenting_subject_id = owner_row.subject_id
-        AND consent.owner_organization_membership_id = owner_row.id
-        AND consent.authority_id = grant_row.authority_id
-        AND live_session_turn_machine_consent(consent.id)
     ) THEN RETURN false; END IF;
 
     IF parent_row.id = grant_row.session_id THEN
@@ -166,7 +257,7 @@ BEGIN
   IF child_row.id IS NULL THEN RETURN false; END IF;
   LOOP
     IF child_row.id = ANY(visited) OR child_row.parent_session_id IS NULL
-      OR child_row.parent_turn_id IS NULL THEN RETURN false; END IF;
+      OR child_row.parent_turn_id IS NULL OR child_row.agent_creation_attempt_id IS NULL THEN RETURN false; END IF;
     visited := array_append(visited, child_row.id);
     SELECT parent.* INTO parent_row FROM sessions parent
     JOIN session_turns causal ON causal.id = child_row.parent_turn_id
@@ -185,6 +276,7 @@ BEGIN
       WHERE binding.consent_id = consent_row.id AND snapshot.account_id = consent_row.account_id
         AND snapshot.workspace_id = consent_row.workspace_id AND snapshot.session_id = parent_row.id
         AND snapshot.turn_id = child_row.parent_turn_id
+        AND snapshot.id = child_row.agent_creation_attempt_id
         AND snapshot.authority_epoch BETWEEN parent_row.execution_authority_epoch AND parent_row.authority_epoch
     ) THEN RETURN false; END IF;
     IF parent_row.id = consent_row.session_id THEN

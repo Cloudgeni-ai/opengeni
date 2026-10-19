@@ -426,7 +426,7 @@ Personal-machine consent also covers the consenting session's agent-created
 descendants (0844). Every causal parent/turn link must remain in the same workspace
 and belong to the same machine owner and initiating human. Admission and dispatch
 reuse the original grant, never mint child grants, and recheck each parent machine
-snapshot plus live membership, machine authority, grant generation, expiry and
+snapshot for the exact creating attempt plus live membership, machine authority, grant generation, expiry and
 revocation. `once` covers only descendants of the originating accepted turn;
 `session` covers its consented session tree. A sibling of the consenting session,
 an unrelated chat, a bare parent/group ID, another human's turn, or another machine
@@ -434,7 +434,16 @@ is not covered. Other personal-resource grants remain exact-session.
 An owner move's logical-turn receipt follows the same causal tree and live
 authority checks when no exact-session machine grant exists. If a source grant
 exists in the current execution epoch, tree coverage stays grant-derived: a
-move receipt cannot bypass its expiry or revocation.
+move receipt cannot bypass its expiry, revocation, generation change or stale
+grant snapshot. Grant-backed ancestors must have a valid grant snapshot; a move
+receipt is never a replacement for a failed snapshot check.
+
+Parent IDs alone are not delegation evidence. `record_session_agent_creation`
+verifies the exact live parent turn/attempt/generation in the child's creation
+transaction and writes an immutable, owner-protected witness. Both grant and
+receipt inheritance require that witness at every edge. Direct inserts and
+legacy children without it remain uncovered; migration does not backfill proof
+from readable parent IDs. Existing exact-session grants remain usable.
 
 The model-facing first-party `session_create` tool makes the dependency
 structural: it accepts an optional `machineTarget` object containing required

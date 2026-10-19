@@ -30137,6 +30137,16 @@ async function createSessionInTransaction(
     throw error;
   }
   const [inserted] = insertedRows;
+  if (inserted && input.createdByActor && parentTurnId) {
+    // Parent IDs are not delegation proof. Stamp the protected witness only
+    // inside this creation transaction, after SQL verifies the exact live
+    // parent attempt. Old rows and direct app-role INSERTs cannot acquire it.
+    await tx.execute(sql`select record_session_agent_creation(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${inserted.id}::uuid,
+      ${input.createdByActor.sessionId}::uuid, ${input.createdByActor.turnId}::uuid,
+      ${input.createdByActor.attemptId}::uuid, ${input.createdByActor.executionGeneration}::integer
+    )`);
+  }
   if (inserted && !input.archivedImport) {
     await copySubscriptionAuthorityCompatInTransaction(tx, [
       { kind: "session_initial", workspaceId: input.workspaceId, id: inserted.id },

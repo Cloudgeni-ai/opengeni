@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { sql } from "drizzle-orm";
 import {
   acquireRestrictedRuntimeTestDatabase,
   acquireSharedTestDatabase,
@@ -176,6 +177,40 @@ async function fixture(
   const grants =
     () => admin`select id,session_id,mode,generation from organization_user_resource_grants
     where account_id=${accountId} and action='connected_machine.use'`;
+  const forge = async (
+    parent: Attempt,
+    options: { start?: boolean; witness?: string; stamp?: Partial<Attempt> } = {},
+  ) => {
+    const id = crypto.randomUUID();
+    // Restricted app INSERT deliberately bypasses createSession's exact actor
+    // path. Parent IDs are readable data, not creation provenance.
+    await withWorkspaceSubjectSessionActivityRls(client.db, workspaceId, subjectId, async (db) => {
+      await db.execute(sql`insert into sessions (
+        id, account_id, workspace_id, initial_message, model, reasoning_effort,
+        latency_mode, sandbox_backend, sandbox_group_id, tool_policy,
+        created_by_kind, created_by_subject_id, parent_session_id, parent_turn_id,
+        active_sandbox_id, status ${options.witness ? sql`, agent_creation_attempt_id` : sql``}
+      ) values (${id},${accountId},${workspaceId},'forged child','test-model','medium',
+        'standard','none',${id},'{"mode":"explicit","inheritedFromSessionId":null}'::jsonb,'subject',${subjectId},
+        ${parent.sessionId},${parent.turnId},${machine.sandbox_id},'idle'
+        ${options.witness ? sql`, ${options.witness}` : sql``})`);
+      if (options.stamp) {
+        const actor = { ...parent, ...options.stamp };
+        await db.execute(sql`select record_session_agent_creation(${accountId}::uuid,
+          ${workspaceId}::uuid,${id}::uuid,${actor.sessionId}::uuid,${actor.turnId}::uuid,
+          ${actor.attemptId}::uuid,${actor.executionGeneration})`);
+      }
+    });
+    if (options.start !== false)
+      await initializeSessionStartAtomically(client.db, {
+        accountId,
+        workspaceId,
+        sessionId: id,
+        reasoningEffortFallback: "medium",
+        createdEventPayload: {},
+      });
+    return id;
+  };
   return {
     admin,
     client,
@@ -189,6 +224,7 @@ async function fixture(
     claim,
     use,
     grants,
+    forge,
   };
 }
 
@@ -213,7 +249,9 @@ test("before migration: exact production-shaped child claim fails at the persona
   const f = await fixture(before);
   try {
     const parent = await f.claim((await f.create({ mode: "session" })).id);
-    const child = await f.create({ parent });
+    // Pre-migration children have no protected creation witness. Raw app-role
+    // insertion preserves the historical parent/session/turn shape here.
+    const child = { id: await f.forge(parent) };
     let failure: unknown;
     try {
       await f.claim(child.id);
@@ -346,6 +384,102 @@ test("a later move receipt cannot bypass revocation of an existing source sessio
       generation=generation+1 where id=${grant!.id}`;
     await denied(f.use(child));
     await denied(f.claim(pending.id));
+  } finally {
+    await f.client.close();
+  }
+}, 180_000);
+
+for (const invalidation of ["grant_generation", "ancestor_snapshot_epoch"] as const) {
+  test(`move receipt cannot bypass ${invalidation} for dispatch or new claims`, async () => {
+    const f = await fixture();
+    try {
+      const root = await f.claim((await f.create({ mode: "session" })).id);
+      await setActiveSandbox(f.client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        subjectId: f.subjectId,
+        sessionId: root.sessionId,
+        targetSandboxId: f.machine.sandbox_id,
+        expectedEpoch: 0,
+        consentToCurrentTurn: true,
+      });
+      const child = await f.claim((await f.create({ parent: root })).id);
+      const pendingChild = await f.create({ parent: root });
+      const pendingGrandchild = await f.create({ parent: child });
+      if (invalidation === "grant_generation")
+        await f.admin`update organization_user_resource_grants set generation=generation+1
+          where account_id=${f.accountId} and session_id=${root.sessionId}`;
+      else
+        await f.admin`update session_attempt_connected_machine_authorizations
+          set session_authority_epoch=0 where session_id=${root.sessionId}`;
+      await denied(f.claim(pendingChild.id));
+      await denied(f.use(child));
+      await denied(f.claim(pendingGrandchild.id));
+    } finally {
+      await f.client.close();
+    }
+  }, 180_000);
+}
+
+for (const source of ["grant", "move_receipt"] as const) {
+  test(`${source}: forged parent IDs without protected agent-creation provenance grant no access`, async () => {
+    const f = await fixture();
+    try {
+      const root = await f.claim(
+        (await f.create(source === "grant" ? { mode: "session" } : { target: null })).id,
+      );
+      if (source === "move_receipt")
+        await setActiveSandbox(f.client.db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          subjectId: f.subjectId,
+          sessionId: root.sessionId,
+          targetSandboxId: f.machine.sandbox_id,
+          expectedEpoch: 0,
+          consentToCurrentTurn: true,
+        });
+      const forged = await f.forge(root);
+      await denied(f.claim(forged));
+    } finally {
+      await f.client.close();
+    }
+  }, 180_000);
+}
+
+test("agent creation witnesses cannot be inserted, rewritten, or added after the creation transaction", async () => {
+  const f = await fixture();
+  try {
+    const root = await f.claim((await f.create({ mode: "session" })).id);
+    await denied(f.forge(root, { witness: root.attemptId }));
+    await denied(f.forge(root, { stamp: { attemptId: crypto.randomUUID() } }));
+    await denied(f.forge(root, { stamp: { turnId: crypto.randomUUID() } }));
+    await denied(f.forge(root, { stamp: { executionGeneration: root.executionGeneration + 1 } }));
+    const forged = await f.forge(root, { start: false });
+    const scoped = (query: ReturnType<typeof sql>) =>
+      withWorkspaceSubjectSessionActivityRls(f.client.db, f.workspaceId, f.subjectId, (db) =>
+        db.execute(query),
+      );
+    await denied(
+      scoped(sql`update sessions set agent_creation_attempt_id=${root.attemptId}
+      where id=${forged}`),
+    );
+    await denied(
+      scoped(sql`update sessions set agent_creation_transaction_id=pg_current_xact_id()
+      where id=${forged}`),
+    );
+    await denied(
+      scoped(sql`select record_session_agent_creation(${f.accountId}::uuid,
+      ${f.workspaceId}::uuid,${forged}::uuid,${root.sessionId}::uuid,${root.turnId}::uuid,
+      ${root.attemptId}::uuid,${root.executionGeneration})`),
+    );
+    const child = await f.create({ parent: root });
+    const [witness] =
+      await f.admin`select agent_creation_attempt_id from sessions where id=${child.id}`;
+    expect(witness!.agent_creation_attempt_id).toBe(root.attemptId);
+    await denied(
+      scoped(sql`update sessions set agent_creation_attempt_id=null where id=${child.id}`),
+    );
+    await denied(scoped(sql`update sessions set parent_session_id=null where id=${child.id}`));
   } finally {
     await f.client.close();
   }
