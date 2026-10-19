@@ -10,7 +10,11 @@
 // (compute.wake.by: fleet, agent_link or guest_port); a proof that names what
 // must wake it (the sleeps: agent_link) fails on any other. A checkpoint check
 // passes only if the journal shows a completed checkpoint of its sandbox
-// while its streams were open (begun and completed inside the window).
+// while its streams were open (begun and completed inside the window). Before
+// each pause to save or checkpoint, the host asks the guest to write its
+// disks out and warns only when it does not ("guest did not write its disks
+// out"): a sleep or checkpoint proof fails on such a warning for its sandbox
+// inside its window.
 //
 //   bun verify.ts <run directory>   (results.json and host-*.log)
 //
@@ -50,6 +54,10 @@ type Step = {
   host: string;
 };
 const steps: Step[] = [];
+/** A host's warning that the guest did not write its disks out before a
+ * pause, so the copy was saved as it was. */
+type Unsynced = { at: number; sandbox: string; host: string };
+const unsynced: Unsynced[] = [];
 // host-<name>.log is each host's journal at the end of the run;
 // host-<name>@<instance>.log one the suite kept before stopping that
 // machine (host-loss), whose journal its replacement does not have. A
@@ -95,8 +103,20 @@ const journals = readdirSync(dir).filter((name) => {
   return true;
 });
 const seen = new Set<string>();
+const seenUnsynced = new Set<string>();
 for (const name of journals) {
   for (const line of readFileSync(`${dir}/${name}`, "utf8").split("\n")) {
+    if (line.includes("guest did not write its disks out")) {
+      const host = name.replace(/^host-|(@[^@]*)?\.log$/g, "");
+      const id = /\bid=([0-9a-f]+)/.exec(line)?.[1] ?? "";
+      const at = Date.parse(line.split(" ")[0] ?? "");
+      const key = `${host} ${line.split(" ")[0]} ${id}`;
+      if (!seenUnsynced.has(key)) {
+        seenUnsynced.add(key);
+        unsynced.push({ at: Number.isFinite(at) ? at : Number.NaN, sandbox: id, host });
+      }
+      continue;
+    }
     const at = line.indexOf("compute_event: ");
     if (at < 0) continue;
     let event: Record<string, unknown>;
@@ -130,6 +150,16 @@ const clock = (ms: number) => new Date(ms).toISOString().slice(11, 22);
 /** A step that woke the sandbox, with its cause and what asked for it. */
 const wake = (s: Step) => `${s.step} (${s.cause}${s.by ? `, by ${s.by}` : ""}) at ${clock(s.at)}`;
 
+/** The hosts' warnings that `sandbox`'s guest did not write its disks out
+ * inside `from`..`to` (one whose time cannot be read counts as inside). */
+function unsyncedIn(sandbox: string, from: number, to: number): string | undefined {
+  const found = unsynced.filter(
+    (one) => one.sandbox === sandbox && (Number.isNaN(one.at) || (one.at >= from && one.at <= to)),
+  );
+  if (found.length === 0) return undefined;
+  return `host journal: the guest did not write its disks out before ${found.length} pause(s) to copy it (${found.map((one) => `${Number.isNaN(one.at) ? "?" : clock(one.at)} on ${one.host}`).join(", ")})`;
+}
+
 /** Why the journals do not show `proof`, or how they do. */
 function check(proof: Proof): { ok: boolean; how: string } {
   if (proof.kind === "journal") return keptJournal(proof);
@@ -156,6 +186,8 @@ function leveled(proof: LevelProof): { ok: boolean; how: string } {
   if (journals.length === 0) return { ok: false, how: "no host journals to verify the level with" };
   const from = Date.parse(proof.from);
   const to = Date.parse(proof.to);
+  const notSynced = unsyncedIn(proof.sandbox, from, to);
+  if (notSynced) return { ok: false, how: notSynced };
   const mine = steps.filter((s) => s.sandbox === proof.sandbox);
   const during = mine.filter((s) => s.at >= from && s.at <= to);
   // Any wake inside the window undid a sleep the check asked for.
@@ -221,7 +253,7 @@ function leveled(proof: LevelProof): { ok: boolean; how: string } {
     ok: true,
     how:
       `host journal: ${proof.level} at ${clock(last.at)} on ${last.host}, woken from it by ${wake(woke)}, ` +
-      `begun ${((woke.start - to) / 1000).toFixed(2)} s after the suite's request${wakes}`,
+      `begun ${((woke.start - to) / 1000).toFixed(2)} s after the suite's request${wakes}; no warning that the guest did not write its disks out`,
   };
 }
 
@@ -230,6 +262,8 @@ function checkpointed(proof: CheckpointProof): { ok: boolean; how: string } {
     return { ok: false, how: "no host journals to verify the checkpoint with" };
   const from = Date.parse(proof.from);
   const to = Date.parse(proof.to);
+  const notSynced = unsyncedIn(proof.sandbox, from, to);
+  if (notSynced) return { ok: false, how: notSynced };
   const done = steps.filter(
     (s) => s.sandbox === proof.sandbox && s.step === "checkpoint" && s.start >= from && s.at <= to,
   );
@@ -237,12 +271,12 @@ function checkpointed(proof: CheckpointProof): { ok: boolean; how: string } {
   if (done.length < min) {
     return {
       ok: false,
-      how: `host journal: ${done.length} checkpoint(s) of the sandbox completed while the streams were open, not at least ${min}`,
+      how: `host journal: ${done.length} checkpoint(s) of the sandbox begun and completed inside the window, not at least ${min}`,
     };
   }
   return {
     ok: true,
-    how: `host journal: ${done.length} checkpoint(s) while streaming, at ${done.map((s) => `${clock(s.at)} on ${s.host}`).join(", ")}`,
+    how: `host journal: ${done.length} checkpoint(s) inside the window, at ${done.map((s) => `${clock(s.at)} on ${s.host}`).join(", ")}; no warning that the guest did not write its disks out`,
   };
 }
 
@@ -271,6 +305,14 @@ for (const name of readdirSync(dir).filter((file) => /^consoles-.*\.log$/.test(f
       `"reconnecting at once" ${tally(/reconnecting at once/g)}, "connected to control plane" ${tally(/connected to control plane/g)}`,
   );
 }
+// Every warning in the run that a guest did not write its disks out, inside
+// a proof's window or not.
+notes.push(
+  `"guest did not write its disks out" warnings: ${unsynced.length}` +
+    (unsynced.length
+      ? ` (${unsynced.map((one) => `${one.sandbox.slice(0, 12)} on ${one.host}${Number.isNaN(one.at) ? "" : ` at ${clock(one.at)}`}`).join(", ")})`
+      : ""),
+);
 saved.notes = notes;
 for (const note of notes) console.log(note);
 

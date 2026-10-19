@@ -2054,11 +2054,131 @@ check("move", "a move to another host keeps the sandbox's files", ["files", "hos
   return `${before.host} -> ${after.host} in ${seconds(start)}; the first command after it answered; ${describeState(now)}`;
 });
 
+/** The connection instance of the sandbox's active enrollment, as
+ * Opengeni's database holds it ("" with none): each agent process that
+ * connects gets a new one. */
+function connectionInstance(): string {
+  const group = state.session?.sandboxGroupId ?? state.session?.id;
+  if (!group || !/^[0-9a-f-]{36}$/.test(group)) throw new Error(`no sandbox group (${group})`);
+  const run = spawnSync(
+    "kubectl",
+    [
+      "-n",
+      "opengeni",
+      "exec",
+      "pod/og-opengeni-postgres-0",
+      "-c",
+      "postgres",
+      "--",
+      "psql",
+      "-U",
+      "opengeni",
+      "-d",
+      "opengeni",
+      "-At",
+      "-c",
+      `select coalesce(connection_instance_id, '') from enrollments where kind = 'sandbox' and status = 'active' and sandbox_group_id = '${group}'`,
+    ],
+    { encoding: "utf8", timeout: 60_000 },
+  );
+  if (run.status !== 0) {
+    throw new Error(
+      `reading the enrollment failed (${run.status ?? run.signal}): ${`${run.error ?? ""} ${run.stderr ?? ""}`.trim().slice(-300)}`,
+    );
+  }
+  const rows = run.stdout.trim().split("\n").filter(Boolean);
+  if (rows.length > 1) throw new Error(`${rows.length} active enrollments for ${group}`);
+  return rows[0] ?? "";
+}
+
+/** How many processes in the guest have `pattern` in their command line
+ * (a grep pattern written so it does not match itself, as `[h]l-x`). */
+async function processesMatching(pattern: string): Promise<number> {
+  const out = await execOk(
+    `for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null; echo; done | grep -c '${pattern}' || true`,
+  );
+  return Number(out.trim());
+}
+
+/** A copy of a sandbox a host made, by its journal: a completed
+ * checkpoint or archive, begun and ended at (ms). */
+type Copy = { step: string; start: number; end: number };
+/** The completed copies of `boxId` in a journal's compute events. */
+function copiesIn(journal: string, boxId: string): Copy[] {
+  const copies: Copy[] = [];
+  for (const line of journal.split("\n")) {
+    const at = line.indexOf("compute_event: ");
+    if (at < 0) continue;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line.slice(at + "compute_event: ".length));
+    } catch {
+      continue;
+    }
+    const name = String(event["compute.step"]);
+    if (
+      event.event !== "compute.step" ||
+      event["compute.outcome"] !== "done" ||
+      event["compute.sandbox.id"] !== boxId ||
+      (name !== "checkpoint" && name !== "archive")
+    )
+      continue;
+    const end = Number(BigInt(String(event.time_unix_nano)) / 1_000_000n);
+    copies.push({
+      step: name,
+      start: end - Number(event["compute.duration_us"] ?? 0) / 1_000,
+      end,
+    });
+  }
+  return copies;
+}
+
+/** What `host`'s journal since `sinceMs` says of `boxId`: its completed
+ * steps in order, how many were boots and restores, and how many times it
+ * was adopted from its files (its memory image left out). */
+function adoptedSince(
+  host: string,
+  sinceMs: number,
+  boxId: string,
+): { steps: string[]; boots: number; restores: number; fromFiles: number } {
+  const text = onHost(
+    host,
+    `j=$(sudo journalctl --no-pager -o cat -u 'compute-*' --since @${Math.floor(sinceMs / 1000)}) || { echo "the host journal could not be read" >&2; exit 7; }; ` +
+      `printf '%s\\n' "$j" | sed 's/\\x1b\\[[0-9;]*m//g' | grep -F '${boxId}' || true`,
+  );
+  const steps: string[] = [];
+  let fromFiles = 0;
+  for (const line of text.split("\n")) {
+    if (line.includes("adopted from its files") && line.includes(`id=${boxId}`)) fromFiles += 1;
+    const at = line.indexOf("compute_event: ");
+    if (at < 0) continue;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line.slice(at + "compute_event: ".length));
+    } catch {
+      continue;
+    }
+    if (
+      event.event === "compute.step" &&
+      event["compute.outcome"] === "done" &&
+      event["compute.sandbox.id"] === boxId
+    )
+      steps.push(String(event["compute.step"]));
+  }
+  return {
+    steps,
+    boots: steps.filter((name) => name === "boot").length,
+    restores: steps.filter((name) => name === "restore").length,
+    fromFiles,
+  };
+}
+
 check(
   "host-loss",
-  "a lost host's sandbox comes back elsewhere from its last archived copy",
+  "a lost host's sandbox boots elsewhere from its last copy's files: those files kept, later writes and programs lost, a new agent connection, the command in flight ends with an error and is not run again",
   ["files", "hosts"],
   async () => {
+    const id = state.sandbox!;
     const kept = `kept-${rand()}`;
     await og("POST", `${ses()}/fs/write`, {
       path: "e2e/kept.txt",
@@ -2069,14 +2189,82 @@ check(
     // The copy the sandbox comes back from is the one this sleep archives.
     await step("reach remote", () => reachLevel("remote", REACH_MS.remote!));
     await execOk("cat e2e/kept.txt", 120_000);
+    const before = await sandbox();
+    const lost = before.host!;
+    // What the loss must change: the guest's boot, the host's boot
+    // generation, and the agent's connection instance.
+    const boot = (await sandboxState()).generation;
+    if (boot === null) throw new Error("the host reports no boot generation");
+    const bootId = (await execOk("cat /proc/sys/kernel/random/boot_id")).trim();
+    const linkBefore = connectionInstance();
+    if (!linkBefore) {
+      throw new Error("the sandbox's enrollment has no agent connection instance before the stop");
+    }
+    // A running program, which a boot from files must not bring back.
+    const token = rand();
+    await execOk(
+      `(setsid nohup python3 -c 'import time; time.sleep(100000)' hlw-${token} >/dev/null 2>&1 &) && sleep 1`,
+    );
+    if ((await processesMatching(`[h]lw-${token}`)) !== 1) {
+      throw new Error(`the program hlw-${token} is not running before the stop`);
+    }
+    // A write a checkpoint then copies: written without a sync, so only the
+    // host's request to the guest to write its disks out before the
+    // capture puts it in the copy. The checkpoint holds the program's
+    // memory too, which a boot from files must leave out.
+    const copied = `copied-${rand()}`;
+    await og("POST", `${ses()}/fs/write`, {
+      path: "e2e/copied.txt",
+      content: copied,
+      encoding: "utf8",
+    });
+    const copiedAt = new Date().toISOString();
+    // The last time the suite saw no step under way before the checkpoint
+    // began: the next checkpoint is due a full minute of running after it.
+    let checkpointAfter = 0;
+    await step("a checkpoint after the copied write", async () => {
+      const limit = Date.now() + 150_000;
+      let idleAt = 0;
+      let during = false;
+      let poked = 0;
+      for (;;) {
+        if (Date.now() > limit) throw new Error("no checkpoint began and completed within 150 s");
+        if (Date.now() - poked > 4_000) {
+          poked = Date.now();
+          exec("true").catch(() => undefined);
+        }
+        const seenAt = Date.now();
+        const now = await sandboxState();
+        if (now.level !== "running" && !now.step)
+          throw new Error(`it went to ${now.level} while waiting for a checkpoint`);
+        if (!now.step) {
+          if (during) return;
+          idleAt = seenAt;
+        } else if (idleAt && now.step === "checkpoint" && !during) {
+          during = true;
+          checkpointAfter = idleAt;
+        }
+        await sleep(200);
+      }
+    });
+    // A write after that checkpoint, which no copy holds if the host is
+    // gone before the next one is due.
     const late = `late-${rand()}`;
+    const lateFrom = Date.now();
     await og("POST", `${ses()}/fs/write`, {
       path: "e2e/late.txt",
       content: late,
       encoding: "utf8",
     });
-    const before = await sandbox();
-    const lost = before.host!;
+    const lateDone = Date.now();
+    // The journals show that checkpoint, begun after the copied write and
+    // done before the late one, with the guest's disks written out first.
+    proofs.push({
+      kind: "checkpoint",
+      sandbox: id,
+      from: copiedAt,
+      to: new Date(lateFrom).toISOString(),
+    });
     const lostEpoch = (await hosts()).find((host) => host.name === lost)?.epoch;
     if (typeof lostEpoch !== "number") {
       throw new Error(`the fleet lists no host epoch for ${lost} before the stop`);
@@ -2108,6 +2296,7 @@ check(
     // read on the machine looked up: its metadata server names the
     // instance, and the journal is of its current boot, both in the header.
     let lostBoot = "";
+    let keptJournal = "";
     try {
       const since = Math.floor(Date.parse(STARTED) / 1000) - 60;
       const journalText = onHost(
@@ -2126,6 +2315,7 @@ check(
         );
       }
       lostBoot = header[2]!;
+      keptJournal = journalText;
       writeFileSync(`${OUT}/host-${lost}@${lostInstance}.log`, journalText);
     } catch (error) {
       throw new Error(`could not keep ${lost}'s journal before stopping it: ${error}`, {
@@ -2133,6 +2323,38 @@ check(
       });
     }
     proofs.push({ kind: "journal", host: lost, instance: lostInstance, boot: lostBoot });
+    // The copies of this sandbox the lost host made after the late write
+    // began (checkpoints and archives, by its kept journal): one begun after
+    // the write returned holds it, one under way across it may or may not.
+    const copies = copiesIn(keptJournal, id);
+    const copiedAfter = copies.filter((copy) => copy.start > lateDone);
+    const copiedAcross = copies.filter((copy) => copy.start <= lateDone && copy.end > lateFrom);
+    // A command running in the guest when its host goes: it notes the
+    // guest's boot, then would run on. Sent after the journal was kept, so
+    // the stop follows at once and the loss, not its 120 s timeout, ends it.
+    const inflightFile = `e2e/hl-inflight-${token}.txt`;
+    const inflightAbort = new AbortController();
+    const inflightSent = Date.now();
+    const inflight = exec(
+      `cat /proc/sys/kernel/random/boot_id >> ${inflightFile}; sleep 600; echo finished`,
+      120_000,
+      inflightAbort.signal,
+    ).then(
+      (result) => ({ settled: Date.now(), result, error: undefined as unknown }),
+      (error: unknown) => ({ settled: Date.now(), result: undefined, error }),
+    );
+    await step("the command in flight is running", async () => {
+      for (let tries = 0; ; tries += 1) {
+        const seen = await exec(`test -s ${inflightFile} && echo yes || echo no`);
+        if (
+          seen.stdout.trim() === "yes" &&
+          (await processesMatching(`[h]l-inflight-${token}`)) >= 1
+        )
+          return;
+        if (tries >= 20) throw new Error("the command in flight did not begin within 10 s");
+        await sleep(500);
+      }
+    });
     // Stopped, the machine is plainly gone: its lease lapses, the service
     // fences it (finds it stopped) and the sandbox wakes elsewhere.
     log(`stopping ${lost} (instance ${lostInstance})`);
@@ -2174,7 +2396,7 @@ check(
       ) as typeof stopped;
       if (stopped.status === "DONE") break;
       if (Date.now() - start > 300_000) throw new Error(`stop ${operation.name} not done in 300 s`);
-      await sleep(5_000);
+      await sleep(2_000);
     }
     if (stopped.error) throw new Error(`stop ${operation.name}: ${JSON.stringify(stopped.error)}`);
     if (String(stopped.targetId ?? operation.targetId ?? "") !== lostInstance) {
@@ -2182,12 +2404,13 @@ check(
         `the stop of ${lost} stopped instance ${stopped.targetId ?? "unknown"}, not ${lostInstance} whose journal was kept`,
       );
     }
+    const stoppedAt = Date.now();
     hostAddresses.delete(lost);
     let out = "";
     for (;;) {
       if (Date.now() - start > 20 * 60_000) throw new Error("no recovery within 20 minutes");
       const result = await exec(
-        "cat e2e/kept.txt; cat e2e/late.txt 2>/dev/null || echo late-missing",
+        "cat e2e/kept.txt; echo; cat e2e/copied.txt 2>/dev/null || echo copied-missing; echo; cat e2e/late.txt 2>/dev/null || echo late-missing",
         120_000,
       ).catch((error) => ({ stdout: "", stderr: String(error), exitCode: -1 }));
       if (result.exitCode === 0 && result.stdout.includes(kept)) {
@@ -2206,6 +2429,8 @@ check(
       }
       await sleep(10_000);
     }
+    const recoveredAt = Date.now();
+    const failures: string[] = [];
     const after = await sandbox();
     const fleet = await hosts();
     const owner = fleet.find((host) => host.name === after.host);
@@ -2263,9 +2488,159 @@ check(
     const now = await sandboxState();
     if (now.host !== after.host)
       throw new Error(`the fabric says ${after.host}, but ${now.host ?? "no host"} holds it`);
+    const newHost = after.host;
+    // The command in flight ends with an error once its sandbox is back:
+    // its connection was replaced, so the request is answered as lost, not
+    // run on the new boot. It has 120 s from the recovery.
+    const inflightBound = recoveredAt + 120_000;
+    let settledInflight = await Promise.race([
+      inflight,
+      sleep(Math.max(0, inflightBound - Date.now())).then(() => undefined),
+    ]);
+    let inflightHow: string;
+    if (!settledInflight) {
+      inflightAbort.abort();
+      settledInflight = await inflight;
+      failures.push(
+        `the command in flight at the loss had no answer 120 s after the sandbox was back (${((Date.now() - inflightSent) / 1000).toFixed(0)} s after it was sent): it hangs`,
+      );
+      inflightHow = "no answer";
+    } else {
+      const took = ((settledInflight.settled - inflightSent) / 1000).toFixed(1);
+      if (settledInflight.settled < stoppedAt) {
+        failures.push(
+          `the command in flight ended ${took} s after it was sent, before its host was stopped, so the loss did not end it`,
+        );
+      }
+      if (settledInflight.result) {
+        const { exitCode, stdout, stderr } = settledInflight.result;
+        if (exitCode === 0 || stdout.includes("finished")) {
+          failures.push(
+            `the command in flight at the loss came back exit ${exitCode} ${JSON.stringify(stdout.trim().slice(0, 100))} after ${took} s, as if it had run to the end`,
+          );
+        }
+        inflightHow = `exit ${exitCode} ${JSON.stringify(`${stdout}${stderr}`.trim().slice(0, 160))} after ${took} s`;
+      } else {
+        const error = settledInflight.error;
+        if (error instanceof Error && error.name === "TimeoutError") {
+          failures.push(
+            `the command in flight at the loss was cut off by the suite's 600 s request limit after ${took} s: it hangs`,
+          );
+        }
+        inflightHow = `${String(error).slice(0, 200)} after ${took} s`;
+      }
+      if (settledInflight.settled > inflightBound) {
+        failures.push(`the command in flight ended ${took} s after it was sent, past its bound`);
+      }
+    }
+    // A new boot of the guest, under a later boot generation.
+    const bootIdAfter = (await execOk("cat /proc/sys/kernel/random/boot_id")).trim();
+    if (bootIdAfter === bootId) {
+      failures.push(`the guest's boot id is ${bootId} before and after: it was not booted`);
+    }
+    if (!(typeof now.generation === "number" && now.generation > boot)) {
+      failures.push(`generation ${boot} -> ${now.generation}, not a boot`);
+    }
+    // Programs end with the lost host; the command in flight is not run
+    // again on the new boot (it would note that boot in its file).
+    const witnessLeft = await processesMatching(`[h]lw-${token}`);
+    if (witnessLeft !== 0) failures.push(`the program hlw-${token} runs again after the loss`);
+    const inflightLeft = await processesMatching(`[h]l-inflight-${token}`);
+    if (inflightLeft !== 0) failures.push(`the command in flight runs again after the loss`);
+    const noted = (await execOk(`cat ${inflightFile} 2>/dev/null || true`))
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (noted.includes(bootIdAfter)) {
+      failures.push(
+        `the command in flight ran again on the new boot (its file: ${noted.join(", ")})`,
+      );
+    }
+    // Files as the last copy left them: the checkpointed write kept, and
+    // the late write lost when the host was gone before the next
+    // checkpoint was due (a minute of running after the last), or kept
+    // when the kept journal shows a copy begun after it.
+    if (!out.includes(copied)) {
+      failures.push(
+        "the write the last checkpoint copied is lost: that checkpoint's disk did not hold it (the guest did not write it out before the capture)",
+      );
+    }
+    const lateKept = out.includes(late);
+    const copyWords = (list: Copy[]) =>
+      list
+        .map((copy) => `${copy.step} ${new Date(copy.end).toISOString().slice(11, 22)}`)
+        .join(", ");
+    const stopAfterCheckpoint = ((stoppedAt - checkpointAfter) / 1000).toFixed(1);
+    const noLaterCopy = copiedAfter.length === 0 && stoppedAt < checkpointAfter + 60_000;
+    let lateHow: string;
+    if (noLaterCopy) {
+      if (lateKept) {
+        failures.push(
+          `the late write came back, though the host was stopped ${stopAfterCheckpoint} s after the last checkpoint began, before the next was due, and its kept journal has no copy after it: the sandbox was not booted from its last copy's files`,
+        );
+      }
+      lateHow = `lost (stopped ${stopAfterCheckpoint} s after the last checkpoint began, before the next was due)`;
+    } else if (copiedAfter.length > 0) {
+      if (!lateKept) {
+        failures.push(
+          `the late write is lost, though the lost host copied the sandbox after it (${copyWords(copiedAfter)})`,
+        );
+      }
+      lateHow = `kept, as a copy after it holds it (${copyWords(copiedAfter)})`;
+    } else {
+      // Stopped too late to rule out a copy after the journal was kept.
+      lateHow = `${lateKept ? "kept" : "lost"}, either allowed: stopped ${stopAfterCheckpoint} s after the last checkpoint began${copiedAcross.length ? `; a copy under way across it: ${copyWords(copiedAcross)}` : ""}`;
+    }
+    // A new agent connection: the enrollment's connection instance changes.
+    let linkAfter = connectionInstance();
+    for (let tries = 0; (!linkAfter || linkAfter === linkBefore) && tries < 12; tries += 1) {
+      await sleep(5_000);
+      linkAfter = connectionInstance();
+    }
+    if (!linkAfter || linkAfter === linkBefore) {
+      failures.push(
+        `the agent's connection instance is ${linkBefore} before the loss and ${linkAfter || "none"} after: no new connection`,
+      );
+    }
+    // The adopting host booted it from files, once, and its agent
+    // connected once: its journal since the stop and the console of that
+    // launch, whole.
+    const fromStop: ConsoleMark = {
+      host: newHost,
+      inode: "none",
+      bytes: 0,
+      at: (start / 1000).toFixed(3),
+    };
+    let booted = consoleSince(newHost, fromStop);
+    for (let tries = 0; booted.connected < 1 && tries < 12; tries += 1) {
+      await sleep(5_000);
+      booted = consoleSince(newHost, fromStop);
+    }
+    if (booted.launches !== 1) {
+      failures.push(
+        `the host journal of ${newHost} records ${booted.launches} VMM launches since the stop, not one boot: ${describeGrowth(booted)}`,
+      );
+    }
+    if (booted.connected !== 1) {
+      failures.push(
+        `the agent connected ${booted.connected} times on ${newHost}, not once: ${describeGrowth(booted)}`,
+      );
+    }
+    const adopting = adoptedSince(newHost, start, id);
+    if (adopting.boots !== 1 || adopting.restores !== 0) {
+      failures.push(
+        `${newHost}'s journal since the stop has ${adopting.boots} boot(s) and ${adopting.restores} restore(s) of the sandbox, not one boot and no restore (steps: ${adopting.steps.join(", ") || "none"})`,
+      );
+    }
+    if (adopting.fromFiles < 1) {
+      failures.push(`${newHost}'s journal has no "adopted from its files" line for id=${id}`);
+    }
+    if (failures.length > 0) throw new Error(failures.join("; "));
     return (
       `${lost} stopped; back on ${after.host} (owner epoch ${before.owner_epoch} -> ${after.owner_epoch}) in ${seconds(start)}; ` +
-      `the archived copy's file kept, the late write ${out.includes(late) ? "kept too" : "lost (after the last save)"}; ${lost} is ${fenced}`
+      `booted from files (generation ${boot} -> ${now.generation}, guest boot id changed, steps ${adopting.steps.join(", ")}, "adopted from its files" ${adopting.fromFiles}); ` +
+      `the archived file kept, the checkpointed write kept, the late write ${lateHow}; program and command in flight gone, not run again; ` +
+      `the command in flight ended with ${inflightHow}; connection instance ${linkBefore} -> ${linkAfter}; console ${describeGrowth(booted)}; ${lost} is ${fenced}`
     );
   },
 );
