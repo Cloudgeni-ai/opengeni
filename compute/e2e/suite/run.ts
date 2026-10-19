@@ -104,7 +104,7 @@ async function og<T = any>(
   method: string,
   path: string,
   body?: unknown,
-  { cleanup = false } = {},
+  { cleanup = false, signal }: { cleanup?: boolean; signal?: AbortSignal } = {},
 ): Promise<T> {
   const response = await fetch(`${OPENGENI_URL}${path}`, {
     method,
@@ -115,9 +115,12 @@ async function og<T = any>(
     body: body === undefined ? undefined : JSON.stringify(body),
     // Longer than any request's own timeout (a 120 s command), so a request
     // that never answers fails its check instead of stopping the run.
-    signal: cleanup
-      ? AbortSignal.timeout(120_000)
-      : AbortSignal.any([AbortSignal.timeout(600_000), checkAbort.signal]),
+    signal: AbortSignal.any([
+      ...(cleanup
+        ? [AbortSignal.timeout(120_000)]
+        : [AbortSignal.timeout(600_000), checkAbort.signal]),
+      ...(signal ? [signal] : []),
+    ]),
   });
   const text = await response.text();
   if (!response.ok) throw new HttpError(response.status, text, `${method} ${path}`);
@@ -255,8 +258,13 @@ async function say(text: string, timeoutS?: number) {
 }
 
 type Exec = { stdout: string; stderr: string; exitCode: number };
-async function exec(command: string, timeoutMs = 60_000): Promise<Exec> {
-  return og<Exec>("POST", `${ses()}/terminal/exec`, { command, timeoutMs, emitStream: false });
+async function exec(command: string, timeoutMs = 60_000, signal?: AbortSignal): Promise<Exec> {
+  return og<Exec>(
+    "POST",
+    `${ses()}/terminal/exec`,
+    { command, timeoutMs, emitStream: false },
+    { signal },
+  );
 }
 async function execOk(command: string, timeoutMs?: number): Promise<string> {
   const result = await exec(command, timeoutMs);
@@ -415,8 +423,9 @@ function onHost(host: string, command: string, timeoutMs = 120_000): string {
 const vmDir = (id: string) => `/var/lib/compute/state/vm/firecracker/${id}`;
 
 /** Where the sandbox's guest console on a host was read up to: the file
- * (each VMM launch writes a new one) and its length then. */
-type ConsoleMark = { host: string; inode: string; bytes: number };
+ * and its length then, and the host's clock then (`date +%s.%N`), from
+ * which the host's journal says how many times the VMM launched since. */
+type ConsoleMark = { host: string; inode: string; bytes: number; at: string };
 /** What the console gained since a mark about the agent's connections:
  * each "connected to control plane" is one connection made, "reconnecting
  * at once" the agent told to make one, "lost this sandbox's connections"
@@ -426,9 +435,10 @@ type ConsoleGrowth = {
   reconnecting: number;
   lost: number;
   how: string;
-  /** Whether the counted console is another file than the mark's (or the
-   * same one started over): the VMM launched again. */
-  relaunched: boolean;
+  /** VMM launches of the sandbox since the mark, by the host's journal
+   * (each launch writes a new console, so a launch means the counted file
+   * is that launch's, read whole). */
+  launches: number;
   mark: ConsoleMark;
 };
 /** The host keeps about the last 1 MiB of a console (it punches out the
@@ -438,35 +448,60 @@ const CONSOLE_KEPT = 900 << 10;
 function asRoot(host: string, script: string): string {
   return onHost(host, `echo ${Buffer.from(script).toString("base64")} | base64 -d | sudo sh`);
 }
-/** Shell that counts the console `$f` (inode `$i`) from `since`: the bytes
- * the same file gained after it, or all of another (a newer launch's). */
+/** Shell that sets `now` (the host's clock) and `l`, the sandbox's VMM
+ * launches the host journal records since `since` (0 with no mark). The
+ * journal, not the file, says whether the console was replaced: a new
+ * file can come back with the old one's inode. */
+function launchesScript(since?: ConsoleMark): string {
+  return [
+    `now=$(date +%s.%N); l=0`,
+    since
+      ? `l=$(journalctl --no-pager -o cat -u 'compute-*' --since @${since.at} | grep -F '"compute.sandbox.id":"${state.sandbox}"' | grep -o '"compute.launches":[0-9]*' | cut -d: -f2 | awk '{ n += $1 } END { print n + 0 }')`
+      : "",
+  ].join("\n");
+}
+/** Shell that counts the console `$f` (inode `$i`) from `since`, given
+ * `launchesScript`'s `now` and `l`: with no launch since, the bytes the
+ * same file gained after the mark; after a launch, all of the file. */
 function countScript(since?: ConsoleMark): string {
   return [
     `s=$(stat -L -c %s $f); from=0`,
-    `if [ "$i" = "${since?.inode ?? "none"}" ] && [ "$s" -ge ${since?.bytes ?? 0} ]; then from=${since?.bytes ?? 0}; fi`,
-    `echo "$i $s $from"`,
+    `if [ "$l" = 0 ] && [ "$i" = "${since?.inode ?? "none"}" ] && [ "$s" -ge ${since?.bytes ?? 0} ]; then from=${since?.bytes ?? 0}; fi`,
+    `echo "$i $s $from $now $l"`,
     `d=$(tail -c +$((from + 1)) $f | tr -d '\\000')`,
     `for p in 'connected to control plane' 'reconnecting at once' "lost this sandbox's connections"; do printf '%s\\n' "$d" | grep -c "$p" || true; done`,
   ].join("\n");
 }
 /** The growth `countScript` printed (`out`) since `since`. */
 function growthOf(host: string, out: string[], since?: ConsoleMark): ConsoleGrowth {
-  const [inode = "", bytesText = "", fromText = ""] = (out[0] ?? "").split(" ");
-  const [bytes, from, connected, reconnecting, lost] = [
+  const [inode = "", bytesText = "", fromText = "", at = "", launchesText = ""] = (
+    out[0] ?? ""
+  ).split(" ");
+  const [bytes, from, launches, connected, reconnecting, lost] = [
     bytesText,
     fromText,
+    launchesText,
     ...out.slice(1, 4),
   ].map(Number);
-  if (!inode || [bytes, from, connected, reconnecting, lost].some((n) => !Number.isFinite(n))) {
+  if (
+    !inode ||
+    !/^\d+\.\d+$/.test(at) ||
+    [bytes, from, launches, connected, reconnecting, lost].some((n) => !Number.isFinite(n))
+  ) {
     throw new Error(
       `the guest console on ${host} could not be read: ${out.join(" | ").slice(0, 300)}`,
     );
   }
-  const mark = { host, inode, bytes: bytes! };
-  if (!since)
-    return { connected: 0, reconnecting: 0, lost: 0, how: "marked", relaunched: false, mark };
+  const mark = { host, inode, bytes: bytes!, at };
+  if (!since) {
+    return { connected: 0, reconnecting: 0, lost: 0, how: "marked", launches: 0, mark };
+  }
   if (since.host !== host) throw new Error(`the console was marked on ${since.host}, not ${host}`);
-  const same = inode === since.inode && from === since.bytes;
+  if (launches === 0 && from !== since.bytes) {
+    throw new Error(
+      `the guest console on ${host} is not the marked one continued (inode ${since.inode} of ${since.bytes} bytes, now ${inode} of ${bytes}), yet the host journal records no VMM launch since`,
+    );
+  }
   if (bytes! - from! > CONSOLE_KEPT) {
     throw new Error(
       `the guest console gained ${bytes! - from!} bytes, more than the host keeps of it, so a count of it could miss lines`,
@@ -476,20 +511,26 @@ function growthOf(host: string, out: string[], since?: ConsoleMark): ConsoleGrow
     connected: connected!,
     reconnecting: reconnecting!,
     lost: lost!,
-    how: same
-      ? `${bytes! - from!} bytes the console gained`
-      : `a new console of ${bytes} bytes (the VMM launched again)`,
-    relaunched: !same,
+    how:
+      launches === 0
+        ? `${bytes! - from!} bytes the console gained`
+        : `the console of a VMM launched since, ${bytes} bytes, after ${launches} launch(es)`,
+    launches: launches!,
     mark,
   };
 }
 /**
  * Reads the console on `host` from `since`: the bytes the same file gained
- * after it, or all of a newer file (a VMM launched since). With no mark,
- * only marks where it is now.
+ * after it, or, after a launch the host's journal records, all of the
+ * file that launch wrote. With no mark, only marks where it is now.
  */
 function consoleSince(host: string, since?: ConsoleMark): ConsoleGrowth {
-  const script = `f=${vmDir(state.sandbox!)}/console.log; i=$(stat -c %i $f)\n${countScript(since)}`;
+  const script = [
+    `f=${vmDir(state.sandbox!)}/console.log`,
+    launchesScript(since),
+    `i=$(stat -c %i $f)`,
+    countScript(since),
+  ].join("\n");
   return growthOf(host, asRoot(host, script).trim().split("\n"), since);
 }
 const connections = (g: ConsoleGrowth) => g.connected + g.reconnecting + g.lost;
@@ -594,7 +635,7 @@ function connectGet(port: number, path: string): Promise<string> {
           `X-API-Key: ${OPENGENI_KEY}\r\nConnection: Upgrade\r\nUpgrade: compute-stream\r\n\r\n`,
       );
     });
-    socket.on("data", (chunk) => {
+    socket.on("data", (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
       if (!upgraded) {
         const end = buffer.indexOf("\r\n\r\n");
@@ -1300,6 +1341,8 @@ const WITNESS_PORTS: Record<string, number> = {
   archived: 8773,
   remote: 8774,
 };
+/** The witness port of the vm-crash check. */
+const VM_CRASH_PORT = 8775;
 type Witness = { token: string; pid: string; memory: string };
 async function askWitness(port: number, timeoutMs?: number): Promise<Witness> {
   const out = await execOk(
@@ -1462,7 +1505,7 @@ check(
     };
     const guestSums = async () => {
       const out = await execOk("cd e2e/link && sha256sum in-* out-*", 120_000);
-      const seen = new Map(
+      const seen = new Map<string, string>(
         out
           .trim()
           .split("\n")
@@ -1514,13 +1557,13 @@ check(
     const during = await step("the guest console after the transfers", async () =>
       consoleSince(host, marked),
     );
+    // Running checkpoints keep the VMM: a launch means it started over,
+    // and the old console's last lines went uncounted.
+    if (during.launches !== 0) {
+      throw new Error(`the VMM launched again during the transfers: ${describeGrowth(during)}`);
+    }
     if (connections(during) !== 0) {
       throw new Error(`the agent reconnected during the transfers: ${describeGrowth(during)}`);
-    }
-    // Running checkpoints keep the VMM, so its console: a new one means it
-    // launched again, and the old one's last lines went uncounted.
-    if (during.relaunched) {
-      throw new Error(`the VMM launched again during the transfers: ${describeGrowth(during)}`);
     }
     // Then a saved sleep, woken by a read.
     const sleepFrom = new Date().toISOString();
@@ -1533,11 +1576,11 @@ check(
     const asleep = await step("the guest console asleep", async () =>
       consoleSince(host, during.mark),
     );
+    if (asleep.launches !== 0) {
+      throw new Error(`the VMM launched again before it was saved: ${describeGrowth(asleep)}`);
+    }
     if (connections(asleep) !== 0) {
       throw new Error(`the agent reconnected going to sleep: ${describeGrowth(asleep)}`);
-    }
-    if (asleep.relaunched) {
-      throw new Error(`the VMM launched again before it was saved: ${describeGrowth(asleep)}`);
     }
     const sleepTo = new Date().toISOString();
     const wakeStart = Date.now();
@@ -1560,6 +1603,11 @@ check(
     const growth = await step("the guest console after", async () =>
       consoleSince(host, asleep.mark),
     );
+    // The wake launches the VMM once; a second launch's console would hide
+    // the first's lines.
+    if (growth.launches > 1) {
+      throw new Error(`the VMM launched more than once to wake: ${describeGrowth(growth)}`);
+    }
     if (connections(growth) !== 0) {
       throw new Error(`the agent reconnected across the saved sleep: ${describeGrowth(growth)}`);
     }
@@ -1581,20 +1629,23 @@ check(
   },
 );
 
-// A host that loses a running sandbox's VMM restores it from its last
-// checkpoint: what the sandbox did after that checkpoint is lost (the
-// expected loss for a crash), and the restored guest's agent, whose
-// streams the host no longer has, reconnects exactly once.
+// A sandbox whose VMM dies while it runs boots again from its disk on the
+// same host (ADR 10's crash table): its programs are lost and every write
+// it made is kept, even one after its last running checkpoint (restoring
+// that checkpoint would roll the disk back). A command in flight at the
+// crash ends with an error within its timeout, and the new boot's agent
+// connects exactly once.
 check(
-  "stale-restore",
-  "a killed VMM comes back from its last checkpoint on the same host: the write before it kept, the one after lost, one reconnect",
+  "vm-crash",
+  "a VMM killed while it runs boots again from its disk on the same host: every write kept, programs lost, the command in flight ends with an error, one reconnect",
   ["files"],
   async () => {
     const host = (await sandbox()).host!;
+    const id = state.sandbox!;
     const marked = await step("the guest console before", async () => consoleSince(host).mark);
     const boot = (await sandboxState()).generation;
-    // A process with memory, which only a restore of the VM's memory keeps.
-    const port = 8775;
+    if (boot === null) throw new Error("the host reports no boot generation");
+    // A running process, which the crash must take with it.
     const token = `w-${rand()}`;
     await og("POST", `${ses()}/fs/write`, {
       path: "e2e/witness.py",
@@ -1602,12 +1653,12 @@ check(
       encoding: "utf8",
     });
     await execOk(
-      `(setsid nohup python3 e2e/witness.py ${token} ${port} >/tmp/witness-${port}.log 2>&1 &) && sleep 2`,
+      `(setsid nohup python3 e2e/witness.py ${token} ${VM_CRASH_PORT} >/tmp/witness-${VM_CRASH_PORT}.log 2>&1 &) && sleep 2`,
     );
     const witness = await step("the process before", async () => {
       for (let tries = 0; ; tries += 1) {
         try {
-          return await askWitness(port);
+          return await askWitness(VM_CRASH_PORT);
         } catch (error) {
           if (tries >= 20) throw error;
           await sleep(500);
@@ -1616,9 +1667,10 @@ check(
     });
     const first = `first-${rand()}`;
     const second = `second-${rand()}`;
-    await execOk(`rm -f e2e/stale-*.txt; printf ${first} > e2e/stale-1.txt && sync`);
+    await execOk(`rm -f e2e/crash-*; printf ${first} > e2e/crash-1.txt && sync`);
     const firstAt = new Date().toISOString();
-    // A checkpoint that begins after the first write and completes.
+    // A checkpoint that begins after the first write and completes, so the
+    // newest checkpoint holds the first write and not the second.
     const checkpointed = await step("a checkpoint after the first write", async () => {
       const limit = Date.now() + 150_000;
       let idle = false;
@@ -1645,24 +1697,42 @@ check(
         await sleep(200);
       }
     });
-    await execOk(`printf ${second} > e2e/stale-2.txt && sync`);
+    await execOk(`printf ${second} > e2e/crash-2.txt && sync`);
     const secondAt = new Date().toISOString();
-    // Whether the host holds other sandboxes, whose lines its journal would
-    // mix with this one's.
-    const alone = async () => (await hosts()).find((one) => one.name === host)?.sandboxes === 1;
-    const aloneBefore = await alone();
+    // A command running in the guest when the VMM dies: it says it began,
+    // then would run on for 30 s.
+    const inflightTimeoutMs = 60_000;
+    const inflightAbort = new AbortController();
+    const inflightSent = Date.now();
+    const inflight = exec(
+      "touch e2e/crash-inflight; sleep 30; echo finished",
+      inflightTimeoutMs,
+      inflightAbort.signal,
+    ).then(
+      (result) => ({ settled: Date.now(), result, error: undefined as unknown }),
+      (error: unknown) => ({ settled: Date.now(), result: undefined, error }),
+    );
+    await step("the command in flight is running", async () => {
+      for (let tries = 0; ; tries += 1) {
+        const seen = await exec("test -f e2e/crash-inflight && echo yes || echo no");
+        if (seen.stdout.trim() === "yes") return;
+        if (tries >= 20) throw new Error("the command in flight did not begin within 10 s");
+        await sleep(500);
+      }
+    });
     // Kills the VMM the jail's pid file names, checked to be Firecracker
     // started for this sandbox (`--id <sandbox>`), with its console held
     // open, so what it wrote to its end is counted even if the host
     // launches a new one at once.
-    const dir = vmDir(state.sandbox!);
+    const dir = vmDir(id);
     const killing = await step("kill the sandbox's Firecracker on its host", async () =>
       asRoot(
         host,
         [
           `pid=$(cat ${dir}/root/firecracker.pid); [ -n "$pid" ] || exit 3`,
           `[ "$(cat /proc/$pid/comm)" = firecracker ] || exit 4`,
-          `tr '\\0' ' ' < /proc/$pid/cmdline | grep -q -- ' --id ${state.sandbox} ' || exit 5`,
+          `tr '\\0' ' ' < /proc/$pid/cmdline | grep -q -- ' --id ${id} ' || exit 5`,
+          launchesScript(marked),
           `i=$(stat -c %i ${dir}/console.log); exec 3< ${dir}/console.log`,
           `kill -9 $pid; for n in $(seq 50); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done`,
           `kill -0 $pid 2>/dev/null && exit 6`,
@@ -1681,56 +1751,133 @@ check(
       throw new Error(
         `the kill came ${((killedAt - checkpointed) / 1000).toFixed(0)} s after the checkpoint; the next one may have taken the second write`,
       );
-    // The next command, within one bound for every attempt.
+    const failures: string[] = [];
+    // The next command, within one bound for every attempt. Each attempt
+    // asks for a 60 s timeout and is given 15 s more to answer; one that
+    // does not is cut off and retried, and counts as a request that hung.
     const deadline = killedAt + 240_000;
     let out = "";
     let attempts = 0;
+    const hung: string[] = [];
     await step("the next command", async () => {
       for (;;) {
         const left = deadline - Date.now();
-        if (left <= 0) throw new Error(`no answer within 240 s of the kill (${attempts} tries)`);
-        attempts += 1;
-        const result = await exec(
-          "cat e2e/stale-1.txt; echo; cat e2e/stale-2.txt 2>/dev/null || echo second-missing",
-          Math.min(120_000, left),
-        ).catch((error) => ({ stdout: "", stderr: String(error), exitCode: -1 }));
-        if (Date.now() > deadline) {
+        if (left <= 0) {
           throw new Error(
-            `the answer came ${((Date.now() - killedAt) / 1000).toFixed(0)} s after the kill, past the 240 s bound (${attempts} tries)`,
+            `no answer within 240 s of the kill (${attempts} tries${hung.length ? `; ${hung.join(", ")}` : ""})`,
           );
         }
-        if (result.exitCode === 0) {
+        attempts += 1;
+        const askedMs = Math.min(60_000, left);
+        const sent = Date.now();
+        const cut = AbortSignal.timeout(Math.min(askedMs + 15_000, left));
+        const result = await exec(
+          "cat e2e/crash-1.txt; echo; cat e2e/crash-2.txt 2>/dev/null || echo second-missing",
+          askedMs,
+          cut,
+        ).catch((error) => ({ stdout: "", stderr: String(error), exitCode: -1 }));
+        if (cut.aborted) {
+          hung.push(
+            `try ${attempts} had no answer ${((Date.now() - sent) / 1000).toFixed(0)} s after it was sent (timeout ${askedMs / 1000} s)`,
+          );
+        }
+        if (Date.now() > deadline) {
+          throw new Error(
+            `the answer came ${((Date.now() - killedAt) / 1000).toFixed(0)} s after the kill, past the 240 s bound (${attempts} tries${hung.length ? `; ${hung.join(", ")}` : ""})`,
+          );
+        }
+        if (result.exitCode === 0 && !cut.aborted) {
           out = result.stdout.trim();
           return;
         }
         await sleep(Math.min(3_000, Math.max(0, deadline - Date.now())));
       }
     });
+    if (hung.length > 0) failures.push(`the next command: ${hung.join(", ")}`);
     const answered = ((Date.now() - killedAt) / 1000).toFixed(1);
-    if (out !== `${first}\nsecond-missing`) {
-      throw new Error(
-        `expected the first write and not the second after restoring the checkpoint; the sandbox answered ${JSON.stringify(out.slice(0, 200))}`,
-      );
-    }
-    const after = await step("the process after", () => askWitness(port, 120_000));
-    if (after.token !== token || after.pid !== witness.pid || after.memory !== "intact") {
-      throw new Error(
-        `the process did not come back with the VM's memory: before ${JSON.stringify(witness)}, after ${JSON.stringify(after)}`,
+    if (out !== `${first}\n${second}`) {
+      failures.push(
+        `expected both writes kept (the disk is not rolled back to the checkpoint); the sandbox answered ${JSON.stringify(out.slice(0, 200))}`,
       );
     }
     const now = await sandboxState();
-    if (now.host !== host) throw new Error(`restored on ${now.host}, not on ${host}`);
+    if (now.host !== host) failures.push(`it came back on ${now.host}, not on ${host}`);
+    if (now.generation !== boot + 1) {
+      failures.push(`generation ${boot} -> ${now.generation}, not one reboot`);
+    }
+    // The process went with the crash.
+    const survivors = (
+      await execOk(
+        `for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null; echo; done | grep -c '[w]itness.py ${token}' || true`,
+      )
+    ).trim();
+    if (survivors !== "0") failures.push(`process ${witness.pid} (${token}) survived the crash`);
+    // The host says so: running programs lost, files kept.
+    const since = Math.floor(Date.parse(secondAt) / 1000);
+    const journal = onHost(
+      host,
+      `j=$(sudo journalctl --no-pager -o cat -u 'compute-*' --since @${since}); ` +
+        `printf '%s\\n' "$j" | grep '"compute.alarm":"programs_lost"' | grep -c '"compute.sandbox.id":"${id}"' || true; ` +
+        `for p in 'an agent-link stream cannot go on' 'agent-link streams the guest no longer has ended'; do ` +
+        `printf '%s\\n' "$j" | grep "$p" | grep -c '${id}' || true; printf '%s\\n' "$j" | grep -c "$p" || true; done; ` +
+        `for p in 'broke the protocol' 'did not say hello'; do printf '%s\\n' "$j" | grep -c "$p" || true; done`,
+    )
+      .trim()
+      .split("\n")
+      .map(Number);
+    const [
+      lostAlarm = 0,
+      cannotOwn = 0,
+      cannot = 0,
+      endedOwn = 0,
+      ended = 0,
+      broke = 0,
+      nohello = 0,
+    ] = journal;
+    if (lostAlarm < 1) failures.push(`the host journal has no programs_lost alarm for ${id}`);
+    if (broke > 0 || nohello > 0) {
+      failures.push(
+        `the host journal after the kill: ${broke} stream(s) broke the protocol, ${nohello} connection(s) did not say hello`,
+      );
+    }
+    // The command in flight ends with an error within its own timeout (and
+    // some slack for the API), not a hang and not a run on the new boot.
+    const inflightBound = inflightSent + inflightTimeoutMs + 30_000;
+    const timer = setTimeout(() => inflightAbort.abort(), Math.max(0, inflightBound - Date.now()));
+    const settledInflight = await step("the command in flight ends", () => inflight);
+    clearTimeout(timer);
+    const inflightSeconds = ((settledInflight.settled - inflightSent) / 1000).toFixed(1);
+    let inflightHow: string;
+    if (settledInflight.result) {
+      const { exitCode, stdout } = settledInflight.result;
+      if (exitCode === 0 || stdout.includes("finished")) {
+        failures.push(
+          `the command in flight at the crash came back exit ${exitCode} ${JSON.stringify(stdout.trim().slice(0, 100))} after ${inflightSeconds} s, as if it had run to the end`,
+        );
+      }
+      inflightHow = `exit ${exitCode} after ${inflightSeconds} s`;
+    } else if (inflightAbort.signal.aborted) {
+      failures.push(
+        `the command in flight at the crash had no answer ${((inflightBound - inflightSent) / 1000).toFixed(0)} s after it was sent (its timeout is ${inflightTimeoutMs / 1000} s): it hangs`,
+      );
+      inflightHow = "no answer";
+    } else {
+      inflightHow = `${String(settledInflight.error).slice(0, 160)} after ${inflightSeconds} s`;
+    }
     // Wait out the agent's reconnect, then count it: the dead VMM's console
     // to its end (read through the descriptor held across the kill), then
-    // whatever the host's new launch wrote, whole.
+    // the new launch's, whole.
     let restored = consoleSince(host, dead.mark);
     for (let tries = 0; dead.connected + restored.connected < 1 && tries < 12; tries += 1) {
       await sleep(5_000);
       restored = consoleSince(host, dead.mark);
     }
-    if (!restored.relaunched) {
-      throw new Error(
-        `the host did not launch a new VMM after the kill (the console is still the dead one's)`,
+    if (dead.launches !== 0) {
+      failures.push(`the VMM launched again before the kill: ${describeGrowth(dead)}`);
+    }
+    if (restored.launches !== 1) {
+      failures.push(
+        `the host journal records ${restored.launches} VMM launches after the kill, not the one boot: ${describeGrowth(restored)}`,
       );
     }
     const growth: ConsoleGrowth = {
@@ -1738,54 +1885,35 @@ check(
       reconnecting: dead.reconnecting + restored.reconnecting,
       lost: dead.lost + restored.lost,
       how: `up to the kill: ${dead.how}; then ${restored.how}`,
-      relaunched: true,
+      launches: restored.launches,
       mark: restored.mark,
     };
-    if (growth.connected !== 1)
-      throw new Error(
-        `the agent connected ${growth.connected} times after the restore, not once: ${describeGrowth(growth)}`,
-      );
-    // The old streams ended cleanly, by evidence of this sandbox: its guest
-    // was told the host lost its connections (its own console), or the
-    // host, holding only this sandbox before and after, ended streams (the
-    // host's journal lines do not name the sandbox). Nothing on the host
-    // broke the protocol meanwhile.
-    const since = Math.floor(Date.parse(secondAt) / 1000);
-    const [cannot = 0, ended = 0, broke = 0, nohello = 0] = onHost(
-      host,
-      `j=$(sudo journalctl --no-pager -o cat -u 'compute-*' --since @${since}); ` +
-        `for p in 'an agent-link stream cannot go on' 'agent-link streams the guest no longer has ended' 'broke the protocol' 'did not say hello'; do ` +
-        `printf '%s\\n' "$j" | grep -c "$p" || true; done`,
-    )
-      .trim()
-      .split("\n")
-      .map(Number);
-    if (broke > 0 || nohello > 0) {
-      throw new Error(
-        `the host journal after the kill: ${broke} stream(s) broke the protocol, ${nohello} connection(s) did not say hello`,
+    if (growth.connected !== 1) {
+      failures.push(
+        `the agent connected ${growth.connected} times after the crash, not once: ${describeGrowth(growth)}`,
       );
     }
-    const aloneAfter = await alone();
-    let ending: string;
+    // The old streams ended, by evidence of this sandbox: its guest was
+    // told the host lost its connections, or a host journal line about
+    // ending streams names it.
+    let ending = "";
     if (growth.lost >= 1) {
-      ending = `the guest was told the host lost its connections (its console, ${growth.lost} time(s))`;
-    } else if (aloneBefore && aloneAfter && cannot + ended >= 1) {
-      ending = `the host, holding only this sandbox throughout, ended its streams ("cannot go on" ${cannot}, streams ended ${ended})`;
+      ending = `the guest was told the host lost its connections (${growth.lost} time(s))`;
+    } else if (cannotOwn + endedOwn >= 1) {
+      ending = `the host journal names this sandbox ("cannot go on" ${cannotOwn}, streams ended ${endedOwn})`;
     } else {
-      throw new Error(
-        `no evidence that this sandbox's old streams ended: its guest was not told they were lost, and ` +
-          (aloneBefore && aloneAfter
-            ? `the host journal has no "cannot go on" or ended streams`
-            : `the host held other sandboxes (before: ${aloneBefore ? "alone" : "shared"}, after: ${aloneAfter ? "alone" : "shared"}), so its journal ("cannot go on" ${cannot}, streams ended ${ended}) cannot be attributed`),
+      failures.push(
+        `no evidence of this sandbox that its old streams ended: its guest was not told they were lost, and no host journal line naming it ended them ` +
+          `(the host's "cannot go on" ${cannot} and streams-ended ${ended} lines since the second write do not name a sandbox)`,
       );
     }
-    proofs.push({ kind: "checkpoint", sandbox: state.sandbox!, from: firstAt, to: secondAt });
+    if (failures.length > 0) throw new Error(failures.join("; "));
+    proofs.push({ kind: "checkpoint", sandbox: id, from: firstAt, to: secondAt });
     return (
-      `killed Firecracker ${killed} on ${host} ${((killedAt - checkpointed) / 1000).toFixed(1)} s after a checkpoint; ` +
-      `the next command answered ${answered} s after the kill (${attempts} tries), restored on ${now.host}: ` +
-      `the write before the checkpoint kept and the one after it lost, which is the expected loss for a crash after a running checkpoint; ` +
-      `process ${after.pid} and its 32 MiB intact, generation ${boot} -> ${now.generation}; ` +
-      `console ${describeGrowth(growth)}; old streams ended: ${ending}; host protocol errors 0`
+      `killed Firecracker ${killed} on ${host} ${((killedAt - checkpointed) / 1000).toFixed(1)} s after a running checkpoint; ` +
+      `the next command answered ${answered} s after the kill (${attempts} tries) on ${now.host}, generation ${boot} -> ${now.generation}: ` +
+      `both writes kept (the one after the checkpoint too: the disk is not rolled back), process ${witness.pid} gone, programs_lost alarm ${lostAlarm}; ` +
+      `the command in flight ended with ${inflightHow}; console ${describeGrowth(growth)}; old streams ended: ${ending}; host protocol errors 0`
     );
   },
 );
@@ -1989,7 +2117,7 @@ check(
     if (!AGENT_BIN) throw new Error("AGENT_BIN is not set");
     // The suite's helpers follow state.session; this check borrows them for
     // its own session and gives the compute session back afterwards.
-    const saved = { session: state.session, seen };
+    const saved = { session: state.session, eventCursor };
     const config = mkdtempSync(`${tmpdir()}/e2e-machine-`);
     const agentEnv = {
       ...process.env,
@@ -2063,7 +2191,7 @@ check(
       );
       own = created.id;
       state.session = { id: created.id };
-      seen = 0;
+      eventCursor = 0;
       const turn = await step("its first turn", () => nextTurn());
       if (!turn.text.includes(id))
         throw new Error(`the turn answered ${JSON.stringify(turn.text.slice(0, 200))}`);
@@ -2103,7 +2231,7 @@ check(
     } finally {
       // The compute session goes back first, whatever happens below.
       state.session = saved.session;
-      seen = saved.seen;
+      eventCursor = saved.eventCursor;
       const ownSession = own;
       await Promise.all([
         ownSession

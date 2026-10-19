@@ -194,7 +194,7 @@ fleet() {
   g artifacts repositories add-iam-policy-binding "$PREFIX" --location "$REGION" \
     --member "serviceAccount:$(cat "$out/control_service_account")" --role roles/artifactregistry.writer \
     >/dev/null
-  # The suite's fault injection (stale-restore kills one sandbox's VMM) and
+  # The suite's fault injection (vm-crash kills one sandbox's VMM) and
   # its looks at a guest's console reach the hosts as the stack VM's
   # identity over OS Login, on this environment's hosts only; down removes it.
   g projects add-iam-policy-binding "$PROJECT" --member "serviceAccount:$(cat "$out/control_service_account")" \

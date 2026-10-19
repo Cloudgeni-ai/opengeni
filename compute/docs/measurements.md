@@ -1113,4 +1113,4 @@ restore notice, no "host full" refusal, no stream protocol error and no
 The guest consoles cannot show the reconnects of this run: a VMM writes a
 new console at each launch, so the minute copies keep only the last
 launch, and the sandbox goes with the delete. From r15 the link-stream and
-stale-restore checks count them on the host during the check.
+vm-crash checks count them on the host during the check.

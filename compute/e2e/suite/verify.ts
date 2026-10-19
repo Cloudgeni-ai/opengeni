@@ -175,7 +175,7 @@ function checkpointed(proof: CheckpointProof): { ok: boolean; how: string } {
 
 // The checks whose pass rests on the journals: a pass with no proof to
 // verify is not one.
-const NEEDS_PROOF = /^(sleep-.*|checkpoint|link-stream|stale-restore)$/;
+const NEEDS_PROOF = /^(sleep-.*|checkpoint|link-stream|vm-crash)$/;
 for (const result of saved.results) {
   if (result.status === "pass" && !result.proofs?.length && NEEDS_PROOF.test(result.id)) {
     result.status = "fail";

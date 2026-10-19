@@ -12,8 +12,8 @@ name: Compute CI
 #             and the smoke framework's own tests
 #   deploy    the release packaging and deployment around it: shellcheck of
 #             the host bundle's scripts, the GCP host fleet's Terraform
-#             (fmt, validate), and the Helm chart's computeControl render
-#             tests
+#             (fmt, validate), the Helm chart's computeControl render
+#             tests, and the e2e environment's scripts and suite typecheck
 #   kvm       real Firecracker VMs on the runner's KVM through the gate
 #             script (compute/ci/gate.sh): the pager's kernel tests, the
 #             per-sandbox network, the engine, save and wake with an agent
@@ -188,6 +188,14 @@ jobs:
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
       - name: Helm chart (computeControl)
         run: bun test deploy/helm/opengeni/test/compute-control.test.ts
+      # The all-GCP end-to-end environment's scripts and suite: they run only
+      # against a real environment, so CI checks that they parse and that
+      # every name the suite's checks use resolves (a typecheck).
+      - name: e2e environment and suite
+        run: |
+          shellcheck --severity=warning compute/e2e/env.sh compute/e2e/stack/*.sh
+          bun install --frozen-lockfile
+          bun node_modules/typescript/bin/tsc -p compute/e2e/suite
 
   kvm:
     name: real Firecracker on KVM
