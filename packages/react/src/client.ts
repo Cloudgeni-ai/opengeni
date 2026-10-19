@@ -178,9 +178,12 @@ type SessionClientMethods = Pick<
     >
   >;
 
-/** Compact list transport is optional for scripted and older clients. */
+/**
+ * Compact list transport is optional for scripted and older clients, and so is
+ * the attention mutation an open conversation uses to mark itself read.
+ */
 export type SessionClientLike = SessionClientMethods &
-  Partial<Pick<OpenGeniClient, "listSessionSummaryPage" | "findGoal">>;
+  Partial<Pick<OpenGeniClient, "listSessionSummaryPage" | "findGoal" | "updateSessionAttention">>;
 
 /**
  * Tenant-safe client surface required by the session-only React entry.
@@ -211,6 +214,11 @@ export type EmbeddedSessionClientLike = Pick<
   | "sendApprovalDecision"
 > & {
   setWorkspaceInferenceState?: OpenGeniClient["setWorkspaceInferenceState"] | undefined;
+  /**
+   * Optional: lets an open conversation mark itself read while the person
+   * watches it. Without it the conversation works, but replies stay unread.
+   */
+  updateSessionAttention?: OpenGeniClient["updateSessionAttention"] | undefined;
 };
 
 /** Event-read surface shared by hooks that optionally tail a session. */
