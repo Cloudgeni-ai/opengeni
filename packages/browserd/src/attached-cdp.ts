@@ -106,6 +106,10 @@ export async function createAttachedChromeTransport(options: AttachedChromeDrive
 export function createAttachedChromeDriver(
   session: { browserSessionId: string; controllerGeneration: string },
   transport: { runner: BrowserCommandRunner; connection: AttachedChromeCdpConnection },
+  resolveWorkspaceFiles?: (
+    operationId: string,
+    workspaceFileIds: readonly string[],
+  ) => Promise<readonly string[]>,
 ): AgentBrowserDriver {
   return new AgentBrowserDriver({
     browserSessionId: session.browserSessionId,
@@ -121,6 +125,7 @@ export function createAttachedChromeDriver(
     // Agent tabs open in the background so the user's foreground stays
     // theirs; focus emulation keeps them rendering and taking input.
     focusEmulation: true,
+    ...(resolveWorkspaceFiles ? { resolveWorkspaceFiles } : {}),
   });
 }
 
@@ -238,7 +243,9 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         } catch (error) {
           // A failed bridge reply does not prove that a queued command cannot
           // arrive later. Do not attach a replacement debugger underneath it.
-          if (mayChangePage) this.uncertainTabs.add(tabId);
+          // Chrome's own protocol refusal is the reply to that exact command,
+          // so it leaves nothing in flight.
+          if (mayChangePage && !chromeProtocolRefusal(error)) this.uncertainTabs.add(tabId);
           if (navigation && (await this.navigationEndedControl(tabId, detachEpoch)))
             throw new InteractionDefiniteDriverError(
               "unsupported",
@@ -624,11 +631,34 @@ function mapBridgeError(method: string, error: unknown, sessionId?: string): Err
         "Browser tab debugging unavailable; observe the tab again",
         true,
       );
-    return error.code === "driver_rejected"
-      ? new CdpProtocolError(method, -32_000, error.message)
-      : new CdpTransportError(error.message);
+    if (error.code !== "driver_rejected") return new CdpTransportError(error.message);
+    const refusal = chromeProtocolRefusal(error);
+    return refusal
+      ? new CdpProtocolError(method, refusal.code, refusal.message)
+      : new CdpProtocolError(method, -32_000, error.message);
   }
   return new CdpTransportError(error instanceof Error ? error.message : "attached Chrome failed");
+}
+
+/** chrome.debugger rejects a command the browser refused with the protocol's
+ * own error object serialized as the message, for example
+ * {"code":-32000,"message":"Not allowed"}. Unwrap it so attached Chrome
+ * reports the same protocol errors as a direct CDP connection. */
+export function chromeProtocolRefusal(error: unknown): { code: number; message: string } | null {
+  if (!(error instanceof AttachedBrowserBridgeError) || error.code !== "driver_rejected")
+    return null;
+  const text = error.message.trim();
+  if (!text.startsWith("{")) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!Number.isSafeInteger(record.code) || typeof record.message !== "string") return null;
+  return { code: record.code as number, message: record.message };
 }
 
 function nestedSessionId(sessionId: string): string | undefined {

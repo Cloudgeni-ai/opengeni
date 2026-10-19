@@ -2872,7 +2872,7 @@ async function createBrowserDriver(
         ? { authorityFile: context.transport.authorityFile }
         : {}),
     });
-    return createAttachedChromeDriver(context, attached);
+    return createAttachedChromeDriver(context, attached, context.resolveWorkspaceFiles);
   }
   if (context.transport.kind === "managed" && context.transport.engine === "lightpanda") {
     if (!lightpandaBinary) {

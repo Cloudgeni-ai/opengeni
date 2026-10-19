@@ -3,7 +3,8 @@ import {
   navigateToInterceptedMetadataDocument,
 } from "./browser-metadata";
 import { createHash, randomUUID } from "node:crypto";
-import { resolve as resolvePath } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { basename, extname, resolve as resolvePath } from "node:path";
 import {
   BrowserActionCommand,
   BrowserClipboard,
@@ -96,6 +97,66 @@ import {
 } from "./headless-session-cookies";
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
+// Attached Chrome without file access receives upload bytes over its
+// one-megabyte command channel: 384 KiB per chunk is 512 KiB of base64.
+const ATTACHED_TRANSFER_CHUNK_BYTES = 384 * 1024;
+const ATTACHED_TRANSFER_UPLOAD_MAX_BYTES = 32 * 1024 * 1024;
+const TRANSFER_UPLOAD_FILES_FUNCTION = `function (parts, files) {
+  if (!(this instanceof HTMLInputElement) || this.type !== 'file' || this.disabled) {
+    return 'not_file_input';
+  }
+  const transfer = new DataTransfer();
+  files.forEach((file, index) => {
+    const chunks = (parts[index] || []).map((data) => {
+      const binary = atob(data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    });
+    transfer.items.add(new File(chunks, file.name, { type: file.type, lastModified: file.lastModified }));
+  });
+  this.files = transfer.files;
+  this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  this.dispatchEvent(new Event('change', { bubbles: true }));
+  return this.files.length;
+}`;
+// Chrome derives an uploaded file's type from its extension; mirror the
+// common ones so pages that check File.type accept the transferred file.
+const UPLOAD_MEDIA_TYPES: Readonly<Record<string, string>> = {
+  ".csv": "text/csv",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".gif": "image/gif",
+  ".htm": "text/html",
+  ".html": "text/html",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".json": "application/json",
+  ".md": "text/markdown",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".svg": "image/svg+xml",
+  ".txt": "text/plain",
+  ".wav": "audio/wav",
+  ".webm": "video/webm",
+  ".webp": "image/webp",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xml": "application/xml",
+  ".zip": "application/zip",
+};
+
+function uploadMediaType(path: string): string {
+  return UPLOAD_MEDIA_TYPES[extname(path).toLowerCase()] ?? "";
+}
+
+function formatMegabytes(bytes: number): string {
+  return `${Math.ceil(bytes / (1024 * 1024))} MB`;
+}
 const BROWSER_START_TIMEOUT_MS = 30_000;
 const TARGET_CREATION_SETTLE_TIMEOUT_MS = 5_000;
 const TARGET_CLOSE_SETTLE_TIMEOUT_MS = 2_000;
@@ -3851,7 +3912,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     frameId: string,
     paths: readonly string[],
   ): Promise<void> {
-    if (this.engine === "chromium") {
+    if (this.engine !== "lightpanda") {
       const input = await this.callOnNode(
         state,
         backendNodeId,
@@ -3880,12 +3941,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         );
       }
     }
+    const effectsBeforeSelection = state.actionEffectCount;
     try {
       await this.sendActionTarget(state, "DOM.setFileInputFiles", {
         files: [...paths],
         backendNodeId,
       });
     } catch (error) {
+      if (
+        this.engine === "chrome" &&
+        error instanceof CdpProtocolError &&
+        error.message === "Not allowed"
+      ) {
+        // Chrome lets an extension's debugger pick local files only when the
+        // person allowed it file URL access. Without that, put the same files
+        // on the input from the page, as a drag-and-drop would. The refusal
+        // selected nothing, so it is not a page effect.
+        state.actionEffectCount = effectsBeforeSelection;
+        await this.transferUploadFiles(state, backendNodeId, frameId, paths);
+        return;
+      }
       if (
         error instanceof CdpProtocolError &&
         error.message === "Node is not a file input element"
@@ -3896,6 +3971,139 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         );
       }
       throw error;
+    }
+  }
+
+  /** Set a file input's files from inside the page, in bounded chunks that fit
+   * the attached browser's one-megabyte command limit. The input receives the
+   * same input and change events as when Chrome selects the files itself. */
+  private async transferUploadFiles(
+    state: TargetState,
+    backendNodeId: number | null,
+    frameId: string,
+    paths: readonly string[],
+  ): Promise<void> {
+    if (backendNodeId === null) {
+      throw new InteractionDefiniteDriverError("invalid_action", "upload requires a file input");
+    }
+    const files = await Promise.all(paths.map(async (path) => ({ path, info: await stat(path) })));
+    const totalBytes = files.reduce((sum, file) => sum + file.info.size, 0);
+    if (totalBytes > ATTACHED_TRANSFER_UPLOAD_MAX_BYTES) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        `these files total ${formatMegabytes(totalBytes)}; without file access this Chrome can ` +
+          `receive at most ${formatMegabytes(ATTACHED_TRANSFER_UPLOAD_MAX_BYTES)} per upload. ` +
+          'The person can turn on "Allow access to file URLs" for the Opengeni extension in ' +
+          "chrome://extensions to upload larger files",
+      );
+    }
+    const world = await this.sendTarget<{ executionContextId?: unknown }>(
+      state,
+      "Page.createIsolatedWorld",
+      { frameId, worldName: "opengeni-upload" },
+    );
+    if (!Number.isSafeInteger(world.executionContextId)) {
+      throw new Error("CDP did not create an isolated upload world");
+    }
+    const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
+      backendNodeId,
+      executionContextId: world.executionContextId,
+    });
+    if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") {
+      throw new InteractionDefiniteDriverError(
+        "locator_not_found",
+        "upload file input is no longer present",
+      );
+    }
+    const inputId = resolved.object.objectId;
+    let partsId: string | null = null;
+    try {
+      const parts = await this.sendTarget<{ result?: unknown }>(state, "Runtime.callFunctionOn", {
+        objectId: inputId,
+        functionDeclaration: "function () { return []; }",
+        returnByValue: false,
+      });
+      if (!isRecord(parts.result) || typeof parts.result.objectId !== "string") {
+        throw new Error("CDP did not create an upload buffer");
+      }
+      partsId = parts.result.objectId;
+      for (const [index, file] of files.entries()) {
+        const bytes = await readFile(file.path);
+        if (bytes.byteLength !== file.info.size) {
+          throw new InteractionDefiniteDriverError(
+            "resource_unavailable",
+            "an upload file changed while it was being read",
+          );
+        }
+        for (let offset = 0; offset < bytes.byteLength; offset += ATTACHED_TRANSFER_CHUNK_BYTES) {
+          const appended = await this.sendTarget<{ exceptionDetails?: unknown }>(
+            state,
+            "Runtime.callFunctionOn",
+            {
+              objectId: partsId,
+              functionDeclaration:
+                "function (index, data) { (this[index] = this[index] || []).push(data); }",
+              arguments: [
+                { value: index },
+                {
+                  value: bytes
+                    .subarray(offset, offset + ATTACHED_TRANSFER_CHUNK_BYTES)
+                    .toString("base64"),
+                },
+              ],
+              returnByValue: true,
+            },
+          );
+          if (appended.exceptionDetails) throw new Error("browser upload buffer failed");
+        }
+      }
+      const result = await this.sendActionTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+        state,
+        "Runtime.callFunctionOn",
+        {
+          objectId: inputId,
+          functionDeclaration: TRANSFER_UPLOAD_FILES_FUNCTION,
+          arguments: [
+            { objectId: partsId },
+            {
+              value: files.map((file) => ({
+                name: basename(file.path),
+                type: uploadMediaType(file.path),
+                lastModified: Math.trunc(file.info.mtimeMs),
+              })),
+            },
+          ],
+          returnByValue: true,
+        },
+        { potentialEffect: true },
+      );
+      if (result.exceptionDetails) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "the page failed while receiving the upload; inspect the file input before continuing",
+        );
+      }
+      const selected = isRecord(result.result) ? result.result.value : undefined;
+      if (selected === "not_file_input") {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "upload target is no longer an enabled file input",
+        );
+      }
+      if (selected !== files.length) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "the file input did not keep every uploaded file; inspect it before continuing",
+        );
+      }
+    } finally {
+      for (const objectId of [partsId, inputId]) {
+        if (objectId) {
+          await this.sendTarget(state, "Runtime.releaseObject", { objectId }).catch(
+            () => undefined,
+          );
+        }
+      }
     }
   }
 
