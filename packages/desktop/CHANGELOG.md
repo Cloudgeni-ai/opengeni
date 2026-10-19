@@ -1,5 +1,13 @@
 # @opengeni/desktop
 
+## 0.2.2
+
+### Patch Changes
+
+- Updated dependencies [404e017]
+  - @opengeni/sdk@4.1.2
+  - @opengeni/agent-host@4.1.2
+
 ## 0.2.1
 
 ### Patch Changes
