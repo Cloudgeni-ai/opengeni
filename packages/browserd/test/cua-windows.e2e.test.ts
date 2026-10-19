@@ -174,7 +174,10 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
   120_000,
 );
 
-/** Whether this process runs elevated (only an administrator may query sessions). */
+/** Whether this process runs at high (or system) integrity, the elevation
+ * the CUA driver it starts inherits and checks for itself. */
 function elevated(): boolean {
-  return Bun.spawnSync(["net", "session"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+  const groups = Bun.spawnSync(["whoami", "/groups"], { stderr: "ignore" });
+  if (groups.exitCode !== 0) throw new Error("whoami /groups failed");
+  return /S-1-16-(?:12288|16384)\b/u.test(groups.stdout.toString());
 }
