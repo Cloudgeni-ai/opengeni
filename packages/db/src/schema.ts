@@ -2262,8 +2262,8 @@ export const connections = pgTable(
         organizationUserResourceAuthorities.organizationMembershipId,
       ],
     }).onDelete("restrict"),
-    // Migration 0255 owns the same-organization origin FK because Drizzle
-    // cannot express PostgreSQL's column-subset SET NULL action.
+    // Migrations own the same-organization origin FK (ON DELETE CASCADE since
+    // 0857, as origin_workspace_id always equals workspace_id).
   }),
 );
 
