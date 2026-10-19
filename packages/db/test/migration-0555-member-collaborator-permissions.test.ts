@@ -209,6 +209,9 @@ test("named members gain collaborator reads; custom sets and old writers stay co
     where tgrelid = 'workspace_memberships'::regclass and not tgisinternal
     order by tgname`;
   expect(triggers.map(({ name }) => name)).toEqual([
+    "allowance_membership_delete",
+    "allowance_membership_insert",
+    "allowance_membership_update",
     "normalize_legacy_member_connection_read_0516",
   ]);
 
