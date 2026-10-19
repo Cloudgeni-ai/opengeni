@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   OPENGENI_BROWSER_EXTENSION_URL,
   CUA_DESKTOP_TOOLS,
@@ -908,34 +909,132 @@ export function createInteractionAttemptToolDefinitions(
     listTargets: async (browserSessionId) =>
       (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
   });
-  /** Run one call on the requested or current tab and remember it on success. */
+  /** Resume a browser the API refused to use because it is not running. A
+   * browser suspended while idle (to make room for another one on its
+   * machine) or lost to a restarted controller resumes from its saved working
+   * copy, the way browser_open resumes it. Returns the resumed browser's tabs,
+   * or null when the browser was not paused, so the original error stands. */
+  const resumePausedBrowser = async (
+    browserSessionId: string,
+    operationId: string,
+  ): Promise<z.infer<typeof BrowserTargetListResponse> | null> => {
+    let before: z.infer<typeof BrowserSession>;
+    try {
+      before = await input.transport.getBrowserSession(input.workspaceId, browserSessionId);
+    } catch {
+      // When even the browser's state can't be read, the original refusal stands.
+      return null;
+    }
+    if (!isResumablePausedBrowser(before)) return null;
+    let resumed: z.infer<typeof BrowserSession>;
+    try {
+      resumed = (
+        await input.transport.resumeBrowserSession(input.workspaceId, browserSessionId, {
+          operationId: derivedOperationId("browser-tool-resume", operationId, browserSessionId),
+        })
+      ).session;
+    } catch (resumeError) {
+      // Another call may have resumed it first; a refused resume explains why.
+      resumed = await input.transport.getBrowserSession(input.workspaceId, browserSessionId);
+      if (resumed.lifecycle !== "active") throw resumeError;
+    }
+    if (resumed.lifecycle !== "active") {
+      throw new OpenGeniApiError(
+        409,
+        `BrowserSession ${browserSessionId} is still resuming from its saved state; try again shortly.`,
+        { code: "browser_resuming", retryable: true },
+      );
+    }
+    return await input.transport.listBrowserTargets(input.workspaceId, browserSessionId);
+  };
+  /** After a resume, tab IDs are new and unsaved page state may be gone, so a
+   * call aimed at an earlier tab does not run. Report the restored tabs and
+   * the selected tab's outline, so the next call can act on them directly. */
+  const resumedBrowserError = async (
+    tabs: z.infer<typeof BrowserTargetListResponse>,
+  ): Promise<BrowserTargetResolutionError> => {
+    const selectedTab = tabs.targets.find((target) => target.selected);
+    currentTab.use(tabs.browserSessionId, selectedTab?.id ?? null);
+    const observation = selectedTab
+      ? await input.transport
+          .observeBrowserTarget(input.workspaceId, tabs.browserSessionId, selectedTab.id)
+          .then((observed) => projectBrowserObservation(observed, "compact"))
+          .catch(() => undefined)
+      : undefined;
+    return new BrowserTargetResolutionError(
+      "browser_resumed",
+      [
+        "This browser had stopped (it was idle while its machine needed room, or its controller restarted) and has been resumed from its saved state.",
+        "Its tabs reloaded with new targetIds and unsaved page input may be gone, so this call did not run. Continue from the tabs below.",
+        browserTabsText({
+          ...agentTargetList(tabs),
+          ...(observation ? { mutationObservation: observation } : {}),
+        }),
+      ].join("\n"),
+    );
+  };
+  /** Run one call on the requested or current tab and remember it on success.
+   * When the browser had stopped, it resumes. A read on the current tab then
+   * runs again on the resumed browser's selected tab ("replay"); other calls
+   * report the restored tabs instead ("report"), since they name a tab that no
+   * longer exists or would act on a page the agent has not seen. */
   const onTab = async <T>(
     value: { browserSessionId?: string | undefined; targetId?: string | undefined },
+    context: { operationId: string },
+    afterResume: "replay" | "report",
     run: (tab: ResolvedBrowserTarget) => Promise<T>,
   ): Promise<T> => {
-    const tab = await currentTab.target(value);
+    let tab: ResolvedBrowserTarget | undefined;
     try {
+      // Finding the current tab lists the browser's tabs, which also fails
+      // while it is stopped.
+      tab = await currentTab.target(value);
       const output = await run(tab);
       currentTab.use(tab.browserSessionId, tab.targetId);
       return output;
     } catch (error) {
-      if (isGoneBrowserError(error)) currentTab.failed(tab);
-      throw error;
+      if (tab && isGoneBrowserError(error)) currentTab.failed(tab);
+      if (!isBrowserNotRunningError(error)) throw error;
+      const browser = tab ?? (await currentTab.session(value.browserSessionId));
+      const resumed = await resumePausedBrowser(browser.browserSessionId, context.operationId);
+      if (!resumed) throw error;
+      const selectedTab = resumed.targets.find((target) => target.selected);
+      if (afterResume === "report" || value.targetId !== undefined || !selectedTab) {
+        throw await resumedBrowserError(resumed);
+      }
+      const replayed = { ...browser, targetId: selectedTab.id, implicitTarget: true };
+      const output = await run(replayed);
+      currentTab.use(replayed.browserSessionId, replayed.targetId);
+      return output;
     }
   };
-  /** Run one call on the requested or current browser and remember it on success. */
+  /** Run one tab operation on the requested or current browser and remember
+   * it on success, resuming a browser that had stopped as onTab does. Listing
+   * or opening a tab then runs again; select and close name a tab from before
+   * the resume, whose ID no longer exists. */
   const onBrowser = async <T>(
-    browserSessionId: string | undefined,
+    value: { browserSessionId?: string | undefined; operation: string },
+    context: { operationId: string },
     run: (browser: ResolvedBrowserSession) => Promise<T>,
   ): Promise<T> => {
-    const browser = await currentTab.session(browserSessionId);
+    const browser = await currentTab.session(value.browserSessionId);
     try {
       const output = await run(browser);
       currentTab.use(browser.browserSessionId);
       return output;
     } catch (error) {
       if (isGoneBrowserError(error)) currentTab.failed(browser);
-      throw error;
+      if (!isBrowserNotRunningError(error)) throw error;
+      const resumed = await resumePausedBrowser(browser.browserSessionId, context.operationId);
+      if (!resumed) throw error;
+      if (value.operation !== "list" && value.operation !== "open") {
+        throw await resumedBrowserError(resumed);
+      }
+      const selectedTab = resumed.targets.find((target) => target.selected);
+      currentTab.use(browser.browserSessionId, selectedTab?.id ?? null);
+      const output = await run(browser);
+      currentTab.use(browser.browserSessionId);
+      return output;
     }
   };
   const add = <TInput extends z.ZodType, TOutput extends z.ZodType>(options: {
@@ -1129,8 +1228,8 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: false,
     idempotent: false,
     modelText: browserTabsText,
-    execute: async (value) =>
-      await onBrowser(value.browserSessionId, async ({ browserSessionId }) => {
+    execute: async (value, context) =>
+      await onBrowser(value, context, async ({ browserSessionId }) => {
         let mutationObservation: z.infer<typeof BrowserObservation> | undefined;
         if (value.operation === "open") {
           mutationObservation = await input.transport.openBrowserTarget(
@@ -1176,8 +1275,8 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: true,
     idempotent: true,
     modelText: agentObservationText,
-    execute: async (value) =>
-      await onTab(value, async ({ browserSessionId, targetId }) => {
+    execute: async (value, context) =>
+      await onTab(value, context, "replay", async ({ browserSessionId, targetId }) => {
         const observationRequest = input.transport.observeBrowserTarget(
           input.workspaceId,
           browserSessionId,
@@ -1232,8 +1331,8 @@ export function createInteractionAttemptToolDefinitions(
     idempotent: true,
     modelText: (output) =>
       output.source === "accessibility" ? browserReadText(output) : JSON.stringify(output),
-    execute: async (value) =>
-      await onTab(value, async ({ browserSessionId, targetId }) => {
+    execute: async (value, context) =>
+      await onTab(value, context, "replay", async ({ browserSessionId, targetId }) => {
         if (value.mode === "dom") {
           const state =
             value.expectedTargetGeneration !== undefined &&
@@ -1305,8 +1404,8 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserScreenshotOutput,
     readOnly: true,
     idempotent: true,
-    execute: async (value) =>
-      await onTab(value, async ({ browserSessionId, targetId }) => {
+    execute: async (value, context) =>
+      await onTab(value, context, "replay", async ({ browserSessionId, targetId }) => {
         const frame = await input.transport.captureBrowserTarget(
           input.workspaceId,
           browserSessionId,
@@ -1351,8 +1450,9 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: false,
     idempotent: true,
     modelText: agentActionText,
+    // An action never runs on a page that reloaded since the agent saw it.
     execute: async (value, context) =>
-      await onTab(value, async ({ browserSessionId, targetId }) => {
+      await onTab(value, context, "report", async ({ browserSessionId, targetId }) => {
         const action = await withPublishedUploadPaths(value.action, (path) =>
           publishUploadPath(context.operationId, path),
         );
@@ -1421,9 +1521,12 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserDiagnosticBatch,
     readOnly: true,
     idempotent: true,
-    execute: async (value) =>
+    // Diagnostics belong to the tab from before a resume, which is gone.
+    execute: async (value, context) =>
       await onTab(
         value,
+        context,
+        "report",
         async ({ browserSessionId, targetId }) =>
           await input.transport.listBrowserDiagnostics(
             input.workspaceId,
@@ -2189,6 +2292,30 @@ const RESUMABLE_LOST_BROWSER_FAILURES: ReadonlySet<string> = new Set([
   "controller_transition_expired",
 ]);
 
+/** A browser that is not running but continues from its saved working copy
+ * when resumed: suspended, or lost to a restarted controller. */
+function isResumablePausedBrowser(session: z.infer<typeof BrowserSession>): boolean {
+  return (
+    session.lifecycle === "suspended" ||
+    // A browser lost to a restarted controller continues from its preserved
+    // working copy. The resume refuses, and says why, when it cannot.
+    (session.lifecycle === "lost" && RESUMABLE_LOST_BROWSER_FAILURES.has(session.failureCode ?? ""))
+  );
+}
+
+/** A stable operation ID for a step a tool call takes on its own behalf, so a
+ * retried call repeats the same step instead of starting another. */
+function derivedOperationId(purpose: string, operationId: string, subject: string): string {
+  const bytes = createHash("sha256")
+    .update(`opengeni:${purpose}:v1\n${operationId}\n${subject}`, "utf8")
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 async function openBrowser(
   transport: InteractionTransport,
   workspaceId: string,
@@ -2285,12 +2412,7 @@ async function openBrowser(
       }
     }
   }
-  if (
-    session.lifecycle === "suspended" ||
-    // A browser lost to a restarted controller continues from its preserved
-    // working copy. The resume refuses, and says why, when it cannot.
-    (session.lifecycle === "lost" && RESUMABLE_LOST_BROWSER_FAILURES.has(session.failureCode ?? ""))
-  ) {
+  if (isResumablePausedBrowser(session)) {
     session = (
       await transport.resumeBrowserSession(workspaceId, session.id, {
         operationId: context.operationId,
@@ -3329,6 +3451,12 @@ function browserToolImageContent(
 /** The remembered browser or tab no longer exists. */
 function isGoneBrowserError(error: unknown): boolean {
   return error instanceof OpenGeniApiError && (error.status === 404 || error.status === 410);
+}
+
+/** The API refused the call before running it, possibly because its browser
+ * is not running. */
+function isBrowserNotRunningError(error: unknown): boolean {
+  return error instanceof OpenGeniApiError && error.status === 409 && !error.outcomeUnknown;
 }
 
 function interactionErrorResult(

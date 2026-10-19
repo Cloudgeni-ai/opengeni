@@ -1064,6 +1064,137 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test.each([
+    ["observe on the current tab", "browser_observe", {}, "replay"],
+    ["observe on a named tab", "browser_observe", { targetId: "tab-1" }, "report"],
+    [
+      "act on the current tab",
+      "browser_act",
+      { action: { type: "scroll", deltaX: 0, deltaY: 400 } },
+      "report",
+    ],
+    [
+      "act on a named tab",
+      "browser_act",
+      { targetId: "tab-1", action: { type: "scroll", deltaX: 0, deltaY: 400 } },
+      "report",
+    ],
+    ["list tabs", "browser_tabs", { operation: "list" }, "replay"],
+    ["close a named tab", "browser_tabs", { operation: "close", targetId: "tab-1" }, "report"],
+  ] as const)(
+    "browser tools resume a suspended browser (%s)",
+    async (_label, tool, args, expected) => {
+      const suspended = discoveredBrowserSession(browserSessionId, sessionId);
+      suspended.lifecycle = "suspended";
+      const active = discoveredBrowserSession(browserSessionId, sessionId);
+      active.lifecycle = "active";
+      active.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-2",
+        placementInstanceId: "placement-1",
+      };
+      // Resuming reopens the saved tab under a new ID.
+      const restored = { ...browserTarget(), id: "tab-2", controllerGeneration: "controller-2" };
+      let running = false;
+      const notActive = () => new OpenGeniApiError(409, "BrowserSession is not active");
+      const resumes: string[] = [];
+      const observed: string[] = [];
+      const acted: string[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          getBrowserSession: async () => (running ? active : suspended),
+          resumeBrowserSession: async (_workspaceId, resumedId, request) => {
+            resumes.push(`${resumedId}:${request.operationId}`);
+            running = true;
+            return { session: active } as never;
+          },
+          listBrowserTargets: async () => {
+            if (!running) throw notActive();
+            return { browserSessionId, controllerGeneration: "controller-2", targets: [restored] };
+          },
+          observeBrowserTarget: async (_workspaceId, _browserSessionId, targetId) => {
+            if (!running) throw notActive();
+            observed.push(targetId);
+            return browserObservation(restored);
+          },
+          actInBrowser: async (_workspaceId, _browserSessionId, request) => {
+            acted.push(request.targetId);
+            throw notActive();
+          },
+          closeBrowserTarget: async () => {
+            throw notActive();
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: [tool],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const operationId = randomUUID();
+      const result = await definitions[0]!.execute(
+        { browserSessionId, ...args },
+        { operationId, caller: { kind: "model", subjectId: "model:test" } },
+      );
+      // One resume, under its own operation ID rather than the tool call's.
+      expect(resumes).toHaveLength(1);
+      expect(resumes[0]).not.toContain(operationId);
+      // An action never runs on the reloaded page.
+      expect(acted).toEqual("targetId" in args && tool === "browser_act" ? ["tab-1"] : []);
+      if (expected === "replay") {
+        expect(result.isError).toBeFalsy();
+        expect(observed).toEqual(tool === "browser_observe" ? ["tab-2"] : []);
+        return;
+      }
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: "browser_resumed", retryable: false } },
+      });
+      const message = (result.structuredContent as { error: { message: string } }).error.message;
+      expect(message).toContain("resumed from its saved state");
+      expect(message).toContain("this call did not run");
+      expect(message).toContain("tab-2");
+      // The report carries the selected tab's outline for the next call.
+      expect(observed).toEqual(["tab-2"]);
+    },
+  );
+
+  test.each([
+    ["an active browser", "active", null],
+    ["a browser lost to a crash", "lost", "browser_crashed"],
+  ] as const)("browser tools keep a refusal on %s", async (_label, lifecycle, failureCode) => {
+    const session = discoveredBrowserSession(browserSessionId, sessionId);
+    session.lifecycle = lifecycle;
+    session.failureCode = failureCode;
+    let resumed = false;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getBrowserSession: async () => session,
+        resumeBrowserSession: async () => {
+          resumed = true;
+          return { session } as never;
+        },
+        observeBrowserTarget: async () => {
+          throw new OpenGeniApiError(409, "BrowserSession controller authority changed");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId, targetId: "tab-1" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(resumed).toBe(false);
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: { message: expect.stringContaining("controller authority changed") },
+      },
+    });
+  });
+
   test.each(["matching", "missing", "unknown", "session", "generation", "target"] as const)(
     "browser_open reuse preserves no-op, refusal and unknown boundaries (%s)",
     async (scenario) => {
