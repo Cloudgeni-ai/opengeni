@@ -111,6 +111,45 @@ describe("message runtime", () => {
     expect(seen.locale).toBe("nb");
     expect(t.locale).toBe("nb");
   });
+
+  test("built-in text names the host's product; the nearest name wins", () => {
+    expect(createOpenGeniText()("provider.opengeniUpdated")).toBe("Opengeni updated");
+    expect(
+      createOpenGeniText({ productName: "Acme" })(
+        "lib.providerRecovery.opengeniRetriedTimesWithoutSuccess",
+        {
+          count: 2,
+        },
+      ),
+    ).toBe("Acme retried 2 times without success.");
+
+    const seen: { text?: OpenGeniText } = {};
+    function Probe() {
+      seen.text = useOpenGeniText();
+      return null;
+    }
+    renderToStaticMarkup(
+      <OpenGeniMessagesProvider
+        productName="Acme"
+        messages={{ "provider.opengeniUpdated": "{product} er oppdatert" }}
+      >
+        <OpenGeniMessagesProvider locale="nb">
+          <Probe />
+        </OpenGeniMessagesProvider>
+      </OpenGeniMessagesProvider>,
+    );
+    expect(seen.text!("provider.opengeniUpdated")).toBe("Acme er oppdatert");
+    expect(seen.text!("modelPolicy.opengeniCredits")).toBe("Acme credits");
+
+    renderToStaticMarkup(
+      <OpenGeniMessagesProvider messages={{ "provider.opengeniUpdated": "{product} er oppdatert" }}>
+        <OpenGeniMessagesProvider productName="Inner">
+          <Probe />
+        </OpenGeniMessagesProvider>
+      </OpenGeniMessagesProvider>,
+    );
+    expect(seen.text!("provider.opengeniUpdated")).toBe("Inner er oppdatert");
+  });
 });
 
 describe("English catalog", () => {

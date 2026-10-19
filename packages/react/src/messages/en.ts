@@ -40,7 +40,7 @@ export const englishMessages = {
   "artifacts.artifactChrome.countvalueWorkspaceToolsAvailableTo":
     "{countValue} workspace tools available to this Site",
   "artifacts.artifactChrome.edit": "Edit",
-  "artifacts.artifactChrome.editWithOpengeni": "Edit with Opengeni",
+  "artifacts.artifactChrome.editWithOpengeni": "Edit with {product}",
   "artifacts.artifactChrome.fileRetainedFile": "File · retained file",
   "artifacts.artifactChrome.imageRetainedFile": "Image · retained file",
   "artifacts.artifactChrome.itMayHaveBeenRemoved":
@@ -315,7 +315,7 @@ export const englishMessages = {
   "browserViewer.checkBrowser": "Check browser",
   "browserViewer.chromeConnectionReady": "Chrome connection ready",
   "browserViewer.chromeKeepsThisProfileS":
-    "Chrome keeps this profile's state directly; Opengeni does not copy it automatically.",
+    "Chrome keeps this profile's state directly; {product} does not copy it automatically.",
   "browserViewer.chromeReconnectedOpenAFresh": "Chrome reconnected—open a fresh browser/desktop.",
   "browserViewer.closeBrowserDiagnostics": "Close browser diagnostics",
   "browserViewer.closeTitle": "Close {title}",
@@ -810,7 +810,7 @@ export const englishMessages = {
   "connectAccounts.reconnectNeeded": "Reconnect needed",
   "connectAccounts.reloadAccounts": "Reload accounts",
   "connectAccounts.thisRemovesLocalOpengeniAccess":
-    "This removes local Opengeni access. It does not revoke consent at the provider.",
+    "This removes local {product} access. It does not revoke consent at the provider.",
   "connectAccounts.yourConnections": "Your connections",
   "connectChooser.addAConnection": "Add a connection",
   "connectChooser.backToConnections": "Back to connections",
@@ -869,7 +869,7 @@ export const englishMessages = {
   "connectSetup.anOrganizationOwnerApprovesThe":
     "An organization owner approves the request on GitHub.",
   "connectSetup.anOwnerThenConnectsThe":
-    "An owner then connects the organization here. If they don't use Opengeni yet, invite them to this workspace first.",
+    "An owner then connects the organization here. If they don't use {product} yet, invite them to this workspace first.",
   "connectSetup.authorizeConnection": "Authorize connection",
   "connectSetup.authorizeYourAccount": "Authorize your account",
   "connectSetup.browseAllResources": "Browse all resources",
@@ -920,7 +920,7 @@ export const englishMessages = {
   "connectSetup.workInThisWorkspaceCan": "Work in this workspace can use this connection.",
   "connectSetup.workspaceConnection": "Workspace connection",
   "connectSetup.yourRequestWasSentGithub":
-    "Your request was sent. GitHub asked the owners of your organization to approve Opengeni.",
+    "Your request was sent. GitHub asked the owners of your organization to approve {product}.",
   "conversationRenderBoundary.chatUnavailable": "This chat couldn't be displayed.",
   "conversationRenderBoundary.tryAgain": "Try again",
   "copyButton.copied": "Copied",
@@ -1004,7 +1004,7 @@ export const englishMessages = {
   "diffView.noChanges": "No changes",
   "diffView.noRepositoryMounted": "No repository mounted",
   "enrollmentConsent.alsoLetTheAgentControl": "Also let the agent control my mouse & keyboard",
-  "enrollmentConsent.approvingLetsTheOpengeniAgent": "Approving lets the Opengeni agent run on",
+  "enrollmentConsent.approvingLetsTheOpengeniAgent": "Approving lets the {product} agent run on",
   "enrollmentConsent.bodyDisconnectTheAgentTo":
     "{body} Disconnect the agent to revoke access instantly.",
   "enrollmentConsent.cancel": "Cancel",
@@ -1253,9 +1253,9 @@ export const englishMessages = {
   "identityLinkConsent.allowSelectedAccess": "Allow selected access",
   "identityLinkConsent.allowThesePermissions": "Allow these permissions",
   "identityLinkConsent.linkRevokedYourOpengeniAccount":
-    "Link revoked. Your Opengeni account and existing work are unchanged.",
+    "Link revoked. Your {product} account and existing work are unchanged.",
   "identityLinkConsent.linkYourAccount": "Link your account",
-  "identityLinkConsent.linkYourOpengeniAccount": "Link your Opengeni account",
+  "identityLinkConsent.linkYourOpengeniAccount": "Link your {product} account",
   "identityLinkConsent.loadingTheAccountLinkRequest": "Loading the account-link request…",
   "identityLinkConsent.onlyContinueIfYouStarted":
     "Only continue if you started this request in a product you trust. Linking lets that product act as your account with the permissions you select. It does not merge accounts or move existing work.",
@@ -1270,7 +1270,7 @@ export const englishMessages = {
   "identityLinkConsent.tryAgain": "Try again",
   "identityLinkConsent.youCanCloseThisPage": "You can close this page without granting access.",
   "identityLinkConsent.yourCurrentPermissionsStillApply": "Your current permissions still apply.",
-  "identityLinkConsent.yourOpengeniIdentity": "Your Opengeni identity",
+  "identityLinkConsent.yourOpengeniIdentity": "Your {product} identity",
   "interactionInterventionBanner.actionNeeded": "Action needed",
   "interactionInterventionBanner.agentNeedsYourHelp": "Agent needs your help",
   "interactionInterventionBanner.cancelRequest": "Cancel request",
@@ -1334,29 +1334,29 @@ export const englishMessages = {
   "lib.providerRecovery.modelStoppedRespondingAt": "{model} stopped responding{at}",
   "lib.providerRecovery.modelStoppedRightAfterCompacting":
     "{model} stopped right after compacting the conversation",
-  "lib.providerRecovery.opengeniCanTReachAn": "Opengeni can't reach an upstream service",
+  "lib.providerRecovery.opengeniCanTReachAn": "{product} can't reach an upstream service",
   "lib.providerRecovery.opengeniIsApplyingAConfiguration":
-    "Opengeni is applying a configuration update",
+    "{product} is applying a configuration update",
   "lib.providerRecovery.opengeniIsMovingTheWorkspace":
-    "Opengeni is moving the workspace to a fresh sandbox",
-  "lib.providerRecovery.opengeniIsPreparingTheSandbox": "Opengeni is preparing the sandbox",
-  "lib.providerRecovery.opengeniIsRecoveringTheSandbox": "Opengeni is recovering the sandbox",
-  "lib.providerRecovery.opengeniIsSavingTheSandbox": "Opengeni is saving the sandbox workspace",
+    "{product} is moving the workspace to a fresh sandbox",
+  "lib.providerRecovery.opengeniIsPreparingTheSandbox": "{product} is preparing the sandbox",
+  "lib.providerRecovery.opengeniIsRecoveringTheSandbox": "{product} is recovering the sandbox",
+  "lib.providerRecovery.opengeniIsSavingTheSandbox": "{product} is saving the sandbox workspace",
   "lib.providerRecovery.opengeniRetriedTimesWithoutSuccess_one":
-    "Opengeni retried {count} time without success.",
+    "{product} retried {count} time without success.",
   "lib.providerRecovery.opengeniRetriedTimesWithoutSuccess_other":
-    "Opengeni retried {count} times without success.",
+    "{product} retried {count} times without success.",
   "lib.providerRecovery.subjectRetryingAttempt":
     "{subject} — retrying (attempt {attempt} of {maxAttempts})…",
   "lib.providerRecovery.subjectRetryingAutomatically": "{subject} — retrying automatically…",
   "lib.providerRecovery.theModel": "The model",
   "lib.providerRecovery.theSandboxIsnTReady": "The sandbox isn't ready yet",
   "lib.providerRecovery.theSandboxReachedItsMaximum":
-    "The sandbox reached its maximum lifetime, so Opengeni is moving the workspace to a fresh sandbox",
+    "The sandbox reached its maximum lifetime, so {product} is moving the workspace to a fresh sandbox",
   "lib.providerRecovery.tryAgainInAFew": "Try again in a few minutes, or switch to another model.",
   "lib.providerRecovery.tryAgainInAFew2": "Try again in a few minutes.",
   "lib.transientRetry.opengeniIsUpdatingWeLl":
-    "Opengeni is updating. We'll reconnect automatically.",
+    "{product} is updating. We'll reconnect automatically.",
   "machineCard.active": "Active",
   "machineCard.aSecondCopyOfThe":
     "A second copy of the agent is running on this machine. It's kept out, so work isn't affected. Stop the extra copy.",
@@ -1722,7 +1722,7 @@ export const englishMessages = {
   "modelPickerModel.noMatchingModelsTryA": "No matching models. Try a model or provider name.",
   "modelPickerModel.noModelsAvailable": "No models available.",
   "modelPickerModel.openModels": "Open Models",
-  "modelPickerModel.providedByOpengeni": "Provided by Opengeni",
+  "modelPickerModel.providedByOpengeni": "Provided by {product}",
   "modelPickerModel.providerTermsAndLimitsApply": "Provider terms and limits apply",
   "modelPickerModel.searchModelsOrProviders": "Search models or providers",
   "modelPickerModel.searchModelsOrProviders2": "Search models or providers…",
@@ -1759,7 +1759,7 @@ export const englishMessages = {
   "modelPolicy.deploymentAzureIdentity": "Deployment Azure identity",
   "modelPolicy.deploymentProvidedConnection": "Deployment-provided connection",
   "modelPolicy.external": "External",
-  "modelPolicy.externalProviderNoOpengeniCredits": "External provider · no Opengeni credits",
+  "modelPolicy.externalProviderNoOpengeniCredits": "External provider · no {product} credits",
   "modelPolicy.extraHigh": "Extra high",
   "modelPolicy.fast": "Fast",
   "modelPolicy.freeCredits": "Free credits",
@@ -1767,10 +1767,10 @@ export const englishMessages = {
   "modelPolicy.models": "Models",
   "modelPolicy.needsCredits": "Needs credits",
   "modelPolicy.notEntitled": "Not entitled",
-  "modelPolicy.opengeniCredits": "Opengeni credits",
-  "modelPolicy.opengeniCreditsAutomaticManagedRoute": "Opengeni credits · automatic managed route",
-  "modelPolicy.opengeniCreditsOff": "Opengeni credits off",
-  "modelPolicy.opengeniNoModelCredits": "Opengeni · no model credits",
+  "modelPolicy.opengeniCredits": "{product} credits",
+  "modelPolicy.opengeniCreditsAutomaticManagedRoute": "{product} credits · automatic managed route",
+  "modelPolicy.opengeniCreditsOff": "{product} credits off",
+  "modelPolicy.opengeniNoModelCredits": "{product} · no model credits",
   "modelPolicy.organizationProviders": "Organization providers",
   "modelPolicy.priority": "Priority",
   "modelPolicy.providerUnavailable": "Provider unavailable",
@@ -1782,9 +1782,9 @@ export const englishMessages = {
   "modelPolicy.unsupported": "Unsupported",
   "modelPolicy.usesCredits": "Uses credits",
   "modelPolicy.usesTheConnectedClaudeSubscription":
-    "Uses the connected Claude subscription · no Opengeni credits",
+    "Uses the connected Claude subscription · no {product} credits",
   "modelPolicy.usesTheWorkspaceClaudeSubscription":
-    "Uses the workspace Claude subscription · no Opengeni credits",
+    "Uses the workspace Claude subscription · no {product} credits",
   "modelPolicy.workspaceOpenrouterConnection": "Workspace OpenRouter connection",
   "modelPolicy.workspaceOpperConnection": "Workspace Opper connection",
   "modelPolicy.workspaceProviderConnection": "Workspace provider connection",
@@ -2281,14 +2281,14 @@ export const englishMessages = {
   "pluginDiscovery.viewAllPlugins": "View all plugins",
   "previewLoading.preparingPreview": "Preparing preview…",
   "provider.clientExpectedApiActual": "Client {expected} · API {actual}",
-  "provider.opengeniUpdated": "Opengeni updated",
+  "provider.opengeniUpdated": "{product} updated",
   "provider.reloadNow": "Reload now",
   "provider.thisTabCannotSafelyContinue":
     "This tab cannot safely continue with the new server version. Reload it before sending or controlling work.",
   "providerRecoveryNotice.theTurnContinuesAutomaticallyAs":
     "The turn continues automatically as soon as the sandbox is ready.",
   "providerRecoveryNotice.yourMessageIsSavedOpengeni":
-    "Your message is saved. Opengeni keeps retrying automatically for a few minutes.",
+    "Your message is saved. {product} keeps retrying automatically for a few minutes.",
   "queueItemContent.contentUnavailable": "Content unavailable",
   "queuePresentationModel.contentOmittedAtSafeBoundary":
     "Content omitted at safe boundary · ref {reference}",
@@ -2431,7 +2431,7 @@ export const englishMessages = {
   "realtime.realtimeControl.modeVersion": "mode version",
   "realtime.realtimeControl.muteMicrophone": "Mute microphone",
   "realtime.realtimeControl.muteVoiceAudio": "Mute voice audio",
-  "realtime.realtimeControl.opengeni": "Opengeni",
+  "realtime.realtimeControl.opengeni": "{product}",
   "realtime.realtimeControl.pendingBytes": "pending bytes",
   "realtime.realtimeControl.pendingDurableEvents": "pending durable events",
   "realtime.realtimeControl.preparingYourMicrophoneAndLive":
@@ -2464,7 +2464,7 @@ export const englishMessages = {
   "realtime.realtimeControl.unmuteVoiceAudio": "Unmute voice audio",
   "realtime.realtimeControl.usageLimitReached": "Usage limit reached",
   "realtime.realtimeControl.usedWhenYouStartA": "Used when you start a voice conversation.",
-  "realtime.realtimeControl.usesOpengeniCredits": "Uses Opengeni credits",
+  "realtime.realtimeControl.usesOpengeniCredits": "Uses {product} credits",
   "realtime.realtimeControl.voiceActiveElsewhere": "Voice active elsewhere",
   "realtime.realtimeControl.voiceAndTypedMessagesShare":
     "Voice and typed messages share this session.",
@@ -2682,7 +2682,7 @@ export const englishMessages = {
   "sessionChrome.incoming": "Incoming",
   "sessionChrome.incomingUpdates": "Incoming updates",
   "sessionChrome.insufficientOpengeniCreditsAddCredits":
-    "Insufficient Opengeni credits. Add credits before resuming.",
+    "Insufficient {product} credits. Add credits before resuming.",
   "sessionChrome.lengthBackgroundCommandsAreNo":
     "{length} background commands are no longer running because their sandbox was shut down or lost. Whether they finished is unknown.",
   "sessionChrome.lengthIncoming": "{length} incoming",
@@ -2701,7 +2701,7 @@ export const englishMessages = {
   "sessionChrome.notConfirmed": "Not confirmed",
   "sessionChrome.notConfirmedCheckTheQueue": "Not confirmed. Check the queue before retrying.",
   "sessionChrome.opengeniUsageAllowanceExhaustedResume":
-    "Opengeni usage allowance exhausted. Resume when your allowance is available.",
+    "{product} usage allowance exhausted. Resume when your allowance is available.",
   "sessionChrome.pause": "Pause",
   "sessionChrome.paused": "Paused",
   "sessionChrome.pausedAtTheAutomaticContinuation":
@@ -2817,7 +2817,7 @@ export const englishMessages = {
   "sessionFeedbackModel.rateThisSession": "Rate this session",
   "sessionFeedbackModel.sendFeedback": "Send feedback",
   "sessionFeedbackModel.shareWhatWorkedOrWhat": "Share what worked or what could be better.",
-  "sessionFeedbackModel.tellUsWhatCouldMake": "Tell us what could make Opengeni better.",
+  "sessionFeedbackModel.tellUsWhatCouldMake": "Tell us what could make {product} better.",
   "sessionFeedbackModel.thumbsDown": "Thumbs down",
   "sessionFeedbackModel.thumbsUp": "Thumbs up",
   "sessionList.archive": "Archive",

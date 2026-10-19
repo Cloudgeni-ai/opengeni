@@ -274,6 +274,37 @@ pub fn remove_native_host_manifests(home: &Path) -> Result<(), BrowserBridgeErro
     Ok(())
 }
 
+/// Remove the manifests that point at `binary_path`, leaving those another agent
+/// on this computer wrote. Returns the removed paths.
+pub fn remove_native_host_manifests_for(
+    binary_path: &Path,
+    home: &Path,
+) -> Result<Vec<PathBuf>, BrowserBridgeError> {
+    let mut removed = Vec::new();
+    for (browser_root, _) in native_host_browser_roots(home) {
+        let path = browser_root
+            .join("NativeMessagingHosts")
+            .join(format!("{NATIVE_HOST_NAME}.json"));
+        let body = match std::fs::read(&path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let points_here = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|manifest| manifest.get("path")?.as_str().map(PathBuf::from))
+            .is_some_and(|target| target == binary_path);
+        if points_here {
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed.push(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(removed)
+}
+
 #[cfg(target_os = "macos")]
 fn native_host_browser_roots(home: &Path) -> Vec<(PathBuf, bool)> {
     let applications = home.join("Library").join("Application Support");
@@ -2389,6 +2420,25 @@ mod tests {
             assert_eq!(manifest["allowed_origins"], json!(extension_origins()));
         }
         remove_native_host_manifests(directory.path()).expect("remove");
+        assert!(manifests.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn removes_only_the_manifests_that_point_at_this_agent() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let other = directory.path().join("other-agent");
+        let this = directory.path().join("this-agent");
+        let manifests = install_native_host_manifests(&other, directory.path()).expect("install");
+        assert_eq!(
+            remove_native_host_manifests_for(&this, directory.path()).expect("keep"),
+            Vec::<std::path::PathBuf>::new()
+        );
+        assert!(manifests.iter().all(|path| path.exists()));
+        install_native_host_manifests(&this, directory.path()).expect("overwrite");
+        assert_eq!(
+            remove_native_host_manifests_for(&this, directory.path()).expect("remove"),
+            manifests
+        );
         assert!(manifests.iter().all(|path| !path.exists()));
     }
 
