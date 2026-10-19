@@ -187,7 +187,7 @@ and 16.1).
 
 ## Consequences
 
-- Every feature Opengeni has on a Connected Machine works on compute
+- Every feature Opengeni has on a Connected Machine works in a compute
   sandbox, and a fix to either serves both.
 - The model sees what it sees on a Connected Machine; nothing already sent
   changes, as only new sessions on the new backend use it.

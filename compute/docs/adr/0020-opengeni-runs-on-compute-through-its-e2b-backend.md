@@ -10,8 +10,8 @@ Opengeni chooses one sandbox backend per deployment (Modal, E2B, Daytona,
 Runloop, OpenSandbox, a person's own machine and others), each a small
 registration around an SDK adapter. Compute needs to serve Opengeni
 sessions: create, commands and terminals, files, preview ports, and a
-sandbox that comes back with its files and programs after a pause. The
-Opengeni compute already speaks E2B's API and runs E2B's envd in every guest
+sandbox that comes back with its files and programs after a pause. Opengeni compute
+already speaks E2B's API and runs E2B's envd in every guest
 (ADR 19), so that E2B clients work unchanged.
 
 Opengeni's e2b backend is dormant: the E2B SDK it loads is not installed,
@@ -59,8 +59,8 @@ The options were:
   `OPENGENI_E2B_AUTO_RESUME=true`. Idle sandboxes sleep on compute
   regardless, so E2B's timeout is not the cost lever it is on E2B's cloud;
   a paused sandbox is saved and comes back on Opengeni's next `connect`.
-- **The proof** is a real Opengeni development stack session on the
-  compute: create, commands, files, a preview port, pause and resume, with
+- **The proof** is a real Opengeni development stack session on
+  Opengeni compute: create, commands, files, a preview port, pause and resume, with
   the method and results in `docs/measurements.md`. The Opengeni change
   lives on the branch `feat/opengeni-e2b-endpoint`.
 

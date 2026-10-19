@@ -638,7 +638,7 @@ store upload:
 The proof ADR 20 asks for. An Opengeni development stack (API, worker
 and web on a laptop in Norway, branch `feat/opengeni-e2b-endpoint` at
 `f2c3868a7`) ran with `OPENGENI_SANDBOX_BACKEND=e2b`, a timeout of 900 s,
-`OPENGENI_E2B_TIMEOUT_ACTION=pause` and auto-resume, against the fleet
+`OPENGENI_E2B_TIMEOUT_ACTION=pause` and auto-resume, against the control
 service's E2B front door over HTTPS with a test certificate authority. The
 fleet ran on one GCP n2-highmem-32 with nested virtualization in
 europe-west4-a (one host agent, `nested` profile, local NVMe), with the
@@ -1362,7 +1362,7 @@ after a host loss.
 ### r19: host loss boots from files
 
 r19 (2026-10-19; r19 started at 05:50 and wrote its results at 06:00:23,
-r19b and r19c at 06:08:12 and 06:12:43) ran on hosts, a guest image and a fleet
+r19b and r19c at 06:08:12 and 06:12:43) ran on hosts, a guest image and a control
 service rebuilt from compute 85708a8a7 (hosts first), with the backend
 2c15dcf7d, which already carries the run-as and agent branches, and the
 same database (it never ran 16d85d2b9's schema, so no `FRESH`). Its

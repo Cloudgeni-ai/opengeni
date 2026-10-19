@@ -3,7 +3,7 @@ name: Compute Release
 # Release packaging for compute/, Opengeni's own sandbox system. Nothing in Opengeni
 # uses these unless a deployment turns the compute backend on.
 #
-#   control-image  ghcr.io/cloudgeni-ai/opengeni-compute-control: the fleet
+#   control-image  ghcr.io/cloudgeni-ai/opengeni-compute-control: the control
 #                  service and front door (compute/docker/control.Dockerfile),
 #                  with build provenance and an SBOM. Every run pushes it as
 #                  sha-<commit>, a candidate nothing names; once it runs, the
