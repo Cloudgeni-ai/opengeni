@@ -1668,3 +1668,115 @@ the stop is in its `suite.log`, the adoption and the alarm in
 `api.log`, and the UI screenshots in `ui-*.png`; the failed install is
 in that host's serial console. The in-flight check still reads the API's
 answer, not a model turn's tool result; both carry the same text.
+
+### r24: the final run
+
+r24 (2026-10-19; the chain started at 17:09:16, the suite ran from
+17:26:42 to 17:46:04) is the run of every check, in full order, on the
+heads that go into the pull requests. It supersedes r22 as the final run:
+
+- compute feat/compute-lab 71e541269, which merges feat/compute-prod
+  77c02d4c6: the control service as the hosts' certificate authority
+  (6daf6ca09), the retries of transient registry failures and of a
+  failed host install (aeb2ff178, f1f71baa3), and the host-enforced
+  no-wake request class (839dd06dc, 16da8e66d);
+- the backend feat/compute-backend fde01a4c2: housekeeping that never
+  wakes a sandbox, single-use output recovery for every runner that
+  reports an operation inventory, generation admission, and migrations
+  0854-0859.
+
+The hosts' bundle, the guest image (with the agent of fde01a4c2) and the
+control service were rebuilt from 71e541269, the hosts were replaced with
+the new template, and API, worker and web were deployed from fde01a4c2
+with `FRESH=1`: new Opengeni and control-service databases. The model
+was the existing gpt-6.1-sol deployment. The chain ran as one launchd
+job:
+
+```sh
+. p4.env
+export OPENGENI_REF=fde01a4c2 COMPUTE_REF=71e541269
+compute/e2e/env.sh build && compute/e2e/env.sh fleet &&
+  FRESH=1 compute/e2e/env.sh deploy && RUN=r24 compute/e2e/env.sh suite
+```
+
+26 checks passed, none failed and one was not applicable (run-as:
+Opengeni offers no way to ask for it), with the verifier's agreement.
+
+| check | r24 |
+| --- | --- |
+| create | first turn in 28.4 s |
+| background | read back by id with exit status 3; the stopped one unlisted and its process gone 2.3 s after the stop |
+| checkpoint | the terminal showed all 150 ticks across 2 checkpoints (17:28:52.36, 17:30:05.03); the command returned all 110 in order across 1 (17:28:52.36); longest quiet 1.5 s |
+| ui | file browser, terminal and desktop pass (Playwright) |
+| sleep-paused | paused in 0.3 s, woke in 0.1 s |
+| sleep-saved | saved in 6.6 s, woke in 0.4 s |
+| sleep-archived | archived in 17.8 s, woke in 0.7 s |
+| sleep-remote | remote in 20.8 s, woke in 8.3 s |
+| link-stream | 88 cycles in 184 s, 352 MiB in and 704 MiB out, every sha256 matching, across 2 checkpoints; saved in 11.7 s, woken by a read in 1.3 s |
+| vm-crash | the next command answered 5.2 s after the kill, generation 1 -> 2 on the same host, both writes kept, the program lost and the `programs_lost` alarm raised |
+| move | xfxn -> 2pv9 in 25.9 s |
+| host-loss | back on g2c0 161.5 s after the stop, booted from files, the in-flight request ended as outcome unknown (HTTP 409) after 148.7 s |
+| delete | the compute sandbox gone 15.4 s after the delete |
+| connected-machine | online 3.1 s after connecting; exec in 0.1 s after 90 s idle |
+| cleanup | nothing left |
+
+(Host names drop the `sbx-p4-e-host-` prefix.)
+
+host-loss began at 17:39:04 and asked for sbx-p4-e-host-2pv9, where the
+sandbox had just moved, to stop at 17:41:04. sbx-p4-e-host-g2c0 logged
+"adopted from its files" and the `programs_lost` alarm for the sandbox at
+17:43:23.797, then fetched the copy and booted it at 17:43:31.99: a new
+guest boot id and agent connection instance, owner epoch 3 -> 5, the
+program and the command in flight gone and not run again, and the
+archived and checkpointed files kept. The late write was lost; either
+outcome was allowed for it, as the stop operation finished 167.3 s after
+the last checkpoint began. No run logged a warning that the guest did
+not write its disks out before a pause.
+
+Nothing woke the sandbox that the run did not ask for. The three hosts'
+journals hold ten steps that took it out of a sleep level: seven by
+`agent_link`, each the suite's own request (the sleeps' wakes began
+0.03-0.04 s after it; `api.log` has a "a request wakes a sleeping
+sandbox" line for each), and three by the control service: the boot at
+creation, the move and the host-loss adoption. No step was caused by
+housekeeping, and the idle sleeps between checks stayed asleep until the
+next check's request.
+
+The authority change worked as designed on every host. There was no
+Certificate Authority Service pool; each of the three hosts got its
+certificate from the control service by an instance identity token at
+install ("a certificate for sbx-p4-e-host-<name> by an instance identity
+token", valid seven days, in each host's serial console), and the hosts
+check found all three registered. No host install needed the new
+startup retry: no attempt failed on the boots their serial consoles
+still show.
+
+Output release was checked once more on the same build, in r24-bg
+(17:50:53 to 17:53:40; `ONLY=background,sleep-saved`), with the
+background-command rows read from the database every second before the
+suite's cleanup deleted them. Both commands' output was released in the
+exchange that stored it: the exited one stored at 17:51:25.272 and
+released at 17:51:25.288, the stopped one stored at 17:51:34.901 and
+released at 17:51:34.914, each with `last_reconcile_outcome`
+`output_released` after one attempt, and nothing about them reached the
+sandbox afterwards. That run's sleep-saved failed for the subset reason
+r20a gave: with no stored copy yet, the idle archive at 17:52:17.91
+followed the save, so the wake at 17:52:21.12 restored from the archive,
+and the check, which expects the restore of a saved copy, found no pager
+file. Not a compute fault; in the full order it passed.
+
+One gap remains. The recovery of an output release whose exchange
+failed, which the runner's next operation inventory completes, did not
+run live: in both runs every release succeeded in its first exchange,
+and failing one needs a fault the public API cannot cause. It is covered
+by the backend's and the agent's unit tests, not by this suite. The
+overlay-network option of the GCP module (2ff9d5e47, later than
+71e541269 and off by default) was not in this run.
+
+The figures are the rows of `runs/r24/results.md` (and `results.json`);
+the stop is in its `suite.log`, the adoption and the alarm in
+`host-sbx-p4-e-host-g2c0.log` (lines 3 and 4), the lost host's journal
+in `host-sbx-p4-e-host-2pv9@9105887324079386369.log`, the steps in the
+`compute.step` events of the three `host-*.log` journals, the wake lines
+in `api.log`, and the UI screenshots in `ui-*.png`. r24-bg's rows are in
+`runs/r24-bg/dbpoll.log` and its results in `runs/r24-bg/results.md`.
