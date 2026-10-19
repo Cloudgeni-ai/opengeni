@@ -2397,6 +2397,7 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.operation.started",
   "sandbox.operation.completed",
   "sandbox.operation.failed",
+  "sandbox.recovery.selected",
   "session.command.backgrounded",
   "session.command.finished",
   "session.wait.started",
@@ -6893,12 +6894,29 @@ export type SandboxRecoverySelection = {
   revision: string;
   capturedAt: string;
 };
+export type SandboxRecoveryTarget = {
+  sessionId: string;
+  sandboxGroupId: string;
+  leaseId: string;
+  routeEpoch: number;
+  authorityEpoch: number;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  archiveGeneration: number | null;
+  revision: string | null;
+  restoreStatus: string;
+  restoreCompletedAt: string | null;
+};
 export type SandboxRecoveryProjection = {
   version: 1;
   status: "unsupported" | "blocked" | "eligible" | "consent_accepted" | "restoring" | "restored";
   reason: string | null;
   checkpoint: SandboxRecoverySelection | null;
   operationId: string | null;
+  target?: SandboxRecoveryTarget;
+  retryAvailable?: boolean;
+  freshWorkspaceAvailable?: boolean;
+  groupSessionCount?: number;
   automaticAvailable?: boolean;
   /** What an automatic Retry does: restore `checkpoint`, or continue on a new
    * empty workspace because no usable checkpoint survived the sandbox loss. */
@@ -6907,11 +6925,19 @@ export type SandboxRecoveryProjection = {
    * let Opengeni decide again. Nothing proceeds by itself before then. */
   availableAt?: string;
 };
-export type SandboxRecoveryRequest = {
-  operationId: string;
-  acceptHistoricalCheckpoint: true;
-  selection: SandboxRecoverySelection;
-};
+export type SandboxRecoveryRequest =
+  | {
+      operationId: string;
+      acceptHistoricalCheckpoint: true;
+      selection: SandboxRecoverySelection;
+    }
+  | { operationId: string; action: "retry"; target: SandboxRecoveryTarget }
+  | {
+      operationId: string;
+      action: "continue_fresh";
+      acceptEmptyWorkspace: true;
+      target: SandboxRecoveryTarget;
+    };
 export type SandboxRecoveryResponse = {
   outcome: "accepted" | "replayed";
   operationId: string;

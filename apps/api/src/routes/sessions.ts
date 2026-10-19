@@ -3875,8 +3875,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
       );
       if (
-        projection.operationId === receipt.operationId &&
-        projection.status === "consent_accepted"
+        ("action" in parsed.data && receipt.outcome === "accepted") ||
+        (projection.operationId === receipt.operationId && projection.status === "consent_accepted")
       ) {
         // Establish/verify only. No failed-turn Retry, Send, tool callback or
         // command replay. The ordinary cold->warming election owns creation.

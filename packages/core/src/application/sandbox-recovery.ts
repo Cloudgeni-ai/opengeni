@@ -32,11 +32,12 @@ async function authorize(
   authorization: AccessGrantAuthorization,
   workspaceId: string,
   sessionId: string,
-  intent: "preview" | "consent",
+  intent: "preview" | "consent" | "workspace",
 ) {
   // Cookie-verification stamp, never principal-shape inference or an actor from
-  // the body. The local human may only read; agents, API keys and delegated
-  // humans cannot accept data loss or broaden the consent mutation.
+  // the body. The exact local human may retry or explicitly continue empty;
+  // historical checkpoint consent remains managed-human only. Agents, API keys
+  // and delegated humans cannot accept data loss or broaden either mutation.
   if (intent === "consent") requireCanonicalManagedHuman(authorization, workspaceId);
   else requireSandboxRecoveryPreviewHuman(authorization, workspaceId);
   requirePermission(authorization.grant, "sessions:read");
@@ -51,6 +52,20 @@ async function authorize(
     workspaceId,
     sessionId,
     subjectId: authorization.grant.subjectId,
+    canControlMember: async (tx: Dependencies["db"], memberSessionId: string) => {
+      try {
+        await requireSessionAuthorization({ ...deps, db: tx }, authorization.grant, {
+          sessionId: memberSessionId,
+          operation: "session.control",
+          // Unlike a standalone core read, a hidden/missing member must refuse
+          // control rather than return the legacy null/no-host-port result.
+          surface: "http",
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    },
   };
 }
 
@@ -73,6 +88,12 @@ export async function consentManagedHumanSandboxRecovery(
   sessionId: string,
   request: SandboxRecoveryRequest,
 ) {
-  const scope = await authorize(deps, authorization, workspaceId, sessionId, "consent");
+  const scope = await authorize(
+    deps,
+    authorization,
+    workspaceId,
+    sessionId,
+    "action" in request ? "workspace" : "consent",
+  );
   return consentPublicSandboxRecovery(deps.db, { ...scope, request });
 }
