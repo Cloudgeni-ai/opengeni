@@ -97,7 +97,7 @@ import {
   siteSessionOriginFromMetadata,
   withSiteOriginMetadata,
 } from "../site-session-origin";
-import { assertNotSiteClampedAgent } from "../site-agent-clamp";
+
 import { personalGitHubRepositoryResources } from "./resources";
 import { knowledgeContextForAccess } from "./knowledge";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
@@ -371,8 +371,6 @@ export async function createValidatedScheduledTask(input: {
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
 }): Promise<ScheduledTask> {
-  // An agent started from a Site page acts with the page's reach: no schedules.
-  await assertNotSiteClampedAgent(input.db, input.grant, "schedules");
   // Variable Sets were replaced by vaults (RM-1).
   if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
   if (input.payload.runMode === "existing_session") {
@@ -434,8 +432,8 @@ export async function createValidatedScheduledTask(input: {
     workspaceId: input.grant.workspaceId,
   });
   // A schedule created from a Site page records which Site. Each run's
-  // session copies this metadata, so runs record it too and act with the
-  // page's reach (the Site agent clamp). Callers never supply it themselves.
+  // session copies this provenance, without changing its authority.
+  // Callers never supply it themselves.
   const agentConfig: ScheduledTaskAgentConfig = {
     ...validatedAgentConfig,
     metadata: withSiteOriginMetadata(
@@ -970,7 +968,6 @@ export async function assertScheduledTaskMutationOwner(
   grant: AccessGrant,
   taskId: string,
 ): Promise<void> {
-  await assertNotSiteClampedAgent(db, grant, "schedules");
   await assertSiteMayReachScheduledTask(db, grant, taskId);
   const writer = scheduledTaskInitiatorForGrant(grant);
   const matches = await scheduledTaskMutationOwnerMatches(db, {

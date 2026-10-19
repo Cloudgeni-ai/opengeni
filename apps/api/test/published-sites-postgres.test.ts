@@ -7,11 +7,18 @@ import {
   SITE_GATEWAY_BODY_SHA256_HEADER,
   SITE_GATEWAY_CALLBACK_PATH,
   DEFAULT_SITE_LIMITS,
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  signDelegatedAccessToken,
   WorkspaceModelCatalogResponse,
   type AccessGrant,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
-import { mcpAccountRouteId } from "@opengeni/core";
+import {
+  hasPermission,
+  mcpAccountRouteId,
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+} from "@opengeni/core";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   appendSessionEvents,
@@ -194,6 +201,141 @@ test("Site members own native private work, while normal discovery and other vie
   ).rejects.toMatchObject({ code: "42501" });
 }, 60_000);
 
+test("published member creation matches ordinary native defaults, including compact admin permissions", async () => {
+  const f = await fixture();
+  const site = await f.live("Ordinary authority", {
+    access: "members",
+    agent: { enabled: true, instructions: "  " },
+  });
+  for (const permissions of [memberPermissions, ["workspace:admin"]] as const) {
+    const person = await f.person(permissions);
+    const session = await f.signIn(person, site.host);
+    const siteChat = await f.gateway(site.host, "POST", "/sessions", {
+      session,
+      body: { initialMessage: "Hello" },
+    });
+    expect(siteChat.status, JSON.stringify(siteChat.json)).toBe(202);
+    const consoleChat = await f.api(person, "POST", `/v1/workspaces/${f.workspace.id}/sessions`, {
+      initialMessage: "Hello",
+      visibility: "private",
+    });
+    expect(consoleChat.status, JSON.stringify(consoleChat.json)).toBe(202);
+    const config = async (id: string) => {
+      const [row] =
+        await shared.admin`select tools, first_party_mcp_tools, first_party_mcp_permissions,
+        agent_config, vault_policy, sandbox_backend, agent_access, memory_scope from sessions where id=${id}`;
+      const defaults = DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter((p) =>
+        hasPermission([...permissions] as AccessGrant["permissions"], p),
+      );
+      return {
+        ...row,
+        first_party_mcp_permissions: [...(row!.first_party_mcp_permissions ?? defaults)].sort(),
+      };
+    };
+    expect(await config(String(siteChat.json.id))).toEqual(
+      await config(String(consoleChat.json.id)),
+    );
+  }
+});
+
+test("guest agents are confined by native authority without a Site-agent write allowlist", async () => {
+  const f = await fixture();
+  const site = await f.live("Guest service", { access: "public", agent: { enabled: true } });
+  const made = await f.gateway(site.host, "POST", "/sessions", {
+    visitor: visitorId(),
+    body: { initialMessage: "Hello" },
+  });
+  expect(made.status, JSON.stringify(made.json)).toBe(202);
+  const id = String(made.json.id);
+  const [row] =
+    await shared.admin`select first_party_mcp_permissions,first_party_mcp_tools,agent_access
+    from sessions where id=${id}`;
+  expect(row!.agent_access).toBe("session");
+  const ceiling = new Set([
+    "workspace:read",
+    "sessions:read",
+    "sessions:create",
+    "sessions:control",
+    "artifacts:read",
+    "artifacts:publish",
+  ]);
+  expect(row!.first_party_mcp_permissions.every((p: string) => ceiling.has(p))).toBe(true);
+  const [turn] =
+    await shared.admin`select temporal_workflow_id from session_turns where session_id=${id} order by position limit 1`;
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(db.db, f.workspace.id, {
+    sessionId: id,
+    workflowId: turn!.temporal_workflow_id,
+    workflowRunId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    attemptId,
+    trigger: { kind: "next" },
+  });
+  expect(claim.action).toBe("claimed");
+  if (claim.action !== "claimed") throw new Error("Guest turn not claimed");
+  const metadata = {
+    sessionId: id,
+    turnId: claim.turn.id,
+    attemptId,
+    executionGeneration: claim.turn.executionGeneration,
+    firstPartyMcpTools: row!.first_party_mcp_tools,
+  };
+  const grant: AccessGrant = {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: "worker:first-party-mcp",
+    principalKind: "agent_attempt",
+    permissions: row!.first_party_mcp_permissions,
+    metadata,
+  };
+  const sharedChat = await f.api(f.owner, "POST", `/v1/workspaces/${f.workspace.id}/sessions`, {
+    initialMessage: "Workspace work",
+    visibility: "workspace",
+  });
+  expect(sharedChat.status, JSON.stringify(sharedChat.json)).toBe(202);
+  await expect(
+    requireSessionAuthorization(f.deps as unknown as ApiRouteDeps, grant, {
+      sessionId: String(sharedChat.json.id),
+      operation: "session.read",
+      surface: "first_party_mcp",
+    }),
+  ).rejects.toBeInstanceOf(SessionAuthorizationDeniedError);
+  const bearer = await signDelegatedAccessToken(f.settings.delegationSecret!, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: grant.subjectId,
+    permissions: grant.permissions,
+    principalKind: "agent_attempt",
+    ...metadata,
+    exp: Math.floor(Date.now() / 1000) + 600,
+  });
+  for (const [method, path, body] of [
+    ["GET", `/sessions/${sharedChat.json.id}`, undefined],
+    ["PUT", `/sessions/${id}/agent`, { expectedVersion: 1, capabilities: { from: "all" } }],
+    ["PUT", `/sessions/${id}/tool-policy`, { expectedVersion: 1, firstPartyMcpTools: ["run_on"] }],
+    [
+      "POST",
+      "/sessions",
+      { initialMessage: "Choose compute", targetSandboxId: crypto.randomUUID() },
+    ],
+    ["POST", "/knowledge/entries", {}],
+    ["POST", "/vaults", { name: "Not available" }],
+    ["POST", "/scheduled-tasks", { name: "Not available" }],
+  ] as const) {
+    const response = await f.app.request(`/v1/workspaces/${f.workspace.id}${path}`, {
+      method,
+      headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const text = await response.text();
+    expect({ method, path, status: response.status, text }).toMatchObject({
+      status: method === "GET" ? 404 : 403,
+    });
+    expect(text).not.toContain("site_agent_clamped");
+    if (method !== "GET") expect(text.toLowerCase()).toContain("permission");
+  }
+}, 30_000);
+
 test("Site execution respects member control permission and explicitly refuses disabled private conversations", async () => {
   const f = await fixture();
   const site = await f.live("Policy", { access: "public", agent: { enabled: true } });
@@ -245,7 +387,10 @@ test("member Site AI needs session authority, not artifact publishing; data tool
         await shared.admin`select first_party_mcp_tools tools,
       first_party_mcp_permissions permissions from sessions where id=${created.json.id}`
       )[0]!;
-    expect((await inspect()).tools).toEqual(canReadData ? ["site_data_query"] : []);
+    const initial = await inspect();
+    expect(initial.permissions).toEqual(
+      expect.arrayContaining(["sessions:read", "sessions:control"]),
+    );
     expect((await inspect()).permissions).not.toContain("artifacts:publish");
     if (canReadData) {
       // A later request must not retain even a read tool after the live ceiling narrows.
@@ -259,9 +404,11 @@ test("member Site AI needs session authority, not artifact publishing; data tool
       body: { type: "user.message", payload: { text: "Continue without a data write" } },
     });
     expect(continued.status, JSON.stringify(continued.json)).toBe(202);
-    expect((await inspect()).tools).toEqual([]);
+    expect((await inspect()).tools).toEqual(initial.tools);
     expect((await inspect()).permissions).not.toContain("artifacts:publish");
-    expect((await inspect()).permissions).not.toContain("artifacts:read");
+    // Stored selections are not rewritten on Send. Native authorization
+    // revalidates live membership at each request/execution boundary.
+    expect((await inspect()).permissions).toEqual(initial.permissions);
   }
 });
 
@@ -2396,9 +2543,7 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   expect(given.json.warnings.map((warning: { code: string }) => warning.code)).toContain(
     "agent_tools_members_only",
   );
-  // Tools are optional references: a connection the workspace does not have
-  // (or no longer has) is skipped, never a failed conversation. Which viewers
-  // get them is unit-tested with siteAgentToolRefs.
+  // The legacy publication field does not grant connections to visitors.
   await setLimits({ agentMicrosPerSitePerMonth: 10_000_000, conversationsPerSitePerDay: 10 });
   const guestStart = await start();
   expect(guestStart.status).toBe(202);
@@ -2492,7 +2637,7 @@ test("finished conversations free the Site budget; a lowered cap lowers running 
   expect((await reserved(second.json.id)).reserved).toBe(0);
 }, 60_000);
 
-test("narrowing a Site's tools stops the conversations that hold tools they would not get now", async () => {
+test("legacy Site tool selections never rewrite or cancel member conversations", async () => {
   const f = await fixture();
   const effects = configureSitePublishingEffects(f.settings, {});
   const site = await f.live("Tools", { access: "public", agent: { enabled: true } });
@@ -2532,7 +2677,7 @@ test("narrowing a Site's tools stops the conversations that hold tools they woul
   expect(await conversation(guestChat)).toEqual({ kind: "guest", tools: [], cancelled: false });
   expect(await conversation(memberChat)).toEqual({
     kind: "member",
-    tools: ["crm", "billing"],
+    tools: [],
     cancelled: false,
   });
   expect((await conversation(await start(plainMember))).tools).toEqual([]);
@@ -2542,14 +2687,13 @@ test("narrowing a Site's tools stops the conversations that hold tools they woul
   expect((await conversation(guestChat)).cancelled).toBe(false);
   expect((await conversation(memberChat)).cancelled).toBe(false);
 
-  // A removed tool stops the member's conversation, not the guest's, which
-  // holds none; a new one gets what is left. Nobody is signed out.
+  // Editing the legacy field changes neither member authority nor guest authority.
   await change({ tools: ["crm"] });
-  expect((await conversation(memberChat)).cancelled).toBe(true);
+  expect((await conversation(memberChat)).cancelled).toBe(false);
   expect((await conversation(guestChat)).cancelled).toBe(false);
-  expect(code(await send(member, memberChat))).toBe("site_conversation_outdated");
+  expect((await send(member, memberChat)).status).toBeLessThan(300);
   expect((await send(guest, guestChat)).status).toBeLessThan(300);
-  expect((await conversation(await start(member))).tools).toEqual(["crm"]);
+  expect((await conversation(await start(member))).tools).toEqual([]);
   const [signedIn] = await shared.admin`select count(*)::int as n from site_viewer_sessions
     where site_id = ${site.id} and revoked_at is null`;
   expect(signedIn!.n).toBe(2);
@@ -3552,7 +3696,7 @@ test("turns reserve an estimate, so open conversations don't use up a Site; busy
   });
 });
 
-test("Site agent sessions run without a sandbox, whatever the deployment default", async () => {
+test("published members inherit normal compute while guests retain their service profile", async () => {
   const f = await fixture({ sandboxBackend: "docker" });
   const site = await f.live("No shell", { access: "public", agent: { enabled: true } });
   const memberSession = await f.signIn(f.member, site.host);
@@ -3564,9 +3708,16 @@ test("Site agent sessions run without a sandbox, whatever the deployment default
     expect(created.status, JSON.stringify(created.json)).toBe(202);
     const [row] = await shared.admin`select sandbox_backend, first_party_mcp_tools
       from sessions where id = ${created.json.id}`;
-    expect(row!.sandbox_backend).toBe("none");
-    // Only this Site's own data tools (Site SQL is off here), no management tools.
-    expect([...row!.first_party_mcp_tools].sort()).toEqual(["site_data_query", "site_data_write"]);
+    if ("session" in who) {
+      expect(row!.sandbox_backend).toBe("docker");
+      expect(row!.first_party_mcp_tools).toContain("sessions_list");
+    } else {
+      expect(row!.sandbox_backend).toBe("none");
+      expect([...row!.first_party_mcp_tools].sort()).toEqual([
+        "site_data_query",
+        "site_data_write",
+      ]);
+    }
   }
 });
 
@@ -3623,6 +3774,15 @@ test("legacy Site continuations restore only viewer-bound data tools and no sand
       agent_config,sandbox_backend,instructions,metadata,tool_policy_version from sessions where id=${id}`
       )[0]!;
     const before = await snapshot();
+    if ("session" in who) {
+      const sent = await f.gateway(site.host, "POST", `/sessions/${id}/events`, {
+        ...who,
+        body: { type: "user.message", payload: { text: "Keep my settings" } },
+      });
+      expect(sent.status, JSON.stringify(sent.json)).toBeLessThan(300);
+      expect(await snapshot()).toEqual(before);
+      continue;
+    }
     const fault = `site_defaults_${id.replaceAll("-", "")}`;
     await shared.admin.unsafe(`create function ${fault}() returns trigger language plpgsql as $f$
       begin if new.id='${id}'::uuid and new.metadata #>> '{opengeniPublishedSite,agentDefaultsVersion}' = '${SITE_AGENT_DEFAULTS_VERSION}'

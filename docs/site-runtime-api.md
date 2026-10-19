@@ -82,8 +82,8 @@ managers. The Site must be shared with the workspace, not "Only me".
 
 Every changing route (`PUT`, `DELETE`, takedown, restore, report status and
 `PUT site-limit-profile`), and the `site_publication_update` tool, refuses
-a request made from a Site page (403 `site_page_forbidden`) and an agent
-started from a Site page (403 `site_agent_forbidden`).
+a request made from a Site page (403 `site_page_forbidden`). Agents use ordinary
+owner authorization regardless of where their turn started.
 
 Other management routes:
 

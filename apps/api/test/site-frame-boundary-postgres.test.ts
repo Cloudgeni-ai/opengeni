@@ -6,16 +6,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createSiteToolBridge } from "@opengeni/sdk/site";
 import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
 import { SITE_NO_ORIGIN_ID } from "@opengeni/contracts/site-session-http";
-import { LEARNING_REFUSAL_META_KEY } from "@opengeni/contracts/learning-refusal";
 import {
-  assertNotSiteClampedAgent,
   assertScheduledTaskMutationOwner,
-  createValidatedScheduledTask,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
-  siteAgentClamp,
-  siteAgentMayReachSession,
-  siteSessionClamp,
   withSiteSessionOrigin,
   type ApiRouteDeps,
   type ObjectStorageDependency,
@@ -28,8 +22,6 @@ import {
   createSession,
   createWorkspace,
   ensureExternalIdentity,
-  PostgresEditableArtifactStore,
-  touchEditableArtifactSessionLink,
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
@@ -40,17 +32,14 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp, type AppDependencies } from "../src/app";
-import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerKnowledgeEntryTools } from "../src/mcp/knowledge-entries";
 import { registerSecretTools } from "../src/mcp/secret-tools";
-import { registerSitePublicationTools } from "../src/mcp/site-publication-tools";
 import { resolveSiteManagement } from "../src/site-publishing/service";
 
 // Site pages reach only the SITE_OPERATIONS allowlist and only their
-// own Site's sessions, everything they start records which Site, and agents
-// started from a Site cannot reach outside it (schedules, automations, other
-// sessions). These run the real routes against PostgreSQL as the restricted
-// application role.
+// own Site's sessions and explicitly allowed chats. Agents retain ordinary
+// native authority. These run the real routes against PostgreSQL as the
+// restricted application role.
 let shared: SharedTestDatabase;
 let db: DbClient;
 beforeAll(async () => {
@@ -246,18 +235,21 @@ async function fixture(overrides: { sandboxBackend?: "none" | "docker" } = {}) {
     };
   };
   /** An agent grant with a running turn and attempt, as the worker's first-party MCP sees it. */
-  const liveAgentGrant = async (sessionId: string): Promise<AccessGrant> => {
+  const liveAgentGrant = async (
+    sessionId: string,
+    surface: "site" | "web" = "web",
+  ): Promise<AccessGrant> => {
     const [turn] = await shared.admin<{ id: string }[]>`
       insert into session_turns (
         account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
         status, position, prompt, model, reasoning_effort, sandbox_backend,
-        execution_generation, initiator_kind, initiator_subject_id, initiator_context
+        execution_generation, initiator_kind, initiator_subject_id, initiator_context, surface
       ) values (
         ${accountId}, ${workspace.id}, ${sessionId}, gen_random_uuid(),
         ${`frame-wf-${crypto.randomUUID()}`}, 'running',
         (select coalesce(max(position), 0) + 1 from session_turns where session_id = ${sessionId}),
         'Agent work', 'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${identity.subjectId},
-        '{"accepted":true}'::jsonb
+        '{"accepted":true}'::jsonb, ${surface}
       ) returning id`;
     const attemptId = crypto.randomUUID();
     await shared.admin.begin(async (tx) => {
@@ -526,7 +518,7 @@ test("an owner can allow an existing chat in one private console Site and revoke
   expect((await f.call("GET", `/sessions/${sessionId}`)).status).toBe(200);
 }, 30_000);
 
-test("Site chat grants cannot cross viewers or be minted by Site-origin agents", async () => {
+test("Site chat grants require the owner, regardless of the agent turn surface", async () => {
   const f = await fixture();
   const site = await f.publish("Owner's dashboard", { visibility: "private" });
   const sessionId = await f.startSession();
@@ -598,8 +590,8 @@ test("Site chat grants cannot cross viewers or be minted by Site-origin agents",
   const grantResponse = await agentRequest(plainToken, "PUT");
   expect(grantResponse.status, await grantResponse.clone().text()).toBe(200);
   const clamped = await makeBearer(await f.startSession(site.frame("site-agent")));
-  expect((await agentRequest(clamped, "PUT")).status).toBe(403);
-  expect((await agentRequest(clamped, "DELETE")).status).toBe(403);
+  expect((await agentRequest(clamped, "PUT")).status).toBe(200);
+  expect((await agentRequest(clamped, "DELETE")).status).toBe(200);
 }, 30_000);
 
 test("a published Site frame reaches only SITE_OPERATIONS and only its own Site's sessions", async () => {
@@ -819,8 +811,7 @@ test("a tool a Site page called acts only on that Site's sessions", async () => 
       );
   // Reads keep the viewer's ordinary authorization.
   await expect(authorize(originB, fromA, "session.read")).resolves.toBeDefined();
-  // An agent a Site started reads only sessions acting for the same Site:
-  // another session's transcript is data its page must not reach.
+  // The page boundary does not propagate into a separate agent profile.
   const otherFromA = await f.startSession(siteA.frame("frame-a2"));
   const fromAAgent = await f.liveAgentGrant(fromA);
   const plainAgent = await f.liveAgentGrant(plain);
@@ -832,9 +823,7 @@ test("a tool a Site page called acts only on that Site's sessions", async () => 
     });
   await expect(agentRead(fromAAgent, fromA)).resolves.toBeDefined();
   await expect(agentRead(fromAAgent, otherFromA)).resolves.toBeDefined();
-  await expect(agentRead(fromAAgent, plain)).rejects.toBeInstanceOf(
-    SessionAuthorizationDeniedError,
-  );
+  await expect(agentRead(fromAAgent, plain)).resolves.toBeDefined();
   await expect(agentRead(plainAgent, fromA)).resolves.toBeDefined();
   // Without a Site origin nothing changes.
   await expect(
@@ -844,101 +833,6 @@ test("a tool a Site page called acts only on that Site's sessions", async () => 
       surface: "first_party_mcp",
     }),
   ).resolves.toBeDefined();
-});
-
-test("agents started from a Site cannot create or change schedules or reach other sessions", async () => {
-  const f = await fixture();
-  const siteA = await f.publish("Site A");
-  const siteB = await f.publish("Site B");
-  const fromA = await f.startSession(siteA.frame("frame-a"));
-  const otherFromA = await f.startSession(siteA.frame("frame-a2"));
-  const fromB = await f.startSession(siteB.frame("frame-b"));
-  const fromFrame = await f.startSession(f.inline("frame-1"));
-  const plain = await f.startSession();
-  // A child an inline-frame session spawned acts for that frame too.
-  const frameAgent = await f.liveAgentGrant(fromFrame);
-  const child = await withSessionRlsActorContext({ subjectId: f.grant.subjectId }, () =>
-    createSession(db.db, {
-      accountId: f.accountId,
-      workspaceId: f.workspace.id,
-      parentSessionId: fromFrame,
-      visibility: "user_private",
-      createdByActor: {
-        type: "agent_attempt",
-        sessionId: fromFrame,
-        turnId: String(frameAgent.metadata!.turnId),
-        attemptId: String(frameAgent.metadata!.attemptId),
-        executionGeneration: Number(frameAgent.metadata!.executionGeneration),
-      },
-      initialMessage: "Child work",
-      resources: [],
-      metadata: {},
-      createdBy: { kind: "subject", subjectId: f.grant.subjectId },
-      subjectId: f.grant.subjectId,
-      model: "test-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-    }),
-  );
-
-  expect(await siteAgentClamp(db.db, await f.agentGrant(fromA))).toEqual({
-    clamped: true,
-    originSiteIds: [siteA.siteId],
-  });
-  expect(await siteAgentClamp(db.db, await f.agentGrant(fromFrame))).toMatchObject({
-    clamped: true,
-    originSiteIds: [],
-  });
-  expect(await siteAgentClamp(db.db, await f.agentGrant(child.id))).toMatchObject({
-    clamped: true,
-  });
-  expect(await siteAgentClamp(db.db, await f.agentGrant(plain))).toEqual({
-    clamped: false,
-    originSiteIds: [],
-  });
-  expect(await siteAgentClamp(db.db, f.grant)).toBeNull();
-
-  const refusal = "An agent started from a Site page cannot create or change schedules";
-  for (const sessionId of [fromA, fromFrame, child.id]) {
-    const agent = await f.agentGrant(sessionId);
-    await expect(assertNotSiteClampedAgent(db.db, agent, "schedules")).rejects.toMatchObject({
-      status: 403,
-      message: refusal,
-    });
-    await expect(
-      createValidatedScheduledTask({
-        settings: f.settings,
-        db: db.db,
-        objectStorage: f.objectStorage,
-        grant: agent,
-        payload: {
-          name: "Nightly",
-          schedule: { type: "manual" },
-          runMode: "new_session_per_run",
-          agentConfig: { prompt: "Do it", tools: [], resources: [], metadata: {} },
-        } as never,
-      }),
-    ).rejects.toMatchObject({ status: 403, message: refusal });
-  }
-  await expect(
-    assertNotSiteClampedAgent(db.db, await f.agentGrant(plain), "schedules"),
-  ).resolves.toBeUndefined();
-
-  // A Site-started agent messages only sessions acting for the same Site.
-  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
-  const caller = (sessionId: string) => ({ sessionId, turnId: null });
-  expect(await siteAgentMayReachSession(db.db, scope, caller(fromA), fromA)).toBe(true);
-  expect(await siteAgentMayReachSession(db.db, scope, caller(fromA), otherFromA)).toBe(true);
-  expect(await siteAgentMayReachSession(db.db, scope, caller(fromA), plain)).toBe(false);
-  expect(await siteAgentMayReachSession(db.db, scope, caller(fromA), fromB)).toBe(false);
-  expect(await siteAgentMayReachSession(db.db, scope, caller(fromA), crypto.randomUUID())).toBe(
-    false,
-  );
-  expect(await siteAgentMayReachSession(db.db, scope, caller(child.id), fromFrame)).toBe(true);
-  expect(await siteAgentMayReachSession(db.db, scope, caller(child.id), fromA)).toBe(false);
-  // An agent no Site started is not limited by this clamp.
-  expect(await siteAgentMayReachSession(db.db, scope, caller(plain), fromA)).toBe(true);
 });
 
 test("a schedule created from a Site records the Site; another Site cannot change it", async () => {
@@ -1016,7 +910,7 @@ test("a schedule created from a Site records the Site; another Site cannot chang
   expect(outside.status).not.toBe(403);
 });
 
-test("Site pages and agents started from them cannot change Site publications", async () => {
+test("Site pages cannot change publications; their agents use normal owner authorization", async () => {
   const f = await fixture();
   const site = await f.publish("Site A");
   const fromSite = await f.startSession(site.frame("frame-a"));
@@ -1031,13 +925,13 @@ test("Site pages and agents started from them cannot change Site publications", 
     title: "Site A",
     versionId: site.versionId,
   };
-  const clamped = await f.agentGrant(fromSite);
+  const clamped = await f.liveAgentGrant(fromSite);
   const refusedWith = (code: string) => ({ status: 403, details: { code } });
 
   // The check every publication change runs first.
   await expect(
     resolveSiteManagement(deps, clamped, site.siteId, { mutate: true }),
-  ).rejects.toMatchObject(refusedWith("site_agent_forbidden"));
+  ).resolves.toMatchObject({ manager: true });
   await expect(
     withSiteSessionOrigin(origin, () =>
       resolveSiteManagement(deps, f.grant, site.siteId, { mutate: true }),
@@ -1050,35 +944,10 @@ test("Site pages and agents started from them cannot change Site publications", 
   await expect(
     resolveSiteManagement(deps, await f.liveAgentGrant(plain), site.siteId, { mutate: true }),
   ).resolves.toMatchObject({ manager: true });
-  // A Site-started agent is refused before anything else, live attempt or not.
+  // Site origin does not remove the owner's normal management authority.
   await expect(
-    resolveSiteManagement(deps, await f.liveAgentGrant(fromSite), site.siteId, { mutate: true }),
-  ).rejects.toMatchObject(refusedWith("site_agent_forbidden"));
-
-  // The agent tool refuses a Site-started agent.
-  const server = new McpServer({ name: "site-publication-clamp", version: "1" });
-  registerSitePublicationTools(
-    server,
-    deps,
-    clamped,
-    async () => undefined,
-    (value) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] }),
-  );
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const mcp = new Client({ name: "site-publication-clamp", version: "1" });
-  await server.connect(serverTransport);
-  await mcp.connect(clientTransport);
-  try {
-    const result = await mcp.callTool({
-      name: "site_publication_update",
-      arguments: { siteId: site.siteId, access: "members" },
-    });
-    expect(result.isError).toBe(true);
-    const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
-    expect(JSON.parse(text).error.details.code).toBe("site_agent_forbidden");
-  } finally {
-    await mcp.close();
-  }
+    resolveSiteManagement(deps, clamped, site.siteId, { mutate: true }),
+  ).resolves.toMatchObject({ manager: true });
 
   // Every publication route: a framed page never reaches it (the frame
   // allowlist), and a request inside a Site origin is refused by the route.
@@ -1120,7 +989,7 @@ test("Site pages and agents started from them cannot change Site publications", 
   expect((await f.call("PUT", publication, {}, { access: "members" })).status).toBe(201);
 });
 
-test("agents started from a Site do not learn or change secrets, members, connections or settings", async () => {
+test("Site and console agents use the same learning, secret and HTTP authorization", async () => {
   const f = await fixture();
   const site = await f.publish("Site L");
   const fromSite = await f.startSession(site.frame("frame-l"));
@@ -1133,7 +1002,7 @@ test("agents started from a Site do not learn or change secrets, members, connec
   const clampedAgent = await f.liveAgentGrant(fromSite);
   const plainAgent = await f.liveAgentGrant(plain);
 
-  // First-party tools: the writes are refused, before anything is read.
+  // The same native permission and input checks apply to both agents.
   const tools = async (grant: AccessGrant, sessionId: string) => {
     const server = new McpServer({ name: "site-learning-clamp", version: "1" });
     registerKnowledgeEntryTools(server, deps, grant, sessionId);
@@ -1177,7 +1046,7 @@ test("agents started from a Site do not learn or change secrets, members, connec
     }
   };
   for (const [grant, sessionId, clamped] of [
-    [clampedAgent, fromSite, true],
+    [clampedAgent, fromSite, false],
     [plainAgent, plain, false],
   ] as const) {
     const client = await tools(grant, sessionId);
@@ -1188,20 +1057,6 @@ test("agents started from a Site do not learn or change secrets, members, connec
           name,
           clamped,
         });
-        // A refused learning write tells the person, through the timeline,
-        // that it was not saved; the fact rides in `_meta`, never the text.
-        const learningDestination =
-          name === "instruction_policy_save"
-            ? "instruction"
-            : name.startsWith("knowledge_")
-              ? "knowledge"
-              : null;
-        if (clamped && learningDestination) {
-          expect({ name, refusal: result._meta?.[LEARNING_REFUSAL_META_KEY] }).toEqual({
-            name,
-            refusal: { destination: learningDestination, reason: "site_agent" },
-          });
-        }
       }
     } finally {
       await client.close();
@@ -1253,905 +1108,15 @@ test("agents started from a Site do not learn or change secrets, members, connec
     const clamped = await as(clampedAgent, method, path, body);
     expect({ route, status: clamped.status, refused: refusal.test(clamped.text) }).toEqual({
       route,
-      status: 403,
-      refused: true,
+      status: clamped.status,
+      refused: false,
     });
     const other = await as(plainAgent, method, path, body);
     expect({ route, refused: refusal.test(other.text) }).toEqual({ route, refused: false });
+    expect({ route, status: clamped.status }).toEqual({ route, status: other.status });
   }
   const search = await as(clampedAgent, "POST", "/knowledge/entries/search", {});
   expect(refusal.test(search.text)).toBe(false);
-});
-
-test("agents started from a Site leave the organization profile, machines, environments and other published Sites alone", async () => {
-  const f = await fixture();
-  const own = await f.publish("Own Site");
-  const other = await f.publish("Other Site");
-  const draft = await f.publish("Draft Site");
-  // `own` and `other` are also published on their own hostnames; `draft` is not.
-  for (const site of [own, other]) {
-    const published = await f.call(
-      "PUT",
-      `/published-artifacts/${site.siteId}/publication`,
-      {},
-      { access: "members" },
-    );
-    expect(published.status, await published.clone().text()).toBe(201);
-  }
-  const fromSite = await f.startSession(own.frame("frame-own"));
-  const plain = await f.startSession();
-  const settings = { ...f.settings, sandboxSelfhostedEnabled: true };
-  const deps = {
-    db: db.db,
-    bus: new MemoryEventBus(),
-    settings,
-    objectStorage: f.objectStorage,
-    workflowClient: new Proxy({}, { get: () => noop }),
-  } as unknown as ApiRouteDeps;
-  const tools = [
-    "company_profile_propose",
-    "company_profile_confirm",
-    "connected_machine_enroll_token",
-    "connected_machine_enable_screen_control",
-    "connected_machine_remove",
-    "rig_propose_change",
-    "rig_verify",
-    "rig_promote",
-    "artifacts_create",
-    "artifacts_publish",
-    "artifacts_rollback",
-    "artifacts_archive",
-    "artifacts_restore",
-    "sandbox_attach",
-    "sandbox_swap",
-    "run_on",
-    "sandbox_provision",
-  ];
-  // A Site page's session gets only the first-party tools its Site declares;
-  // this test is about the clamp, so its session holds the Site tools it uses.
-  await shared.admin`
-    update sessions
-    set first_party_mcp_tools = first_party_mcp_tools || ${shared.admin.json(tools)}::jsonb
-    where id = ${fromSite}`;
-  // One running turn each: the agents the MCP calls and the HTTP calls run as.
-  const clampedAgent = await f.liveAgentGrant(fromSite);
-  const plainAgent = await f.liveAgentGrant(plain);
-  const connect = async (live: AccessGrant) => {
-    const grant: AccessGrant = {
-      ...live,
-      permissions: [
-        ...live.permissions,
-        "enrollments:manage",
-        "rigs:use",
-        "rigs:manage",
-      ] as AccessGrant["permissions"],
-      metadata: { ...live.metadata, firstPartyMcpTools: tools },
-    };
-    const server = buildOpenGeniMcpServer(deps, grant);
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "site-clamp-sweep", version: "1" });
-    await server.connect(serverTransport);
-    await client.connect(clientTransport);
-    return client;
-  };
-  const errorCode = (result: Awaited<ReturnType<Client["callTool"]>>) => {
-    const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
-    try {
-      return (JSON.parse(text) as { error?: { code?: string } }).error?.code;
-    } catch {
-      return undefined;
-    }
-  };
-  const uuid = () => crypto.randomUUID();
-  const html = "<!doctype html><h1>Changed by an agent</h1>";
-  const writes = (siteId: string, versionId: string): Array<[string, Record<string, unknown>]> => [
-    [
-      "artifacts_publish",
-      { artifactId: siteId, expectedCurrentVersionId: versionId, html, idempotencyKey: uuid() },
-    ],
-    [
-      "artifacts_rollback",
-      {
-        artifactId: siteId,
-        versionId,
-        expectedCurrentVersionId: versionId,
-        reason: "From a Site page",
-        idempotencyKey: uuid(),
-      },
-    ],
-    [
-      "artifacts_archive",
-      {
-        artifactId: siteId,
-        expectedCurrentVersionId: versionId,
-        reason: "From a Site page",
-        idempotencyKey: uuid(),
-      },
-    ],
-    [
-      "artifacts_restore",
-      {
-        artifactId: siteId,
-        expectedCurrentVersionId: versionId,
-        reason: "From a Site page",
-        idempotencyKey: uuid(),
-      },
-    ],
-  ];
-  const workspaceWide: Array<[string, Record<string, unknown>]> = [
-    [
-      "company_profile_propose",
-      { operationId: uuid(), identity: "A robotics company.", mission: "Build safe robots." },
-    ],
-    [
-      "company_profile_confirm",
-      { operationId: uuid(), proposalReceiptId: uuid(), humanInputRequestId: uuid() },
-    ],
-    ["connected_machine_enroll_token", {}],
-    ["connected_machine_enable_screen_control", { target: uuid() }],
-    ["connected_machine_remove", { enrollmentId: uuid() }],
-    ["rig_propose_change", { rigId: uuid(), command: "echo hello" }],
-    ["rig_verify", { rigId: uuid() }],
-    ["rig_promote", { rigId: uuid(), changeId: uuid() }],
-    // Compute beyond its own session's: the viewer's machines among it.
-    ["sandbox_attach", { target: uuid() }],
-    ["sandbox_swap", { target: uuid() }],
-    ["run_on", { target: uuid(), op: { kind: "read", path: "/etc/hostname" } }],
-    ["sandbox_provision", { kind: "modal" }],
-  ];
-
-  for (const [agent, clamped] of [
-    [clampedAgent, true],
-    [plainAgent, false],
-  ] as const) {
-    const client = await connect(agent);
-    try {
-      const listed = new Set((await client.listTools()).tools.map((tool) => tool.name));
-      expect(tools.filter((tool) => !listed.has(tool))).toEqual([]);
-      // Workspace-wide writes: refused for the Site-started agent only.
-      for (const [name, args] of workspaceWide) {
-        const result = await client.callTool({ name, arguments: args });
-        expect({ name, clamped: errorCode(result) === "site_agent_clamped" }).toEqual({
-          name,
-          clamped,
-        });
-      }
-      // Another published Site: refused for the Site-started agent only.
-      for (const [name, args] of writes(other.siteId, other.versionId)) {
-        const result = await client.callTool({ name, arguments: args });
-        expect({ name, clamped: errorCode(result) === "site_agent_clamped" }).toEqual({
-          name,
-          clamped,
-        });
-      }
-      if (clamped) {
-        const [unchanged] = await shared.admin<{ current_version_id: string; status: string }[]>`
-          select current_version_id, status from workspace_artifacts where id = ${other.siteId}`;
-        expect(unchanged).toEqual({ current_version_id: other.versionId, status: "active" });
-      }
-    } finally {
-      await client.close();
-    }
-  }
-  // The Site it was started from stays open, and so does a Site its own
-  // session tree created. A Site a person made does not, published or not,
-  // so a page cannot spread itself through the person's drafts.
-  const client = await connect(clampedAgent);
-  let mine = { siteId: "", versionId: "" };
-  try {
-    const made = await client.callTool({
-      name: "artifacts_create",
-      arguments: { title: "Made by the Site's agent", html, idempotencyKey: uuid() },
-    });
-    expect(made.isError ?? false).toBe(false);
-    const { version } = JSON.parse((made.content as Array<{ text: string }>)[0]!.text) as {
-      version: { id: string; artifactId: string };
-    };
-    mine = { siteId: version.artifactId, versionId: version.id };
-    for (const site of [own, mine]) {
-      const [name, args] = writes(site.siteId, site.versionId)[0]!;
-      const result = await client.callTool({ name, arguments: args });
-      expect({ siteId: site.siteId, isError: result.isError ?? false }).toEqual({
-        siteId: site.siteId,
-        isError: false,
-      });
-    }
-    for (const [name, args] of writes(draft.siteId, draft.versionId)) {
-      const result = await client.callTool({ name, arguments: args });
-      expect({ name, code: errorCode(result) }).toEqual({ name, code: "site_agent_clamped" });
-    }
-    const [unchanged] = await shared.admin<{ current_version_id: string; status: string }[]>`
-      select current_version_id, status from workspace_artifacts where id = ${draft.siteId}`;
-    expect(unchanged).toEqual({ current_version_id: draft.versionId, status: "active" });
-  } finally {
-    await client.close();
-  }
-  // Over HTTP: the same rule for a published Site's content, and every
-  // workspace-wide family, matched on the decoded path. Reads stay open.
-  const bearer = async (grant: AccessGrant) => {
-    const metadata = grant.metadata as {
-      sessionId: string;
-      turnId: string;
-      attemptId: string;
-      executionGeneration: number;
-    };
-    return `Bearer ${await signDelegatedAccessToken(f.settings.delegationSecret!, {
-      accountId: f.accountId,
-      workspaceId: f.workspace.id,
-      subjectId: "worker:first-party-mcp",
-      permissions: [...permissions, "documents:manage", "members:manage", "workspace:admin"],
-      principalKind: "agent_attempt",
-      sessionId: metadata.sessionId,
-      turnId: metadata.turnId,
-      attemptId: metadata.attemptId,
-      executionGeneration: metadata.executionGeneration,
-      exp: Math.floor(Date.now() / 1000) + 600,
-    })}`;
-  };
-  const as = async (grant: AccessGrant, method: string, path: string, body?: unknown) => {
-    const response = await f.app.request(`/v1/workspaces/${f.workspace.id}${path}`, {
-      method,
-      headers: { authorization: await bearer(grant), "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    return { status: response.status, text: await response.text() };
-  };
-  const clampRefusal =
-    /An agent started from a Site page (cannot create or change|can change only its own Site)/u;
-  const otherSite = `/published-artifacts/${other.siteId}`;
-  const refused: Array<[string, string, unknown]> = [
-    ["POST", `${otherSite}/versions`, { html, expectedCurrentVersionId: other.versionId }],
-    [
-      "POST",
-      `${otherSite.toUpperCase().replace("/PUBLISHED-ARTIFACTS/", "/published-artifacts/")}/rollback`,
-      {},
-    ],
-    ["PATCH", `${otherSite}/status`, { status: "archived" }],
-    ["PUT", `${otherSite}/visibility`, { visibility: "private" }],
-    ["PATCH", "", { name: "Renamed from a Site" }],
-    ["DELETE", "", undefined],
-    ["PATCH", "/%73ettings", {}],
-    ["POST", "/%6Bnowledge/entries", {}],
-    ["PUT", "/company-profile", {}],
-    ["POST", "/enrollments/token", {}],
-    ["POST", `/machines/${uuid()}/update`, {}],
-    ["POST", "/rigs", {}],
-    ["PUT", "/default-rig", {}],
-    ["POST", "/webhooks", {}],
-    ["POST", "/network-routes", {}],
-    ["POST", "/browser-identities", {}],
-    ["PATCH", "/session-mcp-tool-permissions", {}],
-    ["POST", `/published-artifacts/${draft.siteId}/versions`, {}],
-    ["PATCH", `/published-artifacts/${draft.siteId}/status`, { status: "archived" }],
-  ];
-  for (const [method, path, body] of refused) {
-    const route = `${method} ${path}`;
-    const result = await as(clampedAgent, method, path, body);
-    expect({ route, status: result.status, refused: clampRefusal.test(result.text) }).toEqual({
-      route,
-      status: 403,
-      refused: true,
-    });
-  }
-  // Not refused: other callers, the agent's own Site, a Site its session
-  // tree created, and writes that only read.
-  const open: Array<[AccessGrant, string, string, unknown]> = [
-    [plainAgent, "POST", `${otherSite}/versions`, {}],
-    [plainAgent, "PATCH", "", {}],
-    [plainAgent, "PATCH", "/%73ettings", {}],
-    [plainAgent, "POST", "/webhooks", {}],
-    [clampedAgent, "POST", `/published-artifacts/${own.siteId}/versions`, {}],
-    [clampedAgent, "POST", `/published-artifacts/${mine.siteId}/versions`, {}],
-    [clampedAgent, "POST", `/machines/${uuid()}/audience/preview`, {}],
-  ];
-  for (const [grant, method, path, body] of open) {
-    const route = `${grant === plainAgent ? "plain" : "clamped"} ${method} ${path}`;
-    const result = await as(grant, method, path, body);
-    expect({ route, refused: clampRefusal.test(result.text) }).toEqual({ route, refused: false });
-  }
-});
-
-test("an agent whose own session cannot be read is clamped until it can be read", async () => {
-  const f = await fixture();
-  const plain = await f.startSession();
-  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
-  const turnId = crypto.randomUUID();
-  const unreadable = new Proxy(
-    {},
-    {
-      get: () => {
-        throw new Error("database unavailable");
-      },
-    },
-  ) as never;
-  expect(await siteSessionClamp(unreadable, scope, plain, turnId)).toEqual({
-    clamped: true,
-    originSiteIds: [],
-  });
-  // Not cached: the next read of the same turn sees the plain session.
-  expect(await siteSessionClamp(db.db, scope, plain, turnId)).toEqual({
-    clamped: false,
-    originSiteIds: [],
-  });
-  // A session that does not exist is not clamped here (other checks refuse it).
-  for (const missing of [crypto.randomUUID(), "not-a-session"])
-    expect(await siteSessionClamp(db.db, scope, missing, null)).toEqual({
-      clamped: false,
-      originSiteIds: [],
-    });
-});
-
-test("agents started from a Site write only on the allowlist; other workspace writes are refused", async () => {
-  const f = await fixture();
-  const own = await f.publish("Own Site");
-  const fromSite = await f.startSession(own.frame("frame-own"));
-  const plain = await f.startSession();
-  const clampedAgent = await f.liveAgentGrant(fromSite);
-  const plainAgent = await f.liveAgentGrant(plain);
-  const bearer = async (grant: AccessGrant) => {
-    const metadata = grant.metadata as {
-      sessionId: string;
-      turnId: string;
-      attemptId: string;
-      executionGeneration: number;
-    };
-    return `Bearer ${await signDelegatedAccessToken(f.settings.delegationSecret!, {
-      accountId: f.accountId,
-      workspaceId: f.workspace.id,
-      subjectId: "worker:first-party-mcp",
-      permissions: [
-        ...permissions,
-        "documents:manage",
-        "members:manage",
-        "workspace:admin",
-        "documents:search",
-        "files:upload",
-        "files:read",
-      ],
-      principalKind: "agent_attempt",
-      sessionId: metadata.sessionId,
-      turnId: metadata.turnId,
-      attemptId: metadata.attemptId,
-      executionGeneration: metadata.executionGeneration,
-      exp: Math.floor(Date.now() / 1000) + 600,
-    })}`;
-  };
-  const as = async (
-    grant: AccessGrant,
-    method: string,
-    path: string,
-    body?: unknown,
-    headers: Record<string, string> = {},
-  ) => {
-    const response = await f.app.request(`/v1/workspaces/${f.workspace.id}${path}`, {
-      method,
-      headers: {
-        authorization: await bearer(grant),
-        "content-type": "application/json",
-        ...headers,
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    return { status: response.status, text: await response.text() };
-  };
-  const clampRefusal = /An agent started from a Site page cannot/u;
-  const uuid = () => crypto.randomUUID();
-  // Families the earlier block list did not name, a session's own settings,
-  // tool approvals and inference: every write is refused, naming what it
-  // would change. (The only `mcp` writes are the agent's own MCP endpoints,
-  // which stay open; a path no route serves is a 404 before any guard.)
-  const refused: Array<[string, string, unknown, string]> = [
-    ["POST", "/variable-sets", {}, "secrets"],
-    ["POST", "/model-providers/openai/custom-models", {}, "workspace settings"],
-    ["PATCH", "/claude/settings", {}, "workspace settings"],
-    ["POST", "/github/repositories/sync", {}, "workspace members, connections or settings"],
-    ["POST", "/environments", {}, "sandbox environments"],
-    ["POST", "/identity-links", {}, "workspace members, connections or settings"],
-    ["POST", "/channels", {}, "workspace members, connections or settings"],
-    ["PUT", "/slack-task-policy", {}, "workspace settings"],
-    ["POST", "/preferences/proposals", {}, "workspace instructions"],
-    [
-      "POST",
-      `/user-resource-authorities/${uuid()}/grants`,
-      {},
-      "workspace members, connections or settings",
-    ],
-    ["PUT", "/memory-slack-publications/configuration", {}, "workspace settings"],
-    ["POST", "/company-brain/knowledge/record", {}, "Knowledge"],
-    ["POST", "/codex/apps", {}, "workspace settings"],
-    ["POST", "/gateway-custom-models", {}, "workspace settings"],
-    ["POST", "/scheduled-tasks", {}, "schedules"],
-    ["PUT", `/sessions/${fromSite}/tool-policy`, {}, "workspace settings"],
-    ["PUT", `/sessions/${fromSite}/vault-policy`, {}, "workspace settings"],
-    ["PUT", `/sessions/${fromSite}/usage-limit`, {}, "workspace settings"],
-    ["POST", "/tools/approvals", {}, "workspace settings"],
-    ["POST", "/chat/completions", {}, "workspace settings"],
-    // Browsers and screens can be the viewer's own Chrome and machines.
-    ["POST", "/browser-sessions", {}, "browser or computer sessions"],
-    ["POST", "/computer-sessions", {}, "browser or computer sessions"],
-  ];
-  for (const [method, path, body, what] of refused) {
-    const route = `${method} ${path}`;
-    const clamped = await as(clampedAgent, method, path, body);
-    expect({
-      route,
-      status: clamped.status,
-      refused: clamped.text.includes(`cannot create or change ${what}`),
-    }).toEqual({ route, status: 403, refused: true });
-    // Another agent is not limited here.
-    const other = await as(plainAgent, method, path, body);
-    expect({ route, refused: clampRefusal.test(other.text) }).toEqual({ route, refused: false });
-  }
-  // A publication keeps its own refusal code.
-  const publication = await as(
-    clampedAgent,
-    "PUT",
-    `/published-artifacts/${own.siteId}/publication`,
-    { access: "members" },
-  );
-  expect({
-    status: publication.status,
-    code: (JSON.parse(publication.text) as { error?: { details?: { code?: string } } }).error
-      ?.details?.code,
-  }).toEqual({ status: 403, code: "site_agent_forbidden" });
-
-  // Site SQL: managing the database is closed at the guard (as a Site
-  // publication); running a named query, as the page does, passes the guard
-  // (Site SQL then applies its own clamp and the query's audience; this
-  // deployment has no Site SQL, so it answers 503).
-  const refusalCode = (text: string) =>
-    (JSON.parse(text) as { error?: { details?: { code?: string } } }).error?.details?.code;
-  const sqlBase = `/published-artifacts/${own.siteId}/sql`;
-  for (const [method, path, body] of [
-    ["PUT", `${sqlBase}/settings`, { enabled: true }],
-    ["POST", `${sqlBase}/migrations`, { name: "init", sql: "CREATE TABLE t (a);" }],
-    ["PUT", `${sqlBase}/queries/recent`, { sql: "SELECT 1 AS one" }],
-    ["DELETE", `${sqlBase}/queries/recent`, undefined],
-    ["POST", `${sqlBase}/query`, { sql: "SELECT 1" }],
-    ["POST", `${sqlBase}/execute`, { sql: "DELETE FROM t" }],
-    ["POST", `${sqlBase}/import`, { format: "json", table: "t", rows: [] }],
-    ["POST", `${sqlBase}/reset`, { confirm: true }],
-  ] as const) {
-    const route = `${method} ${path}`;
-    const clamped = await as(clampedAgent, method, path, body);
-    expect({ route, status: clamped.status, code: refusalCode(clamped.text) }).toEqual({
-      route,
-      status: 403,
-      code: "site_agent_forbidden",
-    });
-    const other = await as(plainAgent, method, path, body);
-    expect({ route, refused: refusalCode(other.text) === "site_agent_forbidden" }).toEqual({
-      route,
-      refused: false,
-    });
-  }
-  const run = await as(clampedAgent, "POST", `${sqlBase}/queries/recent`, { params: {} });
-  expect({ status: run.status, code: refusalCode(run.text) }).toEqual({
-    status: 503,
-    code: "unavailable",
-  });
-
-  // The allowlist still serves the agent's work: its tools, its
-  // conversations, files, content and reads sent as POST.
-  const mcp = await as(
-    clampedAgent,
-    "POST",
-    "/mcp",
-    {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-06-18",
-        capabilities: {},
-        clientInfo: { name: "site-agent", version: "1" },
-      },
-    },
-    { accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" },
-  );
-  expect({ status: mcp.status, initialized: mcp.text.includes('"serverInfo"') }).toEqual({
-    status: 200,
-    initialized: true,
-  });
-  const renamed = await as(clampedAgent, "PATCH", `/sessions/${fromSite}`, {
-    title: "Renamed by its agent",
-  });
-  expect(renamed.status, renamed.text).toBe(200);
-  // A conversation it starts is its child, so it stays clamped to the Site.
-  const child = await as(clampedAgent, "POST", "/sessions", { initialMessage: "Child work" });
-  expect(child.status, child.text).toBe(202);
-  const childId = (JSON.parse(child.text) as { id: string }).id;
-  expect(await siteAgentClamp(db.db, await f.agentGrant(childId))).toEqual({
-    clamped: true,
-    originSiteIds: [own.siteId],
-  });
-  // Its workers run in its own sandbox or a new managed one: never on a
-  // chosen machine, a self-hosted backend or another session's sandbox.
-  for (const compute of [
-    { targetSandboxId: uuid() },
-    { sandboxBackend: "selfhosted" },
-    { sandbox: { groupId: uuid() } },
-  ]) {
-    const body = { initialMessage: "Child work", ...compute };
-    const refusedChild = await as(clampedAgent, "POST", "/sessions", body);
-    expect({ compute, status: refusedChild.status, text: refusedChild.text }).toMatchObject({
-      compute,
-      status: 403,
-      text: expect.stringContaining("cannot run on, attach, provision or choose sandboxes"),
-    });
-    const plainChild = await as(plainAgent, "POST", "/sessions", body);
-    expect({ compute, refused: clampRefusal.test(plainChild.text) }).toEqual({
-      compute,
-      refused: false,
-    });
-  }
-  const created = await as(clampedAgent, "POST", "/published-artifacts", {
-    title: "Made by a Site agent",
-    html: "<!doctype html><h1>New</h1>",
-    idempotencyKey: uuid(),
-  });
-  expect(created.status, created.text).toBe(201);
-  const open: Array<[string, string, unknown]> = [
-    ["POST", `/sessions/${fromSite}/events`, { type: "user.message", payload: { text: "Hi" } }],
-    ["POST", `/sessions/${fromSite}/control`, { action: "interrupt" }],
-    ["POST", `/sessions/${fromSite}/fs/list`, { path: "." }],
-    ["PUT", `/sessions/${fromSite}/archive`, { archived: true }],
-    ["POST", "/codemode/calls", {}],
-    ["POST", "/tools/calls", {}],
-    ["POST", "/files/uploads", {}],
-    ["POST", `/published-artifacts/${own.siteId}/versions`, {}],
-    ["POST", `/published-artifacts/${own.siteId}/data/query`, {}],
-    ["POST", "/knowledge/entries/search", {}],
-    ["POST", `/document-bases/${uuid()}/search`, {}],
-    ["POST", "/company-brain/knowledge/search", {}],
-    ["POST", "/feedback", {}],
-  ];
-  for (const [method, path, body] of open) {
-    const route = `${method} ${path}`;
-    const result = await as(clampedAgent, method, path, body);
-    expect({ route, refused: clampRefusal.test(result.text) }).toEqual({ route, refused: false });
-  }
-  // Documents, spreadsheets and presentations open only for a published Site
-  // that declares a first-party editing tool; this Site declares none.
-  const editable = await as(clampedAgent, "POST", "/editable-artifacts", {});
-  expect(editable.status).toBe(403);
-  expect(editable.text).toContain(
-    "documents, spreadsheets or presentations the Site did not declare",
-  );
-  expect(clampRefusal.test((await as(plainAgent, "POST", "/editable-artifacts", {})).text)).toBe(
-    false,
-  );
-  // Reads stay open everywhere.
-  const read = await as(clampedAgent, "GET", "/variable-sets");
-  expect(clampRefusal.test(read.text)).toBe(false);
-});
-
-test("Site artifact edits need declared tools and creation in the clamped session tree, over MCP and HTTP", async () => {
-  const f = await fixture();
-  const plainSite = await f.publish("Plain Site");
-  const editorSite = await f.publish("Editor Site", {
-    requestedTools: [
-      "editable_artifact_create",
-      "editable_artifact_apply",
-      "editable_artifact_export",
-    ].map((toolName) => ({ serverId: "opengeni", toolName })),
-  });
-  const fromPlain = await f.liveAgentGrant(await f.startSession(plainSite.frame("frame-plain")));
-  const fromEditor = await f.liveAgentGrant(await f.startSession(editorSite.frame("frame-editor")));
-  const writes: string[] = [];
-  const artifactId = crypto.randomUUID().replaceAll("-", "");
-  const seed = async (live: AccessGrant, id = crypto.randomUUID().replaceAll("-", "")) => {
-    const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
-    const actor = {
-      kind: "agent" as const,
-      subjectId: live.subjectId,
-      replicaId: crypto.randomUUID().replaceAll("-", "").slice(0, 16),
-      sessionId: String(live.metadata!.sessionId),
-      turnId: String(live.metadata!.turnId),
-      attemptId: String(live.metadata!.attemptId),
-      generation: Number(live.metadata!.executionGeneration),
-    };
-    const snapshotId = crypto.randomUUID().replaceAll("-", "");
-    const now = new Date().toISOString();
-    const stateHash = `sha256:${"a".repeat(64)}`;
-    const result = await new PostgresEditableArtifactStore(db.db).createArtifact({
-      scope,
-      artifactId: id,
-      authorizationActor: actor,
-      receiptId: crypto.randomUUID().replaceAll("-", ""),
-      authorityKey: JSON.stringify([
-        "agent",
-        actor.subjectId,
-        actor.sessionId,
-        actor.turnId,
-        actor.attemptId,
-        actor.generation,
-      ]),
-      idempotencyKey: `create:${id}`,
-      requestHash: stateHash,
-      operationKind: "create",
-      modality: "document",
-      title: "Notes",
-      expectedScopeAuthorizationRevision: 1,
-      initialArtifactAuthorizationRevision: 1,
-      createdBySubjectId: actor.subjectId,
-      genesisSnapshot: {
-        scope,
-        artifactId: id,
-        snapshotId,
-        modality: "document",
-        nativeRevision: 0,
-        blobReference: `editable-artifacts/${id}/${snapshotId}`,
-        byteSize: 256,
-        contentHash: stateHash,
-        mimeType: "application/vnd.opengeni.editable-artifact-snapshot",
-        coveredHeadSequence: 0,
-        stateHash,
-        modelSchemaVersion: 1,
-        kernelVersion: "test-kernel-1",
-        verifiedAt: now,
-        publishedAt: now,
-      },
-      outbox: {
-        outboxId: crypto.randomUUID().replaceAll("-", ""),
-        event: {
-          kind: "snapshot_published",
-          schemaVersion: 1,
-          scope,
-          artifactId: id,
-          modality: "document",
-          snapshotId,
-          coveredHeadSequence: 0,
-          stateHash,
-          publishedAt: now,
-        },
-        state: "pending",
-        attemptCount: 0,
-        leaseOwner: null,
-        leaseExpiresAt: null,
-        nextAttemptAt: now,
-        lastErrorCode: null,
-        publishedAt: null,
-        deadLetteredAt: null,
-        createdAt: now,
-      },
-    });
-    expect(result.kind).toBe("result");
-    return id;
-  };
-  const artifactMetadata = (id: string) => ({
-    id,
-    artifactReference: `artifact:${id}`,
-    modality: "document",
-    title: "Notes",
-    lifecycle: "active",
-    headSequence: 0,
-    stateHash: `sha256:${"a".repeat(64)}`,
-    createdAt: "2026-10-15T00:00:00.000Z",
-    updatedAt: "2026-10-15T00:00:00.000Z",
-  });
-  const deps = {
-    db: db.db,
-    bus: new MemoryEventBus(),
-    settings: f.settings,
-    objectStorage: f.objectStorage,
-    workflowClient: new Proxy({}, { get: () => noop }),
-    editableArtifactAgent: {
-      async create() {
-        writes.push("create");
-        await seed(fromEditor, artifactId);
-        return artifactMetadata(artifactId);
-      },
-      async apply(input: { artifactId: string }) {
-        writes.push(`apply:${input.artifactId}`);
-        return {
-          artifact: artifactMetadata(input.artifactId),
-          transaction: {
-            id: crypto.randomUUID().replaceAll("-", ""),
-            clientTransactionId: "edit",
-            sequenceStart: 1,
-            sequenceEnd: 1,
-            stateHash: `sha256:${"a".repeat(64)}`,
-            committedAt: new Date().toISOString(),
-            replayed: false,
-          },
-        };
-      },
-      async startExport(input: { artifactId: string }) {
-        writes.push(`export:${input.artifactId}`);
-        return {
-          artifact: artifactMetadata(input.artifactId),
-          versionId: "b".repeat(32),
-          jobId: "c".repeat(32),
-          sourceHeadSequence: 0,
-          sourceStateHash: `sha256:${"a".repeat(64)}`,
-          state: "pending",
-        };
-      },
-    },
-  } as unknown as ApiRouteDeps;
-  const connect = async (live: AccessGrant) => {
-    const server = buildOpenGeniMcpServer(deps, {
-      ...live,
-      permissions: [...live.permissions, "files:upload"],
-      metadata: {
-        ...live.metadata,
-        firstPartyMcpTools: [
-          "editable_artifact_create",
-          "editable_artifact_apply",
-          "editable_artifact_export",
-          "editable_artifact_export_status",
-        ],
-      },
-    });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "site-editable-artifacts", version: "1" });
-    await server.connect(serverTransport);
-    await client.connect(clientTransport);
-    return client;
-  };
-  const errorCode = (result: Awaited<ReturnType<Client["callTool"]>>) => {
-    const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
-    try {
-      return (JSON.parse(text) as { error?: { code?: string } }).error?.code;
-    } catch {
-      return undefined;
-    }
-  };
-  const create = {
-    name: "editable_artifact_create",
-    arguments: { modality: "document", title: "Notes" },
-  };
-  const exportCall = {
-    name: "editable_artifact_export",
-    arguments: { artifactId: crypto.randomUUID().replaceAll("-", ""), format: "pdf" },
-  };
-  // The Site declares no editing tool: create and export are both refused.
-  const plainClient = await connect(fromPlain);
-  for (const call of [create, exportCall]) {
-    const result = await plainClient.callTool(call);
-    expect({ tool: call.name, code: errorCode(result) }).toEqual({
-      tool: call.name,
-      code: "site_agent_clamped",
-    });
-  }
-  expect(writes).toEqual([]);
-  // A declared editing tool actually reaches the application and returns a
-  // successful MCP artifact result; unrelated failures cannot pass this test.
-  const editorClient = await connect(fromEditor);
-  const result = await editorClient.callTool(create);
-  expect(result.isError, JSON.stringify(result)).not.toBe(true);
-  expect(result.structuredContent).toMatchObject({ id: artifactId });
-  expect(writes).toEqual(["create"]);
-  const edit = (id: string, modality = "document") => ({
-    name: "editable_artifact_apply",
-    arguments: {
-      artifactId: id,
-      modality,
-      expectedHeadSequence: 0,
-      expectedStateHash: `sha256:${"a".repeat(64)}`,
-      commands: [{ kind: "test.edit" }],
-    },
-  });
-  // Existing workspace artifacts and another conversation on the same Site stay
-  // outside this tree, even after the caller has read/associated the artifact.
-  const unrelated = await seed(await f.liveAgentGrant(await f.startSession()));
-  const otherTree = await seed(
-    await f.liveAgentGrant(await f.startSession(editorSite.frame("other-tree"))),
-  );
-  await touchEditableArtifactSessionLink(
-    db.db,
-    { accountId: f.accountId, workspaceId: f.workspace.id },
-    String(fromEditor.metadata!.sessionId),
-    unrelated,
-  );
-  for (const id of [unrelated, otherTree]) {
-    for (const modality of ["document", "spreadsheet", "presentation"]) {
-      expect(errorCode(await editorClient.callTool(edit(id, modality)))).toBe("site_agent_clamped");
-    }
-    expect(
-      errorCode(
-        await editorClient.callTool({
-          ...exportCall,
-          arguments: { artifactId: id, format: "pdf" },
-        }),
-      ),
-    ).toBe("site_agent_clamped");
-    expect(
-      errorCode(
-        await editorClient.callTool({
-          name: "editable_artifact_export_status",
-          arguments: { artifactId: id, versionId: "b".repeat(32), jobId: "c".repeat(32) },
-        }),
-      ),
-    ).toBe("site_agent_clamped");
-  }
-  expect(writes).toEqual(["create"]);
-  expect((await editorClient.callTool(edit(artifactId))).isError).not.toBe(true);
-  expect(
-    (await editorClient.callTool({ ...exportCall, arguments: { artifactId, format: "pdf" } }))
-      .isError,
-  ).not.toBe(true);
-  const child = await withSessionRlsActorContext({ subjectId: f.grant.subjectId }, () =>
-    createSession(db.db, {
-      accountId: f.accountId,
-      workspaceId: f.workspace.id,
-      parentSessionId: String(fromEditor.metadata!.sessionId),
-      visibility: "user_private",
-      createdByActor: {
-        type: "agent_attempt",
-        sessionId: String(fromEditor.metadata!.sessionId),
-        turnId: String(fromEditor.metadata!.turnId),
-        attemptId: String(fromEditor.metadata!.attemptId),
-        executionGeneration: Number(fromEditor.metadata!.executionGeneration),
-      },
-      initialMessage: "Child",
-      resources: [],
-      metadata: {},
-      createdBy: { kind: "subject", subjectId: f.grant.subjectId },
-      subjectId: f.grant.subjectId,
-      model: "test-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-    }),
-  );
-  const childGrant = await f.liveAgentGrant(child.id);
-  const childArtifact = await seed(childGrant);
-  expect((await editorClient.callTool(edit(childArtifact))).isError).not.toBe(true);
-  const childClient = await connect(childGrant);
-  expect((await childClient.callTool(edit(artifactId))).isError).not.toBe(true);
-  await childClient.close();
-  await plainClient.close();
-  await editorClient.close();
-  const bearer = async (grant: AccessGrant) => {
-    const metadata = grant.metadata as {
-      sessionId: string;
-      turnId: string;
-      attemptId: string;
-      executionGeneration: number;
-    };
-    return `Bearer ${await signDelegatedAccessToken(f.settings.delegationSecret!, {
-      accountId: f.accountId,
-      workspaceId: f.workspace.id,
-      subjectId: "worker:first-party-mcp",
-      permissions: [...permissions, "documents:manage"],
-      principalKind: "agent_attempt",
-      sessionId: metadata.sessionId,
-      turnId: metadata.turnId,
-      attemptId: metadata.attemptId,
-      executionGeneration: metadata.executionGeneration,
-      exp: Math.floor(Date.now() / 1000) + 600,
-    })}`;
-  };
-  const post = async (grant: AccessGrant, path: string) => {
-    const response = await f.app.request(`/v1/workspaces/${f.workspace.id}${path}`, {
-      method: "POST",
-      headers: { authorization: await bearer(grant), "content-type": "application/json" },
-      body: "{}",
-    });
-    return { status: response.status, text: await response.text() };
-  };
-  const undeclared = "documents, spreadsheets or presentations the Site did not declare";
-  for (const path of [
-    "/editable-artifacts",
-    `/editable-artifacts/${artifactId}/live-ticket`,
-    `/editable-artifacts/${artifactId}/materializations`,
-  ]) {
-    expect((await post(fromPlain, path)).text).toContain(undeclared);
-    // This fixture intentionally sends an invalid body: an allowed resource
-    // reaches the real route's validation, not a clamp or an unrelated 500.
-    const allowed = await post(fromEditor, path);
-    expect(allowed.status, allowed.text).toBe(422);
-    expect(allowed.text).not.toContain(undeclared);
-  }
-  for (const id of [unrelated, otherTree]) {
-    for (const suffix of ["live-ticket", "versions", "materializations"]) {
-      const denied = await post(fromEditor, `/editable-artifacts/${id}/${suffix}`);
-      expect(denied.status).toBe(403);
-      expect(denied.text).toContain(undeclared);
-    }
-  }
 });
 
 test("Site pages send message text only: no approvals, answers, resources or credentials", async () => {
@@ -2284,74 +1249,80 @@ test("Site pages send message text only: no approvals, answers, resources or cre
   expect(direct.status, await direct.clone().text()).toBeLessThan(300);
 });
 
-test("a Site page's session gets only the declared first-party tools and the Site's own data tools, without a sandbox", async () => {
-  // The deployment default backend is a real sandbox; a Site page's agent still gets none.
+test("Site creation and console creation have identical tools and execution settings", async () => {
   const f = await fixture({ sandboxBackend: "docker" });
-  const declaring = await f.publish("Declaring Site", {
-    requestedTools: [{ serverId: "opengeni", toolName: "editable_artifact_create" }],
+  const site = await f.publish("Workspace chat", {
+    requestedTools: [{ serverId: "crm", toolName: "read_contact" }],
   });
-  const plain = await f.publish("Plain Site");
-  const session = async (id: string) => {
-    const [row] = await shared.admin<
-      { first_party_mcp_tools: string[]; sandbox_backend: string; tools: Array<{ id: string }> }[]
-    >`select first_party_mcp_tools, sandbox_backend, tools from sessions where id = ${id}`;
-    return {
-      firstParty: [...row!.first_party_mcp_tools].sort(),
-      sandbox: row!.sandbox_backend,
-      servers: row!.tools.map((tool) => tool.id).sort(),
-    };
+  const create = async (frame: Record<string, string>, extra: Record<string, unknown> = {}) => {
+    const response = await f.call("POST", "/sessions", frame, {
+      initialMessage: "Hello",
+      ...extra,
+    });
+    expect(response.status, await response.clone().text()).toBe(202);
+    const { id } = await response.json();
+    const [row] = await shared.admin`select tools,first_party_mcp_tools,first_party_mcp_permissions,
+      agent_config,vault_policy,sandbox_backend,agent_access,memory_scope,tool_policy
+      from sessions where id=${id}`;
+    return row;
   };
-  expect(await session(await f.startSession(declaring.frame("frame-d")))).toEqual({
-    firstParty: [
-      "editable_artifact_create",
-      "set_session_title",
-      "site_data_query",
-      "site_data_write",
-      "wait_for_input",
-    ],
-    sandbox: "none",
-    servers: [],
-  });
-  expect(await session(await f.startSession(plain.frame("frame-p")))).toEqual({
-    firstParty: ["set_session_title", "site_data_query", "site_data_write", "wait_for_input"],
-    sandbox: "none",
-    servers: [],
-  });
-  // An inline frame (no published Site) has no Site data to reach.
-  expect(await session(await f.startSession(f.inline("frame-i")))).toEqual({
-    firstParty: ["set_session_title", "wait_for_input"],
-    sandbox: "none",
-    servers: [],
-  });
+  const consoleConfig = await create({});
+  expect(consoleConfig!.sandbox_backend).toBe("docker");
+  for (const frame of [site.frame("published"), f.inline("inline")]) {
+    expect(await create(frame)).toEqual(consoleConfig);
+  }
 });
 
-test("a Site frame freezes tool names, not the whole declared MCP connection", async () => {
+test("Site and console turns in existing and Site-created chats have identical native authority", async () => {
   const f = await fixture();
-  const site = await f.publish("CRM reader", {
-    requestedTools: [
-      { serverId: "crm", toolName: "read_contact" },
-      { serverId: "crm", toolName: "search_contacts" },
-    ],
-  });
-  const id = await f.startSession(site.frame("frame-crm"));
-  const [row] = await shared.admin`select tools from sessions where id = ${id}`;
-  expect(row!.tools).toEqual([
-    { kind: "mcp", id: "crm", optional: true, allowedTools: ["read_contact", "search_contacts"] },
-  ]);
+  const site = await f.publish("Chat", { visibility: "private" });
+  const other = await f.startSession();
+  const deps = { db: db.db, settings: f.settings, objectStorage: f.objectStorage } as ApiRouteDeps;
+  const existing = await f.startSession();
+  expect(
+    (await f.call("PUT", `/published-artifacts/${site.siteId}/session-access/${existing}`)).status,
+  ).toBe(200);
+  for (const id of [existing, await f.startSession(site.frame("created"))]) {
+    for (const surface of ["site", "web"]) {
+      const grant = await f.liveAgentGrant(id, surface as "site" | "web");
+      await expect(
+        requireSessionAuthorization(deps, grant, {
+          sessionId: other,
+          operation: "session.read",
+          surface: "first_party_mcp",
+        }),
+      ).resolves.toBeDefined();
+      await expect(
+        resolveSiteManagement(deps, grant, site.siteId, { mutate: true }),
+      ).resolves.toMatchObject({ manager: true });
+      // Normal read authorization still rejects nonexistent sessions.
+      await expect(
+        requireSessionAuthorization(deps, grant, {
+          sessionId: crypto.randomUUID(),
+          operation: "session.read",
+          surface: "first_party_mcp",
+        }),
+      ).rejects.toBeInstanceOf(SessionAuthorizationDeniedError);
+      await shared.admin`update session_turn_attempts set state='closed',outcome='completed',closed_at=now()
+        where id=${String(grant.metadata!.attemptId)}`;
+      await shared.admin`update session_turns set status='completed' where id=${String(grant.metadata!.turnId)}`;
+    }
+  }
 });
 
-test("a Site page starts a session with a message and a model only, on a minimal profile", async () => {
+test("Site creation preserves normal defaults, workspace restrictions and trusted origin", async () => {
   const f = await fixture();
   const site = await f.publish("Site A");
   const frame = site.frame("frame-a");
   for (const [field, value] of [
     ["tools", [{ kind: "mcp", id: "crm" }]],
     ["firstPartyMcpTools", ["sessions_list"]],
+    ["firstPartyMcpPermissions", ["workspace:admin"]],
+    ["agent", { instructions: "Hidden context", vaultPolicy: { mode: "all" } }],
     ["vaultPolicy", { mode: "all" }],
     ["sandboxBackend", "none"],
     ["targetSandboxId", crypto.randomUUID()],
     ["resources", [{ kind: "file", fileId: crypto.randomUUID() }]],
-    ["agent", { instructions: "Be someone else" }],
     ["modelContext", "Hidden context"],
     ["agentLearning", { knowledge: "automatic" }],
     ["channelId", crypto.randomUUID()],
@@ -2391,7 +1362,9 @@ test("a Site page starts a session with a message and a model only, on a minimal
     title: "Site A",
     versionId: site.versionId,
   });
-  expect(row!.vault_policy).toEqual({ mode: "selected", vaultIds: [] });
+  const [ordinary] =
+    await shared.admin`select vault_policy from sessions where id = ${await f.startSession()}`;
+  expect(row!.vault_policy).toEqual(ordinary!.vault_policy);
   expect(row!.reasoning_effort).toBe("low");
 
   // Its agent has the workspace's default capabilities without workspace
@@ -2408,8 +1381,8 @@ test("a Site page starts a session with a message and a model only, on a minimal
     from: fromAll.from,
     workspaceAdmin: fromAll.capabilities.workspaceAdmin,
     browser: fromAll.capabilities.browser,
-  }).toEqual({ from: "all", workspaceAdmin: false, browser: false });
-  // A narrower workspace default stays narrow; it cannot turn them back on.
+  }).toEqual({ from: "all", workspaceAdmin: true, browser: true });
+  // A narrower workspace default stays narrow, including explicitly enabled capabilities.
   await shared.admin`
     update workspaces
     set settings = jsonb_set(
@@ -2436,7 +1409,7 @@ test("a Site page starts a session with a message and a model only, on a minimal
     from: "none",
     artifacts: true,
     subagents: false,
-    workspaceAdmin: false,
-    browser: false,
+    workspaceAdmin: true,
+    browser: true,
   });
 });

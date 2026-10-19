@@ -40,6 +40,9 @@ export async function normalizeSiteAgentSession(
   retainedToolIds: readonly string[],
   memberPermissions?: readonly Permission[],
 ): Promise<void> {
+  // Saved member settings are the person's ordinary chat settings. Never
+  // replace them on Send merely because the chat was opened from a Site.
+  if (viewer.kind === "member") return;
   const data = await resolveSiteAgentDataContext(deps, host.scope, sessionId);
   if (
     data.kind !== "site" ||

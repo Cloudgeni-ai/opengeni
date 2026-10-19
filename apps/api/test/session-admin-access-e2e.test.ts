@@ -203,7 +203,7 @@ describe("session admin access end to end", () => {
         })
       ).status,
     ).toBe(403);
-    // Never a session a Site page started: it acts with that page's reach.
+    // The owner can give admin access to a Site-created chat normally.
     // Use the authenticated inline-frame route: Site provenance alone is not
     // authority to insert a shared root after the private-audience migration.
     const fromSiteResponse = await app.request(`/v1/workspaces/${workspaceId}/sessions`, {
@@ -229,13 +229,10 @@ describe("session admin access end to end", () => {
       headers: browser(cookie),
       body: "{}",
     });
-    expect(refusedForSite.status).toBe(409);
-    expect(
-      ((await refusedForSite.json()) as { error: { message: string } }).error.message,
-    ).toContain("A session started from a Site page cannot get admin access");
+    expect(refusedForSite.status, await refusedForSite.clone().text()).toBe(200);
     expect(
       await (await app.request(sessionAccess(fromSite), { headers: { cookie } })).json(),
-    ).toMatchObject({ active: false });
+    ).toMatchObject({ active: true });
 
     const granted = await app.request(sessionAccess(own), {
       method: "PUT",

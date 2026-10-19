@@ -176,10 +176,8 @@ budgets are checked before each new conversation and message.
   inline HTML is attributed too. Site-surface turns record which Site.
 - A Site may message only sessions that it originated; a page on Site B
   cannot send to a session started from Site A.
-- A Site-clamped agent cannot create or change schedules, automations or
-  Site publications, and reads, messages, steers or controls only sessions
-  acting for its own Site. Site pages cannot change publications either,
-  nor choose tools or authority in a session create body.
+- Superseded: agents now retain ordinary chat authority in every surface.
+  Page audience and request checks still apply; see `docs/site-conversations.md`.
 - `docs/agent-session-authority.md` and `AGENTS.md` describe the allowlist
   correctly.
 

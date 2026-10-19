@@ -3250,7 +3250,7 @@ export const englishMessages = {
   "timeline.learningRefusal.openSkills": "Open Skills",
   "timeline.learningRefusal.openWorkspaceInstructions": "Open workspace instructions",
   "timeline.learningRefusal.siteAgent":
-    "Agents started from a Site page don't save Skills, instructions, or Knowledge.",
+    "This save was refused under the Site policy in effect at the time.",
   "timeline.learningRefusal.skillLearningOff":
     "Agent learning for Skills is off where this would be saved. Turn it on in Agent learning settings, then ask again.",
   "timeline.learningRefusal.skillNotPermitted": "This chat isn't allowed to change this Skill.",

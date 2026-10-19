@@ -19,7 +19,7 @@ export type LearningRefusalDestination = (typeof LEARNING_REFUSAL_DESTINATIONS)[
  * destination it explicitly chooses, so only a genuine refusal is reported:
  * - `learning_off`: Agent learning for this destination is Off, in this
  *   chat's or the workspace's settings.
- * - `site_agent`: an agent started from a Site page never saves learning.
+ * - `site_agent`: historical receipts from the retired Site-specific policy.
  * - `not_permitted`: any other definite authority or policy refusal.
  */
 export const LEARNING_REFUSAL_REASONS = ["learning_off", "site_agent", "not_permitted"] as const;

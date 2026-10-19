@@ -85,7 +85,7 @@ function productionRoute() {
       withEffectivePolicy, measureSessionCreatePhase, legacyVariableSetFields,
       variableSetsRemovedResponse, withoutEmptyLegacyVariableSetFields,
       currentSiteSessionOrigin, currentSiteViewerRlsContext,
-      siteFrameBodyRefusal, siteFrameSessionProfile } = ports;
+      siteFrameBodyRefusal } = ports;
     ${code}
     return handler;
   `,
@@ -144,11 +144,6 @@ function routeFixture() {
     currentSiteSessionOrigin,
     currentSiteViewerRlsContext,
     siteFrameBodyRefusal,
-    // The route's minimal Site profile (module-private): recorded, payload kept.
-    siteFrameSessionProfile: async (_deps: unknown, _workspaceId: unknown, value: unknown) => {
-      calls.push({ name: "site profile", args: [value] });
-      return value;
-    },
     createSessionForRequest: (...args: unknown[]) => {
       calls.push({ name: "create", args });
       return hold.create.promise;
@@ -251,8 +246,8 @@ test("the production Site branch retains request-local provenance without export
   f.hold.projection.resolve(session);
   expect(await running).toEqual({ body: session, status: 202 });
   expect(metadata).toEqual({ _opengeniSiteOrigin: origin });
-  // A Site page's create runs on the minimal Site profile.
-  expect(f.calls.map((c) => c.name)).toContain("site profile");
+  // Origin is attribution, not a replacement execution profile.
+  expect(f.calls.map((c) => c.name)).not.toContain("site profile");
   expect(sessionCreationMetadata({})).toEqual({});
   expect(JSON.stringify(f.o.endings)).not.toContain("private");
 });

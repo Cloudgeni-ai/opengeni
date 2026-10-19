@@ -4,7 +4,7 @@ import {
   parseSiteHostname,
   siteHostname,
   SITE_NOT_AVAILABLE_FOR_VIEWER_ERROR_CODE,
-  type Permission,
+  Permission,
   type SiteLimitProfileKind,
   type SiteLimits,
   type SiteViewerCapabilities,
@@ -835,9 +835,9 @@ export async function siteRuntimeSessionRequest(
     stampSiteViewerSessionAuthorization(request, {
       organizationId: host.scope.accountId,
       subjectId: viewer.subjectId,
-      permissions: [
-        ...new Set([...SITE_RUNTIME_AGENT_PERMISSIONS, ...(input.extraPermissions ?? [])]),
-      ],
+      // The native resolver intersects this ceiling with live membership,
+      // including compact admin grants. The Site adds no permission ceiling.
+      permissions: [...Permission.options],
       workspaceId: host.scope.workspaceId,
     });
   }
