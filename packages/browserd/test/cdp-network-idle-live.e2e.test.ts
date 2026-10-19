@@ -13,7 +13,7 @@ import {
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
 e2e(
-  "network idle settles on live pages that keep an event stream or long poll open",
+  "network idle ignores event streams but waits for every request that can finish",
   async () => {
     const encoder = new TextEncoder();
     const openStreams = new Set<ReadableStreamDefaultController<Uint8Array>>();
@@ -45,21 +45,28 @@ e2e(
             { headers: { "content-type": "text/event-stream", "cache-control": "no-store" } },
           );
         }
-        if (url.pathname === "/poll") {
-          // A long poll the server never answers.
-          return new Response(
-            new ReadableStream<Uint8Array>({
-              start(controller) {
-                openStreams.add(controller);
-              },
-            }),
-            { headers: { "content-type": "application/json" } },
+        if (url.pathname === "/slow") {
+          // A finite response that takes a while: the page is still loading.
+          return new Promise<Response>((resolve) =>
+            setTimeout(
+              () =>
+                resolve(
+                  new Response('{"ok":true}', { headers: { "content-type": "application/json" } }),
+                ),
+              3_000,
+            ),
           );
         }
-        const page =
-          url.pathname === "/stream"
-            ? '<script>new EventSource("/events").onmessage=(e)=>{document.querySelector("output").textContent=e.data}</script>'
-            : '<script>fetch("/poll").catch(()=>{})</script>';
+        const pages: Record<string, string> = {
+          "/event-source":
+            '<script>new EventSource("/events").onmessage=(e)=>{document.querySelector("output").textContent=e.data}</script>',
+          // Apps that stream through fetch read the same event stream body.
+          "/fetch-stream":
+            '<script>fetch("/events").then(async(r)=>{const reader=r.body.getReader();for(;;){const {done}=await reader.read();if(done)break;document.querySelector("output").textContent="tick"}})</script>',
+          "/slow-page":
+            '<script>fetch("/slow").then((r)=>r.json()).then(()=>{document.querySelector("output").textContent="loaded"})</script>',
+        };
+        const page = pages[url.pathname] ?? "";
         return new Response(`<!doctype html><title>Live page</title><output>-</output>${page}`, {
           headers: { "content-type": "text/html" },
         });
@@ -109,29 +116,43 @@ e2e(
     });
     const origin = `http://127.0.0.1:${server.port}`;
     try {
-      // An open event stream is never page loading, so idle comes quickly.
-      const stream = await driver.start(`${origin}/stream`);
-      let started = Date.now();
-      const streamIdle = await controller.run(
-        command(stream, { type: "wait", condition: "network_idle", timeoutMs: 8_000 }),
-      );
-      expect(streamIdle.error ?? null).toBeNull();
-      expect(streamIdle.state).toBe("completed");
-      expect(Date.now() - started).toBeLessThan(5_000);
+      const initial = await driver.start(`${origin}/event-source`);
+      const idleAt = async (path: string, timeoutMs: number) => {
+        if (path !== "/event-source") {
+          const navigated = await controller.run(
+            command(await driver.observe(initial.target.id), {
+              type: "navigate",
+              url: `${origin}${path}`,
+            }),
+          );
+          expect(navigated.state).toBe("completed");
+        }
+        const started = Date.now();
+        const idle = await controller.run(
+          command(await driver.observe(initial.target.id), {
+            type: "wait",
+            condition: "network_idle",
+            timeoutMs,
+          }),
+        );
+        expect(idle.error ?? null).toBeNull();
+        expect(idle.state).toBe("completed");
+        return Date.now() - started;
+      };
+      const output = async () => {
+        const view = await driver.observe(initial.target.id);
+        return JSON.stringify(view.semantic);
+      };
 
-      // A request left open stops counting once it has outlived page loading.
-      const navigated = await controller.run(
-        command(stream, { type: "navigate", url: `${origin}/poll-page` }),
-      );
-      expect(navigated.state).toBe("completed");
-      const poll = await driver.observe(stream.target.id);
-      started = Date.now();
-      const pollIdle = await controller.run(
-        command(poll, { type: "wait", condition: "network_idle", timeoutMs: 20_000 }),
-      );
-      expect(pollIdle.error ?? null).toBeNull();
-      expect(pollIdle.state).toBe("completed");
-      expect(Date.now() - started).toBeLessThan(15_000);
+      // An open event stream is never page loading, so idle comes quickly,
+      // whether the page reads it as an EventSource or through fetch.
+      expect(await idleAt("/event-source", 8_000)).toBeLessThan(5_000);
+      expect(await idleAt("/fetch-stream", 8_000)).toBeLessThan(5_000);
+      expect(await output()).toContain("tick");
+
+      // A slow finite request keeps the page busy until it finishes.
+      await idleAt("/slow-page", 15_000);
+      expect(await output()).toContain("loaded");
     } finally {
       await driver.close();
       for (const open of openStreams) {
