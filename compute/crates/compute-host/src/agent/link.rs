@@ -34,8 +34,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn listen_link(&self, id: Id, spec: &VmSpec, clock: &RunClock) -> Option<Listeners> {
         let hub = self.link.clone()?;
         let sandbox = id.to_string();
+        let named: std::sync::Arc<str> = sandbox.as_str().into();
         let serve = move |stream| hub.serve(sandbox.clone(), stream);
         match guest_ports::listen_link(
+            named,
             &spec.vsock_path(),
             AGENT_LINK_PORT,
             (spec.uid, spec.gid),

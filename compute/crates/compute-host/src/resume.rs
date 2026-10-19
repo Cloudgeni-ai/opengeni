@@ -162,6 +162,8 @@ impl<F> std::fmt::Debug for Streams<F> {
 }
 
 struct Inner<F> {
+    /// The sandbox, named on every line logged about its streams.
+    sandbox: Arc<str>,
     /// Hands a new stream's hub end to the hub.
     serve: F,
     /// Streams the sandbox may have at once.
@@ -204,6 +206,8 @@ impl Drop for Tasks {
 }
 
 struct Shared {
+    /// The sandbox whose stream this is.
+    sandbox: Arc<str>,
     state: Mutex<State>,
     /// Bumped whenever the state changes; every task waits on it.
     changed: watch::Sender<()>,
@@ -287,11 +291,18 @@ impl<F> Streams<F>
 where
     F: Fn(DuplexStream) + Send + Sync + 'static,
 {
-    /// A sandbox's streams, each handed to `serve` when it begins; at most
-    /// `limit` at once. `clock` counts the time its guest could run.
-    pub(crate) fn new(serve: F, limit: usize, take_up: Duration, clock: RunClock) -> Self {
+    /// Sandbox `sandbox`'s streams, each handed to `serve` when it begins;
+    /// at most `limit` at once. `clock` counts the time its guest could run.
+    pub(crate) fn new(
+        sandbox: Arc<str>,
+        serve: F,
+        limit: usize,
+        take_up: Duration,
+        clock: RunClock,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
+                sandbox,
                 serve,
                 limit,
                 take_up,
@@ -312,7 +323,10 @@ where
             Ok(Err(_)) | Err(_) => None,
         };
         let Some(hello) = hello else {
-            tracing::warn!("an agent-link connection did not say hello; closing it");
+            tracing::warn!(
+                sandbox = %self.inner.sandbox,
+                "an agent-link connection did not say hello; closing it",
+            );
             return;
         };
         self.carry(&hello, connection);
@@ -331,7 +345,11 @@ where
         let mut map = self.inner.lock();
         if !map.streams.contains_key(&hello.id) {
             if hello.received > 0 || map.streams.len() >= self.inner.limit {
-                tracing::debug!(stream = %hello.id, "an agent-link stream the host does not have");
+                tracing::debug!(
+                    sandbox = %self.inner.sandbox,
+                    stream = %hello.id,
+                    "an agent-link stream the host does not have",
+                );
                 self.sweep_later(&mut map, now);
                 drop(map);
                 tokio::spawn(gone(connection));
@@ -365,7 +383,11 @@ where
         let Some((carrier, answer, cursor)) = taken else {
             // Restored from before what the host already took, not keeping
             // count, or already ending: the hub's end goes with the stream.
-            tracing::info!(stream = %hello.id, "an agent-link stream cannot go on; ending it");
+            tracing::info!(
+                sandbox = %self.inner.sandbox,
+                stream = %hello.id,
+                "an agent-link stream cannot go on; ending it",
+            );
             map.streams.remove(&hello.id);
             drop(map);
             tokio::spawn(gone(connection));
@@ -399,13 +421,14 @@ where
     fn start(&self, id: StreamId) -> Entry {
         let (near, far) = tokio::io::duplex(HUB_BUFFER);
         let shared = Arc::new(Shared {
+            sandbox: Arc::clone(&self.inner.sandbox),
             state: Mutex::new(State::default()),
             changed: watch::channel(()).0,
         });
         let (reading, writing) = tokio::io::split(near);
         let reader = tokio::spawn(read_hub(reading, Arc::clone(&shared)));
         let writer = tokio::spawn(write_hub(writing, Arc::clone(&shared)));
-        tracing::debug!(stream = %id, "an agent-link stream begins");
+        tracing::debug!(sandbox = %self.inner.sandbox, stream = %id, "an agent-link stream begins");
         (self.inner.serve)(far);
         Entry {
             shared,
@@ -450,7 +473,11 @@ async fn sweep<F>(inner: Weak<Inner<F>>, mut since: Duration) {
         });
         let ended = before - map.streams.len();
         if ended > 0 {
-            tracing::info!(ended, "agent-link streams the guest no longer has ended");
+            tracing::info!(
+                sandbox = %strong.sandbox,
+                ended,
+                "agent-link streams the guest no longer has ended",
+            );
         }
         let Some(next) = map.next_sweep.take() else {
             map.sweeping = false;
@@ -572,14 +599,24 @@ async fn read_frames<C, F>(
                         Ok(Received::Taken) => {}
                         Ok(Received::Abandoned) => break Some(Over::Abandoned),
                         Err(error) => {
-                            tracing::warn!(stream = %id, %error, "an agent-link stream broke the protocol; ending it");
+                            tracing::warn!(
+                                sandbox = %shared.sandbox,
+                                stream = %id,
+                                %error,
+                                "an agent-link stream broke the protocol; ending it",
+                            );
                             break Some(Over::Broken);
                         }
                     }
                 }
                 Ok(None) => break None,
                 Err(error) => {
-                    tracing::warn!(stream = %id, %error, "an agent-link stream broke the protocol; ending it");
+                    tracing::warn!(
+                        sandbox = %shared.sandbox,
+                        stream = %id,
+                        %error,
+                        "an agent-link stream broke the protocol; ending it",
+                    );
                     break Some(Over::Broken);
                 }
             }
@@ -646,7 +683,7 @@ async fn write_frames<C, F>(
         if over.is_some() || finished {
             let _ = connection.shutdown().await;
             if finished {
-                tracing::debug!(stream = %id, "an agent-link stream ended");
+                tracing::debug!(sandbox = %shared.sandbox, stream = %id, "an agent-link stream ended");
             }
             forget(&inner, id, &shared, carrier);
             return;
@@ -698,6 +735,7 @@ mod tests {
         let (began, hub) = mpsc::unbounded_channel();
         let clock = RunClock::running();
         let streams = Streams::new(
+            Arc::from("sandbox"),
             Box::new(move |end| {
                 let _ = began.send(end);
             }) as Serve,

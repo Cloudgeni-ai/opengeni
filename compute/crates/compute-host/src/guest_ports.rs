@@ -182,14 +182,15 @@ pub(crate) fn listen<A: Activity>(
     Ok(listeners)
 }
 
-/// Starts listening for the guest's connections to its agent link on
-/// `port`, each carrying a resumable stream (see [`crate::resume`]), and
-/// hands each new stream's end to `serve`. The streams end with the
-/// listeners. At most [`MAX_CONNECTIONS`] connections are open at once,
-/// and as many streams; more connections are closed as they come. `clock`
-/// counts the time the guest could run, by which streams it no longer
-/// takes up end. Must run inside a Tokio runtime.
+/// Starts listening for sandbox `sandbox`'s guest connections to its agent
+/// link on `port`, each carrying a resumable stream (see
+/// [`crate::resume`]), and hands each new stream's end to `serve`. The
+/// streams end with the listeners. At most [`MAX_CONNECTIONS`] connections
+/// are open at once, and as many streams; more connections are closed as
+/// they come. `clock` counts the time the guest could run, by which streams
+/// it no longer takes up end. Must run inside a Tokio runtime.
 pub(crate) fn listen_link(
+    sandbox: Arc<str>,
     vsock: &Path,
     port: u32,
     owner: (u32, u32),
@@ -202,8 +203,13 @@ pub(crate) fn listen_link(
     };
     let listener = bind(vsock, port, owner, &mut listeners)?;
     let open = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
-    let streams =
-        crate::resume::Streams::new(serve, MAX_CONNECTIONS, crate::resume::TAKE_UP, clock);
+    let streams = crate::resume::Streams::new(
+        Arc::clone(&sandbox),
+        serve,
+        MAX_CONNECTIONS,
+        crate::resume::TAKE_UP,
+        clock,
+    );
     listeners.tasks.push(tokio::spawn(async move {
         // Hellos still being read; they end with the listener, and the
         // streams with the last of them.
@@ -223,6 +229,7 @@ pub(crate) fn listen_link(
                         drop(stream);
                         if !over_limit {
                             tracing::warn!(
+                                sandbox = %sandbox,
                                 port,
                                 limit = MAX_CONNECTIONS,
                                 "a sandbox holds too many agent-link connections; closing new ones",
@@ -232,7 +239,12 @@ pub(crate) fn listen_link(
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(port, %error, "accepting an agent-link connection failed");
+                    tracing::warn!(
+                        sandbox = %sandbox,
+                        port,
+                        %error,
+                        "accepting an agent-link connection failed",
+                    );
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             }
