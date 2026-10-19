@@ -106,6 +106,13 @@ class Fixture implements CuaDesktopRuntime {
   }
 }
 
+class LinuxPermissionsFixture extends Fixture {
+  async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+    if (name === "check_permissions") return result({ atspi: true, x11: true });
+    return await super.callTool(name, argumentsJson);
+  }
+}
+
 class WindowsFixture extends Fixture {
   async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
     const response = await super.callTool(name, argumentsJson);
@@ -799,7 +806,7 @@ describe("CUA desktop boundary", () => {
     }
   });
 
-  test("macOS launches apps in the background by bundle id or name; other platforms refuse", async () => {
+  test("apps launch in the background by each platform's own app name", async () => {
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);
     fixture.callTool = async (name, json) =>
@@ -879,18 +886,63 @@ describe("CUA desktop boundary", () => {
     } finally {
       await backend.close();
     }
-    const windows = await CuaComputerBackend.open(new WindowsFixture(), "windows");
-    try {
-      expect((await windows.capabilities()).appLaunch).toBe(false);
-      const observation = await windows.observe((await windows.targets())[0]!.id);
-      await expect(
-        windows.validate({
-          ...command(observation),
-          action: { type: "launch", applicationId: "notepad" },
-        }),
-      ).rejects.toMatchObject({ code: "unsupported" });
-    } finally {
-      await windows.close();
+    for (const [platform, platformFixture, launches] of [
+      [
+        "windows",
+        new WindowsFixture(),
+        [
+          ["Notepad", { name: "Notepad" }],
+          [
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            {
+              aumid: "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            },
+          ],
+          ["C:\\Program Files\\App\\app.exe", { path: "C:\\Program Files\\App\\app.exe" }],
+          ["\\\\server\\share\\tool.exe", { path: "\\\\server\\share\\tool.exe" }],
+          ["C:\\Tools\\Acme!\\tool.exe", { path: "C:\\Tools\\Acme!\\tool.exe" }],
+          ["\\\\server\\Tools!\\tool.exe", { path: "\\\\server\\Tools!\\tool.exe" }],
+        ],
+      ],
+      [
+        "linux",
+        new LinuxPermissionsFixture(),
+        [
+          ["gedit", { name: "gedit" }],
+          ["org.gnome.Calculator", { name: "org.gnome.Calculator" }],
+        ],
+      ],
+    ] as const) {
+      const platformCall = platformFixture.callTool.bind(platformFixture);
+      platformFixture.callTool = async (name, json) =>
+        name === "launch_app"
+          ? (platformFixture.calls.push({
+              name,
+              args: JSON.parse(json) as Record<string, unknown>,
+            }),
+            // Linux reports the launcher process it started the app through.
+            result(platform === "linux" ? { launcher_pid: 92 } : { pid: 91, windows: [] }))
+          : await platformCall(name, json);
+      const other = await CuaComputerBackend.open(platformFixture, platform);
+      try {
+        expect((await other.capabilities()).appLaunch).toBe(true);
+        const target = (await other.targets())[0]!;
+        for (const [applicationId] of launches) {
+          const launch = {
+            ...command(await other.observe(target.id)),
+            action: { type: "launch" as const, applicationId },
+          };
+          await other.validate(launch);
+          await other.dispatch(launch);
+        }
+        expect(
+          platformFixture.calls
+            .filter((call) => call.name === "launch_app")
+            .map((call) => call.args),
+        ).toEqual(launches.map(([, args]) => args));
+      } finally {
+        await other.close();
+      }
     }
   });
 
