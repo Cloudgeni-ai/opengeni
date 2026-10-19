@@ -17,6 +17,7 @@ import {
   SUBSCRIPTION_RENAMED_ROUTINES,
   SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
   BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
+  MAINTENANCE_PROBE_OWNER_ROUTINES,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -2251,6 +2252,12 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    FOREACH routine_signature IN ARRAY ARRAY[${MAINTENANCE_PROBE_OWNER_ROUTINES.map(literal).join(",")} ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION opengeni_private.%s FROM PUBLIC, %I',
+          routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     FOREACH routine_signature IN ARRAY ${retiringOwnerOnlyRoutines} LOOP
       IF to_regprocedure(routine_signature) IS NOT NULL THEN
         EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC, %I',

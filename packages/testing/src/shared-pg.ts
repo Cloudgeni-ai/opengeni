@@ -991,7 +991,9 @@ export async function acquireRestrictedRuntimeTestDatabase(
   if (!owner) return null;
   let admin: postgres.Sql | null = null;
   try {
-    await owner.admin.unsafe(`CREATE SCHEMA ${schema} AUTHORIZATION "${owner.ownerRole}"`);
+    await owner.admin.unsafe(
+      `CREATE SCHEMA IF NOT EXISTS ${schema} AUTHORIZATION "${owner.ownerRole}"`,
+    );
     await owner.admin.unsafe(`ALTER EXTENSION vector SET SCHEMA ${schema}`);
     await migrate(owner.ownerUrl, schema, { applicationDatabaseRoles: ["opengeni_app"] });
     await provisionRoles(owner.adminUrl, {

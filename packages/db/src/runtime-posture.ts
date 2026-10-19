@@ -114,6 +114,57 @@ export const MAINTENANCE_WORK_PROBE_ROUTINES = [
   ],
 ] as const;
 
+/** Private predicate projections; never runtime-readable or writable. */
+export const MAINTENANCE_PROBE_SOURCES = [
+  "session_workflow_wake_outbox",
+  "site_auth_connections",
+  "sandbox_leases",
+  "sandbox_lease_holders",
+  "browser_sessions",
+  "session_system_update_outbox",
+  "session_list_snapshots",
+  "session_background_commands",
+  "sandbox_retained_processes",
+  "sandbox_workspace_mutation_admissions",
+  "sandbox_checkpoint_artifacts",
+  "rig_versions",
+  "rig_changes",
+  "enrollments",
+  "sessions",
+  "session_turns",
+] as const;
+export const MAINTENANCE_PROBE_TABLES = MAINTENANCE_PROBE_SOURCES.map(
+  (name) => `maintenance_probe_${name}`,
+);
+export const MAINTENANCE_PRIVATE_TABLES = [
+  ...MAINTENANCE_PROBE_TABLES,
+  "maintenance_claim_capabilities",
+];
+export const MAINTENANCE_PROBE_OWNER_ROUTINES = [
+  ...MAINTENANCE_PROBE_TABLES.map((name) => `${name}_sync()`),
+  "maintenance_probe_output_runner_eligible_v1(uuid, uuid, text)",
+  "maintenance_claim_wakes_inner(integer)",
+  "maintenance_claim_snapshots_inner(integer)",
+  "maintenance_claim_titles_inner(integer)",
+  "maintenance_claim_site_auth_inner(bigint, integer)",
+  "maintenance_claim_updates_inner(integer)",
+  "maintenance_claim_checkpoint_gc_inner(uuid, integer, bigint)",
+  "maintenance_claim_checkpoint_settle_inner(uuid, uuid, boolean, text, bigint)",
+  "maintenance_claim_checkpoint_prune_inner(bigint, integer)",
+  "maintenance_claim_output_release_inner(uuid, integer, bigint, timestamp with time zone)",
+  "maintenance_claim_ended_blockers_inner(integer)",
+  "maintenance_claim_ended_setup_inner(integer)",
+  "maintenance_inventory_retained_inner()",
+  "maintenance_inventory_draining_inner()",
+  "maintenance_workspace_commands_prepare_inner(uuid, uuid)",
+  "maintenance_workspace_commands_prune_inner(uuid, uuid)",
+  "maintenance_schedule_cleanup_claim_inner(uuid, integer, integer)",
+  "maintenance_schedule_cleanup_settle_inner(uuid, uuid, text)",
+  "maintenance_schedule_cleanup_connector_inner(uuid, uuid)",
+  "validate_sandbox_checkpoint_refs()",
+  "validate_sandbox_checkpoint_artifact_refs()",
+];
+
 const MODEL_FACT_CAPABILITY_ROUTINES = [
   [
     "insights_scoped_usage_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, text, uuid[], boolean)",
@@ -203,6 +254,7 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",
+  ...MAINTENANCE_PROBE_OWNER_ROUTINES,
   "guard_session_title_operation()",
   "subscription_plan_definition(text)",
   "plan_period_usage(plan_credit_periods, timestamp with time zone)",
@@ -3101,15 +3153,15 @@ export async function inspectRuntimeDatabasePosture(
             -- table must remain EXECUTE-only even after column ACL drift.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
               ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','usage_maintenance_due','usage_allowance_membership_changes','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...MAINTENANCE_PRIVATE_TABLES, ...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
               ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','usage_maintenance_due','usage_allowance_membership_changes','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...MAINTENANCE_PRIVATE_TABLES, ...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
               ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','usage_maintenance_due','usage_allowance_membership_changes','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...MAINTENANCE_PRIVATE_TABLES, ...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
             has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
@@ -3168,7 +3220,11 @@ export async function inspectRuntimeDatabasePosture(
               ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE},
               'credit_promotion_policy_revisions',
               'subscription_plan_catalog_revisions',
-              ${MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE}
+              ${MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE},
+              ${sql.join(
+                MAINTENANCE_PRIVATE_TABLES.map((name) => sql`${name}`),
+                sql`, `,
+              )}
             )
         `),
       ).map((row) => ({
@@ -5747,6 +5803,57 @@ export function evaluateRuntimeDatabasePosture(
       !routine.configuration?.includes("search_path=pg_catalog")
     ) {
       violations.push(`maintenance work check ${name} is missing or has unsafe posture`);
+    }
+  }
+  if (
+    !options.protectedTables ||
+    posture.privateTables.some((table) => MAINTENANCE_PROBE_TABLES.includes(table.name))
+  ) {
+    const owner = tableByName.get("workspaces")?.owner;
+    for (const name of MAINTENANCE_PRIVATE_TABLES) {
+      const table = posture.privateTables.find((candidate) => candidate.name === name);
+      if (
+        !table ||
+        table.owner !== owner ||
+        table.owner === expectedRole ||
+        table.select ||
+        table.insert ||
+        table.update ||
+        table.delete ||
+        table.truncate ||
+        table.references ||
+        table.trigger
+      ) {
+        violations.push(`maintenance probe index ${name} is missing or accessible to runtime`);
+      }
+    }
+    for (const name of MAINTENANCE_PROBE_OWNER_ROUTINES) {
+      const routine = posture.privateRoutines.find((candidate) => candidate.name === name);
+      if (
+        !routine ||
+        routine.owner !== owner ||
+        routine.execute ||
+        routine.publicExecute ||
+        !routine.configuration?.some(
+          (value) => value === "search_path=pg_catalog" || integrationSearchPaths.includes(value),
+        )
+      ) {
+        violations.push(`maintenance probe helper ${name} is missing or unsafe`);
+      }
+    }
+    for (const name of [
+      "maintenance_claim_active(text, text)",
+      "maintenance_title_event_visible(text, uuid)",
+    ]) {
+      const capability = posture.privateRoutines.find((routine) => routine.name === name);
+      if (
+        !capability ||
+        capability.owner !== owner ||
+        !capability.securityDefiner ||
+        !capability.configuration?.includes("search_path=pg_catalog")
+      ) {
+        violations.push(`maintenance claim predicate ${name} is missing or unsafe`);
+      }
     }
   }
   if (tableByName.has("organization_credential_providers")) {
