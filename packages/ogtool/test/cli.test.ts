@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAttemptToolEnvironment, digestAttemptToolCatalog } from "@opengeni/codemode";
@@ -287,30 +287,99 @@ describe("ogtool CLI", () => {
       structuredContent: { kind: "browser_screenshot" },
       isError: false,
     };
-    const mock = codemodeServer({ result: imageResult });
-    const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
-    const directory = mkdtempSync(join(tmpdir(), "ogtool-save-image-"));
-    try {
-      const printed = await run(["call", "docs.search", "{}"], environment);
-      expect(printed.exitCode).toBe(0);
-      const block = JSON.parse(printed.stdout).content[0];
-      expect(block).toMatchObject({ type: "image", mimeType: "image/png", sizeBytes: png.length });
-      expect(block.data).toBeUndefined();
-      expect(readFileSync(block.path)).toEqual(png);
+    const clients: string[][] = [[process.execPath, cliSource]];
+    if (process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT) {
+      clients.push([process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT, "codemode"]);
+    }
+    for (const client of clients) {
+      const mock = codemodeServer({ result: imageResult });
+      const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+      const directory = mkdtempSync(join(tmpdir(), "ogtool-save-image-"));
+      const posts = () => mock.requests.filter((request) => request.method === "POST").length;
+      try {
+        const printed = await run(["call", "docs.search", "{}"], environment, client);
+        expect(printed.exitCode).toBe(0);
+        const block = JSON.parse(printed.stdout).content[0];
+        expect(block).toMatchObject({
+          type: "image",
+          mimeType: "image/png",
+          sizeBytes: png.length,
+        });
+        expect(block.data).toBeUndefined();
+        expect(readFileSync(block.path)).toEqual(png);
 
-      const target = join(directory, "shots", "home.png");
-      const saved = await run(["call", "docs.search", "{}", "--save-image", target], environment);
-      expect(saved.exitCode).toBe(0);
-      expect(JSON.parse(saved.stdout).content[0].path).toBe(target);
-      expect(readFileSync(target)).toEqual(png);
-      const again = await run(["call", "docs.search", "{}", `--save-image=${target}`], environment);
-      expect(again.exitCode).not.toBe(0);
+        const target = join(directory, "shots", "home.png");
+        const saved = await run(
+          ["call", "docs.search", "{}", "--save-image", target],
+          environment,
+          client,
+        );
+        expect(saved.exitCode).toBe(0);
+        expect(JSON.parse(saved.stdout).content[0].path).toBe(target);
+        expect(readFileSync(target)).toEqual(png);
 
-      const full = await run(["call", "docs.search", "{}", "--full"], environment);
-      expect(JSON.parse(full.stdout)).toEqual(imageResult);
-    } finally {
-      mock.server.stop(true);
-      rmSync(directory, { recursive: true, force: true });
+        // An existing path is refused before anything is called.
+        const before = posts();
+        const again = await run(
+          ["call", "docs.search", "{}", `--save-image=${target}`],
+          environment,
+          client,
+        );
+        expect(again.exitCode).toBe(1);
+        expect(again.stderr).toContain("already exists");
+        expect(posts()).toBe(before);
+
+        const full = await run(["call", "docs.search", "{}", "--full"], environment, client);
+        expect(JSON.parse(full.stdout)).toEqual(imageResult);
+      } finally {
+        mock.server.stop(true);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("a completed call whose image cannot be saved still prints its result", async () => {
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const image = { type: "image", data: png.toString("base64"), mimeType: "image/png" };
+    const twoImages = {
+      content: [image, image],
+      structuredContent: { kind: "browser_screenshot" },
+      isError: false,
+    };
+    const clients: string[][] = [[process.execPath, cliSource]];
+    if (process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT) {
+      clients.push([process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT, "codemode"]);
+    }
+    for (const client of clients) {
+      const mock = codemodeServer({ result: twoImages });
+      const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+      const directory = mkdtempSync(join(tmpdir(), "ogtool-save-image-"));
+      try {
+        const target = join(directory, "one.png");
+        const result = await run(
+          ["call", "docs.search", "{}", "--save-image", target],
+          environment,
+          client,
+        );
+        expect(result.exitCode).toBe(4);
+        const printed = JSON.parse(result.stdout);
+        expect(printed.structuredContent).toEqual({ kind: "browser_screenshot" });
+        expect(printed.imageSaveError.operationId).toMatch(/^[0-9a-f-]{36}$/u);
+        expect(printed.imageSaveError.message).toContain("exactly one image");
+        expect(printed.imageSaveError.note).toContain("Do not repeat the call");
+        expect(printed.content).toHaveLength(2);
+        for (const block of printed.content) {
+          expect(block.data).toBeUndefined();
+          expect(readFileSync(block.path)).toEqual(png);
+        }
+        expect(existsSync(target)).toBe(false);
+      } finally {
+        mock.server.stop(true);
+        rmSync(directory, { recursive: true, force: true });
+      }
     }
   });
 

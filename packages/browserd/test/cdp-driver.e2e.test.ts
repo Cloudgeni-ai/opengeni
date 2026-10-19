@@ -158,6 +158,70 @@ e2e(
   60_000,
 );
 
+e2e(
+  "an explicit load wait returns only after slow subresources and load handlers finish",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-load-wait-");
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        if (new URL(request.url).pathname === "/slow.png") {
+          await Bun.sleep(1_500);
+          return new Response(png, { headers: { "content-type": "image/png" } });
+        }
+        return new Response(
+          `<!doctype html><title>Load wait</title><p id="state">Loading</p>
+          <img src="/slow.png" alt="Slow">
+          <script>addEventListener("load", () => { state.textContent = "Loaded"; });</script>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `loadwait_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+    });
+    try {
+      let observation = await driver.start("about:blank");
+      observation = await driver.dispatch(
+        command(observation, { type: "navigate", url: `http://127.0.0.1:${server.port}/` }),
+      );
+      observation = await driver.dispatch(
+        command(observation, { type: "wait", condition: "load" }),
+      );
+      expect(names(observation)).toContain("Loaded");
+    } finally {
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
 headedE2e(
   "opens a slow-response tab without applying the blank-document creation deadline to navigation",
   async () => {

@@ -1,5 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
 import {
   CodemodeClient,
   CodemodeApprovalPendingError,
@@ -34,6 +43,8 @@ function usage(exitCode = 1): void {
     "call omits a text block that only repeats structuredContent; --full prints the exact result",
     "call writes images (such as screenshots) to files and prints their paths instead of base64;",
     "  --save-image saves the result's single image at that path and never overwrites",
+    "  if the call completes but its image cannot be saved, the result is still printed",
+    "  with imageSaveError and the exit code is 4; do not repeat that call",
     "",
     "requires OPENGENI_CODEMODE_URL and OPENGENI_CODEMODE_TOKEN or OPENGENI_CODEMODE_TOKEN_FILE",
   ].join("\n");
@@ -214,6 +225,58 @@ export async function materializeCallImages(
   };
 }
 
+/**
+ * Refuse a --save-image path before the tool runs when the file could not be
+ * written anyway, so nothing is called for a screenshot that cannot be kept.
+ */
+export function preflightImagePath(saveTo: string): void {
+  const path = resolve(saveTo);
+  let exists = true;
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    exists = false;
+  }
+  if (exists) {
+    throw new Error(`--save-image ${path} already exists; choose a new path (nothing was called)`);
+  }
+  mkdirSync(dirname(path), { recursive: true });
+  accessSync(dirname(path), constants.W_OK);
+}
+
+/**
+ * The tool call already completed, so a failure to save its image must not
+ * hide the result: print it (images kept in a private temporary file when
+ * possible) with the save error and the operation ID.
+ */
+export async function imageSaveFailureOutput(
+  result: AttemptToolResult,
+  error: unknown,
+  operationId: string,
+  full: boolean,
+): Promise<string> {
+  let printed = result;
+  if (!full) {
+    try {
+      printed = await materializeCallImages(result);
+    } catch {
+      printed = result;
+    }
+  }
+  return callOutput(
+    {
+      ...printed,
+      imageSaveError: {
+        operationId,
+        message: error instanceof Error ? error.message : String(error),
+        note: "The call completed; only saving its image failed. Do not repeat the call.",
+      },
+    } as AttemptToolResult,
+    full,
+  );
+}
+
 function callFlags(args: string[]): { full: boolean; saveTo?: string; rest: string[] } {
   let full = false;
   let saveTo: string | undefined;
@@ -284,13 +347,20 @@ async function main(): Promise<void> {
     const argumentsValue = parseToolArguments(rawArguments);
     const catalog = await client.catalog();
     const entry = resolveTool(catalog, name);
-    const result = await client.call(entry.identity, argumentsValue, {
-      operationId: randomUUID(),
-    });
-    const printed = await materializeCallImages(result, {
-      full,
-      ...(saveTo === undefined ? {} : { saveTo }),
-    });
+    if (saveTo !== undefined) preflightImagePath(saveTo);
+    const operationId = randomUUID();
+    const result = await client.call(entry.identity, argumentsValue, { operationId });
+    let printed: AttemptToolResult;
+    try {
+      printed = await materializeCallImages(result, {
+        full,
+        ...(saveTo === undefined ? {} : { saveTo }),
+      });
+    } catch (error) {
+      process.stdout.write(await imageSaveFailureOutput(result, error, operationId, full));
+      process.exitCode = 4;
+      return;
+    }
     process.stdout.write(callOutput(printed, full));
     return;
   }
