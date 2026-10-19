@@ -1573,7 +1573,7 @@ check(
     let transfersAfterSecond = 0;
     try {
       while (
-        Date.now() - start < LINK_WINDOW_MS ||
+        lastTransferEnd - start < LINK_WINDOW_MS ||
         checkpointsSeen < 2 ||
         transfersAfterSecond < 1
       ) {
