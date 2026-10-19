@@ -7,12 +7,14 @@ describe("personal-resource direct-read authority", () => {
       new URL("../src/activities/agent-turn/tool-environment.ts", import.meta.url),
       "utf8",
     );
-    const admission = source.slice(
-      source.indexOf("const titleToolPlan ="),
-      source.indexOf("const googleDriveConnectorBindings"),
-    );
+    const start = source.indexOf("const needsTitle = shouldRequestMissingSessionTitle(");
+    const end = source.indexOf("const googleDriveConnectorBindings", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const admission = source.slice(start, end);
     expect(admission).not.toContain("session.firstPartyMcpPermissions");
     expect(admission).toContain("firstPartyMcpPermissions: effectiveFirstPartyPermissions");
+    expect(admission).toContain("shouldRequestTitle: needsTitle &&");
     expect(
       admission.match(/effectiveFirstPartyPermissions \?\? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS/g),
     ).toHaveLength(2);
