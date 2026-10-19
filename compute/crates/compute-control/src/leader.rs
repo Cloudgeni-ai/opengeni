@@ -393,8 +393,10 @@ impl Boots {
     /// - one without a host is booting, within `within` of when this
     ///   leadership first saw it without one, and stalled past it;
     /// - one the group is removing holds no place and brings nothing;
-    /// - a host the listing does not name brings itself, and takes one of
-    ///   the places asked for and not listed;
+    /// - a host the listing does not name may be one the group has not
+    ///   listed yet, or one it has let go: such hosts take the places
+    ///   asked for and not listed, as many as there are, the ones with
+    ///   least to bring first, and only those bring anything;
     /// - the places left of those are booting.
     ///
     /// Says once when a member stalls, and when a stalled one registers.
@@ -442,14 +444,29 @@ impl Boots {
             self.0.insert(member.name.clone(), boot);
         }
         let names: HashSet<&str> = members.iter().map(|member| member.name.as_str()).collect();
-        let mut unnamed = 0u32;
-        for (name, host) in hosts {
-            if !names.contains(name.as_str()) {
-                bring(&mut seen, host);
-                unnamed += 1;
+        let mut unnamed: Vec<&GroupHost> = hosts
+            .iter()
+            .filter(|(name, _)| !names.contains(name.as_str()))
+            .map(|(_, host)| host)
+            .collect();
+        // Least spare first, so a host the group has let go never makes
+        // the group look roomier than one it is yet to list would.
+        unnamed.sort_by_key(|host| {
+            if host.draining {
+                0
+            } else {
+                host.free_memory_mib
             }
+        });
+        let mut unlisted = target_size.saturating_sub(listed);
+        for host in unnamed {
+            if unlisted == 0 {
+                break;
+            }
+            bring(&mut seen, host);
+            unlisted -= 1;
         }
-        seen.booting += target_size.saturating_sub(listed).saturating_sub(unnamed);
+        seen.booting += unlisted;
         seen
     }
 }
@@ -652,6 +669,33 @@ mod tests {
         // Two places asked for: the other is booting.
         let seen = Boots::default().count(2, &[], &hosts(&[("hosts-a", live(1))]), BOOTING);
         assert_eq!((seen.hosts, seen.booting), (1, 1), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_host_the_group_let_go_brings_nothing_without_a_place_for_it() {
+        // One place, listed; the other host was let go (abandoned, its
+        // listing gone) but is still registered.
+        let members = [member("hosts-a")];
+        let registered = hosts(&[("hosts-a", live(1)), ("hosts-b", live(64))]);
+        let seen = Boots::default().count(1, &members, &registered, BOOTING);
+        assert_eq!(
+            (seen.hosts, seen.booting, seen.free_memory_mib),
+            (1, 0, GIB),
+            "{seen:?}"
+        );
+        assert_eq!(grown_size(1, &seen, 2, 10), 2);
+        // With one place not listed, only the host with least spare takes it.
+        let registered = hosts(&[
+            ("hosts-a", live(1)),
+            ("hosts-b", live(64)),
+            ("hosts-c", live(2)),
+        ]);
+        let seen = Boots::default().count(2, &members, &registered, BOOTING);
+        assert_eq!(
+            (seen.hosts, seen.booting, seen.free_memory_mib),
+            (2, 0, 3 * GIB),
+            "{seen:?}"
+        );
     }
 
     #[tokio::test]

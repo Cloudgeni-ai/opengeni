@@ -126,8 +126,9 @@ can be built and tested.
   member the cloud never gets running. Each place in the group's size
   counts once, from one look at the group and one read of the hosts: a
   member brings its host, live or draining; a host the listing does not
-  name yet takes one of the places asked for; a member the group is
-  removing holds none; growth adds the usable hosts it is short on top
+  name takes one of the places asked for and not listed, and brings
+  nothing once none is left (the group has let it go); a member the
+  group is removing holds none; growth adds the usable hosts it is short on top
   of the places draining and stalled hosts hold; and no shrink is
   suggested while a member is stalled. Only zonal groups are supported,
   since a fence must name the instance's zone. Hosts outside a group rely
