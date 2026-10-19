@@ -554,6 +554,7 @@ export {
   type NatsRequestConnection,
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
+export { AGENT_LINK_LOST_HEADER } from "./selfhosted/control-replay";
 // The transport-agnostic per-op observation seam (out-of-band telemetry — metrics
 // + machine.* events; the op-engine's op-stream client emits through this too).
 export type { SelfhostedOpObserver, SelfhostedOpObservation } from "./selfhosted/op-observer";

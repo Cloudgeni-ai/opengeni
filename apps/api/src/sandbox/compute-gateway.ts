@@ -14,6 +14,7 @@
  */
 
 import type { AgentLinkNats } from "@opengeni/events";
+import { AGENT_LINK_LOST_HEADER } from "@opengeni/runtime/sandbox";
 import type { ApiWebSocketConnection, ApiWebSocketLike } from "../api-websocket";
 import {
   AGENT_LINK_PROTOCOL,
@@ -125,6 +126,9 @@ const RENEW_CONCURRENCY = 16;
 /** Room for a frame's JSON header inside one WebSocket message. */
 const FRAME_HEADER_ALLOWANCE = 64 * 1024;
 const MAX_SUBSCRIPTIONS_PER_SESSION = 1024;
+/** Unanswered requests one session remembers; past this the oldest is
+ * forgotten (its requester then waits out its own timeout). */
+const MAX_UNANSWERED_REQUESTS_PER_SESSION = 4096;
 /** Frames waiting behind an open or a close on one link; a host that floods
  * past this is cut off (it dials again and reopens its sessions). */
 const MAX_PENDING_FRAMES = 4096;
@@ -146,6 +150,10 @@ type Session = {
   claim: ComputeAgentLinkClaim;
   scope: string;
   subscriptions: Map<string, { sid: AgentLinkSid; unsubscribe: () => void }>;
+  /** Reply subjects of the requests forwarded to the agent that it has not
+   * answered yet. When the session ends each gets an empty reply marked
+   * AGENT_LINK_LOST_HEADER, so no requester waits on a link that is gone. */
+  unanswered: Set<string>;
   relayExpiresAtMs: number;
   /** When the last confirmed open or renewal stops covering this session.
    * Past it nothing is forwarded and no credential is minted: another
@@ -678,6 +686,7 @@ class AgentLink implements ApiWebSocketConnection {
       claim,
       scope: `agent.${claim.workspaceId}.${claim.agentId}.connection.${claim.connectionInstanceId}`,
       subscriptions: new Map(),
+      unanswered: new Set(),
       relayExpiresAtMs: relay.expires_at_ms,
       leaseDeadlineMs: this.gateway.leaseDeadline(startedAtMs),
       renewing: false,
@@ -802,6 +811,13 @@ class AgentLink implements ApiWebSocketConnection {
               ...(message.headers ? { headers: message.headers } : {}),
               payload: message.data,
             });
+            if (message.reply && session.state === "open") {
+              session.unanswered.add(message.reply);
+              if (session.unanswered.size > MAX_UNANSWERED_REQUESTS_PER_SESSION) {
+                const oldest = session.unanswered.values().next().value;
+                if (oldest !== undefined) session.unanswered.delete(oldest);
+              }
+            }
           },
         );
         session.subscriptions.set(key, { sid, unsubscribe });
@@ -835,10 +851,16 @@ class AgentLink implements ApiWebSocketConnection {
           });
           return;
         }
+        session.unanswered.delete(frame.subject);
+        // Only the gateway says a link was lost: an agent's own marker is
+        // dropped, so its reply reads as the reply it is.
+        const headers = frame.headers?.filter(
+          ([name]) => name.toLowerCase() !== AGENT_LINK_LOST_HEADER.toLowerCase(),
+        );
         try {
           this.gateway.options.nats.publish(frame.subject, frame.payload, {
             ...(frame.reply ? { reply: frame.reply } : {}),
-            ...(frame.headers ? { headers: frame.headers } : {}),
+            ...(headers?.length ? { headers } : {}),
           });
         } catch {
           // NATS publishes are fire-and-forget; a closed connection drops it.
@@ -858,6 +880,19 @@ class AgentLink implements ApiWebSocketConnection {
     session.state = "ended";
     for (const subscription of session.subscriptions.values()) subscription.unsubscribe();
     session.subscriptions.clear();
+    // The agent can no longer answer these through this session. Tell each
+    // requester at once, from whichever replica held the link: a replayable
+    // request is delivered again, to wherever the agent is now.
+    for (const reply of session.unanswered) {
+      try {
+        this.gateway.options.nats.publish(reply, new Uint8Array(0), {
+          headers: [[AGENT_LINK_LOST_HEADER, "1"]],
+        });
+      } catch {
+        // A closed connection drops it; the requester's own timeout ends it.
+      }
+    }
+    session.unanswered.clear();
     if (this.sessions.get(session.s) === session) this.sessions.delete(session.s);
     this.gateway.forget(session);
   }

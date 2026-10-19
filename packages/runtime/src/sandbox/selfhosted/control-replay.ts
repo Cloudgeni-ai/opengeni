@@ -9,11 +9,39 @@ const RECOVERY_MS = 120_000;
  * connection was not replaced. It reads Opengeni's own state, never the agent. */
 const REPLACEMENT_CHECK_MS = 1_000;
 
+/** The header of the empty reply a compute agent gateway publishes to a
+ * request it forwarded into a session that then ended before the agent
+ * answered: the request may have reached the agent, and its answer can no
+ * longer come back that way. Never sent by an agent. */
+export const AGENT_LINK_LOST_HEADER = "Opengeni-Agent-Link-Lost";
+
+/** The link that carried a request to its agent ended before the answer
+ * came back. The request may have been delivered, so it is never "never
+ * sent"; a replayable request is delivered again at once. */
+export class AgentLinkLostError extends Error {
+  readonly code = "AGENT_LINK_LOST";
+  constructor() {
+    super("the link that carried this request to its agent ended before the agent answered");
+    this.name = "AgentLinkLostError";
+  }
+}
+
+function linkLost(reply: { data: Uint8Array; headers?: { get(name: string): string } }): boolean {
+  return reply.data.byteLength === 0 && reply.headers?.get(AGENT_LINK_LOST_HEADER) === "1";
+}
+
 function transient(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
   return (
     typeof code === "string" &&
-    ["503", "TIMEOUT", "DISCONNECT", "CONNECTION_CLOSED", "AUTHENTICATION_EXPIRED"].includes(code)
+    [
+      "503",
+      "TIMEOUT",
+      "DISCONNECT",
+      "CONNECTION_CLOSED",
+      "AUTHENTICATION_EXPIRED",
+      "AGENT_LINK_LOST",
+    ].includes(code)
   );
 }
 
@@ -138,9 +166,22 @@ export class ControlReplyRecovery {
 
 /** One request attempt. While it waits for its reply, it ends as soon as the
  * agent connection its subject names is replaced, however long a host holds
- * the request: the caller stops waiting on the old process. The attempt
- * was published, so it may have reached that agent: never "never sent". */
+ * the request: the caller stops waiting on the old process. It also ends when
+ * the link that carried it ends (AgentLinkLostError). The attempt was
+ * published, so it may have reached that agent: never "never sent". */
 async function attempt(
+  conn: NatsRequestConnection,
+  subject: string,
+  payload: Uint8Array,
+  timeout: number,
+  connectionCurrent: (() => Promise<boolean>) | undefined,
+): ReturnType<NatsRequestConnection["request"]> {
+  const reply = await awaitReply(conn, subject, payload, timeout, connectionCurrent);
+  if (linkLost(reply)) throw new AgentLinkLostError();
+  return reply;
+}
+
+async function awaitReply(
   conn: NatsRequestConnection,
   subject: string,
   payload: Uint8Array,

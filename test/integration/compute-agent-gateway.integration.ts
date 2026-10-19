@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
 import { verifyRelayToken } from "@opengeni/contracts";
 import {
   createDb,
@@ -22,6 +23,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { connect, type NatsConnection } from "@opengeni/events";
+import { NatsControlRpc } from "@opengeni/runtime/sandbox";
 import {
   acquireSharedTestDatabase,
   freePort,
@@ -29,6 +31,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import type { ApiWebSocketConnection } from "../../apps/api/src/api-websocket";
+import type { GatewayFrame } from "../../apps/api/src/sandbox/compute-link-frames";
 import { dispatchApiWebSocketUpgrade } from "../../apps/api/src/http/websocket-upgrade-dispatch";
 import {
   startComputeAgentGateway,
@@ -116,6 +119,7 @@ let api: ReturnType<typeof Bun.serve<ApiWebSocketConnection>>;
 let handle: ComputeGatewayHandle;
 let linkUrl: string;
 let keyReads = 0;
+let gatewaySettings: ReturnType<typeof testSettings>;
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
   const admin = shared!.admin;
@@ -143,11 +147,52 @@ async function sandboxAgent() {
   return { ...workspace, agentId, sandbox: `sbx-${agentId.slice(0, 8)}` };
 }
 
-async function linkAs(host: string): Promise<TestComputeHostLink> {
-  return await TestComputeHostLink.connect(
-    linkUrl,
-    await hostToken(key, { audience: linkUrl, host }),
-  );
+async function linkAs(host: string, url = linkUrl): Promise<TestComputeHostLink> {
+  // Every replica serves the one public link URL, the tokens' audience.
+  return await TestComputeHostLink.connect(url, await hostToken(key, { audience: linkUrl, host }));
+}
+
+/** Serve an API replica: its own gateway and listener on the shared NATS and
+ * database, as another API pod does. */
+function serveGateway(routes: ComputeGatewayHandle["gateway"][], port = 0) {
+  return Bun.serve<ApiWebSocketConnection>({
+    hostname: "127.0.0.1",
+    port,
+    fetch: (request, server) => {
+      const upgrade = dispatchApiWebSocketUpgrade(request, server, routes, null);
+      if (upgrade.handled) return upgrade.response;
+      return new Response("not found", { status: 404 });
+    },
+    websocket: {
+      maxPayloadLength: MAX_WS_MESSAGE,
+      open: (socket) => socket.data.attach(socket),
+      message: (socket, message) => socket.data.receive(message),
+      close: (socket) => socket.data.transportClosed(),
+      ping: (socket) => socket.data.heard?.(),
+      pong: (socket) => socket.data.heard?.(),
+    },
+  });
+}
+
+/** The agent side of a session: answer each request the host is handed
+ * (null leaves it unanswered). */
+function answerRequests(
+  link: TestComputeHostLink,
+  s: number,
+  answer: (
+    frame: Extract<GatewayFrame, { t: "msg" }>,
+  ) => { payload: Uint8Array; headers?: Array<[string, string]> } | null,
+): () => void {
+  let index = 0;
+  const timer = setInterval(() => {
+    while (index < link.frames.length) {
+      const frame = link.frames[index++]!;
+      if (frame.t !== "msg" || frame.s !== s || !frame.reply) continue;
+      const reply = answer(frame);
+      if (reply) link.send({ t: "pub", s, subject: frame.reply, ...reply });
+    }
+  }, 5);
+  return () => clearInterval(timer);
 }
 
 async function ticketFor(
@@ -210,24 +255,8 @@ beforeAll(async () => {
   });
   if (!started) throw new Error("the compute gateway did not start");
   handle = started;
-  const routes = [handle.gateway];
-  api = Bun.serve<ApiWebSocketConnection>({
-    hostname: "127.0.0.1",
-    port: apiPort,
-    fetch: (request, server) => {
-      const upgrade = dispatchApiWebSocketUpgrade(request, server, routes, null);
-      if (upgrade.handled) return upgrade.response;
-      return new Response("not found", { status: 404 });
-    },
-    websocket: {
-      maxPayloadLength: MAX_WS_MESSAGE,
-      open: (socket) => socket.data.attach(socket),
-      message: (socket, message) => socket.data.receive(message),
-      close: (socket) => socket.data.transportClosed(),
-      ping: (socket) => socket.data.heard?.(),
-      pong: (socket) => socket.data.heard?.(),
-    },
-  });
+  gatewaySettings = settings;
+  api = serveGateway([handle.gateway], apiPort);
 }, 180_000);
 
 afterAll(async () => {
@@ -537,6 +566,123 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
     await Bun.sleep(200);
     expect(await getLiveEnrollmentConnection(db, kept.workspaceId, kept.agentId)).toBeNull();
   }, 30_000);
+
+  test("a request whose host link ends is delivered again through the replica the agent returns on", async () => {
+    if (!available) return;
+    // A second API replica on the same NATS and database.
+    const second = await startComputeAgentGateway({
+      db,
+      settings: gatewaySettings,
+      natsAuth: undefined,
+      maxWebSocketMessageBytes: MAX_WS_MESSAGE,
+    });
+    if (!second) throw new Error("the second gateway did not start");
+    const secondApi = serveGateway([second.gateway]);
+    const stops: Array<() => void> = [];
+    try {
+      const agent = await sandboxAgent();
+      const instance = crypto.randomUUID();
+      const scope = `agent.${agent.workspaceId}.${agent.agentId}.connection.${instance}`;
+      const subscribe = (link: TestComputeHostLink, s: number) => {
+        link.send({ t: "sub", s, sid: 1, subject: `${scope}.rpc` });
+        link.send({ t: "sub", s, sid: 2, subject: `${scope}.rpc.>` });
+      };
+      const pong = (frame: Extract<GatewayFrame, { t: "msg" }>, replay: boolean) => {
+        const request = ControlRequest.decode(frame.payload);
+        return {
+          payload: ControlResponse.encode(
+            ControlResponse.fromPartial({
+              requestId: request.requestId,
+              result: { $case: "ping", ping: {} },
+            }),
+          ).finish(),
+          ...(replay
+            ? { headers: [["Opengeni-Control-Replay", "1"]] as Array<[string, string]> }
+            : {}),
+        };
+      };
+
+      // The sandbox runs on host h1, linked to the first replica.
+      const lost = await linkAs("h1");
+      expect(
+        await lost.open({
+          s: 1,
+          sandbox: agent.sandbox,
+          ticket: await ticketFor(agent, { host: "h1", epoch: 1 }),
+          connection: instance,
+        }),
+      ).toMatchObject({ t: "opened" });
+      subscribe(lost, 1);
+      // The agent answers the transport's capability probe, then its host goes
+      // dark: it takes the request and never answers.
+      const deliveredToLost: string[] = [];
+      stops.push(
+        answerRequests(lost, 1, (frame) => {
+          if (frame.subject === `${scope}.rpc`) return pong(frame, true);
+          deliveredToLost.push(frame.subject);
+          return null;
+        }),
+      );
+      await Bun.sleep(100);
+
+      const rpc = new NatsControlRpc(async () => ({
+        supportsHeaders: true,
+        request: async (subject, payload, options) => {
+          const message = await controlPlane.request(subject, payload, {
+            timeout: options.timeout,
+          });
+          return { data: message.data, ...(message.headers ? { headers: message.headers } : {}) };
+        },
+      }));
+      const startedAt = Date.now();
+      // Far longer than the test: only the link's end can cut this short.
+      const request = rpc.request(
+        `${scope}.rpc`,
+        ControlRequest.fromPartial({
+          requestId: crypto.randomUUID(),
+          op: { $case: "ping", ping: { nonce: "1" } },
+        }),
+        { timeoutMs: 60_000 },
+      );
+      const deadline = Date.now() + 5_000;
+      while (deliveredToLost.length === 0 && Date.now() < deadline) await Bun.sleep(10);
+      expect(deliveredToLost).toHaveLength(1);
+
+      // The host is lost: its link to the first replica ends. The sandbox comes
+      // back on host h2, which links to the second replica.
+      lost.close();
+      await lost.closed();
+      const restored = await linkAs("h2", `ws://127.0.0.1:${secondApi.port}/v1/compute/agent-link`);
+      const deliveredToRestored: string[] = [];
+      stops.push(
+        answerRequests(restored, 1, (frame) => {
+          deliveredToRestored.push(frame.subject);
+          return pong(frame, frame.subject === `${scope}.rpc`);
+        }),
+      );
+      expect(
+        await restored.open({
+          s: 1,
+          sandbox: agent.sandbox,
+          ticket: await ticketFor(agent, { host: "h2", epoch: 2 }),
+          connection: instance,
+        }),
+      ).toMatchObject({ t: "opened" });
+      subscribe(restored, 1);
+
+      const response = await request;
+      expect(response.error).toBeUndefined();
+      expect(response.result?.$case).toBe("ping");
+      // The same delivery, so the agent's journal would join a duplicate.
+      expect(deliveredToRestored).toEqual([deliveredToLost[0]]);
+      expect(Date.now() - startedAt).toBeLessThan(10_000);
+      restored.close();
+    } finally {
+      for (const stop of stops) stop();
+      await second.close().catch(() => undefined);
+      secondApi.stop(true);
+    }
+  }, 60_000);
 
   test("a text frame or a malformed frame ends the link", async () => {
     if (!available) return;

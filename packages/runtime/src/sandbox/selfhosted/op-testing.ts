@@ -327,7 +327,10 @@ export class FakeOpRunner implements ControlRpc {
     }
     const run = this.runs.get(opId);
     if (!run) {
-      return statusOnly(requestId, lostStatus(opId));
+      return statusOnly(
+        requestId,
+        this.cancelledBeforeStart.has(opId) ? tombstoneStatus(opId) : lostStatus(opId),
+      );
     }
     if (run.connectionInstanceId !== connectionInstanceId) {
       return errorResponse(
@@ -375,7 +378,10 @@ export class FakeOpRunner implements ControlRpc {
     }
     const run = this.runs.get(opId);
     if (!run) {
-      return statusOnly(requestId, lostStatus(opId));
+      return statusOnly(
+        requestId,
+        this.cancelledBeforeStart.has(opId) ? tombstoneStatus(opId) : lostStatus(opId),
+      );
     }
     if (run.connectionInstanceId !== connectionInstanceId) {
       return errorResponse(
@@ -625,6 +631,12 @@ function lostStatus(opId: string): OpStatus {
     exit: undefined,
     lostReason: OpLostReason.OP_LOST_REASON_EVICTED,
   };
+}
+
+/** The agent's status for an op cancelled before it began: complete and
+ *  cancelled, no frame ever sent, no output record. */
+function tombstoneStatus(opId: string): OpStatus {
+  return { ...cancelledStatus(opId), nextSeq: "0" };
 }
 
 function cancelledStatus(opId: string): OpStatus {

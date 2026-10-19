@@ -22,7 +22,11 @@
 
 import { AgentError, ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import type { CapabilityUnavailableReason } from "@opengeni/contracts";
-import { ControlConnectionReplacedError, ControlReplyRecovery } from "./control-replay";
+import {
+  AgentLinkLostError,
+  ControlConnectionReplacedError,
+  ControlReplyRecovery,
+} from "./control-replay";
 
 // Re-export the contracts reason union locally so callers of the mapping below
 // don't have to import from two places. CapabilityUnavailableReason here is the
@@ -632,6 +636,9 @@ export class NatsControlRpc implements ControlRpc {
         opts.connectionCurrent,
       );
     } catch (err) {
+      // The link that carried it ended unanswered: it may have been
+      // delivered, so this is the same ambiguous blip as a timeout.
+      const lostLink = err instanceof AgentLinkLostError;
       if (err instanceof ControlConnectionReplacedError) {
         return {
           requestId: req.requestId,
@@ -665,7 +672,7 @@ export class NatsControlRpc implements ControlRpc {
       // A one-shot attempt (no replay) that failed: say so when its connection
       // was replaced, as the replay retries do.
       if (
-        (noResponders || isRequestTimeoutError(err)) &&
+        (noResponders || lostLink || isRequestTimeoutError(err)) &&
         opts.connectionCurrent &&
         !(await opts.connectionCurrent().catch(() => true))
       ) {
@@ -680,7 +687,7 @@ export class NatsControlRpc implements ControlRpc {
         // was NOT delivered → NEVER SENT (provably not executed): safe to re-issue.
         return offlineControlResponse(req.requestId, true);
       }
-      if (isRequestTimeoutError(err)) {
+      if (lostLink || isRequestTimeoutError(err)) {
         // A responder may exist but the request timed out → a transient blip. AMBIGUOUS
         // (the op may have run and only the reply was lost) — never marked never-sent.
         return timeoutControlResponse(req.requestId);

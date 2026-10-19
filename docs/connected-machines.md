@@ -116,6 +116,14 @@ passed), and a start re-admitted to a new connection is sent only the time
 left. A start that timeout or deadline ended before any OpStart was sent fails
 as never sent, so nothing keeps custody of it or waits on its agent.
 
+A stop can reach an agent before the start it stops, for example when the
+start sat on a link that ended and is delivered again. The agent then refuses
+the start and keeps a tombstone for the operation: a query or attach answers
+`COMPLETE` with a cancelled exit and no output. The requester treats that
+answer as the command's end (cancelled, exit code -1, no output, nothing
+proven to have run) and never waits for frames from it, so the stop settles and
+nothing keeps custody of the command.
+
 ### Enrollment maintenance boundary
 
 Migration `0498_enrollment_membership_fence.sql` repairs user-owned device approval

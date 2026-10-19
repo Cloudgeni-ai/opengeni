@@ -4,6 +4,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { AgentLinkNats, AgentLinkNatsMessage } from "@opengeni/events";
+import { AGENT_LINK_LOST_HEADER } from "@opengeni/runtime/sandbox";
 import { testSettings } from "@opengeni/testing";
 import type { ApiWebSocketConnection, ApiWebSocketLike } from "../src/api-websocket";
 import { startComputeAgentGateway } from "../src/sandbox/compute-gateway-boot";
@@ -250,7 +251,12 @@ class FakeNats implements AgentLinkNats {
     number,
     { subject: string; deliver: (m: AgentLinkNatsMessage) => void }
   >();
-  readonly published: Array<{ subject: string; data: Uint8Array; reply?: string }> = [];
+  readonly published: Array<{
+    subject: string;
+    data: Uint8Array;
+    reply?: string;
+    headers?: Array<[string, string]>;
+  }> = [];
   private next = 0;
   maxPayload(): number {
     return 1024;
@@ -264,8 +270,17 @@ class FakeNats implements AgentLinkNats {
     this.subscriptions.set(id, { subject, deliver });
     return () => void this.subscriptions.delete(id);
   }
-  publish(subject: string, data: Uint8Array, options?: { reply?: string }) {
-    this.published.push({ subject, data, ...(options?.reply ? { reply: options.reply } : {}) });
+  publish(
+    subject: string,
+    data: Uint8Array,
+    options?: { reply?: string; headers?: Array<[string, string]> },
+  ) {
+    this.published.push({
+      subject,
+      data,
+      ...(options?.reply ? { reply: options.reply } : {}),
+      ...(options?.headers ? { headers: options.headers } : {}),
+    });
   }
   async close() {}
 }
@@ -697,6 +712,100 @@ describe("agent gateway sessions", () => {
     expect(socket.closedWith).toEqual({ code: 4408, reason: "link silent" });
     await settle();
     expect(store.calls.at(-1)).toBe(`release:${INSTANCE}`);
+  });
+
+  test("requests the agent has not answered when its session ends are told the link was lost", async () => {
+    const { socket, send, settle, nats } = await gatewayWithLink();
+    send({ t: "open", s: 1, sandbox: "sbx", ticket: "t", connection: INSTANCE });
+    send({ t: "sub", s: 1, sid: "r", subject: `${SCOPE}.rpc` });
+    await settle();
+    const [subscription] = [...nats.subscriptions.values()];
+    for (const reply of ["_INBOX.answered", "_INBOX.pending"]) {
+      subscription!.deliver({ subject: `${SCOPE}.rpc`, reply, data: new Uint8Array([1]) });
+    }
+    // A plain message has no requester to tell.
+    subscription!.deliver({ subject: `${SCOPE}.rpc`, data: new Uint8Array([2]) });
+    send({ t: "pub", s: 1, subject: "_INBOX.answered", payload: new Uint8Array([3]) });
+    await settle();
+    expect(nats.published.map((message) => message.subject)).toEqual(["_INBOX.answered"]);
+    // The host's link ends (its machine is gone).
+    socket.data.transportClosed();
+    await settle();
+    expect(nats.published.slice(1)).toEqual([
+      {
+        subject: "_INBOX.pending",
+        data: new Uint8Array(0),
+        headers: [[AGENT_LINK_LOST_HEADER, "1"]],
+      },
+    ]);
+  });
+
+  test("an agent cannot say its own link was lost", async () => {
+    const { send, settle, nats } = await gatewayWithLink();
+    send({ t: "open", s: 1, sandbox: "sbx", ticket: "t", connection: INSTANCE });
+    await settle();
+    send({
+      t: "pub",
+      s: 1,
+      subject: "_INBOX.forged",
+      payload: new Uint8Array(0),
+      headers: [
+        [AGENT_LINK_LOST_HEADER.toLowerCase(), "1"],
+        ["Opengeni-Replay", "1"],
+      ],
+    });
+    send({
+      t: "pub",
+      s: 1,
+      subject: "_INBOX.plain",
+      payload: new Uint8Array(0),
+      headers: [[AGENT_LINK_LOST_HEADER, "1"]],
+    });
+    await settle();
+    expect(nats.published).toEqual([
+      { subject: "_INBOX.forged", data: new Uint8Array(0), headers: [["Opengeni-Replay", "1"]] },
+      { subject: "_INBOX.plain", data: new Uint8Array(0) },
+    ]);
+  });
+
+  test("a session remembers a bounded number of unanswered requests, oldest forgotten first", async () => {
+    const { socket, send, settle, nats } = await gatewayWithLink();
+    send({ t: "open", s: 1, sandbox: "sbx", ticket: "t", connection: INSTANCE });
+    send({ t: "sub", s: 1, sid: "r", subject: `${SCOPE}.rpc` });
+    await settle();
+    const [subscription] = [...nats.subscriptions.values()];
+    for (let index = 0; index <= 4096; index += 1) {
+      subscription!.deliver({
+        subject: `${SCOPE}.rpc`,
+        reply: `_INBOX.${index}`,
+        data: new Uint8Array([1]),
+      });
+    }
+    socket.data.transportClosed();
+    await settle();
+    const told = nats.published.map((message) => message.subject);
+    expect(told).toHaveLength(4096);
+    expect(told[0]).toBe("_INBOX.1");
+    expect(told.at(-1)).toBe("_INBOX.4096");
+  });
+
+  test("a session the gateway ends tells its unanswered requesters too", async () => {
+    const { gateway, send, settle, store, nats } = await gatewayWithLink();
+    send({ t: "open", s: 1, sandbox: "sbx", ticket: "t", connection: INSTANCE });
+    send({ t: "sub", s: 1, sid: "r", subject: `${SCOPE}.rpc` });
+    await settle();
+    const [subscription] = [...nats.subscriptions.values()];
+    subscription!.deliver({
+      subject: `${SCOPE}.rpc`,
+      reply: "_INBOX.1",
+      data: new Uint8Array([1]),
+    });
+    store.renewAnswer = { renewed: false, code: "lost" };
+    await gateway.tick();
+    await settle();
+    expect(nats.published).toEqual([
+      { subject: "_INBOX.1", data: new Uint8Array(0), headers: [[AGENT_LINK_LOST_HEADER, "1"]] },
+    ]);
   });
 
   test("a later local session for the same agent supersedes the earlier", async () => {

@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
-import { NatsControlRpc } from "../src/sandbox/selfhosted/control-rpc";
-import { ControlReplyRecovery } from "../src/sandbox/selfhosted/control-replay";
+import { NatsControlRpc, timeoutAgentError } from "../src/sandbox/selfhosted/control-rpc";
+import {
+  AGENT_LINK_LOST_HEADER,
+  ControlReplyRecovery,
+} from "../src/sandbox/selfhosted/control-replay";
 
 const subject = "agent.workspace.machine.connection.process.rpc";
 const mutation = ControlRequest.fromPartial({
@@ -161,5 +164,61 @@ describe("control reply recovery", () => {
     }));
     expect(await rpc.request(subject, mutation, { timeoutMs: 100 })).toEqual(failure);
     expect(executions).toBe(1);
+  });
+});
+
+describe("a request whose agent link ends before the answer", () => {
+  const replayHeaders = { get: (name: string) => (name === "Opengeni-Control-Replay" ? "1" : "") };
+  const linkLost = {
+    data: new Uint8Array(0),
+    headers: { get: (name: string) => (name === AGENT_LINK_LOST_HEADER ? "1" : "") },
+  };
+
+  test("is delivered again at once under the same delivery, not after its timeout", async () => {
+    const deliveries: string[] = [];
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      async request(target: string, payload: Uint8Array) {
+        if (ControlRequest.decode(payload).op?.$case === "ping") {
+          return { data: result, headers: replayHeaders };
+        }
+        deliveries.push(target);
+        // The gateway that held the link answers for it as the link ends.
+        if (deliveries.length === 1) return linkLost;
+        return { data: result };
+      },
+    }));
+    const startedAt = Date.now();
+    const response = await rpc.request(subject, mutation, { timeoutMs: 30_000 });
+    expect(response.error).toBeUndefined();
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries[1]).toBe(deliveries[0]);
+  });
+
+  test("a one-shot request ends as the ambiguous timeout it is, never as never-sent", async () => {
+    const rpc = new NatsControlRpc(async () => ({
+      async request() {
+        return linkLost;
+      },
+    }));
+    const response = await rpc.request(subject, mutation, { timeoutMs: 30_000 });
+    expect(response.error?.code).toBe(timeoutAgentError().code);
+    expect(response.error?.detail ?? {}).not.toHaveProperty("_never_sent");
+  });
+
+  test("an agent's own reply is never mistaken for the link's end", async () => {
+    const recovery = new ControlReplyRecovery(100, 1);
+    const reply = await recovery.request(
+      {
+        async request() {
+          return { data: result, headers: { get: () => "1" } };
+        },
+      },
+      subject,
+      new Uint8Array(),
+      10,
+    );
+    expect(reply.data).toEqual(result);
   });
 });

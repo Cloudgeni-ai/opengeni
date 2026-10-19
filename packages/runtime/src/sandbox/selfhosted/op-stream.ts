@@ -445,16 +445,25 @@ export class OpStreamExecClient {
     this.inFlight.add(opId);
     this.readCheckpoints.delete(opId);
     try {
-      const result = await consumer.run(
-        null,
-        0,
-        Math.max(yieldMs + this.deps.controlTimeoutMs, 1000),
-        {
+      let result: Awaited<ReturnType<OpConsumer["run"]>>;
+      try {
+        result = await consumer.run(null, 0, Math.max(yieldMs + this.deps.controlTimeoutMs, 1000), {
           yieldMs: Math.max(1, yieldMs),
           onYield: () => {},
           captureOutput,
-        },
-      );
+        });
+      } catch (error) {
+        // The runner's own terminal record: the op was cancelled before it
+        // ever began on this connection, so there is no output to read.
+        if (error instanceof OpTombstonedError) {
+          return {
+            status: "completed",
+            outcome: tombstonedOutcome(error.exit),
+            replaySequence: "0",
+          };
+        }
+        throw error;
+      }
       // Only a successful capture may advance this local replay optimization.
       // A fresh client or failed persistence always replays retained truth.
       consumer.teardown();
@@ -1152,6 +1161,8 @@ class OpConsumer {
     if (result.opStatus.state === OpState.OP_STATE_LOST) {
       throw lostToControlError(result.opStatus);
     }
+    // Cancelled before it ever began: no frames will come, and it never ran.
+    if (isTombstone(result.opStatus)) throw new OpTombstonedError(result.opStatus.exit!);
     this.markAcknowledged();
     return result.opStatus;
   }
@@ -1406,6 +1417,10 @@ class OpConsumer {
         reject(lostToControlError(status));
         return;
       }
+      if (isTombstone(status)) {
+        reject(new OpTombstonedError(status.exit!));
+        return;
+      }
       this.markAcknowledged();
       // Alive on the runner. If it is ahead of our frontier, frames were lost
       // in flight — re-attach to replay them (this also restores live flow
@@ -1521,6 +1536,55 @@ function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedCon
     retryable: false,
     detail: { lost_reason: String(status.lostReason) },
   });
+}
+
+/** The runner's answer for an op cancelled before it ever began (its
+ *  tombstone): complete and cancelled, with no frame ever sent and no output
+ *  record. A real exit always declares its output totals and digests and
+ *  follows at least one frame, so nothing else matches. It proves the op never
+ *  ran on that connection and never can. */
+function isTombstone(status: OpStatus): boolean {
+  const exit = status.exit;
+  return (
+    status.state === OpState.OP_STATE_COMPLETE &&
+    exit?.cancelled === true &&
+    BigInt(status.nextSeq || "0") === 0n &&
+    Object.keys(exit.totals ?? {}).length === 0 &&
+    Object.keys(exit.digests ?? {}).length === 0
+  );
+}
+
+/** A start, attach or read met the op's tombstone (see isTombstone). For a
+ *  caller that ran the command it reads as the start refusal it is. */
+export class OpTombstonedError extends SelfhostedControlError {
+  constructor(readonly exit: OpExit) {
+    super({
+      message: "The command was cancelled before the machine admitted it.",
+      code: ErrorCode.ERROR_CODE_TIMEOUT,
+      reason: null,
+      retryable: false,
+      detail: { cancelled: "true" },
+    });
+  }
+}
+
+/** The outcome a read reports for a tombstoned op: the runner's own record,
+ *  with no output. */
+function tombstonedOutcome(exit: OpExit): OpStreamExecOutcome {
+  return {
+    terminalExit: exit,
+    response: {
+      exitCode: exit.exitCode,
+      stdout: new Uint8Array(0),
+      stderr: new Uint8Array(0),
+      timedOut: exit.timedOut,
+      durationMs: exit.durationMs,
+      backgroundChildrenStopped: exit.backgroundChildrenStopped,
+    },
+    heals: 0,
+    startRetries: 0,
+    replyBytes: 0,
+  };
 }
 
 /** The op's agent connection was replaced by a new one while the op existed

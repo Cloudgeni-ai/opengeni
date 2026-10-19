@@ -91,6 +91,27 @@ function rig(
     state.gone.delete(OLD);
     state.live = OLD;
   };
+  /** The agent's host is lost: the agent stops answering on its connection,
+   * which stays its live one. */
+  const loseHost = () => {
+    state.gone.add(OLD);
+  };
+  /** The sandbox is restored on another host from its last snapshot: the SAME
+   * connection instance answers again, as it was before the requests its old
+   * host took, knowing none of their ops. */
+  const restoreFromSnapshot = () => {
+    runners.set(
+      OLD,
+      new FakeOpRunner({
+        transport: streams.get(OLD)!,
+        workspaceId: WORKSPACE,
+        agentId: AGENT,
+        connectionInstanceId: OLD,
+        ...(options.defaultScript ? { defaultScript: options.defaultScript } : {}),
+      }),
+    );
+    state.gone.delete(OLD);
+  };
   const requests: { request: ControlRequest; instance: string }[] = [];
   const controlRpc = new NatsControlRpc(async () => ({
     request: async (subject: string, payload: Uint8Array, opts: { timeout: number }) => {
@@ -172,7 +193,18 @@ function rig(
       reconnectHoldMs: 600,
       connectionCurrent: async () => state.live === OLD,
     });
-  return { session, runners, restart, returnOld, requests, adoptions, transport, oldClient };
+  return {
+    session,
+    runners,
+    restart,
+    returnOld,
+    loseHost,
+    restoreFromSnapshot,
+    requests,
+    adoptions,
+    transport,
+    oldClient,
+  };
 }
 
 async function until(condition: () => boolean): Promise<void> {
@@ -685,3 +717,124 @@ function expectOutcomeUnknown(
   if (!expected.startConfirmed) expect(text).not.toMatch(/while this command was running/);
   expect(text).not.toMatch(/did not survive|did not run/);
 }
+
+describe("an exec whose sandbox is restored from a snapshot on another host", () => {
+  // As a direct terminal exec runs on a compute sandbox whose host is lost:
+  // its start goes to the lost host, the caller gives up, and the sandbox comes
+  // back on another host with the same agent connection, rewound.
+  function hostLoss(order: "stop first" | "start first") {
+    let lost = false;
+    let restored = false;
+    const stopSeen = Promise.withResolvers<void>();
+    const context = rig({
+      controlTimeoutMs: 400,
+      execTimeoutMs: 0,
+      goneHolds: true,
+      ledger: "direct",
+      defaultScript: () => ({ frames: [], exit: { exitCode: 0 } }),
+      onRequest: async (request) => {
+        if (request.op?.$case === "opCancel") stopSeen.resolve();
+        if (request.op?.$case === "opStart" && !lost) {
+          lost = true;
+          context.loseHost();
+          setTimeout(() => {
+            restored = true;
+            context.restoreFromSnapshot();
+          }, 1_000);
+        }
+        // The restored agent gets the stop before the retried start.
+        if (order === "stop first" && request.op?.$case === "opStart" && restored) {
+          await stopSeen.promise;
+          await Bun.sleep(20);
+        }
+      },
+    });
+    return context;
+  }
+
+  test("a stop that reaches the restored agent first settles the command: it never ran there", async () => {
+    const { session, runners, requests } = hostLoss("stop first");
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    // The caller gives up while the start is still unanswered.
+    const timer = setTimeout(() => abort.abort(new Error("timed out")), 1_200);
+    try {
+      const error = await controller
+        .runSandboxCommandStructured(session, { cmd: "touch once", yieldTimeMs: 1_200 })
+        .then(
+          () => undefined,
+          (caught: unknown) => caught,
+        );
+      expect(error).toBeDefined();
+      const settledAt = Date.now();
+      controller.cancel(error);
+      // The agent's tombstone proves the op never began and never can: the
+      // drain ends instead of waiting for frames that will never come.
+      await controller.waitForQuiescence();
+      expect(Date.now() - settledAt).toBeLessThan(1_000);
+    } finally {
+      clearTimeout(timer);
+    }
+    const restoredRunner = runners.get(OLD)!;
+    expect(restoredRunner.starts).toEqual([]);
+    expect(restoredRunner.runs.size).toBe(0);
+    // No probing storm after the proof.
+    expect(requests.filter((r) => r.request.op?.$case === "opAttach").length).toBeLessThan(10);
+  });
+
+  test("a start that reaches the restored agent first runs there once", async () => {
+    const { session, runners } = hostLoss("start first");
+    const controller = createTurnToolCancellationController(new AbortController().signal);
+    const result = await controller.runSandboxCommandStructured(session, {
+      cmd: "touch once",
+      yieldTimeMs: 5_000,
+    });
+    expect(result.exitCode).toBe(0);
+    await controller.waitForQuiescence();
+    expect(runners.get(OLD)!.starts).toHaveLength(1);
+  });
+
+  test("a read of an op the agent tombstoned completes as cancelled, with no output", async () => {
+    const { oldClient, runners } = rig();
+    const opId = "call_tombstoned:0";
+    // Cancelled before it ever began on this connection.
+    await runners.get(OLD)!.request(
+      `agent.${WORKSPACE}.${AGENT}.connection.${OLD}.rpc`,
+      ControlRequest.fromPartial({
+        requestId: "cancel",
+        op: { $case: "opCancel", opCancel: { opId } },
+      }),
+      { timeoutMs: 1_000 },
+    );
+    const read = await oldClient().readExisting(opId, 250, async () => {});
+    expect(read.status).toBe("completed");
+    if (read.status !== "completed") throw new Error("not completed");
+    expect(read.outcome.terminalExit?.cancelled).toBe(true);
+    expect(read.outcome.response.stdout.byteLength).toBe(0);
+    expect(read).not.toHaveProperty("outputReceipt");
+  });
+
+  test("a tombstone is no evidence the command began: a later replaced read keeps it unconfirmed", async () => {
+    const { oldClient, runners, restart } = rig();
+    const client = oldClient();
+    const opId = "call_tombstoned_then_replaced:0";
+    await runners.get(OLD)!.request(
+      `agent.${WORKSPACE}.${AGENT}.connection.${OLD}.rpc`,
+      ControlRequest.fromPartial({
+        requestId: "cancel",
+        op: { $case: "opCancel", opCancel: { opId } },
+      }),
+      { timeoutMs: 1_000 },
+    );
+    // An attach-only read meets the tombstone.
+    expect((await client.readExisting(opId, 250, async () => {})).status).toBe("completed");
+    restart();
+    const error = await client
+      .readExisting(opId, 50, async () => {})
+      .then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+    expectOutcomeUnknown(error, { startConfirmed: false, stopRequested: false });
+  });
+});
