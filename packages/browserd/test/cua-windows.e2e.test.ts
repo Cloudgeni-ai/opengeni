@@ -55,6 +55,7 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
       { stdout: "inherit", stderr: "inherit" },
     );
     let supervisor: ComputerSupervisor | undefined;
+    let launchedPid: number | undefined;
     const reference = { computerSessionId: randomUUID(), controllerGeneration: randomUUID() };
     try {
       // A cold PowerShell start that loads WinForms can take several seconds.
@@ -150,11 +151,13 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
           applicationId: join(process.env.SystemRoot ?? "C:\\Windows", "System32", "charmap.exe"),
         }),
       );
+      launchedPid = launched.observation?.target.processId ?? undefined;
       // On failure, CUA's own reason is in the receipt's error.
       expect(launched).toMatchObject({ state: "completed" });
     } finally {
       await supervisor?.close();
-      Bun.spawnSync(["taskkill", "/F", "/IM", "charmap.exe"]);
+      // Only the process this test launched.
+      if (launchedPid !== undefined) Bun.spawnSync(["taskkill", "/F", "/PID", String(launchedPid)]);
       fixture.kill();
       await fixture.exited;
       await rm(root, { recursive: true, force: true });
