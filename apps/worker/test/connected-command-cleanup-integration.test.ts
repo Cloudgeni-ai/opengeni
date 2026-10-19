@@ -10,7 +10,14 @@ import {
   sandboxMaintenanceDue,
   settleConnectedMachineSessionBackgroundCommand,
 } from "@opengeni/db";
-import { ErrorCode, ExecRequest, OpAck } from "@opengeni/agent-proto";
+import {
+  ControlRequest,
+  ControlResponse,
+  ErrorCode,
+  ExecRequest,
+  OpAck,
+} from "@opengeni/agent-proto";
+import { agentConnectionCurrent } from "@opengeni/core";
 import { sql } from "drizzle-orm";
 import {
   recordConnectedCommandOutputConsumption,
@@ -22,9 +29,12 @@ import type { OpStreamConnection } from "@opengeni/events";
 import {
   FakeOpRunner,
   InMemoryOpStreamTransport,
+  NatsControlRpc,
   SelfhostedControlError,
   subjectFor,
+  wakeComputeSandboxOnNoResponders,
   type ControlRpc,
+  type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
 import {
   reconcileConnectedMachineBackgroundCommands as reconcile,
@@ -981,3 +991,80 @@ test("a command abandoned while its runner was unreachable is stopped when that 
   expect(settled.state).not.toBe("stopping");
   await parkSession(fixture.session.id);
 });
+
+test("a request to a replaced connection ends without a wake when another process records the new one", async () => {
+  // Two processes share only the database: this one holds a request for the
+  // sandbox's old agent connection, and another (the gateway pod where the
+  // new agent's session opened) records the new connection over its own
+  // database connection.
+  const fixture = await abandonedCommandFixture("sandbox");
+  try {
+    const oldSubject = subjectFor(fixture.workspaceId, fixture.enrollment.id, "launch");
+    const wakes: string[] = [];
+    const connectionCurrent = agentConnectionCurrent(client.db);
+    let held = 0;
+    const connection: NatsRequestConnection = {
+      supportsHeaders: true,
+      async request(subject, payload, opts) {
+        const request = ControlRequest.decode(payload);
+        if (request.op?.$case === "ping") {
+          return {
+            data: ControlResponse.encode(
+              ControlResponse.fromPartial({
+                requestId: request.requestId,
+                result: { $case: "ping", ping: { nonce: request.op.ping.nonce } },
+              }),
+            ).finish(),
+            headers: { get: (name: string) => (name === "Opengeni-Control-Replay" ? "1" : "") },
+          };
+        }
+        if ((await connectionCurrent(subject.split(".replay.")[0]!)) === false) {
+          throw Object.assign(new Error("503"), { code: "503" });
+        }
+        // The host holds a request for an agent that no longer answers.
+        held += 1;
+        await Bun.sleep(Math.min(opts.timeout, 4_000));
+        throw Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
+      },
+    };
+    const rpc = new NatsControlRpc(async () => connection, {
+      connectionCurrent,
+      onNoResponders: wakeComputeSandboxOnNoResponders({
+        fabric: {
+          wake: async (sandboxId) => {
+            wakes.push(sandboxId);
+            return {} as never;
+          },
+        },
+        sandboxOf: async () => "box-1",
+        connectionCurrent,
+      }),
+    });
+    const request = () =>
+      rpc.request(
+        oldSubject,
+        ControlRequest.fromPartial({
+          requestId: crypto.randomUUID(),
+          op: { $case: "opCancel", opCancel: { opId: fixture.opId } },
+        }),
+        { timeoutMs: 30_000 },
+      );
+    const startedAt = Date.now();
+    const inFlight = request();
+    await Bun.sleep(300);
+    await shared.admin`update enrollments set connection_instance_id='fresh' where id=${fixture.enrollment.id}`;
+    const answer = await inFlight;
+    expect(held).toBe(1);
+    expect(answer.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
+    // Within about a second of the new connection, not the 30 s timeout.
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    // A later request to the old connection reaches no responder and ends at
+    // once; neither woke the idle sandbox.
+    const again = await request();
+    expect(again.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
+    expect(held).toBe(1);
+    expect(wakes).toEqual([]);
+  } finally {
+    await parkSession(fixture.session.id);
+  }
+}, 20_000);

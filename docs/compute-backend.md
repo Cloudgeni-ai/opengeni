@@ -130,7 +130,15 @@ skips sandbox enrollments, and machine routes list machines only.
   finds no responder (no host serves the sandbox, for example mid-move),
   `ComputeWakingControlRpc` asks the fabric to wake it and resends under the
   same request id until the agent answers. Every operation re-resolves the
-  agent's connection instance.
+  agent's connection instance. A request bound to a connection instance
+  that is no longer the enrollment's live one never wakes the sandbox,
+  whether it comes from a turn, a direct request, the API's Stop or the
+  reconciler: each transport checks the live instance before it wakes, and
+  stops instead. The check reads the enrollment from the database every time
+  (nothing is cached in the process), so a new connection recorded by the
+  gateway on any API pod ends the old request on every other one. A stop for
+  a command bound to a replaced instance never reaches the transport: the
+  reconciler's claim settles it by runner retirement.
 - **Restart**: when a sandbox's VM dies, the host boots it fresh on its disk
   (programs lost, files kept), and its agent comes back on a new connection
   instance. A request still bound to the old instance ends as soon as the new

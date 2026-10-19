@@ -12,6 +12,8 @@ import {
   ComputeFabricError,
   ComputeSandboxClient,
   ComputeSandboxSession,
+  ComputeWakeGate,
+  ComputeWakingControlRpc,
   MockAgentResponder,
   NatsControlRpc,
   SandboxConfigError,
@@ -278,7 +280,11 @@ class FakeAgentPlane implements ComputeAgentPlane {
     return instance;
   }
 
+  /** The no-responders handler the latest session gave its transport. */
+  onNoResponders: ((subject: string) => Promise<boolean>) | undefined;
+
   controlRpc(options?: { onNoResponders?: (subject: string) => Promise<boolean> }): ControlRpc {
+    this.onNoResponders = options?.onNoResponders;
     const fake = this.fakeControlRpc();
     if (!this.natsTransport) return fake;
     const connection: NatsRequestConnection = {
@@ -1551,6 +1557,7 @@ describe("waking a compute sandbox for an exact-locator request", () => {
         lookups.push(agent);
         return "box-1";
       },
+      connectionCurrent: async () => true,
       now: () => nowMs,
     });
     expect(await onNoResponders(subject)).toBe(true);
@@ -1572,6 +1579,7 @@ describe("waking a compute sandbox for an exact-locator request", () => {
         },
       },
       sandboxOf: async () => null,
+      connectionCurrent: async () => true,
     });
     expect(await machine(subject)).toBe(true);
     expect(await machine("not.an.agent.subject")).toBe(true);
@@ -1583,8 +1591,35 @@ describe("waking a compute sandbox for an exact-locator request", () => {
         },
       },
       sandboxOf: async () => "box-1",
+      connectionCurrent: async () => true,
     });
     expect(await gone(subject)).toBe(false);
+  });
+
+  test("a request bound to a replaced connection wakes nothing and stops retrying", async () => {
+    const wakes: string[] = [];
+    const lookups: unknown[] = [];
+    const checked: string[] = [];
+    const onNoResponders = wakeComputeSandboxOnNoResponders({
+      fabric: {
+        wake: async (sandboxId) => {
+          wakes.push(sandboxId);
+          return {} as never;
+        },
+      },
+      sandboxOf: async (agent) => {
+        lookups.push(agent);
+        return "box-1";
+      },
+      connectionCurrent: async (asked) => {
+        checked.push(asked);
+        return false;
+      },
+    });
+    expect(await onNoResponders(subject)).toBe(false);
+    expect(checked).toEqual([subject]);
+    expect(wakes).toEqual([]);
+    expect(lookups).toEqual([]);
   });
 
   test("a failed lookup is asked again, and a failed wake keeps retrying", async () => {
@@ -1601,6 +1636,7 @@ describe("waking a compute sandbox for an exact-locator request", () => {
         if (lookups === 1) throw new Error("database unavailable");
         return "box-1";
       },
+      connectionCurrent: async () => true,
       now: () => nowMs,
     });
     expect(await onNoResponders(subject)).toBe(true);
@@ -1656,6 +1692,50 @@ describe("an operation whose agent restarts", () => {
     expect(reads.at(-1)?.subject.split(".")[4]).not.toBe(old);
   }, 20_000);
 
+  test("a request bound to the old connection never wakes the sandbox; one to the live connection does", async () => {
+    const { plane, client, fabric } = setup();
+    plane.natsTransport = true;
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    expect((await session.exec({ cmd: "echo hi" })).exitCode).toBe(0);
+    const agentId = session.state.enrollmentId;
+    const old = plane.sessions.get(agentId)!;
+    const oldSubject = `agent.${WORKSPACE}.${agentId}.connection.${old}.rpc`;
+    // The VM booted fresh: its new agent holds the connection, and nothing
+    // answers the old one.
+    const fresh = plane.open(agentId);
+    const transportHandler = plane.onNoResponders!;
+    expect(await transportHandler(oldSubject)).toBe(false);
+    expect(fabric.wakes).toBe(0);
+    // The session-level resend after a no-responder answer stops too.
+    const waking = new ComputeWakingControlRpc(
+      { request: async (_subject, req) => offlineControlResponse(req.requestId, true) },
+      new ComputeWakeGate({
+        fabric: {
+          wake: async () => {
+            fabric.wakes += 1;
+            return {} as never;
+          },
+        },
+        sandboxId: "box",
+        enrollmentId: agentId,
+        resolveConnection: async () =>
+          await plane.resolveConnection({ workspaceId: WORKSPACE, enrollmentId: agentId }),
+        probe: async () => true,
+        readyTimeoutMs: 2_000,
+      }),
+      agentId,
+    );
+    const answer = await waking.request(oldSubject, pingRequestFor(), { timeoutMs: 100 });
+    expect(answer.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
+    expect(fabric.wakes).toBe(0);
+    // No host serves the sandbox at all (it sleeps unplaced): the live
+    // connection's request wakes it.
+    plane.sessions.delete(agentId);
+    const liveSubject = `agent.${WORKSPACE}.${agentId}.connection.${fresh}.rpc`;
+    expect(await transportHandler(liveSubject)).toBe(true);
+    expect(fabric.wakes).toBe(1);
+  }, 20_000);
+
   test("an exec whose agent never answers ends at its own timeout, start included", async () => {
     const { plane, client } = setup({ controlTimeoutMs: 500, execTimeoutMs: 1_000 });
     plane.natsTransport = true;
@@ -1672,3 +1752,10 @@ describe("an operation whose agent restarts", () => {
     expect(Date.now() - startedAt).toBeLessThan(15_000);
   }, 30_000);
 });
+
+function pingRequestFor(): ControlRequest {
+  return ControlRequest.fromPartial({
+    requestId: crypto.randomUUID(),
+    op: { $case: "ping", ping: { nonce: "0" } },
+  });
+}

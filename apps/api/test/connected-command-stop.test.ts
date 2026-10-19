@@ -176,6 +176,44 @@ describe("the immediate stop's budget", () => {
     expect(agent.subjects.at(-1)!.startsWith(`${rpcSubject}.replay.`)).toBe(true);
   });
 
+  test("a stop for a replaced connection never wakes the sandbox and ends at once", async () => {
+    const wakes: string[] = [];
+    const checked: string[] = [];
+    const agent = agentConnection(() => false);
+    const startedAt = performance.now();
+    const delivery = await deliverConnectedCommandStop(
+      connectedCommandStopRpc({
+        db: unusedDb,
+        settings: noCompute,
+        connect: async () => agent.connection,
+        budgetMs: 3_000,
+        compute: {
+          fabric: {
+            wake: async (sandboxId) => {
+              wakes.push(sandboxId);
+              return {} as never;
+            },
+          },
+          sandboxOf: async () => "box-1",
+        },
+        // The sandbox's VM booted fresh: another connection is its live one.
+        connectionCurrent: async (subject) => {
+          checked.push(subject);
+          return false;
+        },
+      }),
+      target,
+      3_000,
+    );
+    expect(delivery.delivered).toBe(false);
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(wakes).toEqual([]);
+    expect(checked.length).toBeGreaterThan(0);
+    expect(checked.every((subject) => subject === rpcSubject)).toBe(true);
+    // One attempt reached no responder; nothing was resent.
+    expect(agent.subjects).toEqual([rpcSubject]);
+  });
+
   test("a Connected Machine is not woken; its stop falls to the reconciler", async () => {
     const wakes: string[] = [];
     const agent = agentConnection(() => false);

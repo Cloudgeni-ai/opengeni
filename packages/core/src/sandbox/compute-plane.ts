@@ -6,6 +6,7 @@
 import type { Settings } from "@opengeni/config";
 import {
   createSandboxEnrollment,
+  getEnrollment,
   getLiveEnrollmentConnection,
   revokeSandboxEnrollment,
   type Database,
@@ -14,10 +15,37 @@ import type { EventBus } from "@opengeni/events";
 import {
   NatsControlRpc,
   NatsOpStreamTransport,
+  parseAgentRpcSubject,
   setComputeAgentPlane,
   type ComputeAgentPlane,
   type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
+
+/**
+ * Whether the agent connection an RPC subject names is still its enrollment's
+ * live one. Every call reads the enrollment from the database, which every API
+ * and worker process shares, so a replacement recorded by any of them (for
+ * example the gateway on another pod opening the new agent's session) is seen
+ * at once; nothing is cached in the process. An unknown answer (a failed read,
+ * a subject that names no agent connection, an enrollment with no live
+ * connection) counts as current. A Connected Machine and a compute sandbox are
+ * read the same way.
+ */
+export function agentConnectionCurrent(db: Database): (subject: string) => Promise<boolean> {
+  return async (subject) => {
+    const target = parseAgentRpcSubject(subject);
+    if (!target) return true;
+    try {
+      const enrollment = await getEnrollment(db, target.workspaceId, target.agentId);
+      return (
+        !enrollment?.connectionInstanceId ||
+        enrollment.connectionInstanceId === target.connectionInstanceId
+      );
+    } catch {
+      return true;
+    }
+  };
+}
 
 export function createComputeAgentPlane(deps: {
   db: Database;

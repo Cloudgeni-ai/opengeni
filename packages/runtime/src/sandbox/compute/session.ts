@@ -176,6 +176,11 @@ export class ComputeWakeGate {
     return this.deps.readyTimeoutMs;
   }
 
+  /** The agent's live connection as recorded now, or null; never wakes. */
+  async current(): Promise<ComputeAgentConnection | null> {
+    return await this.deps.resolveConnection();
+  }
+
   /** The agent's live connection, recovering the sandbox when none is open. */
   async admit(): Promise<ComputeAgentConnection> {
     const connection = await this.deps.resolveConnection();
@@ -259,6 +264,16 @@ export class ComputeWakingControlRpc implements ControlRpc {
     const deadline = this.now() + this.gate.readyTimeoutMs;
     let delayMs = 200;
     while (isNoResponder(response) && this.now() < deadline) {
+      // A request bound to a connection that is no longer the agent's live one
+      // never wakes the sandbox: its agent is gone, and the session admits the
+      // operation again on the live connection.
+      const live = await this.gate.current().catch(() => null);
+      if (
+        live &&
+        subjectFor(live.workspaceId, this.enrollmentId, live.connectionInstanceId) !== subject
+      ) {
+        return response;
+      }
       // Never delivered: safe to resend once a host serves the sandbox again.
       await this.gate.wake();
       const connection = await this.gate.admit().catch(() => null);
@@ -287,12 +302,19 @@ const AGENT_RPC_SUBJECT = /^agent\.([^.]+)\.([^.]+)\.connection\.[^.]+\.rpc$/u;
  * sandbox: ask the fabric to wake it (at most once per interval) and let the
  * transport retry the same delivery at the same subject, never at a successor
  * connection. An enrollment that is not a sandbox's (a Connected Machine)
- * keeps its ordinary offline retry. A deleted sandbox ends the retries.
+ * keeps its ordinary offline retry. A deleted sandbox ends the retries. A
+ * request bound to a connection that is no longer its enrollment's live one
+ * never wakes anything and stops retrying: that agent is gone, and its
+ * commands are settled by runner retirement instead.
  */
 export function wakeComputeSandboxOnNoResponders(input: {
   fabric: Pick<ComputeFabricClient, "wake">;
   /** The sandbox an enrollment runs in, or null for any other enrollment. */
   sandboxOf: (agent: { workspaceId: string; enrollmentId: string }) => Promise<string | null>;
+  /** Whether the connection a subject names is still its enrollment's live
+   * one, read from the record of truth on every call. An unknown answer
+   * counts as current. */
+  connectionCurrent: (subject: string) => Promise<boolean>;
   now?: () => number;
 }): (subject: string) => Promise<boolean> {
   const now = input.now ?? Date.now;
@@ -301,6 +323,7 @@ export function wakeComputeSandboxOnNoResponders(input: {
   return async (subject) => {
     const match = AGENT_RPC_SUBJECT.exec(subject);
     if (!match) return true;
+    if (!(await input.connectionCurrent(subject).catch(() => true))) return false;
     const agent = { workspaceId: match[1]!, enrollmentId: match[2]! };
     const key = `${agent.workspaceId}.${agent.enrollmentId}`;
     let lookup = sandboxes.get(key);
@@ -396,19 +419,23 @@ export class ComputeSandboxSession extends SelfhostedSession {
       // Nobody received the request: no host serves the sandbox. Wake it at
       // once (the gate throttles the fabric calls) and let the transport retry
       // the same delivery, keeping its replay identity, until the agent is
-      // back; stop early when it came back on another connection, so the
-      // operation is admitted again there.
+      // back. A request bound to a connection that is no longer the live one
+      // stops without waking anything: its agent is gone, and the operation is
+      // admitted again on the live connection.
       onNoResponders: async (subject) => {
-        await gate.wake();
-        const connection = await resolveConnection();
-        return (
-          !connection ||
+        const connection = await resolveConnection().catch(() => null);
+        if (
+          connection &&
           subjectFor(
             connection.workspaceId,
             state.enrollmentId,
             connection.connectionInstanceId,
-          ) === subject
-        );
+          ) !== subject
+        ) {
+          return false;
+        }
+        await gate.wake();
+        return true;
       },
     });
     const gate =

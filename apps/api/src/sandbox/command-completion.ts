@@ -1,5 +1,6 @@
 import { AgentEventAck, type OperationCompleted } from "@opengeni/agent-proto";
 import type { Settings } from "@opengeni/config";
+import { agentConnectionCurrent } from "@opengeni/core";
 import {
   computeSandboxOfEnrollment,
   settleCollectedConnectedMachineBackgroundCommand,
@@ -47,6 +48,8 @@ export function connectedCommandStopRpc(input: {
     fabric: Pick<ComputeFabricClient, "wake">;
     sandboxOf: (agent: { workspaceId: string; enrollmentId: string }) => Promise<string | null>;
   };
+  /** Injected for tests: whether a subject's connection is still live. */
+  connectionCurrent?: (subject: string) => Promise<boolean>;
 }): ControlRpc {
   const deadlineAtMs = Date.now() + input.budgetMs;
   const signal = AbortSignal.timeout(input.budgetMs);
@@ -66,9 +69,16 @@ export function connectedCommandStopRpc(input: {
             await computeSandboxOfEnrollment(input.db, agent, { deadlineAtMs, signal }),
         }
       : undefined);
+  // A stop addressed to a replaced connection ends at once and never wakes a
+  // sandbox: that runner is gone, and the reconciler settles the command by
+  // runner retirement.
+  const connectionCurrent = input.connectionCurrent ?? agentConnectionCurrent(input.db);
   return new NatsControlRpc(input.connect, {
     recoveryMs: 0,
-    ...(compute ? { onNoResponders: wakeComputeSandboxOnNoResponders(compute) } : {}),
+    connectionCurrent,
+    ...(compute
+      ? { onNoResponders: wakeComputeSandboxOnNoResponders({ ...compute, connectionCurrent }) }
+      : {}),
   });
 }
 
