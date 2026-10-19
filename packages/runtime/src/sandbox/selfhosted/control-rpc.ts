@@ -22,7 +22,7 @@
 
 import { AgentError, ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import type { CapabilityUnavailableReason } from "@opengeni/contracts";
-import { ControlReplyRecovery } from "./control-replay";
+import { ControlReplyRecovery, responderWaitExhausted } from "./control-replay";
 
 // Re-export the contracts reason union locally so callers of the mapping below
 // don't have to import from two places. CapabilityUnavailableReason here is the
@@ -562,9 +562,9 @@ export class NatsControlRpc implements ControlRpc {
         // No subscriber on the subject at all → the request reached no responder and
         // was NOT delivered → NEVER SENT (provably not executed): safe to re-issue.
         const offline = offlineControlResponse(req.requestId, true);
-        // A connection with headers already waited for this process to come back
-        // (the reply recovery window); say so, so callers do not wait it again.
-        if (conn.supportsHeaders && offline.error) {
+        // The reply recovery already waited its whole window for this process
+        // to come back; say so, so callers do not wait it again.
+        if (responderWaitExhausted(err) && offline.error) {
           offline.error.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY] = "1";
         }
         return offline;

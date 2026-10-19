@@ -44,6 +44,36 @@ describe("control reply recovery", () => {
     ).toEqual({ action: "fail" });
   });
 
+  test("a responder without reply recovery that vanishes is still retried", async () => {
+    // The probe answers without the replay header, so the operation is sent once
+    // directly; its no-responder did not wait out any recovery window.
+    let probes = 0;
+    const rpc = new NatsControlRpc(
+      async () => ({
+        supportsHeaders: true,
+        async request() {
+          if (probes++ === 0) return { data: result, headers: { get: () => "" } };
+          throw Object.assign(new Error("no responders"), { code: "503" });
+        },
+      }),
+      { recoveryMs: 10_000 },
+    );
+    const startedAt = Date.now();
+    const response = await rpc.request(subject, mutation, { timeoutMs: 1_000 });
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(response.error?.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY]).toBeUndefined();
+    expect(
+      decideSelfhostedRetry({
+        opKind: "browserControlEnsure",
+        error: agentErrorToControlError(response.error!, mutation.requestId),
+        drainingRetries: 0,
+        timeoutRetries: 0,
+        neverSentRetries: 0,
+        jitter: 0,
+      }).action,
+    ).toBe("retry");
+  });
+
   test("a connection without reply recovery still retries a missing responder", async () => {
     const rpc = new NatsControlRpc(async () => ({
       async request() {
