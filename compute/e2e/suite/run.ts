@@ -1903,26 +1903,22 @@ check(
     // Every host line about a sandbox's agent-link streams and connections
     // carries `sandbox=<id>` (the journal colours the field name, so the
     // colour codes go first); only lines naming this sandbox count.
-    const journal = onHost(
-      host,
-      `j=$(sudo journalctl --no-pager -o cat -u 'compute-*' --since @${since}) || { echo "the host journal could not be read" >&2; exit 7; }; ` +
-        `j=$(printf '%s\\n' "$j" | sed 's/\\x1b\\[[0-9;]*m//g'); ` +
-        `printf '%s\\n' "$j" | grep '"compute.alarm":"programs_lost"' | grep -c '"compute.sandbox.id":"${id}"' || true; ` +
-        `for p in 'an agent-link stream cannot go on' 'agent-link streams the guest no longer has ended' ` +
-        `'broke the protocol' 'did not say hello' 'too many agent-link connections'; do ` +
-        `printf '%s\\n' "$j" | grep "$p" | grep -c 'sandbox=${id}' || true; done`,
-    )
-      .trim()
-      .split("\n")
-      .map(Number);
-    const [lostAlarm = 0, cannotOwn = 0, endedOwn = 0, broke = 0, nohello = 0, tooMany = 0] =
-      journal;
-    if (lostAlarm < 1) failures.push(`the host journal has no programs_lost alarm for ${id}`);
-    if (broke > 0 || nohello > 0 || tooMany > 0) {
-      failures.push(
-        `the host journal after the kill, for sandbox=${id}: ${broke} stream(s) broke the protocol, ${nohello} connection(s) did not say hello, ${tooMany} "too many agent-link connections"`,
-      );
-    }
+    // Read after the reconnect: the host ends the old streams when the
+    // rebooted guest's agent says hello, which can be logged after the
+    // first command on the new boot has answered.
+    const readJournal = () =>
+      onHost(
+        host,
+        `j=$(sudo journalctl --no-pager -o cat -u 'compute-*' --since @${since}) || { echo "the host journal could not be read" >&2; exit 7; }; ` +
+          `j=$(printf '%s\\n' "$j" | sed 's/\\x1b\\[[0-9;]*m//g'); ` +
+          `printf '%s\\n' "$j" | grep '"compute.alarm":"programs_lost"' | grep -c '"compute.sandbox.id":"${id}"' || true; ` +
+          `for p in 'an agent-link stream cannot go on' 'agent-link streams the guest no longer has ended' ` +
+          `'broke the protocol' 'did not say hello' 'too many agent-link connections'; do ` +
+          `printf '%s\\n' "$j" | grep "$p" | grep -c 'sandbox=${id}' || true; done`,
+      )
+        .trim()
+        .split("\n")
+        .map(Number);
     // The command in flight ends with an error within the bound armed when
     // it was sent, not a hang and not a run on the new boot.
     const settledInflight = await step("the command in flight ends", () => inflight);
@@ -1975,6 +1971,24 @@ check(
     if (growth.connected !== 1) {
       failures.push(
         `the agent connected ${growth.connected} times after the crash, not once: ${describeGrowth(growth)}`,
+      );
+    }
+    let journal = readJournal();
+    for (
+      let tries = 0;
+      tries < 6 &&
+      ((journal[0] ?? 0) < 1 || (growth.lost < 1 && (journal[1] ?? 0) + (journal[2] ?? 0) < 1));
+      tries += 1
+    ) {
+      await sleep(5_000);
+      journal = readJournal();
+    }
+    const [lostAlarm = 0, cannotOwn = 0, endedOwn = 0, broke = 0, nohello = 0, tooMany = 0] =
+      journal;
+    if (lostAlarm < 1) failures.push(`the host journal has no programs_lost alarm for ${id}`);
+    if (broke > 0 || nohello > 0 || tooMany > 0) {
+      failures.push(
+        `the host journal after the kill, for sandbox=${id}: ${broke} stream(s) broke the protocol, ${nohello} connection(s) did not say hello, ${tooMany} "too many agent-link connections"`,
       );
     }
     // The old streams ended, by evidence of this sandbox: its guest was
