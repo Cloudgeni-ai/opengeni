@@ -994,7 +994,9 @@ export type BrowserSessionMutationResponse = {
   session: BrowserSession;
   operation: InteractionLifecycleOperationReceipt;
   /** Present only on a create that launched the browser in this request. */
-  initialView?: { targets: BrowserTarget[]; observation: BrowserObservation } | undefined;
+  initialView?:
+    | { targets: BrowserTarget[]; observation: BrowserObservation; notice?: string | undefined }
+    | undefined;
 };
 
 export type BrowserSessionLifecycleRequest = { operationId: string };

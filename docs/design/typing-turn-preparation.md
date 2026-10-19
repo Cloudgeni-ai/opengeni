@@ -346,3 +346,114 @@ The new `claim_provider_settings` phase makes that slice separately measurable
 after deployment. Production validation must also account for the earlier
 deferred-preparation change; a lean local fixture and a production subscription
 turn with real integrations are not matched controls.
+
+## Follow-up: indexed inbox provenance lookups
+
+Delivered updates still require the same live authority checks. Several of those
+checks compare a turn's indexed UUID after converting the column to text. On a
+large retained history this prevents a parameterized UUID index lookup, even
+though the lineage names one exact turn. The same pattern occurs in the inbox
+context and MCP binding fences and the subscription compatibility readers.
+
+Convert the lineage value instead, inside a guarded CASE. Require exactly 36
+bytes of canonical lowercase hexadecimal UUID text before casting; PostgreSQL's
+ordinary UUID parser also accepts spellings the old text comparison rejected.
+Keep `lower()` only at the compatibility sites that already normalized their
+input. Malformed, missing and non-string lineage values remain nonmatches, not
+cast errors. Workspace, session, source, credential and generation predicates
+are unchanged. The migration patches exactly one occurrence of each of eight
+known comparisons and fails on source drift. It adds no routine, grant, index,
+lock, cached authority or runtime-posture exception, so old binaries can continue
+using the same database functions during a rolling deployment.
+
+Four bounded read-only production query comparisons over about 79,000 retained
+workspace turns measured 52–63 ms for the original representative provenance
+join versus 0.23–1.06 ms for the indexed form. The original plan touched roughly
+25,730 shared buffers; the indexed form touched eight. These are lookup
+measurements, not full trigger or turn measurements: other predicates can select
+different plans or short-circuit the lookup. In particular, an empty-binding
+local claim did not reproduce a stable whole-claim improvement in alternating
+controls. Do not multiply the isolated lookup saving by the number of sites or
+present it as the missing production second.
+
+Real-PostgreSQL tests exercise every installed guard against canonical,
+uppercase, malformed, missing and non-string JSON values; pin the existing
+normalization differences; check wrong-workspace/session nonmatches; and verify
+parameterized index scans with retained history. Existing receiver-context,
+sender-binding and subscription-authority suites remain the behavioral gates.
+
+## Follow-up: overlap accepted-turn catalog discovery
+
+Expired shared-account catalogs still put a provider metadata request on the
+accepted path. A mixed production interval measured a mean 442 ms for the
+Codex entitlement phase. That is not a per-turn percentile or proof that every
+turn queried the provider. Starting after all claim preparation would hide only
+about 20 ms in that interval: learning freeze, identity read and health recovery
+were already short. Start earlier, after the atomic claim has established the
+exact attempt and its valid frozen Codex policy, alongside post-claim settings
+and policy preparation.
+
+The hint uses the same deployment settings and initiating human as the existing
+reader, but only fresh credentials. It never renews a token or changes account
+health before run admission. A renewal-due token skips preparation and remains
+the responsibility of normal placement. Invalid or absent frozen policies,
+compaction and deployments enabling cross-provider failover skip the hint; they
+keep their existing capacity path rather than probing a possible fallback.
+
+Placement joins the owned hint best-effort, then **always** runs the original
+live entitlement check after health recovery. That reader checks current scope,
+cutover, serving accounts, credential generation and expiry. A valid observation
+avoids another provider request. A missing or renewal-deferred observation takes
+the existing token/probe path. A failed early provider probe retains today's
+five-second unknown-result cache; it is not persisted as an entitlement denial.
+An early database error cannot replace an admission error or a later successful
+live read. There is no new authority snapshot, TTL, model request or queue path.
+
+The hint can use another existing pool connection while settings are read; no
+pool configuration or resource control changes. Activity cleanup drains it on
+every exit, including admission refusal, fencing and cancellation. The metadata
+read retains its existing bounded timeout, so an early exit can still wait for
+that in-flight read before final cleanup. No credential renewal is started by
+the hint. Model input, tool disclosure and prompt-cache prefixes are unchanged.
+
+### Claim attribution
+
+Claim timing is not synonymous with SQL execution. Database admission includes
+connection acquisition and BEGIN; nested admission includes SAVEPOINT. Scope
+setup and callback timing can contain planning, locks and other reads, and nested
+callbacks overlap their parents. Record bounded per-claim totals and counts for
+those four stages, plus the continued-account and pending-update authority
+callbacks. They are not additive critical-path intervals and carry no query,
+session, account or credential identifiers as metric labels.
+
+A local real-PostgreSQL child-result fixture invoked continued-account resolution
+once and used nine nested scopes. Its ten measured claims had a median/p90 of
+48/70 ms, of which the callback took 17/29 ms. This does not explain the mixed
+production atomic-claim mean of 525 ms: production phase evidence, not that
+source-reading hypothesis, must determine any further claim rewrite.
+
+### Matched development-stack evidence
+
+The full API/Temporal/PostgreSQL worker stack used a synthetic Codex account,
+no tools or inference calls, and a fixed 442 ms `/models` response delay. Each
+turn changed only the fixture's credential generation to force a cold catalog;
+ordinary admission and placement still ran. Each traced cohort contained ten
+new-chat/follow-up pairs after two separate warm-up pairs. Worker reload markers
+confirmed the actual control/candidate path and were removed afterwards.
+
+| Metric, milliseconds (median / p90) | Chat | Control | Candidate | Repeat candidate |
+| --- | --- | ---: | ---: | ---: |
+| Live entitlement wait | New | 455 / 459 | 395 / 400 | 399 / 405 |
+| Live entitlement wait | Existing | 455 / 458 | 395 / 401 | 404 / 407 |
+| Acceptance → request-start audit | New | 956 / 1,007 | 981 / 1,057 | 937 / 965 |
+| Acceptance → request-start audit | Existing | 943 / 1,041 | 964 / 1,263 | 934 / 960 |
+
+Candidate refresh work still took about 456–460 ms; overlapping it removed
+roughly 50–60 ms from the local live wait, not the entire provider request.
+The table presents control first for comparison; execution order was candidate,
+control, repeat candidate. Total startup drifted enough that a stable end-to-end
+improvement is not established. An earlier untraced run likewise showed no
+reliable total-latency win. Production's longer post-claim window may hide more,
+but that remains a canary hypothesis, not a measured saving. Warm catalog hits
+still pay the live scope/serving read, and the hint adds an early read; track
+both hit cost and cold-probe overlap before claiming a general improvement.

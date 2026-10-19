@@ -534,6 +534,7 @@ const BrowserOpenOutput = z
     observation: CompactBrowserObservation.optional(),
     attachedProfile: AgentAttachedProfile.optional(),
     otherAttachedProfiles: z.array(AgentAttachedProfile).optional(),
+    notice: z.string().optional(),
   })
   .strict();
 
@@ -2342,6 +2343,7 @@ async function openBrowser(
     ...(shown.length < targets.length ? { otherTabCount: targets.length - shown.length } : {}),
     ...(observation ? { observation } : {}),
     ...chosenProfile,
+    ...(initialView?.notice ? { notice: initialView.notice } : {}),
   };
 }
 

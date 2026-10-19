@@ -16,6 +16,20 @@ import {
 
 const host = "/v1/workspaces/site-host";
 
+test("workspace-scoped composer config is pinned by both hosts, never forwarded as site-host", () => {
+  for (const route of [siteSessionPath, siteHostWorkspacePath]) {
+    expect(route("/v1/config/client?workspaceId=site-host", "workspace")).toBe(
+      "/v1/config/client?workspaceId=workspace",
+    );
+    expect(route("/v1/config/client", "workspace")).toBe("/v1/config/client?workspaceId=workspace");
+    expect(route("/v1/config/client?workspaceId=site-host", "site-host")).toBe(
+      "/v1/config/client?workspaceId=site-host",
+    );
+    for (const query of ["workspaceId=other", "workspaceId=site-host&workspaceId=other"])
+      expect(() => route(`/v1/config/client?${query}`, "workspace")).toThrow(SiteSessionPathError);
+  }
+});
+
 test("Site access listing is pinned to current, never a self-grant or an origin rewrite", () => {
   expect(siteSessionPath(`${host}/sessions?siteAccessId=current`, "ws", "GET", "site")).toBe(
     "/v1/workspaces/ws/sessions?siteAccessId=site",
@@ -69,7 +83,7 @@ test("Site code reaches only the SITE_OPERATIONS allowlist", () => {
     // The in-Site check leaves the path unresolved.
     expect(siteSessionPath(`${host}${suffix}`, "site-host", method)).toBe(`${host}${suffix}`);
   }
-  expect(siteSessionPath("/v1/config/client", "ws")).toBe("/v1/config/client");
+  expect(siteSessionPath("/v1/config/client", "ws")).toBe("/v1/config/client?workspaceId=ws");
 });
 
 test("every other workspace route and method is refused before any request", () => {
@@ -174,7 +188,7 @@ test("an agent's own Codemode SDK proxy keeps the workspace prefix boundary", ()
       `/v1/workspaces/ws${suffix}?x=1`,
     );
   }
-  expect(siteHostWorkspacePath("/v1/config/client", "ws")).toBe("/v1/config/client");
+  expect(siteHostWorkspacePath("/v1/config/client", "ws")).toBe("/v1/config/client?workspaceId=ws");
   expect(siteHostWorkspacePath(`${host}/sessions?originSiteId=current`, "ws")).toBe(
     `/v1/workspaces/ws/sessions?originSiteId=${SITE_NO_ORIGIN_ID}`,
   );

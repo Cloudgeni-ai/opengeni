@@ -59,6 +59,12 @@ test("a create returns the launch view only for the launch it activated in this 
   // An older controller that did not report its tabs, or no launch at all.
   expect(withInitialView(response(), { ...launched!, targets: undefined })).toEqual(response());
   expect(withInitialView(response(), null)).toEqual(response());
+  // A controller's launch notice rides along with the view it belongs to.
+  const notice = "This browser uses the machine's network directly.";
+  expect(withInitialView(response(), { ...launched!, notice })).toEqual({
+    ...response(),
+    initialView: { targets: launched!.targets, observation: launched!.observation, notice },
+  });
 });
 
 test("automatic managed directory recovery preserves current authority and refused outcomes", async () => {

@@ -226,6 +226,8 @@ export type BrowserStateRestoreInput = {
 
 export type BrowserSupervisorSession = BrowserSessionReference & {
   observation: BrowserObservation;
+  /** Returned only by the create that launched the browser. */
+  notice?: string;
 };
 
 export type BrowserStateCaptureInput = BrowserSessionReference & {
@@ -240,6 +242,7 @@ export type BrowserStateCaptureInput = BrowserSessionReference & {
 export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
+  readonly networkNotice?: string | null;
   start(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   listTargets(): Promise<BrowserTarget[]>;
   openTarget(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
@@ -316,6 +319,10 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
 
 export type BrowserSupervisorOptions = {
   ephemeralContextPoolEnabled?: boolean;
+  /** Run managed Linux browsers in their own network namespace where the
+   * machine supports it (default true). A deployment whose browsers already
+   * own their network, such as a managed sandbox VM, turns it off. */
+  networkIsolation?: boolean;
   /** Host a virtual WebAuthn authenticator in every page target (default true
    * where the transport supports it). Passkey placements bring the acted-on
    * tab to the front before each action, because Chromium refuses WebAuthn
@@ -464,6 +471,7 @@ export class BrowserSupervisor {
               options.agentBrowserBinary,
               options.lightpandaBinary,
               options.headlessShell,
+              options.networkIsolation !== false,
             )));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
@@ -523,6 +531,7 @@ export class BrowserSupervisor {
             downloadDirectory: join(poolDirectory, "downloads"),
             screenshotDirectory: join(poolDirectory, "screenshots"),
             headed: false,
+            ...(options.networkIsolation === false ? { networkIsolation: false } : {}),
             ...(context.browserExecutablePath
               ? { browserExecutablePath: context.browserExecutablePath }
               : {}),
@@ -955,9 +964,11 @@ export class BrowserSupervisor {
       this.sessions.set(options.browserSessionId, runtime);
       const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
       runtime.creationObservation = null;
+      const notice = runtime.driver.networkNotice;
       return {
         ...binding(runtime),
         observation,
+        ...(notice ? { notice } : {}),
       };
     } finally {
       if (this.creating.get(options.browserSessionId) === creation) {
@@ -2795,11 +2806,61 @@ function browserActionUsesWorkspaceFiles(action: BrowserActionCommand["action"])
   );
 }
 
+/** The program a managed Chromium launch executes for this driver context.
+ *
+ * A recovered working runtime records its browser's process image (the
+ * resolved `/proc/<pid>/exe`) only as ownership evidence. That image is not a
+ * launcher: distribution wrappers (NixOS, Debian and Google Chrome's own
+ * script) prepare the sandbox helper, flags and environment and then exec it,
+ * and a Chromium started from its bare image can abort before DevTools starts.
+ * A relaunch after the recorded browser exited therefore uses the same
+ * launcher as every other launch of this profile, and reattaching a live
+ * browser launches nothing. The record decides only whether this exact
+ * directory may be reattached or relaunched. Undefined selects the platform
+ * default launcher. */
+export async function managedChromiumLaunchExecutable(
+  context: Pick<
+    BrowserSupervisorDriverContext,
+    | "headed"
+    | "profileDirectory"
+    | "restoredProfile"
+    | "browserExecutablePath"
+    | "recoverOwnedProcess"
+    | "allowOwnedProcessLaunch"
+  >,
+  headlessShell?: VerifiedHeadlessShell,
+): Promise<{ browserExecutablePath: string | undefined; useHeadlessShell: boolean }> {
+  const browserExecutablePath = await selectManagedChromiumExecutable({
+    headed: context.headed,
+    profileDirectory: context.profileDirectory,
+    restoredProfile: context.restoredProfile,
+    ...(context.browserExecutablePath
+      ? { browserExecutablePath: context.browserExecutablePath }
+      : {}),
+    ...(headlessShell ? { headlessShell } : {}),
+  });
+  // Without directory launch permission only a verified headless shell, whose
+  // daemon lineage is proven before reattaching, may recover.
+  if (
+    context.recoverOwnedProcess &&
+    context.allowOwnedProcessLaunch !== true &&
+    (!headlessShell ||
+      (await realpath(headlessShell.path)) !== context.recoverOwnedProcess.executablePath)
+  ) {
+    throw workingRuntimeUnavailable();
+  }
+  return {
+    browserExecutablePath,
+    useHeadlessShell: headlessShell !== undefined && browserExecutablePath === headlessShell.path,
+  };
+}
+
 async function createBrowserDriver(
   context: BrowserSupervisorDriverContext,
   binary?: ResolvedAgentBrowserBinary,
   lightpandaBinary?: ResolvedLightpandaBinary,
   headlessShell?: VerifiedHeadlessShell,
+  networkIsolation = true,
 ): Promise<BrowserSupervisorDriver> {
   if (context.transport.kind === "attached_chrome") {
     const attached = await createAttachedChromeTransport({
@@ -2875,31 +2936,10 @@ async function createBrowserDriver(
   if (context.linkedComputer) {
     launchArguments.push("--force-renderer-accessibility=complete");
   }
-  const selectedExecutable = await selectManagedChromiumExecutable({
-    headed: context.headed,
-    profileDirectory: context.profileDirectory,
-    restoredProfile: context.restoredProfile,
-    ...(context.browserExecutablePath
-      ? { browserExecutablePath: context.browserExecutablePath }
-      : {}),
-    ...(headlessShell ? { headlessShell } : {}),
-  });
-  if (
-    context.recoverOwnedProcess &&
-    selectedExecutable &&
-    (await realpath(selectedExecutable)) !== context.recoverOwnedProcess.executablePath
-  ) {
-    throw workingRuntimeUnavailable();
-  }
-  const browserExecutablePath = context.recoverOwnedProcess?.executablePath ?? selectedExecutable;
-  if (
-    context.recoverOwnedProcess &&
-    context.allowOwnedProcessLaunch !== true &&
-    (!headlessShell || (await realpath(headlessShell.path)) !== browserExecutablePath)
-  ) {
-    throw workingRuntimeUnavailable();
-  }
-  const useHeadlessShell = headlessShell && browserExecutablePath === headlessShell.path;
+  const { browserExecutablePath, useHeadlessShell } = await managedChromiumLaunchExecutable(
+    context,
+    headlessShell,
+  );
   if (context.headlessSessionCookies && !useHeadlessShell) {
     throw new Error("Headless cookie state requires its matching verified profile launcher");
   }
@@ -2926,6 +2966,7 @@ async function createBrowserDriver(
     downloadDirectory: context.downloadDirectory,
     screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
+    ...(networkIsolation ? {} : { networkIsolation: false }),
     ...(offscreen ? { offscreen: true } : {}),
     ...(route?.kind === "proxy" && route.proxyUrl ? { proxyUrl: route.proxyUrl } : {}),
     ...(launchArguments.length > 0 ? { launchArguments } : {}),
@@ -2970,9 +3011,7 @@ async function createBrowserDriver(
     (!context.headed || offscreen)
       ? { completeClientHints: true }
       : {}),
-    ...(headlessShell && browserExecutablePath === headlessShell.path
-      ? { userAgentMetadataSource: "intercepted_local" as const }
-      : {}),
+    ...(useHeadlessShell ? { userAgentMetadataSource: "intercepted_local" as const } : {}),
     downloadDirectory: context.downloadDirectory,
     ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
     resolveWorkspaceFiles: context.resolveWorkspaceFiles,

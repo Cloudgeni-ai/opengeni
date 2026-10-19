@@ -318,4 +318,6 @@ export const embeddingMigrationTail = [
   // The Site chat-access grant policy reads the sessions.site_access_root_id
   // column added by withheld 0793; replay after it.
   "0842_site_session_access.sql",
+  // Patches the withheld provenance fences and subscription compatibility readers.
+  "0843_indexed_inbox_lineage.sql",
 ];

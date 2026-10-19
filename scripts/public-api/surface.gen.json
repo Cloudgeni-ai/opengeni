@@ -12034,6 +12034,7 @@
       "shape": {
         "$": "object",
         "$.initialView": "object?",
+        "$.initialView.notice": "string?",
         "$.initialView.observation": "object!",
         "$.initialView.observation.browserSessionId": "string!",
         "$.initialView.observation.changedRegions": "array!",

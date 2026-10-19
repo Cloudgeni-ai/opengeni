@@ -2854,6 +2854,7 @@ describe("release schema contract", () => {
       "0839_docker_local_command_containment.sql",
       "0840_retained_process_reconciler_version.sql",
       "0842_site_session_access.sql",
+      "0843_indexed_inbox_lineage.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

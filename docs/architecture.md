@@ -631,6 +631,12 @@ token/probe path. Successful durable composer saves can prepare those facts via
 turn, starts a workflow, acquires a turn lease, calls a model, or wakes compute.
 Its credential read is fresh-only: renewal and connection-health changes are
 left to normal access, so preparing a draft cannot revoke its own readiness.
+The worker can start the same fresh-only hint after atomic claim of a valid
+frozen Codex turn, alongside settings and policy preparation. Cross-provider
+failover and compaction retain the ordinary path. The activity owns and drains
+the hint; account placement still runs its original live entitlement check,
+which alone may renew credentials and consumes only generation-matched,
+unexpired stored facts. No model-input projection moves with this hint.
 See [typing preparation](design/typing-turn-preparation.md).
 
 Claude projects system inputs at native phase boundaries, adding a labeled
@@ -1725,7 +1731,12 @@ transport tests on every supported host.
 
 One agent independently connects multiple deployments/workspaces within shared
 host containment. The relay carries terminal/desktop bytes, never durable session
-or lease state. Install `latest` may serve baked binaries; pinned versions resolve
+or lease state. Producer registration selects a relay owner and returns a signed,
+channel-bound route in the stream descriptor. Any ingress-selected replica can
+authenticate and proxy one private WebSocket hop to that owner; the existing
+registry remains the only pairing/replay/epoch state. No shared channel store or
+ingress affinity is needed. The chart wires pod-IP advertisement and same-release
+peer access. Install `latest` may serve baked binaries; pinned versions resolve
 binaries/signatures from the immutable release archive.
 
 Canonical: [`../agent/README.md`](../agent/README.md) and
@@ -2077,6 +2088,20 @@ Managed download tools use the existing explicit workspace-save API; bytes stay 
 
 Linux managed-browser cleanup and recovery share exact profile/executable and
 process-birth checks in [`linux-process-identity.ts`](../packages/browserd/src/linux-process-identity.ts).
+
+On a person's Linux machine, managed Chromium runs in its own network namespace
+bridged to the host by pasta ([`browser-network-isolation.ts`](../packages/browserd/src/browser-network-isolation.ts)),
+so host interface churn (container veths, bridges, VPNs) cannot fire Chromium's
+network-change handling and abort requests in flight. The browser keeps the
+person's UID and the spawned PID; host loopback servers, the DevTools port and
+DNS stay reachable. Loopback keeps both address families, so a server listening
+only on `127.0.0.1` or only on `::1` stays reachable through `localhost`, as on
+the shared network. A launch probe uses the namespace only when the pasta found
+forwards each host loopback listener on its own family and never on the other
+one; Chrome then starts once the namespace's IPv6 addresses have settled.
+Where pasta fails that probe, or pasta or user namespaces are unavailable, it
+launches on the shared network and `browser_open` says so in one line. Managed
+sandbox VMs turn it off (`OPENGENI_BROWSERD_NETWORK_ISOLATION=off`).
 
 Explicit managed Chromium working-directory recovery uses the internal
 [`working-runtime-journal.ts`](../packages/browserd/src/working-runtime-journal.ts)

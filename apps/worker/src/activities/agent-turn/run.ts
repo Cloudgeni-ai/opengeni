@@ -110,6 +110,7 @@ import {
   assertTurnModelConnection,
   assertCoreCodexSourceConnected,
   buildCoreCodexRequestTokenResolver,
+  prepareCoreCodexTurnEntitlements,
 } from "./codex-core-capacity";
 import { createCoreCodexRequests, providerRequestIdPrefix } from "./codex-core-requests";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
@@ -289,6 +290,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     } = resolvedServices;
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
+    let codexEntitlementPreparation: Promise<number> | undefined;
     // Temporal cancellation is not the only way an activity loses ownership:
     // a database attempt fence or workflow abandonment can finalize the logical
     // turn while the SDK cancellation signal remains open. Bind sandbox
@@ -535,6 +537,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         media,
         claimedResult,
         acknowledgeLostAttemptOwnership,
+        startCodexEntitlementPreparation: (turn) => {
+          if (cancellationSignal?.aborted) return;
+          codexEntitlementPreparation ??= prepareCoreCodexTurnEntitlements({
+            db,
+            settings,
+            input,
+            turn,
+            observability,
+          });
+          // This is a hint. The original placement-stage read remains the
+          // authority and retries if this preparation could not finish.
+          void codexEntitlementPreparation.catch(() => undefined);
+        },
       });
       if ("exit" in claimed) return claimed.exit;
       if (!eventing.publish || !eventing.settle) {
@@ -647,6 +662,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // Gated on the codex-billed predicate — non-codex turns never touch this.
           {
             const capacityDeps: CapacityPhaseDeps = {
+              codexEntitlementPreparation,
               input,
               settings,
               db,
@@ -2182,6 +2198,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         acknowledgeRecoveryQuiescence,
       });
     } finally {
+      if (codexEntitlementPreparation) await Promise.allSettled([codexEntitlementPreparation]);
       await finalizeTurnAttempt({
         turnFinalizationTimeoutMs,
         requestWorkerDrain,

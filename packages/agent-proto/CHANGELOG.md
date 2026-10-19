@@ -1,5 +1,12 @@
 # @opengeni/agent-proto
 
+## 4.1.1
+
+### Patch Changes
+
+- c602300: Fix large Connected Machine writes for machine-addressed operations, including run_on. Negotiate epoch-zero transactional upload support without inventing session epochs or replaying mutations. Older transactional agents receive a preflight 256 KiB limit and update guidance; nonzero session transfers remain compatible. Large machine-addressed transfers require the corresponding native agent release.
+- 91dc10d: Carry producer-selected relay owner routes through stream descriptors so multi-replica terminal and frame streams connect without ingress affinity. Relays authenticate and proxy directly to the channel owner, preserving its replay and epoch fences; scoped terminals refresh the route after owner loss without restarting the shell.
+
 ## 4.0.4
 
 ### Patch Changes
