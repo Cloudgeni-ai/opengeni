@@ -222,6 +222,28 @@ test.skipIf(!native)(
 );
 
 test.skipIf(!native)(
+  "a reattached browser that already shut down is retired with its launcher, repeatably",
+  async () => {
+    const f = await fixture();
+    try {
+      const receipt = (await f.attest())!;
+      const replacement = await f.reattach(receipt);
+      // The controller's own close request ended the browser, and its launcher
+      // reaped it, before cleanup could read the browser's parent.
+      process.kill(f.browserPid, "SIGTERM");
+      expect((await f.browserExited()).exitedBrowserPid).toBe(f.browserPid);
+      await replacement.terminate();
+      await f.daemon.exited;
+      expect(() => process.kill(f.daemon.pid, 0)).toThrow();
+      await replacement.terminate();
+    } finally {
+      await f.close();
+    }
+  },
+  15_000,
+);
+
+test.skipIf(!native)(
   "a live browser is reattached after an agent update removed its daemon's runtime",
   async () => {
     const f = await fixture({ daemonRuntimeCopy: true });
