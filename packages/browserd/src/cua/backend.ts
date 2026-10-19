@@ -848,11 +848,11 @@ function launchArguments(
       return BUNDLE_ID.test(name) ? { bundle_id: name } : { name };
     }
     case "windows":
-      // A packaged app's AUMID ({PackageFamilyName}!{AppId}) activates that
-      // app; a full path runs that executable; a name is looked up among the
-      // installed apps, then on PATH.
-      if (id.includes("!")) return { aumid: id };
+      // A full path runs that executable; a packaged app's AUMID
+      // ({PackageFamilyName}!{AppId}) activates that app; a name is looked up
+      // among the installed apps, then on PATH.
       if (/^(?:[A-Za-z]:[\\/]|\\\\)/u.test(id)) return { path: id };
+      if (id.includes("!")) return { aumid: id };
       return { name: id };
     case "linux":
       // A name runs as a command, or matches an installed application.

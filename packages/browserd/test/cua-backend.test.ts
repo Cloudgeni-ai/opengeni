@@ -900,6 +900,8 @@ describe("CUA desktop boundary", () => {
           ],
           ["C:\\Program Files\\App\\app.exe", { path: "C:\\Program Files\\App\\app.exe" }],
           ["\\\\server\\share\\tool.exe", { path: "\\\\server\\share\\tool.exe" }],
+          ["C:\\Tools\\Acme!\\tool.exe", { path: "C:\\Tools\\Acme!\\tool.exe" }],
+          ["\\\\server\\Tools!\\tool.exe", { path: "\\\\server\\Tools!\\tool.exe" }],
         ],
       ],
       [
