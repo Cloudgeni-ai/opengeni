@@ -4,7 +4,7 @@
  * gateway Worker and its `SiteDatabase` SQLite Durable Object in workerd
  * (Miniflare) through the signed internal route.
  */
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -753,37 +753,47 @@ test("published hosts run named queries as the verified viewer; guests only ever
   const stored = await s.request(f.owner, "POST", "/query", { sql: "SELECT voter FROM votes" });
   expect(stored.json.rows).toEqual([{ voter: `user:${f.member.subjectId}` }]);
 
-  // Guests' write queries share the Site's guest write limit with Site Data.
-  expect((await run("sign_guestbook", { note: "hi" }, guest)).status).toBe(200);
-  expect((await run("sign_guestbook", { note: "hello" }, guest)).status).toBe(200);
-  const flooded = await run("sign_guestbook", { note: "again" }, guest);
-  expect(flooded.status, JSON.stringify(flooded.json)).toBe(429);
-  expect(flooded.json.error.details).toMatchObject({ bucket: "guest_writes" });
-  // Reads and signed-in writes are not guest writes.
-  expect((await run("results", { poll: "lunch" }, guest)).status).toBe(200);
-  expect((await run("sign_guestbook", { note: "member" }, signedIn)).status).toBe(200);
-  // New visitor ids from the same client address share its guest write budget
-  // (SITE_GUEST_IP_LIMIT_FACTOR times the per-visitor limit).
-  let addressFlooded: Awaited<ReturnType<typeof run>> | null = null;
-  for (let attempt = 0; attempt < 12 && !addressFlooded; attempt += 1) {
-    const fresh = { visitor: randomBytes(18).toString("base64url") };
-    const signed = await run("sign_guestbook", { note: `fresh ${attempt}` }, fresh);
-    if (signed.status === 429) addressFlooded = signed;
-    else expect(signed.status, JSON.stringify(signed.json)).toBe(200);
+  // Keep the burst in one fixed minute: real requests can straddle :00 on CI.
+  // Use today's clock so signed requests and database-backed sessions stay valid.
+  const rateWindow = new Date();
+  setSystemTime(rateWindow);
+  try {
+    // Guests' write queries share the Site's guest write limit with Site Data.
+    expect((await run("sign_guestbook", { note: "hi" }, guest)).status).toBe(200);
+    expect((await run("sign_guestbook", { note: "hello" }, guest)).status).toBe(200);
+    const flooded = await run("sign_guestbook", { note: "again" }, guest);
+    expect(flooded.status, JSON.stringify(flooded.json)).toBe(429);
+    expect(flooded.json.error.details).toMatchObject({ bucket: "guest_writes" });
+    // Reads and signed-in writes are not guest writes.
+    expect((await run("results", { poll: "lunch" }, guest)).status).toBe(200);
+    expect((await run("sign_guestbook", { note: "member" }, signedIn)).status).toBe(200);
+    // New visitor ids from the same client address share its guest write budget
+    // (SITE_GUEST_IP_LIMIT_FACTOR times the per-visitor limit).
+    const addressStatuses: number[] = [];
+    for (let attempt = 0; attempt < 7; attempt += 1) {
+      const fresh = { visitor: randomBytes(18).toString("base64url") };
+      const signed = await run("sign_guestbook", { note: `fresh ${attempt}` }, fresh);
+      addressStatuses.push(signed.status);
+      if (attempt === 6)
+        expect(signed.json.error.details).toMatchObject({ bucket: "guest_writes" });
+    }
+    expect(addressStatuses).toEqual([200, 200, 200, 200, 200, 200, 429]);
+    // IPv6 clients count per /64: new addresses in the same /64 share one budget.
+    const prefixStatuses: number[] = [];
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      const fresh = {
+        visitor: randomBytes(18).toString("base64url"),
+        clientIp: `2001:db8:7:1:${(attempt + 1).toString(16)}::${attempt + 2}`,
+      };
+      const signed = await run("sign_guestbook", { note: `v6 ${attempt}` }, fresh);
+      prefixStatuses.push(signed.status);
+      if (attempt === 8)
+        expect(signed.json.error.details).toMatchObject({ bucket: "guest_writes" });
+    }
+    expect(prefixStatuses).toEqual([200, 200, 200, 200, 200, 200, 200, 200, 429]);
+  } finally {
+    setSystemTime();
   }
-  expect(addressFlooded?.json.error.details).toMatchObject({ bucket: "guest_writes" });
-  // IPv6 clients count per /64: new addresses in the same /64 share one budget.
-  let prefixFlooded: Awaited<ReturnType<typeof run>> | null = null;
-  for (let attempt = 0; attempt < 12 && !prefixFlooded; attempt += 1) {
-    const fresh = {
-      visitor: randomBytes(18).toString("base64url"),
-      clientIp: `2001:db8:7:1:${(attempt + 1).toString(16)}::${attempt + 2}`,
-    };
-    const signed = await run("sign_guestbook", { note: `v6 ${attempt}` }, fresh);
-    if (signed.status === 429) prefixFlooded = signed;
-    else expect(signed.status, JSON.stringify(signed.json)).toBe(200);
-  }
-  expect(prefixFlooded?.json.error.details).toMatchObject({ bucket: "guest_writes" });
 
   // sql.run goes through the gateway signature like every site-runtime call:
   // a body that is not the signed one is refused before anything runs.
