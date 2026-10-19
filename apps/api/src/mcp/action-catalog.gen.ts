@@ -7713,6 +7713,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateFileVisibility",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/files/:fileId/visibility",
+    "request": [
+      "UpdateFileVisibilityRequest"
+    ],
+    "response": [
+      "UpdateFileVisibilityResponse"
+    ]
+  },
+  {
     "id": "updateGitHubActionPolicy",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/github/action-policies",

@@ -1662,9 +1662,13 @@ enabled, and one added branch in the operation-lease guard.
     upstream idempotency key and claim release on an uncertain outcome are
     the legacy sequence: an uncertain send is retried only with the same key.
   - Completion (`completeSubscriptionCoreCodexResetRedemption`) records the
-    outcome and audit event and, for `reset` or `alreadyRedeemed`, clears
-    the stored exhaustion only when it was observed with the connection's
-    current refresh generation, then delivers a core wake after commit. The
+    outcome and audit event and, for `reset` or `alreadyRedeemed`,
+    invalidates every stored usage window and the stored exhaustion
+    deadline (`quotaAfterRateLimitReset`: each window keeps its id with
+    unknown usage until the next reading), only when the quota was observed
+    with the connection's current refresh generation, then delivers a core
+    wake after commit. Clearing only the deadline left an exhausted weekly
+    window standing, so woken waiters re-waited until its old reset. The
     legacy exhaustion columns and capacity outbox are never touched.
 - **Overview (EP-N21).** The core overview projects the workspace's core
   pool. Each account's live usage (through the seam, as above) and reset

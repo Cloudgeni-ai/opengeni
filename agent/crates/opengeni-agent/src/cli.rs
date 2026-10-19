@@ -16,6 +16,8 @@
 //! * [`Command::Uninstall`] — stop any service, remove the binary, and (with
 //!   `--purge`) delete credentials + deactivate the enrollment.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 /// The Opengeni self-hosted agent: run your own machine as a first-class Opengeni
@@ -380,6 +382,13 @@ pub struct CodemodeCallArgs {
     /// `structuredContent` as JSON is omitted.
     #[arg(long)]
     pub full: bool,
+
+    /// Save the result's single image (such as a browser screenshot) at this
+    /// path; an existing file is never overwritten. Without it, images are
+    /// written to a private temporary file. Either way the printed result
+    /// names the file instead of carrying base64 pixels, unless --full is set.
+    #[arg(long, value_name = "PATH")]
+    pub save_image: Option<PathBuf>,
 }
 
 /// Arguments for the `permissions` subcommand.

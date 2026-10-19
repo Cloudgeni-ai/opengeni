@@ -1599,7 +1599,9 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browserd_real_e2e == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 27
+    # 17m browser installation + 2m recovery + 6m headless + 5m headed,
+    # with 3m for checkout, dependencies and cleanup.
+    timeout-minutes: 33
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@v6
@@ -1638,7 +1640,7 @@ jobs:
             packages/browserd/test/supervisor.e2e.test.ts \
             --test-name-pattern '^a (graceful|killed) controller leaves the same live browser'
 
-      - name: Run actual browserd end-to-end suite
+      - name: Run headless browserd end-to-end suite
         timeout-minutes: 6
         run: |
           set -euo pipefail
@@ -1648,6 +1650,14 @@ jobs:
           chmod 700 "$RUNNER_TEMP/opengeni-test-chromium"
           export OPENGENI_BROWSER_EXECUTABLE="$RUNNER_TEMP/opengeni-test-chromium"
           bun run --cwd packages/browserd test:e2e
+
+      # The headed stream test deliberately observes 60 seconds of frames.
+      # It must not inherit whatever remains of the headless suite's budget.
+      - name: Run headed browserd streaming and interaction suite
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          export OPENGENI_BROWSER_EXECUTABLE="$RUNNER_TEMP/opengeni-test-chromium"
           OPENGENI_BROWSERD_HEADED_E2E=1 xvfb-run --auto-servernum \
             bun test --timeout 120000 packages/browserd/test/cdp-driver.e2e.test.ts \
             --test-name-pattern 'streams a mobile headed tab continuously'

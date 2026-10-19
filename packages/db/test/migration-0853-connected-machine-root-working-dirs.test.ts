@@ -56,9 +56,9 @@ test("clears only a saved filesystem root or Windows system32 launch directory",
       enrollmentId: enrollment.id,
     });
   };
-  const mac = await machine("mac", "/Users/a");
+  const mac = await machine("mac", "/Users/user");
   const linux = await machine("linux", "/home/u");
-  const windows = await machine("windows", "C:/Users/a");
+  const windows = await machine("windows", "C:/Users/user");
 
   const session = async (workingDir: string, sandboxId: string | null) => {
     const created = await createSession(db, {
@@ -85,7 +85,7 @@ test("clears only a saved filesystem root or Windows system32 launch directory",
       after: null,
     },
     machineRoot: { id: await session("/home/u", linux.id), after: "/home/u" },
-    windowsHome: { id: await session("C:/Users/a", windows.id), after: "C:/Users/a" },
+    windowsHome: { id: await session("C:/Users/user", windows.id), after: "C:/Users/user" },
     windowsSubfolder: {
       id: await session("C:/Windows/system32/drivers", windows.id),
       after: "C:/Windows/system32/drivers",

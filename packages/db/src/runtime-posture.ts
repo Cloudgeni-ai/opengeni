@@ -209,6 +209,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE = "automatic_session_title_fan
 export const SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES = [
   "record_sandbox_file_publication(uuid, uuid, uuid, uuid)",
   "list_sandbox_file_publications(uuid, uuid, jsonb)",
+  "file_private_to_another(uuid, uuid, uuid)",
 ] as const;
 const SANDBOX_FILE_PUBLICATIONS_TABLE = "sandbox_file_publications";
 export const ARTIFACT_PIN_RUNTIME_ROUTINES = [

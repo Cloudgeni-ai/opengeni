@@ -6,6 +6,7 @@ import { CompactActivityContext } from "./shared";
 import { defaultToolRegistry } from "./tool-renderers";
 import type { ToolRegistry } from "./registry";
 import { toolDisplayName } from "./tool-display-name";
+import { toolStepPhase } from "./tool-steps";
 import type { ActivityItem } from "./types";
 import { rollingActivityItem } from "./work-presentation";
 import { useOpenGeniText } from "../messages/runtime";
@@ -38,7 +39,7 @@ export function RollingActivity({
       <WrenchIcon className="size-3.5" />
       <span>
         {item.kind === "tool-call"
-          ? toolDisplayName(t, item.name, item.display)
+          ? toolDisplayName(t, item.name, item.display, toolStepPhase(item.status))
           : t("timeline.rollingActivity.working")}
       </span>
     </span>
@@ -47,7 +48,7 @@ export function RollingActivity({
     <span className="og-rolling-status" data-running={selected.running ? "true" : undefined}>
       <span className="sr-only">
         {item.kind === "tool-call"
-          ? toolDisplayName(t, item.name, item.display)
+          ? toolDisplayName(t, item.name, item.display, toolStepPhase(item.status))
           : item.kind === "reasoning"
             ? t("timeline.rollingActivity.thinking")
             : t("timeline.rollingActivity.working")}

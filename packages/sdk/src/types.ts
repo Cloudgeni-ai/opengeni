@@ -2956,12 +2956,18 @@ export type FsReadResponse = {
   revision: number;
 };
 export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 5_000_000_000;
-export type PublishSandboxFileArtifactRequest = { path: string };
+export type PublishSandboxFileArtifactRequest = {
+  path: string;
+  /** Who can open the file. Omitted: the chat's own audience. */
+  visibility?: "private" | "workspace";
+};
 export type SandboxFileArtifactReceipt = {
   type: "sandbox_file";
   sandboxPath: string;
   filename: string;
   artifact: RetainedArtifactReference;
+  /** Who can open the file; absent from receipts made before files had audiences. */
+  access?: FileAccess | undefined;
 };
 export type FsWriteRequest = {
   path: string;
@@ -7581,8 +7587,20 @@ export type FileListRequest = {
 };
 export type FileListResponse = { files: FileAsset[]; nextCursor: string | null };
 
+/**
+ * Who can open a file: only its owner ("private", Only me) or everyone in the
+ * workspace, with one plain sentence saying so.
+ */
+export type FileAccess = {
+  visibility: "private" | "workspace";
+  whoCanOpen: string;
+};
+
 export type FileAsset = {
+  /** "personal" is Only me: only its owner can open it. */
   scope?: "workspace" | "personal" | undefined;
+  /** The person who alone can share the file or limit it to themselves. */
+  ownerSubjectId?: string | null | undefined;
   id: string;
   workspaceId: string;
   status: FileStatus;
@@ -7595,7 +7613,12 @@ export type FileAsset = {
   objectKey: string;
   createdAt: string;
   updatedAt: string;
+  /** Present on upload, publish and sharing results: who can open the file. */
+  access?: FileAccess | undefined;
 };
+
+export type UpdateFileVisibilityRequest = { visibility: "private" | "workspace" };
+export type UpdateFileVisibilityResponse = { file: FileAsset };
 
 /** Mirrors the closed, provider-neutral retained-output contract. */
 export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
@@ -7626,7 +7649,9 @@ export type RetainedOutputUnavailableReason =
   | "quota_exceeded"
   | "invalid_content"
   | "oversized"
-  | "unsupported";
+  | "unsupported"
+  /** The file exists but is Only me for someone else. */
+  | "private";
 
 export type RetainedArtifactReference = {
   available: true;
@@ -7861,6 +7886,8 @@ export type CreateFileUploadResponse = {
   requiredHeaders: Record<string, string>;
   expiresAt: string;
   maxSizeBytes: number;
+  /** Who will be able to open the file once uploaded. */
+  access?: FileAccess | undefined;
 };
 
 export type CompleteFileUploadResponse = {

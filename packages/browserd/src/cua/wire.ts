@@ -92,15 +92,50 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   authorization_required: "permission_denied",
   unsupported: "unsupported",
   background_delivery_unsupported: "unsupported",
+  background_unavailable: "unsupported",
 };
 
-/** A failed/partial mutation is ambiguous unless CUA explicitly proves refusal. */
+/** CUA's own explanation of a refused or unconfirmed action (why it refused,
+ * what to do instead), so the failure says more than that it failed. The text
+ * is kept exactly as CUA wrote it: the computer driver redacts typed secrets
+ * from it first and only then bounds its length. */
+function cuaFailureReason(result: ToolResult, data: Record<string, unknown>): string | null {
+  const message = (entry: unknown): unknown =>
+    entry !== null && typeof entry === "object"
+      ? ((entry as Record<string, unknown>).message ?? (entry as Record<string, unknown>).detail)
+      : undefined;
+  // Raw text, never trimmed: a typed secret can end in whitespace, and the
+  // driver can only recognize it unchanged.
+  const rawText = (entry: unknown): string =>
+    typeof entry === "string" && entry.trim().length > 0 ? entry : "";
+  const reason =
+    [
+      message(data.refusal),
+      message(data.error),
+      message(result.action?.error),
+      data.message,
+      data.summary,
+      result.action?.summary,
+      result.text,
+    ]
+      .map(rawText)
+      .find((entry) => entry.length > 0) ?? "";
+  const hint = rawText(data.hint);
+  const full = hint && !reason.includes(hint) ? `${reason}${reason ? " " : ""}${hint}` : reason;
+  return full.length > 0 ? full : null;
+}
+
+/** A failed/partial mutation is ambiguous unless CUA explicitly proves refusal.
+ * `"caller-settles"` is a mutation whose tool reports success in its own
+ * result (launch_app's pid) rather than an action disposition: failures are
+ * still ambiguous, and the caller decides whether a result proves completion. */
 export async function callDesktop(
   runtime: CuaDesktopRuntime,
   name: string,
   args: Record<string, unknown>,
-  mutation = false,
+  mode: boolean | "caller-settles" = false,
 ): Promise<{ data: Record<string, unknown>; result: ToolResult }> {
+  const mutation = mode !== false;
   let result: ToolResult;
   let data: Record<string, unknown>;
   try {
@@ -145,14 +180,17 @@ export async function callDesktop(
           ? data.code
           : result.errorCode;
     const mapped = code ? errorCodes[code] : undefined;
+    const reason = cuaFailureReason(result, data);
     throw new ComputerBackendError(
       mutation && !refused ? "outcome_unknown" : (mapped ?? "driver_failed"),
-      `CUA ${name} ${refused ? "refused the operation" : "did not establish completion"}`,
+      `CUA ${name} ${refused ? "refused the operation" : "did not establish completion"}${
+        reason ? `: ${reason}` : ""
+      }`,
       false,
       mutation && !refused,
     );
   }
-  if (mutation && effect !== "confirmed" && effect !== "unverifiable") {
+  if (mode === true && effect !== "confirmed" && effect !== "unverifiable") {
     throw new ComputerBackendError(
       "outcome_unknown",
       `CUA ${name} returned no action disposition`,

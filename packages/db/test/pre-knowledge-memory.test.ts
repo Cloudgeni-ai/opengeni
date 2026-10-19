@@ -55,6 +55,9 @@ describe("pre-knowledge Memory storage compatibility", () => {
       await owner`INSERT INTO schema_migrations(name) VALUES('0738_private_sessions_share_sandboxes.sql')`;
       // Extends the machine grant predicates from withheld 0501.
       await owner`INSERT INTO schema_migrations(name) VALUES('0851_personal_machine_session_tree.sql')`;
+      // Replaces the file ownership trigger from withheld 0461 and reads the
+      // file read-capability table from withheld 0499.
+      await owner`INSERT INTO schema_migrations(name) VALUES('0854_file_visibility.sql')`;
       // The import migration extends the withheld 0499 attachment helper.
       await owner`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
       // The session storage lifecycle extends the withheld 0560 import guards.

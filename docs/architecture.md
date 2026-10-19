@@ -1602,8 +1602,11 @@ the aggregate fallback), `compaction` or `session-title`. Older events have none
 Streamed main calls also carry worker-measured `timing` (whole milliseconds: pre-dispatch
 work, first dispatch to first token and first text, first dispatch to terminal response)
 on the event and on `model_call_facts`. A call that needed several requests (a transport
-retry or a provider continuation) is measured from its first dispatch. The first
-measurement wins on replay and repair, and absent or malformed values stay null. Output
+retry or a provider continuation) is measured from its first dispatch. The
+pre-dispatch clock starts only at SDK model entry, never at a transport admission
+recheck: native providers can recheck after dispatch. Older measurements could
+therefore include the preceding response and tool work; they are not corrected on replay.
+The first measurement wins on replay and repair, and absent or malformed values stay null. Output
 tokens per second is derived, not stored:
 `1000 * output_tokens / (duration_ms - time_to_first_token_ms)` when the denominator is
 positive.

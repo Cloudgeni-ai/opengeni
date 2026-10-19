@@ -2358,7 +2358,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
     expect(r.container.textContent).toContain("Waiting: child still running");
-    expect(r.container.textContent).toContain("Wait for input");
+    expect(r.container.textContent).toContain("Waited");
 
     await r.unmount();
   });
@@ -2496,7 +2496,7 @@ describe("MessageTimeline — settled turn folding", () => {
 
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(visibleOutcome?.isConnected).toBe(true);
-    expect(r.container.textContent).toContain("Wait for input");
+    expect(r.container.textContent).toContain("Waited");
 
     await r.unmount();
   });

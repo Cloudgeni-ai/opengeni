@@ -2900,8 +2900,10 @@ export class StreamTimingMetrics {
   }
 
   /** Producer side: the SDK entered a model request (first admission check).
-   *  Admission can be re-entered for the same request; keep the earliest. */
-  onModelRequestEntry(): void {
+   *  Keep the earliest model entry, but ignore transport rechecks: native
+   *  providers can run those after dispatch, while the response is in flight. */
+  onModelRequestEntry(point: "model_entry" | "transport" = "model_entry"): void {
+    if (point !== "model_entry") return;
     if (this.modelEntryAt === null) this.modelEntryAt = this.now();
   }
 

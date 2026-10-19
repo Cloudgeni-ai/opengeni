@@ -232,7 +232,10 @@ import {
   listWorkspaceGitHubRepositories,
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
-import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
+import {
+  changeWorkspaceFileVisibility,
+  publishSandboxFileArtifact,
+} from "../sandbox-file-artifacts";
 import {
   projectWorkspaceArtifactDetailProvenance,
   projectWorkspaceArtifactMutationProvenance,
@@ -2279,19 +2282,34 @@ function registerSandboxFileArtifactTool(
     "sandbox_file_publish",
     {
       description:
-        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result. The artifactId is also the file's workspace File ID, so tools that take workspace file IDs, such as a browser upload action, accept it.",
+        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result. The artifactId is also the file's workspace File ID, so tools that take workspace file IDs, such as a browser upload action, accept it. A new file gets this chat's visibility (Only me in an Only me chat, otherwise the workspace) unless you pass visibility; to change an existing file, such as a generated image, pass its artifactId and visibility instead of path. Check the result's access.whoCanOpen before sharing a link with anyone.",
       inputSchema: {
-        path: z4.string().min(1).max(4_096),
+        path: z4.string().min(1).max(4_096).optional(),
+        artifactId: z4.string().uuid().optional(),
+        visibility: z4
+          .enum(["private", "workspace"])
+          .optional()
+          .describe(
+            '"private" is Only me (only the person you work for); "workspace" is everyone in the workspace.',
+          ),
       },
     },
-    async ({ path }) => {
+    async ({ path, artifactId, visibility }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      if ((path === undefined) === (artifactId === undefined))
+        throw new Error("Pass exactly one of path or artifactId.");
+      if (artifactId !== undefined) {
+        if (!visibility)
+          throw new Error("Pass visibility with artifactId to change who can open that file.");
+        return json(await changeWorkspaceFileVisibility(deps, { grant, artifactId, visibility }));
+      }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
       return json(
         await publishSandboxFileArtifact(deps, {
           grant,
           session,
-          path,
+          path: path!,
+          visibility,
         }),
       );
     },

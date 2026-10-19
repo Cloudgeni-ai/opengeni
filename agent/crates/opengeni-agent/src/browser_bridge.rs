@@ -275,7 +275,9 @@ pub fn remove_native_host_manifests(home: &Path) -> Result<(), BrowserBridgeErro
 }
 
 /// Remove the manifests that point at `binary_path`, leaving those another agent
-/// on this computer wrote. Returns the removed paths.
+/// on this computer wrote. A manifest that points at a program which no longer
+/// exists in this agent's own directory is a leftover from before the agent was
+/// renamed, so it is removed too. Returns the removed paths.
 pub fn remove_native_host_manifests_for(
     binary_path: &Path,
     home: &Path,
@@ -293,7 +295,10 @@ pub fn remove_native_host_manifests_for(
         let points_here = serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
             .and_then(|manifest| manifest.get("path")?.as_str().map(PathBuf::from))
-            .is_some_and(|target| target == binary_path);
+            .is_some_and(|target| {
+                target == binary_path
+                    || (target.parent() == binary_path.parent() && !target.exists())
+            });
         if points_here {
             match std::fs::remove_file(&path) {
                 Ok(()) => removed.push(path),
@@ -2428,6 +2433,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let other = directory.path().join("other-agent");
         let this = directory.path().join("this-agent");
+        std::fs::write(&other, b"fixture").expect("other binary");
         let manifests = install_native_host_manifests(&other, directory.path()).expect("install");
         assert_eq!(
             remove_native_host_manifests_for(&this, directory.path()).expect("keep"),
@@ -2435,6 +2441,22 @@ mod tests {
         );
         assert!(manifests.iter().all(|path| path.exists()));
         install_native_host_manifests(&this, directory.path()).expect("overwrite");
+        assert_eq!(
+            remove_native_host_manifests_for(&this, directory.path()).expect("remove"),
+            manifests
+        );
+        assert!(manifests.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn removes_a_leftover_manifest_from_before_this_agent_was_renamed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let install = directory.path().join("install");
+        std::fs::create_dir_all(&install).expect("install dir");
+        let old_name = install.join("old-agent");
+        let this = install.join("This Agent");
+        let manifests =
+            install_native_host_manifests(&old_name, directory.path()).expect("install");
         assert_eq!(
             remove_native_host_manifests_for(&this, directory.path()).expect("remove"),
             manifests

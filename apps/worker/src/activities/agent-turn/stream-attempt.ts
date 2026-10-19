@@ -1032,7 +1032,7 @@ export async function runTurnStreamAttempt(
         attempt.modelRequestStarted = true;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
           beforeModelRequest: (point) => {
-            streamTiming.onModelRequestEntry();
+            streamTiming.onModelRequestEntry(point);
             return modelCallAdmission.beforeModelRequest(point);
           },
           onModelResponse: (event) => {

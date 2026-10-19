@@ -717,6 +717,183 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a ref from an earlier observation of the window still resolves; an unknown one says what is current", async () => {
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const seen = await backend.observe(target.id);
+      // An action without fences is checked against a fresh observation,
+      // which mints new refs; the ref the model read still names its element.
+      const fresh = await backend.observe(target.id);
+      expect(fresh.roots[0]!.ref).not.toBe(seen.roots[0]!.ref);
+      await backend.dispatch({
+        ...command(fresh),
+        action: {
+          type: "semantic",
+          locator: { kind: "ref", ref: seen.roots[0]!.ref },
+          action: "invoke",
+        },
+      });
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
+      ).toMatchObject({
+        element_token: seen.roots[0]!.ref,
+      });
+      const latest = await backend.observe(target.id);
+      await expect(
+        backend.dispatch({
+          ...command(latest),
+          action: { type: "semantic", locator: { kind: "ref", ref: "s99:0" }, action: "invoke" },
+        }),
+      ).rejects.toMatchObject({
+        code: "locator_not_found",
+        message: `CUA ref s99:0 is not in a recent observation of this window; observe it again and use a ref from the latest observation (${latest.observationId.split(":").pop()})`,
+      });
+      // macOS accepts the usual names for the command key, and a shortcut goes
+      // through CUA's hotkey, which reaches a background app's menus.
+      await backend.dispatch({
+        ...command(latest),
+        action: { type: "keyboard", action: "press", value: "super+n" },
+      });
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "hotkey")?.args,
+      ).toMatchObject({
+        pid: 42,
+        window_id: 1,
+        keys: ["cmd", "n"],
+        delivery_mode: "background",
+      });
+      // A single key is still a key press.
+      await backend.dispatch({
+        ...command(await backend.observe(target.id)),
+        action: { type: "keyboard", action: "press", value: "Enter" },
+      });
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "press_key")?.args,
+      ).toMatchObject({ key: "return", modifiers: [] });
+      // A menu item macOS keeps disabled in the background is refused, clearly.
+      fixture.mutation = result(
+        {
+          effect: "refused",
+          refusal: {
+            code: "background_unavailable",
+            message: "Save is disabled while TextEdit is in the background",
+          },
+        },
+        true,
+      );
+      await expect(
+        backend.dispatch({
+          ...command(await backend.observe(target.id)),
+          action: { type: "keyboard", action: "press", value: "cmd+s" },
+        }),
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message:
+          "CUA hotkey refused the operation: Save is disabled while TextEdit is in the background",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("macOS launches apps in the background by bundle id or name; other platforms refuse", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, json) =>
+      name === "launch_app"
+        ? (fixture.calls.push({ name, args: JSON.parse(json) as Record<string, unknown> }),
+          result({ pid: 77, bundle_id: "com.apple.TextEdit", windows: [] }))
+        : await original(name, json);
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      expect((await backend.capabilities()).appLaunch).toBe(true);
+      const target = (await backend.targets())[0]!;
+      for (const applicationId of ["com.apple.TextEdit", "TextEdit.app", "System Settings"]) {
+        const observation = await backend.observe(target.id);
+        const launch = {
+          ...command(observation),
+          action: { type: "launch" as const, applicationId },
+        };
+        await backend.validate(launch);
+        expect(await backend.dispatch(launch)).not.toBeNull();
+      }
+      expect(
+        fixture.calls.filter((call) => call.name === "launch_app").map((call) => call.args),
+      ).toEqual([
+        { bundle_id: "com.apple.TextEdit" },
+        { name: "TextEdit" },
+        { name: "System Settings" },
+      ]);
+
+      // Once the app runs, the launch succeeded even if listing its windows fails.
+      const observed = await backend.observe(target.id);
+      fixture.callTool = async (name, json) =>
+        name === "launch_app"
+          ? result({ pid: 78 })
+          : name === "list_windows"
+            ? result({ error: { code: "internal", message: "list failed" } }, true)
+            : await original(name, json);
+      await expect(
+        backend.dispatch({
+          ...command(observed),
+          action: { type: "launch", applicationId: "Notes" },
+        }),
+      ).resolves.toBeDefined();
+
+      // A lost response or no reported process may still have launched it.
+      for (const lost of [
+        async () => {
+          throw new Error("lost after delivery");
+        },
+        async () => result({ windows: [] }),
+        async () => result({ error: { code: "internal", message: "launch stalled" } }, true),
+      ]) {
+        fixture.callTool = async (name, json) =>
+          name === "launch_app" ? await lost() : await original(name, json);
+        const before = await backend.observe(target.id);
+        await expect(
+          backend.dispatch({
+            ...command(before),
+            action: { type: "launch", applicationId: "Notes" },
+          }),
+        ).rejects.toMatchObject({ code: "outcome_unknown", dispatched: true });
+      }
+      // An explicit refusal is a definite failure: nothing launched.
+      fixture.callTool = async (name, json) =>
+        name === "launch_app"
+          ? result(
+              { effect: "refused", refusal: { code: "unsupported", message: "no such app" } },
+              true,
+            )
+          : await original(name, json);
+      const refusedFrom = await backend.observe(target.id);
+      await expect(
+        backend.dispatch({
+          ...command(refusedFrom),
+          action: { type: "launch", applicationId: "Nope" },
+        }),
+      ).rejects.toMatchObject({ code: "unsupported", dispatched: false });
+    } finally {
+      await backend.close();
+    }
+    const windows = await CuaComputerBackend.open(new WindowsFixture(), "windows");
+    try {
+      expect((await windows.capabilities()).appLaunch).toBe(false);
+      const observation = await windows.observe((await windows.targets())[0]!.id);
+      await expect(
+        windows.validate({
+          ...command(observation),
+          action: { type: "launch", applicationId: "notepad" },
+        }),
+      ).rejects.toMatchObject({ code: "unsupported" });
+    } finally {
+      await windows.close();
+    }
+  });
+
   test("unknown/partial delivery stays unknown; explicit refusal alone is safe", async () => {
     const fixture = new Fixture();
     for (const effect of ["partial", "suspected_noop", undefined]) {
@@ -731,6 +908,35 @@ describe("CUA desktop boundary", () => {
     await expect(callDesktop(fixture, "click", {}, true)).rejects.toMatchObject({
       code: "frame_stale",
       dispatched: false,
+    });
+    // The failure carries CUA's own reason and hint, not only that it refused.
+    fixture.mutation = result(
+      {
+        effect: "refused",
+        refusal: {
+          code: "no_text_target",
+          message: "type_text did not synthesize character events",
+        },
+        hint: "Use press_key for single keys.",
+      },
+      true,
+    );
+    await expect(callDesktop(fixture, "type_text", {}, true)).rejects.toMatchObject({
+      message:
+        "CUA type_text refused the operation: type_text did not synthesize character events Use press_key for single keys.",
+      dispatched: false,
+    });
+    // The reason is passed on exactly as written, trailing whitespace too, so
+    // the driver can still recognize a typed value at its end.
+    fixture.mutation = result(
+      {
+        effect: "refused",
+        refusal: { code: "no_text_target", message: "could not type ab cd \n" },
+      },
+      true,
+    );
+    await expect(callDesktop(fixture, "type_text", {}, true)).rejects.toMatchObject({
+      message: "CUA type_text refused the operation: could not type ab cd \n",
     });
     fixture.callTool = async () => {
       throw new Error("lost after delivery");

@@ -380,6 +380,9 @@ async function projectCandidate(
     if (!reference) return null;
     return {
       ...item,
+      // Who can open it, and whether this viewer may change that.
+      visibility: file.scope === "personal" ? "private" : "workspace",
+      ownedByViewer: fileSubject !== null && file.ownerSubjectId === fileSubject,
       file: reference,
       filename: file.filename,
       contentType: reference.contentType,

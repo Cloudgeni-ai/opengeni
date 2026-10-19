@@ -6208,6 +6208,10 @@ export const files = pgTable(
     privateOwnerSubjectIds: text("private_owner_subject_ids").array().default(sql`CASE
       WHEN nullif(current_setting('opengeni.private_file_owner',true),'') IS NULL THEN NULL
       ELSE ARRAY[current_setting('opengeni.private_file_owner',true)] END`),
+    /** The person the file belongs to: only they can share or limit it. */
+    ownerSubjectId: text("owner_subject_id").default(sql`coalesce(
+      nullif(current_setting('opengeni.private_file_owner',true),''),
+      nullif(current_setting('opengeni.initiating_human_subject_id',true),''))`),
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
       .notNull()

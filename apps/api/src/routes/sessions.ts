@@ -5029,6 +5029,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         authorization,
         session: ctx.session,
         path: request.path,
+        visibility: request.visibility,
         signal: ctx.waitSignal,
       }),
     );
