@@ -2604,6 +2604,12 @@ external infrastructure. Bundled Postgres/Temporal/NATS/storage templates
 serve development, CI, conformance and documented single-machine fixtures.
 They are not production defaults.
 
+Migration and catalog-import Jobs consume incoming-release settings snapshots
+(`deploy/helm/opengeni/templates/job-settings.yaml`), rendered through the same
+ConfigMap/Secret templates as ordinary workloads and ordered before each Job's
+hook. Pre-upgrade hooks never depend on the previous workload ConfigMap; external
+Secrets remain operator-provisioned references. See the chart's hook settings contract.
+
 The turn-worker's default-off queue-demand scaler is a separate
 schema-v1 Helm contract: fresh global Temporal ACTIVITY queue MAX plus SDK
 all-non-local-activity occupancy, UID-complete Running/draining coverage, and

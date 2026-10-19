@@ -10,6 +10,30 @@ no explicit entry. Other provider credentials and configuration keep their
 existing precedence. Canary renderers must preserve an already-correct entry's
 position so saved values reproduce the same pod template on later upgrades.
 
+## Hook release settings
+
+Migration and catalog-import Jobs read job-scoped settings snapshots rendered
+from the incoming release, not the live workload ConfigMap. Each snapshot uses
+the Job's hook events and a weight one lower than the Job, so a pre-upgrade
+migration sees new config before Helm updates ordinary resources. The canonical
+ConfigMap rendering supplies all generated settings as well as `config` values.
+
+When `secret.create=true`, the chart also snapshots the incoming runtime Secret
+for each Job. Externally managed runtime and migration Secrets remain external
+references: provision their desired contents before invoking Helm. The order
+stays config, runtime Secret, then the separate migration Secret; explicit
+generated environment entries retain their existing precedence. Catalog import
+still takes its owner database URL from the migration Secret.
+
+Snapshots are replaced before the next hook run and deleted after a successful
+hook event. They remain available throughout Job execution; Helm performs
+successful-hook cleanup only after the event's hooks finish. Custom hook events
+and weights follow the corresponding Job. With hooks disabled, snapshots are
+ordinary release resources. Disabling a Job disables its snapshots too.
+
+This does not make externally managed Secret updates atomic with rolling pods;
+operators must still coordinate changes incompatible with old running pods.
+
 ## Service links
 
 Every Opengeni pod sets `enableServiceLinks: false`. Kubernetes otherwise
