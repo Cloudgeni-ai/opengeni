@@ -7,7 +7,8 @@
 // sandbox's agent restored and reconnected at once (once per move or host
 // loss is expected, not once per restore). Every wake inside a sleep
 // check's window, and the one that ends it, is printed with what asked for it
-// (compute.wake.by: fleet, agent_link or guest_port). A checkpoint check
+// (compute.wake.by: fleet, agent_link or guest_port); a proof that names what
+// must wake it (the sleeps: agent_link) fails on any other. A checkpoint check
 // passes only if the journal shows a completed checkpoint of its sandbox
 // while its streams were open (begun and completed inside the window).
 //
@@ -53,20 +54,43 @@ const steps: Step[] = [];
 // host-<name>@<instance>.log one the suite kept before stopping that
 // machine (host-loss), whose journal its replacement does not have. A
 // machine that came back keeps its journal, so an event can be in both:
-// it counts once. A kept journal counts only if its header, read on the
-// machine, names the instance its file does.
+// it counts once. A kept journal is read only once it is known good: its
+// name well formed, declared by a check's journal proof (host, instance and
+// boot), and its header, written on the machine itself, naming that same
+// instance and boot. Any other file is left out, with the reason.
+const declared = new Map<string, JournalProof>();
+for (const result of saved.results) {
+  for (const proof of result.proofs ?? []) {
+    if (proof.kind === "journal") declared.set(`host-${proof.host}@${proof.instance}.log`, proof);
+  }
+}
 const kept = new Map<string, { instance: string; boot: string }>();
+const refused = new Map<string, string>();
 const journals = readdirSync(dir).filter((name) => {
   if (!/^host-.*\.log$/.test(name)) return false;
-  const named = /@([0-9]+)\.log$/.exec(name);
-  if (!named) return true;
+  if (!name.includes("@")) {
+    if (/^host-[a-z0-9-]+\.log$/.test(name)) return true;
+    console.error(`${name}: not a host journal's name; not used`);
+    return false;
+  }
+  const refuse = (why: string) => {
+    refused.set(name, why);
+    console.error(`${name}: ${why}; not used`);
+    return false;
+  };
+  const named = /^host-([a-z0-9-]+)@([0-9]+)\.log$/.exec(name);
+  if (!named) return refuse("not a kept journal's name (host-<name>@<instance id>.log)");
+  const proof = declared.get(name);
+  if (!proof) return refuse("no check of this run declared it");
   const header = /^# instance=([0-9]+) boot=([0-9a-f-]{36})\n/.exec(
     readFileSync(`${dir}/${name}`, "utf8"),
   );
-  if (!header || header[1] !== named[1]) {
-    console.error(`${name}: its header does not name instance ${named[1]}; not used`);
-    return false;
+  if (!header) return refuse("it has no instance and boot header");
+  if (header[1] !== proof.instance) {
+    return refuse(`its header names instance ${header[1]}, not ${proof.instance}`);
   }
+  if (header[2] !== proof.boot)
+    return refuse(`its header names boot ${header[2]}, not ${proof.boot}`);
   kept.set(name, { instance: header[1]!, boot: header[2]! });
   return true;
 });
@@ -115,8 +139,10 @@ function check(proof: Proof): { ok: boolean; how: string } {
 function keptJournal(proof: JournalProof): { ok: boolean; how: string } {
   const name = `host-${proof.host}@${proof.instance}.log`;
   const found = kept.get(name);
-  if (!found)
-    return { ok: false, how: `no kept journal ${name} naming instance ${proof.instance}` };
+  if (!found) {
+    const why = refused.get(name);
+    return { ok: false, how: why ? `${name} not used: ${why}` : `no kept journal ${name}` };
+  }
   if (found.boot !== proof.boot) {
     return { ok: false, how: `${name} is of boot ${found.boot}, not ${proof.boot}` };
   }
@@ -183,6 +209,12 @@ function leveled(proof: LevelProof): { ok: boolean; how: string } {
     return {
       ok: false,
       how: `host journal: the wake ${wake(woke)} began ${((to - woke.start) / 1000).toFixed(3)} s before the suite's request${wakes}`,
+    };
+  }
+  if (proof.by && woke.by !== proof.by) {
+    return {
+      ok: false,
+      how: `host journal: ${proof.level} at ${clock(last.at)} on ${last.host}, woken by ${wake(woke)}, not by ${proof.by}${wakes}`,
     };
   }
   return {

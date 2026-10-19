@@ -1101,7 +1101,7 @@ run-as is not applicable; what each proves and how long it took:
 | browser | the agent's browser tool loads a page served in the sandbox and returns its random title | 14.7 s |
 | desktop | the agent opens a computer session, takes a screenshot, and the API's frame decodes to a real screen | 1024x640, 157 colours |
 | ui | Playwright: the web app's file browser, terminal and desktop view | 64.8 s |
-| sleep-paused, -saved, -archived, -remote | the host reached the level (state and journal), nothing began to wake it before the suite's request, the request woke it over the agent link, and a 32 MiB process kept its pid and memory under the same boot generation | reached in 0.3, 6.6, 15.2 and 19.0 s; first answer 0.1, 0.5, 0.5 and 8.3 s; each woken by `agent_link` 0.04 to 0.07 s after the request |
+| sleep-paused, -saved, -archived, -remote | the host reached the level (state and journal), nothing began to wake it before the suite's request, the request woke it over the agent link (the journal step's `compute.wake.by` is `agent_link`), and a 32 MiB process kept its pid and memory under the same boot generation | reached in 0.3, 6.6, 15.2 and 19.0 s; first answer 0.1, 0.5, 0.5 and 8.3 s; each woken by `agent_link` 0.04 to 0.07 s after the request |
 | move | a saved sandbox moves to another host and answers there with its files | 29.9 s |
 | host-loss | a stopped host's sandbox comes back on another live host under a higher owner epoch, the old host fenced, from the archived copy | back in 280.9 s, owner epoch 3 to 5 |
 | delete | deleting the session deletes its fabric sandbox | 25.3 s |
@@ -1248,13 +1248,18 @@ The reruns, against the same stack:
 | r17b 02:34 | 17404e753 | assertions held; verifier failed (the replaced host took the journal with it) | pass, 285.8 s | pass |
 | r17c 02:44 | bd065b066 | pass | pass, 446.0 s | fail: the session's delete answered 409 for 5 minutes |
 | r17d 02:59 | 70dc8de19 | pass | pass, 293.3 s | pass |
+| r17e 03:12 | 298ffb689 | pass | not finished: the workstation's agent restarted during the check and ended the suite after it had stopped the host | not run |
+| r17f 03:22 | 298ffb689 | pass | pass, 297.4 s, back on another live host; the kept journal's instance and boot checked | pass |
 
-r17c's cleanup failure is a backend bug. The suite's exec poll woke the
-sandbox through one API replica just as the stopped host powered off. The
-replacement host then linked through the other replica, and the first
-request never ended. It held the session's live-sandbox mark, so every
-delete answered 409 with `session_delete_live_sandboxes`. The fix is the
-backend's; host-loss and delete are rerun at its head.
+r17c's cleanup failure is a backend bug. The suite's exec poll reached one
+API replica just as the stopped host powered off, and was delivered into a
+gateway session on that host's link. The gateway ended the link 38 s
+later, but the request was neither failed nor sent again. The replacement
+host restored the sandbox and linked through the other replica, and the
+first request never ended. It held the session's live-sandbox mark, so
+every delete answered 409 with `session_delete_live_sandboxes`. The fix is
+the backend's (a reply to such a request when its link is lost);
+host-loss and delete are rerun at its head.
 
 The recovery takes 4.8 to 7.4 minutes. `gcloud compute instances stop`
 shuts the guest down gracefully, which took 2 minutes 14 s to 2 minutes
@@ -1262,11 +1267,16 @@ shuts the guest down gracefully, which took 2 minutes 14 s to 2 minutes
 re-linking meanwhile. The leader fenced the host as stopped in the last
 seconds of that shutdown and gave up on it. The instance group recreated
 it at once, and the new machine registered about a minute after its
-insert. In r17 the wake was then
-delivered to a session on the old host's link, which the gateway dropped
-29 s later. Nothing reached the fabric before the new host registered:
-the adopt landed on that new, empty host 61 s after it registered,
-although the other two hosts had been live and empty all along.
+insert. In r17 the request was delivered into a gateway session on the
+old host's link while that host was still shutting down, and the gateway
+dropped that link 29 s later. While the request sat in that session, no
+fabric wake was needed or made, until the session ended: the same backend
+bug as r17c's, which there kept the request from ever ending. When the
+wake request itself reached the fabric was not measured; neither the
+fleet service nor the API logs wake requests at info. The adopt landed on
+the new, empty host 61 s after it registered, although the other two
+hosts had been live and empty all along. In r17f the sandbox came back on
+another live host.
 
 In vm-crash, the command in flight at the kill ended after 30.1 s in
 r17b, r17c and r17d. The API answered 409, from agent code 9: the outcome
@@ -1287,11 +1297,11 @@ second try.
 | browser | the agent's browser tool loads a page served in the sandbox and returns its random title | 14.8 s |
 | desktop | the agent opens a computer session, takes a screenshot, and the API's frame decodes to a real screen | 1024x640, 157 colours |
 | ui | Playwright: the web app's file browser, terminal and desktop view, through the stock relays | 64.8 s; the desktop view drew 1422x888 |
-| sleep-paused, -saved, -archived, -remote | the host reached the level (state and journal), nothing began to wake it before the suite's request, the request woke it over the agent link, and a 32 MiB process kept its pid and memory under the same boot generation | reached in 0.3, 6.6, 15.0 and 18.3 s; first answer 0.1, 0.3, 0.5 and 8.8 s; each woken by `agent_link` 0.03 to 0.04 s after the request; the saved wake's pager wrote `learned.json` 3 s after it, no "Permission denied" |
+| sleep-paused, -saved, -archived, -remote | the host reached the level (state and journal), nothing began to wake it before the suite's request, the request woke it over the agent link, and a 32 MiB process kept its pid and memory under the same boot generation | reached in 0.3, 6.6, 15.0 and 18.3 s; first answer 0.1, 0.3, 0.5 and 8.8 s; each woken by `agent_link` 0.03 to 0.04 s after the request (observed in r17; the verifier asserts it from r17f's fixes on); the saved wake's pager wrote `learned.json` 3 s after it, no "Permission denied" |
 | link-stream | 4 MiB files both ways through the agent's link across at least two running checkpoints and a Saved sleep, every file matching both ways, with no agent reconnect and one VMM launch for the wake | 87 cycles in 173 s (348 MiB in, 696 MiB out), 2 checkpoints, saved in 11.9 s, woken by a read in 1.1 s, 0 reconnects |
-| vm-crash | a killed VM process boots again from its live disk (ADR 10): both writes kept, generation +1, programs lost and reported, one reconnect, old streams ended on host lines naming the sandbox, no protocol error; the request in flight ends with an error within its bound | failed in the check (see above); passed in r17c and r17d, the request in flight ending with 409 after 30.1 s |
+| vm-crash | a killed VM process boots again from its live disk (ADR 10): both writes kept, generation +1, programs lost and reported, one reconnect, old streams ended on host lines naming the sandbox, no protocol error; the request in flight ends with an error within its bound | failed in the check (see above); passed in r17c, r17d and r17f, the request in flight ending with 409 after 30.1 s |
 | move | a saved sandbox moves to another host and answers there with its files | 21.8 s |
-| host-loss | a stopped host's sandbox comes back on another live machine (a new instance id and host epoch, if the instance group reused the name) under a higher owner epoch, from its archived copy, the old host fenced | failed in the check (see above); passed in r17b, r17c and r17d in 285.8, 446.0 and 293.3 s, the archived file kept and the late write lost |
+| host-loss | a stopped host's sandbox comes back on another live machine (a new instance id and host epoch, if the instance group reused the name) under a higher owner epoch, from its archived copy, the old host fenced | failed in the check (see above); passed in r17b, r17c, r17d and r17f in 285.8, 446.0, 293.3 and 297.4 s, the archived file kept and the late write lost |
 | delete | deleting the session deletes its fabric sandbox | 20.4 s |
 | connected-machine | the same agent build enrolled on the stack VM comes online, runs a turn and an exec, and still answers after 90 s idle with the same process | online in 3.1 s |
 | cleanup | the run's sessions are deleted and its enrollment revoked | nothing left; r17c failed (see above) |

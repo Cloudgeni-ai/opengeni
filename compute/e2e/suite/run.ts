@@ -1443,7 +1443,7 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
         level === "saved"
           ? await step("the restore's pager", () => pagerAfter(awake.host!, Date.parse(to)))
           : "";
-      proofs.push({ kind: "level", sandbox: state.sandbox!, level, from, to });
+      proofs.push({ kind: "level", sandbox: state.sandbox!, level, from, to, by: "agent_link" });
       const moved = await sandbox();
       return (
         `${reached.state.level} in ${(reached.ms / 1000).toFixed(1)} s (${reached.seen.join(" -> ")}), held 3 s, ` +
@@ -1695,6 +1695,7 @@ check(
       level: "saved",
       from: sleepFrom,
       to: sleepTo,
+      by: "agent_link",
     });
     const mib = (n: number) => `${(n / (1 << 20)).toFixed(0)} MiB`;
     return (

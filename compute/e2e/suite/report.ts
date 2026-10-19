@@ -5,13 +5,15 @@ export type Status = "pass" | "fail" | "skip" | "n/a";
 
 /** What a check claims that only a host's journal can show: that the
  * sandbox reached `level` (a completed step to it, the last one) between
- * `from` and `to`, when the next request woke it. */
+ * `from` and `to`, when the next request woke it (through `by`, the step's
+ * compute.wake.by, when given). */
 export type LevelProof = {
   kind: "level";
   sandbox: string;
   level: string;
   from: string;
   to: string;
+  by?: string;
 };
 
 /** That the host checkpointed the running sandbox (at least `min`, default
