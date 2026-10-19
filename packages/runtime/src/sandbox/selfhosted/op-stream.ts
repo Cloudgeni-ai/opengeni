@@ -1102,7 +1102,7 @@ class OpConsumer {
 
   private refusedStart(status: OpStatus | undefined): SelfhostedControlError {
     // The runner's tombstone: this op was cancelled before it ever began.
-    if (status && isOpTombstone(status)) return new OpTombstonedError(status.exit!);
+    if (status && isOpTombstone(status, this.opId)) return new OpTombstonedError(status.exit!);
     if (status?.exit?.cancelled) {
       return new SelfhostedControlError({
         message: "The command was cancelled before the machine admitted it.",
@@ -1174,7 +1174,9 @@ class OpConsumer {
       throw lostToControlError(result.opStatus);
     }
     // Cancelled before it ever began: no frames will come, and it never ran.
-    if (isOpTombstone(result.opStatus)) throw new OpTombstonedError(result.opStatus.exit!);
+    if (isOpTombstone(result.opStatus, this.opId)) {
+      throw new OpTombstonedError(result.opStatus.exit!);
+    }
     this.markAcknowledged();
     return result.opStatus;
   }
@@ -1429,7 +1431,7 @@ class OpConsumer {
         reject(lostToControlError(status));
         return;
       }
-      if (isOpTombstone(status)) {
+      if (isOpTombstone(status, this.opId)) {
         reject(new OpTombstonedError(status.exit!));
         return;
       }
@@ -1550,14 +1552,17 @@ function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedCon
   });
 }
 
-/** The runner's answer for an op cancelled before it ever began (its
+/** The runner's answer for op `opId` cancelled before it ever began (its
  *  tombstone): complete and cancelled, with no frame ever sent and no output
  *  record. A real exit always declares its output totals and digests and
  *  follows at least one frame, so nothing else matches. It proves the op never
- *  ran on that connection and never can. */
-export function isOpTombstone(status: OpStatus): boolean {
+ *  ran on that connection and never can, so a status for any other op (or
+ *  with no identity) is never taken as this proof. */
+export function isOpTombstone(status: OpStatus, opId: string): boolean {
   const exit = status.exit;
   return (
+    opId !== "" &&
+    status.opId === opId &&
     status.state === OpState.OP_STATE_COMPLETE &&
     status.lostReason === OpLostReason.OP_LOST_REASON_UNSPECIFIED &&
     exit?.cancelled === true &&

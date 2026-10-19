@@ -1891,7 +1891,7 @@ export async function reconcileConnectedCommandOutputReleases(
           });
           // Lost, or cancelled before it ever began (its tombstone): there is
           // no output to read, so none is recorded and nothing is acknowledged.
-          if (status.state === OpState.OP_STATE_LOST || isOpTombstone(status)) {
+          if (status.state === OpState.OP_STATE_LOST || isOpTombstone(status, claim.opId)) {
             if (
               !(await settleConnectedCommandOutputReleaseClaim(db, {
                 claim,

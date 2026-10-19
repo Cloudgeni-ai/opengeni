@@ -271,9 +271,12 @@ test.each([
 
 test.each([
   ["a tombstone", { nextSeq: "0" }, true],
-  // Negative control: a cancelled record that has stored a frame is not a
-  // tombstone, so the start refusal alone proves nothing.
+  // Negative controls: a cancelled record that has stored a frame is not a
+  // tombstone, and neither is another op's tombstone or one with no identity,
+  // so the start refusal alone proves nothing about the requested op.
   ["a cancelled record with frames", { nextSeq: "1" }, false],
+  ["another op's tombstone", { nextSeq: "0", opId: "another:0" }, false],
+  ["a tombstone with no op id", { nextSeq: "0", opId: "" }, false],
 ] as const)(
   "a start refused with %s releases custody only on the tombstone's own proof",
   async (_name, override, tombstone) => {

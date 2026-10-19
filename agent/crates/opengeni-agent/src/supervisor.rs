@@ -5771,6 +5771,7 @@ mod tests {
         reconnect.request();
         gate.accepted().await;
         gate.accepted().await;
+        it::assert_no_hello(&mut hellos, Duration::from_millis(500), "bulk dial held").await;
         gate.forward(1);
         let asked = Instant::now();
         reconnect.request();
@@ -5781,6 +5782,12 @@ mod tests {
             asked.elapsed()
         );
         gate.accepted().await;
+        it::assert_no_hello(
+            &mut hellos,
+            Duration::from_millis(500),
+            "redialed bulk held",
+        )
+        .await;
 
         // Both lanes get through: the hello follows.
         gate.forward(2);
@@ -7510,6 +7517,17 @@ mod tests {
                 .expect("a hello in time")
                 .expect("hello subscription open");
             opengeni_agent_proto::v1::Hello::decode(message.payload.as_ref()).expect("hello")
+        }
+
+        /// Fails if a `Hello` arrives on a hello subject within `quiet`.
+        pub async fn assert_no_hello(
+            hellos: &mut async_nats::Subscriber,
+            quiet: Duration,
+            while_: &str,
+        ) {
+            if let Ok(message) = tokio::time::timeout(quiet, hellos.next()).await {
+                panic!("a hello arrived while {while_}: {message:?}");
+            }
         }
 
         /// Sends one control request and decodes its answer, within five

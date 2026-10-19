@@ -1615,7 +1615,7 @@ export class SelfhostedSession {
         try {
           if (
             error instanceof OpTombstonedError ||
-            isZeroFrameTerminalOperation(await client.query(opId))
+            isZeroFrameTerminalOperation(await client.query(opId), opId)
           ) {
             terminalProof = true;
             notifyRemoteOperationNotDispatched(opId);
@@ -2603,7 +2603,7 @@ export class SelfhostedSession {
   }
 }
 
-function isZeroFrameTerminalOperation(status: OpStatus): boolean {
+function isZeroFrameTerminalOperation(status: OpStatus, opId: string): boolean {
   const exit = status.exit;
   if (
     status.state !== OpState.OP_STATE_COMPLETE ||
@@ -2612,7 +2612,7 @@ function isZeroFrameTerminalOperation(status: OpStatus): boolean {
   )
     return false;
   // A cancel-before-start tombstone has no handles, frames or output totals.
-  if (isOpTombstone(status)) return true;
+  if (isOpTombstone(status, opId)) return true;
   // Failed spawn records have handles but no stored frame (watermark zero).
   // A process may briefly have existed before spawn cleanup killed it; this
   // proves terminal custody, not that the command had no effects.
