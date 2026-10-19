@@ -394,19 +394,19 @@ mod tests {
     #[test]
     fn login_env_comes_from_the_account() {
         let identity = RunAsIdentity {
-            name: "dev".into(),
+            name: "user".into(),
             uid: 1000,
             gid: 1000,
             groups: vec![1000],
-            home: "/home/dev".into(),
+            home: "/home/user".into(),
             shell: "/bin/bash".into(),
         };
         assert_eq!(
             identity.login_env(),
             [
-                ("HOME", "/home/dev".to_string()),
-                ("USER", "dev".to_string()),
-                ("LOGNAME", "dev".to_string()),
+                ("HOME", "/home/user".to_string()),
+                ("USER", "user".to_string()),
+                ("LOGNAME", "user".to_string()),
                 ("SHELL", "/bin/bash".to_string()),
             ]
         );
