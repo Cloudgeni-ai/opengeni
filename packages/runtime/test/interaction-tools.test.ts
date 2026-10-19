@@ -986,6 +986,84 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test.each([
+    ["controller_resource_missing", true],
+    ["controller_transition_expired", true],
+    ["browser_crashed", false],
+    [null, false],
+  ] as const)(
+    "browser_open continues a lost browser only through the resume route (%s)",
+    async (failureCode, resumable) => {
+      const lost = discoveredBrowserSession(browserSessionId, sessionId);
+      lost.lifecycle = "lost";
+      lost.failureCode = failureCode;
+      const active = discoveredBrowserSession(browserSessionId, sessionId);
+      active.lifecycle = "active";
+      active.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const target = browserTarget();
+      const resumes: string[] = [];
+      let refuse = false;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          getBrowserSession: async () => lost,
+          resumeBrowserSession: async (_workspaceId, resumedId) => {
+            resumes.push(resumedId);
+            if (refuse)
+              throw new OpenGeniApiError(
+                409,
+                JSON.stringify({
+                  error: {
+                    code: "conflict",
+                    message:
+                      "BrowserSession was lost when its controller restarted, and its working copy could not be recovered",
+                    retryable: false,
+                  },
+                }),
+              );
+            return { session: active } as never;
+          },
+          listBrowserTargets: async () => ({
+            browserSessionId,
+            controllerGeneration: "controller-1",
+            targets: [target],
+          }),
+          observeBrowserTarget: async () => browserObservation(target),
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const open = async () =>
+        await definitions[0]!.execute(
+          { browserSessionId },
+          { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+        );
+      const result = await open();
+      const content = result.structuredContent as Record<string, unknown>;
+      expect(resumes).toEqual(resumable ? [browserSessionId] : []);
+      expect(content.session).toMatchObject({ lifecycle: resumable ? "active" : "lost" });
+      expect(content.targets).toEqual(resumable ? [agentTarget(target)] : []);
+      if (!resumable) return;
+      refuse = true;
+      // A refused resume is a definite answer the model can act on.
+      expect(await open()).toMatchObject({
+        isError: true,
+        structuredContent: {
+          error: {
+            code: "conflict",
+            message: expect.stringContaining("working copy could not be recovered"),
+            retryable: false,
+          },
+        },
+      });
+    },
+  );
+
   test.each(["matching", "missing", "unknown", "session", "generation", "target"] as const)(
     "browser_open reuse preserves no-op, refusal and unknown boundaries (%s)",
     async (scenario) => {

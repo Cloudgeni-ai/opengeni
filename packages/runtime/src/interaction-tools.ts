@@ -2181,6 +2181,14 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
   });
 }
 
+/** Failures the browser resume route can continue from the browser's own
+ * working copy (an expired resume, or a suspension that found its controller
+ * restarted). Every other lost browser stays as it is. */
+const RESUMABLE_LOST_BROWSER_FAILURES: ReadonlySet<string> = new Set([
+  "controller_resource_missing",
+  "controller_transition_expired",
+]);
+
 async function openBrowser(
   transport: InteractionTransport,
   workspaceId: string,
@@ -2277,7 +2285,12 @@ async function openBrowser(
       }
     }
   }
-  if (session.lifecycle === "suspended") {
+  if (
+    session.lifecycle === "suspended" ||
+    // A browser lost to a restarted controller continues from its preserved
+    // working copy. The resume refuses, and says why, when it cannot.
+    (session.lifecycle === "lost" && RESUMABLE_LOST_BROWSER_FAILURES.has(session.failureCode ?? ""))
+  ) {
     session = (
       await transport.resumeBrowserSession(workspaceId, session.id, {
         operationId: context.operationId,
