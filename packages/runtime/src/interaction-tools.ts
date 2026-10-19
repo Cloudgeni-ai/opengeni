@@ -919,6 +919,9 @@ const ComputerActionBatchReceipt = z
         .strict(),
     ),
     observation: ComputerObservation.nullable(),
+    /** The observation was read before the action the batch stopped at, and
+     * a fresh read after it failed. */
+    observationPrecedesStop: z.boolean(),
   })
   .strict();
 const ComputerActOutput = z.union([ComputerActionReceipt, ComputerActionBatchReceipt]);
@@ -2563,7 +2566,8 @@ function derivedOperationId(purpose: string, operationId: string, subject: strin
  * Run a computer_act batch: each action is its own durable operation, fenced
  * by the observation the action before it returned, so it acts on the state
  * that action left. Stops at the first action that does not complete. A
- * retried call derives the same operation IDs and gets the same receipts back.
+ * retried call derives the same operation IDs; an action that already ran
+ * under its ID returns its recorded receipt, whatever fence it ran with.
  */
 async function actInComputerBatch(
   transport: InteractionTransport,
@@ -2572,23 +2576,58 @@ async function actInComputerBatch(
   actions: ComputerAction[],
   operationId: string,
 ): Promise<z.output<typeof ComputerActionBatchReceipt>> {
-  let generation = value.expectedTargetGeneration;
-  let observationId = value.expectedObservationId;
-  let observation: z.output<typeof ComputerObservation> | null = null;
-  const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
-  for (const [index, action] of actions.entries()) {
-    if (generation === undefined || observationId == null) {
-      const current = await transport.observeComputerTarget(
+  type Observation = z.output<typeof ComputerObservation>;
+  type Receipt = z.output<typeof ComputerActionReceipt>;
+  const observe = async (): Promise<Observation> =>
+    await transport.observeComputerTarget(workspaceId, value.computerSessionId, value.targetId);
+  const recorded = async (stepOperationId: string): Promise<Receipt | null> => {
+    try {
+      return await transport.getComputerActionReceipt(
         workspaceId,
         value.computerSessionId,
-        value.targetId,
+        stepOperationId,
       );
+    } catch {
+      return null;
+    }
+  };
+  const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  let generation = value.expectedTargetGeneration;
+  let observationId = value.expectedObservationId;
+  let observation: Observation | null = null;
+  let observedAfterLastAction = true;
+  const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
+  for (const [index, action] of actions.entries()) {
+    const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
+    if (generation === undefined || observationId == null) {
+      let current: Observation;
+      try {
+        current = await observe();
+      } catch (error) {
+        // The first action failing is the call failing. Later, the actions
+        // before this one did run and must still be reported.
+        if (index === 0) throw error;
+        steps.push({
+          operationId: stepOperationId,
+          state: "failed",
+          error: {
+            code: "resource_unavailable",
+            message:
+              `the window could not be read before this action, so it was not sent: ${reasonOf(error)}`.slice(
+                0,
+                8_192,
+              ),
+            retryable: true,
+          },
+        });
+        observedAfterLastAction = false;
+        break;
+      }
       generation ??= current.target.targetGeneration;
       observationId ??= current.observationId;
       observation = current;
     }
-    const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
-    let receipt: z.output<typeof ComputerActionReceipt>;
+    let receipt: Receipt | null;
     try {
       receipt = await transport.actInComputer(workspaceId, value.computerSessionId, {
         operationId: stepOperationId,
@@ -2599,26 +2638,42 @@ async function actInComputerBatch(
         action,
       });
     } catch (error) {
-      // The first action failing is the call failing. A later one must still
-      // report the actions before it, which did run.
-      if (index === 0) throw error;
-      const reason = error instanceof Error ? error.message : String(error);
-      steps.push({
-        operationId: stepOperationId,
-        state: "outcome_unknown",
-        error: {
-          code: "outcome_unknown",
-          message: `the request for this action failed: ${reason}`.slice(0, 8_192),
-          retryable: false,
-        },
-      });
-      break;
+      // A retried batch reaches an action that already ran with the fence of
+      // its first run, or the reply to this request was lost: the recorded
+      // receipt says what happened.
+      receipt = await recorded(stepOperationId);
+      if (!receipt) {
+        if (index === 0) throw error;
+        steps.push({
+          operationId: stepOperationId,
+          state: "outcome_unknown",
+          error: {
+            code: "outcome_unknown",
+            message: `the request for this action failed: ${reasonOf(error)}`.slice(0, 8_192),
+            retryable: false,
+          },
+        });
+        observedAfterLastAction = false;
+        break;
+      }
     }
     steps.push({ operationId: receipt.operationId, state: receipt.state, error: receipt.error });
     if (receipt.observation) observation = receipt.observation;
-    if (receipt.state !== "completed") break;
+    if (receipt.state !== "completed") {
+      observedAfterLastAction = receipt.observation !== null;
+      break;
+    }
     generation = receipt.observation?.target.targetGeneration;
     observationId = receipt.observation?.observationId ?? null;
+  }
+  if (!observedAfterLastAction) {
+    // Show the state the stopped action left, not the state before it.
+    try {
+      observation = await observe();
+      observedAfterLastAction = true;
+    } catch {
+      // Keep the earlier state; the text says it predates the stopped action.
+    }
   }
   return {
     type: "batch",
@@ -2626,6 +2681,7 @@ async function actInComputerBatch(
     actionCount: actions.length,
     steps,
     observation,
+    observationPrecedesStop: !observedAfterLastAction && observation !== null,
   };
 }
 

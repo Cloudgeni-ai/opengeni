@@ -477,6 +477,7 @@ export function computerActionText(
         actionCount: number;
         steps: readonly { operationId: string; state: string; error: ComputerTextError }[];
         observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
+        observationPrecedesStop?: boolean | undefined;
       },
 ): string {
   if (receipt.type === "batch") return computerBatchText(receipt);
@@ -497,6 +498,7 @@ function computerBatchText(receipt: {
   actionCount: number;
   steps: readonly { operationId: string; state: string; error: ComputerTextError }[];
   observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
+  observationPrecedesStop?: boolean | undefined;
 }): string {
   const last = receipt.steps.at(-1);
   const lines: string[] = [];
@@ -515,12 +517,20 @@ function computerBatchText(receipt: {
       lines.push(
         `${actionRange(at + 1, receipt.actionCount)} ${
           at + 1 === receipt.actionCount ? "was" : "were"
-        } not run.${
-          last?.state === "outcome_unknown"
-            ? " Check the state below before sending them again; do not resend action " +
-              `${at} unless it did not take effect.`
-            : ""
-        }`,
+        } not run.`,
+      );
+    }
+    // Only a definite failure is known not to have acted.
+    const uncertain = last !== undefined && last.state !== "failed";
+    if (receipt.observationPrecedesStop) {
+      lines.push(
+        `The state below is from before action ${at}${
+          uncertain ? ", which may have taken effect" : ""
+        }; observe the window again before sending it or later actions.`,
+      );
+    } else if (uncertain) {
+      lines.push(
+        `Action ${at} may have taken effect: check the state below before sending it or later actions again.`,
       );
     }
   }

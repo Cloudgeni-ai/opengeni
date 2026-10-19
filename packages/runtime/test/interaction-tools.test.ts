@@ -2622,22 +2622,38 @@ describe("interaction attempt tools", () => {
     const target = computerTarget();
     const initial = computerObservation(target);
     const requests: ComputerActionRequest[] = [];
+    // The controller's journal: an operation ID bound to a different command
+    // (another fence) conflicts; its receipt stays readable.
+    const journal = new Map<
+      string,
+      { request: ComputerActionRequest; receipt: ComputerActionReceipt }
+    >();
     let observed = 0;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
         observeComputerTarget: async () => {
           observed += 1;
-          return initial;
+          return observed === 1 ? initial : { ...initial, observationId: `fresh-${observed}` };
         },
         actInComputer: async (_workspaceId, _computerSessionId, value) => {
           requests.push(value);
-          return computerReceipt(value.operationId, {
-            ...computerObservation({
-              ...target,
-              targetGeneration: `target-${requests.length + 2}`,
-            }),
-            observationId: `after-${requests.length}`,
+          const existing = journal.get(value.operationId);
+          if (existing) {
+            if (JSON.stringify(existing.request) !== JSON.stringify(value))
+              throw new Error("operation id is already bound to a different computer command");
+            return existing.receipt;
+          }
+          const receipt = computerReceipt(value.operationId, {
+            ...computerObservation({ ...target, targetGeneration: `target-${journal.size + 3}` }),
+            observationId: `after-${journal.size + 1}`,
           });
+          journal.set(value.operationId, { request: value, receipt });
+          return receipt;
+        },
+        getComputerActionReceipt: async (_workspaceId, _computerSessionId, id) => {
+          const existing = journal.get(id);
+          if (!existing) throw new Error("operation not found");
+          return existing.receipt;
         },
       }),
       workspaceId,
@@ -2680,15 +2696,21 @@ describe("interaction attempt tools", () => {
       actionCount: 3,
       steps: operationIds.map((id) => ({ operationId: id, state: "completed", error: null })),
       observation: { observationId: "after-3" },
+      observationPrecedesStop: false,
     });
     expect((result.content[0] as { text: string }).text).toStartWith(
       `Batch completed on ${target.id}: 3 actions.\n`,
     );
 
-    // A retried call repeats the same operations instead of starting others.
+    // A retried call reads a new fence for its first action, conflicts with
+    // the recorded command and returns the recorded receipts instead of
+    // acting again.
     requests.length = 0;
-    await run();
+    const retried = await run();
+    expect(observed).toBe(2);
     expect(requests.map((request) => request.operationId)).toEqual(operationIds);
+    expect(journal.size).toBe(3);
+    expect(retried.structuredContent).toEqual(result.structuredContent);
   });
 
   test("stops a Computer batch at the first action that does not complete and says what ran", async () => {
@@ -2747,6 +2769,83 @@ describe("interaction attempt tools", () => {
     expect(result.structuredContent).toMatchObject({
       observation: { observationId: observation.observationId },
     });
+  });
+
+  test("reports the actions a Computer batch ran when it cannot read the window or reach the controller later", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    const run = async (transport: Parameters<typeof partialTransport>[0]) => {
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport(transport),
+        workspaceId,
+        sessionId,
+        selectedTools: ["computer_act"],
+        permissions: ["sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        {
+          computerSessionId,
+          targetId: target.id,
+          action: {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "5" },
+              { type: "keyboard", action: "press", value: "6" },
+            ],
+          },
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      return { result, text: (result.content[0] as { text: string }).text };
+    };
+
+    // The first action completes without an observation, and reading the
+    // window before the second fails: the second is not sent.
+    let reads = 0;
+    const unread = await run({
+      observeComputerTarget: async () => {
+        reads += 1;
+        if (reads === 1) return observation;
+        throw new Error("controller unavailable");
+      },
+      actInComputer: async (_workspaceId, _computerSessionId, value) => ({
+        ...computerReceipt(value.operationId, observation),
+        observation: null,
+      }),
+    });
+    expect(unread.result.isError).not.toBe(true);
+    expect(unread.text.split("\n").slice(0, 4)).toEqual([
+      expect.stringContaining("at action 2 of 2: action 2 failed"),
+      "Error resource_unavailable (retryable): the window could not be read before this action, so it was not sent: controller unavailable",
+      "Action 1 completed.",
+      "The state below is from before action 2; observe the window again before sending it or later actions.",
+    ]);
+
+    // The second action's reply is lost and nothing is recorded under its
+    // ID: it may have acted, and the state shown predates it.
+    let acts = 0;
+    let observes = 0;
+    const lost = await run({
+      observeComputerTarget: async () => {
+        observes += 1;
+        if (observes === 1) return observation;
+        throw new Error("controller unavailable");
+      },
+      actInComputer: async (_workspaceId, _computerSessionId, value) => {
+        acts += 1;
+        if (acts === 1) return computerReceipt(value.operationId, observation);
+        throw new Error("socket hang up");
+      },
+    });
+    expect(lost.result.structuredContent).toMatchObject({
+      steps: [{ state: "completed" }, { state: "outcome_unknown" }],
+      observationPrecedesStop: true,
+    });
+    expect(lost.text.split("\n").slice(1, 4)).toEqual([
+      "Error outcome_unknown: the request for this action failed: socket hang up",
+      "Action 1 completed.",
+      "The state below is from before action 2, which may have taken effect; observe the window again before sending it or later actions.",
+    ]);
   });
 
   test("keeps pointer actions out of a Computer batch and shows the model one compact batch item", async () => {
