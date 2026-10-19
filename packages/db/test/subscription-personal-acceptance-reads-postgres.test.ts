@@ -46,6 +46,10 @@ import { rawRows, withRlsContext } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import {
+  MAINTENANCE_PRIVATE_TABLES,
+  MAINTENANCE_PROBE_OWNER_ROUTINES,
+} from "../src/runtime-posture";
 import { withSubscriptionCoreAcceptedTurn } from "../src/subscription-core-placement-world";
 import {
   stageVaultPolicyColumns,
@@ -637,6 +641,30 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "Site cancellation policy predicate is missing or unsafe",
       "Site cancellation routine begin_site_session_cancellation(uuid, uuid, uuid, uuid) is missing or unsafe",
       "Site cancellation routine end_site_session_cancellation(uuid) is missing or unsafe",
+    );
+    // 0848–0849 add the strict-owner projections and maintenance claim boundary.
+    // The original checkpoint validators already exist and provisioning revokes
+    // their runtime EXECUTE, even before the later wrappers are installed.
+    heldBack.push(
+      ...MAINTENANCE_PRIVATE_TABLES.map(
+        (table) => `maintenance probe index ${table} is missing or accessible to runtime`,
+      ),
+      ...MAINTENANCE_PROBE_OWNER_ROUTINES.filter(
+        (routine) =>
+          routine !== "validate_sandbox_checkpoint_refs()" &&
+          routine !== "validate_sandbox_checkpoint_artifact_refs()",
+      ).map((routine) => `maintenance probe helper ${routine} is missing or unsafe`),
+      "maintenance claim predicate maintenance_claim_active(text, text) is missing or unsafe",
+      "maintenance claim predicate maintenance_title_event_visible(text, uuid) is missing or unsafe",
+    );
+    // 0851 adds exact session-tree machine access and agent creation authority.
+    heldBack.push(
+      ...[
+        "guard_session_agent_creation_provenance()",
+        "personal_machine_grant_covers_descendant(uuid, uuid, uuid, uuid)",
+        "personal_machine_turn_consent_covers_descendant(uuid, uuid, uuid)",
+      ].map((routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`),
+      "target-schema runtime capability create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb) is missing or ambiguous",
     );
     // 0796-0798 (subscription plans and billing operations) are held back too.
     heldBack.push(
