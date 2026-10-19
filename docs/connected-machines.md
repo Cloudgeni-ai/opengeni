@@ -73,8 +73,10 @@ and ambiguous mutations are never automatically reissued as fresh deliveries.
 No model-visible schema, result text, or previously sent history changes.
 
 Retrying stops early when the agent process a request was sent to is replaced.
-After each failed attempt the requester checks the enrollment's live connection
-instance (an unknown answer counts as unchanged). Once a new connection has
+While an attempt waits for its reply (every second, from Opengeni's own records,
+never by contacting the agent) and after each failed attempt, the requester
+checks the enrollment's live connection instance (an unknown answer counts as
+unchanged), so a request a host holds for a gone agent ends too. Once a new connection has
 replaced the request's (the agent restarted, or a compute sandbox's VM booted
 fresh), nothing will ever answer the old subject, so the request ends at once
 with `agent_offline`: "The machine's agent restarted before this request
@@ -84,9 +86,13 @@ is unknown." A request that reached no responder is re-admitted to the new
 connection like any never-sent request, and a read whose outcome is unknown is
 read again; nothing else is re-sent, and the old subject is never rebound to the
 new connection. A streaming exec in flight ends as lost ("the machine agent
-restarted and the op did not survive"), and its own timeout also covers its
-start and first attach, so an exec whose agent never answers ends at that
-timeout.
+restarted and the op did not survive"), and that loss is its terminal outcome:
+an agent's operations end with its process (an in-place update keeps the same
+connection instance), so turn cleanup and the command ledger have nothing left
+to stop or wait for. Its own timeout also covers its start and first attach, so
+an exec whose agent never answers ends at that timeout; a start that timeout
+abandoned is never sent afterwards, and every retry of a start keeps its first
+deadline.
 
 ### Enrollment maintenance boundary
 

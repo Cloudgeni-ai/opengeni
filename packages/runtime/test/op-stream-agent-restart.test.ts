@@ -1,0 +1,326 @@
+// An exec whose agent restarts: the connection it was admitted to is replaced
+// by a new one (a Connected Machine's agent restarted, or a compute sandbox's
+// VM booted fresh). Real SelfhostedSession, op stream and NatsControlRpc over a
+// fake NATS connection that routes each exact subject to its own fake runner.
+
+import { describe, expect, test } from "bun:test";
+import { ControlRequest, ControlResponse, ExecRequest } from "@opengeni/agent-proto";
+import { NatsControlRpc } from "../src/sandbox/selfhosted/control-rpc";
+import {
+  FakeOpRunner,
+  InMemoryOpStreamTransport,
+  type FakeOpScript,
+} from "../src/sandbox/selfhosted/op-testing";
+import { OpStreamExecClient } from "../src/sandbox/selfhosted/op-stream";
+import type { OpStreamTransport } from "../src/sandbox/selfhosted/op-transport";
+import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
+import { runWithToolCallCorrelation } from "../src/sandbox/op-correlation";
+import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
+
+const WORKSPACE = "ws-restart";
+const AGENT = "agent-restart";
+const OLD = "connection-old";
+const NEW = "connection-new";
+const ROOT = "/home/user/project";
+
+function rig(
+  options: {
+    execTimeoutMs?: number;
+    controlTimeoutMs?: number;
+    /** A gone agent's requests are held unanswered, as a host holds a request
+     * while it wakes a sandbox, instead of finding no responders. */
+    goneHolds?: boolean;
+    onRequest?: (request: ControlRequest, instance: string) => void | Promise<void>;
+    defaultScript?: (exec: ExecRequest) => FakeOpScript;
+  } = {},
+) {
+  const state = { live: OLD, gone: new Set<string>() };
+  // Each agent has its own frame stream; a gone agent's frames stop.
+  const streams = new Map(
+    [OLD, NEW].map((instance) => [instance, new InMemoryOpStreamTransport()]),
+  );
+  const transport: OpStreamTransport = {
+    subscribe: async (subject, onMessage) => {
+      const subscriptions = await Promise.all(
+        [...streams].map(([instance, stream]) =>
+          stream.subscribe(subject, (payload) => {
+            if (!state.gone.has(instance)) onMessage(payload);
+          }),
+        ),
+      );
+      return {
+        unsubscribe: () => {
+          for (const subscription of subscriptions) subscription.unsubscribe();
+        },
+      };
+    },
+    publish: async (subject, payload) => {
+      for (const [instance, stream] of streams) {
+        if (!state.gone.has(instance)) await stream.publish(subject, payload);
+      }
+    },
+  };
+  const runners = new Map(
+    [OLD, NEW].map((instance) => [
+      instance,
+      new FakeOpRunner({
+        transport: streams.get(instance)!,
+        workspaceId: WORKSPACE,
+        agentId: AGENT,
+        connectionInstanceId: instance,
+        ...(options.defaultScript ? { defaultScript: options.defaultScript } : {}),
+      }),
+    ]),
+  );
+  /** The old agent is gone and a new one is live on a new connection. */
+  const restart = () => {
+    state.gone.add(OLD);
+    state.live = NEW;
+  };
+  const requests: { request: ControlRequest; instance: string }[] = [];
+  const controlRpc = new NatsControlRpc(async () => ({
+    request: async (subject: string, payload: Uint8Array, opts: { timeout: number }) => {
+      const instance = subject.split(".")[4] ?? "";
+      const request = ControlRequest.decode(payload);
+      requests.push({ request, instance });
+      await options.onRequest?.(request, instance);
+      const runner = runners.get(instance);
+      if (runner && state.gone.has(instance) && options.goneHolds) {
+        await Bun.sleep(opts.timeout);
+        throw Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
+      }
+      if (!runner || state.gone.has(instance)) {
+        throw Object.assign(new Error("503 no responders"), { code: "503" });
+      }
+      // A request the agent holds is answered or times out, as over NATS.
+      const response = await Promise.race([
+        runner.request(subject, request, { timeoutMs: opts.timeout }),
+        Bun.sleep(opts.timeout).then(() => {
+          throw Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
+        }),
+      ]);
+      return { data: ControlResponse.encode(response).finish() };
+    },
+  }));
+  const adoptions: { connectionInstanceId: string; opId: string; abandoned?: boolean }[] = [];
+  const session = new SelfhostedSession({
+    workspaceId: WORKSPACE,
+    workspaceRoot: ROOT,
+    agentId: AGENT,
+    connectionInstanceId: OLD,
+    controlRpc,
+    relay: { host: "relay.test" },
+    timeoutMs: options.controlTimeoutMs ?? 2_000,
+    execTimeoutMs: options.execTimeoutMs ?? 5_000,
+    retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+    resolveOperationAdmission: async () => ({
+      connectionInstanceId: state.live,
+      workspaceRoot: ROOT,
+      operationResourcePolicy: {
+        memoryMaxBytes: null,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 1,
+      },
+      operationResourcePolicySupported: true,
+      operationCpuQuotaSupported: true,
+      opStream: { transport, ackIntervalMs: 20, silenceTimeoutMs: 120, reconnectHoldMs: 600 },
+    }),
+    adoptBackgroundCommand: async (input) => {
+      adoptions.push(input);
+      return { commandId: `command-${adoptions.length}` };
+    },
+    opStream: { transport, ackIntervalMs: 20, silenceTimeoutMs: 120, reconnectHoldMs: 600 },
+  });
+  return { session, runners, restart, requests, adoptions, transport };
+}
+
+async function until(condition: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("condition not reached");
+    await Bun.sleep(1);
+  }
+}
+
+describe("an exec whose agent restarts", () => {
+  test("a running command settles as lost and releases the turn at once", async () => {
+    const { session, runners, restart, adoptions } = rig({
+      // The turn's own setup commands finish; the user's command keeps running.
+      defaultScript: (exec) =>
+        exec.command.join(" ").includes("sleep 600")
+          ? { frames: [], live: true, holdUntilCancel: true }
+          : { frames: [], exit: { exitCode: 0 } },
+    });
+    const controller = createTurnToolCancellationController(new AbortController().signal);
+    // As a terminal command runs: through the turn fence, outside any tool call.
+    const run = controller.runSandboxCommandStructured(session, { cmd: "sleep 600" });
+    const started = () =>
+      runners.get(OLD)!.starts.find((start) => start.exec.command.join(" ").includes("sleep 600"));
+    await until(() => started() !== undefined);
+    const opId = started()!.opId;
+    restart();
+
+    const startedAt = Date.now();
+    const error = await run.then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(String(error)).toMatch(/agent restarted and the op did not survive/);
+    // Its loss is terminal: nothing is left for a ledger to stop or settle.
+    expect(adoptions).toEqual([]);
+    // The turn's fence drains without the old agent ever coming back.
+    controller.cancel(error);
+    await controller.waitForQuiescence();
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    expect(runners.get(NEW)!.runs.has(opId)).toBe(false);
+  });
+
+  test("a replacement after the start was accepted never says the command did not run", async () => {
+    let restarted = false;
+    const context = rig({
+      onRequest: (request) => {
+        // The agent restarts after accepting the start, before the first attach.
+        if (request.op?.$case === "opAttach" && !restarted) {
+          restarted = true;
+          context.restart();
+        }
+      },
+    });
+    const { session, runners, adoptions } = context;
+    const opId = "call_restart_attach:0";
+    runners.get(OLD)!.script(opId, { frames: [], live: true, holdUntilCancel: true });
+
+    const error = await runWithToolCallCorrelation("call_restart_attach", () =>
+      session.exec({ cmd: "touch once" }),
+    ).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(runners.get(OLD)!.runs.get(opId)?.startCount).toBe(1);
+    expect(String(error)).toMatch(/agent restarted and the op did not survive/);
+    expect(String(error)).not.toMatch(/did not run/);
+    expect(adoptions).toEqual([]);
+    // Never repeated on the new agent.
+    expect(runners.get(NEW)!.runs.has(opId)).toBe(false);
+  });
+
+  test("a request the old agent's host holds ends once the agent is replaced", async () => {
+    let restarted = false;
+    const context = rig({
+      // Far longer than the test: only the replacement can end the wait.
+      controlTimeoutMs: 30_000,
+      execTimeoutMs: 60_000,
+      goneHolds: true,
+      onRequest: (request) => {
+        // The sandbox's VM dies as the start is sent; its host holds the start
+        // while it brings the sandbox back with a fresh agent.
+        if (request.op?.$case === "opStart" && !restarted) {
+          restarted = true;
+          context.restart();
+        }
+      },
+    });
+    const { session, runners } = context;
+    const controller = createTurnToolCancellationController(new AbortController().signal);
+    const startedAt = Date.now();
+    const error = await controller.runSandboxCommandStructured(session, { cmd: "touch once" }).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    // The start may have reached the old agent: lost, never "did not run".
+    expect(String(error)).toMatch(/agent restarted and the op did not survive/);
+    expect(String(error)).not.toMatch(/did not run/);
+    controller.cancel(error);
+    await controller.waitForQuiescence();
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect([...runners.get(NEW)!.runs.keys()]).toEqual([]);
+  });
+
+  test("a start that never reached the old agent runs once on the new one", async () => {
+    let restarted = false;
+    const context = rig({
+      onRequest: (request) => {
+        // The agent restarts before its start arrives.
+        if (request.op?.$case === "opStart" && !restarted) {
+          restarted = true;
+          context.restart();
+        }
+      },
+    });
+    const { session, runners, requests, adoptions } = context;
+    const opId = "call_restart_start:0";
+    runners.get(NEW)!.script(opId, {
+      frames: [{ channel: "stdout", bytes: "ran on the new agent" }],
+      exit: { exitCode: 0 },
+    });
+
+    const result = await runWithToolCallCorrelation("call_restart_start", () =>
+      session.exec({ cmd: "echo hi" }),
+    );
+    expect(result.stdout).toBe("ran on the new agent");
+    expect(runners.get(OLD)!.runs.has(opId)).toBe(false);
+    expect(runners.get(NEW)!.runs.get(opId)?.startCount).toBe(1);
+    // The first start kept its own destination; the second went to the new one.
+    expect(
+      requests.filter((r) => r.request.op?.$case === "opStart").map((r) => r.instance),
+    ).toEqual([OLD, NEW]);
+    expect(adoptions).toEqual([]);
+  });
+});
+
+describe("an exec whose start outlives its wall", () => {
+  function directClient(revalidate: () => Promise<void>) {
+    const transport = new InMemoryOpStreamTransport();
+    const runner = new FakeOpRunner({
+      transport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: OLD,
+    });
+    const starts: ControlRequest[] = [];
+    const client = new OpStreamExecClient({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: OLD,
+      epoch: 0,
+      rpcSubject: `agent.${WORKSPACE}.${AGENT}.connection.${OLD}.rpc`,
+      controlRpc: {
+        request: async (subject, request, opts) => {
+          if (request.op?.$case === "opStart") starts.push(request);
+          return await runner.request(subject, request, opts);
+        },
+      },
+      transport,
+      controlTimeoutMs: 1_000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      revalidateBeforeStartRetry: revalidate,
+    });
+    return { client, runner, starts };
+  }
+
+  test("a start whose revalidation outlasts the wall never runs", async () => {
+    const { client, runner, starts } = directClient(() => Bun.sleep(150));
+    const exec = ExecRequest.fromPartial({ command: ["touch once"], shell: true });
+    const error = await client.exec("wall_start:0", exec, 50, 80).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(String(error)).toMatch(/did not respond in time/);
+    await Bun.sleep(200);
+    expect(starts).toEqual([]);
+    expect(runner.runs.has("wall_start:0")).toBe(false);
+  });
+
+  test("a retried start keeps its first absolute deadline", async () => {
+    const { client, runner, starts } = directClient(() => Bun.sleep(20));
+    runner.script("retried_start:0", { frames: [], exit: { exitCode: 0 }, drainingStarts: 2 });
+    const exec = ExecRequest.fromPartial({ command: ["true"], shell: true });
+    await client.exec("retried_start:0", exec, 5_000, 10_000);
+    const deadlines = starts.map((start) =>
+      start.op?.$case === "opStart" ? start.op.opStart.deadlineMs : "",
+    );
+    expect(deadlines).toHaveLength(3);
+    expect(new Set(deadlines).size).toBe(1);
+  });
+});

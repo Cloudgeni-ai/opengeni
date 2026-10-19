@@ -64,6 +64,18 @@ export interface ControlRpc {
 }
 
 /** The control-plane RPC subject for one exact claimed daemon instance. */
+const AGENT_RPC_SUBJECT = /^agent\.([^.]+)\.([^.]+)\.connection\.([^.]+)\.rpc$/u;
+
+/** The exact agent connection an RPC subject from `subjectFor` addresses. */
+export function parseAgentRpcSubject(
+  subject: string,
+): { workspaceId: string; agentId: string; connectionInstanceId: string } | null {
+  const match = AGENT_RPC_SUBJECT.exec(subject);
+  return match
+    ? { workspaceId: match[1]!, agentId: match[2]!, connectionInstanceId: match[3]! }
+    : null;
+}
+
 export function subjectFor(
   workspaceId: string,
   agentId: string,
@@ -513,6 +525,7 @@ export class NatsControlRpc implements ControlRpc {
   private readonly connect: () => Promise<NatsRequestConnection | null>;
   private connection: NatsRequestConnection | undefined;
   private connecting: Promise<NatsRequestConnection | null> | undefined;
+  private readonly connectionCurrent: ((subject: string) => Promise<boolean>) | undefined;
 
   constructor(
     connect: () => Promise<NatsRequestConnection | null>,
@@ -522,10 +535,13 @@ export class NatsControlRpc implements ControlRpc {
       /** See ControlReplyRecovery: acts on each "no responders" of a replayable
        * request before the same delivery is retried. */
       onNoResponders?: (subject: string) => Promise<boolean>;
+      /** The `connectionCurrent` check of a request that brings none. */
+      connectionCurrent?: (subject: string) => Promise<boolean>;
     } = {},
   ) {
     this.connect = connect;
     this.recovery = new ControlReplyRecovery(options.recoveryMs, undefined, options.onNoResponders);
+    this.connectionCurrent = options.connectionCurrent;
   }
 
   private async resolveConnection(): Promise<NatsRequestConnection | null> {
@@ -557,8 +573,15 @@ export class NatsControlRpc implements ControlRpc {
   async request(
     subject: string,
     req: ControlRequest,
-    opts: { timeoutMs: number; connectionCurrent?: () => Promise<boolean> },
+    requestOpts: { timeoutMs: number; connectionCurrent?: () => Promise<boolean> },
   ): Promise<ControlResponse> {
+    const fallbackCurrent = this.connectionCurrent;
+    const opts = {
+      timeoutMs: requestOpts.timeoutMs,
+      connectionCurrent:
+        requestOpts.connectionCurrent ??
+        (fallbackCurrent ? async () => await fallbackCurrent(subject) : undefined),
+    };
     const conn = await this.resolveConnection();
     if (!conn) {
       // No NATS configured / not reachable → the agent is unaddressable → offline.

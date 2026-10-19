@@ -5,6 +5,9 @@ import type { NatsRequestConnection } from "./control-rpc";
 /** Wire-only capability, deliberately absent from model-facing tool contracts. */
 const REPLAY_HEADER = "Opengeni-Control-Replay";
 const RECOVERY_MS = 120_000;
+/** How often a request still waiting for its reply checks that its agent
+ * connection was not replaced. It reads Opengeni's own state, never the agent. */
+const REPLACEMENT_CHECK_MS = 1_000;
 
 function transient(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
@@ -48,7 +51,9 @@ export class ControlReplyRecovery {
     /** False once the subject's connection was replaced; see ControlRpc. */
     connectionCurrent?: () => Promise<boolean>,
   ): Promise<{ data: Uint8Array }> {
-    if (!conn.supportsHeaders) return conn.request(subject, payload, { timeout: timeoutMs });
+    if (!conn.supportsHeaders) {
+      return await attempt(conn, subject, payload, timeoutMs, connectionCurrent);
+    }
     const deadline = Date.now() + timeoutMs + this.recoveryMs;
     let supported = this.supported.get(subject);
     if (!supported) {
@@ -74,9 +79,13 @@ export class ControlReplyRecovery {
     }
     if (!(await supported)) {
       // Negotiation and the request share one absolute deadline.
-      return conn.request(subject, payload, {
-        timeout: Math.max(1, Math.min(timeoutMs, deadline - Date.now())),
-      });
+      return await attempt(
+        conn,
+        subject,
+        payload,
+        Math.max(1, Math.min(timeoutMs, deadline - Date.now())),
+        connectionCurrent,
+      );
     }
     const delivery = `${subject}.replay.${deadline}.${randomUUID()}`;
     return this.retry(conn, subject, delivery, payload, timeoutMs, deadline, connectionCurrent);
@@ -94,10 +103,16 @@ export class ControlReplyRecovery {
     let uncertain: unknown;
     for (;;) {
       try {
-        return await conn.request(subject, payload, {
-          timeout: Math.max(1, Math.min(timeoutMs, deadline - Date.now())),
-        });
+        return await attempt(
+          conn,
+          subject,
+          payload,
+          Math.max(1, Math.min(timeoutMs, deadline - Date.now())),
+          connectionCurrent,
+        );
       } catch (error) {
+        // Replaced while this attempt waited: it may have reached the old agent.
+        if (error instanceof ControlConnectionReplacedError) throw error;
         // Even a definitive refusal of THIS attempt says nothing about a prior
         // attempt whose reply was lost. Stop, but preserve its uncertain outcome.
         if (!transient(error)) throw uncertain ?? error;
@@ -117,5 +132,41 @@ export class ControlReplyRecovery {
         await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs));
       }
     }
+  }
+}
+
+/** One request attempt. While it waits for its reply, it ends as soon as the
+ * agent connection its subject names is replaced: the old agent process is gone
+ * and will never answer, however long a host holds the request. The attempt
+ * was published, so it may have reached that agent: never "never sent". */
+async function attempt(
+  conn: NatsRequestConnection,
+  subject: string,
+  payload: Uint8Array,
+  timeout: number,
+  connectionCurrent: (() => Promise<boolean>) | undefined,
+): ReturnType<NatsRequestConnection["request"]> {
+  const reply = conn.request(subject, payload, { timeout });
+  if (!connectionCurrent) return await reply;
+  let done = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const replaced = new Promise<never>((_, reject) => {
+    const check = async () => {
+      if (done) return;
+      if (!(await connectionCurrent().catch(() => true))) {
+        reject(new ControlConnectionReplacedError(false));
+        return;
+      }
+      if (!done) timer = setTimeout(check, REPLACEMENT_CHECK_MS);
+    };
+    timer = setTimeout(check, REPLACEMENT_CHECK_MS);
+  });
+  void replaced.catch(() => {});
+  try {
+    return await Promise.race([reply, replaced]);
+  } finally {
+    done = true;
+    clearTimeout(timer);
+    void reply.catch(() => {});
   }
 }

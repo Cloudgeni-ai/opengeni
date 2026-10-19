@@ -51,6 +51,7 @@ import {
 } from "@opengeni/agent-proto";
 import {
   agentErrorToControlError,
+  NEVER_SENT_DETAIL_KEY,
   SelfhostedControlError,
   timeoutAgentError,
   type ControlRpc,
@@ -319,7 +320,10 @@ export class OpStreamExecClient {
         resourcePolicy: undefined,
         op: { $case: "opCancel", opCancel: { opId } },
       },
-      { timeoutMs: this.deps.controlTimeoutMs },
+      {
+        timeoutMs: this.deps.controlTimeoutMs,
+        ...(this.deps.connectionCurrent ? { connectionCurrent: this.deps.connectionCurrent } : {}),
+      },
     );
     if (response.error || !response.result) {
       throw agentErrorToControlError(
@@ -716,7 +720,10 @@ class OpConsumer {
       // The universal begin (B2): attach from our contiguous frontier under the
       // initial window — for a FRESH op that is seq 0 (replay nothing, start live
       // flow); for a KNOWN op (re-dispatch) it replays everything we do not hold.
-      await startWall.race(this.attach(this.windowBytes));
+      // The op exists from here on, so no failure may say it did not run.
+      await startWall.race(this.attach(this.windowBytes)).catch((error: unknown) => {
+        throw startedOpError(error);
+      });
     } finally {
       startWall.clear();
     }
@@ -852,7 +859,7 @@ class OpConsumer {
       } catch (error) {
         // The agent restarted: the op went with it, and nothing will answer.
         if (error instanceof SelfhostedControlError && error.connectionReplaced) {
-          throw lostToControlError({ lostReason: OpLostReason.OP_LOST_REASON_AGENT_RESTARTED });
+          throw agentRestartedLostError();
         }
         if (
           error instanceof SelfhostedControlError &&
@@ -902,12 +909,19 @@ class OpConsumer {
   private async startOp(exec: ExecRequest, deadlineMs: number): Promise<number> {
     let drainingRetries = 0;
     let blipRetries = 0;
+    // One absolute deadline for every attempt: a retried start never extends it.
+    const absoluteDeadline = deadlineMs > 0 ? String(Date.now() + deadlineMs) : "0";
+    // Whether an earlier attempt may have reached the runner.
+    let maybeDelivered = false;
     for (;;) {
       if (this.startAbandoned) throw agentErrorToControlError(timeoutAgentError());
       // Subscription setup can yield after the caller's initial admission.
       // Close that window, and the equivalent proven-unstarted retry windows,
       // at the last boundary before bytes can reach the provider.
       await this.deps.revalidateBeforeStartRetry?.();
+      // The op's wall may have ended the call meanwhile: a caller told that it
+      // timed out never has its command started afterwards.
+      if (this.startAbandoned) throw agentErrorToControlError(timeoutAgentError());
       try {
         const result = await this.controlOp(
           {
@@ -917,7 +931,7 @@ class OpConsumer {
               windowBytes: String(this.windowBytes),
               // Absolute epoch deadline (the runner's clock decides the actual
               // budget; host clock skew shifts it — a known wire caveat).
-              deadlineMs: deadlineMs > 0 ? String(Date.now() + deadlineMs) : "0",
+              deadlineMs: absoluteDeadline,
               originId: this.deps.rpcSubject,
             },
           },
@@ -951,13 +965,12 @@ class OpConsumer {
             "runner",
           );
         }
-        // The agent it was admitted to restarted. A start that reached no
-        // responder did not run; one that may have reached it was lost with it.
+        // The agent it was admitted to restarted. A start no attempt delivered
+        // did not run; one that any attempt may have delivered was lost with it.
         if (error.connectionReplaced) {
-          throw error.neverSent
-            ? error
-            : lostToControlError({ lostReason: OpLostReason.OP_LOST_REASON_AGENT_RESTARTED });
+          throw error.neverSent && !maybeDelivered ? error : agentRestartedLostError();
         }
+        if (!error.neverSent) maybeDelivered = true;
         const blip = error.reason === "agent_reconnecting" || error.neverSent;
         if (error.draining && drainingRetries < OP_START_DRAINING_MAX_RETRIES) {
           await this.deps.retryClock.sleep(
@@ -1066,9 +1079,7 @@ class OpConsumer {
       })
       .catch((error) => {
         if (error instanceof SelfhostedControlError && error.connectionReplaced) {
-          this.settleReject?.(
-            lostToControlError({ lostReason: OpLostReason.OP_LOST_REASON_AGENT_RESTARTED }),
-          );
+          this.settleReject?.(agentRestartedLostError());
         } else if (
           error instanceof SelfhostedControlError &&
           !error.retryable &&
@@ -1316,7 +1327,7 @@ class OpConsumer {
       }
       // The agent restarted: the op is gone with it. Waiting cannot bring it back.
       if (error.connectionReplaced) {
-        reject(lostToControlError({ lostReason: OpLostReason.OP_LOST_REASON_AGENT_RESTARTED }));
+        reject(agentRestartedLostError());
         return;
       }
       const transient =
@@ -1401,7 +1412,10 @@ function protocolError(message: string): SelfhostedControlError {
 /** A definitive `lost` status → a typed op-level failure. The result was
  *  bounded-retention collateral (LRU eviction / a runner restart predating the
  *  persistence milestone) — honest, never silent. */
-function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedControlError {
+function lostToControlError(
+  status: Pick<OpStatus, "lostReason">,
+  connectionReplaced = false,
+): SelfhostedControlError {
   const reason =
     status.lostReason === OpLostReason.OP_LOST_REASON_EVICTED
       ? "its retained result was evicted before collection"
@@ -1415,7 +1429,40 @@ function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedCon
     code: ErrorCode.ERROR_CODE_STREAM,
     reason: null,
     retryable: false,
+    connectionReplaced,
     detail: { lost_reason: String(status.lostReason) },
+  });
+}
+
+/** The op was lost with an agent connection that a new one replaced: the
+ *  agent restarted, and the op ended with its process. Marked so the session
+ *  records that loss as the op's terminal outcome. */
+function agentRestartedLostError(): SelfhostedControlError {
+  return lostToControlError({ lostReason: OpLostReason.OP_LOST_REASON_AGENT_RESTARTED }, true);
+}
+
+/** A failure once the op exists (its start was accepted, may have been, or it
+ *  was already known) never says it did not run: a replaced connection lost
+ *  it, and any other never-sent failure proves only that this one request was
+ *  not delivered. */
+function startedOpError(error: unknown): unknown {
+  if (!(error instanceof SelfhostedControlError)) return error;
+  if (error.connectionReplaced) return agentRestartedLostError();
+  if (!error.neverSent) return error;
+  return new SelfhostedControlError({
+    message: error.message,
+    code: error.code,
+    reason: error.reason,
+    retryable: error.retryable,
+    fenced: error.fenced,
+    draining: error.draining,
+    agentOffline: error.agentOffline,
+    osNotFound: error.osNotFound,
+    payloadTooLarge: error.payloadTooLarge,
+    controlRequestId: error.controlRequestId,
+    detail: Object.fromEntries(
+      Object.entries(error.detail).filter(([key]) => key !== NEVER_SENT_DETAIL_KEY),
+    ),
   });
 }
 

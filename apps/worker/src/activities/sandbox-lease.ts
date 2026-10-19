@@ -159,6 +159,7 @@ import {
   sandboxCommandExitCode,
   sandboxCommandStillRunning,
   SelfhostedControlError,
+  parseAgentRpcSubject,
   subjectFor,
   SUPERVISED_STOP_KILL_AFTER_SECONDS,
   modalAppHasRunningSandboxes,
@@ -1621,6 +1622,32 @@ function connectedCommandControlOptions(
   };
 }
 
+/** Whether the connection an RPC subject addresses is still its enrollment's
+ * live one. A replaced connection's runner is gone, so a stop or query sent
+ * to it ends at once, and runner retirement settles the command, instead of
+ * retrying (or waking a compute sandbox) for the whole recovery allowance.
+ * An unknown answer counts as current. Each subject is read at most once a
+ * second. */
+function connectedCommandConnectionCurrent(
+  db: ActivityServices["db"],
+): (subject: string) => Promise<boolean> {
+  const reads = new Map<string, { atMs: number; current: Promise<boolean> }>();
+  return async (subject) => {
+    const target = parseAgentRpcSubject(subject);
+    if (!target) return true;
+    const cached = reads.get(subject);
+    if (cached && Date.now() - cached.atMs < 1_000) return await cached.current;
+    const current = getEnrollment(db, target.workspaceId, target.agentId).then(
+      (enrollment) =>
+        !enrollment?.connectionInstanceId ||
+        enrollment.connectionInstanceId === target.connectionInstanceId,
+      () => true,
+    );
+    reads.set(subject, { atMs: Date.now(), current });
+    return await current;
+  };
+}
+
 /** Reconcile commands only against the immutable physical locator copied at
  * adoption. A successor enrollment connection is intentionally irrelevant: no
  * query or cancellation is ever rebound to it. */
@@ -1659,7 +1686,10 @@ export async function reconcileConnectedMachineBackgroundCommands(
       controlRpcOverride ??
       new NatsControlRpc(
         async (): Promise<NatsRequestConnection | null> => bus.getRequestConnection(),
-        connectedCommandControlOptions(db, settings, deadline),
+        {
+          ...connectedCommandControlOptions(db, settings, deadline),
+          connectionCurrent: connectedCommandConnectionCurrent(db),
+        },
       );
     await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
       let proof = claim.proof;

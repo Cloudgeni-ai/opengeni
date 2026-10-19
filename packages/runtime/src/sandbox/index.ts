@@ -538,6 +538,7 @@ export {
   NatsControlRpc,
   SelfhostedControlError,
   agentErrorToControlError,
+  parseAgentRpcSubject,
   subjectFor,
   offlineControlResponse,
   timeoutControlResponse,

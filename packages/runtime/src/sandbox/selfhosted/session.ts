@@ -1247,72 +1247,89 @@ export class SelfhostedSession {
     // 0 deliberately means no process deadline. That contract is safe only over
     // op-stream: its liveness probes, replay, and cancellation do not depend on a
     // request/reply timer or a monolithic response.
-    const executionTimeoutMs = this.effectiveExecDeadlineMs;
-    try {
-      // Admission is the only mutable-policy read. Everything below retains
-      // its exact connection/capability/policy snapshot through completion.
-      admission = await this.admitCommand();
-      const requestedShell = args.shell?.trim();
-      // Secret references (design §10.3, connected machines): splice in the
-      // machine's dialect and deliver the values natively in ExecRequest.env.
-      // With no explicit shell the command is forced through a known one
-      // (`/bin/sh -c` on POSIX, `powershell -NoProfile -NonInteractive
-      // -Command` on Windows) so the splice matches the parser. `args.cmd`
-      // (references) remains the command recorded for background adoption.
-      const secret = await this.prepareSecretExec(args, requestedShell);
-      const commandText = secret?.command ?? args.cmd;
-      const shell = secret?.shell ?? requestedShell;
-      execReq = {
-        // An explicit shell is encoded as direct argv so every agent version honors
-        // it. With no explicit shell, preserve the existing machine-owned default
-        // shell behavior byte-for-byte.
-        command: shell
-          ? explicitShellArgv(shell, commandText, secret ? false : args.login === true)
-          : [commandText],
-        shell: !shell,
-        // Relative paths resolve from the exact host root, while absolute paths
-        // retain their literal machine meaning. In particular, "/workspace" is
-        // sent as the real absolute path "/workspace".
-        cwd: resolveConnectedMachinePath(this.workspaceRoot, args.workdir),
-        // The machine owns its ambient shell environment and ordinary credentials.
-        // Only attempt-local values explicitly supplied by the worker cross here;
-        // snapshot now so a later renewal cannot mutate an in-flight request.
-        env: { ...(this.transientExecEnvironment?.() ?? {}), ...(secret?.env ?? {}) },
-        stdin,
-        timeoutMs: executionTimeoutMs,
-        // Only a runner that advertises run-as receives a user; older runners
-        // keep running the command as their own account unless this session
-        // requires run-as. Decided on the exact admission this command uses.
-        runAs: this.execRunAs(args.runAs ?? "", admission.runAsSupported),
-      };
-      opStreamClient = this.opStreamClientFor(admission);
-      if (!opStreamClient) throw execRequiresOpStream();
-    } catch (error) {
-      // This region has issued no command RPC and registered no live consumer.
-      // This local fact, not the error's code/shape, proves non-dispatch.
-      notifyRemoteOperationNotDispatched(opId);
-      throw error;
-    }
-    try {
-      return await this.execViaOpStream(
-        opStreamClient,
-        admission,
-        execReq,
-        executionTimeoutMs,
-        allowBackground
-          ? Math.min(
-              SELFHOSTED_BACKGROUND_MAX_YIELD_MS,
-              Math.max(1, Math.trunc(args.yieldTimeMs ?? SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS)),
-            )
-          : 0,
-        args.cmd,
-        opId,
-      );
-    } catch (error) {
-      if (error instanceof OpStreamUnavailableError) {
-        throw execRequiresOpStream(error);
+    const totalTimeoutMs = this.effectiveExecDeadlineMs;
+    const execStartedAt = Date.now();
+    // A start that provably reached no agent before that agent restarted is
+    // admitted again, to the new connection, within the same deadline. The
+    // earlier attempt keeps its own destination; nothing is rebound.
+    for (let readmissions = 0; ; readmissions += 1) {
+      const executionTimeoutMs =
+        totalTimeoutMs > 0 ? Math.max(1, totalTimeoutMs - (Date.now() - execStartedAt)) : 0;
+      try {
+        // Admission is the only mutable-policy read. Everything below retains
+        // its exact connection/capability/policy snapshot through completion.
+        admission = await this.admitCommand();
+        const requestedShell = args.shell?.trim();
+        // Secret references (design §10.3, connected machines): splice in the
+        // machine's dialect and deliver the values natively in ExecRequest.env.
+        // With no explicit shell the command is forced through a known one
+        // (`/bin/sh -c` on POSIX, `powershell -NoProfile -NonInteractive
+        // -Command` on Windows) so the splice matches the parser. `args.cmd`
+        // (references) remains the command recorded for background adoption.
+        const secret = await this.prepareSecretExec(args, requestedShell);
+        const commandText = secret?.command ?? args.cmd;
+        const shell = secret?.shell ?? requestedShell;
+        execReq = {
+          // An explicit shell is encoded as direct argv so every agent version honors
+          // it. With no explicit shell, preserve the existing machine-owned default
+          // shell behavior byte-for-byte.
+          command: shell
+            ? explicitShellArgv(shell, commandText, secret ? false : args.login === true)
+            : [commandText],
+          shell: !shell,
+          // Relative paths resolve from the exact host root, while absolute paths
+          // retain their literal machine meaning. In particular, "/workspace" is
+          // sent as the real absolute path "/workspace".
+          cwd: resolveConnectedMachinePath(this.workspaceRoot, args.workdir),
+          // The machine owns its ambient shell environment and ordinary credentials.
+          // Only attempt-local values explicitly supplied by the worker cross here;
+          // snapshot now so a later renewal cannot mutate an in-flight request.
+          env: { ...(this.transientExecEnvironment?.() ?? {}), ...(secret?.env ?? {}) },
+          stdin,
+          timeoutMs: executionTimeoutMs,
+          // Only a runner that advertises run-as receives a user; older runners
+          // keep running the command as their own account unless this session
+          // requires run-as. Decided on the exact admission this command uses.
+          runAs: this.execRunAs(args.runAs ?? "", admission.runAsSupported),
+        };
+        opStreamClient = this.opStreamClientFor(admission);
+        if (!opStreamClient) throw execRequiresOpStream();
+      } catch (error) {
+        // This region has issued no command RPC and registered no live consumer.
+        // This local fact, not the error's code/shape, proves non-dispatch.
+        notifyRemoteOperationNotDispatched(opId);
+        throw error;
       }
-      throw error;
+      try {
+        return await this.execViaOpStream(
+          opStreamClient,
+          admission,
+          execReq,
+          executionTimeoutMs,
+          allowBackground
+            ? Math.min(
+                SELFHOSTED_BACKGROUND_MAX_YIELD_MS,
+                Math.max(1, Math.trunc(args.yieldTimeMs ?? SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS)),
+              )
+            : 0,
+          args.cmd,
+          opId,
+        );
+      } catch (error) {
+        if (error instanceof OpStreamUnavailableError) {
+          throw execRequiresOpStream(error);
+        }
+        if (startReachedNoReplacedAgent(error)) {
+          if (
+            readmissions < SELFHOSTED_EXEC_READMISSIONS_MAX &&
+            (totalTimeoutMs === 0 || Date.now() - execStartedAt < totalTimeoutMs)
+          ) {
+            continue;
+          }
+          notifyRemoteOperationNotDispatched(opId);
+        }
+        throw error;
+      }
     }
   }
 
@@ -1338,6 +1355,8 @@ export class SelfhostedSession {
     let adoptedCommandId: string | null = null;
     let ownershipTransferPending = false;
     let terminalProof = false;
+    // The start reached no agent before that agent restarted: it never ran.
+    let notDispatched = false;
     const retainedOutput: {
       stdout: string[];
       stderr: string[];
@@ -1551,10 +1570,28 @@ export class SelfhostedSession {
               reason: null,
               retryable: false,
             });
+      if (controlError.connectionReplaced && !controlError.neverSent && !adoptedCommandId) {
+        // The agent process that ran the op is gone, replaced by a new one, and
+        // the op ended with it: an agent's operations never outlive its process
+        // (an in-place update keeps the same connection). That is terminal
+        // proof of a loss, never an exit. Record it as the op's observed
+        // outcome, so turn cleanup settles at once instead of querying a
+        // connection that will never answer again.
+        retainedOutput.completed = {
+          status: "completed",
+          result: {
+            stdout: retainedOutput.stdout.join(""),
+            stderr: retainedOutput.stderr.join(""),
+            exitCode: null,
+          },
+          failure: controlError,
+        };
+      }
       if (
         !terminalProof &&
         !adoptedCommandId &&
         !controlError.neverSent &&
+        !controlError.connectionReplaced &&
         machineStoppedAnswering(controlError) &&
         this.adoptBackgroundCommand
       ) {
@@ -1591,13 +1628,16 @@ export class SelfhostedSession {
         machineId: this.agentId,
         faultClass: selfhostedFaultClass(controlError),
       });
+      // Nothing of a start that never ran needs custody; the caller may admit
+      // it again.
+      if (startReachedNoReplacedAgent(controlError)) notDispatched = true;
       throw controlError;
     } finally {
       // An observer failure does not prove that the exact provider operation
       // stopped. Keep its launch client available for cancellation and
       // readExisting recovery; only terminal proof or durable adoption releases
       // this process-local custody entry.
-      if (terminalProof || adoptedCommandId) {
+      if (terminalProof || adoptedCommandId || notDispatched) {
         this.inFlightOpStreamClients.delete(opId);
         this.inFlightOpStreamOutput.delete(opId);
       }
@@ -2995,6 +3035,17 @@ function mediaTypeFromPath(path: string): string | undefined {
  *  represented as a numeric string by ts-proto). */
 /** The machine itself stopped answering (offline, reconnecting past the hold
  * window, or draining), as opposed to an answer that the operation failed. */
+/** How many times an exec whose start reached no agent before that agent
+ *  restarted is admitted again. */
+const SELFHOSTED_EXEC_READMISSIONS_MAX = 2;
+
+/** The op stream reports a start that provably reached no agent before the
+ *  connection it was admitted to was replaced (every later failure of an op
+ *  that may exist is a lost or unknown outcome instead): it never ran. */
+function startReachedNoReplacedAgent(error: unknown): boolean {
+  return error instanceof SelfhostedControlError && error.connectionReplaced && error.neverSent;
+}
+
 function machineStoppedAnswering(error: SelfhostedControlError): boolean {
   const faultClass = selfhostedFaultClass(error);
   return faultClass === "offline" || faultClass === "reconnecting" || faultClass === "draining";

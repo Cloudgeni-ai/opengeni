@@ -468,8 +468,8 @@ export class ComputeSandboxSession extends SelfhostedSession {
       workspaceRoot: COMPUTE_WORKSPACE_ROOT,
       environment: state.environment,
       resolveOperationAdmission,
-      // Without waking anything: only after a failed request, to tell a
-      // restarted agent (a new instance) from an unreachable one.
+      // Without waking anything: while a request waits and after a failed
+      // one, to tell a restarted agent (a new instance) from an unreachable one.
       liveConnectionInstance: async () => (await resolveConnection())?.connectionInstanceId ?? null,
       ...(deps.controlTimeoutMs !== undefined ? { timeoutMs: deps.controlTimeoutMs } : {}),
       ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
