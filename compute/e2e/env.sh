@@ -174,7 +174,7 @@ fleet() {
       project_id: $project, name_prefix: $prefix, region: $region, zone: $zone, labels: $labels,
       machine_type: $machine, initial_hosts: 0, assign_external_ip: false,
       host_bundle: {url: $url, sha256: $sha}, base_image_ref: $base,
-      control_url: "https://\($stack):\($port)", control_dns_names: [$stack],
+      control_url: "https://\($stack):\($port)",
       control_source_ranges: [$internal], control_target_tags: [$stack], control_hosts_port: $port,
       archive_bucket: $bucket, for_tests: true
     }' >"$dir/e2e.tfvars.json"
@@ -185,11 +185,15 @@ fleet() {
   local out=$STATE/fleet
   mkdir -p "$out"
   chmod 700 "$out"
-  for name in archive host_group host_memory_mib control_service_account host_service_account fleet_ca_pem \
-    control_certificate_pem control_private_key_pem; do
+  for name in archive host_group host_memory_mib control_service_account host_service_account \
+    host_authority_pem host_authority_key_pem; do
     tf output -state="$dir/terraform.tfstate" -raw "$name" >"$out/$name"
   done
-  chmod 600 "$out/control_private_key_pem"
+  chmod 600 "$out/host_authority_key_pem"
+  tf output -state="$dir/terraform.tfstate" -json identity_tokens >"$out/identity_tokens.json"
+  # The service's hostUrl is the URL hosts are given, exactly: their
+  # identity tokens are for it.
+  jq -r .control_url "$dir/e2e.tfvars.json" >"$out/control_url"
   # The stack pushes its images there and build-image reads them back.
   g artifacts repositories add-iam-policy-binding "$PREFIX" --location "$REGION" \
     --member "serviceAccount:$(cat "$out/control_service_account")" --role roles/artifactregistry.writer \
@@ -560,7 +564,7 @@ down() {
   fi
   local dir=$STATE/terraform
   if [ -f "$dir/terraform.tfstate" ]; then
-    log "terraform destroy (group, template, bucket, authority, accounts, rules)"
+    log "terraform destroy (group, template, bucket, accounts, rules)"
     if ! tf destroy -input=false -auto-approve -state="$dir/terraform.tfstate" -var-file="$dir/e2e.tfvars.json" \
       >"$STATE/terraform-destroy.log" 2>&1; then
       tail -40 "$STATE/terraform-destroy.log" >&2
@@ -613,9 +617,6 @@ status() {
       *) printf 'project IAM: could not read the policy; roles/compute.osAdminLogin for %s may remain\n' "$login_sa" ;;
     esac
   fi
-  # A certificate authority's pool stays until its authorities are gone
-  # (they wait out their deletion period).
-  g privateca pools list --location "$REGION" --format 'value(name.basename())' | sed -n "s/^\($PREFIX-.*\)/ca pool \1/p"
   # The model deployment this environment recorded creating, or else the
   # one the settings name.
   local account=${AZURE_OPENAI_ACCOUNT:-} group=${AZURE_OPENAI_GROUP:-} name=${MODEL_DEPLOYMENT:-${MODEL_NAME:-}} record=none

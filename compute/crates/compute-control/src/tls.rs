@@ -1,31 +1,36 @@
-//! Mutual TLS between the service and its hosts.
+//! Mutual TLS between the service and its hosts, all of it by the hosts'
+//! authority ([`authority`](crate::authority)).
 //!
-//! The service proves itself with its certificate and trusts only the
-//! hosts' authority, both when hosts call it and when it calls them. A
-//! host is who its certificate names: it may register, renew and report
-//! only under one of those names, so a host broken into cannot renew
-//! another host's lease.
+//! The service presents its own certificate, issued in memory by the
+//! authority for the names hosts dial and replaced a day after each issue
+//! ([`OwnCertificate`]), both when hosts call it and when it calls them; it
+//! trusts the authority's certificates alone. A host is who its certificate
+//! names: it may register, renew and report only under that name, so a
+//! host broken into cannot act for another. A caller may come without a
+//! certificate only to ask for one (`hostapi`); every other route refuses
+//! it.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
+use rcgen::KeyPair;
+use rustls::client::ResolvesClientCert;
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::pem::PemObject as _;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::WebPkiClientVerifier;
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
+use rustls::sign::CertifiedKey;
+use rustls::{ClientConfig, RootCertStore, ServerConfig, SignatureScheme};
 
-/// Where the service's certificate, its key and the hosts' authority are.
-#[derive(Clone, Debug)]
-pub struct TlsFiles {
-    /// The service's certificate chain, PEM.
-    pub cert: PathBuf,
-    /// The service's private key, PEM.
-    pub key: PathBuf,
-    /// The authority that signs hosts' certificates, PEM.
-    pub host_ca: PathBuf,
-}
+use crate::authority::{Authority, ISSUED_FOR};
+
+/// How old the service's own certificate gets before it is replaced: a
+/// day, so a week-long certificate always has six days left.
+pub const OWN_RENEWED_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long to wait before trying again when replacing it failed.
+const OWN_RETRY: Duration = Duration::from_secs(60);
 
 /// Both directions' settings.
 #[derive(Clone)]
@@ -34,6 +39,10 @@ pub struct Tls {
     pub server: Arc<ServerConfig>,
     /// For calling hosts.
     pub client: ClientConfig,
+    /// The authority both trust and issue by.
+    pub authority: Arc<Authority>,
+    /// The certificate the service presents.
+    pub own: Arc<OwnCertificate>,
 }
 
 impl std::fmt::Debug for Tls {
@@ -70,29 +79,150 @@ pub fn authority(path: &Path) -> anyhow::Result<Arc<RootCertStore>> {
     Ok(Arc::new(roots))
 }
 
+/// The service's own certificate on the host endpoint: a new key and a
+/// certificate for it from the authority, valid for [`ISSUED_FOR`], for
+/// the names hosts reach the service by. Connections made with an earlier
+/// one keep going; new ones get the current one.
+pub struct OwnCertificate {
+    authority: Arc<Authority>,
+    names: Vec<String>,
+    current: RwLock<(Arc<CertifiedKey>, SystemTime)>,
+}
+
+impl std::fmt::Debug for OwnCertificate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnCertificate")
+            .field("names", &self.names)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OwnCertificate {
+    /// A certificate for `names` from `authority`.
+    pub fn new(authority: Arc<Authority>, names: Vec<String>) -> anyhow::Result<Self> {
+        let first = Self::issue(&authority, &names)?;
+        Ok(Self {
+            authority,
+            names,
+            current: RwLock::new(first),
+        })
+    }
+
+    fn issue(
+        authority: &Authority,
+        names: &[String],
+    ) -> anyhow::Result<(Arc<CertifiedKey>, SystemTime)> {
+        let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+        let issued = authority.issue(names, &key, SystemTime::now(), ISSUED_FOR)?;
+        let certified = CertifiedKey::from_der(
+            vec![issued.der],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+            &provider(),
+        )
+        .context("the service's own certificate")?;
+        Ok((Arc::new(certified), issued.not_after))
+    }
+
+    /// The names hosts reach the service by, which its certificate holds.
+    #[must_use]
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    /// The certificate presented now.
+    #[must_use]
+    pub fn current(&self) -> Arc<CertifiedKey> {
+        Arc::clone(
+            &self
+                .current
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0,
+        )
+    }
+
+    /// When the certificate presented now stops being valid.
+    #[must_use]
+    pub fn not_after(&self) -> SystemTime {
+        self.current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1
+    }
+
+    /// Replaces the certificate with a new one, of a new key.
+    pub fn renew(&self) -> anyhow::Result<()> {
+        let next = Self::issue(&self.authority, &self.names)?;
+        *self
+            .current
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+        Ok(())
+    }
+
+    /// Replaces the certificate [`OWN_RENEWED_AFTER`] after each issue, for
+    /// ever.
+    pub async fn keep_fresh(self: Arc<Self>) {
+        loop {
+            let renew_at = self.not_after() - ISSUED_FOR + OWN_RENEWED_AFTER;
+            let wait = renew_at
+                .duration_since(SystemTime::now())
+                .unwrap_or(Duration::ZERO);
+            tokio::time::sleep(wait).await;
+            match self.renew() {
+                Ok(()) => {
+                    tracing::info!(names = ?self.names, "renewed the service's own certificate");
+                }
+                Err(error) => {
+                    tracing::error!(error = %format!("{error:#}"), "renewing the service's own certificate failed");
+                    tokio::time::sleep(OWN_RETRY).await;
+                }
+            }
+        }
+    }
+}
+
+impl ResolvesServerCert for OwnCertificate {
+    fn resolve(&self, _: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(self.current())
+    }
+}
+
+impl ResolvesClientCert for OwnCertificate {
+    fn resolve(&self, _: &[&[u8]], _: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
+        Some(self.current())
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
 impl Tls {
-    /// Loads both directions' settings from `files`.
-    pub fn load(files: &TlsFiles) -> anyhow::Result<Self> {
-        let chain = certificates(&files.cert)?;
-        let key = PrivateKeyDer::from_pem_file(&files.key)
-            .with_context(|| format!("reading the key in {}", files.key.display()))?;
-        let hosts = authority(&files.host_ca)?;
+    /// Both directions' settings, by `authority`, for a service hosts reach
+    /// by `names`.
+    pub fn new(authority: Arc<Authority>, names: Vec<String>) -> anyhow::Result<Self> {
+        let own = Arc::new(OwnCertificate::new(Arc::clone(&authority), names)?);
+        let hosts = authority.roots();
+        // A caller without a certificate gets as far as the routes, which
+        // refuse it everywhere but where it asks for its certificate.
         let verifier = WebPkiClientVerifier::builder_with_provider(Arc::clone(&hosts), provider())
+            .allow_unauthenticated()
             .build()
             .context("setting up host certificate checks")?;
         let server = ServerConfig::builder_with_provider(provider())
             .with_safe_default_protocol_versions()?
             .with_client_cert_verifier(verifier)
-            .with_single_cert(chain.clone(), key.clone_key())
-            .context("the service's certificate and key")?;
+            .with_cert_resolver(Arc::clone(&own) as Arc<dyn ResolvesServerCert>);
         let client = ClientConfig::builder_with_provider(provider())
             .with_safe_default_protocol_versions()?
             .with_root_certificates(hosts)
-            .with_client_auth_cert(chain, key)
-            .context("the service's certificate and key")?;
+            .with_client_cert_resolver(Arc::clone(&own) as Arc<dyn ResolvesClientCert>);
         Ok(Self {
             server: Arc::new(server),
             client,
+            authority,
+            own,
         })
     }
 }
@@ -183,5 +313,126 @@ pub async fn serve(
                 tracing::debug!(%error, "{what}: a connection ended with an error");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rustls::pki_types::ServerName;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+    use super::*;
+    use crate::authority::generate;
+
+    fn service() -> Tls {
+        let (certificate, key) = generate("test authority").unwrap();
+        let authority = Arc::new(Authority::from_pem(&certificate, &key).unwrap());
+        Tls::new(authority, vec!["control.example".into()]).unwrap()
+    }
+
+    /// A host's client: trusts the authority, presents a certificate of it.
+    fn host(tls: &Tls) -> ClientConfig {
+        let key = KeyPair::generate().unwrap();
+        let issued = tls
+            .authority
+            .issue(&["host-1".into()], &key, SystemTime::now(), ISSUED_FOR)
+            .unwrap();
+        let mut client = ClientConfig::builder_with_provider(provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(tls.authority.roots())
+            .with_client_auth_cert(
+                vec![issued.der],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+            )
+            .unwrap();
+        // Each connection a full handshake, so it shows the certificate the
+        // service presents now.
+        client.resumption = rustls::client::Resumption::disabled();
+        client
+    }
+
+    /// A connection from `client` to the service, echoing what it is sent,
+    /// and the certificate the service presented on it.
+    async fn connect(
+        tls: &Tls,
+        client: &ClientConfig,
+    ) -> (
+        tokio_rustls::client::TlsStream<tokio::io::DuplexStream>,
+        CertificateDer<'static>,
+    ) {
+        let (near, far) = tokio::io::duplex(64 << 10);
+        let acceptor = TlsAcceptor::from(Arc::clone(&tls.server));
+        tokio::spawn(async move {
+            let mut stream = acceptor.accept(near).await.unwrap();
+            let mut buffer = [0u8; 4];
+            while stream.read_exact(&mut buffer).await.is_ok() {
+                stream.write_all(&buffer).await.unwrap();
+                stream.flush().await.unwrap();
+            }
+        });
+        let connector = TlsConnector::from(Arc::new(client.clone()));
+        let name = ServerName::try_from("control.example").unwrap();
+        let stream = connector.connect(name, far).await.unwrap();
+        let presented = stream.get_ref().1.peer_certificates().unwrap()[0].clone();
+        (stream, presented)
+    }
+
+    async fn echoes(stream: &mut tokio_rustls::client::TlsStream<tokio::io::DuplexStream>) {
+        stream.write_all(b"ping").await.unwrap();
+        stream.flush().await.unwrap();
+        let mut heard = [0u8; 4];
+        stream.read_exact(&mut heard).await.unwrap();
+        assert_eq!(&heard, b"ping");
+    }
+
+    #[tokio::test]
+    async fn a_renewed_own_certificate_serves_new_connections_and_keeps_open_ones() {
+        let tls = service();
+        let client = host(&tls);
+        let (mut open, before) = connect(&tls, &client).await;
+        echoes(&mut open).await;
+        let lasts = tls
+            .own
+            .not_after()
+            .duration_since(SystemTime::now())
+            .unwrap();
+        assert!(lasts + Duration::from_secs(5) > ISSUED_FOR, "{lasts:?}");
+        tls.own.renew().unwrap();
+        echoes(&mut open).await;
+        let (mut new, after) = connect(&tls, &client).await;
+        echoes(&mut new).await;
+        assert_ne!(before, after, "a new certificate");
+        crate::authority::verify(
+            &tls.authority.roots(),
+            &after,
+            SystemTime::now(),
+            "control.example",
+        )
+        .unwrap();
+        echoes(&mut open).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_own_certificate_is_replaced_a_day_after_its_issue() {
+        let tls = service();
+        let first = tls.own.current();
+        let keeping = tokio::spawn(Arc::clone(&tls.own).keep_fresh());
+        // The wait is measured against the wall clock, which a paused
+        // runtime does not move: a day of the runtime's time passes it.
+        tokio::time::sleep(OWN_RENEWED_AFTER.saturating_sub(Duration::from_secs(60))).await;
+        assert!(Arc::ptr_eq(&first, &tls.own.current()), "not yet");
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(!Arc::ptr_eq(&first, &tls.own.current()), "renewed");
+        keeping.abort();
+    }
+
+    #[tokio::test]
+    async fn the_service_presents_its_own_certificate_when_it_calls_hosts() {
+        let tls = service();
+        let own = ResolvesClientCert::resolve(&*tls.own, &[], &[]).unwrap();
+        assert!(Arc::ptr_eq(&own, &tls.own.current()));
+        assert!(tls.own.has_certs());
     }
 }

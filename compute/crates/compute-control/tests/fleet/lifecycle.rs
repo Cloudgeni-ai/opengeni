@@ -86,13 +86,6 @@ async fn a_host_registers_only_under_a_name_its_certificate_carries() {
         .unwrap();
     let response = other.post(&url).json(&body).send().await.unwrap();
     assert_eq!(response.status(), 403);
-
-    // Without a certificate of the hosts' authority there is no TLS.
-    let anonymous = reqwest::Client::builder()
-        .use_preconfigured_tls(fleet.pki.anonymous_client())
-        .build()
-        .unwrap();
-    assert!(anonymous.post(&url).json(&body).send().await.is_err());
 }
 
 #[tokio::test]

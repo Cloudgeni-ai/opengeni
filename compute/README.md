@@ -295,7 +295,9 @@ base image, as before.
 Postgres store holds each sandbox's configuration, lifecycle and owner:
 the host that owns it and the sandbox's owner epoch, raised each time it
 changes hands or loses its owner. Its archives, and the pointer to the
-latest one, are in object storage. Hosts register over mutual TLS, renew a
+latest one, are in object storage. The service is the hosts' certificate
+authority, and issues each host a certificate for the name it proves (on
+GCP with its instance identity token). Hosts register over mutual TLS, renew a
 lease and push their capacity; creates and wakes are placed from that
 capacity, and the public API reaches a sandbox through its owner. A host
 runs only what its current lease covers: its guard stops its VMs when

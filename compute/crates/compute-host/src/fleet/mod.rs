@@ -129,6 +129,7 @@ impl FleetConfig {
         tracing::info!(listen = %self.listen, control = %self.control, "joining the fleet");
         let listening = listen::Listening {
             acceptor: TlsAcceptor::from(Arc::clone(&tls.server)),
+            service: tls::service_name(&self.control)?,
             handle: handle.clone(),
             gate: gate.clone(),
         };

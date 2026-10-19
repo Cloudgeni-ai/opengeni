@@ -1,21 +1,27 @@
-//! The API hosts call: register, renew and report, and ask for their
-//! agent-link tokens, over mutual TLS.
+//! The API hosts call: get their certificate, register, renew and report,
+//! and ask for their agent-link tokens, over TLS.
 //!
 //! Each connection carries the names its client certificate is valid for,
-//! and a host may act only under one of them.
+//! and a host may act only under one of them. A caller without a
+//! certificate is refused by every route but the one that issues one
+//! ([`CERTIFICATE_PATH`]), which names a host only as it proves: an
+//! instance identity token names its instance ([`identity`](crate::identity)),
+//! and a current certificate of the authority names what it names.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Extension, Json, State};
+use axum::extract::{DefaultBodyLimit, Extension, FromRequestParts, Json, State};
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::routing::post;
 use axum::{Router, response::IntoResponse};
 use compute_fleet::LeaseTerms;
 use compute_protocol::fleet::{
-    LINK_TOKENS_PATH, LinkTokens, LinkTokensAsked, REGISTER_PATH, RENEW_PATH, REPORT_PATH,
-    Register, Registered, Renew, Renewed, Report, Ruling, Terms, Verdict,
+    CERTIFICATE_PATH, CertificateAsked, HostCertificate, LINK_TOKENS_PATH, LinkTokens,
+    LinkTokensAsked, Proof, REGISTER_PATH, RENEW_PATH, REPORT_PATH, Register, Registered, Renew,
+    Renewed, Report, Ruling, Terms, Verdict,
 };
 use compute_protocol::host::Id;
 use hyper_util::rt::TokioIo;
@@ -24,16 +30,107 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt as _;
 
+use crate::authority::{Authority, ISSUED_FOR, requested_key};
+use crate::identity::GceIdentity;
 use crate::link::Links;
 use crate::store::{Admission, Store};
 use crate::tls::names_of;
 
 /// How long a host may take to agree TLS.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// The longest certificate request body: a request and a token are a few
+/// KiB.
+pub const MAX_CERTIFICATE_ASKED: usize = 16 << 10;
 
-/// The names the caller's certificate is valid for.
+/// What the caller presented on its connection: the names its certificate
+/// is valid for, or `None` without a certificate.
+#[derive(Clone, Debug, Default)]
+pub struct Presented(pub Option<Arc<[String]>>);
+
+/// A caller with a certificate of the hosts' authority, and the names it
+/// is valid for. Routes that take one refuse a caller without a
+/// certificate.
 #[derive(Clone, Debug, Default)]
 pub struct Peer(pub Arc<[String]>);
+
+impl<S: Send + Sync> FromRequestParts<S> for Peer {
+    type Rejection = (StatusCode, &'static str);
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        _: &S,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(match parts.extensions.get::<Presented>() {
+            Some(Presented(Some(names))) => Ok(Self(Arc::clone(names))),
+            _ => Err((
+                StatusCode::UNAUTHORIZED,
+                "this needs a host certificate of the hosts' authority",
+            )),
+        })
+    }
+}
+
+/// How the service issues host certificates.
+#[derive(Debug)]
+pub struct Certificates {
+    pub authority: Arc<Authority>,
+    /// What checks instance identity tokens; `None` takes none.
+    pub identity: Option<GceIdentity>,
+    /// Names no host may have: the service's own.
+    pub reserved: Vec<String>,
+}
+
+fn refused(status: StatusCode, message: impl std::fmt::Display) -> (StatusCode, String) {
+    (status, message.to_string())
+}
+
+impl Certificates {
+    /// A certificate for the host `name`, for the key `csr` was signed by.
+    pub fn issue(
+        &self,
+        name: &str,
+        csr: &str,
+        now: std::time::SystemTime,
+    ) -> Result<HostCertificate, (StatusCode, String)> {
+        if self
+            .reserved
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(name))
+        {
+            return Err(refused(
+                StatusCode::FORBIDDEN,
+                format!("{name} is the service's own name, never a host's"),
+            ));
+        }
+        let dns = name.parse::<std::net::IpAddr>().is_err()
+            && rustls::pki_types::DnsName::try_from(name).is_ok()
+            && !name.contains('*');
+        if !dns {
+            return Err(refused(
+                StatusCode::FORBIDDEN,
+                format!("{name:?} is not a host name"),
+            ));
+        }
+        let key = requested_key(csr)
+            .map_err(|error| refused(StatusCode::BAD_REQUEST, format!("{error:#}")))?;
+        let issued = self
+            .authority
+            .issue(&[name.to_owned()], &key, now, ISSUED_FOR)
+            .map_err(|error| refused(StatusCode::BAD_REQUEST, format!("{error:#}")))?;
+        let not_after_ms = issued
+            .not_after
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
+        Ok(HostCertificate {
+            name: name.to_owned(),
+            certificate: issued.pem,
+            authorities: self.authority.pem().to_owned(),
+            not_after_ms,
+        })
+    }
+}
 
 /// Lease terms as hosts are told them.
 #[must_use]
@@ -55,6 +152,7 @@ struct Inner<S> {
     store: Arc<S>,
     terms: LeaseTerms,
     links: Option<Arc<Links>>,
+    certificates: Arc<Certificates>,
 }
 
 /// The host API's state.
@@ -78,7 +176,7 @@ fn unavailable(error: impl std::fmt::Display) -> (StatusCode, String) {
 
 async fn register<S: Store>(
     State(api): State<HostApi<S>>,
-    Extension(peer): Extension<Peer>,
+    peer: Peer,
     Json(register): Json<Register>,
 ) -> Result<Json<Registered>, (StatusCode, String)> {
     if !peer.0.contains(&register.info.name) {
@@ -166,7 +264,7 @@ async fn with_links<S: Store>(
 
 async fn renew<S: Store>(
     State(api): State<HostApi<S>>,
-    Extension(peer): Extension<Peer>,
+    peer: Peer,
     Json(renew): Json<Renew>,
 ) -> Result<Json<Renewed>, (StatusCode, String)> {
     let accepted = api
@@ -187,7 +285,7 @@ async fn renew<S: Store>(
 
 async fn report<S: Store>(
     State(api): State<HostApi<S>>,
-    Extension(peer): Extension<Peer>,
+    peer: Peer,
     Json(report): Json<Report>,
 ) -> impl IntoResponse {
     match api.0.store.report(&report, &peer.0).await {
@@ -213,7 +311,7 @@ fn now_ms() -> u64 {
 /// for.
 async fn link_tokens<S: Store>(
     State(api): State<HostApi<S>>,
-    Extension(peer): Extension<Peer>,
+    peer: Peer,
     Json(asked): Json<LinkTokensAsked>,
 ) -> Result<Json<LinkTokens>, (StatusCode, String)> {
     if !peer.0.contains(&asked.name) {
@@ -243,22 +341,75 @@ async fn link_tokens<S: Store>(
     Ok(Json(LinkTokens { tokens }))
 }
 
+/// Issues the caller a certificate for the name it proves.
+async fn certificate<S: Store>(
+    State(api): State<HostApi<S>>,
+    Extension(presented): Extension<Presented>,
+    Json(asked): Json<CertificateAsked>,
+) -> Result<Json<HostCertificate>, (StatusCode, String)> {
+    let certificates = &api.0.certificates;
+    let now = std::time::SystemTime::now();
+    let (name, by) = match &asked.proof {
+        Proof::GceIdentity { token } => {
+            let Some(identity) = &certificates.identity else {
+                return Err(refused(
+                    StatusCode::FORBIDDEN,
+                    "this service takes no instance identity tokens",
+                ));
+            };
+            let name = identity
+                .verify(token, now)
+                .await
+                .map_err(|error| refused(StatusCode::FORBIDDEN, error))?;
+            (name, "an instance identity token")
+        }
+        Proof::Certificate => match &presented.0 {
+            Some(names) if names.len() == 1 => (names[0].clone(), "its certificate"),
+            Some(_) => {
+                return Err(refused(
+                    StatusCode::FORBIDDEN,
+                    "a certificate that names one host renews",
+                ));
+            }
+            None => {
+                return Err(refused(
+                    StatusCode::UNAUTHORIZED,
+                    "renewing needs the current certificate of the hosts' authority",
+                ));
+            }
+        },
+    };
+    let issued = certificates.issue(&name, &asked.csr, now)?;
+    tracing::info!(host = %name, by, not_after_ms = issued.not_after_ms, "issued a host certificate");
+    Ok(Json(issued))
+}
+
 /// The host API's routes.
-pub fn router<S: Store>(store: Arc<S>, terms: LeaseTerms, links: Option<Arc<Links>>) -> Router {
+pub fn router<S: Store>(
+    store: Arc<S>,
+    terms: LeaseTerms,
+    links: Option<Arc<Links>>,
+    certificates: Arc<Certificates>,
+) -> Router {
     Router::new()
         .route(REGISTER_PATH, post(register::<S>))
         .route(RENEW_PATH, post(renew::<S>))
         .route(REPORT_PATH, post(report::<S>))
         .route(LINK_TOKENS_PATH, post(link_tokens::<S>))
+        .route(
+            CERTIFICATE_PATH,
+            post(certificate::<S>).layer(DefaultBodyLimit::max(MAX_CERTIFICATE_ASKED)),
+        )
         .with_state(HostApi(Arc::new(Inner {
             store,
             terms,
             links,
+            certificates,
         })))
 }
 
 /// Serves `router` on `listener` to clients `acceptor` verifies, each
-/// request carrying its caller's [`Peer`].
+/// request carrying what its caller [`Presented`].
 pub async fn serve(listener: TcpListener, acceptor: TlsAcceptor, router: Router) {
     loop {
         let (tcp, _) = match listener.accept().await {
@@ -281,17 +432,16 @@ pub async fn serve(listener: TcpListener, acceptor: TlsAcceptor, router: Router)
                 }
                 Err(_) => return,
             };
-            let names: Vec<String> = tls
-                .get_ref()
-                .1
-                .peer_certificates()
-                .and_then(|chain| chain.first())
-                .map(names_of)
-                .unwrap_or_default();
-            let peer = Peer(names.into());
+            let presented = Presented(
+                tls.get_ref()
+                    .1
+                    .peer_certificates()
+                    .and_then(|chain| chain.first())
+                    .map(|certificate| names_of(certificate).into()),
+            );
             let service = router.map_request(
                 move |mut request: axum::http::Request<hyper::body::Incoming>| {
-                    request.extensions_mut().insert(peer.clone());
+                    request.extensions_mut().insert(presented.clone());
                     request
                 },
             );
@@ -302,5 +452,194 @@ pub async fn serve(listener: TcpListener, acceptor: TlsAcceptor, router: Router)
                 tracing::debug!(%error, "a host connection ended with an error");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use http_body_util::BodyExt as _;
+    use rcgen::{CertificateParams, KeyPair};
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject as _;
+    use serde_json::json;
+
+    use super::*;
+    use crate::authority::{generate, verify};
+    use crate::identity::tests::{Google, claims};
+    use crate::store::MemoryStore;
+
+    struct Api {
+        router: Router,
+        authority: Arc<Authority>,
+        google: Google,
+    }
+
+    fn api() -> Api {
+        let (certificate, key) = generate("test authority").unwrap();
+        let authority = Arc::new(Authority::from_pem(&certificate, &key).unwrap());
+        let google = Google::new();
+        let certificates = Arc::new(Certificates {
+            authority: Arc::clone(&authority),
+            identity: Some(GceIdentity::new(
+                crate::identity::tests::expected(),
+                google.source(),
+            )),
+            reserved: vec!["control.example".into()],
+        });
+        let router = router(
+            Arc::new(MemoryStore::new()),
+            LeaseTerms::RECOMMENDED,
+            None,
+            certificates,
+        );
+        Api {
+            router,
+            authority,
+            google,
+        }
+    }
+
+    fn csr(name: &str) -> String {
+        CertificateParams::new(vec![name.to_owned()])
+            .unwrap()
+            .serialize_request(&KeyPair::generate().unwrap())
+            .unwrap()
+            .pem()
+            .unwrap()
+    }
+
+    /// Posts `body` to `path` as a caller who presented `presented`.
+    async fn post(
+        router: &Router,
+        path: &str,
+        presented: Option<&[&str]>,
+        body: &impl serde::Serialize,
+    ) -> (StatusCode, Vec<u8>) {
+        let mut request = axum::http::Request::post(path)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(Presented(presented.map(|names| {
+                names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>()
+                    .into()
+            })));
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        (status, body)
+    }
+
+    fn token_asked(token: String, csr: String) -> CertificateAsked {
+        CertificateAsked {
+            csr,
+            proof: Proof::GceIdentity { token },
+        }
+    }
+
+    #[tokio::test]
+    async fn an_identity_token_gets_its_instance_a_certificate_for_that_name_only() {
+        let api = api();
+        let asked = token_asked(api.google.token("host-1"), csr("host-2"));
+        let (status, body) = post(&api.router, CERTIFICATE_PATH, None, &asked).await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let issued: HostCertificate = serde_json::from_slice(&body).unwrap();
+        assert_eq!(issued.name, "host-1", "the token's name, not the request's");
+        let der = CertificateDer::from_pem_slice(issued.certificate.as_bytes()).unwrap();
+        let now = std::time::SystemTime::now();
+        verify(&api.authority.roots(), &der, now, "host-1").unwrap();
+        assert!(verify(&api.authority.roots(), &der, now, "host-2").is_err());
+        assert_eq!(issued.authorities, api.authority.pem());
+        // A token is proof even from a caller whose certificate names
+        // another host: the token decides.
+        let asked = token_asked(api.google.token("host-3"), csr("host-3"));
+        let (status, body) = post(&api.router, CERTIFICATE_PATH, Some(&["host-1"]), &asked).await;
+        assert_eq!(status, StatusCode::OK);
+        let issued: HostCertificate = serde_json::from_slice(&body).unwrap();
+        assert_eq!(issued.name, "host-3");
+    }
+
+    #[tokio::test]
+    async fn a_token_that_does_not_hold_or_names_the_service_gets_nothing() {
+        let api = api();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut wrong = claims("host-1", now);
+        wrong["aud"] = "https://elsewhere.example".into();
+        let token = api.google.sign(&api.google.header(), &wrong);
+        let (status, _) = post(
+            &api.router,
+            CERTIFICATE_PATH,
+            None,
+            &token_asked(token, csr("host-1")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // An instance named as the service is still not the service.
+        let asked = token_asked(api.google.token("control.example"), csr("control.example"));
+        let (status, _) = post(&api.router, CERTIFICATE_PATH, None, &asked).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // A request not signed by its key.
+        let (status, _) = post(
+            &api.router,
+            CERTIFICATE_PATH,
+            None,
+            &token_asked(api.google.token("host-1"), "garbage".into()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn renewing_by_certificate_names_exactly_its_one_name() {
+        let api = api();
+        let renew = CertificateAsked {
+            csr: csr("host-9"),
+            proof: Proof::Certificate,
+        };
+        let (status, body) = post(&api.router, CERTIFICATE_PATH, Some(&["host-4"]), &renew).await;
+        assert_eq!(status, StatusCode::OK);
+        let issued: HostCertificate = serde_json::from_slice(&body).unwrap();
+        assert_eq!(issued.name, "host-4");
+        let (status, _) = post(
+            &api.router,
+            CERTIFICATE_PATH,
+            Some(&["host-4", "host-5"]),
+            &renew,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "one name only");
+        let (status, _) = post(&api.router, CERTIFICATE_PATH, Some(&[]), &renew).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = post(&api.router, CERTIFICATE_PATH, None, &renew).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn every_other_route_refuses_a_caller_without_a_certificate() {
+        let api = api();
+        for path in [REGISTER_PATH, RENEW_PATH, REPORT_PATH, LINK_TOKENS_PATH] {
+            let (status, _) = post(&api.router, path, None, &json!({})).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+            // With one, the request gets as far as its body.
+            let (status, _) = post(&api.router, path, Some(&["host-1"]), &json!({})).await;
+            assert_ne!(status, StatusCode::UNAUTHORIZED, "{path}");
+        }
+        let huge = token_asked("x".repeat(MAX_CERTIFICATE_ASKED), csr("host-1"));
+        let (status, _) = post(&api.router, CERTIFICATE_PATH, None, &huge).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 }

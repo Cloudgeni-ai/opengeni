@@ -23,18 +23,21 @@ output "host_service_account" {
   value       = google_service_account.host.email
 }
 
-output "fleet_ca_pem" {
-  description = "The fleet authority's certificate: ca.crt of computeControl.hostsTls.secretName."
-  value       = google_privateca_certificate_authority.fleet.pem_ca_certificates[0]
+output "host_authority_pem" {
+  description = "The hosts' authority's certificate: ca.crt of computeControl.hostsTls.secretName."
+  value       = tls_self_signed_cert.authority.cert_pem
 }
 
-output "control_certificate_pem" {
-  description = "The control service's host-endpoint certificate chain: tls.crt of computeControl.hostsTls.secretName."
-  value       = length(var.control_dns_names) > 0 ? join("", concat([google_privateca_certificate.control[0].pem_certificate], google_privateca_certificate.control[0].pem_certificate_chain)) : null
-}
-
-output "control_private_key_pem" {
-  description = "The control service's host-endpoint key: tls.key of computeControl.hostsTls.secretName."
-  value       = length(var.control_dns_names) > 0 ? tls_private_key.control[0].private_key_pem : null
+output "host_authority_key_pem" {
+  description = "The hosts' authority's key, PKCS#8: ca.key of computeControl.hostsTls.secretName. Every host trusts what it signs: keep it as the service's other keys."
+  value       = tls_private_key.authority.private_key_pem_pkcs8
   sensitive   = true
+}
+
+output "identity_tokens" {
+  description = "What the control service checks hosts' identity tokens against: computeControl.hostIdentity in the Helm chart."
+  value = {
+    project = var.project_id
+    account = google_service_account.host.email
+  }
 }

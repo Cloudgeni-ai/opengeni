@@ -1,10 +1,10 @@
-# A GCP host fleet for Opengeni compute: the hosts' managed instance group
-# (nested virtualization or bare metal), the archive bucket, the authority
-# that issues host and control-service certificates, two service accounts
-# with only what each needs, and the firewall rules between hosts and the
-# control service. The control service itself (compute-control) runs elsewhere,
-# for example in the Opengeni Helm chart (computeControl); see
-# compute/docs/operations.md.
+# GCP hosts for Opengeni compute: the hosts' managed instance group (nested
+# virtualization or bare metal), the archive bucket, the hosts' authority
+# the control service issues host certificates and its own with, two
+# service accounts with only what each needs, and the firewall rules between
+# hosts and the control service. The control service itself
+# (compute-control) runs elsewhere, for example in the Opengeni Helm chart
+# (computeControl); see compute/docs/operations.md.
 
 locals {
   labels = merge(var.labels, {
@@ -29,7 +29,7 @@ data "google_compute_machine_types" "host" {
 }
 
 resource "google_project_service" "apis" {
-  for_each           = toset(["compute.googleapis.com", "storage.googleapis.com", "privateca.googleapis.com", "iam.googleapis.com"])
+  for_each           = toset(["compute.googleapis.com", "storage.googleapis.com", "iam.googleapis.com"])
   project            = var.project_id
   service            = each.value
   disable_on_destroy = false
@@ -40,7 +40,7 @@ resource "google_project_service" "apis" {
 resource "google_service_account" "host" {
   account_id   = "${var.name_prefix}-host"
   display_name = "Opengeni compute host"
-  description  = "Compute hosts: the archive bucket's objects and their own certificates, nothing else."
+  description  = "Compute hosts: the archive bucket's objects, nothing else."
 }
 
 resource "google_service_account" "control" {
@@ -123,155 +123,30 @@ resource "google_storage_bucket_iam_member" "control_objects" {
 
 # --- Certificates -----------------------------------------------------------
 #
-# One private authority signs the hosts' certificates (the control service
-# trusts it for host connections) and the control service's host-endpoint
-# certificate (hosts trust it for the service). Hosts request their own at
-# boot and renew them; any instance running as the host account can ask
-# for a certificate of any host name, so until the control service issues
-# host certificates against an instance identity token, the host account
-# is as trusted as every host (see operations.md, Security).
+# The hosts' authority: a key and a self-signed certificate the control
+# service holds (ca.key and ca.crt of computeControl.hostsTls.secretName).
+# The service issues its own host-endpoint certificate from it, in memory
+# for a week and anew every day, and each host's, for the instance name
+# the host's identity token proves. Hosts trust the authority's certificate
+# alone (and previous_host_authority_pem while one is replaced), from the
+# instance template's metadata. The key lives in this
+# state and the service's Secret, never in the service's database; replace
+# it as operations.md, Keys and certificates says.
 
-# Certificate Authority Service never reuses a deleted pool's name, so
-# each pool gets a suffix and a fleet can be torn down and made again.
-resource "random_id" "pool" {
-  byte_length = 3
-}
-
-resource "google_privateca_ca_pool" "fleet" {
-  name     = "${var.name_prefix}-fleet-${random_id.pool.hex}"
-  location = var.region
-  # Enterprise keeps the certificates it issues, so Terraform can manage
-  # the control service's certificate and a lost host's can be revoked; the
-  # DevOps tier keeps none (about $20 against $200 a month per authority).
-  tier   = "ENTERPRISE"
-  labels = local.labels
-
-  issuance_policy {
-    maximum_lifetime = "2592000s"
-    allowed_key_types {
-      elliptic_curve {
-        signature_algorithm = "ECDSA_P256"
-      }
-    }
-    baseline_values {
-      ca_options {
-        is_ca = false
-      }
-      key_usage {
-        base_key_usage {
-          digital_signature = true
-        }
-        extended_key_usage {
-          server_auth = true
-          client_auth = true
-        }
-      }
-    }
-    identity_constraints {
-      allow_subject_passthrough           = true
-      allow_subject_alt_names_passthrough = true
-    }
-  }
-
-  depends_on = [google_project_service.apis]
-}
-
-resource "google_privateca_certificate_authority" "fleet" {
-  pool                                   = google_privateca_ca_pool.fleet.name
-  certificate_authority_id               = "${var.name_prefix}-fleet-root"
-  location                               = var.region
-  type                                   = "SELF_SIGNED"
-  lifetime                               = "315360000s"
-  deletion_protection                    = !var.for_tests
-  skip_grace_period                      = var.for_tests
-  ignore_active_certificates_on_deletion = var.for_tests
-  labels                                 = local.labels
-
-  config {
-    subject_config {
-      subject {
-        organization = "Opengeni compute"
-        common_name  = "${var.name_prefix} fleet authority"
-      }
-    }
-    x509_config {
-      ca_options {
-        is_ca = true
-      }
-      key_usage {
-        base_key_usage {
-          cert_sign = true
-          crl_sign  = true
-        }
-        extended_key_usage {}
-      }
-    }
-  }
-
-  key_spec {
-    algorithm = "EC_P256_SHA256"
-  }
-}
-
-resource "google_privateca_ca_pool_iam_member" "host_requests" {
-  ca_pool = google_privateca_ca_pool.fleet.id
-  role    = "roles/privateca.certificateRequester"
-  member  = "serviceAccount:${google_service_account.host.email}"
-}
-
-# Hosts read the authority's certificate to trust the control service.
-resource "google_privateca_ca_pool_iam_member" "host_reads" {
-  ca_pool = google_privateca_ca_pool.fleet.id
-  role    = "roles/privateca.poolReader"
-  member  = "serviceAccount:${google_service_account.host.email}"
-}
-
-# The control service's host-endpoint certificate lasts 30 days. Each apply
-# from 20 days after it was issued makes a new key, so a new request and a
-# certificate of a new name: the authority keeps every name it issued, even
-# revoked, so a renewal never reuses one. The new certificate exists before
-# the old one is revoked; put it in the service's Secret and restart the
-# service (operations.md, Keys and certificates).
-resource "time_rotating" "control" {
-  count         = length(var.control_dns_names) > 0 ? 1 : 0
-  rotation_days = 20
-}
-
-resource "tls_private_key" "control" {
-  count       = length(var.control_dns_names) > 0 ? 1 : 0
+resource "tls_private_key" "authority" {
   algorithm   = "ECDSA"
   ecdsa_curve = "P256"
-
-  lifecycle {
-    create_before_destroy = true
-    replace_triggered_by  = [time_rotating.control[0].id]
-  }
 }
 
-resource "tls_cert_request" "control" {
-  count           = length(var.control_dns_names) > 0 ? 1 : 0
-  private_key_pem = tls_private_key.control[0].private_key_pem
-  dns_names       = var.control_dns_names
+resource "tls_self_signed_cert" "authority" {
+  private_key_pem       = tls_private_key.authority.private_key_pem
+  is_ca_certificate     = true
+  validity_period_hours = 87600
+  allowed_uses          = ["cert_signing", "crl_signing"]
+
   subject {
-    common_name = var.control_dns_names[0]
-  }
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "google_privateca_certificate" "control" {
-  count                 = length(var.control_dns_names) > 0 ? 1 : 0
-  pool                  = google_privateca_ca_pool.fleet.name
-  location              = var.region
-  certificate_authority = google_privateca_certificate_authority.fleet.certificate_authority_id
-  name                  = "${var.name_prefix}-control-${substr(sha256(tls_cert_request.control[0].cert_request_pem), 0, 12)}"
-  lifetime              = "2592000s"
-  pem_csr               = tls_cert_request.control[0].cert_request_pem
-
-  lifecycle {
-    create_before_destroy = true
+    organization = "Opengeni compute"
+    common_name  = "${var.name_prefix} hosts"
   }
 }
 
@@ -392,8 +267,7 @@ resource "google_compute_instance_template" "host" {
     compute-control        = var.control_url
     compute-store          = local.store
     compute-base-image     = var.base_image_ref
-    compute-ca-pool        = google_privateca_ca_pool.fleet.name
-    compute-ca-location    = var.region
+    compute-host-authority = "${tls_self_signed_cert.authority.cert_pem}${var.previous_host_authority_pem}"
     compute-nested         = var.nested ? "true" : "false"
     compute-huge-pages-pct = tostring(var.huge_pages_percent)
     compute-host-args      = var.host_args
@@ -403,8 +277,6 @@ resource "google_compute_instance_template" "host" {
   lifecycle {
     create_before_destroy = true
   }
-
-  depends_on = [google_privateca_certificate_authority.fleet]
 }
 
 resource "google_compute_instance_group_manager" "hosts" {
