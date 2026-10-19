@@ -291,6 +291,8 @@ test("a bounded call ends its database work at the deadline and never commits la
   // A one-connection pool, held by the revoke itself: the deadline needs no
   // other connection, because the server enforces it.
   const client = createDb(appUrl(), { max: 1 });
+  // The row's transaction ends before its connection goes back to the pool.
+  let releaseRow = Promise.resolve();
   try {
     // The tenancy lock is released after 210 ms, inside the 300 ms deadline;
     // the revoke's UPDATE then waits on the enrollment's row lock, which is
@@ -302,7 +304,7 @@ test("a bounded call ends its database work at the deadline and never commits la
     setTimeout(() => {
       void tenancy`select pg_advisory_unlock(hashtextextended(${`session-tenancy:${workspaceId}`}::text, 0))`.execute();
     }, 210);
-    const releaseRow = new Promise<void>((resolve) => {
+    releaseRow = new Promise<void>((resolve) => {
       setTimeout(() => {
         void row`rollback`.then(() => resolve());
       }, 700);
@@ -315,10 +317,17 @@ test("a bounded call ends its database work at the deadline and never commits la
     ).catch((reason: unknown) => reason);
     expect(error).toBeInstanceOf(Error);
     expect(Date.now() - started).toBeLessThan(480);
-    // The server is no longer running the revoke's statement.
+    // The server ends the revoke's statement at the deadline, well before the
+    // row lock it waits on goes at 700 ms. The call settles by its deadline,
+    // so the server's cancel can land a moment after it: ask until it has.
     // (The admin pool's connections are both reserved above, so ask on one of them.)
-    const active = await tenancy`select pid from pg_stat_activity
+    const activeRevoke = () => tenancy`select pid from pg_stat_activity
       where usename = ${appRole} and state = 'active' and query ilike '%update enrollments%'`;
+    let active = await activeRevoke();
+    while (active.length > 0 && Date.now() - started < 600) {
+      await pause(10);
+      active = await activeRevoke();
+    }
     expect(active).toHaveLength(0);
     await releaseRow;
     const [still] = await tenancy`select status from enrollments where id = ${enrollmentId}`;
@@ -340,6 +349,7 @@ test("a bounded call ends its database work at the deadline and never commits la
       ),
     ).toBe(true);
   } finally {
+    await releaseRow;
     tenancy.release();
     row.release();
     await client.close();
