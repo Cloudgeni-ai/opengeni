@@ -299,6 +299,7 @@ import {
 } from "@opengeni/core";
 import {
   buildFleetContextForSession,
+  fleetAgentNotice,
   listFleet,
   provisionSandbox,
   runOnSandbox,
@@ -4300,17 +4301,21 @@ function registerFleetTools(
     "sandboxes_list",
     {
       description:
-        "List the sandboxes this session can run on: its own session sandbox plus enrolled selfhosted machines. `operationAvailability` is authoritative for ordinary shell/files use: `wakeable` means the next ordinary operation will wake or restore the idle managed home sandbox, even when `liveness=offline`, `leaseLiveness=cold|draining`, or `attachable=false`. `attachable` describes an already-live swap target, not ordinary operation availability. `recovering` requires a bounded retry/typed recovery result; `unavailable` is not usable. Provider, lease, route, archive, restore, workspace, lease epoch, and route epoch remain separate truth dimensions. Use an entry `id` as an attach/swap/run_on target.",
+        "List the sandboxes this session can run on: the person's connected computers and machines (enrolled selfhosted Connected Machines, such as their Mac, Windows PC or laptop, Linux desktop or server), plus the session's own managed sandbox when the deployment has one. Check it before telling the person you cannot reach their computer; when exactly one entry fits what they mean, use it without asking which. To work on a machine (commands, files, its screen with computer_open, a browser on it with browser_open), sandbox_swap to its `id`; staying there afterwards is fine. run_on is a one-off side channel to another machine without swapping. When talking to the person, name their computers plainly; never mention sandboxes, placements, swaps, sessions, enrollments, tool names or ids. `operationAvailability` is authoritative for ordinary shell/files use: `wakeable` means the next ordinary operation will wake or restore the idle managed home sandbox, even when `liveness=offline`, `leaseLiveness=cold|draining`, or `attachable=false`. `attachable` describes an already-live swap target, not ordinary operation availability. `recovering` requires a bounded retry/typed recovery result; `unavailable` is not usable. Provider, lease, route, archive, restore, workspace, lease epoch, and route epoch remain separate truth dimensions. Use an entry `id` as an attach/swap/run_on target.",
       inputSchema: {},
     },
-    async () => json(await listFleet(services, await fleetContext())),
+    async () => {
+      const fleet = await listFleet(services, await fleetContext());
+      // The notice comes first so it is read before the machine details.
+      return json({ notice: fleetAgentNotice(fleet), ...fleet });
+    },
   );
 
   server.registerTool(
     "sandbox_attach",
     {
       description:
-        'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for home.',
+        'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for the session\'s own managed sandbox when the deployment has one.',
       inputSchema: { target: z4.string().min(1) },
     },
     async ({ target }) =>
@@ -4322,7 +4327,7 @@ function registerFleetTools(
     "sandbox_swap",
     {
       description:
-        'Swap the active sandbox for this session mid-conversation. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for home.',
+        'Swap the active sandbox for this session mid-conversation: commands, files, computer_open and browser_open then work on that machine. Staying on it is a fine end state; there is no need to swap back. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for the session\'s own managed sandbox when the deployment has one.',
       inputSchema: { target: z4.string().min(1) },
     },
     async ({ target }) =>
