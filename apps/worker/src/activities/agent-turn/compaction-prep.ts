@@ -940,6 +940,7 @@ export async function runPostAgentCompaction(
       const deferredSteer = await settleDeferredSteerAfterCompaction();
       if (deferredSteer) return { exit: deferredSteer };
       observability.error("context compaction failed", {
+        error: compactError,
         sessionId: input.sessionId,
         turnId: attempt.turnId,
         ...safeErrorDiagnostic(compactError),
