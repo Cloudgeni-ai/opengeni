@@ -416,7 +416,14 @@ authority alone for agent links.
   `host.pem` and `host.key` point through it, so an interrupted renewal
   leaves the old pair or the new one. A pair counts as current only if
   the key is the certificate's and the certificate verifies against
-  `ca.pem`; runs take a lock.
+  `ca.pem`; runs take a lock. Each run first finishes what an
+  interrupted one left: it points `host.pem` and `host.key` through a
+  valid published pair they do not both point through yet, and does a
+  restart of the agent still owed. `/etc/compute/restart-owed` is written
+  before a pair is switched in and removed only once the agent restarted
+  (or was not running), so a failure after the switch, in cleaning up or
+  in the restart, is made good by the next run (the daily timer at the
+  latest).
 - **Google's keys** (for identity tokens) are used only until their
   answer's `Cache-Control` expiry. Past it, only a successful fetch makes
   them usable again, so while Google's keys cannot be fetched no host gets
@@ -516,8 +523,15 @@ before users move to compute from Modal:
   so grant `iam.serviceAccountUser` on it to no one but the service.
 - **Revoking a host.** A GCP host's certificate renews only with a fresh
   identity token, which only that instance's metadata server can give: so
-  once the instance is deleted, its certificate and key, even stolen,
-  work until the certificate expires, a week at most, and never renew. A
+  once the instance is deleted, no new token can be had for it, and its
+  certificate and key, even stolen, never renew by themselves. The
+  service does not check offline whether an instance still exists,
+  though: an identity token the instance was given before (Google's last
+  an hour) gets a certificate until the token's `exp` plus the
+  verifier's 60 s leeway, as many times as it is presented. So what an
+  attacker took from the instance works for at most the token's remaining
+  lifetime, plus 60 s, plus the seven days of the last certificate it
+  got; with no token taken, until the certificate expires, a week at most. A
   lost instance that comes back (stopped, reset, recreated under its
   name) gets a new one by token. Off GCP, a host renews by presenting its
   certificate, and the service keeps no list of retired hosts: a stolen

@@ -35,6 +35,15 @@
 # the other, and a pair counts as current only if the key is the
 # certificate's and the certificate verifies against ca.pem. Runs are
 # serialised by a lock.
+#
+# Every run first finishes what an interrupted one left: host.pem and
+# host.key are pointed through `certificate` if that holds a valid pair
+# and they do not (a run stopped between the two, as when moving from the
+# old layout of plain files), and a restart the agent is owed is done. The
+# file restart-owed is written, durably, before a pair is switched in, and
+# removed only once the agent restarted (or was not running, so it starts
+# with the new pair): a run that fails after the switch, in cleaning up or
+# in the restart, leaves it for the next run.
 set -euo pipefail
 
 config=/etc/compute/host.env
@@ -74,6 +83,27 @@ pair() {
 }
 current() { pair host.pem host.key "${1:-0}"; }
 
+# Points host.pem and host.key through `certificate`, each in one rename.
+link_public() {
+  local file
+  for file in host.pem host.key; do
+    if [ "$(readlink "$file" 2>/dev/null)" != "certificate/$file" ]; then
+      ln -sfn "certificate/$file" "$file.new"
+      mv -T "$file.new" "$file"
+    fi
+  done
+}
+
+# Restarts the agent if it runs, so it takes up the published pair, then
+# clears the restart owed; a failed restart leaves it owed.
+activate() {
+  if systemctl is-active -q compute-host.service; then
+    systemctl restart compute-host.service
+  fi
+  rm -f restart-owed
+  sync . 2>/dev/null || sync
+}
+
 # Makes the pair in directory `$1` (host.pem, host.key) the host's, in one
 # rename, and points host.pem and host.key through it.
 publish() {
@@ -85,28 +115,34 @@ publish() {
   cp -p "$1/host.key" "$1/host.pem" "certificates/$stamp/"
   chmod 600 "certificates/$stamp/host.key" "certificates/$stamp/host.pem"
   sync -f "certificates/$stamp/host.pem" 2>/dev/null || sync
+  # Owed from before the switch until the agent restarted with the pair.
+  : >restart-owed
+  sync -f restart-owed 2>/dev/null || sync
   ln -sfn "certificates/$stamp" certificate.new
   mv -T certificate.new certificate
-  for file in host.pem host.key; do
-    if [ "$(readlink "$file" 2>/dev/null)" != "certificate/$file" ]; then
-      ln -sfn "certificate/$file" "$file.new"
-      mv -T "$file.new" "$file"
-    fi
-  done
+  link_public
   # Older pairs are no longer anyone's.
   for old in certificates/*; do
     [ "$old" = "certificates/$stamp" ] || rm -rf -- "$old"
   done
 }
 
+# What an interrupted run left: a published pair the public paths do not
+# yet both point through, and a restart owed.
+if [ -L certificate ] && pair certificate/host.pem certificate/host.key; then
+  link_public
+fi
+if [ -e restart-owed ]; then
+  log "restarting the agent for the certificate published before"
+  activate
+fi
+
 # A first certificate an operator issued for the request left here.
 if [ -s request/host.pem ] && pair request/host.pem request/host.key; then
   publish request
   rm -rf request
   log "installed the certificate issued for $COMPUTE_NAME, until $(openssl x509 -in host.pem -noout -enddate | cut -d= -f2)"
-  if systemctl is-active -q compute-host.service; then
-    systemctl restart compute-host.service
-  fi
+  activate
   exit 0
 fi
 
@@ -168,6 +204,4 @@ cmp -s "$work/ca.pem" ca.pem || mv "$work/ca.pem" ca.pem
 publish "$work"
 rm -rf request
 log "a certificate for $name by $by, until $(openssl x509 -in host.pem -noout -enddate | cut -d= -f2)"
-if systemctl is-active -q compute-host.service; then
-  systemctl restart compute-host.service
-fi
+activate
