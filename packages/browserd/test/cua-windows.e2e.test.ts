@@ -138,6 +138,18 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
       );
       expect(await supervisor.action(click)).toMatchObject({ state: "completed" });
       await until((state) => state.clicks === 1, "button click");
+
+      // Apps launch in the background by full path.
+      expect(session.capabilities.appLaunch).toBe(true);
+      observed = await supervisor.observe(reference, target.id);
+      expect(
+        await supervisor.action(
+          command(observed, {
+            type: "launch",
+            applicationId: join(process.env.SystemRoot ?? "C:\\Windows", "System32", "whoami.exe"),
+          }),
+        ),
+      ).toMatchObject({ state: "completed" });
     } finally {
       await supervisor?.close();
       fixture.kill();

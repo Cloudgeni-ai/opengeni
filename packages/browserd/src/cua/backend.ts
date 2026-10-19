@@ -76,8 +76,8 @@ export class CuaComputerBackend implements ComputerBackend {
     this.initialCapabilities = {
       semanticObservation: permissions.accessibility,
       appDiscovery: true,
-      // CUA launches macOS apps in the background without taking focus.
-      appLaunch: platform === "macos",
+      // CUA launches apps in the background without taking focus.
+      appLaunch: true,
       windowCapture: permissions.screen_recording,
       screenCapture: false,
       semanticActions: permissions.accessibility,
@@ -185,8 +185,6 @@ export class CuaComputerBackend implements ComputerBackend {
   validate(command: ComputerBackendActionCommand): Promise<void> {
     return this.run(async () => {
       if (command.action.type === "launch") {
-        if (this.identity.platform !== "macos")
-          throw unsupported("CUA app launch is available only on macOS");
         await this.target(command.targetId);
         return;
       }
@@ -774,18 +772,16 @@ export class CuaComputerBackend implements ComputerBackend {
 
   /** Start an app (or bring up its existing instance) in the background. */
   private async launch(applicationId: string): Promise<void> {
-    if (this.identity.platform !== "macos")
-      throw unsupported("CUA app launch is available only on macOS");
-    // "TextEdit.app" names the app; a bundle identifier has more than one dot.
-    const id = applicationId.trim().replace(/^([^./]+)\.app$/iu, "$1");
+    const id = applicationId.trim();
     const { data } = await callDesktop(
       this.runtime,
       "launch_app",
-      BUNDLE_ID.test(id) ? { bundle_id: id } : { name: id },
+      launchArguments(this.identity.platform, id),
       "caller-settles",
     );
-    // Launching may have happened even without a reported process.
-    if (typeof data.pid !== "number")
+    // Launching may have happened even without a reported process. On Linux
+    // the app starts through a launcher process, which CUA reports instead.
+    if (typeof data.pid !== "number" && typeof data.launcher_pid !== "number")
       throw new ComputerBackendError(
         "outcome_unknown",
         `CUA did not report a running process for ${id}; observe the desktop before launching it again`,
@@ -839,6 +835,30 @@ export class CuaComputerBackend implements ComputerBackend {
 const RECENT_OBSERVATIONS = 4;
 /** A reverse-DNS bundle identifier such as com.apple.TextEdit; anything else is an app name. */
 const BUNDLE_ID = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u;
+
+/** How CUA's launch_app names an app on each platform. */
+function launchArguments(
+  platform: "macos" | "windows" | "linux",
+  id: string,
+): Record<string, string> {
+  switch (platform) {
+    case "macos": {
+      // "TextEdit.app" names the app; a bundle identifier has more than one dot.
+      const name = id.replace(/^([^./]+)\.app$/iu, "$1");
+      return BUNDLE_ID.test(name) ? { bundle_id: name } : { name };
+    }
+    case "windows":
+      // A packaged app's AUMID ({PackageFamilyName}!{AppId}) activates that
+      // app; a full path runs that executable; a name is looked up among the
+      // installed apps, then on PATH.
+      if (id.includes("!")) return { aumid: id };
+      if (/^(?:[A-Za-z]:[\\/]|\\\\)/u.test(id)) return { path: id };
+      return { name: id };
+    case "linux":
+      // A name runs as a command, or matches an installed application.
+      return { name: id };
+  }
+}
 
 const KEY_MODIFIERS: Record<
   "macos" | "windows" | "linux",
