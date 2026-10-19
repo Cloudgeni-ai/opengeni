@@ -72,6 +72,22 @@ transparent successes: the existing failure/unknown-outcome semantics remain,
 and ambiguous mutations are never automatically reissued as fresh deliveries.
 No model-visible schema, result text, or previously sent history changes.
 
+Retrying stops early when the agent process a request was sent to is replaced.
+After each failed attempt the requester checks the enrollment's live connection
+instance (an unknown answer counts as unchanged). Once a new connection has
+replaced the request's (the agent restarted, or a compute sandbox's VM booted
+fresh), nothing will ever answer the old subject, so the request ends at once
+with `agent_offline`: "The machine's agent restarted before this request
+reached it, so it did not run." when no attempt reached a responder, otherwise
+"The machine's agent restarted while this request was in flight, so its outcome
+is unknown." A request that reached no responder is re-admitted to the new
+connection like any never-sent request, and a read whose outcome is unknown is
+read again; nothing else is re-sent, and the old subject is never rebound to the
+new connection. A streaming exec in flight ends as lost ("the machine agent
+restarted and the op did not survive"), and its own timeout also covers its
+start and first attach, so an exec whose agent never answers ends at that
+timeout.
+
 ### Enrollment maintenance boundary
 
 Migration `0498_enrollment_membership_fence.sql` repairs user-owned device approval

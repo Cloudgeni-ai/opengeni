@@ -26,15 +26,17 @@ fences sessions by the fabric owner epoch, claims the agent's connection
 instance as the NATS auth callout does, bridges `sub`/`pub`/`msg` with exactly
 the agent's NATS permissions, mints relay producer tokens, and renews the claim
 every 5 s while the session is open, asleep or not. A sleeping sandbox stays
-reachable; a message to it makes the host wake it.
+reachable: a request (a message with a reply subject) makes the host wake it,
+and any other message (acks, receipts) waits on the host until the agent next
+runs.
 A session acts only within its last confirmed lease: when renewals keep
 failing past it, the gateway ends the session as `lost` (the host opens it
 again) and forwards nothing and mints no relay credential for it meanwhile.
 An open that a later epoch overtook while it was in flight is refused as
 `stale_epoch` and never evicts the newer session.
 
-Nothing in Opengeni may message a compute agent on a timer: every message
-wakes the sandbox. Liveness comes from the gateway's session and claim. A
+Nothing in Opengeni may send a compute agent requests on a timer: every
+request wakes the sandbox. Liveness comes from the gateway's session and claim. A
 background command on a compute sandbox settles from the agent's pushed
 completion; the reconciler claims it only after that push or once it is
 retired (connection replaced, enrollment revoked), never to poll it (0846).
@@ -129,6 +131,14 @@ skips sandbox enrollments, and machine routes list machines only.
   `ComputeWakingControlRpc` asks the fabric to wake it and resends under the
   same request id until the agent answers. Every operation re-resolves the
   agent's connection instance.
+- **Restart**: when a sandbox's VM dies, the host boots it fresh on its disk
+  (programs lost, files kept), and its agent comes back on a new connection
+  instance. A request still bound to the old instance ends as soon as the new
+  one is live, as on a Connected Machine ("Control transport recovery" in
+  `docs/connected-machines.md`): a running command ends as lost because its
+  agent restarted, a read is read again from the new agent, and the request
+  is never moved to the new connection. Abandoned work therefore neither keeps
+  the lease warm nor holds up deleting the chat.
 - **Request epoch**: compute requests are machine-addressed (epoch 0), like
   `run_on`. The agent in a sandbox has no session route epoch: nothing
   acknowledges its Hello with one, so it holds 0, and a nonzero epoch (the
