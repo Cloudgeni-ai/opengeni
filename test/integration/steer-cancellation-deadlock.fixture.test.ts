@@ -230,17 +230,6 @@ describe("cancellation-settlement lane Steer cancellation deadlock production fi
         expect(steered.interruptionCount).toBe(1);
         expect(steered.wakeRevision).toBeGreaterThan(0);
         await handle.signal("sessionControl");
-        const wakeDelivery = await markSessionWorkflowWakeDelivered(dbClient.db, {
-          accountId: grant.accountId,
-          workspaceId,
-          sessionId: target.id,
-          temporalWorkflowId: workflowId,
-          wakeRevision: steered.wakeRevision,
-        });
-        expect(wakeDelivery).toEqual({
-          action: "pending_admission",
-          blocker: "pending_prompt_turn",
-        });
 
         // The workflow logically settles Steer before waiting forever for the
         // activity promise. This is the exact split-brain production state.
@@ -257,6 +246,21 @@ describe("cancellation-settlement lane Steer cancellation deadlock production fi
           return pending?.state === encodePendingActivityState("CANCEL_REQUESTED");
         });
         expect(pendingActivityId).toBeTruthy();
+
+        // Signal acceptance alone races logical settlement. CANCEL_REQUESTED
+        // follows the database settlement commit, so assert the closed attempt's
+        // physical-quiescence fence rather than the earlier queued-prompt state.
+        const wakeDelivery = await markSessionWorkflowWakeDelivered(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: target.id,
+          temporalWorkflowId: workflowId,
+          wakeRevision: steered.wakeRevision,
+        });
+        expect(wakeDelivery).toEqual({
+          action: "pending_admission",
+          blocker: "pending_quiescence",
+        });
 
         const beatsAfterCancelRequest = heartbeats;
         await waitFor(() => heartbeats >= beatsAfterCancelRequest + 3);
@@ -503,17 +507,6 @@ describe("cancellation-settlement lane Steer cancellation deadlock production fi
         expect(steered.interruptionCount).toBe(1);
         expect(steered.wakeRevision).toBeGreaterThan(0);
         await handle.signal("sessionControl");
-        const wakeDelivery = await markSessionWorkflowWakeDelivered(dbClient.db, {
-          accountId: grant.accountId,
-          workspaceId,
-          sessionId: target.id,
-          temporalWorkflowId: workflowId,
-          wakeRevision: steered.wakeRevision,
-        });
-        expect(wakeDelivery).toEqual({
-          action: "pending_admission",
-          blocker: "pending_prompt_turn",
-        });
 
         await waitFor(async () => {
           const description = await handle.describe();
@@ -524,6 +517,20 @@ describe("cancellation-settlement lane Steer cancellation deadlock production fi
           return pending?.state === encodePendingActivityState("CANCEL_REQUESTED");
         });
         expect(pendingActivityId).toBeTruthy();
+
+        // The cancellation request proves logical settlement already committed,
+        // not that the still-running activity has physically stopped.
+        const wakeDelivery = await markSessionWorkflowWakeDelivered(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: target.id,
+          temporalWorkflowId: workflowId,
+          wakeRevision: steered.wakeRevision,
+        });
+        expect(wakeDelivery).toEqual({
+          action: "pending_admission",
+          blocker: "pending_quiescence",
+        });
 
         // Stop acknowledging the server heartbeat contract without allowing
         // the local function to settle. The receipt-gated workflow closes its
