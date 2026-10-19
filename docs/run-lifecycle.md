@@ -3569,19 +3569,34 @@ may see the browser `suspending`, then resume it.
 
 **Full browser controllers.** One browser controller runs per workspace and
 placement (a Connected Machine or a box). Its browser limit defaults to half
-of the machine's memory (or its container's cgroup limit, when lower) at
+of the machine's memory (or the tightest memory limit on the controller's own
+cgroup or any of its ancestors, cgroup v1 or v2, when lower) at
 300 MiB per browser, about the p90 resident size of live agent browsers, and
 never under 8: 27 browsers on 16 GiB, 81 on 48 GiB, 147 on 86 GiB.
 `OPENGENI_BROWSERD_MAX_SESSIONS` overrides it. When a create reaches a full
 controller, the API saves the least recently used checkpoint-capable browser
 on that same controller instance that has been unused for at least five
 minutes and has no lifecycle operation in flight, through the same private
-checkpoint as an explicit suspend (actor `system:browser-capacity`; kept
-downloads are not attributed to the caller), then retries
-the create once under its own operation. Up to three candidates are tried;
-when none can be saved, the create fails with the controller's
-`capacity_exhausted` error as before. Nothing happens below the limit. The
-saved browser resumes from its working copy on its next open.
+checkpoint as an explicit suspend (actor `system:browser-capacity`), then
+retries the create once under its own operation. The candidate is claimed
+under its row lock: the save is prepared only while the browser is still
+active on the same controller instance and generation, still unused since the
+cutoff, and free of other lifecycle operations; a browser that was used, saved
+or changed meanwhile is skipped, and a browser some other request already
+saved never counts as capacity this create freed. Signing the state upload and
+provisioning the controller happen before the save is dispatched, so a failure
+there returns the candidate to active instead of stranding it in
+`suspending`. Up to three candidates are tried; when none can be saved, the
+create fails with the controller's `capacity_exhausted` error as before.
+Nothing happens below the limit. The saved browser resumes from its working
+copy on its next open.
+
+Downloads kept when a browser is saved (by capacity, an explicit suspend or a
+deadline checkpoint) follow the browser's chat, whoever's request stops it:
+a private chat's downloads become files private to that chat's owner, and a
+shared chat's become workspace files. Listing and saving kept downloads read
+them as the chat's owner only after the request is authorized for that chat,
+and nobody is charged for the capacity save's kept downloads.
 
 **Idle command containment.** An unsupervised retained command (a legacy Modal
 command, or any Docker or local background command) keeps its box warm through

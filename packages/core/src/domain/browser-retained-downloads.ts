@@ -3,9 +3,12 @@ import type { BrowserDownload, BrowserDownloadListResponse } from "@opengeni/con
 import {
   completeFileUpload,
   createFileUpload,
+  currentSessionRlsActorContext,
   getFileUpload,
+  getSessionAuthorityProjection,
   listRetainedBrowserDownloads,
   recordRetainedBrowserDownload,
+  withSessionRlsActorContext,
   type Database,
 } from "@opengeni/db";
 import { retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
@@ -44,12 +47,45 @@ export function sanitizeWorkspaceFilename(filename: string): string {
 }
 
 /**
- * Keep every completed download of a running browser as a ready workspace
- * file before its working directory goes away (suspension removes it), so the
- * download can still be listed and saved into the task's workspace afterwards,
- * wherever the task runs then. Downloads kept earlier are skipped. Each
- * download is best effort: a failure is returned and never blocks the
- * browser's own lifecycle change.
+ * Whose private files a browser's kept downloads are: the owner of a private
+ * chat, or null for a shared chat, whose downloads are workspace files.
+ */
+export async function browserDownloadPrivateOwner(
+  db: Database,
+  workspaceId: string,
+  sourceSessionId: string,
+): Promise<string | null> {
+  const authority = await getSessionAuthorityProjection(db, workspaceId, sourceSessionId);
+  if (!authority) throw new Error("the browser's chat is unavailable");
+  if (authority.visibility !== "user_private") return null;
+  if (!authority.ownerSubjectId) throw new Error("the browser's private chat has no owner");
+  return authority.ownerSubjectId;
+}
+
+/**
+ * Runs `fn` able to read and write files private to `owner`. Callers must
+ * already have authorized the browser's chat; a shared chat (null) runs as is.
+ */
+export async function withBrowserDownloadFileOwner<T>(
+  owner: string | null,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!owner) return await fn();
+  const current = currentSessionRlsActorContext();
+  return await withSessionRlsActorContext(
+    { ...(current ?? { subjectId: owner }), privateFileOwnerSubjectId: owner },
+    fn,
+  );
+}
+
+/**
+ * Keep every completed download of a running browser as a ready file before
+ * its working directory goes away (suspension removes it), so the download
+ * can still be listed and saved into the task's workspace afterwards,
+ * wherever the task runs then. A private chat's downloads stay private to its
+ * owner, whoever's request stops the browser. Downloads kept earlier are
+ * skipped. Each download is best effort: a failure is returned and never
+ * blocks the browser's own lifecycle change.
  */
 export async function retainCompletedBrowserDownloads(
   deps: { db: Database; settings: Settings; objectStorage: ObjectStorage },
@@ -58,10 +94,31 @@ export async function retainCompletedBrowserDownloads(
     workspaceId: string;
     subjectId: string | null;
     browserSessionId: string;
+    /** The browser's chat, which decides whether kept files are private. */
+    sourceSessionId: string;
     source: RetainedDownloadSource;
     /** Network endpoint the browser's controller uploads to. */
     uploadAudience: "public" | "sandbox";
   },
+): Promise<RetainBrowserDownloadsResult> {
+  let owner: string | null;
+  try {
+    owner = await browserDownloadPrivateOwner(deps.db, input.workspaceId, input.sourceSessionId);
+  } catch (error) {
+    return {
+      retained: [],
+      failed: [{ downloadId: null, error: error instanceof Error ? error.message : String(error) }],
+    };
+  }
+  return await withBrowserDownloadFileOwner(owner, () =>
+    retainCompletedBrowserDownloadsAs(deps, input, owner),
+  );
+}
+
+async function retainCompletedBrowserDownloadsAs(
+  deps: { db: Database; settings: Settings; objectStorage: ObjectStorage },
+  input: Parameters<typeof retainCompletedBrowserDownloads>[1],
+  privateOwnerSubjectId: string | null,
 ): Promise<RetainBrowserDownloadsResult> {
   const { db, objectStorage } = deps;
   const result: RetainBrowserDownloadsResult = { retained: [], failed: [] };
@@ -115,6 +172,7 @@ export async function retainCompletedBrowserDownloads(
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         fileId,
+        privateOwnerSubjectId,
         filename: download.filename,
         safeFilename,
         contentType,

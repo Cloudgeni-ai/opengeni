@@ -19,6 +19,7 @@ import {
   prepareBrowserSessionCreate,
   recordRetainedBrowserDownload,
   settleBrowserDownloadSaveFailure,
+  withSessionRlsActorContext,
 } from "../src";
 
 let available = true;
@@ -251,12 +252,17 @@ describe("browser download saves", () => {
 });
 
 describe("retained browser downloads", () => {
-  async function retainedFile(scope: Awaited<ReturnType<typeof fixture>>, ready: boolean) {
+  async function retainedFile(
+    scope: Awaited<ReturnType<typeof fixture>>,
+    ready: boolean,
+    privateOwnerSubjectId: string | null = null,
+  ) {
     const fileId = crypto.randomUUID();
     const created = await createFileUpload(client.db, {
       accountId: scope.accountId,
       workspaceId: scope.workspaceId,
       fileId,
+      privateOwnerSubjectId,
       filename: "report.pdf",
       safeFilename: "report.pdf",
       contentType: "application/octet-stream",
@@ -269,6 +275,33 @@ describe("retained browser downloads", () => {
     if (ready) await completeFileUpload(client.db, scope.workspaceId, created.uploadId);
     return { fileId, uploadId: created.uploadId };
   }
+
+  test("keeps a private chat's download visible only to that chat's owner", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const owner = scope.actorSubjectId;
+    const asOwner = { subjectId: owner, privateFileOwnerSubjectId: owner };
+    const kept = await withSessionRlsActorContext(asOwner, async () => {
+      const file = await retainedFile(scope, true, owner);
+      return await recordRetainedBrowserDownload(client.db, { ...scope, ...file });
+    });
+    expect(
+      await withSessionRlsActorContext(asOwner, () =>
+        listRetainedBrowserDownloads(client.db, scope),
+      ),
+    ).toMatchObject([{ fileId: kept.fileId }]);
+    // Another member of the workspace, or a request with no private owner,
+    // never sees the owner's private download.
+    const other = `user:browser-download-other-${crypto.randomUUID()}`;
+    for (const actor of [
+      { subjectId: other, privateFileOwnerSubjectId: other },
+      { subjectId: other, privateFileOwnerSubjectId: null },
+    ]) {
+      expect(
+        await withSessionRlsActorContext(actor, () => getRetainedBrowserDownload(client.db, scope)),
+      ).toBeNull();
+    }
+  });
 
   test("keeps a completed download saveable after its controller generation is gone", async () => {
     if (!available) return;

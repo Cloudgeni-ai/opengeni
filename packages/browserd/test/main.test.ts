@@ -253,3 +253,49 @@ test("a container's own memory limit bounds the machine memory", () => {
     ),
   ).toBe(64 * GiB);
 });
+
+test("a nested cgroup or a tighter ancestor bounds the machine memory", () => {
+  const GiB = 1024 ** 3;
+  const limits = (values: Record<string, string>) => (path: string) => {
+    const value = values[path];
+    if (value === undefined) throw new Error("ENOENT");
+    return value;
+  };
+  // cgroup v2: the process's own nested limit.
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({
+        "/proc/self/cgroup": "0::/system.slice/agent.service\n",
+        "/sys/fs/cgroup/system.slice/agent.service/memory.max": `${2 * GiB}\n`,
+        "/sys/fs/cgroup/system.slice/memory.max": "max\n",
+      }),
+    ),
+  ).toBe(2 * GiB);
+  // cgroup v2: an ancestor's limit is tighter than the process's own.
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({
+        "/proc/self/cgroup": "0::/user.slice/user-1000.slice/session.scope\n",
+        "/sys/fs/cgroup/user.slice/user-1000.slice/session.scope/memory.max": "max\n",
+        "/sys/fs/cgroup/user.slice/memory.max": `${12 * GiB}\n`,
+      }),
+    ),
+  ).toBe(12 * GiB);
+  // cgroup v1: the memory controller's hierarchy.
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({
+        "/proc/self/cgroup": "5:cpu,cpuacct:/docker/abc\n4:memory:/docker/abc\n",
+        "/sys/fs/cgroup/memory/docker/abc/memory.limit_in_bytes": `${3 * GiB}\n`,
+        "/sys/fs/cgroup/memory/docker/memory.limit_in_bytes": "9223372036854771712\n",
+      }),
+    ),
+  ).toBe(3 * GiB);
+  // Membership outside the cgroup namespace's root is ignored safely.
+  expect(
+    machineMemoryBytes(64 * GiB, limits({ "/proc/self/cgroup": "0::/../../elsewhere\n" })),
+  ).toBe(64 * GiB);
+});

@@ -338,22 +338,64 @@ export function defaultMaxBrowserSessions(memoryBytes: number): number {
   );
 }
 
-/** Physical memory, or a container's own cgroup limit when that is lower. */
+/**
+ * Physical memory, or the tightest memory limit of this process's cgroup and
+ * its ancestors when that is lower. A browser controller started inside a
+ * service or container cgroup is bound by every limit above it, not just the
+ * one at the cgroup mount root.
+ */
 export function machineMemoryBytes(
   physicalBytes: number = totalmem(),
   readLimit: (path: string) => string = (path) => readFileSync(path, "utf8"),
 ): number {
-  for (const path of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
+  let lowest = physicalBytes;
+  const consider = (path: string) => {
     try {
       const value = readLimit(path).trim();
-      if (!/^[0-9]+$/u.test(value)) continue;
+      // "max" (cgroup v2) means unlimited.
+      if (!/^[0-9]+$/u.test(value)) return;
       const limit = Number(value);
-      if (Number.isSafeInteger(limit) && limit > 0 && limit < physicalBytes) return limit;
+      // cgroup v1 reports "unlimited" as a huge sentinel, past the safe range.
+      if (Number.isSafeInteger(limit) && limit > 0 && limit < lowest) lowest = limit;
     } catch {
-      // Not in a memory-limited cgroup namespace.
+      // No limit file at this level.
+    }
+  };
+  let membership = "";
+  try {
+    membership = readLimit("/proc/self/cgroup");
+  } catch {
+    // Not Linux, or /proc is unavailable: only the mount roots apply.
+  }
+  for (const line of membership.split("\n")) {
+    const match = /^[0-9]+:([^:]*):(.*)$/u.exec(line.trim());
+    if (!match) continue;
+    const [, controllers, path] = match as unknown as [string, string, string];
+    if (controllers === "") {
+      for (const directory of cgroupAncestors("/sys/fs/cgroup", path)) {
+        consider(`${directory}/memory.max`);
+      }
+    } else if (controllers.split(",").includes("memory")) {
+      for (const directory of cgroupAncestors("/sys/fs/cgroup/memory", path)) {
+        consider(`${directory}/memory.limit_in_bytes`);
+      }
     }
   }
-  return physicalBytes;
+  consider("/sys/fs/cgroup/memory.max");
+  consider("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+  return lowest;
+}
+
+/** A cgroup's directory and each parent's, innermost first, under its mount. */
+function cgroupAncestors(mount: string, path: string): string[] {
+  const segments = path
+    .split("/")
+    .filter((segment) => segment && segment !== "." && segment !== "..");
+  const directories: string[] = [];
+  for (let depth = segments.length; depth > 0; depth -= 1) {
+    directories.push(`${mount}/${segments.slice(0, depth).join("/")}`);
+  }
+  return directories;
 }
 
 function environmentInteger(
