@@ -85,8 +85,8 @@ async function loadAsset(file: string): Promise<string> {
 }
 
 // "The agent ships inside the control-plane" (cont.): the committed install
-// scripts default their release-asset base URL to the public archive
-// (get.opengeni.ai) so a from-source / standalone copy still works. But a
+// scripts default their release-asset base URL to the managed application
+// (app.opengeni.ai) so a from-source / standalone copy still works. But a
 // DEPLOYED control plane must serve a script that pulls the agent from ITSELF —
 // the per-SHA binary baked into THIS image, via the /agent/* routes below — so
 // `curl https://<this-host>/install.sh | sh` installs the exact agent that
@@ -102,7 +102,7 @@ type DefaultRewrite = { from: string; to: string };
 const DEFAULT_BASE_REWRITES: Record<string, (base: string) => DefaultRewrite[]> = {
   "install.sh": (base) => [
     {
-      from: 'OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"',
+      from: 'OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"',
       to: `OPENGENI_INSTALL_DEFAULT_BASE_URL="${base}"`,
     },
     {
@@ -112,7 +112,7 @@ const DEFAULT_BASE_REWRITES: Record<string, (base: string) => DefaultRewrite[]> 
   ],
   "install.ps1": (base) => [
     {
-      from: "$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'",
+      from: "$OpengeniInstallDefaultBaseUrl = 'https://app.opengeni.ai'",
       to: `$OpengeniInstallDefaultBaseUrl = '${base}'`,
     },
     {

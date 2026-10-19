@@ -28,7 +28,7 @@ use crate::enrollment::InstallIdentity;
 use crate::DEFAULT_API_URL;
 
 /// Public fallback used only before the machine has any enrolled deployment.
-const DEFAULT_BASE_URL: &str = "https://get.opengeni.ai";
+const DEFAULT_BASE_URL: &str = DEFAULT_API_URL;
 // Linux current_exe follows the running inode. After replacement it can return
 // a deleted path; retain the install identity for retries and successor exec.
 static INSTALLED_EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();

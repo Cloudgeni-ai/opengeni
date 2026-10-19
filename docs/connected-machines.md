@@ -952,6 +952,13 @@ the ordinary background service online. A same-version connection is additive an
 does not restart the process or interrupt existing commands. A real upgrade
 restarts once when activation requires it; subsequent connection files load live.
 
+A successor started by a manual installer has no managed-update receipt. Its
+authoritative Hello settles the replaced process's unfinished request as
+`accepting_process_replaced`, not a successful automatic update. The installed
+version remains authoritative for current/ahead status; an old version still
+shows the failed attempt and can retry. A reconnect by the same process does not
+terminate its own active update, and superseded processes cannot settle it.
+
 The running agent captures its executable install path before admitting managed
 updates. Unix apply, rollback/retry, and successor exec use that stable path: a
 late executable lookup can name the old deleted inode after atomic replacement.
