@@ -138,7 +138,10 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
     expected: equalsForkId,
   },
   status: { why: "nothing runs yet", expected: fresh("idle") },
-  temporal_workflow_id: { why: "nothing runs yet", expected: fresh(null) },
+  temporal_workflow_id: {
+    why: "its own workflow, as session start gives every session",
+    expected: ({ fork }) => `session-${fork.id}`,
+  },
   active_turn_id: { why: "nothing runs yet", expected: fresh(null) },
   execution_context_turn_id: { why: "nothing runs yet", expected: fresh(null) },
   last_sequence: {

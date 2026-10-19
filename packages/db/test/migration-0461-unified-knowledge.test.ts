@@ -93,6 +93,10 @@ const forwardMigrations = [
   // Replaces the file ownership trigger from 0461 and reads 0499's file
   // read-capability table; replay after both.
   "0854_file_visibility.sql",
+  // Rewrites the fork routines from replayed 0738; replay after it.
+  "0855_session_fork_agent_parity.sql",
+  // Patches 0855's fork routines and backfills over 0560's import column.
+  "0856_session_fork_workflow_identity.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];
 const sourceTaskId = crypto.randomUUID();
