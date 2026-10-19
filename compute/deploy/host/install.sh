@@ -148,15 +148,22 @@ source /etc/compute/host.env
 
 log "state volume"
 install -d -m 755 /var/lib/compute
-if [ ! -f /etc/compute/state-volume.uuid ] && [ -n "$state_device" ]; then
+# The marker names the state volume this host uses. It is written whole
+# (see below); an empty one, from an interrupted older write, counts as
+# none.
+recorded=$(cat /etc/compute/state-volume.uuid 2>/dev/null || true)
+if [ -z "$recorded" ] && [ -n "$state_device" ]; then
   if mountpoint -q /var/lib/compute; then
     # An earlier attempt formatted and mounted this device but stopped
     # before recording it; anything else mounted there is refused.
-    [ "$(findmnt -no UUID /var/lib/compute)" = "$(blkid -s UUID -o value "$state_device" 2>/dev/null || true)" ] ||
+    have=$(findmnt -no UUID /var/lib/compute || true)
+    want=$(blkid -s UUID -o value "$state_device" 2>/dev/null || true)
+    [ -n "$have" ] && [ "$have" = "$want" ] ||
       fail "/var/lib/compute is mounted already, not from $state_device; leave out --state-device"
   else
     mkfs.xfs -q -f -m reflink=1 "$state_device"
     uuid=$(blkid -s UUID -o value "$state_device")
+    [ -n "$uuid" ] || fail "$state_device has no file system UUID after formatting"
     sed -i '\# /var/lib/compute #d' /etc/fstab
     echo "UUID=$uuid /var/lib/compute xfs noatime,nofail 0 2" >>/etc/fstab
     systemctl daemon-reload
@@ -164,12 +171,14 @@ if [ ! -f /etc/compute/state-volume.uuid ] && [ -n "$state_device" ]; then
   fi
 fi
 mountpoint -q /var/lib/compute || fail "/var/lib/compute is not a mount point: mount the state volume there, or pass --state-device"
-mounted=$(findmnt -no UUID /var/lib/compute)
-if [ -f /etc/compute/state-volume.uuid ]; then
-  [ "$(cat /etc/compute/state-volume.uuid)" = "$mounted" ] ||
-    fail "/var/lib/compute holds $mounted, not the state volume $(cat /etc/compute/state-volume.uuid) recorded for this host"
+mounted=$(findmnt -no UUID /var/lib/compute || true)
+[ -n "$mounted" ] || fail "the file system on /var/lib/compute has no UUID; use one that has (XFS does)"
+if [ -n "$recorded" ]; then
+  [ "$recorded" = "$mounted" ] ||
+    fail "/var/lib/compute holds $mounted, not the state volume $recorded recorded for this host"
 else
-  echo "$mounted" >/etc/compute/state-volume.uuid
+  echo "$mounted" >/etc/compute/state-volume.uuid.part
+  mv /etc/compute/state-volume.uuid.part /etc/compute/state-volume.uuid
 fi
 [ "$(findmnt -no FSTYPE /var/lib/compute)" = xfs ] ||
   log "warning: the state volume is not XFS; saves and clones copy instead of sharing extents"
