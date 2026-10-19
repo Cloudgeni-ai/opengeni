@@ -174,10 +174,25 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
   120_000,
 );
 
-/** Whether this process runs at high (or system) integrity, the elevation
- * the CUA driver it starts inherits and checks for itself. */
+/** Whether this process runs elevated, which the CUA driver it starts
+ * inherits and checks for itself. An administrator's token is a member of the
+ * Administrators role only when elevated (UAC filters it otherwise). */
 function elevated(): boolean {
-  const groups = Bun.spawnSync(["whoami", "/groups"], { stderr: "ignore" });
-  if (groups.exitCode !== 0) throw new Error("whoami /groups failed");
-  return /S-1-16-(?:12288|16384)\b/u.test(groups.stdout.toString());
+  const probe = Bun.spawnSync([
+    join(
+      process.env.SystemRoot ?? "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    ),
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+  ]);
+  const answer = probe.stdout.toString().trim();
+  if (probe.exitCode !== 0 || (answer !== "True" && answer !== "False"))
+    throw new Error(`elevation probe failed: ${answer} ${probe.stderr.toString().trim()}`);
+  return answer === "True";
 }
