@@ -56,9 +56,10 @@ class Fixture implements CuaDesktopRuntime {
         window_bounds: { x: 50, y: 50, width: 200, height: 100 },
       };
       if (args.include_accessibility_tree) {
-        // New worker defaults to Markdown; the Mac adapter needs structured
-        // elements and the Markdown rows' unindexed text.
-        if (!(this instanceof WindowsFixture)) expect(args.tree_format).toBe("both");
+        // The worker defaults to Markdown on every platform and returns
+        // structured elements only when asked; the adapter needs both.
+        expect(args.tree_format).toBe("both");
+        expect(args.timeout_ms).toBe(this instanceof WindowsFixture ? 5_000 : undefined);
         const snapshot = ++this.snapshot;
         Object.assign(data, {
           snapshot_id: `s${snapshot}`,

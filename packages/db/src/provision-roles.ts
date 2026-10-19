@@ -17,6 +17,7 @@ import {
   SUBSCRIPTION_RENAMED_ROUTINES,
   SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
   BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
+  MAINTENANCE_PROBE_OWNER_ROUTINES,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -1832,6 +1833,23 @@ BEGIN
         ${literal(schema)}, ${literal(role)}
       );
     END IF;
+    -- 0851's migration grants the atomic agent-child creation seam only to
+    -- roles that existed then; a role provisioned later needs it here too.
+    IF to_regprocedure(
+      format(
+        '%I.create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
     FOREACH routine_signature IN ARRAY ARRAY[${SUBSCRIPTION_SNAPSHOT_VALIDATOR_ROUTINES.map(literal).join(", ")}] LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
         EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);
@@ -2251,6 +2269,12 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    FOREACH routine_signature IN ARRAY ARRAY[${MAINTENANCE_PROBE_OWNER_ROUTINES.map(literal).join(",")} ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION opengeni_private.%s FROM PUBLIC, %I',
+          routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     FOREACH routine_signature IN ARRAY ${retiringOwnerOnlyRoutines} LOOP
       IF to_regprocedure(routine_signature) IS NOT NULL THEN
         EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC, %I',
@@ -2590,6 +2614,18 @@ BEGIN
       EXECUTE format('REVOKE ALL (backend_pid,transaction_id,data_schema,account_id,workspace_id) ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.usage_allowance_capabilities FROM PUBLIC;
     END IF;
+    IF to_regclass('opengeni_private.usage_maintenance_due') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.usage_maintenance_due FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (data_schema,kind,workspace_id,source_id,due_at,account_id,seen_membership_revision,membership_ready) ON TABLE opengeni_private.usage_maintenance_due FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.usage_maintenance_due FROM PUBLIC;
+      REVOKE ALL (data_schema,kind,workspace_id,source_id,due_at,account_id,seen_membership_revision,membership_ready) ON TABLE opengeni_private.usage_maintenance_due FROM PUBLIC;
+    END IF;
+    IF to_regclass('opengeni_private.usage_allowance_membership_changes') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.usage_allowance_membership_changes FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (data_schema,account_id,revision,changed_at) ON TABLE opengeni_private.usage_allowance_membership_changes FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.usage_allowance_membership_changes FROM PUBLIC;
+      REVOKE ALL (data_schema,account_id,revision,changed_at) ON TABLE opengeni_private.usage_allowance_membership_changes FROM PUBLIC;
+    END IF;
     IF to_regclass('opengeni_private.session_file_attachments') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.session_file_attachments, opengeni_private.session_file_read_capabilities FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.session_file_attachments, opengeni_private.session_file_read_capabilities FROM PUBLIC;
@@ -2652,6 +2688,8 @@ BEGIN
         opengeni_private.read_organization_slack_bot_message(uuid,uuid,uuid,uuid) FROM PUBLIC;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
+      'sync_usage_maintenance_due()',
+      'arm_usage_allowances_for_membership()',
       'read_sender_connection(uuid,uuid,uuid,text)',
       'validate_mcp_account_bindings(jsonb,jsonb)',
       'fence_mcp_account_bindings()',

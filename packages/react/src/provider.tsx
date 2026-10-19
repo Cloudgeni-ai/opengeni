@@ -61,6 +61,11 @@ export type OpenGeniProviderProps = {
    * component shows the host's own words and language. Missing keys fall back to English.
    */
   messages?: OpenGeniMessages | undefined;
+  /**
+   * The product name people know, shown wherever the built-in text names the product.
+   * Default "Opengeni".
+   */
+  productName?: string | undefined;
   children?: ReactNode;
 };
 
@@ -78,6 +83,7 @@ export function OpenGeniProvider({
   formatError,
   locale,
   messages,
+  productName,
   children,
 }: OpenGeniProviderProps) {
   const [workspaceControlEvent, setWorkspaceControlEvent] = useState<WorkspaceControlEvent | null>(
@@ -375,7 +381,7 @@ export function OpenGeniProvider({
     ],
   );
   return (
-    <OpenGeniMessagesProvider locale={locale} messages={messages}>
+    <OpenGeniMessagesProvider locale={locale} messages={messages} productName={productName}>
       <ErrorMessageContext.Provider value={formatError}>
         <OpenGeniContext.Provider value={value}>
           {children}

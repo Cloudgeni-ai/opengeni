@@ -1381,6 +1381,10 @@ describe("release image workflow contract", () => {
   test("agent publication creates only immutable-compatible versioned releases", async () => {
     const agentRelease = await workflow("agent-release.yml");
 
+    expect(agentRelease).toContain("https://app.opengeni.ai/install.sh");
+    expect(agentRelease).toContain("https://app.opengeni.ai/install.ps1");
+    expect(agentRelease).not.toContain("https://get.opengeni.ai/install.");
+
     expect(agentRelease).toContain(
       "uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65",
     );

@@ -35,6 +35,14 @@ const BROWSERD_BINARY_ENV: &str = "OPENGENI_BROWSERD_BINARY";
 const AGENT_BROWSER_BINARY_ENV: &str = "OPENGENI_BROWSERD_AGENT_BROWSER_BINARY";
 const LIGHTPANDA_BINARY_ENV: &str = "OPENGENI_BROWSERD_LIGHTPANDA_BINARY";
 const COMPUTER_NATIVE_BINARY_ENV: &str = "OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY";
+/// Helper file names. People see them as process names (Activity Monitor, Task
+/// Manager), so they carry no product name: an app that runs this agent under its
+/// own name shows only that name.
+pub(crate) const BROWSERD_FILE: &str = "browserd";
+pub(crate) const COMPUTER_NATIVE_FILE: &str = "computer-native";
+/// The names installer layouts and earlier releases put beside the agent.
+const LEGACY_BROWSERD_FILE: &str = "opengeni-browserd";
+const LEGACY_COMPUTER_NATIVE_FILE: &str = "opengeni-computer-native";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_READY_LINE_BYTES: usize = 4_096;
 const MAX_STARTUP_DIAGNOSTIC_BYTES: usize = 4_096;
@@ -451,19 +459,22 @@ fn take_sidecar_pipes(
 }
 
 fn configure_companion_binaries(command: &mut Command, browserd_binary: &Path) {
-    for (environment, name) in [
-        (AGENT_BROWSER_BINARY_ENV, companion_name("agent-browser")),
-        (LIGHTPANDA_BINARY_ENV, companion_name("lightpanda")),
+    for (environment, names) in [
+        (AGENT_BROWSER_BINARY_ENV, &["agent-browser"][..]),
+        (LIGHTPANDA_BINARY_ENV, &["lightpanda"][..]),
         (
             COMPUTER_NATIVE_BINARY_ENV,
-            companion_name("opengeni-computer-native"),
+            &[COMPUTER_NATIVE_FILE, LEGACY_COMPUTER_NATIVE_FILE][..],
         ),
     ] {
         // Explicit operator overrides remain authoritative. Release and local
         // app bundles need no configuration: companions installed beside
         // browserd are forwarded privately to the child.
         if std::env::var_os(environment).is_none() {
-            if let Some(path) = discover_companion_binary(browserd_binary, &name) {
+            if let Some(path) = names
+                .iter()
+                .find_map(|name| discover_companion_binary(browserd_binary, &companion_name(name)))
+            {
                 command.env(environment, path);
             }
         }
@@ -1168,16 +1179,17 @@ fn discover_browserd_binary() -> PlatformResult<PathBuf> {
         let executable = std::env::current_exe()
             .map_err(|error| PlatformError::from_io("resolve running agent path", &error))?;
         let parent = executable.parent().unwrap_or_else(|| Path::new("."));
-        let name = if cfg!(windows) {
-            "opengeni-browserd.exe"
-        } else {
-            "opengeni-browserd"
-        };
-        vec![
-            parent.join(name),
-            parent.join("../Helpers").join(name),
-            parent.join("../Resources").join(name),
-        ]
+        [BROWSERD_FILE, LEGACY_BROWSERD_FILE]
+            .into_iter()
+            .map(companion_name)
+            .flat_map(|name| {
+                [
+                    parent.join(&name),
+                    parent.join("../Helpers").join(&name),
+                    parent.join("../Resources").join(&name),
+                ]
+            })
+            .collect()
     };
     candidates
         .into_iter()
@@ -2062,7 +2074,7 @@ mod tests {
         let environment = command.as_std().get_envs().collect::<HashMap<_, _>>();
         for (key, name) in [
             (AGENT_BROWSER_BINARY_ENV, "agent-browser"),
-            (COMPUTER_NATIVE_BINARY_ENV, "opengeni-computer-native"),
+            (COMPUTER_NATIVE_BINARY_ENV, COMPUTER_NATIVE_FILE),
         ] {
             let expected = runtime.join(companion_name(name));
             assert_eq!(
@@ -2267,9 +2279,7 @@ mod tests {
         let environment_capture = temporary.path().join("sidecar-environment");
         let agent_browser = temporary.path().join(companion_name("agent-browser"));
         let lightpanda = temporary.path().join(companion_name("lightpanda"));
-        let computer_native = temporary
-            .path()
-            .join(companion_name("opengeni-computer-native"));
+        let computer_native = temporary.path().join(companion_name(COMPUTER_NATIVE_FILE));
         for companion in [&agent_browser, &lightpanda, &computer_native] {
             std::fs::write(companion, "companion").expect("write sidecar companion");
             std::fs::set_permissions(companion, std::fs::Permissions::from_mode(0o700))

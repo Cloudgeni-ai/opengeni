@@ -1,5 +1,6 @@
 import { attachedBrowserViewer } from "../attached-browser-viewer";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import sharp from "sharp";
 import {
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
@@ -172,6 +173,10 @@ type ActiveComputerControllerCallback<T> = (input: {
 }) => Promise<T>;
 
 const MODEL_COMPUTER_FRAME_MAX_BYTES = 256 * 1024;
+const MODEL_COMPUTER_FRAME_ATTEMPTS = [
+  { format: "jpeg", quality: 55, maxWidth: 1_024, maxHeight: 768 },
+  { format: "jpeg", quality: 30, maxWidth: 640, maxHeight: 480 },
+] as const;
 
 type ComputerFrameCaptureClient = {
   capture(
@@ -196,32 +201,54 @@ export async function captureModelComputerFrame(
   sessionClient: ComputerFrameCaptureClient,
   expected: ExpectedComputerFrameEvidence,
 ): Promise<ComputerControlFrame> {
-  let captured = validateComputerFrameForApi(
-    await sessionClient.capture(expected.targetId, {
-      format: "jpeg",
-      quality: 55,
-      maxWidth: 1_024,
-      maxHeight: 768,
-    }),
-    expected,
-  );
-  if (captured.data.byteLength > MODEL_COMPUTER_FRAME_MAX_BYTES) {
-    captured = validateComputerFrameForApi(
-      await sessionClient.capture(expected.targetId, {
-        format: "jpeg",
-        quality: 30,
-        maxWidth: 640,
-        maxHeight: 480,
-      }),
+  for (const options of MODEL_COMPUTER_FRAME_ATTEMPTS) {
+    const captured = validateComputerFrameForApi(
+      await sessionClient.capture(expected.targetId, options),
       expected,
     );
+    const fitted = await fitModelComputerFrame(captured, expected, options.quality);
+    if (fitted) return fitted;
   }
-  if (captured.data.byteLength > MODEL_COMPUTER_FRAME_MAX_BYTES) {
-    throw new BrowserControlProtocolError(
-      "computer screenshot could not honor the model image byte bound",
-    );
+  throw new ApiHttpError(422, {
+    code: "limit_exceeded",
+    message:
+      "This screen image stays too large for the model even after compression. Observe a smaller window instead.",
+    retryable: false,
+    outcomeUnknown: false,
+  });
+}
+
+/** Some adapters (for example CUA) only produce PNG, which ignores the JPEG
+ * request and can exceed the model bound on photographic content. Re-encode
+ * the exact same pixels as JPEG: frame identity and dimensions are unchanged,
+ * so pointer coordinates bound to this frame stay valid. */
+async function fitModelComputerFrame(
+  frame: ComputerControlFrame,
+  expected: ExpectedComputerFrameEvidence,
+  quality: number,
+): Promise<ComputerControlFrame | null> {
+  if (frame.data.byteLength <= MODEL_COMPUTER_FRAME_MAX_BYTES) return frame;
+  if (frame.mediaType !== "image/png") return null;
+  const jpeg = await sharp(frame.data, { limitInputPixels: 4_096 * 4_096, failOn: "error" })
+    .flatten({ background: "#ffffff" })
+    .jpeg({ quality })
+    .toBuffer({ resolveWithObject: true });
+  if (
+    jpeg.info.width !== frame.metadata.width ||
+    jpeg.info.height !== frame.metadata.height ||
+    jpeg.data.byteLength > MODEL_COMPUTER_FRAME_MAX_BYTES
+  ) {
+    return null;
   }
-  return captured;
+  const data = new Uint8Array(jpeg.data);
+  const metadataHeader = Buffer.from(
+    JSON.stringify({
+      ...frame.metadata,
+      mediaType: "image/jpeg",
+      sha256: createHash("sha256").update(data).digest("hex"),
+    }),
+  ).toString("base64url");
+  return validateComputerFrameForApi({ data, mediaType: "image/jpeg", metadataHeader }, expected);
 }
 
 /** One validated screen frame, served as sandboxed, non-embeddable user content. */

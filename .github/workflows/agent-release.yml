@@ -768,8 +768,8 @@ jobs:
             opengeni-agent v${{ needs.guard.outputs.version }} — cross-platform signed release.
 
             Install (read the script first — it is short, POSIX, contains no secrets):
-              Linux/macOS: `curl -fsSL https://get.opengeni.ai/install.sh | sh`
-              Windows:     `irm https://get.opengeni.ai/install.ps1 | iex`
+              Linux/macOS: `curl -fsSL https://app.opengeni.ai/install.sh | sh`
+              Windows:     `irm https://app.opengeni.ai/install.ps1 | iex`
 
             Every binary is minisign-signed (verify against the pinned key) + sha256'd.
             macOS/Windows OS-native code-signing is a creds-drop-in (see release notes

@@ -31,8 +31,8 @@ import {
 import { createProviderCommandRetainer } from "@opengeni/db/retained-provider-commands";
 import { createObservability } from "@opengeni/observability";
 import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
   testSettings,
 } from "@opengeni/testing";
 import {
@@ -59,13 +59,13 @@ const SETTINGS = testSettings({
   sandboxLeaseReaperPeriodMs: 30_000,
 });
 
-let shared: SharedTestDatabase | null = null;
+let shared: RestrictedRuntimeTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("worker-ended-epoch-blockers");
+  shared = await acquireRestrictedRuntimeTestDatabase("worker-ended-epoch-blockers", "public");
   if (!shared) throw new Error("Real PostgreSQL required for ended-epoch blocker regressions");
   admin = shared.admin;
   client = createDb(shared.appUrl);

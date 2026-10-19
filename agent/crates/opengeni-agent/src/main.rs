@@ -476,9 +476,17 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     ensure_macos_desktop_grants();
 
     // A desktop app starts this agent as its own helper. Chrome's attached-browser
-    // bridge then has to point at this copy, since no service install wrote it.
+    // bridge then has to point at this copy, since no service install wrote it,
+    // unless the app's people don't use the extension: then this agent leaves the
+    // bridge to the other agents on the computer.
     if hosted_by_desktop_app() {
-        register_hosted_native_host();
+        if hosted_browser_extension_value(
+            std::env::var_os(DESKTOP_BROWSER_EXTENSION_ENV).as_deref(),
+        ) {
+            register_hosted_native_host();
+        } else {
+            release_hosted_native_host();
+        }
     }
 
     // Connect if we have no persisted connection yet ("connect-if-needed").
@@ -843,6 +851,10 @@ fn restart_after_verified_update(handover: &CarriedHandover) -> anyhow_lite::Res
 /// owns the operating-system permission prompts and restarts the agent itself.
 const DESKTOP_HOST_ENV: &str = "OPENGENI_AGENT_HOST";
 
+/// Set to `off` by a desktop app whose people don't use the attached-browser
+/// Chrome extension.
+const DESKTOP_BROWSER_EXTENSION_ENV: &str = "OPENGENI_AGENT_BROWSER_EXTENSION";
+
 /// The screen-control permissions as JSON. A fresh process reads macOS's current
 /// answer; a long-running one can keep seeing a Screen Recording denial that the
 /// person has since changed, until it restarts.
@@ -887,6 +899,31 @@ fn hosted_by_desktop_app() -> bool {
 
 fn hosted_by_desktop_app_value(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_some_and(|value| value == "desktop-app")
+}
+
+fn hosted_browser_extension_value(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_none_or(|value| value != "off")
+}
+
+/// Removes a bridge registration an earlier run of this agent wrote, so the
+/// extension reaches the computer's other agent again.
+fn release_hosted_native_host() {
+    let (Ok(binary), Some(home)) = (
+        update::installed_executable(),
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .filter(|home| !home.is_empty())
+            .map(std::path::PathBuf::from),
+    ) else {
+        return;
+    };
+    match browser_bridge::remove_native_host_manifests_for(&binary, &home) {
+        Ok(removed) => {
+            for manifest in removed {
+                info!(path = %manifest.display(), "removed this agent's Chrome Native Messaging host");
+            }
+        }
+        Err(error) => warn!(%error, "could not remove this agent's attached-browser bridge"),
+    }
 }
 
 fn register_hosted_native_host() {
@@ -1355,7 +1392,7 @@ mod anyhow_lite {
 
 #[cfg(test)]
 mod desktop_host_tests {
-    use super::hosted_by_desktop_app_value;
+    use super::{hosted_browser_extension_value, hosted_by_desktop_app_value};
     use std::ffi::OsStr;
 
     #[test]
@@ -1364,6 +1401,13 @@ mod desktop_host_tests {
         assert!(!hosted_by_desktop_app_value(None));
         assert!(!hosted_by_desktop_app_value(Some(OsStr::new(""))));
         assert!(!hosted_by_desktop_app_value(Some(OsStr::new("1"))));
+    }
+
+    #[test]
+    fn a_desktop_app_turns_the_browser_extension_bridge_off_explicitly() {
+        assert!(hosted_browser_extension_value(None));
+        assert!(hosted_browser_extension_value(Some(OsStr::new("on"))));
+        assert!(!hosted_browser_extension_value(Some(OsStr::new("off"))));
     }
 }
 

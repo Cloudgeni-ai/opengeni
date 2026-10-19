@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing";
 import {
   acquireLease,
   bootstrapWorkspace,
@@ -43,10 +46,10 @@ import {
   reconcileConnectedMachineBackgroundCommands as reconcile,
   reconcileConnectedCommandOutputReleases as releaseOutput,
 } from "../src/activities/sandbox-lease";
-let shared: SharedTestDatabase;
+let shared: RestrictedRuntimeTestDatabase;
 let client: ReturnType<typeof createDb>;
 beforeAll(async () => {
-  const db = await acquireSharedTestDatabase("connected-command-cleanup");
+  const db = await acquireRestrictedRuntimeTestDatabase("connected-command-cleanup", "public");
   if (!db) throw new Error("PostgreSQL required");
   shared = db;
   client = createDb(db.appUrl);

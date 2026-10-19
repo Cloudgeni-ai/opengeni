@@ -3591,7 +3591,8 @@ there returns the candidate to active instead of stranding it in
 `suspending`. Up to three candidates are tried; when none can be saved, the
 create fails with the controller's `capacity_exhausted` error as before.
 Nothing happens below the limit. The saved browser resumes from its working
-copy on its next open.
+copy on its next open; a resume that reaches a full controller makes room the
+same way, once, without saving the browser being resumed.
 
 Downloads kept when a browser is saved (by capacity, an explicit suspend or a
 deadline checkpoint) follow the browser's chat, whoever's request stops it:

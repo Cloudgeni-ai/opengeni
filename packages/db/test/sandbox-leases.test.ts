@@ -1,6 +1,9 @@
 import { createLegacyVariableSet } from "./helpers/legacy-variable-sets";
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { sql } from "drizzle-orm";
@@ -59,6 +62,8 @@ import {
   SandboxImageConflictError,
   SandboxRigConflictError,
   settleTemporalScheduleCleanup,
+  settleSandboxCheckpointArtifactGc,
+  pruneDeletedSandboxCheckpointArtifacts,
   settleSandboxSharedPreparation,
   type Database,
   type DbClient,
@@ -89,7 +94,7 @@ import {
 // afterAll regardless of outcome.
 
 let available = true;
-let shared: SharedTestDatabase | null = null;
+let shared: RestrictedRuntimeTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
@@ -368,7 +373,7 @@ async function assertExpiredDrainFence(
 }
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("sandbox-leases");
+  shared = await acquireRestrictedRuntimeTestDatabase("sandbox-leases", "public");
   if (!shared) {
     available = false;
     // eslint-disable-next-line no-console
@@ -409,7 +414,11 @@ async function seedLiveCanonicalAttempt(input: {
     status: "running",
     initialMessage: "live canonical attempt fixture",
   });
-  await admin`
+  await admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${input.accountId}, true),
+      set_config('opengeni.workspace_id', ${input.workspaceId}, true),
+      set_config('application_name', 'opengeni-lossless-v1-session-variable-sets-v1', true)`;
+    await tx`
     insert into session_turns (
       id, account_id, workspace_id, session_id, trigger_event_id,
       temporal_workflow_id, status, source, position, prompt, resources,
@@ -421,7 +430,11 @@ async function seedLiveCanonicalAttempt(input: {
       1, 'live canonical attempt fixture', '[]'::jsonb, '[]'::jsonb,
       'test-model', 'low', 'modal', '{}'::jsonb, '{}'::jsonb, 1
     )`;
+  });
   await admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${input.accountId}, true),
+      set_config('opengeni.workspace_id', ${input.workspaceId}, true),
+      set_config('application_name', 'opengeni-lossless-v1-session-variable-sets-v1', true)`;
     await tx`
       update sessions set active_turn_id = ${turnId}
       where workspace_id = ${input.workspaceId} and id = ${input.sessionId}`;
@@ -2791,48 +2804,12 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const sessionId = crypto.randomUUID();
-    const turnId = crypto.randomUUID();
-    const attemptId = crypto.randomUUID();
-    const holderId = `turn-attempt:${attemptId}`;
-
-    await seedSession({
+    const { turnId, attemptId, holderId } = await seedLiveCanonicalAttempt({
       accountId,
       workspaceId,
       groupId,
       sessionId,
-      status: "running",
-      initialMessage: "lease heartbeat fixture",
-    });
-    await admin`
-      insert into session_turns (
-        id, account_id, workspace_id, session_id, trigger_event_id,
-        temporal_workflow_id, status, source, position, prompt, resources,
-        tools, model, reasoning_effort, sandbox_backend, metadata, lineage,
-        execution_generation
-      ) values (
-        ${turnId}, ${accountId}, ${workspaceId}, ${sessionId},
-        ${crypto.randomUUID()}, ${`session-${sessionId}`}, 'running', 'user',
-        1, 'lease heartbeat fixture', '[]'::jsonb, '[]'::jsonb,
-        'test-model', 'low', 'modal', '{}'::jsonb, '{}'::jsonb, 1
-      )`;
-    await admin.begin(async (tx) => {
-      await tx`
-        update sessions set active_turn_id = ${turnId}
-        where workspace_id = ${workspaceId} and id = ${sessionId}`;
-      await tx`
-        update session_turns set active_attempt_id = ${attemptId}
-        where workspace_id = ${workspaceId} and id = ${turnId}`;
-      await tx`
-        insert into session_turn_attempts (
-          id, account_id, workspace_id, session_id, turn_id,
-          execution_generation, state, temporal_workflow_id,
-          temporal_workflow_run_id, temporal_activity_id,
-          verified_control_revision, mcp_approval_policies
-        ) values (
-          ${attemptId}, ${accountId}, ${workspaceId}, ${sessionId}, ${turnId},
-          1, 'running', ${`session-${sessionId}`}, ${crypto.randomUUID()}, '2',
-          0, '{}'::jsonb
-        )`;
+      state: "running",
     });
 
     await acquireLease(db, {
@@ -7582,12 +7559,27 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         begun.lease.recovery.restore.selectedRevision ?? undefined,
       );
     }
+    const gcClaimId = crypto.randomUUID();
     const claims = await claimSandboxCheckpointArtifactsForGc(db, {
-      claimId: crypto.randomUUID(),
+      claimId: gcClaimId,
       limit: 10,
       claimTtlMs: 60_000,
     });
     expect(claims.map((claim) => claim.id)).toEqual([evictedArtifactId]);
+    // Each API call commits separately: deferred reference validators must
+    // still work after the claim's temporary capability has been removed.
+    const gcClaim = claims[0]!;
+    expect(
+      await settleSandboxCheckpointArtifactGc(db, {
+        artifactId: gcClaim.id,
+        claimId: gcClaimId,
+        deleted: true,
+        retryAfterMs: 0,
+      }),
+    ).toBe(true);
+    await admin`UPDATE sandbox_checkpoint_artifacts SET deleted_at=now()-interval '2 days'
+      WHERE id=${gcClaim.id}`;
+    expect(await pruneDeletedSandboxCheckpointArtifacts(db, 86_400_000, 10)).toBe(1);
   }, 60_000);
 
   test("(23) Docker continuity serializes restart ownership and preserves the workspace across retry", async () => {
