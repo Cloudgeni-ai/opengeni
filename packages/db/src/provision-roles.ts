@@ -141,6 +141,21 @@ export async function provisionRoles(
 
   const sql = postgres(adminConnection, { max: 1, ...databaseBootConnectOptions(adminConnection) });
   try {
+    // Converge PUBLIC drift even for dedicated-only/scoped provisioning. The
+    // ordinary app grant below includes these policy predicates; dedicated
+    // artifact roles must only receive their explicit entry points.
+    await sql.unsafe(`DO $maintenance_predicates$
+      DECLARE signature text;
+      BEGIN
+        FOREACH signature IN ARRAY ARRAY[
+          'opengeni_private.maintenance_claim_active(text,text)',
+          'opengeni_private.maintenance_title_event_visible(text,uuid)'
+        ] LOOP
+          IF to_regprocedure(signature) IS NOT NULL THEN
+            EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC',signature);
+          END IF;
+        END LOOP;
+      END $maintenance_predicates$;`);
     // FORCE strategy provisions the non-owner app role Opengeni connects as.
     // SCOPED strategy: the host owns the connection role; Opengeni provisions no
     // app role (skipped here), only the optional Temporal role.

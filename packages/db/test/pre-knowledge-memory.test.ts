@@ -10,6 +10,7 @@ import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
@@ -46,6 +47,8 @@ describe("pre-knowledge Memory storage compatibility", () => {
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       // Resolves knowledge_index_claim from the withheld 0461 migration.
       await owner`INSERT INTO schema_migrations(name) VALUES('0730_maintenance_work_probes.sql')`;
+      for (const name of strictOwnerMaintenanceMigrationTail)
+        await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       for (const name of knowledgeActorMigrationTail)
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       // Rewrites the visibility transition installed by the withheld 0501 migration.

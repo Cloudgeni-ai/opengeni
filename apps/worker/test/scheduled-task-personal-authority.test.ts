@@ -1,5 +1,6 @@
 import { migrate } from "@opengeni/db/migrate";
 import { allowanceMigrationTail } from "../../../packages/db/test/allowance-migration-tail";
+import { strictOwnerMaintenanceMigrationTail } from "../../../packages/db/test/strict-owner-maintenance-migration-tail";
 import { restorePreRetirementGrants } from "../../../packages/db/test/fixtures/pre-retirement-grants";
 import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -1755,6 +1756,8 @@ describe("scheduled task personal MCP authority", () => {
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0730_maintenance_work_probes.sql'),
         ('0732_sandbox_maintenance_work_probes.sql')`;
+      for (const name of strictOwnerMaintenanceMigrationTail)
+        await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
       // Main's later visibility transition also depends on withheld 0501.
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0738_private_sessions_share_sandboxes.sql')`;
