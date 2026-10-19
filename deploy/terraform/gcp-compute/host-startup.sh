@@ -38,8 +38,10 @@ BUNDLE_SHA256=$(attr compute-bundle-sha256)
 
 # --- The state volume: local NVMe SSDs, striped, or the "state" disk.
 state_device=
-# install.sh records the volume it set up; an empty record is none.
-if [ ! -s /etc/compute/state-volume.uuid ]; then
+# install.sh records the volume it set up; a record with no UUID in it
+# is none (the same test as install.sh's).
+recorded=$(tr -d '[:space:]' 2>/dev/null </etc/compute/state-volume.uuid || true)
+if [ -z "$recorded" ]; then
   mapfile -t nvme < <(ls /dev/disk/by-id/google-local-nvme-ssd-* 2>/dev/null || true)
   if [ "${#nvme[@]}" -eq 1 ]; then
     state_device=${nvme[0]}

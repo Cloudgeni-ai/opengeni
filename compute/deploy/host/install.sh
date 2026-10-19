@@ -149,9 +149,9 @@ source /etc/compute/host.env
 log "state volume"
 install -d -m 755 /var/lib/compute
 # The marker names the state volume this host uses. It is written whole
-# (see below); an empty one, from an interrupted older write, counts as
-# none.
-recorded=$(cat /etc/compute/state-volume.uuid 2>/dev/null || true)
+# (see below); one with no UUID in it, from an interrupted older write,
+# counts as none (the GCP startup script uses the same test).
+recorded=$(tr -d '[:space:]' 2>/dev/null </etc/compute/state-volume.uuid || true)
 if [ -z "$recorded" ] && [ -n "$state_device" ]; then
   if mountpoint -q /var/lib/compute; then
     # An earlier attempt formatted and mounted this device but stopped
