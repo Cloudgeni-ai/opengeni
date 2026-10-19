@@ -36,6 +36,19 @@ const MARKDOWN_LABEL = new RegExp(`^ ${QUOTED}`, "u");
 const MARKDOWN_VALUE = new RegExp(`(?:^| )= (?:${QUOTED}|([^\\s\\[][^\\[]*?))(?: \\[|$)`, "u");
 const MAX_ROW_TEXTS = 64;
 
+type Platform = "macos" | "windows" | "linux";
+
+/**
+ * Why an element's value must never reach the model, or null. Windows Edit
+ * values are protected by policy because the SDK does not publish UIA
+ * IsPassword, so a password box cannot be told apart from its visible name.
+ */
+function protectionFor(role: string, platform: Platform): "password" | "policy" | null {
+  if (/secure|password/i.test(role)) return "password";
+  if (platform === "windows" && role === "Edit") return "policy";
+  return null;
+}
+
 function unquote(value: string): string {
   try {
     return JSON.parse(`"${value}"`) as string;
@@ -49,20 +62,27 @@ function unquote(value: string): string {
  * only addressable elements, so the static text inside a table row, list item
  * or cell exists only in the Markdown tree as unindexed rows. Collect that
  * text under the nearest indexed ancestor, so a row reads as its cells
- * instead of an empty AXRow. Keyed by element_index.
+ * instead of an empty AXRow. Keyed by element_index. Rows that are, or sit
+ * inside, a protected field (indexed or not) contribute nothing: their label
+ * can be the field's value and their value is the protected text itself.
  */
-export function unindexedTextByElement(markdown: string | undefined): Map<number, string[]> {
+export function unindexedTextByElement(
+  markdown: string | undefined,
+  platform: Platform = "macos",
+): Map<number, string[]> {
   const texts = new Map<number, string[]>();
   if (!markdown) return texts;
-  const ancestors: Array<{ indent: number; index: number | null }> = [];
+  const ancestors: Array<{ indent: number; index: number | null; protected: boolean }> = [];
   for (const line of markdown.split("\n")) {
     const row = MARKDOWN_ROW.exec(line);
     if (!row) continue;
     const indent = row[1]!.length;
     while (ancestors.length > 0 && ancestors.at(-1)!.indent >= indent) ancestors.pop();
     const index = row[2] === undefined ? null : Number(row[2]);
-    ancestors.push({ indent, index });
-    if (index !== null) continue;
+    const isProtected =
+      protectionFor(row[3]!, platform) !== null || (ancestors.at(-1)?.protected ?? false);
+    ancestors.push({ indent, index, protected: isProtected });
+    if (index !== null || isProtected) continue;
     const rest = row[4] ?? "";
     const label = MARKDOWN_LABEL.exec(rest);
     const value = MARKDOWN_VALUE.exec(label ? rest.slice(label[0].length) : rest);
@@ -90,20 +110,14 @@ export function unindexedTextByElement(markdown: string | undefined): Map<number
 
 export function projectElements(
   elements: z.infer<typeof Element>[],
-  platform: "macos" | "windows" | "linux" = "macos",
+  platform: Platform = "macos",
   childTexts: ReadonlyMap<number, readonly string[]> = new Map(),
 ): InteractionSemanticNodeValue[] {
   // CUA may omit non-actionable parents. A flat, bounded forest preserves every
   // returned node without inventing ancestry or dropping orphaned children.
   return elements.map((element) => {
-    // SDK 0.30.4 does not publish UIA IsPassword. Treat Windows Edit values
-    // as protected by policy instead of guessing from their visible names.
-    const opaqueWindowsEdit = platform === "windows" && element.role === "Edit";
-    const protectedReason = /secure|password/i.test(element.role)
-      ? ("password" as const)
-      : opaqueWindowsEdit
-        ? ("policy" as const)
-        : null;
+    const protectedReason = protectionFor(element.role, platform);
+    const opaqueWindowsEdit = protectedReason === "policy";
     // The SDK uses value as its label fallback when the native name is absent.
     const valueLabel =
       opaqueWindowsEdit && element.value !== undefined && element.label === String(element.value);

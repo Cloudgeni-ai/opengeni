@@ -385,7 +385,7 @@ export class CuaComputerBackend implements ComputerBackend {
     const roots = projectElements(
       state.elements,
       this.identity.platform,
-      unindexedTextByElement(state.tree_markdown),
+      unindexedTextByElement(state.tree_markdown, this.identity.platform),
     );
     const incomplete = walkIncompleteness(state);
     const observation: ComputerBackendObservation = {
