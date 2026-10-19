@@ -1462,7 +1462,8 @@ const PAGER_PROOF_MS = 150_000;
  * last restore into running after which no step took the sandbox deeper
  * than paused (an idle pause may follow a wake within seconds; a sleep to
  * saved or below takes far longer). Undefined until the host has logged it.
- * An older restore is followed by the sleep the check asked for. */
+ * An older restore is followed by the sleep the check asked for. `source`
+ * is its `compute.memory.source`, "none" when the event has none. */
 type Restore = { start: bigint; end: bigint; before: string; source: string };
 function wakeRestoreIn(journal: string, boxId: string): Restore | undefined {
   let found: Restore | undefined;
@@ -1493,7 +1494,10 @@ function wakeRestoreIn(journal: string, boxId: string): Restore | undefined {
         start: end - BigInt(Math.round(Number(event["compute.duration_us"] ?? 0))) * 1_000n,
         end,
         before: String(event["compute.level.before"]),
-        source: String(event["compute.memory.source"]),
+        source:
+          typeof event["compute.memory.source"] === "string"
+            ? event["compute.memory.source"]
+            : "none",
       };
     } else if (after !== "running" && after !== "paused") {
       found = undefined;
@@ -1545,9 +1549,18 @@ async function pagerAfter(host: string): Promise<string> {
       throw new Error(`pager.log on ${host} says "Permission denied" ${denied} times`);
     // Pinned once found: a later idle sleep must not move it.
     restore ??= wakeRestoreIn(journal.join("\n"), id);
+    // Only a pager writes what a wake learned: a restore whose memory came
+    // from a file starts none, and a profile seen after it would be an
+    // older one an archive copied (the host agent logs where the memory
+    // came from).
+    if (restore && restore.source !== "pager") {
+      throw new Error(
+        `the wake's restore on ${host} took its memory from ${restore.source === "none" ? "a source its journal does not name" : `the ${restore.source}`}, not a pager`,
+      );
+    }
     if (restore) {
       const after = (at: string) => (Number(fileNanos(at) - restore!.end) / 1e9).toFixed(1);
-      const what = `the restore from ${restore.before} (memory from the ${restore.source})`;
+      const what = `the paged restore from ${restore.before}`;
       if (learned !== "none" && fileNanos(learned) >= restore.start) {
         return `pager: learned.json on ${host} written ${after(learned)} s after ${what} ended, by the host's clock, "Permission denied" ${denied} times`;
       }
