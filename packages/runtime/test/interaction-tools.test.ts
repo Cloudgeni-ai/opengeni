@@ -1249,9 +1249,10 @@ describe("interaction attempt tools", () => {
     expect(browser.acted).toEqual(["tab-2"]);
   });
 
-  test.each(["succeeds", "fails"] as const)(
+  test.each(["succeeds", "fails", "succeeds after a parallel read"] as const)(
     "an action waits for a resume still in flight and does not run (inventory %s)",
-    async (inventory) => {
+    async (scenario) => {
+      const inventory = scenario === "fails" ? "fails" : "succeeds";
       const browser = stoppedBrowser();
       // The resume's own tab inventory is slow; other listings answer at once.
       let releaseInventory!: (outcome: "succeeds" | "fails") => void;
@@ -1295,6 +1296,12 @@ describe("interaction attempt tools", () => {
         );
       const act = press();
       await new Promise((resolve) => setTimeout(resolve, 5));
+      if (scenario === "succeeds after a parallel read") {
+        // A read that finishes first cannot make an action chosen before it safe.
+        expect(
+          (await call("browser_observe", { browserSessionId, targetId: "tab-2" })).isError,
+        ).toBeFalsy();
+      }
       releaseInventory(inventory);
       const [observed, acted] = await Promise.all([observe, act]);
       expect(browser.acted).toEqual([]);
