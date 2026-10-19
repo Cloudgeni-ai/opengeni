@@ -1734,42 +1734,63 @@ the last checkpoint began. No run logged a warning that the guest did
 not write its disks out before a pause.
 
 Nothing woke the sandbox that the run did not ask for. The three hosts'
-journals hold ten steps that took it out of a sleep level: seven by
-`agent_link`, each the suite's own request (the sleeps' wakes began
-0.03-0.04 s after it; `api.log` has a "a request wakes a sleeping
-sandbox" line for each), and three by the control service: the boot at
-creation, the move and the host-loss adoption. No step was caused by
-housekeeping, and the idle sleeps between checks stayed asleep until the
-next check's request.
+journals hold 14 wake-path steps, four of them fetch steps, and ten
+completed wakes (transitions into running): seven by `agent_link`, each
+the suite's own request (the sleeps' wakes began 0.03-0.04 s after it;
+`api.log` has a "a request wakes a sleeping sandbox" line for each), and
+three by the control service: the boot at creation, the move and the
+host-loss adoption. No step was caused by housekeeping, and the idle
+sleeps between checks stayed asleep until the next check's request.
 
 The authority change worked as designed on every host. There was no
 Certificate Authority Service pool; each of the three hosts got its
 certificate from the control service by an instance identity token at
 install ("a certificate for sbx-p4-e-host-<name> by an instance identity
-token", valid seven days, in each host's serial console), and the hosts
-check found all three registered. No host install needed the new
-startup retry: no attempt failed on the boots their serial consoles
-still show.
+token", valid seven days), and the hosts check found all three
+registered. The serial-console captures that show it cover the original
+boots of sbx-p4-e-host-g2c0 and sbx-p4-e-host-xfxn and the replacement
+boot of sbx-p4-e-host-2pv9 (17:44:30), not the original 2pv9 instance,
+whose console went with it. No host install needed the new startup
+retry: no attempt failed on the boots those captures show.
 
-Output release was checked once more on the same build, in r24-bg
-(17:50:53 to 17:53:40; `ONLY=background,sleep-saved`), with the
-background-command rows read from the database every second before the
-suite's cleanup deleted them. Both commands' output was released in the
-exchange that stored it: the exited one stored at 17:51:25.272 and
-released at 17:51:25.288, the stopped one stored at 17:51:34.901 and
-released at 17:51:34.914, each with `last_reconcile_outcome`
-`output_released` after one attempt, and nothing about them reached the
-sandbox afterwards. That run's sleep-saved failed for the subset reason
-r20a gave: with no stored copy yet, the idle archive at 17:52:17.91
-followed the save, so the wake at 17:52:21.12 restored from the archive,
-and the check, which expects the restore of a saved copy, found no pager
-file. Not a compute fault; in the full order it passed.
+The full r24 suite does not assert that an output release completes; its
+background check covers the commands and their stored output. Release
+was measured only in r24-bg (17:50:53 to 17:53:40;
+`ONLY=background,sleep-saved`), with the background-command rows read
+from the database every second before the suite's cleanup deleted them.
+Its two rows were released in the exchange that stored their output: the
+exited command's stored at 17:51:25.272 and released at 17:51:25.288,
+the stopped one's stored at 17:51:34.901 and released at 17:51:34.914,
+each with `last_reconcile_outcome` `output_released` after one attempt.
+That run's sleep-saved failed on its pager proof, "no learned.json ...
+within 60 s of the wake". The cause, established by reproduction in
+r25-s1 (below), is the check's assumption, not the pager. A pager writes
+`learned.json` early only once the guest faults on pages its prefetch
+did not bring in. Otherwise it writes when its 120 s recording window
+closes, or when its VM stops. In r24-bg the sleep-saved wake was the
+sandbox's second paged wake. The first, at 17:51:09 (`prefetch_us` 2,
+nothing to prefetch), learned a profile. The idle archive at 17:52:17.91
+kept that profile, and the restore at 17:52:21.13 (`prefetch_us` 103849)
+prefetched it. Nothing then took the file: the sandbox's next steps
+were an idle pause at 17:52:36 and an idle save at 17:52:58, and neither
+takes `learned.json`; only a restore's start and an archive do. Nothing
+is lost when nothing new is learned. The new profile equals the old one,
+and a restore or archive that finds no `learned.json` keeps
+`wake-profile.json` as it was. That restore's own pager statistics went
+with the sandbox. In the full order, sleep-saved's wake was the
+sandbox's first paged wake (`prefetch_us` 2), so it faulted and wrote
+the file in 3 s. The same wake also met the subset mismatch r20a
+describes (the idle archive finished before the wake request), behind
+the pager failure.
 
 One gap remains. The recovery of an output release whose exchange
-failed, which the runner's next operation inventory completes, did not
-run live: in both runs every release succeeded in its first exchange,
-and failing one needs a fault the public API cannot cause. It is covered
-by the backend's and the agent's unit tests, not by this suite. The
+failed, which the runner's next operation inventory completes, was not
+exercised live: failing an exchange needs a fault the public API cannot
+cause. It is covered by tests, not by this suite: the agent's
+`unreleased_output_is_reported_again_with_backoff_and_only_while_it_remains`
+(`agent/crates/opengeni-agent/src/inventory.rs`) and the backend's
+"output Opengeni has not stored is never ended: it is collected, and
+ended once stored" (`apps/api/test/operation-inventory.test.ts`). The
 overlay-network option of the GCP module (2ff9d5e47, later than
 71e541269 and off by default) was not in this run.
 
@@ -1780,3 +1801,111 @@ in `host-sbx-p4-e-host-2pv9@9105887324079386369.log`, the steps in the
 `compute.step` events of the three `host-*.log` journals, the wake lines
 in `api.log`, and the UI screenshots in `ui-*.png`. r24-bg's rows are in
 `runs/r24-bg/dbpoll.log` and its results in `runs/r24-bg/results.md`.
+
+### r25: the authority review fixes, hosts, link and move
+
+r25 (2026-10-19) is the targeted rerun after the fixes from the Rust
+review of the host authority (e77b159d4, merged into feat/compute-prod as
+3e0207fb8). They change four things. A host's key and certificate are
+published as one unit, behind one symlink switch, and runs are
+serialised. Renewal by certificate checks the presented certificate's
+validity at the moment of issuance. Names ending in a dot are refused.
+Google's keys are no longer trusted past their Cache-Control expiry.
+Each certificate also records in its OU how its name was proven
+("proven by gce-identity" or "proven by certificate"), and only one
+proven by certificate renews by certificate. The backend stayed at
+fde01a4c2 and the databases were kept (no `FRESH`). Only the checks
+these fixes touch ran: `ONLY=hosts,link-stream,move`, with health,
+workspace, create and files as their prerequisites.
+
+The first attempt, r25-ca (chain from 18:09:06, suite from 18:20:13),
+passed all 8 checks but did not test the fixes on the hosts. env.sh
+replaced the hosts with the new bundle at 18:17:05, before it deployed
+the new control service at 18:19:46. So the hosts got their certificates
+from the previous control service, without the OU. 5bc1d3e05 fixes the
+environment: a new `hosts` step comes after `deploy`. It replaces hosts
+whose template is older, then waits until the control service reports
+each of the group's hosts live (`stack/hosts.sh`, which takes over
+deploy.sh's wait).
+
+r25-cb is the run that counts. From 18:31:05 the group's hosts were
+replaced onto the deployed 3e0207fb8 control service, and they were back
+at 18:33:42. `env.sh hosts` (from 5bc1d3e05) found all three live at
+18:33:48, and the suite ran from 18:33:53 to 18:38:41:
+
+| check | r25-cb |
+| --- | --- |
+| hosts | 1wps, n6sv and t022 live |
+| create | first turn in 25.2 s |
+| link-stream | 97 cycles in 190 s, 388 MiB in and 776 MiB out, every sha256 matching, across 2 checkpoints; saved in 6.9 s, woken by a read in 0.8 s |
+| move | t022 -> 1wps in 31.6 s, the first command after it answered |
+| cleanup | nothing left |
+
+8 checks passed, none failed (health, workspace and files also passed).
+Each host's serial console has "a certificate for sbx-p4-e-host-<name>
+by an instance identity token" at install. Each certificate has the
+subject `CN = sbx-p4-e-host-<name>, OU = proven by gce-identity`, its
+name as the single DNS SAN, server and client authentication, and seven
+days' validity. Then four probes ran on n6sv against the same service:
+
+- Asking for a renewal by certificate, presenting n6sv's own certificate,
+  was refused with HTTP 403: "sbx-p4-e-host-n6sv's certificate was proven
+  by an instance identity token: it renews only with a fresh one".
+- The same request with no client certificate was refused with HTTP 401.
+- A forced renewal with the bundle's `compute-host-certificate --force`
+  at 18:41:10 got a new certificate by token, with a new serial and
+  again the gce-identity OU. It moved the `certificate` symlink to a new
+  directory, removed the old pair and restarted the host agent.
+- At 18:41:22, `stack/hosts.sh` found all three hosts live again.
+
+The figures are the rows of `runs/r25-cb/results.md` (and
+`results.json`). The replacement and the hosts step are in
+`chain-r25-cb.log`, and r25-ca's ordering in `chain-r25-ca.log`. Each
+host's certificate and the console lines are in
+`runs/r25-cb/host-certificates.log` and
+`runs/r25-cb/serial-cert-sbx-p4-e-host-<name>.log`. The probes are in
+`runs/r25-cb/authority-probe.log`.
+
+#### r25-s1 and r25-s2: the saved sleep's pager proof
+
+r25-s1 (suite 18:42:35 to 18:44:22, `ONLY=background,sleep-saved`,
+`KEEP=1`) reproduced the cause of r24-bg's pager failure on the same build. The
+sandbox was 01a15579 on n6sv. While the run went on, each host's
+sandbox directories were polled every 2 s. Afterwards the kept sandbox
+was driven through the control service's API.
+
+- Its first paged wake, the suite's restore at 18:44:06, had no profile.
+  It faulted 169 times, prefetched 1 page and wrote `learned.json` at
+  18:44:06.9, so the check's pager proof passed in 1 s.
+- A second paged wake followed: a sleep at saved, which the existing
+  stored copy made archived, then a wake answered at 18:48:31.36. It
+  prefetched the 163-page profile and faulted 0 times. No `learned.json`
+  appeared up to 18:50:32. `wake-profile.json` was rewritten at
+  18:50:31.35, 120 s after the restore, when the pager's window closed
+  and the idle archive took the profile.
+
+The run's own sleep-saved failed for r20a's subset reason only: the idle
+archive finished at 18:44:02, before the wake request.
+
+8d26abc54 changes the check. It now waits 150 s (the hosts' 120 s window
+and a margin), and accepts either of two files. One is `learned.json`
+written at or after the request: the wake's restore removes any older
+one before its pager starts. The other is `wake-profile.json` rewritten
+after the wake answered: a restore's own take of an older profile comes
+before the VM resumes. On the reproduction's timings the second path
+holds about 120 s after the answer. r25-s2 (suite 19:01:25 to 19:03:11,
+`ONLY=sleep-saved`) ran the changed check: "learned.json on t022
+written 2.6 s after the request", "Permission denied" 0 times. The
+sleep-saved check failed again for r20a's subset reason (the archive
+finished at 19:02:30.27, before the wake request). In the full order the
+sandbox already has a stored copy when it sleeps at saved, and the check
+passes (r24).
+
+r25-s1's files are in `runs/r25-s1/`:
+
+- `pager-01a15579.log`: one statistics line per pager.
+- `s1watch-n6sv.log`: the 2 s poll.
+- `manual.log`: the API calls.
+- `host-sbx-p4-e-host-n6sv.full.log`: the journal.
+
+r25-s2's results are in `runs/r25-s2/results.md`.
