@@ -90,6 +90,9 @@ const forwardMigrations = [
   "0738_private_sessions_share_sandboxes.sql",
   // Extends machine grant predicates rewritten by withheld 0501.
   "0851_personal_machine_session_tree.sql",
+  // Replaces the file ownership trigger from 0461 and reads 0499's file
+  // read-capability table; replay after both.
+  "0854_file_visibility.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];
 const sourceTaskId = crypto.randomUUID();
