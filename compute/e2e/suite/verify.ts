@@ -48,7 +48,13 @@ type Step = {
   host: string;
 };
 const steps: Step[] = [];
+// host-<name>.log is each host's journal at the end of the run;
+// host-<name>@<instance>.log one the suite kept before stopping that
+// machine (host-loss), whose journal its replacement does not have. A
+// machine that came back keeps its journal, so an event can be in both:
+// it counts once.
 const journals = readdirSync(dir).filter((name) => /^host-.*\.log$/.test(name));
+const seen = new Set<string>();
 for (const name of journals) {
   for (const line of readFileSync(`${dir}/${name}`, "utf8").split("\n")) {
     const at = line.indexOf("compute_event: ");
@@ -60,6 +66,10 @@ for (const name of journals) {
       continue;
     }
     if (event.event !== "compute.step" || event["compute.outcome"] !== "done") continue;
+    const host = name.replace(/^host-|(@[^@]*)?\.log$/g, "");
+    const key = `${host} ${String(event.time_unix_nano)} ${String(event["compute.sandbox.id"])} ${String(event["compute.step"])}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     const ended = Number(BigInt(String(event.time_unix_nano)) / 1_000_000n);
     steps.push({
       start: ended - Number(event["compute.duration_us"] ?? 0) / 1_000,
@@ -70,7 +80,7 @@ for (const name of journals) {
       by: String(event["compute.wake.by"] ?? ""),
       before: String(event["compute.level.before"] ?? ""),
       after: String(event["compute.level.after"] ?? ""),
-      host: name.replace(/^host-|\.log$/g, ""),
+      host,
     });
   }
 }

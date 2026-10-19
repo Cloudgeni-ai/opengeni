@@ -2090,6 +2090,21 @@ check(
         "value(id)",
       ]);
     const lostInstance = instanceId(lost);
+    // Its journal goes with it when the instance group replaces it: keep
+    // it, from the run's start, for the verifier (as host-<name>@<instance>).
+    try {
+      const since = Math.floor(Date.parse(STARTED) / 1000) - 60;
+      writeFileSync(
+        `${OUT}/host-${lost}@${lostInstance}.log`,
+        onHost(
+          lost,
+          `sudo journalctl --no-pager -o short-iso-precise --since @${since} -u 'compute-*'`,
+          300_000,
+        ),
+      );
+    } catch (error) {
+      throw new Error(`could not keep ${lost}'s journal before stopping it: ${error}`);
+    }
     // Stopped, the machine is plainly gone: its lease lapses, the service
     // fences it (finds it stopped) and the sandbox wakes elsewhere.
     log(`stopping ${lost} (instance ${lostInstance})`);
