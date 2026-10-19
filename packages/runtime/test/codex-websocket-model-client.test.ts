@@ -17,6 +17,7 @@ import {
   OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
   createResponsesTurn,
   withResponsesConversation,
+  withModelTransportObservation,
 } from "@opengeni/network/responses-websocket";
 import { instrumentedModelFetch } from "../src/model-provider-client";
 import { withModelTransportStartedObserver } from "../src/model-preparation-diagnostics";
@@ -49,6 +50,140 @@ class FakeSocket implements CodexWebSocketLike {
     this.onclose?.({ code: 1000 });
   }
 }
+
+test("dispatch waits for a streamed request body and WebSocket handshake", async () => {
+  let socket!: FakeSocket;
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  let created!: () => void;
+  const socketCreated = new Promise<void>((resolve) => {
+    created = resolve;
+  });
+  let dispatched = 0;
+  let outerObserved = 0;
+  const transport = responsesTransport(
+    async () => {
+      throw new Error("unexpected HTTP");
+    },
+    {
+      endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+      createSocket: () => {
+        socket = new FakeSocket();
+        created();
+        return socket;
+      },
+    },
+  );
+  const fetcher = instrumentedModelFetch("openai", transport as typeof fetch, true);
+  const body = new ReadableStream<Uint8Array>({
+    start(value) {
+      controller = value;
+    },
+  });
+  const pending = withResponsesConversation("held-dispatch", () =>
+    withModelTransportObservation(
+      () => {
+        outerObserved++;
+      },
+      () =>
+        withModelTransportStartedObserver(
+          undefined,
+          () =>
+            fetcher("https://api.openai.com/v1/responses", {
+              method: "POST",
+              body,
+            }),
+          () => {
+            dispatched++;
+          },
+        ),
+    ),
+  );
+  await Bun.sleep(1);
+  expect(dispatched).toBe(0);
+  expect(socket).toBeUndefined();
+  controller.enqueue(
+    new TextEncoder().encode(JSON.stringify({ model: "m", input: "hi", stream: true })),
+  );
+  controller.close();
+  await socketCreated;
+  expect(dispatched).toBe(0);
+  socket.open();
+  for (let i = 0; i < 100 && !socket.sent.length; i++) await Bun.sleep(1);
+  expect(socket.sent).toHaveLength(1);
+  expect(dispatched).toBe(1);
+  expect(outerObserved).toBe(1);
+  socket.emit({ type: "response.completed", response: { id: "held-response" } });
+  await (await pending).text();
+  socket.close();
+});
+
+test("native Codex starts preparation at transport send, never during its custody admission", async () => {
+  let release!: () => void;
+  let entered!: () => void;
+  const admission = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const admitted = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let dispatched = 0;
+  let socket!: FakeSocket;
+  const transport = codexResponsesTransport(
+    async () => {
+      throw new Error("unexpected HTTP");
+    },
+    {
+      createSocket: () => {
+        socket = new FakeSocket();
+        queueMicrotask(() => socket.open());
+        return socket;
+      },
+    },
+  );
+  const fetcher = codexSubscriptionFetch(
+    instrumentedModelFetch("codex-subscription", transport as typeof fetch, true),
+  );
+  const context: CodexRequestContext = {
+    clientVersion: "fixture",
+    sessionId: "held-codex",
+    getToken: async () => ({
+      accessToken: "fixture",
+      chatgptAccountId: "fixture",
+      isFedramp: false,
+    }),
+    refresh: async () => {
+      throw new Error("unexpected refresh");
+    },
+    resolveModel: (model) => model,
+    beforeProviderDispatch: async () => {
+      entered();
+      await admission;
+    },
+  };
+  const pending = withCodexTurn(context, () =>
+    withModelTransportStartedObserver(
+      undefined,
+      () =>
+        fetcher("https://chatgpt.com/backend-api/codex/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "m", input: "hi", stream: true }),
+        }),
+      () => {
+        dispatched++;
+      },
+    ),
+  );
+  await admitted;
+  expect(dispatched).toBe(0);
+  expect(socket).toBeUndefined();
+  release();
+  for (let i = 0; i < 100 && !socket?.sent.length; i++) await Bun.sleep(1);
+  expect(socket.sent).toHaveLength(1);
+  expect(dispatched).toBe(1);
+  socket.emit({ type: "response.completed", response: { id: "codex-held-response" } });
+  await (await pending).text();
+  socket.close();
+});
 
 test("Codex receipts snapshot local dispatch and response-scoped server timing without exposing timing frames", async () => {
   let socket!: FakeSocket;

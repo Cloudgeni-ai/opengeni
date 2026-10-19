@@ -2,6 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { withModelTransportStartedObserver } from "../src/model-preparation-diagnostics";
 import { instrumentedModelFetch } from "../src/model-provider-client";
 import { withModelCallLifecycle } from "../src/model-request-capture";
+import { withClaudeUsageObserver } from "../src/claude-subscription-usage";
+import {
+  responsesTransport,
+  OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+} from "@opengeni/network/responses-websocket";
 
 type Clock = { dispatchedAtUnixMs: number; monotonicTimeMs: number };
 
@@ -17,7 +22,80 @@ function held<T = void>() {
 
 const request = ["https://provider.invalid/v1/responses", { method: "POST", body: "{}" }] as const;
 
-describe("literal model fetch-entry diagnostic", () => {
+describe("model transport handoff diagnostic", () => {
+  test.each([null, undefined])(
+    "HTTP fallback reports dispatch when socket support is %s",
+    async (createSocket) => {
+      const order: string[] = [];
+      const transport = responsesTransport(
+        async () => {
+          order.push("fetch");
+          return new Response("{}");
+        },
+        { endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT, createSocket },
+      );
+      const fetcher = instrumentedModelFetch("openai", transport as typeof fetch, true);
+      await withModelTransportStartedObserver(
+        undefined,
+        () => fetcher(...request),
+        () => {
+          order.push("dispatch");
+        },
+      );
+      expect(order).toEqual(["dispatch", "fetch"]);
+    },
+  );
+
+  test("dispatch waits for credential custody and precedes the physical fetch without an async gap", async () => {
+    const custody = held();
+    const entered = held();
+    const order: string[] = [];
+    const fetcher = instrumentedModelFetch("organization-claude-subscription", (async () => {
+      order.push("fetch");
+      return new Response("{}");
+    }) as typeof globalThis.fetch);
+    const pending = withClaudeUsageObserver(
+      () => undefined,
+      () =>
+        withModelTransportStartedObserver(
+          () => {
+            order.push("audit");
+          },
+          () => fetcher("https://api.anthropic.com/v1/messages", { method: "POST", body: "{}" }),
+          () => {
+            order.push("dispatch");
+            queueMicrotask(() => order.push("preparation"));
+          },
+        ),
+      async (_provider, headers) => ({
+        headers,
+        observe: () => undefined,
+        custody: {
+          admit: async () => {
+            order.push("custody-start");
+            entered.resolve();
+            await custody.promise;
+            order.push("custody-complete");
+          },
+          responded: async (response) => response,
+          failed: async () => undefined,
+        },
+      }),
+    );
+    await entered.promise;
+    expect(order).toEqual(["audit", "custody-start"]);
+    custody.resolve();
+    await pending;
+    expect(order).toEqual([
+      "audit",
+      "custody-start",
+      "custody-complete",
+      "dispatch",
+      "fetch",
+      "preparation",
+    ]);
+  });
+
   test("captures after the held audit and synchronously before underlying fetch", async () => {
     const audit = held();
     const entered = held();

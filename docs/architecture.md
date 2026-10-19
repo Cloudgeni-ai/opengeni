@@ -1414,10 +1414,19 @@ For turns using deferred MCP disclosure, the worker starts non-eager preparation
 at main provider dispatch or earlier real tool/recovery demand. The runtime also
 starts it on a substantive provider response when no dispatch hook is available.
 One completion fence owns tool readiness and cleanup; closing before start does
-not create unused connections. Embedded callers keep immediate background
+not create unused connections. Explicit provider-dispatch preparation also
+defers catalog construction and persistence when every server already joined
+the required/eager connection barrier. Those connected servers keep their
+frozen first-request schemas; an unfinished catalog alone does not imply an
+unknown server catalog or expose an extra conditional search router.
+Embedded callers keep immediate background
 preparation by default. Factory-created attempt catalogs are detached immutable
 snapshots whose exact identity can reuse verification; deserialized catalogs
-still receive full checks. See [startup decisions and measurements](design/typing-turn-preparation.md).
+still receive full structure and digest checks. Gateway input/output validators
+compile together on the first call to a tool, before authorization or execution,
+against its preparation-time schema snapshot. Unused tools do not compile;
+schema compilation failures are retained for that tool, not argument-repair
+errors or a failure of every catalog entry. See [startup decisions and measurements](design/typing-turn-preparation.md).
 
 Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
