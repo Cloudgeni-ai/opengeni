@@ -90,6 +90,9 @@ pub struct Issued {
     pub pem: String,
     /// When it stops being valid.
     pub not_after: SystemTime,
+    /// Its serial number in hexadecimal, as `openssl x509 -serial` prints
+    /// it: what tells two certificates of one host apart.
+    pub serial: String,
 }
 
 /// The hosts' authority, as the service holds it.
@@ -128,6 +131,16 @@ fn serial() -> anyhow::Result<SerialNumber> {
     // Positive, and never shortened by a leading zero.
     bytes[0] = (bytes[0] & 0x7f) | 0x40;
     Ok(SerialNumber::from_slice(&bytes))
+}
+
+/// A serial number in uppercase hexadecimal, as `openssl x509 -serial`
+/// prints it.
+pub(crate) fn serial_hex(serial: &SerialNumber) -> String {
+    use std::fmt::Write as _;
+    serial.as_ref().iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02X}");
+        hex
+    })
 }
 
 /// What a certificate may be valid for: a DNS name, or an IP address.
@@ -289,13 +302,16 @@ impl Authority {
         let not_after = now + lifetime;
         params.not_before = unix(now - BACKDATE)?;
         params.not_after = unix(not_after)?;
-        params.serial_number = Some(serial()?);
+        let serial = serial()?;
+        let serial_hex = serial_hex(&serial);
+        params.serial_number = Some(serial);
         let certificate = params.signed_by(key, &self.signer, &self.key)?;
         Ok(Issued {
             der: certificate.der().clone(),
             pem: certificate.pem(),
             not_after: UNIX_EPOCH
                 + Duration::from_secs(not_after.duration_since(UNIX_EPOCH)?.as_secs()),
+            serial: serial_hex,
         })
     }
 }

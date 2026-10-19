@@ -252,8 +252,8 @@ hosts() {
     pairs=()
     for i in "${!names[@]}"; do
       at=$(on_host "$user" "${addresses[$i]}" \
-        'sudo date -u -d "$(sudo openssl x509 -noout -enddate -in /etc/compute/host.pem | cut -d= -f2)" +%s') &&
-        [[ $at =~ ^[0-9]+$ ]] || { log "could not read ${names[$i]}'s certificate"; return 1; }
+        'sudo openssl x509 -noout -serial -in /etc/compute/host.pem | cut -d= -f2') &&
+        [[ $at =~ ^[0-9A-Fa-f:]+$ ]] || { log "could not read ${names[$i]}'s certificate"; return 1; }
       pairs+=("${names[$i]}=$at")
     done
     if on "bash e2e/hosts.sh issued ${pairs[*]}" >>"$STATE/hosts.log" 2>&1; then

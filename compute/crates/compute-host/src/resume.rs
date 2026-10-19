@@ -19,7 +19,12 @@
 //! the guest does not take up again within [`TAKE_UP`] after taking up
 //! another of the sandbox's streams, is one the guest no longer has, as
 //! after a restore from a checkpoint older than it: it ends too, so the
-//! hub does not keep a connection no agent holds. [`TAKE_UP`] counts only
+//! hub does not keep a connection no agent holds. One whose connection's
+//! end the host sees only after that take-up (a reset that reaches the host
+//! after the guest's new hello) still counts as carried then, and ends at
+//! the sweep of the next take-up instead: a window that starts at a
+//! connection's end, rather than at a take-up that proves the guest runs,
+//! could run out before a slow wake lets the guest connect. [`TAKE_UP`] counts only
 //! time in which the guest could run ([`RunClock`]): a guest paused just
 //! after taking one stream up has all of it, once it runs again, for the
 //! others.
@@ -768,6 +773,26 @@ mod tests {
                 .expect("no stream began")
                 .unwrap()
         }
+
+        /// Waits until the host has seen the connection under stream `id`
+        /// end, as it does a moment after the connection ends.
+        async fn until_uncarried(&self, id: u128) {
+            let seen = async {
+                while self
+                    .streams
+                    .inner
+                    .lock()
+                    .streams
+                    .get(&StreamId(id))
+                    .is_some_and(|entry| entry.shared.lock().carried)
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            };
+            tokio::time::timeout(WAIT, seen)
+                .await
+                .expect("the host never saw the connection end");
+        }
     }
 
     /// The guest's relay of an agent connection on a thread, its dialed
@@ -937,6 +962,10 @@ mod tests {
             ends.push(rig.next_stream().await);
             drop(connection);
         }
+        // Both ends seen before the take-up, as after a restore (one seen
+        // only after it waits for the next take-up; see the module's docs).
+        rig.until_uncarried(1).await;
+        rig.until_uncarried(2).await;
         let (mut kept, answer) = raw_hello(&rig, 1, 0, 0).await;
         assert_eq!(answer, "ok 0\n");
         let mut not_taken_up = ends.pop().unwrap();
@@ -950,6 +979,42 @@ mod tests {
         })
         .await;
         assert_eq!(frame, data(0, b"still"));
+    }
+
+    /// A stream whose connection the host sees end only after another was
+    /// taken up is not ended on that take-up's clock, which a slow wake
+    /// could outrun, but on the next take-up's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stream_seen_uncarried_after_a_take_up_ends_at_the_next_one() {
+        let take_up = Duration::from_millis(300);
+        let mut rig = rig(4, take_up);
+        let mut connections = Vec::new();
+        let mut ends = Vec::new();
+        for id in [1, 2] {
+            let (connection, answer) = raw_hello(&rig, id, 0, 0).await;
+            assert_eq!(answer, "ok 0\n");
+            connections.push(connection);
+            ends.push(rig.next_stream().await);
+        }
+        let late = connections.pop().unwrap();
+        drop(connections.pop().unwrap());
+        rig.until_uncarried(1).await;
+        let (first, answer) = raw_hello(&rig, 1, 0, 0).await;
+        assert_eq!(answer, "ok 0\n");
+        drop(late);
+        rig.until_uncarried(2).await;
+        let mut not_taken_up = ends.pop().unwrap();
+        assert!(
+            !ends_within(&mut not_taken_up, take_up * 4).await,
+            "kept past the take-up before its end was seen"
+        );
+
+        // The next take-up's sweep ends it.
+        drop(first);
+        rig.until_uncarried(1).await;
+        let (_again, answer) = raw_hello(&rig, 1, 0, 0).await;
+        assert_eq!(answer, "ok 0\n");
+        assert!(ends_within(&mut not_taken_up, take_up * 10).await);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1070,6 +1135,8 @@ mod tests {
             drop(connection);
             ends.push(end);
         }
+        rig.until_uncarried(1).await;
+        rig.until_uncarried(2).await;
         // Past the sweeps their own take-ups began.
         tokio::time::sleep(take_up * 2).await;
         let (_, answer) = raw_hello(&rig, 3, 0, 0).await;
@@ -1100,7 +1167,8 @@ mod tests {
             drop(connection);
             ends.push(end);
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        rig.until_uncarried(1).await;
+        rig.until_uncarried(2).await;
         let (_kept, answer) = raw_hello(&rig, 1, 0, 0).await;
         assert_eq!(answer, "ok 0\n");
         rig.clock.set(false);

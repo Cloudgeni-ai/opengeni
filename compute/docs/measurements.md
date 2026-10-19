@@ -1918,10 +1918,12 @@ r25-s2's results are in `runs/r25-s2/results.md`.
 #### The environment's review fixes, after r25
 
 The docs review of 5bc1d3e05 and 8d26abc54 found three gaps in the
-environment, now closed. None changes a result above: r25-cb's hosts
-were replaced after the deploy, so their certificates came from the
-deployed control service, and r25-s2's pager file was written 2.6 s
-after the request, on either clock.
+environment. 536ff108c addressed them as described below. Its review
+closed the host count and the one-clock comparison, and found two proof
+gaps left in the other two, fixed after r26 (see the end of r26). None
+changes a result above: r25-cb's hosts were replaced after the deploy,
+so their certificates came from the deployed control service, and
+r25-s2's pager file was written 2.6 s after the request, on either clock.
 
 - The hosts step checked only that hosts were live, not where their
   certificates came from: hosts kept because the template was current

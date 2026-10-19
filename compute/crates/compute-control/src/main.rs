@@ -572,6 +572,10 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .map_err(|(_, message)| anyhow::anyhow!(message))?;
             print!("{}", issued.certificate);
+            eprintln!(
+                "issued a certificate for {}, serial {}",
+                issued.name, issued.serial
+            );
             Ok(())
         }
     }

@@ -421,9 +421,15 @@ authority alone for agent links.
   valid published pair they do not both point through yet, and does a
   restart of the agent still owed. `/etc/compute/restart-owed` is written
   before a pair is switched in and removed only once the agent restarted
-  (or was not running), so a failure after the switch, in cleaning up or
-  in the restart, is made good by the next run (the daily timer at the
-  latest).
+  (or systemd reported it not running), so a failure after the switch, in
+  cleaning up, in asking systemd or in the restart, is made good by the
+  next run (the daily timer at the latest). A restart that was tried is
+  marked so in that file, and the next run restarts the agent whatever its
+  state, since a failed restart may have stopped it; so it also starts an
+  agent you stopped in between. To keep an agent stopped while a restart
+  is owed, stop `compute-host-certificate.timer` too, or delete
+  `/etc/compute/restart-owed` once you have checked that the agent will
+  start with the published pair.
 - **Google's keys** (for identity tokens) are used only until their
   answer's `Cache-Control` expiry. Past it, only a successful fetch makes
   them usable again, so while Google's keys cannot be fetched no host gets

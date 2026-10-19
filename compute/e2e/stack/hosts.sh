@@ -6,13 +6,14 @@
 #     waits until the control service reports every named host live, and
 #     at least <count> of them: the run's hosts are registered with the
 #     control service under test.
-#   hosts.sh issued <host>=<not-after>...
-#     checks that each host's certificate (its notAfter, Unix seconds, read
-#     on the host) is one the deployed control service issued it: a line
-#     "issued a host certificate" for that host and that notAfter in the
-#     logs of the pods of the Deployment's current revision (deploy.sh
-#     waited until the older revision's pods were gone). Exits 3 naming
-#     the hosts whose certificate is not, on its last line:
+#   hosts.sh issued <host>=<serial>...
+#     checks that each host's certificate (its serial, hex, read on the
+#     host) is one the deployed control service issued it: a line "issued
+#     a host certificate" for that host with that serial in the logs of the
+#     pods of the Deployment's current revision (deploy.sh waited until the
+#     older revision's pods were gone). Serials are random, 16 bytes, so
+#     no other certificate has one. Exits 3 naming the hosts whose
+#     certificate is not, on its last line:
 #     "not issued by the deployed control service: <host>...".
 set -euo pipefail
 export KUBECONFIG=$HOME/.kube/config
@@ -21,9 +22,11 @@ ns=opengeni
 full=og-opengeni
 log() { printf '[hosts %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 usage() {
-  echo "usage: hosts.sh live <count> <host>... | hosts.sh issued <host>=<not-after>..." >&2
+  echo "usage: hosts.sh live <count> <host>... | hosts.sh issued <host>=<serial>..." >&2
   exit 2
 }
+# A serial as one string: hex digits only, upper case, no leading zeros.
+serial() { tr -d ':"' <<<"$1" | tr a-f A-F | sed 's/^0*//'; }
 
 live() {
   local count=$1 key control wanted live missing
@@ -57,23 +60,34 @@ live() {
 }
 
 issued() {
-  local deploy=$full-compute-control revision hash logs pair name not_after stale=()
+  local deploy=$full-compute-control revision hash logs pair name number stale=()
   revision=$(kubectl -n "$ns" get deploy "$deploy" \
     -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')
   hash=$(kubectl -n "$ns" get rs -l app.kubernetes.io/component=compute-control -o json |
     jq -r --arg revision "$revision" \
       '.items[] | select(.metadata.annotations["deployment.kubernetes.io/revision"] == $revision) | .metadata.labels["pod-template-hash"]')
   [ -n "$hash" ] || { log "no ReplicaSet of $deploy is at its revision $revision"; exit 1; }
-  # "<host> <not_after_ms>" for every certificate the current revision's
-  # pods issued (their logs are coloured).
+  # "<host> <serial>" for every certificate the current revision's pods
+  # issued (their logs are coloured; the fields are taken by name).
   logs=$(kubectl -n "$ns" logs -l "app.kubernetes.io/component=compute-control,pod-template-hash=$hash" \
     --all-containers --tail=-1 | sed 's/\x1b\[[0-9;]*m//g' |
-    sed -nE 's/.*issued a host certificate host=([^ ]+) .*not_after_ms=([0-9]+).*/\1 \2/p')
+    awk '/issued a host certificate/ {
+      host = ""; number = ""
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^host=/) host = substr($i, 6)
+        if ($i ~ /^serial=/) number = substr($i, 8)
+      }
+      gsub(/[":]/, "", number); number = toupper(number); sub(/^0+/, "", number)
+      if (host != "" && number != "") print host, number
+    }')
+  if [ -z "$logs" ]; then
+    log "revision $revision ($hash) logged no host certificate with a serial"
+  fi
   for pair in "$@"; do
     name=${pair%%=*}
-    not_after=${pair#*=}
-    if grep -qxF "$name ${not_after}000" <<<"$logs"; then
-      log "$name: its certificate (until $(date -u -d "@$not_after" +%FT%TZ)) is from revision $revision ($hash)"
+    number=$(serial "${pair#*=}")
+    if [ -n "$number" ] && grep -qxF "$name $number" <<<"$logs"; then
+      log "$name: its certificate (serial $number) is from revision $revision ($hash)"
     else
       stale+=("$name")
     fi
