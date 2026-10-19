@@ -326,5 +326,7 @@ export const embeddingMigrationTail = [
   "0844_free_plan_credit_scope.sql",
   "0845_signup_eligibility_without_bonus.sql",
   "0846_independent_session_titles.sql",
+  // Extends machine grant predicates rewritten by withheld 0501.
+  "0851_personal_machine_session_tree.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];

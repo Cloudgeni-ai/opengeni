@@ -88,6 +88,8 @@ const forwardMigrations = [
   "0730_maintenance_work_probes.sql",
   // Rewrites the visibility transition installed by withheld 0501; replay after it.
   "0738_private_sessions_share_sandboxes.sql",
+  // Extends machine grant predicates rewritten by withheld 0501.
+  "0851_personal_machine_session_tree.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];
 const sourceTaskId = crypto.randomUUID();

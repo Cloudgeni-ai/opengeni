@@ -1761,6 +1761,8 @@ describe("scheduled task personal MCP authority", () => {
       // Main's later visibility transition also depends on withheld 0501.
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0738_private_sessions_share_sandboxes.sql')`;
+      // Extends the machine grant predicates from withheld 0501.
+      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES('0851_personal_machine_session_tree.sql')`;
       // So do 0768 and 0769, which rewrite the quiescence check and visibility transition.
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0768_private_visibility_ignores_leftovers.sql'),
