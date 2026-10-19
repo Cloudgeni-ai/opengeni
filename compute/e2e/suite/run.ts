@@ -1814,30 +1814,26 @@ check(
     if (survivors !== "0") failures.push(`process ${witness.pid} (${token}) survived the crash`);
     // The host says so: running programs lost, files kept.
     const since = Math.floor(Date.parse(secondAt) / 1000);
+    // Every host line about a sandbox's agent-link streams and connections
+    // carries `sandbox=<id>` (the journal colours the field name, so the
+    // colour codes go first); only lines naming this sandbox count.
     const journal = onHost(
       host,
-      `j=$(sudo journalctl --no-pager -o cat -u 'compute-*' --since @${since}); ` +
+      `j=$(sudo journalctl --no-pager -o cat -u 'compute-*' --since @${since} | sed 's/\\x1b\\[[0-9;]*m//g'); ` +
         `printf '%s\\n' "$j" | grep '"compute.alarm":"programs_lost"' | grep -c '"compute.sandbox.id":"${id}"' || true; ` +
-        `for p in 'an agent-link stream cannot go on' 'agent-link streams the guest no longer has ended'; do ` +
-        `printf '%s\\n' "$j" | grep "$p" | grep -c '${id}' || true; printf '%s\\n' "$j" | grep -c "$p" || true; done; ` +
-        `for p in 'broke the protocol' 'did not say hello'; do printf '%s\\n' "$j" | grep -c "$p" || true; done`,
+        `for p in 'an agent-link stream cannot go on' 'agent-link streams the guest no longer has ended' ` +
+        `'broke the protocol' 'did not say hello' 'too many agent-link connections'; do ` +
+        `printf '%s\\n' "$j" | grep "$p" | grep -c 'sandbox=${id}' || true; done`,
     )
       .trim()
       .split("\n")
       .map(Number);
-    const [
-      lostAlarm = 0,
-      cannotOwn = 0,
-      cannot = 0,
-      endedOwn = 0,
-      ended = 0,
-      broke = 0,
-      nohello = 0,
-    ] = journal;
+    const [lostAlarm = 0, cannotOwn = 0, endedOwn = 0, broke = 0, nohello = 0, tooMany = 0] =
+      journal;
     if (lostAlarm < 1) failures.push(`the host journal has no programs_lost alarm for ${id}`);
-    if (broke > 0 || nohello > 0) {
+    if (broke > 0 || nohello > 0 || tooMany > 0) {
       failures.push(
-        `the host journal after the kill: ${broke} stream(s) broke the protocol, ${nohello} connection(s) did not say hello`,
+        `the host journal after the kill, for sandbox=${id}: ${broke} stream(s) broke the protocol, ${nohello} connection(s) did not say hello, ${tooMany} "too many agent-link connections"`,
       );
     }
     // The command in flight ends with an error within its own timeout (and
@@ -1894,17 +1890,16 @@ check(
       );
     }
     // The old streams ended, by evidence of this sandbox: its guest was
-    // told the host lost its connections, or a host journal line about
-    // ending streams names it.
+    // told the host lost its connections (its own console), or a host
+    // journal line about ending streams carries sandbox=<this id>.
     let ending = "";
     if (growth.lost >= 1) {
       ending = `the guest was told the host lost its connections (${growth.lost} time(s))`;
     } else if (cannotOwn + endedOwn >= 1) {
-      ending = `the host journal names this sandbox ("cannot go on" ${cannotOwn}, streams ended ${endedOwn})`;
+      ending = `the host journal's lines with sandbox=${id} ("cannot go on" ${cannotOwn}, streams ended ${endedOwn})`;
     } else {
       failures.push(
-        `no evidence of this sandbox that its old streams ended: its guest was not told they were lost, and no host journal line naming it ended them ` +
-          `(the host's "cannot go on" ${cannot} and streams-ended ${ended} lines since the second write do not name a sandbox)`,
+        `no evidence of this sandbox that its old streams ended: its guest was not told they were lost, and no host journal line with sandbox=${id} ended them`,
       );
     }
     if (failures.length > 0) throw new Error(failures.join("; "));
