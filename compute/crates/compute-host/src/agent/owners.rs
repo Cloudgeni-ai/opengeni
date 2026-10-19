@@ -31,6 +31,7 @@ use compute_protocol::fleet::{Ruling, Verdict};
 use tokio::sync::oneshot;
 
 use crate::layout::{Images, Paths, sync_parent};
+use crate::observe::{Alarm, Observer, alarm_event};
 use crate::protocol::{Id, SandboxConfig};
 use crate::state::{Change, Disk, Record};
 use crate::store::{Claimed, Owned, OwnerEpoch, Stamp, Store};
@@ -397,6 +398,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.net.clone(),
         );
         let events = self.events_tx.clone();
+        let observer = self.observer.clone();
         tokio::spawn(async move {
             let result = match store.claim(id, owner).await {
                 Err(error) => Err(HostError::Io(error.to_string())),
@@ -407,7 +409,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }),
                 Ok(Owned::Done(None)) => Err(HostError::NoCopy(id)),
                 Ok(Owned::Done(Some(claimed))) => {
-                    match files_only(&*store, id, owner, claimed, from_files).await {
+                    match files_only(&*store, &observer, id, owner, claimed, from_files).await {
                         Err(error) => Err(error),
                         Ok(claimed) => {
                             let made = adopted_files(&paths, &claimed, net.clone(), link).await;
@@ -757,9 +759,12 @@ async fn adopted_files(
 /// `from_files`: its memory image is deleted from the store first, as the
 /// claim's next save, so a later adopt or wake never restores it. A try
 /// whose answer was lost finds the change done; an adopt tried again
-/// claims the copy without the image and leaves it be.
+/// claims the copy without the image and leaves it be. Deleting the image
+/// raises [`Alarm::ProgramsLost`], as a VM that died does: the sandbox
+/// boots fresh from its disk, and whatever ran in it is gone.
 async fn files_only<S: Store>(
     store: &S,
+    observer: &Observer,
     id: Id,
     owner: OwnerEpoch,
     claimed: Claimed,
@@ -782,6 +787,12 @@ async fn files_only<S: Store>(
         Ok(Owned::Done(None)) => Err(HostError::NoCopy(id)),
         Ok(Owned::Done(Some(receipt))) => {
             tracing::info!(%id, "adopted from its files: its last owner was lost, so its memory image may be stale");
+            let what =
+                "running programs lost: adopted from its files, its memory image may be stale";
+            observer.alarm(
+                Alarm::ProgramsLost,
+                alarm_event(what).with("compute.sandbox.id", id.to_string()),
+            );
             Ok(Claimed {
                 save: change.save,
                 receipt,

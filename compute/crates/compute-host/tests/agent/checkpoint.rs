@@ -21,6 +21,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use compute_core::HostPolicy;
 use compute_engine::{CancellationToken, EngineError};
+use compute_host::observe::{Alarm, Observer};
 use compute_host::protocol::{
     DurabilityName, ErrorCode, HostStatus, Id, LevelName, Reply, Request, SandboxConfig,
     SandboxStatus, SleepConfig,
@@ -256,7 +257,8 @@ fn snapshots(lab: &Lab) -> usize {
 /// A host lost while its sandbox runs on past a checkpoint leaves a copy
 /// whose memory is of a past the sandbox's programs had already left: the
 /// next owner takes the copy up from its files, deleting its memory image
-/// from the store, and the sandbox boots with its files as they were then.
+/// from the store and raising the programs-lost alarm, and the sandbox
+/// boots with its files as they were then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_sandbox_is_checkpointed_and_boots_elsewhere_from_its_files_then() {
     let Some(dir) = shared_extents() else {
@@ -274,7 +276,15 @@ async fn a_running_sandbox_is_checkpointed_and_boots_elsewhere_from_its_files_th
         Directory::new(&shelf),
     )
     .await;
-    let two = Lab::start_stored(Lab::root_in(&dir), Arc::default(), Directory::new(&shelf)).await;
+    let observer = Observer::default();
+    let watched = observer.clone();
+    let two = Lab::start_stored_configured(
+        Lab::root_in(&dir),
+        Arc::default(),
+        Directory::new(&shelf),
+        |config| config.observer = watched,
+    )
+    .await;
     assert!(
         one.status().await.about.checkpoints,
         "{dir:?} shares extents"
@@ -320,6 +330,11 @@ async fn a_running_sandbox_is_checkpointed_and_boots_elsewhere_from_its_files_th
     let adopted = two.current(sandbox).await;
     assert_eq!(adopted.level, LevelName::Remote);
     assert!(!adopted.memory_saved, "its memory image is not taken up");
+    assert_eq!(
+        observer.metrics().alarms(Alarm::ProgramsLost),
+        1,
+        "whatever ran past the copy is gone, as when a VM dies"
+    );
     let stored = Directory::new(&shelf)
         .claim(sandbox, OwnerEpoch(2))
         .await

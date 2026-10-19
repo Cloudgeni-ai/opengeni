@@ -333,8 +333,10 @@ authority alone for agent links.
   copy is lost, which is why sandboxes archive soon after they go idle
   and are checkpointed while they run. Its memory is not brought back
   because the lost host may have run it on past the copy (ADR 18); a
-  drain or move hands the latest state off, memory and all. Nothing has to
-  be done by hand, except replacing the machine where no group does it.
+  drain or move hands the latest state off, memory and all. The adopting
+  host raises the `programs_lost` alarm for each sandbox whose memory it
+  set aside, as a host does for a VM that died. Nothing has to be done by
+  hand, except replacing the machine where no group does it.
   If the host comes back, its guard has already stopped its VMs (its
   lease ran out), and it registers again; the raised epochs keep it from
   running any sandbox that moved (ADR 18). A host whose fence
