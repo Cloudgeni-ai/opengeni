@@ -1,5 +1,40 @@
 # @opengeni/api-router
 
+## 4.1.4
+
+### Patch Changes
+
+- b8d5b64: A machine's browser limit now follows its memory instead of a flat 64: half of the machine's memory (or its container's limit) at 300 MiB per browser, never under 8, so a 48 GiB machine runs 81 browsers and an 86 GiB one 147. `OPENGENI_BROWSERD_MAX_SESSIONS` still overrides it. When a new browser would exceed the limit, the least recently used browser that has been idle for at least five minutes is saved and stopped to make room; it resumes from its saved working copy the next time it is opened. Nothing changes below the limit.
+- 4c90154: Agents handle the person's own computers better. `sandboxes_list` describes the person's Connected Machines, so tool search finds it. Its description says to check the list before saying a computer cannot be reached, to use the only fitting machine without asking which, and to work on a machine by swapping to it, where staying afterwards is fine. Agents never mention internal terms, tool names or ids to the person. The `sandboxes_list` result carries a short notice: when no machine is connected, some are offline, or the computer the person means is not listed, it asks for one `capability_authorization_request` call for `api:connected-machine` instead of described setup steps. Opening the screen on a machine with no display now says this may not be the person's own computer and points to `sandboxes_list` and `sandbox_swap`, instead of leading the agent to tell the person their computer has no display. A `run_on` command that times out says it may be waiting on a dialog on the person's screen. Nothing tells agents to swap back any more: the wrong-machine message for computers and browsers only says to swap to the requested machine, and a swap to `session` on a deployment without a managed sandbox says to keep working on the current machine. `computer_open` says to swap to another machine to use its screen and to operate apps through the computer tools rather than `osascript`, which makes macOS ask for permission and hang.
+- Updated dependencies [b8d5b64]
+- Updated dependencies [4c90154]
+- Updated dependencies [47eeb80]
+- Updated dependencies [da09a6e]
+- Updated dependencies [dfd0ce5]
+  - @opengeni/db@4.1.4
+  - @opengeni/core@4.1.4
+  - @opengeni/runtime@4.1.4
+  - @opengeni/contracts@4.1.4
+  - @opengeni/events@4.1.4
+  - @opengeni/documents@4.1.4
+  - @opengeni/artifact-tool@4.1.4
+  - @opengeni/capabilities@4.1.4
+  - @opengeni/codemode@4.1.4
+  - @opengeni/codex@4.1.4
+  - @opengeni/config@4.1.4
+  - @opengeni/github@4.1.4
+  - @opengeni/interaction@4.1.4
+  - @opengeni/observability@4.1.4
+  - @opengeni/storage@4.1.4
+  - @opengeni/tool-gateway@4.1.4
+  - @opengeni/vaults@4.1.4
+  - @opengeni/vaults-keeper@4.1.4
+  - @opengeni/vaults-onepassword@4.1.4
+  - @opengeni/vaults-protonpass@4.1.4
+  - @opengeni/agent-proto@4.1.4
+  - @opengeni/network@4.1.4
+  - @opengeni/xai-subscription@4.1.4
+
 ## 4.1.3
 
 ### Patch Changes

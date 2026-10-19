@@ -1,5 +1,13 @@
 # @opengeni/vaults-bitwarden-bridge
 
+## 2.0.8
+
+### Patch Changes
+
+- Updated dependencies [47eeb80]
+  - @opengeni/contracts@4.1.4
+  - @opengeni/sdk@4.1.4
+
 ## 2.0.7
 
 ### Patch Changes

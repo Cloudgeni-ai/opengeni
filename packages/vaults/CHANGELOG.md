@@ -1,5 +1,12 @@
 # @opengeni/vaults
 
+## 4.1.4
+
+### Patch Changes
+
+- Updated dependencies [47eeb80]
+  - @opengeni/contracts@4.1.4
+
 ## 4.1.3
 
 ### Patch Changes

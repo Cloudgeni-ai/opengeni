@@ -1,5 +1,14 @@
 # @opengeni/sdk
 
+## 4.1.4
+
+### Patch Changes
+
+- 47eeb80: Site and console chat turns now use the same native authority, tools and execution settings. Remove automatic Site-agent restrictions and forced member profiles; retain normal access checks, approvals and outside-workspace visitor identities. Existing saved member settings and accepted turns are not rewritten. Site authors can explicitly choose narrower ordinary chat settings.
+- Updated dependencies [47eeb80]
+  - @opengeni/contracts@4.1.4
+  - @opengeni/connect@4.1.4
+
 ## 4.1.3
 
 ### Patch Changes
