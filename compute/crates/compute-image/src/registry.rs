@@ -10,7 +10,9 @@
 //! A request that fails in a way that can pass (the connection failed,
 //! reset or timed out, or the registry or its token service said it is
 //! overloaded or briefly unavailable) is sent again after a growing wait,
-//! so one dropped connection does not fail a host's install.
+//! so one dropped connection does not fail a host's install. Any other
+//! answer, and a redirect loop, is reported at once. A layer whose
+//! download breaks off is asked for again.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -36,12 +38,14 @@ const DOCKER_MANIFEST: &str = "application/vnd.docker.distribution.manifest.v2+j
 
 /// The largest manifest or config read.
 const MAX_DOCUMENT: usize = 8 * 1024 * 1024;
-/// Attempts per blob download.
+/// Attempts per blob download, for a download that breaks off or arrives
+/// wrong after the registry has answered.
 const ATTEMPTS: u32 = 3;
 /// Times one request is sent before a transient failure is reported.
 const SEND_ATTEMPTS: u32 = 6;
 /// The wait after a first transient failure, doubled after each later
-/// one; a registry's own `Retry-After` replaces it, up to [`MAX_WAIT`].
+/// one; a registry's own `Retry-After` (seconds or an HTTP date) replaces
+/// it, but never for more than [`MAX_WAIT`].
 const FIRST_WAIT: Duration = Duration::from_millis(500);
 const MAX_WAIT: Duration = Duration::from_secs(30);
 /// A connection not made in this time failed; nor one silent this long.
@@ -407,14 +411,17 @@ impl Registry {
     }
 
     /// Downloads a blob to `path`, checking its size and digest as it
-    /// streams; tries again on failure.
+    /// streams; asks for it again when the download breaks off or arrives
+    /// wrong. A request the registry refused, or one that failed for good
+    /// (after its own tries), is reported at once.
     async fn blob_to_file(&self, base: &str, blob: &Descriptor, path: &Path) -> Result<()> {
         ensure!(valid_digest(&blob.digest), "bad digest {}", blob.digest);
         let url = format!("{base}/blobs/{}", blob.digest);
         let mut wait = FIRST_WAIT;
         let mut attempt = 1;
         loop {
-            match self.download(&url, blob, path).await {
+            let response = self.send(|client| client.get(&url)).await?;
+            match Self::save(response, blob, path).await {
                 Ok(()) => return Ok(()),
                 Err(error) if attempt == ATTEMPTS => return Err(error),
                 Err(error) => {
@@ -427,8 +434,9 @@ impl Registry {
         }
     }
 
-    async fn download(&self, url: &str, blob: &Descriptor, path: &Path) -> Result<()> {
-        let response = self.send(|client| client.get(url)).await?;
+    /// Writes the blob `blob` that `response` carries to `path`, checking
+    /// its size and digest as it streams.
+    async fn save(response: Response, blob: &Descriptor, path: &Path) -> Result<()> {
         let mut file = tokio::fs::File::create(path).await?;
         let mut hasher = Sha256::new();
         let mut length = 0_u64;
@@ -543,7 +551,8 @@ struct Token {
 
 /// Sends the request `build` makes, and again after each transient
 /// failure up to [`SEND_ATTEMPTS`] times. Returns the first answer that is
-/// not a transient failure (whatever its status), or the last failure.
+/// not a transient failure (whatever its status), or the last failure. A
+/// request that cannot be built and a redirect loop fail at once.
 async fn retried(build: impl Fn() -> RequestBuilder) -> Result<Response> {
     let mut wait = FIRST_WAIT;
     let mut attempt = 1;
@@ -561,7 +570,9 @@ async fn retried(build: impl Fn() -> RequestBuilder) -> Result<Response> {
                 );
                 retry_after(response.headers()).unwrap_or(wait)
             }
-            Err(error) if last || error.is_builder() => return Err(error.into()),
+            Err(error) if last || error.is_builder() || error.is_redirect() => {
+                return Err(error.into());
+            }
             Err(error) => {
                 tracing::warn!(attempt, %error, "registry request failed; sending it again");
                 wait
@@ -586,17 +597,22 @@ fn transient(status: StatusCode) -> bool {
     )
 }
 
-/// The wait a `Retry-After` header in seconds asks for, at most
-/// [`MAX_WAIT`].
+/// The wait a `Retry-After` header asks for, in seconds or until an HTTP
+/// date (none for a date passed), at most [`MAX_WAIT`].
 fn retry_after(headers: &HeaderMap) -> Option<Duration> {
-    let seconds: u64 = headers
+    let value = headers
         .get(reqwest::header::RETRY_AFTER)?
         .to_str()
         .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    Some(Duration::from_secs(seconds).min(MAX_WAIT))
+        .trim();
+    let wait = match value.parse::<u64>() {
+        Ok(seconds) => Duration::from_secs(seconds),
+        Err(_) => httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or_default(),
+    };
+    Some(wait.min(MAX_WAIT))
 }
 
 async fn checked(response: Response) -> Result<Response> {
@@ -836,18 +852,98 @@ mod tests {
         assert_eq!(served.await.unwrap().len(), 5);
     }
 
+    #[tokio::test]
+    async fn a_redirect_loop_is_reported_at_once() {
+        // The client follows ten redirects and stops at the eleventh; the
+        // twelfth connection would answer, so sending again would succeed.
+        let (address, served) = scripted(|address| {
+            let mut script: Vec<_> = (0..11)
+                .map(|_| {
+                    Some((
+                        format!("HTTP/1.1 302 Found\r\nlocation: {address}/v2/a/manifests/latest"),
+                        "",
+                    ))
+                })
+                .collect();
+            script.push(Some(("HTTP/1.1 200 OK".into(), "late")));
+            script
+        })
+        .await;
+        let registry = Registry::new(None).unwrap();
+        let url = format!("{address}/v2/a/manifests/latest");
+        let looped = registry.send(|client| client.get(&url)).await.unwrap_err();
+        assert!(
+            looped
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_redirect),
+            "{looped:#}"
+        );
+        assert!(!served.is_finished());
+        served.abort();
+    }
+
+    #[tokio::test]
+    async fn a_refused_blob_is_reported_at_once_and_a_broken_one_asked_for_again() {
+        let blob = Descriptor {
+            media_type: String::new(),
+            digest: sha256_digest(b"layer"),
+            size: 5,
+            platform: None,
+        };
+        let (address, served) = scripted(|_| {
+            vec![
+                Some(("HTTP/1.1 200 OK".into(), "lay")),
+                Some(("HTTP/1.1 200 OK".into(), "layer")),
+                Some(("HTTP/1.1 404 Not Found".into(), "")),
+                Some(("HTTP/1.1 200 OK".into(), "layer")),
+            ]
+        })
+        .await;
+        let registry = Registry::new(None).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("blob");
+        let base = format!("{address}/v2/a");
+        registry.blob_to_file(&base, &blob, &path).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"layer");
+        let missing = registry
+            .blob_to_file(&base, &blob, &path)
+            .await
+            .unwrap_err();
+        assert!(missing.to_string().contains("404"), "{missing:#}");
+        assert!(!served.is_finished());
+        served.abort();
+    }
+
     #[test]
-    fn retry_after_is_read_in_seconds_and_bounded() {
+    fn retry_after_is_read_in_seconds_or_as_a_date_and_bounded() {
         let mut headers = HeaderMap::new();
         assert_eq!(retry_after(&headers), None);
         headers.insert(reqwest::header::RETRY_AFTER, "2".parse().unwrap());
         assert_eq!(retry_after(&headers), Some(Duration::from_secs(2)));
         headers.insert(reqwest::header::RETRY_AFTER, "3600".parse().unwrap());
         assert_eq!(retry_after(&headers), Some(MAX_WAIT));
+        // A date passed asks for no wait; one far ahead for the most.
         headers.insert(
             reqwest::header::RETRY_AFTER,
             "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
         );
+        assert_eq!(retry_after(&headers), Some(Duration::ZERO));
+        let soon = std::time::SystemTime::now() + Duration::from_secs(20);
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            httpdate::fmt_http_date(soon).parse().unwrap(),
+        );
+        let wait = retry_after(&headers).unwrap();
+        assert!(
+            wait > Duration::from_secs(17) && wait <= Duration::from_secs(20),
+            "{wait:?}"
+        );
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Fri, 01 Jan 2100 00:00:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after(&headers), Some(MAX_WAIT));
+        headers.insert(reqwest::header::RETRY_AFTER, "soon".parse().unwrap());
         assert_eq!(retry_after(&headers), None);
         assert!(transient(StatusCode::BAD_GATEWAY) && !transient(StatusCode::NOT_FOUND));
         assert!(!transient(StatusCode::UNAUTHORIZED) && !transient(StatusCode::FORBIDDEN));

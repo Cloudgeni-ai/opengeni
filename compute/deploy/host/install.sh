@@ -103,7 +103,11 @@ mv -T /opt/compute/current.part /opt/compute/current
 log "firecracker $FC_VERSION"
 fc=/opt/compute/firecracker/$FC_VERSION
 if [ ! -x "$fc/firecracker" ] || [ ! -x "$fc/jailer" ]; then
-  work=$(mktemp -d)
+  # One fixed place, emptied first, so failed attempts leave at most one
+  # partial download behind.
+  work=/opt/compute/firecracker/.download
+  rm -rf "$work"
+  install -d -m 700 "$work"
   fetch "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-x86_64.tgz" \
     "$work/firecracker.tgz" "$FC_SHA256_X86_64"
   tar -xzf "$work/firecracker.tgz" -C "$work"
@@ -144,22 +148,37 @@ source /etc/compute/host.env
 
 log "state volume"
 install -d -m 755 /var/lib/compute
-if [ ! -f /etc/compute/state-volume.uuid ] && [ -n "$state_device" ]; then
-  mountpoint -q /var/lib/compute && fail "/var/lib/compute is mounted already; leave out --state-device"
-  mkfs.xfs -q -f -m reflink=1 "$state_device"
-  uuid=$(blkid -s UUID -o value "$state_device")
-  sed -i '\# /var/lib/compute #d' /etc/fstab
-  echo "UUID=$uuid /var/lib/compute xfs noatime,nofail 0 2" >>/etc/fstab
-  systemctl daemon-reload
-  mount /var/lib/compute
+# The marker names the state volume this host uses. It is written whole
+# (see below); one with no UUID in it, from an interrupted older write,
+# counts as none (the GCP startup script uses the same test).
+recorded=$(tr -d '[:space:]' 2>/dev/null </etc/compute/state-volume.uuid || true)
+if [ -z "$recorded" ] && [ -n "$state_device" ]; then
+  if mountpoint -q /var/lib/compute; then
+    # An earlier attempt formatted and mounted this device but stopped
+    # before recording it; anything else mounted there is refused.
+    have=$(findmnt -no UUID /var/lib/compute || true)
+    want=$(blkid -s UUID -o value "$state_device" 2>/dev/null || true)
+    [ -n "$have" ] && [ "$have" = "$want" ] ||
+      fail "/var/lib/compute is mounted already, not from $state_device; leave out --state-device"
+  else
+    mkfs.xfs -q -f -m reflink=1 "$state_device"
+    uuid=$(blkid -s UUID -o value "$state_device")
+    [ -n "$uuid" ] || fail "$state_device has no file system UUID after formatting"
+    sed -i '\# /var/lib/compute #d' /etc/fstab
+    echo "UUID=$uuid /var/lib/compute xfs noatime,nofail 0 2" >>/etc/fstab
+    systemctl daemon-reload
+    mount /var/lib/compute
+  fi
 fi
 mountpoint -q /var/lib/compute || fail "/var/lib/compute is not a mount point: mount the state volume there, or pass --state-device"
-mounted=$(findmnt -no UUID /var/lib/compute)
-if [ -f /etc/compute/state-volume.uuid ]; then
-  [ "$(cat /etc/compute/state-volume.uuid)" = "$mounted" ] ||
-    fail "/var/lib/compute holds $mounted, not the state volume $(cat /etc/compute/state-volume.uuid) recorded for this host"
+mounted=$(findmnt -no UUID /var/lib/compute || true)
+[ -n "$mounted" ] || fail "the file system on /var/lib/compute has no UUID; use one that has (XFS does)"
+if [ -n "$recorded" ]; then
+  [ "$recorded" = "$mounted" ] ||
+    fail "/var/lib/compute holds $mounted, not the state volume $recorded recorded for this host"
 else
-  echo "$mounted" >/etc/compute/state-volume.uuid
+  echo "$mounted" >/etc/compute/state-volume.uuid.part
+  mv /etc/compute/state-volume.uuid.part /etc/compute/state-volume.uuid
 fi
 [ "$(findmnt -no FSTYPE /var/lib/compute)" = xfs ] ||
   log "warning: the state volume is not XFS; saves and clones copy instead of sharing extents"
