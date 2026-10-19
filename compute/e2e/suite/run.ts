@@ -2073,9 +2073,26 @@ check(
     const before = await sandbox();
     const lost = before.host!;
     const lostEpoch = (await hosts()).find((host) => host.name === lost)?.epoch;
+    // The instance group heals a stopped host by recreating it under the
+    // same name, so a name alone does not say which machine it is: the
+    // instance id does.
+    const instanceId = (name: string) =>
+      gcloud([
+        "compute",
+        "instances",
+        "describe",
+        name,
+        "--zone",
+        ZONE,
+        "--project",
+        PROJECT,
+        "--format",
+        "value(id)",
+      ]);
+    const lostInstance = instanceId(lost);
     // Stopped, the machine is plainly gone: its lease lapses, the service
     // fences it (finds it stopped) and the sandbox wakes elsewhere.
-    log(`stopping ${lost}`);
+    log(`stopping ${lost} (instance ${lostInstance})`);
     const start = Date.now();
     const stop = spawnSync(
       "gcloud",
@@ -2086,6 +2103,7 @@ check(
       },
     );
     if (stop.status !== 0) throw new Error(`stop: ${stop.error ?? ""} ${stop.stderr}`);
+    hostAddresses.delete(lost);
     let out = "";
     for (;;) {
       if (Date.now() - start > 20 * 60_000) throw new Error("no recovery within 20 minutes");
@@ -2114,10 +2132,28 @@ check(
     const owner = fleet.find((host) => host.name === after.host);
     const old = fleet.find((host) => host.name === lost);
     // A different live owner, under a later owner epoch, and the lost host
-    // fenced: given up on, or back only under a new host epoch.
-    if (!after.host || after.host === lost || owner?.state !== "live") {
+    // fenced: given up on, or back only under a new host epoch. A new
+    // machine under the lost one's name counts as different only by a new
+    // instance id and a new host epoch.
+    let ownerInstance = "";
+    if (after.host === lost) {
+      try {
+        ownerInstance = instanceId(lost);
+      } catch (error) {
+        throw new Error(
+          `answered on ${lost} again, and its instance id could not be read: ${error}`,
+        );
+      }
+    }
+    const sameMachine =
+      after.host === lost && (ownerInstance === lostInstance || owner?.epoch === lostEpoch);
+    if (!after.host || sameMachine || owner?.state !== "live") {
       throw new Error(
-        `answered, but owned by ${after.host ?? "no host"} (${owner?.state ?? "unknown"}), not a different live host`,
+        `answered, but owned by ${after.host ?? "no host"} (${owner?.state ?? "unknown"}` +
+          (after.host === lost
+            ? `, instance ${lostInstance} -> ${ownerInstance}, host epoch ${lostEpoch} -> ${owner?.epoch}`
+            : "") +
+          `), not a different live host`,
       );
     }
     if (!(after.owner_epoch > before.owner_epoch)) {
@@ -2130,9 +2166,12 @@ check(
         `${lost} is still live under its old epoch ${lostEpoch}, so it was never fenced`,
       );
     }
-    const fenced = old
-      ? `${old.state} (host epoch ${lostEpoch} -> ${old.epoch})`
-      : "gone from the fleet";
+    const fenced =
+      after.host === lost
+        ? `replaced by the instance group: instance ${lostInstance} -> ${ownerInstance}, host epoch ${lostEpoch} -> ${owner?.epoch}`
+        : old
+          ? `${old.state} (host epoch ${lostEpoch} -> ${old.epoch})`
+          : "gone from the fleet";
     const now = await sandboxState();
     if (now.host !== after.host)
       throw new Error(`the fabric says ${after.host}, but ${now.host ?? "no host"} holds it`);
