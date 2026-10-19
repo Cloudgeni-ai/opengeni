@@ -1,4 +1,4 @@
-//! The wire types of Opengeni compute, shared by the host agent, the fleet
+//! The wire types of Opengeni compute, shared by the host agent, the control
 //! service and the tools that talk to them.
 //!
 //! - [`host`]: the host agent's API, one JSON request per line, on a Unix
