@@ -59,7 +59,11 @@ fi
 # --- The bundle.
 bundle=/opt/compute/bundles/$BUNDLE_SHA256
 if [ ! -f "$bundle/install.sh" ]; then
-  work=$(mktemp -d)
+  # One fixed place, emptied first, so failed attempts leave at most one
+  # partial download behind.
+  work=/opt/compute/bundles/.download
+  rm -rf "$work" "$bundle.part"
+  install -d -m 700 "$work"
   case "$BUNDLE_URL" in
     gs://*) gcloud storage cp --quiet "$BUNDLE_URL" "$work/bundle.tar.gz" ;;
     *) curl -fsSL --retry 5 -o "$work/bundle.tar.gz" "$BUNDLE_URL" ;;
