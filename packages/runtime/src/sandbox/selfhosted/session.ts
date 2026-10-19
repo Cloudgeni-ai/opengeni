@@ -627,9 +627,6 @@ export class SelfhostedSession {
   private readonly controlRpc: ControlRpc;
   /** Attempt scopes this session wrote `{{secretfile:…}}` files under. */
   private readonly secretScopes = new Set<string>();
-  /** Secret preparations still running, by attempt scope: an exec that gave up
-   *  during one leaves it running, and cleanup waits for it. */
-  private readonly secretPreparations = new Map<string, Set<Promise<unknown>>>();
   private readonly relay: SelfhostedRelayConfig;
   private readonly terminalScopeId: string;
   private readonly epoch: number;
@@ -1197,37 +1194,21 @@ export class SelfhostedSession {
     return this.hostOs() === "windows" ? "windows" : "posix";
   }
 
-  /** `abandoned`: the exec has given up, so no further secret file is
-   *  written for it. */
   private async prepareSecretExec(
     args: SelfhostedExecArgs,
     requestedShell: string | undefined,
-    abandoned: () => boolean,
   ): Promise<{ command: string; shell: string; env: Record<string, string> } | null> {
     const carry = secretExecCarryFor(args.cmd);
     if (!carry) return null;
     const dialect = carry.spliced ? "posix" : this.describeShellDialect(requestedShell);
     const spliced = spliceCarry(carry, dialect);
     const command = carry.spliced ? args.cmd : args.cmd.split(carry.command).join(spliced.text);
-    const preparation = secretExecEnvironment(carry, spliced, async (file) => {
-      if (abandoned()) throw agentErrorToControlError(timeoutAgentError());
-      // Cleanup owns the scope from before its first write, so a write that
-      // fails part-way is removed too.
+    const env = await secretExecEnvironment(carry, spliced, async (file) => {
+      // Best-effort cleanup covers the scope from before its first write, so
+      // a write that fails part-way is removed too.
       this.secretScopes.add(carry.scope);
       await this.writePlacementPrivate({ ...file, createParents: true });
     });
-    const pending = this.secretPreparations.get(carry.scope) ?? new Set<Promise<unknown>>();
-    this.secretPreparations.set(carry.scope, pending);
-    pending.add(preparation);
-    void preparation
-      .finally(() => {
-        pending.delete(preparation);
-        if (pending.size === 0 && this.secretPreparations.get(carry.scope) === pending) {
-          this.secretPreparations.delete(carry.scope);
-        }
-      })
-      .catch(() => {});
-    const env = await preparation;
     const shell = requestedShell || (dialect === "powershell" ? "powershell" : "/bin/sh");
     return { command, shell, env };
   }
@@ -1238,16 +1219,6 @@ export class SelfhostedSession {
    * and runs even when the consuming command never started.
    */
   async clearSecretFilesForAttempt(scope?: string): Promise<void> {
-    // A preparation still writing (its exec timed out meanwhile) finishes
-    // first, so no secret file lands after its scope is removed.
-    for (;;) {
-      const pending =
-        scope === undefined
-          ? [...this.secretPreparations.values()].flatMap((entries) => [...entries])
-          : [...(this.secretPreparations.get(scope) ?? [])];
-      if (pending.length === 0) break;
-      await Promise.allSettled(pending);
-    }
     const scopes = scope === undefined ? [...this.secretScopes] : [scope];
     for (const entry of scopes) {
       const path = selfhostedPlacementPrivatePath(secretScopeDirectory(entry));
@@ -1320,11 +1291,7 @@ export class SelfhostedSession {
         // -Command` on Windows) so the splice matches the parser. `args.cmd`
         // (references) remains the command recorded for background adoption.
         const secret = await beforeExecDeadline(
-          this.prepareSecretExec(
-            args,
-            requestedShell,
-            () => deadlineAt > 0 && Date.now() >= deadlineAt,
-          ),
+          this.prepareSecretExec(args, requestedShell),
           deadlineAt,
           expired,
         );

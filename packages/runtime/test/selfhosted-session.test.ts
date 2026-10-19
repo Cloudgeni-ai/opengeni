@@ -1707,7 +1707,7 @@ describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
     expect(mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove")).toHaveLength(1);
   });
 
-  test("no secret file is written after an exec that timed out during preparation is cleaned up", async () => {
+  test("an exec gives up at its deadline while a secret file is still being written", async () => {
     const events: string[] = [];
     class SlowWrites extends MockAgentResponder {
       override async request(
@@ -1744,12 +1744,9 @@ describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
     expect(String(error)).toMatch(/did not respond in time/);
     expect(Date.now() - startedAt).toBeLessThan(140);
     expect(events).toEqual([]);
-    // Attempt-end cleanup waits for that write, then removes the scope; the
-    // abandoned exec writes nothing more.
-    await session.clearSecretFilesForAttempt();
-    await Bun.sleep(250);
-    expect(events).toEqual(["write", "remove"]);
     expect(mock.requests.some((entry) => entry.req.op?.$case === "opStart")).toBe(false);
+    // The preparation it left finishes on its own; nothing waits for it.
+    await Bun.sleep(350);
   });
 });
 
