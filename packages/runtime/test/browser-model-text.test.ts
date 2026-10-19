@@ -196,6 +196,18 @@ describe("browser model text", () => {
     expect(browserTabsText({ browserSessionId: session.id, targets: [target] })).toBe(
       `BrowserSession ${session.id} has 1 tab:\nTab T1 selected: "Checkout" https://shop.example/checkout`,
     );
+    // The observed tab is listed once, by the observation that follows.
+    const tabsWithOutline = browserTabsText({
+      browserSessionId: session.id,
+      targets: [target, { ...target, id: "T2", title: "Other", selected: false }],
+      mutationObservation: formObservation(),
+    });
+    expect(tabsWithOutline.split("\n").slice(0, 3)).toEqual([
+      `BrowserSession ${session.id} has 2 tabs:`,
+      'Tab T2: "Other" https://shop.example/checkout',
+      'Tab T1: "Checkout" https://shop.example/checkout',
+    ]);
+    expect(tabsWithOutline.match(/Tab T1\b/g)).toHaveLength(1);
     expect(
       browserReadText({
         targetId: "T1",

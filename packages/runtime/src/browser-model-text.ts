@@ -368,7 +368,11 @@ export function browserTabsText(output: {
   const lines = [
     `BrowserSession ${output.browserSessionId} has ${plural(output.targets.length, "tab")}:`,
   ];
-  for (const target of output.targets) lines.push(browserTargetLine(target));
+  // The observation starts with its tab's own line, so list that tab once.
+  const observedId = output.mutationObservation?.target.id;
+  for (const target of output.targets) {
+    if (target.id !== observedId) lines.push(browserTargetLine(target));
+  }
   if (output.mutationObservation) lines.push(browserObservationText(output.mutationObservation));
   return lines.join("\n");
 }
