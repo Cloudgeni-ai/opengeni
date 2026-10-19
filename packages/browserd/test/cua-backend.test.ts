@@ -812,11 +812,15 @@ describe("CUA desktop boundary", () => {
       launched = false;
       listings = 0;
       reportWindows = false;
+      // Linux reports the launcher process; the app's window belongs to its child.
+      linux = false;
       async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
         const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "check_permissions" && this.linux) return result({ atspi: true, x11: true });
         if (name === "launch_app") {
           this.calls.push({ name, args });
           this.launched = true;
+          if (this.linux) return result({ launcher_pid: 76 });
           const window = { pid: 77, window_id: 9, title: "Untitled", app_name: "TextEdit" };
           return result({
             pid: 77,
@@ -845,10 +849,15 @@ describe("CUA desktop boundary", () => {
         return response;
       }
     }
-    for (const reportWindows of [false, true]) {
+    for (const [reportWindows, linux] of [
+      [false, false],
+      [true, false],
+      [false, true],
+    ] as const) {
       const fixture = new LaunchFixture();
       fixture.reportWindows = reportWindows;
-      const backend = await CuaComputerBackend.open(fixture);
+      fixture.linux = linux;
+      const backend = await CuaComputerBackend.open(fixture, linux ? "linux" : "macos");
       try {
         const target = (await backend.targets())[0]!;
         const observation = await backend.observe(target.id);

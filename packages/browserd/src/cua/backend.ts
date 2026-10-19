@@ -196,7 +196,16 @@ export class CuaComputerBackend implements ComputerBackend {
     return this.run(async () => {
       if (command.action.type === "launch") {
         await this.target(command.targetId);
-        const launched = await this.launch(command.action.applicationId);
+        // The windows open before the launch, to recognise the new one when
+        // the app starts through a launcher process (Linux).
+        const before =
+          this.identity.platform === "linux"
+            ? await this.discover().then(
+                (targets) => new Set(targets.map((target) => target.id)),
+                () => null,
+              )
+            : null;
+        const launched = await this.launch(command.action.applicationId, before);
         // The app is running: the launch succeeded whatever happens next. Its
         // windows become targets when discovery works. The receipt observes
         // the launched app's window, so the caller can act on it directly,
@@ -772,7 +781,7 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   /** Start an app (or bring up its existing instance) in the background. */
-  private async launch(applicationId: string): Promise<LaunchedApp> {
+  private async launch(applicationId: string, before: Set<string> | null): Promise<LaunchedApp> {
     const id = applicationId.trim();
     const { data } = await callDesktop(
       this.runtime,
@@ -790,15 +799,21 @@ export class CuaComputerBackend implements ComputerBackend {
         true,
       );
     const reported = Windows.safeParse({ windows: data.windows });
+    const pid = typeof data.pid === "number" ? data.pid : null;
+    const launcherPid = typeof data.launcher_pid === "number" ? data.launcher_pid : null;
     return {
-      pid: typeof data.pid === "number" ? data.pid : null,
+      pids: new Set([pid, launcherPid].filter((value): value is number => value !== null)),
       windows: reported.success ? reported.data.windows : [],
+      // A launcher's app may run as another process (a child, or an instance
+      // already running), so a window that was not open before is its window.
+      before: pid === null ? before : null,
     };
   }
 
   /** The target of the launched app's window: one the launch reported, else
-   * the first listed window of its process. A window can appear a moment
-   * after the process starts, so discovery is retried briefly. */
+   * the first listed window of its process, else (for a launcher) the first
+   * window that was not open before. A window can appear a moment after the
+   * process starts, so discovery is retried briefly. */
   private async launchedWindow(launched: LaunchedApp): Promise<string | null> {
     for (let attempt = 0; ; attempt++) {
       const targets = await this.discover();
@@ -806,9 +821,12 @@ export class CuaComputerBackend implements ComputerBackend {
         const id = `cua:window:${window.pid}:${window.window_id}`;
         if (this.targetsById.has(id)) return id;
       }
-      const owned = targets.find((target) => target.processId === launched.pid);
+      const owned =
+        targets.find(
+          (target) => target.processId !== null && launched.pids.has(target.processId),
+        ) ?? targets.find((target) => launched.before !== null && !launched.before.has(target.id));
       if (owned) return owned.id;
-      if (launched.pid === null || attempt >= LAUNCH_WINDOW_RETRIES) return null;
+      if (attempt >= LAUNCH_WINDOW_RETRIES) return null;
       await new Promise((resolve) => setTimeout(resolve, LAUNCH_WINDOW_RETRY_MS));
     }
   }
@@ -860,9 +878,13 @@ const RECENT_OBSERVATIONS = 4;
 const LAUNCH_WINDOW_RETRIES = 4;
 const LAUNCH_WINDOW_RETRY_MS = 250;
 
-/** A launched app's process and the windows launch_app reported, which have
- * list_windows' shape. */
-type LaunchedApp = { pid: number | null; windows: { pid: number; window_id: number }[] };
+/** A launched app's processes, the windows launch_app reported (in
+ * list_windows' shape), and for a launcher the windows open before it ran. */
+type LaunchedApp = {
+  pids: Set<number>;
+  windows: { pid: number; window_id: number }[];
+  before: Set<string> | null;
+};
 
 /** A reverse-DNS bundle identifier such as com.apple.TextEdit; anything else is an app name. */
 const BUNDLE_ID = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u;
