@@ -2325,12 +2325,12 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0852_classify_connected_command_ops.sql",
-      "0851_compute_stale_sandbox_enrollments.sql",
-      "0850_compute_lease_group_end_and_sleep.sql",
-      "0849_compute_commands_settle_by_push.sql",
-      "0848_compute_leases_skip_idle_drain.sql",
-      "0847_sandbox_enrollments.sql",
+      "0857_classify_connected_command_ops.sql",
+      "0856_compute_stale_sandbox_enrollments.sql",
+      "0855_compute_lease_group_end_and_sleep.sql",
+      "0854_compute_commands_settle_by_push.sql",
+      "0853_compute_leases_skip_idle_drain.sql",
+      "0852_sandbox_enrollments.sql",
       "0838_reclaim_exited_backend_runtime_capabilities.sql",
       "0841_session_machine_access_explanation.sql",
       "0837_hot_session_tables_analyze_cadence.sql",
