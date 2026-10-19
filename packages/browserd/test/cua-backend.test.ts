@@ -933,17 +933,15 @@ describe("CUA desktop boundary", () => {
           });
         }
         if (name === "get_window_state" && args.window_id === 2) {
-          // Its pixels are readable; its accessibility tree is not.
-          if (!args.include_accessibility_tree) {
-            const capture = await super.callTool(name, argumentsJson);
-            const state = JSON.parse(capture.structuredJson!);
-            capture.structuredJson = JSON.stringify({
-              ...state,
-              window_id: 2,
-              window_bounds: { x: 100, y: 60, width: 100, height: 60 },
-            });
-            return capture;
-          }
+          // CUA produces neither its pixels nor its accessibility tree.
+          if (!args.include_accessibility_tree)
+            return {
+              text: "No content produced (neither AX tree nor screenshot succeeded)",
+              images: [],
+              isError: true,
+              degraded: false,
+              rawJson: "{}",
+            };
           this.calls.push({ name, args });
           return result({
             pid: 42,

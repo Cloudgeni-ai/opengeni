@@ -472,7 +472,11 @@ export class CuaComputerBackend implements ComputerBackend {
       this.initialCapabilities.windowCapture &&
       ![...this.frames.values()].some((frame) => frame.targetId === targetId)
     )
-      await this.captureTarget(targetId);
+      await this.captureTarget(targetId).catch((error: unknown) => {
+        // CUA captures nothing for a sheet's own window; its tree read below
+        // says whether this is one.
+        if (!this.sheetParent(target)) throw error;
+      });
     // Viewer polling must never retire a native CUA element-token snapshot.
     // Once native tools own observations, the legacy viewer receives geometry
     // and pixels only. The native result carries its exact tree unchanged.
