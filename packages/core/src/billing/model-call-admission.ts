@@ -53,7 +53,7 @@ export async function admitModelCall(
         return {
           allowed: false,
           denial: "insufficient_credits",
-          message: decision.reason || "Insufficient Opengeni credits.",
+          message: decision.reason || "Insufficient credits.",
         };
       }
     } else {
@@ -63,7 +63,7 @@ export async function admitModelCall(
         return {
           allowed: false,
           denial: "insufficient_credits",
-          message: "Insufficient Opengeni credits.",
+          message: "Insufficient credits.",
         };
       }
     }

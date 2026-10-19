@@ -42842,7 +42842,7 @@ export class SandboxPaidComputeAdmissionError extends Error {
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
   ) {
-    super("Insufficient Opengeni credits to admit paid sandbox compute");
+    super("Insufficient credits to admit paid sandbox compute");
   }
 }
 

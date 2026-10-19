@@ -20,8 +20,8 @@ export function formatSkillCatalog(descriptors: readonly SkillCatalogDescriptor[
     byId.set(entry.id, entry);
   }
   const ordered = [...byId.values()].sort((a, b) => {
-    if (a.id === "builtin:opengeni-skills") return -1;
-    if (b.id === "builtin:opengeni-skills") return 1;
+    if (a.id === "builtin:skill-management") return -1;
+    if (b.id === "builtin:skill-management") return 1;
     const left = `${a.name}\u0000${a.id}`;
     const right = `${b.name}\u0000${b.id}`;
     return left < right ? -1 : left > right ? 1 : 0;
@@ -29,8 +29,8 @@ export function formatSkillCatalog(descriptors: readonly SkillCatalogDescriptor[
   const header = [
     "## Skills",
     "Use skill_read to read a relevant Skill without a sandbox. Omit paths for SKILL.md, or supply paths to read exactly those files.",
-    byId.has("builtin:opengeni-skills")
-      ? "For finding, installing, creating, or editing Skills, read opengeni-skills. Management tools are lazy and available through tool search."
+    byId.has("builtin:skill-management")
+      ? "For finding, installing, creating, or editing Skills, read the skill-management Skill. Management tools are lazy and available through tool search."
       : "Management tools are lazy and available through tool search.",
     "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
   ].join("\n");

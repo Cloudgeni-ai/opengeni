@@ -177,7 +177,7 @@ test("a host funding denial is neutral about the host's private balance and poli
 });
 
 for (const [denial, pausedReason, message] of [
-  ["insufficient_credits", "credits", "Insufficient Opengeni credits"],
+  ["insufficient_credits", "credits", "Insufficient credits"],
   ["allowance_exhausted", "allowance", "usage allowance exhausted"],
   ["monthly_model_cost_limit", "budget", "spending limit reached"],
   ["monthly_agent_run_limit", "usage_limit", "agent run limit reached"],

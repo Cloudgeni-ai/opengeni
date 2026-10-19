@@ -1,6 +1,6 @@
 ---
-name: opengeni-projects
-description: Organize Opengeni sessions into projects, including sidebar groups, shared pins and ordering. Use when the user asks to organize their work in Opengeni.
+name: projects
+description: Organize chats into projects, including sidebar groups, shared pins and ordering. Use when the user asks to organize their chats or work.
 ---
 
 Projects are named, workspace-shared groups of sessions. In the frontend sidebar, users see root sessions grouped under their project; child agents remain under their parent session. Unfiled sessions appear outside project groups. Pins and project order are shared, not personal preferences.

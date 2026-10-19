@@ -303,7 +303,7 @@ describe("server effectiveTools environment projection", () => {
     expect(absent.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("generate_video");
   });
   test("bundled artifact Skills cannot leak a reader from disabled legacy columns", () => {
-    const result = projected(session("none", { bundledSkillIds: ["builtin:opengeni-documents"] }));
+    const result = projected(session("none", { bundledSkillIds: ["builtin:documents"] }));
     expect(result.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("skill_read");
   });
   test("null config preserves the exact legacy projection and skips metadata reads", async () => {

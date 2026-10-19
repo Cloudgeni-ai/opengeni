@@ -137,7 +137,7 @@ describe("worker agent-run admission funding", () => {
           initiatingHumanSubjectId: null,
         });
         if (allowed) await expect(check).resolves.toBe(7);
-        else await expect(check).rejects.toThrow("insufficient Opengeni credits");
+        else await expect(check).rejects.toThrow("insufficient credits");
       }
     } finally {
       balance.mockRestore();
@@ -382,7 +382,7 @@ describe("worker agent-run admission funding", () => {
         ),
       ).toEqual({
         pausedReason: "allowance",
-        message: "Opengeni usage allowance exhausted. Resume when your allowance is available.",
+        message: "Usage allowance exhausted. Resume when your allowance is available.",
       });
       expect(allowance).toHaveBeenCalledWith(expect.anything(), {
         accountId: ACCOUNT,
@@ -449,7 +449,7 @@ describe("worker agent-run admission funding", () => {
           }),
         ).toEqual({
           budgetBlocked:
-            "Opengeni usage allowance exhausted. Resume when your allowance is available.",
+            "Usage allowance exhausted. Resume when your allowance is available.",
           budgetPausedReason: "allowance",
         });
         expect(source).toHaveBeenCalledWith(lockedDb, WORKSPACE, causalTurnId);

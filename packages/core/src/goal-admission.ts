@@ -69,7 +69,7 @@ export function goalContinuationModelDecision(input: {
       model,
       blocked:
         policyVerdict.reason === "credits"
-          ? "Opengeni credits are turned off in this workspace. Choose a model paid by a subscription or API key before resuming."
+          ? "Credits are turned off in this workspace. Choose a model paid by a subscription or API key before resuming."
           : "Workspace policy blocks the selected model. Choose an allowed model before resuming.",
       pausedReason: "model_policy",
     };
@@ -139,11 +139,11 @@ export async function goalRunBudgetBlocked(
         }
       : {
           pausedReason: "credits",
-          message: "Insufficient Opengeni credits. Add credits before resuming.",
+          message: "Insufficient credits. Add credits before resuming.",
         },
     allowance_exhausted: {
       pausedReason: "allowance",
-      message: "Opengeni usage allowance exhausted. Resume when your allowance is available.",
+      message: "Usage allowance exhausted. Resume when your allowance is available.",
     },
     monthly_model_cost_limit: {
       pausedReason: "budget",

@@ -1247,7 +1247,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(creditsDisabled
           ? {
               available: false,
-              unavailableReason: "Opengeni credits are turned off in this workspace",
+              unavailableReason: "Credits are turned off in this workspace",
               unavailableCode: "credits_disabled",
             }
           : hasCredits
@@ -1257,7 +1257,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
                 unavailableReason:
                   creditStanding === "promotional_only"
                     ? "Promotional credits don't cover live voice. Add credits to use it."
-                    : "Add Opengeni credits to use live voice",
+                    : "Add credits to use live voice",
                 unavailableCode: "insufficient_credits",
               }),
         recommended: index === 0,

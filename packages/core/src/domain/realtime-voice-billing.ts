@@ -109,7 +109,7 @@ export type RealtimeVoiceUnavailableCode =
 
 /** Copy for deployment-funded voice in a workspace that turned Opengeni credits off. */
 export const WORKSPACE_CREDITS_DISABLED_VOICE_MESSAGE =
-  "Opengeni credits are turned off in this workspace.";
+  "Credits are turned off in this workspace.";
 
 export { workspaceCreditsDisabled } from "./workspace-credits";
 
@@ -132,20 +132,20 @@ export function realtimeVoiceOfferProblem(
   if (!voice.configured) {
     return new RealtimeVoiceUnavailableError(
       "not_configured",
-      "Opengeni live voice is not configured on this deployment.",
+      "Live voice is not configured on this deployment.",
     );
   }
   if (voiceInputCreditBillingActive(settings) && !voice.pricing) {
     return new RealtimeVoiceUnavailableError(
       "pricing_unconfigured",
-      "Opengeni live voice is not available on this deployment yet.",
+      "Live voice is not available on this deployment yet.",
     );
   }
   return null;
 }
 
 export const REALTIME_VOICE_INSUFFICIENT_CREDITS_MESSAGE =
-  "Live voice needs Opengeni credits. Add credits to continue.";
+  "Live voice needs credits. Add credits to continue.";
 
 /**
  * Credits voice can spend (general and signup credits), only model-scoped
@@ -175,7 +175,7 @@ export function voiceInsufficientCreditsMessage(
 ): string {
   return standing === "promotional_only"
     ? `Promotional credits don't cover ${feature.toLowerCase()}. Add credits to use it.`
-    : `${feature} needs Opengeni credits. Add credits to continue.`;
+    : `${feature} needs credits. Add credits to continue.`;
 }
 
 function startOfUtcMonth(now: Date): Date {
@@ -334,7 +334,7 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
           debitedMicros: 0,
           stop: new RealtimeVoiceUnavailableError(
             "pricing_unconfigured",
-            "Opengeni live voice is no longer available on this deployment.",
+            "Live voice is no longer available on this deployment.",
           ),
         };
       }

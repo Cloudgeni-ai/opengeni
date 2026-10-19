@@ -45,8 +45,23 @@ export type {
 export type BundledSkillId =
   | "builtin:opengeni-help"
   | "builtin:opengeni-client"
-  | "builtin:opengeni-visualize"
+  | "builtin:visualize"
   | "builtin:document-parsing"
+  | "builtin:skill-management"
+  | "builtin:projects"
+  | "builtin:schedules"
+  | "builtin:documents"
+  | "builtin:spreadsheets"
+  | "builtin:presentations"
+  | "builtin:sites"
+  | "builtin:video-generation"
+  | "builtin:secrets"
+  | LegacyBundledSkillId;
+/**
+ * @deprecated Renamed to the neutral ids above; still accepted and resolved to them.
+ */
+export type LegacyBundledSkillId =
+  | "builtin:opengeni-visualize"
   | "builtin:opengeni-skills"
   | "builtin:opengeni-projects"
   | "builtin:opengeni-schedules"

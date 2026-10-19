@@ -785,7 +785,7 @@ export async function refreshScheduledTaskAccess(input: {
     if (plan.creatorFirstPartyPolicy.firstPartyMcpPermissions.length === 0) {
       throw new HTTPException(403, {
         message:
-          "You hold none of the permissions this schedule's Opengeni tools need, so it cannot be refreshed with your access.",
+          "You hold none of the permissions this schedule's built-in tools need, so it cannot be refreshed with your access.",
       });
     }
     update.creatorFirstPartyPolicy = plan.creatorFirstPartyPolicy;

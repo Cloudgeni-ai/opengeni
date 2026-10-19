@@ -16,20 +16,20 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
   const definitions = [
     { name: "opengeni-help", include: () => true },
     { name: "opengeni-client", include: () => true },
-    { name: "opengeni-visualize", include: () => true },
+    { name: "visualize", include: () => true },
     { name: "document-parsing", include: () => true },
-    { name: "opengeni-skills", include: () => true },
-    { name: "opengeni-projects", include: () => true },
-    { name: "opengeni-schedules", include: () => tools.has("scheduled_tasks_create") },
-    { name: "opengeni-documents", include: artifacts },
-    { name: "opengeni-spreadsheets", include: artifacts },
-    { name: "opengeni-presentations", include: artifacts },
+    { name: "skill-management", include: () => true },
+    { name: "projects", include: () => true },
+    { name: "schedules", include: () => tools.has("scheduled_tasks_create") },
+    { name: "documents", include: artifacts },
+    { name: "spreadsheets", include: artifacts },
+    { name: "presentations", include: artifacts },
     {
-      name: "opengeni-sites",
+      name: "sites",
       include: () => tools.has("artifacts_create") && tools.has("artifacts_publish"),
     },
-    { name: "opengeni-secrets", include: () => tools.has("secret_search") },
-    { name: "opengeni-video-generation", include: () => context.videoGenerationEnabled },
+    { name: "secrets", include: () => tools.has("secret_search") },
+    { name: "video-generation", include: () => context.videoGenerationEnabled },
   ];
   return definitions
     .filter(
@@ -44,18 +44,18 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
 export function loadConfiguredBundledSkills(context: BundledSkillConfiguration) {
   const names = new Set(configuredBundledSkillNames(context));
   const artifacts = loadNativeToolSkillArtifacts({
-    projects: names.has("opengeni-projects"),
-    schedules: names.has("opengeni-schedules"),
+    projects: names.has("projects"),
+    schedules: names.has("schedules"),
     editableArtifacts: [
-      "opengeni-documents",
-      "opengeni-spreadsheets",
-      "opengeni-presentations",
+      "documents",
+      "spreadsheets",
+      "presentations",
     ].some((name) => names.has(name)),
-    sites: names.has("opengeni-sites"),
-    secrets: names.has("opengeni-secrets"),
-    videoGeneration: names.has("opengeni-video-generation"),
+    sites: names.has("sites"),
+    secrets: names.has("secrets"),
+    videoGeneration: names.has("video-generation"),
   });
-  return [...artifacts, ...(names.has("opengeni-skills") ? [loadSkillManagementSkill()] : [])]
+  return [...artifacts, ...(names.has("skill-management") ? [loadSkillManagementSkill()] : [])]
     .filter((artifact) => names.has(artifact.name))
     .map((artifact) => ({ id: `builtin:${artifact.name}`, artifact }));
 }

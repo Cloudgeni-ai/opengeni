@@ -264,14 +264,14 @@ describe("chat completions route", () => {
         status: 402,
         type: "insufficient_quota",
         code: "insufficient_credits",
-        message: "Insufficient Opengeni credits.",
+        message: "Insufficient credits.",
       });
     });
     const response = await post(service, { model: "m", messages: MESSAGES });
     expect(response.status).toBe(402);
     expect(await response.json()).toEqual({
       error: {
-        message: "Insufficient Opengeni credits.",
+        message: "Insufficient credits.",
         type: "insufficient_quota",
         param: null,
         code: "insufficient_credits",

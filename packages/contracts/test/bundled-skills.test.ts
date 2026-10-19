@@ -11,15 +11,15 @@ import {
   storedBundledSkillSelectionIdentity,
 } from "../src";
 
-const documents = "builtin:opengeni-documents" as const;
-const sites = "builtin:opengeni-sites" as const;
-const projects = "builtin:opengeni-projects" as const;
+const documents = "builtin:documents" as const;
+const sites = "builtin:sites" as const;
+const projects = "builtin:projects" as const;
 
 for (const help of [
   "builtin:opengeni-help",
   "builtin:opengeni-client",
-  "builtin:opengeni-schedules",
-  "builtin:opengeni-secrets",
+  "builtin:schedules",
+  "builtin:secrets",
 ] as const)
   test(`${help} is addressable and cannot escape a host's empty selection`, () => {
     expect(
@@ -150,4 +150,27 @@ test('a "none" agent freezes no bundled guides unless the request lists them', (
   expect(
     resolveBundledSkillSelection(undefined, bundledSkillSelectionForAgentConfig(undefined, none)),
   ).toEqual([]);
+});
+
+test("renamed product-named ids stay accepted and resolve to their neutral ids", () => {
+  expect(
+    CreateSessionRequest.parse({
+      initialMessage: "Help",
+      bundledSkillIds: ["builtin:opengeni-documents", "builtin:opengeni-skills"],
+    }).bundledSkillIds,
+  ).toEqual([documents, "builtin:skill-management"]);
+  expect(() =>
+    BundledSkillSelection.parse(["builtin:opengeni-documents", documents]),
+  ).toThrow("unique");
+  expect(
+    bundledSkillSelectionFromMetadata({
+      _opengeni_bundled_skill_ids_v1: ["builtin:opengeni-sites", "builtin:opengeni-help"],
+    }),
+  ).toEqual(["builtin:opengeni-help", sites]);
+  expect(
+    resolveBundledSkillSelection(
+      ["builtin:opengeni-sites"] as never,
+      ["builtin:opengeni-sites", "builtin:opengeni-projects"] as never,
+    ),
+  ).toEqual([sites]);
 });

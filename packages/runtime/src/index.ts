@@ -7031,7 +7031,7 @@ const MCP_AUTH_NEEDED_ERROR = {
 const MCP_TOOL_OUTCOME_UNCERTAIN_ERROR = {
   code: 40_102,
   message:
-    "Tool outcome uncertain after provider submission. Opengeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+    "Tool outcome uncertain after provider submission. The platform did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
 } as const;
 
 function mcpToolAuthNeededResponse(request: McpRequestReplayInfo): Response {
@@ -10689,7 +10689,7 @@ function explainConnectedMachineRootDownloadFailure(
     ...failure,
     reason: [
       `The session's working directory is the filesystem root (/), which is often not writable (it is read-only on macOS), so staging the file at ${input.targetRelativePath} may have failed for that reason.`,
-      "This session keeps that folder; start a new session on this machine with a writable working folder (for example the home directory). An updated Opengeni agent defaults new sessions to the home directory.",
+      "This session keeps that folder; start a new session on this machine with a writable working folder (for example the home directory). An updated agent defaults new sessions to the home directory.",
       `Underlying error: ${failure.reason}`,
     ].join(" "),
   };

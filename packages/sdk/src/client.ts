@@ -11593,7 +11593,7 @@ function mutationTransportError(correlationId: string): OpenGeniApiError {
     correlationId,
     outcomeUnknown: true,
     mutation: true,
-    displayMessage: "Opengeni could not confirm the request — reconcile before retrying.",
+    displayMessage: "The request could not be confirmed — reconcile before retrying.",
   });
 }
 

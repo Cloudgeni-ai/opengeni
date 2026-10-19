@@ -1997,7 +1997,7 @@ describe("OpenGeniClient", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "Opengeni is temporarily unavailable — retry.",
+        message: "The workspace is temporarily unavailable — retry.",
         retryable: true,
         requestId: "api-safe-503",
       },
@@ -2014,7 +2014,7 @@ describe("OpenGeniClient", () => {
       correlationId: "api-safe-503",
       outcomeUnknown: false,
       body,
-      message: "Opengeni is temporarily unavailable — retry. Reference: api-safe-503.",
+      message: "The workspace is temporarily unavailable — retry. Reference: api-safe-503.",
     });
   });
 
@@ -2155,7 +2155,7 @@ describe("OpenGeniClient", () => {
           body: "",
         });
         expect((error as Error).message).toBe(
-          `Opengeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+          `The workspace is temporarily unavailable — retry. Reference: ${correlationId}.`,
         );
         expect((error as Error).message).not.toContain("PRIVATE-UPSTREAM-BODY");
         expect(requests[0]!.headers[OPENGENI_CORRELATION_HEADER]).toMatch(/^[0-9a-f-]{36}$/);

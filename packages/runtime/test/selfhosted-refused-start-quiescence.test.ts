@@ -318,7 +318,7 @@ test.each(["unsupported", "offline", "never sent", "reconnecting"] as const)(
     if (kind === "unsupported") {
       expect(caught).toBeInstanceOf(SelfhostedControlError);
       expect((caught as Error).message).toBe(
-        "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the Opengeni agent. The command was not started.",
+        "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the machine's agent. The command was not started.",
       );
       expect(requests.map((r) => r.op?.$case)).toEqual(["opStart", "opQuery"]);
       expect(released).toEqual(["proof:0"]);

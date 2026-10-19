@@ -52,7 +52,7 @@ export class VideoGenerationCapacityError extends Error {
 }
 
 export class VideoGenerationCreditError extends Error {
-  constructor(message = "insufficient Opengeni credits") {
+  constructor(message = "insufficient credits") {
     super(message);
     this.name = "VideoGenerationCreditError";
   }

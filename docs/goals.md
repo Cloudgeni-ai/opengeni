@@ -40,7 +40,7 @@ or when the result is large (multi-page) or clearly meant to be kept or shared.
 That can include a secondary output such as an audit produced while organizing
 Knowledge. The chat reply then gives a short summary and the artifact link
 rather than restating the document. Routing lives in the provider-neutral
-operational instructions; the bundled `opengeni-documents` Skill owns the
+operational instructions; the bundled `documents` Skill owns the
 authoring procedure. The artifact is the working document from the start, not a
 published copy of a sandbox Markdown or DOCX report.
 

@@ -1,5 +1,5 @@
 ---
-name: opengeni-video-generation
+name: video-generation
 description: Generate a retained video when the user asks for a new clip, animation, referenced motion, or a transformation of an existing image or video.
 ---
 

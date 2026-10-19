@@ -137,7 +137,7 @@ export function createVoiceInputBilling(deps: {
           code: "policy_blocked",
           status: 403,
           fallbackSafe: true,
-          message: "Opengeni credits are turned off in this workspace.",
+          message: "Credits are turned off in this workspace.",
         });
       }
       // Debits whose receipt committed but whose ledger write failed are

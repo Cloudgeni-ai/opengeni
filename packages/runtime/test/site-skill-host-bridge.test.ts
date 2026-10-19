@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 const skill = readFileSync(
-  new URL("../src/bundled_site_skills/opengeni-sites/SKILL.md", import.meta.url),
+  new URL("../src/bundled_site_skills/sites/SKILL.md", import.meta.url),
   "utf8",
 );
 
@@ -33,8 +33,8 @@ describe("Sites skill host-bridge rule", () => {
     expect(section).toContain("say which designs are possible and ask before building");
   });
 
-  test("keeps the backend escape hatch scoped to non-Opengeni compute and asks first", () => {
-    expect(skill).toContain("Opengeni AI and tool access are\n  never such a backend (see above)");
+  test("keeps the backend escape hatch scoped to external compute and asks first", () => {
+    expect(skill).toContain("Workspace AI and tool access are\n  never such a backend (see above)");
     expect(skill).toContain(
       "explain that constraint and ask how the user\n  wants to proceed instead of dropping functionality or choosing a host",
     );

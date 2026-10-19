@@ -1552,7 +1552,7 @@ describe("OpenGeniClient files", () => {
       correlationId,
       outcomeUnknown: true,
       body: "",
-      message: `Opengeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+      message: `The workspace is temporarily unavailable — retry. Reference: ${correlationId}.`,
     });
     expect(requests).toHaveLength(2);
     expect(requests.some((request) => request.url.includes("/complete"))).toBe(false);

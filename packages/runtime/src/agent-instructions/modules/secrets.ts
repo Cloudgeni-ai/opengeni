@@ -5,7 +5,7 @@ import { blocks, bullets, sentences, toolAvailable, type AgentPromptModule } fro
  * only when the capability is on and the runtime resolves references for the
  * attempt (`resources.secretReferences`). Each tool-naming clause renders
  * unless the attempt proved its tool absent; playbooks live in the
- * `opengeni-secrets` Skill.
+ * `secrets` Skill.
  */
 export const secretsModule: AgentPromptModule = {
   id: "secrets",
@@ -39,7 +39,7 @@ export const secretsModule: AgentPromptModule = {
           "Hand the browser to the user with `interaction_request_human` only for push approvals or hardware keys.",
         context.capabilities.skills !== false &&
           search &&
-          "For playbooks, read the `opengeni-secrets` skill.",
+          "For playbooks, read the `secrets` Skill.",
       ),
     );
   },

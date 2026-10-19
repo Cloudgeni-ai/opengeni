@@ -929,7 +929,7 @@ describe("API helpers", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "Opengeni is temporarily unavailable — retry.",
+        message: "The workspace is temporarily unavailable — retry.",
         retryable: true,
         requestId: "browser-safe-503",
       },
@@ -954,7 +954,7 @@ describe("API helpers", () => {
     });
     const body = (await response.json()) as { error: { requestId: string; message: string } };
     expect(response.status).toBe(500);
-    expect(body.error.message).toBe("Opengeni could not complete the request.");
+    expect(body.error.message).toBe("The workspace could not complete the request.");
     expect(body.error.requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(JSON.stringify(body)).not.toContain("PRIVATE-DATABASE-CREDENTIAL");
   });
@@ -1686,7 +1686,7 @@ describe("API helpers", () => {
       message = error instanceof Error ? error.message : String(error);
     }
 
-    expect(message).toContain("Opengeni could not initialize configured.example");
+    expect(message).toContain("Could not initialize configured.example");
     expect(message).not.toContain(fixturePassword);
     expect(message).not.toContain(fixtureSecret);
     expect(message).not.toContain("fixture-user");
@@ -1712,7 +1712,7 @@ describe("API helpers", () => {
         throw new Error("Streamable HTTP error: POSTing to endpoint: HTTP 404 Not Found");
       }),
     ).rejects.toThrow(
-      'MCP capability "Gmail" could not be enabled because Opengeni could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
+      'MCP capability "Gmail" could not be enabled because Could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
     );
   });
 
