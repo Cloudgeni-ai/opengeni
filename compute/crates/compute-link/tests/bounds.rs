@@ -1,11 +1,13 @@
-//! What a guest can make the host keep is bounded, and each subscription a
-//! connection leaves has its whole grace period: the core driven directly,
-//! one rule at a time.
+//! What a guest can make the host keep is bounded, each subscription a
+//! connection leaves has its whole grace period, and only requests wake,
+//! never a no-wake one: the core driven directly, one rule at a time.
 
 use bytes::Bytes;
 use compute_link::core::{CONNECTION_NAME, ConnId, Core, Effect, Input, LinkId, Settings};
 use compute_link::nats::{ClientOp, Connect, Publish, ServerOp};
-use compute_protocol::link::{AgentLink, GatewayFrame, HostFrame, Relay, Running};
+use compute_protocol::link::{
+    AgentLink, GatewayFrame, HostFrame, NO_WAKE_HEADER, Relay, Running, UNANSWERED_HEADER,
+};
 
 const SANDBOX: &str = "sb";
 const GATEWAY: &str = "wss://gateway.example/v1/agent-link";
@@ -879,4 +881,273 @@ fn a_sandbox_that_falls_asleep_has_its_session_kept_again() {
         .expect("with its session");
     assert_eq!(saved.instance, INSTANCE);
     assert_eq!(saved.subs.len(), 1);
+}
+
+/// The gateway sends a no-wake request ([`NO_WAKE_HEADER`]) for the host's
+/// `sid` of session `s`, to be answered on `reply`.
+fn send_quiet(core: &mut Core, now: u64, (s, sid): (u32, u32), reply: &str, payload: Bytes) {
+    core.on(
+        now,
+        Input::Gateway {
+            link: LINK,
+            frame: GatewayFrame::Msg {
+                s,
+                sid,
+                subject: format!("{}.rpc", scope()),
+                reply: Some(reply.into()),
+                // Header names compare without case, as NATS compares them.
+                headers: Some(vec![(NO_WAKE_HEADER.to_lowercase(), "1".into())]),
+            },
+            payload,
+        },
+    );
+}
+
+/// The replies the host sent itself, marked [`UNANSWERED_HEADER`]: each
+/// reply subject, with why.
+fn unanswered(effects: &[Effect]) -> Vec<(String, String)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Frame {
+                frame:
+                    HostFrame::Pub {
+                        subject,
+                        reply: None,
+                        headers: Some(headers),
+                        ..
+                    },
+                payload,
+                ..
+            } => headers
+                .iter()
+                .find(|(name, _)| name == UNANSWERED_HEADER)
+                .map(|(_, why)| {
+                    assert!(payload.is_empty(), "the host's own reply is empty");
+                    (subject.clone(), why.clone())
+                }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn pair(reply: &str, why: &str) -> (String, String) {
+    (reply.to_owned(), why.to_owned())
+}
+
+/// A no-wake request never wakes its sandbox. While the sandbox sleeps
+/// (or the host never said it runs) the host answers it at once and its
+/// agent never gets it; while it runs, its agent gets it, and if the
+/// sandbox goes to sleep before the agent answers, the host answers it
+/// then instead of waking it.
+#[test]
+fn a_no_wake_request_never_wakes_its_sandbox_and_is_answered_by_the_host_while_it_sleeps() {
+    let mut core = core(Settings::default());
+    connect(&mut core, 0, 1);
+    let s = open(&mut core, 0);
+    sub(&mut core, 0, 1, "rpc", "1");
+    core.take();
+    // Never told it runs.
+    send_quiet(&mut core, 1, (s, 1), "_INBOX.0", Bytes::from_static(b"q0"));
+    let effects = core.take();
+    assert_eq!(wakes(&effects), 0);
+    assert_eq!(delivered(&effects, 1), Vec::<Bytes>::new());
+    assert_eq!(unanswered(&effects), [pair("_INBOX.0", "asleep")]);
+    told(&mut core, 2, Running::Asleep);
+    core.take();
+    send_quiet(&mut core, 3, (s, 1), "_INBOX.1", Bytes::from_static(b"q1"));
+    let effects = core.take();
+    assert_eq!(wakes(&effects), 0);
+    assert_eq!(delivered(&effects, 1), Vec::<Bytes>::new());
+    assert_eq!(unanswered(&effects), [pair("_INBOX.1", "asleep")]);
+    // Running: delivered, and not counted as activity.
+    told(&mut core, 10, Running::Awake);
+    core.take();
+    send_quiet(&mut core, 11, (s, 1), "_INBOX.2", Bytes::from_static(b"q2"));
+    send_quiet(&mut core, 12, (s, 1), "_INBOX.3", Bytes::from_static(b"q3"));
+    let effects = core.take();
+    assert_eq!(wakes(&effects), 0);
+    assert_eq!(delivered(&effects, 1), ["q2", "q3"]);
+    assert_eq!(unanswered(&effects), Vec::<(String, String)>::new());
+    // The agent answers one; the sandbox sleeps before it answers the
+    // other, which the host answers instead of waking it.
+    answer(&mut core, 13, 1, "_INBOX.2");
+    told(&mut core, 14, Running::Asleep);
+    let effects = core.take();
+    assert_eq!(wakes(&effects), 0);
+    assert_eq!(unanswered(&effects), [pair("_INBOX.3", "asleep")]);
+    // Once only.
+    told(&mut core, 15, Running::Awake);
+    told(&mut core, 16, Running::Asleep);
+    let effects = core.take();
+    assert_eq!(wakes(&effects), 0);
+    assert_eq!(unanswered(&effects), Vec::<(String, String)>::new());
+    // An ordinary request still wakes it.
+    send(
+        &mut core,
+        17,
+        (s, 1),
+        Some("_INBOX.4"),
+        Bytes::from_static(b"r4"),
+    );
+    assert_eq!(wakes(&core.take()), 1);
+    assert_eq!(core.deadline(), None);
+}
+
+/// A sandbox that goes to sleep owing an ordinary request is woken for it
+/// as before; a no-wake request delivered beside it is answered by the
+/// host all the same.
+#[test]
+fn a_no_wake_request_beside_an_owed_one_is_answered_and_the_owed_one_still_wakes() {
+    let mut core = core(Settings::default());
+    connect(&mut core, 0, 1);
+    let s = open(&mut core, 0);
+    sub(&mut core, 0, 1, "rpc", "1");
+    told(&mut core, 0, Running::Awake);
+    core.take();
+    send(
+        &mut core,
+        1,
+        (s, 1),
+        Some("_INBOX.r"),
+        Bytes::from_static(b"r"),
+    );
+    send_quiet(&mut core, 2, (s, 1), "_INBOX.q", Bytes::from_static(b"q"));
+    core.take();
+    told(&mut core, 3, Running::Asleep);
+    let effects = core.take();
+    assert_eq!(wakes(&effects), 1, "woken for the ordinary request");
+    assert_eq!(unanswered(&effects), [pair("_INBOX.q", "asleep")]);
+}
+
+/// A no-wake request never waits: one whose agent does not hold the
+/// subscription now is answered at once, and never reaches the agent once
+/// it takes the subscription up again.
+#[test]
+fn a_no_wake_request_never_waits_for_its_agent() {
+    let (mut core, s) = asleep(Settings::default());
+    told(&mut core, 0, Running::Awake);
+    core.take();
+    send_quiet(&mut core, 1, (s, 1), "_INBOX.1", Bytes::from_static(b"q"));
+    let effects = core.take();
+    assert_eq!(wakes(&effects), 0);
+    assert_eq!(unanswered(&effects), [pair("_INBOX.1", "away")]);
+    assert_eq!(core.deadline(), None, "nothing waits");
+    connect(&mut core, 2, 2);
+    sub(&mut core, 2, 2, "rpc", "1");
+    let effects = core.take();
+    assert_eq!(delivered(&effects, 2), Vec::<Bytes>::new());
+    told(&mut core, 3, Running::Asleep);
+    assert_eq!(unanswered(&core.take()), Vec::<(String, String)>::new());
+}
+
+/// The no-wake requests an agent has not answered are bounded: one past
+/// the bound is answered at once, until the oldest is old.
+#[test]
+fn the_no_wake_requests_an_agent_leaves_unanswered_are_bounded() {
+    let hold = 120_000;
+    let mut core = core(Settings {
+        max_waiting: 2,
+        hold_ms: hold,
+        ..Settings::default()
+    });
+    connect(&mut core, 0, 1);
+    let s = open(&mut core, 0);
+    sub(&mut core, 0, 1, "rpc", "1");
+    told(&mut core, 0, Running::Awake);
+    core.take();
+    for n in 1..=3u8 {
+        let reply = format!("_INBOX.{n}");
+        send_quiet(&mut core, 1, (s, 1), &reply, Bytes::from(vec![n]));
+    }
+    let effects = core.take();
+    assert_eq!(delivered(&effects, 1).len(), 2);
+    assert_eq!(unanswered(&effects), [pair("_INBOX.3", "busy")]);
+    send_quiet(
+        &mut core,
+        hold + 1,
+        (s, 1),
+        "_INBOX.4",
+        Bytes::from_static(b"4"),
+    );
+    let effects = core.take();
+    assert_eq!(delivered(&effects, 1), ["4"]);
+    // Those its requesters gave up on long ago are not answered.
+    told(&mut core, hold + 2, Running::Asleep);
+    assert_eq!(unanswered(&core.take()), [pair("_INBOX.4", "asleep")]);
+}
+
+/// Only the host says a request went unanswered: the marker is dropped
+/// from what an agent publishes, whatever its case, and other headers stay.
+#[test]
+fn an_agent_cannot_mark_its_own_reply_unanswered() {
+    let mut core = core(Settings::default());
+    connect(&mut core, 0, 1);
+    open(&mut core, 0);
+    core.take();
+    let publish = |headers: Vec<(&str, &str)>| {
+        ClientOp::Pub(Publish {
+            subject: "_INBOX.x".into(),
+            reply: None,
+            headers: Some(
+                headers
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect(),
+            ),
+            payload: Bytes::from_static(b"answer"),
+        })
+    };
+    let published = |core: &mut Core| {
+        core.take()
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Frame {
+                    frame: HostFrame::Pub { headers, .. },
+                    ..
+                } => Some(headers),
+                _ => None,
+            })
+            .expect("published")
+    };
+    guest(
+        &mut core,
+        1,
+        1,
+        publish(vec![("opengeni-agent-unanswered", "asleep")]),
+    );
+    assert_eq!(published(&mut core), None);
+    guest(
+        &mut core,
+        2,
+        1,
+        publish(vec![("Status", "ok"), (UNANSWERED_HEADER, "away")]),
+    );
+    assert_eq!(
+        published(&mut core),
+        Some(vec![("Status".to_owned(), "ok".to_owned())])
+    );
+}
+
+/// The host answers only on a reply subject its agent could publish on
+/// itself, and only on an open session.
+#[test]
+fn the_host_answers_only_where_its_agent_could() {
+    let mut core = core(Settings::default());
+    connect(&mut core, 0, 1);
+    let s = open(&mut core, 0);
+    sub(&mut core, 0, 1, "rpc", "1");
+    told(&mut core, 0, Running::Asleep);
+    core.take();
+    send_quiet(
+        &mut core,
+        1,
+        (s, 1),
+        "elsewhere.reply",
+        Bytes::from_static(b"q"),
+    );
+    let effects = core.take();
+    assert_eq!(unanswered(&effects), Vec::<(String, String)>::new());
+    assert_eq!(wakes(&effects), 0);
+    assert_eq!(delivered(&effects, 1), Vec::<Bytes>::new());
 }

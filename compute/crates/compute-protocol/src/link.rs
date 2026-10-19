@@ -21,6 +21,54 @@ pub const VERSION: u32 = 1;
 /// host answers it itself; it never reaches the gateway.
 pub const RELAY_SUBJECT: &str = "_compute.relay";
 
+/// A request header, with any value: the request never wakes its sandbox
+/// and is not activity. The host delivers it only while it says the
+/// sandbox runs and its agent holds the subscription. Otherwise, and when
+/// the sandbox goes to sleep before its agent answers, the host answers it
+/// itself with an empty reply marked [`UNANSWERED_HEADER`]. Meant for
+/// housekeeping that a later exchange the agent starts does anyway.
+pub const NO_WAKE_HEADER: &str = "Opengeni-No-Wake";
+
+/// Marks the host's own empty reply to a [`NO_WAKE_HEADER`] request its
+/// agent did not answer. The value says why: [`Unanswered::Asleep`] (the
+/// sandbox does not run, or went to sleep first), [`Unanswered::Away`] (its
+/// agent does not hold the subscription now) or [`Unanswered::Busy`] (it
+/// already has as many unanswered as the host keeps). A request its agent
+/// got may still take effect when it next runs. The host drops this header
+/// from what an agent publishes, so only the host says it.
+pub const UNANSWERED_HEADER: &str = "Opengeni-Agent-Unanswered";
+
+/// Why the host answered a [`NO_WAKE_HEADER`] request itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unanswered {
+    Asleep,
+    Away,
+    Busy,
+}
+
+impl Unanswered {
+    /// The [`UNANSWERED_HEADER`] value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Asleep => "asleep",
+            Self::Away => "away",
+            Self::Busy => "busy",
+        }
+    }
+}
+
+/// Whether `headers` carry `name`, compared as NATS compares header names,
+/// without case.
+#[must_use]
+pub fn has_header(headers: Option<&Headers>, name: &str) -> bool {
+    headers.is_some_and(|headers| {
+        headers
+            .iter()
+            .any(|(header, _)| header.eq_ignore_ascii_case(name))
+    })
+}
+
 /// NATS message headers, in order, as `[name, value]` pairs.
 pub type Headers = Vec<(String, String)>;
 

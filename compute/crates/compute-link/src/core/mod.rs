@@ -34,6 +34,13 @@
 //!   woken again. Any other message (an acknowledgement, a receipt, a notice)
 //!   reaches the agent whenever it runs and never wakes it, so an explicit
 //!   sleep stays until something asks the agent for something.
+//! - A no-wake request ([`NO_WAKE_HEADER`]) never wakes its sandbox, is not
+//!   activity and never waits: it is delivered only while the host says
+//!   the sandbox runs and its agent holds the subscription, and otherwise
+//!   the host answers it itself ([`UNANSWERED_HEADER`]). One delivered is
+//!   never owed: if the sandbox goes to sleep before its agent answers, the
+//!   host answers it then. Only the host says so: the header is dropped
+//!   from what an agent publishes.
 //! - Subscriptions a reconnected agent did not take up within
 //!   [`Settings::grace_ms`] end, and so do those of a connection that
 //!   ended while others of its agent stay, each counted from when it was
@@ -52,7 +59,10 @@ mod frames;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use bytes::Bytes;
-use compute_protocol::link::{AgentLink, GatewayFrame, Headers, HostFrame, Relay, Running};
+use compute_protocol::link::{
+    AgentLink, GatewayFrame, Headers, HostFrame, NO_WAKE_HEADER, Relay, Running, UNANSWERED_HEADER,
+    Unanswered, has_header, may_publish,
+};
 
 use crate::nats::{ClientOp, ServerOp};
 use crate::nats::{OP_OVERHEAD, header_block_len};
@@ -240,6 +250,10 @@ struct Sandbox {
     /// [`Settings::hold_ms`] old, the agent owes an answer as if it never
     /// sent one.
     untracked: Option<u64>,
+    /// The no-wake requests delivered to its agent that it has not
+    /// answered, by reply subject, with when each arrived. It is never
+    /// woken for them: the host answers them itself when it sleeps.
+    quiet: HashMap<String, u64>,
     /// Whether it runs, as the host last said; every session that opens is
     /// told.
     running: Option<Running>,
@@ -257,6 +271,9 @@ impl Sandbox {
         if !self.unanswered.is_empty() {
             self.unanswered.remove(subject);
         }
+        if !self.quiet.is_empty() {
+            self.quiet.remove(subject);
+        }
     }
 
     /// Nothing delivered to its agent will be answered: another agent
@@ -264,6 +281,7 @@ impl Sandbox {
     fn owes_nothing(&mut self) {
         self.unanswered.clear();
         self.untracked = None;
+        self.quiet.clear();
     }
 }
 
@@ -309,6 +327,11 @@ struct Queued {
 }
 
 impl Queued {
+    /// Whether it is a no-wake request ([`NO_WAKE_HEADER`]).
+    fn quiet(&self) -> bool {
+        self.reply.is_some() && has_header(self.headers.as_ref(), NO_WAKE_HEADER)
+    }
+
     /// What keeping it costs: every byte it holds, plus [`OP_OVERHEAD`].
     fn cost(&self) -> usize {
         OP_OVERHEAD
@@ -555,6 +578,7 @@ impl Core {
                 woke_at: None,
                 unanswered: HashMap::new(),
                 untracked: None,
+                quiet: HashMap::new(),
                 running: None,
             },
         );
@@ -795,6 +819,7 @@ impl Core {
             // once more: if an earlier save was lost, this one is what a
             // restarted host opens.
             self.save(id);
+            self.answer_quiet(now, id);
             self.owed(now, id);
         }
     }
@@ -977,5 +1002,87 @@ impl Core {
                 sandbox: id.to_owned(),
             });
         }
+    }
+
+    /// A no-wake request for sandbox `id`'s agent arrived. It never wakes
+    /// the sandbox nor counts as activity, and it never waits: it is
+    /// delivered only while the host says the sandbox runs and its agent
+    /// holds the subscription, and otherwise the host answers it itself.
+    fn quiet_request(&mut self, now: u64, id: &str, queued: Queued) {
+        let (hold, most) = (self.settings.hold_ms, self.settings.max_waiting);
+        let Some(sandbox) = self.sandboxes.get_mut(id) else {
+            return;
+        };
+        let taken = matches!(sandbox.session, Session::Open { .. })
+            && sandbox
+                .subs
+                .get(&queued.sid)
+                .is_some_and(|sub| sub.guest.is_some());
+        let why = if sandbox.running != Some(Running::Awake) {
+            Some(Unanswered::Asleep)
+        } else if !taken {
+            Some(Unanswered::Away)
+        } else {
+            if sandbox.quiet.len() >= most {
+                sandbox.quiet.retain(|_, at| now < at.saturating_add(hold));
+            }
+            (sandbox.quiet.len() >= most).then_some(Unanswered::Busy)
+        };
+        match (why, queued.reply.clone()) {
+            (Some(why), Some(reply)) => self.unanswered(id, reply, why),
+            _ => self.deliver(now, id, queued),
+        }
+    }
+
+    /// Sandbox `id` went to sleep: the host answers each no-wake request
+    /// its agent got and has not answered, as its agent may not run again
+    /// for a long time and is not woken for them.
+    fn answer_quiet(&mut self, now: u64, id: &str) {
+        let hold = self.settings.hold_ms;
+        let Some(sandbox) = self.sandboxes.get_mut(id) else {
+            return;
+        };
+        if sandbox.quiet.is_empty() {
+            return;
+        }
+        let mut replies: Vec<(u64, String)> = sandbox
+            .quiet
+            .drain()
+            .filter(|(_, at)| now < at.saturating_add(hold))
+            .map(|(reply, at)| (at, reply))
+            .collect();
+        replies.sort();
+        for (_, reply) in replies {
+            self.unanswered(id, reply, Unanswered::Asleep);
+        }
+    }
+
+    /// The host answers a no-wake request itself, on the sandbox's open
+    /// session: an empty reply marked [`UNANSWERED_HEADER`]. With no open
+    /// session there is no one to tell; its gateway tells the requester
+    /// when that session ended.
+    fn unanswered(&mut self, id: &str, reply: String, why: Unanswered) {
+        let Some(sandbox) = self.sandboxes.get(id) else {
+            return;
+        };
+        let Session::Open { link, s, scope } = &sandbox.session else {
+            return;
+        };
+        if !may_publish(scope, &reply) {
+            return;
+        }
+        self.effects.push(Effect::Frame {
+            link: *link,
+            frame: HostFrame::Pub {
+                s: *s,
+                subject: reply,
+                reply: None,
+                headers: Some(vec![(
+                    UNANSWERED_HEADER.to_owned(),
+                    why.as_str().to_owned(),
+                )]),
+            },
+            payload: Bytes::new(),
+        });
     }
 }

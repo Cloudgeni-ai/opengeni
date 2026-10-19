@@ -22,7 +22,15 @@
 //!   at most once per wake interval; a sandbox the host says went to sleep
 //!   while its agent certainly owes an answer to a young request is woken
 //!   again; and nothing else wakes one (not a message nobody waits on, a
-//!   relay credential, another state change or what the agent sends).
+//!   relay credential, another state change, what the agent sends or a
+//!   no-wake request);
+//! - a no-wake request the host takes for a sandbox it does not say runs is
+//!   answered by the host at once and never reaches the agent; one the
+//!   agent got and left unanswered is answered by the host when its
+//!   sandbox falls asleep with an open session; the host answers each at
+//!   most once, only then or on arrival, never after the agent's answer
+//!   reached it, and only with an empty reply, so an agent cannot mark its
+//!   own reply as the host's.
 //!
 //! And at the end, once everything is back, every message sent is
 //! delivered, both connections of each agent are up, and each sandbox's
@@ -36,7 +44,8 @@ use compute_link::core::{ConnId, Core, Effect, Input, LinkId, Settings};
 use compute_link::nats::{ClientOp, Connect, Delivery, Publish, ServerOp};
 use compute_link::saved::Saved;
 use compute_protocol::link::{
-    AgentLink, Ending, GatewayFrame, HostFrame, Refusal, Relay, Running, may_publish, may_subscribe,
+    AgentLink, Ending, GatewayFrame, HostFrame, NO_WAKE_HEADER, Refusal, Relay, Running,
+    UNANSWERED_HEADER, has_header, may_publish, may_subscribe,
 };
 
 const SANDBOXES: usize = 3;
@@ -138,6 +147,9 @@ struct Sandbox {
     /// Those its agent got and has not sent an answer to, since its agent
     /// process last changed: the core certainly owes them still.
     owes: HashSet<String>,
+    /// The no-wake requests its agent got and will not answer, since its
+    /// agent process last changed.
+    quiet_owes: HashSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,6 +195,8 @@ struct Sent {
     reply: Option<String>,
     /// Must be delivered, sent once everything was back.
     must: bool,
+    /// A no-wake request.
+    quiet: bool,
 }
 
 struct Sim {
@@ -211,6 +225,16 @@ struct Sim {
     next_msg: u64,
     sent: HashMap<u64, Sent>,
     delivered: HashSet<u64>,
+    /// The no-wake requests the host answered itself, by reply subject.
+    host_answered: HashSet<String>,
+    /// The no-wake requests whose agent's answer the core took and sent on.
+    agent_answered: HashSet<String>,
+    /// The no-wake requests the core delivered: sandbox, when, and whether
+    /// the core was told since that the sandbox fell asleep, which ends
+    /// what it keeps of them.
+    quiet_taken: HashMap<String, (usize, u64, bool)>,
+    /// The sessions the host opened, of those it holds.
+    host_open: HashSet<(LinkId, u32)>,
     last_delivered: HashMap<(String, String, u32), u64>,
     /// Whether the gateways may refuse or end sessions and links may drop.
     chaos: bool,
@@ -260,6 +284,7 @@ impl Sim {
                     told: None,
                     taken: HashMap::new(),
                     owes: HashSet::new(),
+                    quiet_owes: HashSet::new(),
                 })
                 .collect(),
             sessions: HashMap::new(),
@@ -277,6 +302,10 @@ impl Sim {
             next_msg: 1,
             sent: HashMap::new(),
             delivered: HashSet::new(),
+            host_answered: HashSet::new(),
+            agent_answered: HashSet::new(),
+            quiet_taken: HashMap::new(),
+            host_open: HashSet::new(),
             last_delivered: HashMap::new(),
             chaos: true,
         };
@@ -334,6 +363,16 @@ impl Sim {
                     .is_none_or(|at| self.now >= at + self.settings.wake_every_ms)
         });
         let fell_asleep = self.fell_asleep(&input);
+        let quiet_for = self.quiet_for(&input);
+        let quiet_due = fell_asleep.map(|(n, _, _)| self.quiet_due(n));
+        let opened = match &input {
+            Input::Gateway {
+                link,
+                frame: GatewayFrame::Opened { s, .. },
+                ..
+            } => Some((*link, *s)),
+            _ => None,
+        };
         if let Input::Running { sandbox, running } = &input {
             let n = self.index(sandbox);
             if self.sandboxes[n].attached {
@@ -390,8 +429,168 @@ impl Sim {
                 self.sandboxes[n].id
             );
         }
+        self.check_unanswered(&effects, quiet_for.as_ref(), fell_asleep, quiet_due);
         for effect in effects {
             self.effect(effect);
+        }
+        if let Some(session) = opened
+            && self.host_sessions.contains(&session)
+        {
+            self.host_open.insert(session);
+        }
+    }
+
+    /// The no-wake request the host takes, for a session it still holds:
+    /// its sandbox, reply subject, message and whether the host must
+    /// answer it at once (it does not say the sandbox runs, and the
+    /// session is open).
+    fn quiet_for(&self, input: &Input) -> Option<(usize, String, u64, bool)> {
+        match input {
+            Input::Gateway {
+                link,
+                frame:
+                    GatewayFrame::Msg {
+                        s,
+                        reply: Some(reply),
+                        headers,
+                        ..
+                    },
+                payload,
+            } if self.host_sessions.contains(&(*link, *s))
+                && has_header(headers.as_ref(), NO_WAKE_HEADER) =>
+            {
+                let session = self.sessions.get(&(*link, *s))?;
+                let n = self.index(&session.sandbox);
+                let id = u64::from_be_bytes(payload.as_ref().try_into().unwrap());
+                let must = self.sandboxes[n].told != Some(Running::Awake)
+                    && self.host_open.contains(&(*link, *s));
+                Some((n, reply.clone(), id, must))
+            }
+            _ => None,
+        }
+    }
+
+    /// The no-wake requests the host must answer if sandbox `n` falls
+    /// asleep now: those its agent got and left unanswered, still young,
+    /// when it holds an open session.
+    fn quiet_due(&self, n: usize) -> HashSet<String> {
+        let open = self.host_open.iter().any(|session| {
+            self.host_sessions.contains(session)
+                && self
+                    .sessions
+                    .get(session)
+                    .is_some_and(|gw| gw.sandbox == self.sandboxes[n].id)
+        });
+        if !open {
+            return HashSet::new();
+        }
+        self.sandboxes[n]
+            .quiet_owes
+            .iter()
+            .filter(|reply| {
+                self.quiet_taken
+                    .get(*reply)
+                    .is_some_and(|(_, at, slept)| !slept && self.now < at + self.settings.hold_ms)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The host's own replies to no-wake requests in `effects`, for the
+    /// request just taken (`quiet_for`) or a sandbox that fell asleep.
+    fn check_unanswered(
+        &mut self,
+        effects: &[Effect],
+        quiet_for: Option<&(usize, String, u64, bool)>,
+        fell_asleep: Option<(usize, bool, bool)>,
+        quiet_due: Option<HashSet<String>>,
+    ) {
+        let mut answered = HashSet::new();
+        for effect in effects {
+            let Effect::Frame {
+                frame: HostFrame::Pub {
+                    subject, headers, ..
+                },
+                payload,
+                ..
+            } = effect
+            else {
+                continue;
+            };
+            if !payload.is_empty() {
+                // The agent's answer, which the core took.
+                if self.quiet_taken.contains_key(subject) {
+                    self.agent_answered.insert(subject.clone());
+                }
+                continue;
+            }
+            let Some((_, why)) = headers.as_ref().and_then(|headers| {
+                headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(UNANSWERED_HEADER))
+            }) else {
+                continue;
+            };
+            assert!(
+                self.host_answered.insert(subject.clone()),
+                "the host answered {subject} twice"
+            );
+            assert!(
+                !self.agent_answered.contains(subject),
+                "the host answered {subject} after its agent's answer"
+            );
+            match quiet_for {
+                Some((_, reply, _, must)) if reply == subject => {
+                    assert!(
+                        !must || why == "asleep",
+                        "{subject} answered {why} for a sandbox not said to run"
+                    );
+                }
+                _ => {
+                    let (n, _, _) = self
+                        .quiet_taken
+                        .get(subject)
+                        .unwrap_or_else(|| panic!("the host answered {subject}, never delivered"));
+                    assert!(
+                        fell_asleep.is_some_and(|(asleep, _, _)| asleep == *n),
+                        "the host answered {subject} other than when its sandbox fell asleep"
+                    );
+                    assert_eq!(why, "asleep");
+                }
+            }
+            answered.insert(subject.clone());
+        }
+        if let Some((n, reply, id, must)) = quiet_for {
+            let delivered = effects.iter().any(|effect| {
+                matches!(effect, Effect::ToGuest { op: ServerOp::Msg(delivery), .. }
+                    if delivery.payload.as_ref() == id.to_be_bytes())
+            });
+            if *must {
+                assert!(
+                    answered.contains(reply),
+                    "{reply} for a sandbox not said to run was not answered at once"
+                );
+            }
+            assert!(
+                !(delivered && answered.contains(reply)),
+                "{reply} was answered and delivered"
+            );
+            if delivered {
+                self.quiet_taken
+                    .insert(reply.clone(), (*n, self.now, false));
+            }
+        }
+        if let (Some((n, _, _)), Some(due)) = (fell_asleep, quiet_due) {
+            for reply in due {
+                assert!(
+                    answered.contains(&reply),
+                    "{} fell asleep and {reply} its agent left was not answered",
+                    self.sandboxes[n].id
+                );
+            }
+            for (asleep, _, slept) in self.quiet_taken.values_mut() {
+                *slept |= *asleep == n;
+            }
         }
     }
 
@@ -405,13 +604,17 @@ impl Sim {
                     GatewayFrame::Msg {
                         s,
                         reply: Some(reply),
+                        headers,
                         ..
                     },
                 ..
-            } if self.host_sessions.contains(&(*link, *s)) => self
-                .sessions
-                .get(&(*link, *s))
-                .map(|session| (self.index(&session.sandbox), reply.clone())),
+            } if self.host_sessions.contains(&(*link, *s))
+                && !has_header(headers.as_ref(), NO_WAKE_HEADER) =>
+            {
+                self.sessions
+                    .get(&(*link, *s))
+                    .map(|session| (self.index(&session.sandbox), reply.clone()))
+            }
             _ => None,
         }
     }
@@ -632,13 +835,21 @@ impl Sim {
                 self.opened_scope(link, s, "unsub");
                 self.sessions.get_mut(&(link, s)).unwrap().subs.remove(&sid);
             }
-            HostFrame::Pub { s, subject, .. } => {
+            HostFrame::Pub {
+                s,
+                subject,
+                headers,
+                ..
+            } => {
                 let scope = self.opened_scope(link, s, "pub");
                 assert!(
                     may_publish(&scope, &subject),
                     "a pub outside {scope}: {subject}"
                 );
-                let _ = payload;
+                assert!(
+                    payload.is_empty() || !has_header(headers.as_ref(), UNANSWERED_HEADER),
+                    "an agent's reply on {subject} reached its gateway marked as the host's"
+                );
             }
             HostFrame::State { s, state } => {
                 self.opened_scope(link, s, "state");
@@ -774,6 +985,7 @@ impl Sim {
                         != Some(instance)
                     {
                         self.sandboxes[n].owes.clear();
+                        self.sandboxes[n].quiet_owes.clear();
                     }
                 }
                 self.input(Input::Guest { conn, op });
@@ -866,6 +1078,7 @@ impl Sim {
             "message {id} with another reply"
         );
         let reply = sent.reply.clone();
+        let quiet = sent.quiet;
         let agent = &mut self.sandboxes[n].agent;
         let Some(sub) = agent.subs.get_mut(&delivery.sid) else {
             assert!(
@@ -895,16 +1108,25 @@ impl Sim {
         // unknown one.
         if let Some(reply) = reply {
             if !self.rng.chance(70) {
-                self.sandboxes[n].owes.insert(reply);
+                if quiet {
+                    self.sandboxes[n].quiet_owes.insert(reply);
+                } else {
+                    self.sandboxes[n].owes.insert(reply);
+                }
                 return;
             }
             self.sandboxes[n].owes.remove(&reply);
+            // Now and then an agent marks its answer as the host's.
+            let forged = self
+                .rng
+                .chance(20)
+                .then(|| vec![(UNANSWERED_HEADER.to_lowercase(), "asleep".to_owned())]);
             self.agent_sends(
                 conn,
                 ClientOp::Pub(Publish {
                     subject: reply,
                     reply: None,
-                    headers: None,
+                    headers: forged,
                     payload: Bytes::from_static(b"answer"),
                 }),
             );
@@ -1183,6 +1405,9 @@ impl Sim {
         // Half are requests, answered on an inbox of their own; the rest
         // are acknowledgements and notices nobody waits on.
         let reply = self.rng.chance(50).then(|| format!("_INBOX.q{id}"));
+        // A third of the requests not certain to be delivered are no-wake
+        // ones, as housekeeping is.
+        let quiet = reply.is_some() && !must && self.rng.chance(33);
         self.sent.insert(
             id,
             Sent {
@@ -1192,6 +1417,7 @@ impl Sim {
                 subject: subject.clone(),
                 reply: reply.clone(),
                 must,
+                quiet,
             },
         );
         self.send_host(
@@ -1201,7 +1427,7 @@ impl Sim {
                 sid,
                 subject,
                 reply,
-                headers: None,
+                headers: quiet.then(|| vec![(NO_WAKE_HEADER.to_owned(), "1".to_owned())]),
             },
             Bytes::copy_from_slice(&id.to_be_bytes()),
         );
@@ -1298,7 +1524,10 @@ impl Sim {
             sandbox.told = None;
             sandbox.taken.clear();
             sandbox.owes.clear();
+            sandbox.quiet_owes.clear();
         }
+        // A new host keeps nothing of what the one before delivered.
+        self.quiet_taken.clear();
         self.core = Core::new(self.settings.clone());
         for n in 0..SANDBOXES {
             if self.sandboxes[n].attached {
@@ -1375,6 +1604,18 @@ impl Sim {
                     self.sandboxes[n].agent.asleep = false;
                 }
                 if !self.sandboxes[n].agent.asleep {
+                    // Its host says it runs, now and then only later.
+                    if self.sandboxes[n].attached
+                        && self.sandboxes[n].running != Some(Running::Awake)
+                        && self.rng.chance(50)
+                    {
+                        self.sandboxes[n].running = Some(Running::Awake);
+                        let id = self.sandboxes[n].id.clone();
+                        self.input(Input::Running {
+                            sandbox: id,
+                            running: Running::Awake,
+                        });
+                    }
                     self.agent_connects(n);
                 }
             }
@@ -1685,6 +1926,7 @@ fn the_agent_link_core_keeps_its_rules_under_any_interleaving() {
         .and_then(|seeds| seeds.parse().ok())
         .unwrap_or(300);
     let (mut sent, mut delivered, mut connects, mut restarts) = (0, 0, 0, 0);
+    let (mut quiet, mut quiet_delivered, mut host_answered) = (0, 0, 0);
     for seed in 1..=seeds {
         let mut sim = Sim::new(seed);
         let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1699,6 +1941,9 @@ fn the_agent_link_core_keeps_its_rules_under_any_interleaving() {
         }
         sent += sim.sent.len();
         delivered += sim.delivered.len();
+        quiet += sim.sent.values().filter(|sent| sent.quiet).count();
+        quiet_delivered += sim.quiet_taken.len();
+        host_answered += sim.host_answered.len();
         connects += sim.next_conn - 1;
         restarts += sim
             .sandboxes
@@ -1707,10 +1952,14 @@ fn the_agent_link_core_keeps_its_rules_under_any_interleaving() {
             .sum::<u32>();
     }
     eprintln!(
-        "{seeds} seeds: {sent} messages sent, {delivered} delivered, {connects} connections, {restarts} agent restarts"
+        "{seeds} seeds: {sent} messages sent, {delivered} delivered, {connects} connections, {restarts} agent restarts; {quiet} no-wake requests, {quiet_delivered} delivered, {host_answered} answered by the host"
     );
     // The interleavings did the work they are meant to check.
     let seeds = usize::try_from(seeds).unwrap();
     assert!(delivered > seeds * 20, "too few deliveries: {delivered}");
     assert!(connects > u64::try_from(seeds).unwrap() * 20);
+    assert!(
+        quiet_delivered > seeds && host_answered > seeds,
+        "too few no-wake requests delivered ({quiet_delivered}) or answered by the host ({host_answered})"
+    );
 }
