@@ -271,7 +271,7 @@ export function personalMachineRefusal(
       code: "personal_machine_permission_required",
       reason:
         "This is a personal (Only me) machine, and its owner has not allowed this chat to use it. " +
-        "The owner can allow it from this chat: choose the machine with Use in this chat, then allow it once, for this chat, or always.",
+        "The owner can allow it from this chat by choosing the machine on the Connected Machine card, then allowing it once, for this chat, or always.",
     };
   }
   if (

@@ -2640,7 +2640,7 @@ function chooseAttachedProfile(
   if (!chosen) {
     throw new OpenGeniApiError(
       409,
-      `No Chrome profile is connected through the Opengeni Browser extension. The person needs a Connected Machine, then the extension: ${OPENGENI_BROWSER_EXTENSION_URL}`,
+      `No Chrome profile is connected through the browser extension. The person needs a Connected Machine, then the extension: ${OPENGENI_BROWSER_EXTENSION_URL}`,
       { code: "attached_browser_unavailable", retryable: false },
     );
   }
