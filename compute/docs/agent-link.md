@@ -86,8 +86,9 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
   every boot there and stays through a pause, save and restore there. Each
   owner numbers afresh, so compare two only under the same `owner_epoch`
   (the sandbox's view, `GET /v1/sandboxes/{id}`): a new epoch is a new
-  owner, after a move (which keeps the programs) or a host loss (which
-  ends them; the new host raises the `programs_lost` alarm).
+  ownership period. A move keeps the programs; a recovery from the stored
+  copy's files after a host loss ends them, and the adopting host raises
+  the `programs_lost` alarm.
 - `GET /v1/requests/{request_id}` answers the view of the sandbox that
   request made, `404 not_found` if no create named it, or `410 request_gone`
   once that sandbox was deleted, so a caller that crashed between a create
