@@ -2030,6 +2030,19 @@ in order; later system items keep their conversation position. Tool names unsupp
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
 ordinary function tools and Opengeni's text compaction remain available.
 
+Claude Opus 5.5 and Sonnet 5.5 write their notes for the person between tool
+calls as progress-update `thinking` blocks, not `text` blocks. For those models
+requests use `thinking.display: "updates"` (beta
+`thinking-display-updates-2026-08-18`): reasoning blocks come back empty, and
+every `thinking` block with text is a progress update. Each non-empty one becomes
+an assistant message, streamed as output text, so it is shown as a reply and
+counts as visible text for `wait_for_input` and final-answer checks; empty
+reasoning blocks stay reasoning items. The message carries the signed block, and
+replay sends that block back unchanged in its original position, so the history
+bytes match what Claude returned. The shown text is Anthropic's short rendering
+of the note, not the verbatim note; replay gives the model its full note. Other
+Claude models keep `display: "summarized"` and their existing reasoning items.
+
 Native Claude HTTP and SSE errors retain status and bounded retry/request
 metadata. Documented tier-spend proof and configured-spend HTTP 400 prefixes
 become terminal quota; ordinary throttling remains recoverable. General billing
@@ -2173,8 +2186,10 @@ streaming tool loops, signed thinking, cache reads/writes, and retained PNG/SVG/
 artifacts using this profile without `cch`.
 
 The profile enables `claude-code-20250219` and `oauth-2025-04-20`. Thinking requests
-also enable interleaved thinking, thinking token counts, effort, and summarized
-thinking display betas. One-hour caching adds the extended cache TTL beta;
+also enable interleaved thinking, thinking token counts, effort, and thinking
+display updates betas. The profile keeps the adapter's per-model display:
+`updates` for models that write progress updates and `summarized` for the others.
+One-hour caching adds the extended cache TTL beta;
 mid-conversation system messages add their existing beta. Thread, advisor,
 inline-tool, context-management, global-cache-scope and fallback-credit flags
 are not advertised without those features. Normal agent calls stream; title and

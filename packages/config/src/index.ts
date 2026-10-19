@@ -11298,6 +11298,14 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       maxOutputTokens: number;
       autoCompactTokenLimit?: number;
       prefixBoundThinking?: boolean;
+      /**
+       * The model writes its notes for the person between tool calls as
+       * progress-update `thinking` blocks instead of `text` blocks. Requests
+       * use `thinking.display: "updates"` so those blocks, and only those,
+       * carry readable text (Anthropic's documented way to tell them apart
+       * from reasoning).
+       */
+      progressUpdates?: boolean;
     }>
   >
 > = Object.fromEntries([
@@ -11318,6 +11326,7 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       maxOutputTokens: 128_000,
       prefixBoundThinking:
         id === "claude-opus-5-5" || id === "claude-sonnet-5-5" || id === "claude-haiku-5-5",
+      ...(id === "claude-opus-5-5" || id === "claude-sonnet-5-5" ? { progressUpdates: true } : {}),
       ...(id === "claude-haiku-5-5"
         ? { autoCompactTokenLimit: 95_000 }
         : id === "claude-opus-5-5"

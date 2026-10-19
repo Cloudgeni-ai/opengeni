@@ -78,7 +78,6 @@ export function applyClaudeCodeIdentity(
     betas.add("thinking-token-count-2026-05-13");
     betas.add("effort-2025-11-24");
     betas.add("thinking-display-updates-2026-08-18");
-    body.thinking.display = "summarized";
   }
   if (
     [
