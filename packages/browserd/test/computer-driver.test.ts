@@ -686,7 +686,11 @@ describe("ComputerDriver", () => {
 
   test("a backend's failure text is redacted in full before it is bounded", async () => {
     const raw = ["{{", "secret:Desk/token", "}}"].join("");
-    for (const secret of ["line-one\nline-two-secret", `long-${"x".repeat(3_000)}-secret`]) {
+    for (const secret of [
+      "line-one\nline-two-secret",
+      `long-${"x".repeat(3_000)}-secret`,
+      "trailing-secret \n",
+    ]) {
       const transport = new FixtureNativeTransport();
       transport.dispatchError = new ComputerBackendError(
         "driver_failed",

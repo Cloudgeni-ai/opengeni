@@ -794,6 +794,55 @@ describe("CUA desktop boundary", () => {
         { name: "TextEdit" },
         { name: "System Settings" },
       ]);
+
+      // Once the app runs, the launch succeeded even if listing its windows fails.
+      const observed = await backend.observe(target.id);
+      fixture.callTool = async (name, json) =>
+        name === "launch_app"
+          ? result({ pid: 78 })
+          : name === "list_windows"
+            ? result({ error: { code: "internal", message: "list failed" } }, true)
+            : await original(name, json);
+      await expect(
+        backend.dispatch({
+          ...command(observed),
+          action: { type: "launch", applicationId: "Notes" },
+        }),
+      ).resolves.toBeDefined();
+
+      // A lost response or no reported process may still have launched it.
+      for (const lost of [
+        async () => {
+          throw new Error("lost after delivery");
+        },
+        async () => result({ windows: [] }),
+        async () => result({ error: { code: "internal", message: "launch stalled" } }, true),
+      ]) {
+        fixture.callTool = async (name, json) =>
+          name === "launch_app" ? await lost() : await original(name, json);
+        const before = await backend.observe(target.id);
+        await expect(
+          backend.dispatch({
+            ...command(before),
+            action: { type: "launch", applicationId: "Notes" },
+          }),
+        ).rejects.toMatchObject({ code: "outcome_unknown", dispatched: true });
+      }
+      // An explicit refusal is a definite failure: nothing launched.
+      fixture.callTool = async (name, json) =>
+        name === "launch_app"
+          ? result(
+              { effect: "refused", refusal: { code: "unsupported", message: "no such app" } },
+              true,
+            )
+          : await original(name, json);
+      const refusedFrom = await backend.observe(target.id);
+      await expect(
+        backend.dispatch({
+          ...command(refusedFrom),
+          action: { type: "launch", applicationId: "Nope" },
+        }),
+      ).rejects.toMatchObject({ code: "unsupported", dispatched: false });
     } finally {
       await backend.close();
     }
@@ -843,6 +892,18 @@ describe("CUA desktop boundary", () => {
       message:
         "CUA type_text refused the operation: type_text did not synthesize character events Use press_key for single keys.",
       dispatched: false,
+    });
+    // The reason is passed on exactly as written, trailing whitespace too, so
+    // the driver can still recognize a typed value at its end.
+    fixture.mutation = result(
+      {
+        effect: "refused",
+        refusal: { code: "no_text_target", message: "could not type ab cd \n" },
+      },
+      true,
+    );
+    await expect(callDesktop(fixture, "type_text", {}, true)).rejects.toMatchObject({
+      message: "CUA type_text refused the operation: could not type ab cd \n",
     });
     fixture.callTool = async () => {
       throw new Error("lost after delivery");

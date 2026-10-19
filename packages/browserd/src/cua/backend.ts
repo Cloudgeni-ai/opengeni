@@ -199,10 +199,11 @@ export class CuaComputerBackend implements ComputerBackend {
       if (command.action.type === "launch") {
         await this.target(command.targetId);
         await this.launch(command.action.applicationId);
-        // The new app's windows become targets; the action's own target is
-        // observed as for any other action.
-        await this.discover();
+        // The app is running: the launch succeeded whatever happens next. Its
+        // windows become targets when discovery works, and the action's own
+        // target is observed as for any other action.
         try {
+          await this.discover();
           return await this.observeTarget(command.targetId);
         } catch {
           return null;
@@ -764,13 +765,15 @@ export class CuaComputerBackend implements ComputerBackend {
       this.runtime,
       "launch_app",
       BUNDLE_ID.test(id) ? { bundle_id: id } : { name: id },
+      "caller-settles",
     );
+    // Launching may have happened even without a reported process.
     if (typeof data.pid !== "number")
       throw new ComputerBackendError(
-        "driver_failed",
-        `CUA did not report a running process for ${id}`,
+        "outcome_unknown",
+        `CUA did not report a running process for ${id}; observe the desktop before launching it again`,
         false,
-        false,
+        true,
       );
   }
 
