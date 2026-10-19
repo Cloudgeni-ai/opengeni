@@ -3,6 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
+import { lockSessionEventWriteRows } from "./session-control";
 
 export type GeneratedImageSourceStrategy = "native_hosted" | "provider_adapter";
 export type GeneratedImageArtifactStatus = "pending" | "ready";
@@ -105,6 +106,16 @@ export async function prepareImageGenerationOperation(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        // FK triggers can KEY SHARE the attempt before the turn, depending on
+        // catalog history. Take the lifecycle prefix before operation locks so
+        // reservation cannot invert a concurrent turn -> attempt writer.
+        await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "none",
+          sessionIds: input.sessionId ? [input.sessionId] : [],
+          turnIds: input.turnId ? [input.turnId] : [],
+          attemptIds: input.attemptId ? [input.attemptId] : [],
+        });
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`image-generation-operation:${input.operationKey}`}, 0))`,
         );
@@ -370,8 +381,18 @@ export async function prepareGeneratedImageArtifact(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        // Artifact correlation has the same turn/attempt FK edges as operation
+        // reservation. Acquire parents before either file rows or settlement
+        // locks, following the canonical lifecycle order rather than FK order.
+        await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "none",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
         // `settlementKey` is the durable provider-operation identity. Serializing
-        // only that key makes concurrent Temporal/activity retries converge
+        // that key makes concurrent Temporal/activity retries converge
         // without relying on unique-violation recovery across three tables.
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`generated-image:${input.settlementKey}`}, 0))`,
