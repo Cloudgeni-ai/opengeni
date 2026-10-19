@@ -2189,12 +2189,16 @@ sbx-p4-e-host-xr3f logged "adopted from its files" and the
 copy and booted it at 22:45:41. The boot gave a new guest boot id and a
 new agent connection instance, and the owner epoch went from 3 to 5. The
 program and the command in flight were gone and not run again. The
-archived and the checkpointed files were kept. The late write was lost;
-either outcome was allowed for it, because the stop came 167.9 s after
-the last checkpoint began. The group recreated j759, and the control
-service issued that new instance a certificate by identity token at
-22:46:51. No run logged a warning that the guest did not write its
-disks out before a pause.
+archived and the checkpointed files were kept. The late write was lost.
+Either outcome was allowed for it: the suite saw the stop operation
+confirmed done 167.9 s after the last checkpoint it knew of began, past
+the time the next was due, so it could not rule out a later copy. That
+figure is when the stop was confirmed, not when the host stopped: the
+stop was asked for at 22:43:22, and j759's journal shows a checkpoint
+begun at 22:43:00.391 and finished at 22:43:19.360. The group recreated
+j759, and the control service issued that new instance a certificate by
+identity token at 22:46:51. No run logged a warning that the guest did
+not write its disks out before a pause.
 
 Nothing woke the sandbox that the run did not ask for. The hosts'
 journals (xr3f's and the lost j759's) hold 14 wake-path steps, four of
