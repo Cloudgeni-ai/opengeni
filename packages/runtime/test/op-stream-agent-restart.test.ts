@@ -185,7 +185,7 @@ describe("an exec whose agent restarts", () => {
       () => undefined,
       (caught: unknown) => caught,
     );
-    expectOutcomeUnknown(error);
+    expectOutcomeUnknown(error, { startConfirmed: true, stopRequested: true });
     // A new connection does not prove the old process is gone: the command is
     // handed over once, with a stop request bound to the connection it ran on.
     expect(adoptions).toEqual([
@@ -220,7 +220,7 @@ describe("an exec whose agent restarts", () => {
       (caught: unknown) => caught,
     );
     expect(runners.get(OLD)!.runs.get(opId)?.startCount).toBe(1);
-    expectOutcomeUnknown(error);
+    expectOutcomeUnknown(error, { startConfirmed: true, stopRequested: true });
     expect(adoptions).toEqual([
       expect.objectContaining({ connectionInstanceId: OLD, opId, abandoned: true }),
     ]);
@@ -251,12 +251,41 @@ describe("an exec whose agent restarts", () => {
       () => undefined,
       (caught: unknown) => caught,
     );
-    // The start may have reached the old agent: unknown, never "did not run".
-    expectOutcomeUnknown(error);
+    // The start may have reached the old agent, but no agent confirmed it:
+    // unknown, never "did not run" and never "while this command was running".
+    expectOutcomeUnknown(error, { startConfirmed: false, stopRequested: true });
     expect(adoptions).toEqual([expect.objectContaining({ connectionInstanceId: OLD })]);
     controller.cancel(error);
     await controller.waitForQuiescence();
     expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect([...runners.get(NEW)!.runs.keys()]).toEqual([]);
+  });
+
+  test("a held start whose stop cannot be recorded claims neither a run nor a stop", async () => {
+    let restarted = false;
+    const context = rig({
+      controlTimeoutMs: 30_000,
+      execTimeoutMs: 60_000,
+      goneHolds: true,
+      ledger: "failing",
+      onRequest: (request) => {
+        if (request.op?.$case === "opStart" && !restarted) {
+          restarted = true;
+          context.restart();
+        }
+      },
+    });
+    const { session, runners, requests, adoptions } = context;
+    const error = await runWithToolCallCorrelation("call_held_unrecorded", () =>
+      session.exec({ cmd: "touch once" }),
+    ).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expectOutcomeUnknown(error, { startConfirmed: false, stopRequested: false });
+    expect(adoptions).toEqual([]);
+    expect(requests.filter((r) => r.request.op?.$case === "opCancel")).toEqual([]);
+    expect(runners.get(OLD)!.starts).toEqual([]);
     expect([...runners.get(NEW)!.runs.keys()]).toEqual([]);
   });
 
@@ -278,7 +307,7 @@ describe("an exec whose agent restarts", () => {
       () => undefined,
       (caught: unknown) => caught,
     );
-    expectOutcomeUnknown(error);
+    expectOutcomeUnknown(error, { startConfirmed: true, stopRequested: true });
     // Only the abandonment is recorded: a direct request never backgrounds.
     expect(adoptions).toEqual([{ ...adoptions[0], connectionInstanceId: OLD, opId }]);
     expect(adoptions[0]).not.toHaveProperty("abandoned");
@@ -300,7 +329,8 @@ describe("an exec whose agent restarts", () => {
       () => undefined,
       (caught: unknown) => caught,
     );
-    expectOutcomeUnknown(error);
+    // Nothing recorded a stop, so the text does not claim one.
+    expectOutcomeUnknown(error, { startConfirmed: true, stopRequested: false });
     expect(adoptions).toEqual([]);
     controller.cancel(error);
     let quiescent = false;
@@ -321,8 +351,10 @@ describe("an exec whose agent restarts", () => {
     let restarted = false;
     const context = rig({
       execTimeoutMs: 150,
-      // The re-admission takes longer than the time the exec has left.
-      admissionDelayMs: (call) => (call === 1 ? 200 : 0),
+      // The re-admission (admission 2, after the first admission and the
+      // revalidation before the first start) takes longer than the time the
+      // exec has left.
+      admissionDelayMs: (call) => (call === 2 ? 200 : 0),
       onRequest: (request) => {
         if (request.op?.$case === "opStart" && !restarted) {
           restarted = true;
@@ -352,7 +384,8 @@ describe("an exec whose agent restarts", () => {
     let restarted = false;
     const context = rig({
       execTimeoutMs: 1_000,
-      admissionDelayMs: (call) => (call === 1 ? 300 : 0),
+      // The re-admission takes 300 ms of the exec's time.
+      admissionDelayMs: (call) => (call === 2 ? 300 : 0),
       onRequest: (request) => {
         if (request.op?.$case === "opStart" && !restarted) {
           restarted = true;
@@ -373,6 +406,23 @@ describe("an exec whose agent restarts", () => {
     expect(first).toBeGreaterThan(900);
     expect(second).toBeLessThanOrEqual(700);
     expect(second).toBeGreaterThan(0);
+  });
+
+  test("a start whose admission check outlasts the deadline is never sent", async () => {
+    const { session, requests } = rig({
+      execTimeoutMs: 150,
+      // The revalidation just before the first start outlasts the exec.
+      admissionDelayMs: (call) => (call === 1 ? 200 : 0),
+    });
+    const error = await runWithToolCallCorrelation("call_late_check", () =>
+      session.exec({ cmd: "touch once" }),
+    ).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(String(error)).toMatch(/did not respond in time/);
+    await Bun.sleep(100);
+    expect(requests.filter((r) => r.request.op?.$case === "opStart")).toEqual([]);
   });
 
   test("a start that never reached the old agent runs once on the new one", async () => {
@@ -408,10 +458,18 @@ describe("an exec whose agent restarts", () => {
 });
 
 describe("an exec whose start outlives its wall", () => {
-  function directClient(revalidate: () => Promise<void>) {
-    const transport = new InMemoryOpStreamTransport();
+  function directClient(revalidate: () => Promise<void>, subscribeDelayMs = 0) {
+    const frames = new InMemoryOpStreamTransport();
+    // Subscription setup that takes `subscribeDelayMs`, as a slow bus does.
+    const transport: OpStreamTransport = {
+      subscribe: async (subject, onMessage) => {
+        if (subscribeDelayMs > 0) await Bun.sleep(subscribeDelayMs);
+        return await frames.subscribe(subject, onMessage);
+      },
+      publish: async (subject, payload) => await frames.publish(subject, payload),
+    };
     const runner = new FakeOpRunner({
-      transport,
+      transport: frames,
       workspaceId: WORKSPACE,
       agentId: AGENT,
       connectionInstanceId: OLD,
@@ -450,6 +508,33 @@ describe("an exec whose start outlives its wall", () => {
     expect(runner.runs.has("wall_start:0")).toBe(false);
   });
 
+  test("a start whose subscription setup outlasts the deadline is never sent", async () => {
+    const { client, runner, starts } = directClient(async () => {}, 120);
+    const exec = ExecRequest.fromPartial({ command: ["touch once"], shell: true });
+    // The wall is far later: only the deadline itself refuses the start.
+    const error = await client.exec("slow_subscribe:0", exec, 50, 5_000).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(String(error)).toMatch(/did not respond in time/);
+    await Bun.sleep(100);
+    expect(starts).toEqual([]);
+    expect(runner.runs.has("slow_subscribe:0")).toBe(false);
+  });
+
+  test("subscription setup does not extend the start's absolute deadline", async () => {
+    const { client, runner, starts } = directClient(async () => {}, 80);
+    runner.script("slow_subscribe_ok:0", { frames: [], exit: { exitCode: 0 } });
+    const exec = ExecRequest.fromPartial({ command: ["true"], shell: true });
+    const before = Date.now();
+    await client.exec("slow_subscribe_ok:0", exec, 1_000, 5_000);
+    const [start] = starts;
+    const deadline = start?.op?.$case === "opStart" ? Number(start.op.opStart.deadlineMs) : NaN;
+    expect(deadline).toBeGreaterThanOrEqual(before + 1_000);
+    // Fixed when the exec began, not after its 80 ms subscription setup.
+    expect(deadline).toBeLessThan(before + 1_000 + 40);
+  });
+
   test("a retried start keeps its first absolute deadline", async () => {
     const { client, runner, starts } = directClient(() => Bun.sleep(20));
     runner.script("retried_start:0", { frames: [], exit: { exitCode: 0 }, drainingStarts: 2 });
@@ -463,10 +548,22 @@ describe("an exec whose start outlives its wall", () => {
   });
 });
 
-function expectOutcomeUnknown(error: unknown): void {
+function expectOutcomeUnknown(
+  error: unknown,
+  expected: { startConfirmed: boolean; stopRequested: boolean },
+): void {
   const text = String(error);
-  expect(text).toMatch(/was replaced while this command was running, so its outcome is unknown/);
-  expect(text).toMatch(/may still be running, or it may have finished/);
-  expect(text).toMatch(/A stop has been requested for it/);
+  const outcome = expected.startConfirmed
+    ? "The machine's agent was replaced while this command was running, so its outcome is " +
+      "unknown: it may still be running, or it may have finished."
+    : "The machine's agent was replaced before this command's outcome was known: it may " +
+      "not have started, may still be running, or may have finished.";
+  expect(text).toContain(outcome);
+  if (expected.stopRequested) {
+    expect(text).toContain(`${outcome} A stop has been requested for it.`);
+  } else {
+    expect(text).not.toMatch(/stop has been requested/);
+  }
+  if (!expected.startConfirmed) expect(text).not.toMatch(/while this command was running/);
   expect(text).not.toMatch(/did not survive|did not run/);
 }

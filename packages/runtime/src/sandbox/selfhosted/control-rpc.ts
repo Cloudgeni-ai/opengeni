@@ -418,18 +418,34 @@ export function connectionReplacedAgentError(neverSent: boolean): AgentError {
   };
 }
 
-/** A command whose agent connection was replaced while it ran. A new
- *  connection does not prove the old agent process is gone, so the command's
- *  outcome is unknown; the caller records a stop request for it. */
-export function commandOutcomeUnknownAfterReplacementAgentError(): AgentError {
+/** The reserved `detail` key on a command's outcome-unknown error after its
+ *  agent connection was replaced: "1" when the agent had accepted the
+ *  command's start, "0" when that was never confirmed. Reserved (never sent
+ *  by the agent). */
+export const START_CONFIRMED_DETAIL_KEY = "_start_confirmed";
+
+/** A command whose agent connection was replaced before its outcome was
+ *  known. A new connection does not prove the old agent process is gone, so
+ *  the outcome is unknown. Each clause states only what is known: whether the
+ *  agent had accepted the start, and whether a stop request has actually been
+ *  recorded for it. */
+export function commandOutcomeUnknownAfterReplacementAgentError(options: {
+  startConfirmed: boolean;
+  stopRequested: boolean;
+}): AgentError {
+  const outcome = options.startConfirmed
+    ? "The machine's agent was replaced while this command was running, so its outcome is " +
+      "unknown: it may still be running, or it may have finished."
+    : "The machine's agent was replaced before this command's outcome was known: it may " +
+      "not have started, may still be running, or may have finished.";
   return {
     code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
-    message:
-      "The machine's agent was replaced while this command was running, so its outcome is " +
-      "unknown: it may still be running, or it may have finished. A stop has been " +
-      "requested for it.",
+    message: options.stopRequested ? `${outcome} A stop has been requested for it.` : outcome,
     retryable: false,
-    detail: { [CONNECTION_REPLACED_DETAIL_KEY]: "1" },
+    detail: {
+      [CONNECTION_REPLACED_DETAIL_KEY]: "1",
+      [START_CONFIRMED_DETAIL_KEY]: options.startConfirmed ? "1" : "0",
+    },
   };
 }
 

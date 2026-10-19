@@ -699,25 +699,36 @@ class OpConsumer {
       this.settleReject = reject;
     });
 
-    // Subscription BEFORE OpStart (protocol invariant): no frame can be
-    // published before the consumer exists on a healthy path.
-    this.subscription = await this.deps.transport.subscribe(
-      opFrameSubject(
-        this.deps.workspaceId,
-        this.deps.agentId,
-        this.opId,
-        this.deps.connectionInstanceId,
-      ),
-      (payload) => this.onFramePayload(payload),
-    );
-
-    // The op's own wall covers its start too: a start whose agent cannot be
-    // reached ends with the op's timeout, never after it.
+    // The op's one absolute deadline and its wall start here, before
+    // subscription setup, so no setup time extends either. The wall covers the
+    // start too: a start whose agent cannot be reached ends with the op's
+    // timeout, never after it.
     const runStartedAt = Date.now();
+    const deadlineAt = deadlineMs > 0 ? runStartedAt + deadlineMs : 0;
     const startWall = this.startWall(wallMs);
     let startRetries: number;
     try {
-      startRetries = exec === null ? 0 : await startWall.race(this.startOp(exec, deadlineMs));
+      // Subscription BEFORE OpStart (protocol invariant): no frame can be
+      // published before the consumer exists on a healthy path.
+      const subscribing = this.deps.transport.subscribe(
+        opFrameSubject(
+          this.deps.workspaceId,
+          this.deps.agentId,
+          this.opId,
+          this.deps.connectionInstanceId,
+        ),
+        (payload) => this.onFramePayload(payload),
+      );
+      try {
+        this.subscription = await startWall.race(subscribing);
+      } catch (error) {
+        void subscribing.then(
+          (subscription) => subscription.unsubscribe(),
+          () => {},
+        );
+        throw error;
+      }
+      startRetries = exec === null ? 0 : await startWall.race(this.startOp(exec, deadlineAt));
 
       // The universal begin (B2): attach from our contiguous frontier under the
       // initial window — for a FRESH op that is seq 0 (replay nothing, start live
@@ -862,7 +873,7 @@ class OpConsumer {
         // Another agent process holds the connection: this client stops
         // waiting, and the op's outcome is unknown.
         if (error instanceof SelfhostedControlError && error.connectionReplaced) {
-          throw agentReplacedOutcomeUnknownError();
+          throw agentReplacedOutcomeUnknownError(true);
         }
         if (
           error instanceof SelfhostedControlError &&
@@ -909,22 +920,26 @@ class OpConsumer {
    *  is IDEMPOTENT BY OP ID (the request id), so a timed-out/never-sent start
    *  is safe to re-issue even though exec mutates — the runner either never saw
    *  it or answers the SAME op. The stable request id is what makes that true. */
-  private async startOp(exec: ExecRequest, deadlineMs: number): Promise<number> {
+  private async startOp(exec: ExecRequest, deadlineAt: number): Promise<number> {
     let drainingRetries = 0;
     let blipRetries = 0;
-    // One absolute deadline for every attempt: a retried start never extends it.
-    const absoluteDeadline = deadlineMs > 0 ? String(Date.now() + deadlineMs) : "0";
+    // One absolute deadline (epoch ms, 0: none), fixed when the run began, for
+    // every attempt: neither subscription setup nor a retry extends it.
+    const absoluteDeadline = deadlineAt > 0 ? String(deadlineAt) : "0";
+    // A start is never sent once the op's wall has ended the call or its
+    // deadline has passed.
+    const refused = () => this.startAbandoned || (deadlineAt > 0 && Date.now() >= deadlineAt);
     // Whether an earlier attempt may have reached the runner.
     let maybeDelivered = false;
     for (;;) {
-      if (this.startAbandoned) throw agentErrorToControlError(timeoutAgentError());
+      if (refused()) throw agentErrorToControlError(timeoutAgentError());
       // Subscription setup can yield after the caller's initial admission.
       // Close that window, and the equivalent proven-unstarted retry windows,
       // at the last boundary before bytes can reach the provider.
       await this.deps.revalidateBeforeStartRetry?.();
-      // The op's wall may have ended the call meanwhile: a caller told that it
-      // timed out never has its command started afterwards.
-      if (this.startAbandoned) throw agentErrorToControlError(timeoutAgentError());
+      // The wall or the deadline may have ended the call meanwhile: a caller
+      // told that it timed out never has its command started afterwards.
+      if (refused()) throw agentErrorToControlError(timeoutAgentError());
       try {
         const result = await this.controlOp(
           {
@@ -972,7 +987,9 @@ class OpConsumer {
         // delivered did not run; one any attempt may have delivered has an
         // unknown outcome.
         if (error.connectionReplaced) {
-          throw error.neverSent && !maybeDelivered ? error : agentReplacedOutcomeUnknownError();
+          throw error.neverSent && !maybeDelivered
+            ? error
+            : agentReplacedOutcomeUnknownError(false);
         }
         if (!error.neverSent) maybeDelivered = true;
         const blip = error.reason === "agent_reconnecting" || error.neverSent;
@@ -1083,7 +1100,7 @@ class OpConsumer {
       })
       .catch((error) => {
         if (error instanceof SelfhostedControlError && error.connectionReplaced) {
-          this.settleReject?.(agentReplacedOutcomeUnknownError());
+          this.settleReject?.(agentReplacedOutcomeUnknownError(true));
         } else if (
           error instanceof SelfhostedControlError &&
           !error.retryable &&
@@ -1332,7 +1349,7 @@ class OpConsumer {
       // Another agent process holds the connection: stop waiting here; the
       // op's outcome is unknown and its stop is handed over.
       if (error.connectionReplaced) {
-        reject(agentReplacedOutcomeUnknownError());
+        reject(agentReplacedOutcomeUnknownError(true));
         return;
       }
       const transient =
@@ -1437,11 +1454,15 @@ function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedCon
 
 /** The op's agent connection was replaced by a new one while the op existed
  *  or may have. That does not prove the old process is gone (an expired claim
- *  can be taken over while it still runs), so the outcome is unknown. Marked
+ *  can be taken over while it still runs), so the outcome is unknown.
+ *  `startConfirmed`: the agent had accepted the start. Marked
  *  connection-replaced so the session hands the op to its command ledger with
- *  a stop request bound to the old connection. */
-function agentReplacedOutcomeUnknownError(): SelfhostedControlError {
-  return agentErrorToControlError(commandOutcomeUnknownAfterReplacementAgentError());
+ *  a stop request bound to the old connection; the session adds that a stop
+ *  was requested only once one is recorded. */
+function agentReplacedOutcomeUnknownError(startConfirmed: boolean): SelfhostedControlError {
+  return agentErrorToControlError(
+    commandOutcomeUnknownAfterReplacementAgentError({ startConfirmed, stopRequested: false }),
+  );
 }
 
 /** A failure once the op exists (its start was accepted, may have been, or it
@@ -1450,7 +1471,7 @@ function agentReplacedOutcomeUnknownError(): SelfhostedControlError {
  *  not delivered. */
 function startedOpError(error: unknown): unknown {
   if (!(error instanceof SelfhostedControlError)) return error;
-  if (error.connectionReplaced) return agentReplacedOutcomeUnknownError();
+  if (error.connectionReplaced) return agentReplacedOutcomeUnknownError(true);
   if (!error.neverSent) return error;
   return new SelfhostedControlError({
     message: error.message,

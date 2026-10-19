@@ -1706,6 +1706,51 @@ describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
     await session.clearSecretFilesForAttempt();
     expect(mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove")).toHaveLength(1);
   });
+
+  test("no secret file is written after an exec that timed out during preparation is cleaned up", async () => {
+    const events: string[] = [];
+    class SlowWrites extends MockAgentResponder {
+      override async request(
+        subject: string,
+        req: ControlRequest,
+        opts: { timeoutMs: number },
+      ): Promise<ControlResponse> {
+        if (req.op?.$case === "fsWrite") {
+          await Bun.sleep(150);
+          events.push("write");
+        }
+        if (req.op?.$case === "fsRemove") events.push("remove");
+        return await super.request(subject, req, opts);
+      }
+    }
+    const mock = new SlowWrites();
+    const session = sessionWith(mock, 0, undefined, {
+      workspaceRoot: "/home/user/project",
+      execTimeoutMs: 50,
+    });
+    const prepared = await prepareSecretExec("cat {{secretfile:Canary}} {{secretfile:Other}}", {
+      resolver: createStaticSecretResolver({ Canary: CANARY, Other: "other" }),
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    const startedAt = Date.now();
+    const error = await runWithSecretCarry(prepared!.carry, () =>
+      session.exec({ cmd: prepared!.text }),
+    ).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    // The exec gives up at its deadline, with the first write still in flight.
+    expect(String(error)).toMatch(/did not respond in time/);
+    expect(Date.now() - startedAt).toBeLessThan(140);
+    expect(events).toEqual([]);
+    // Attempt-end cleanup waits for that write, then removes the scope; the
+    // abandoned exec writes nothing more.
+    await session.clearSecretFilesForAttempt();
+    await Bun.sleep(250);
+    expect(events).toEqual(["write", "remove"]);
+    expect(mock.requests.some((entry) => entry.req.op?.$case === "opStart")).toBe(false);
+  });
 });
 
 describe("SelfhostedSession.browserControlHttp", () => {

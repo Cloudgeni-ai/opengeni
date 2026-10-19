@@ -93,19 +93,26 @@ streaming exec that was started, or may have been, is not settled by the
 requester. It is handed to the session's command ledger with a stop request
 bound to its exact enrollment, connection instance and operation (the same
 adoption used when a machine stops answering), and the exec ends with
-`agent_offline`: "The machine's agent was replaced while this command was running,
-so its outcome is unknown: it may still be running, or it may have finished. A
-stop has been requested for it." A turn records it through its own adoption; a
-direct terminal or file request records it in the same ledger without a turn.
-If recording fails, the caller keeps custody and goes on stopping it, as for a
-machine that stopped answering. The reconciler alone decides the outcome: it
+`agent_offline`. Once the agent had accepted the start, the text is "The
+machine's agent was replaced while this command was running, so its outcome is
+unknown: it may still be running, or it may have finished." If no agent
+confirmed the start, it is "The machine's agent was replaced before this
+command's outcome was known: it may not have started, may still be running, or
+may have finished." Either ends with " A stop has been requested for it." only
+once the ledger has recorded that stop. A turn records it through its own
+adoption; a direct terminal or file request records it in the same ledger
+without a turn. If recording fails, the caller keeps custody and goes on
+stopping it, as for a machine that stopped answering, and the text claims no
+stop. The reconciler alone decides the outcome: it
 delivers the stop if the old runner answers again, and settles the command as
 lost once the enrollment retires that runner (revoked, a different connection
 instance, or a stopped connection). The exec's own timeout also covers its
 start and first attach, so an exec whose agent never answers ends at that
 timeout; a start that timeout abandoned is never sent afterwards, every retry
-of a start keeps its first deadline, and a start re-admitted to a new
-connection is sent only the time left.
+of a start keeps the one absolute deadline fixed when the exec began (neither
+subscription setup nor a retry extends it, and no start is sent once it has
+passed), and a start re-admitted to a new connection is sent only the time
+left.
 
 ### Enrollment maintenance boundary
 
@@ -236,7 +243,9 @@ Vault secrets reach a machine only per command. When an `exec_command` or
 on Windows (an explicit supported `shell` argument is honoured), splices each
 reference as `OPENGENI_SECRET_n`, and sends the values only in that command's
 `ExecRequest.env`. `{{secretfile:…}}` files are written under the 0700
-`/tmp/opengeni-private` root and removed when the attempt ends. `cmd.exe`, fish
+`/tmp/opengeni-private` root and removed when the attempt ends; that cleanup
+first waits for any write still in flight from an exec that timed out during
+preparation, and such an exec writes no further file. `cmd.exe`, fish
 and unknown shells return `unsupported_shell`. Commands without references run
 exactly as before, and nothing from a vault is copied into the machine's
 environment. See [`secrets.md`](secrets.md#where-references-resolve).
