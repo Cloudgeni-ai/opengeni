@@ -342,6 +342,19 @@ pub fn launchd_stderr_log_path(user_home: &Path) -> PathBuf {
 /// Returns an OS error if the supplied home is not an absolute non-root path,
 /// or contains characters unsuitable for XML or launchctl line-oriented output.
 pub fn render_launchd_plist(spec: &ServiceSpec, user_home: &Path) -> PlatformResult<String> {
+    render_launchd_plist_with_environment(spec, user_home, &std::collections::BTreeMap::new())
+}
+
+/// Renders a LaunchAgent while preserving its previously configured environment.
+/// Existing values take precedence over the invoking shell's defaults.
+///
+/// # Errors
+/// Returns the same home-validation errors as [`render_launchd_plist`].
+pub fn render_launchd_plist_with_environment(
+    spec: &ServiceSpec,
+    user_home: &Path,
+    existing: &std::collections::BTreeMap<String, String>,
+) -> PlatformResult<String> {
     // This pure renderer is also tested on Windows; validate macOS/POSIX syntax
     // rather than the build host's interpretation of an absolute path.
     let user_home = user_home
@@ -367,21 +380,25 @@ pub fn render_launchd_plist(spec: &ServiceSpec, user_home: &Path) -> PlatformRes
         .map(|a| format!("    <string>{}</string>", xml_escape(a)))
         .collect::<Vec<_>>()
         .join("\n");
-    let path = spec
-        .environment_path
-        .as_deref()
-        .map(|value| {
+    let mut values = std::collections::BTreeMap::new();
+    if let Some(path) = &spec.environment_path {
+        values.insert("PATH".to_string(), path.clone());
+    }
+    // The agent writes its own bounded log; launchd's capture keeps only output
+    // that bypasses it (panics during abort, allocator failures, raw prints).
+    values.insert(AGENT_STDERR_LOG_ENV.to_string(), "off".to_string());
+    values.extend(existing.clone());
+    let entries = values
+        .iter()
+        .map(|(key, value)| {
             format!(
-                "    <key>PATH</key>\n    <string>{}</string>\n",
+                "    <key>{}</key>\n    <string>{}</string>\n",
+                xml_escape(key),
                 xml_escape(value)
             )
         })
-        .unwrap_or_default();
-    // The agent writes its own bounded log; launchd's capture keeps only output
-    // that bypasses it (panics during abort, allocator failures, raw prints).
-    let environment = format!(
-        "  <key>EnvironmentVariables</key>\n  <dict>\n{path}    <key>{AGENT_STDERR_LOG_ENV}</key>\n    <string>off</string>\n  </dict>\n"
-    );
+        .collect::<String>();
+    let environment = format!("  <key>EnvironmentVariables</key>\n  <dict>\n{entries}  </dict>\n");
     // Joined as a POSIX path on every build host, like the home it extends.
     let stderr_log = xml_escape(&format!(
         "{}/.config/opengeni/agent/logs/agent.stderr.log",
@@ -834,9 +851,9 @@ mod tests {
             "<string>/Users/Runner &amp; Co/.config/opengeni/agent/logs/agent.stderr.log</string>";
         assert!(plist.contains(&format!("<key>StandardOutPath</key>\n  {log}")));
         assert!(plist.contains(&format!("<key>StandardErrorPath</key>\n  {log}")));
-        assert!(plist.contains(
-            "    <key>OPENGENI_AGENT_STDERR_LOG</key>\n    <string>off</string>\n  </dict>"
-        ));
+        assert!(
+            plist.contains("    <key>OPENGENI_AGENT_STDERR_LOG</key>\n    <string>off</string>")
+        );
         let mut without_path = spec();
         without_path.environment_path = None;
         let plist = render_launchd_plist(&without_path, Path::new("/Users/runner")).unwrap();
@@ -1007,6 +1024,24 @@ mod tests {
             Some("S-1-5-18")
         );
         assert_eq!(parse_whoami_user_sid("ERROR: something"), None);
+    }
+
+    #[test]
+    fn launchd_restart_preserves_configured_path_and_custom_environment() {
+        let existing = std::collections::BTreeMap::from([
+            (
+                "PATH".to_string(),
+                "/opt/tools & sdk/bin:/usr/bin".to_string(),
+            ),
+            ("LANG".to_string(), "en_US.UTF-8".to_string()),
+        ]);
+        let plist =
+            render_launchd_plist_with_environment(&spec(), Path::new("/Users/runner"), &existing)
+                .unwrap();
+        assert!(plist.contains("/opt/tools &amp; sdk/bin:/usr/bin"));
+        assert!(!plist.contains("/home/u/.local/bin:/usr/bin:/bin"));
+        assert!(plist.contains("<key>LANG</key>\n    <string>en_US.UTF-8</string>"));
+        assert!(plist.contains(&format!("<key>{AGENT_STDERR_LOG_ENV}</key>")));
     }
 
     #[test]
