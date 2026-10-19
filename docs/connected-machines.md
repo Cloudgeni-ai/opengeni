@@ -1007,6 +1007,9 @@ user's home directory. This makes the reported default workspace root writable
 for attachment delivery instead of inheriting launchd's `/`. Foreground `run`
 continues to use the directory it was launched from, and an explicit session
 `workingDir` still takes precedence.
+Reinstalling or restarting the LaunchAgent preserves its existing environment
+(including PATH and locale), rather than replacing it with the invoking shell's
+environment. Fresh installs still inherit the installer's PATH.
 
 On Windows, the background agent is a per-user Task Scheduler task named
 **Opengeni Agent**, not a Windows Service. A service runs in session 0, where
@@ -1158,6 +1161,15 @@ exchange. A failed post-exchange verification or managed-receipt write exchanges
 the entire old app back. The successor receipt contains the installed executable
 digest, not the ZIP digest. Interrupted transactions retain their recovery copy.
 Standalone Mac executables retain the binary update path.
+The updater resolves macOS executable symlinks before selecting the artifact,
+so invoking an app through `~/.local/bin/opengeni-agent` still updates the whole
+app and leaves that symlink intact. Standalone release binaries are signed with
+the stable identifier `ai.opengeni.agent`, matching the app. Previously released
+standalone binaries used build-dependent identifiers: their grants may need a
+one-time reapproval after migration to the stable identity. Updating the old
+updater itself still uses its old behavior; use the official whole-app installer
+for that first upgrade when launching through an app symlink. No updater can
+restore grants that macOS already revoked or that a user explicitly removed.
 
 Mac agents older than 0.1.29 require a one-time upgrade through the official
 whole-app installer. Their old updater would replace a single sealed executable;

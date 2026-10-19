@@ -1389,6 +1389,18 @@ describe("release image workflow contract", () => {
     expect(publish!.with?.tag_name).toBe("agent-v${{ needs.guard.outputs.version }}");
   });
 
+  test("standalone macOS agent signing keeps the same stable identity as the app", async () => {
+    const parsed = Bun.YAML.parse(await workflow("agent-release.yml")) as ParsedWorkflow;
+    const steps = parsed.jobs.build!.steps!;
+    for (const name of [
+      "macOS codesign + notarize (if creds present)",
+      "macOS assemble + sign + notarize .app bundle (if creds present)",
+    ]) {
+      const step = steps.find((candidate) => candidate.name === name);
+      expect(step?.run).toContain("--binary-identifier ai.opengeni.agent");
+    }
+  });
+
   test("agent publication creates only immutable-compatible versioned releases", async () => {
     const agentRelease = await workflow("agent-release.yml");
 
