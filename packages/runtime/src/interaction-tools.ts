@@ -1058,9 +1058,15 @@ export function createInteractionAttemptToolDefinitions(
       // Finding the current tab lists the browser's tabs, which also fails
       // while it is stopped.
       tab = await currentTab.target(value);
-      const resumed = afterResume === "report" && unseenResume(tab.browserSessionId, startedAt);
-      const resumedTabs = resumed ? await resumed : null;
-      if (resumedTabs) throw await resumedBrowserError(resumedTabs);
+      if (afterResume === "report") {
+        // A resume still in flight, or one no result has shown yet, means
+        // the page this call would act on reloaded unseen.
+        const inFlight = resumesInFlight.get(tab.browserSessionId);
+        const resumedTabs = inFlight
+          ? await inFlight.catch(() => null)
+          : unseenResume(tab.browserSessionId, startedAt);
+        if (resumedTabs) throw await resumedBrowserError(resumedTabs);
+      }
       const output = await run(tab);
       currentTab.use(tab.browserSessionId, tab.targetId);
       markResumeShown(tab.browserSessionId);
