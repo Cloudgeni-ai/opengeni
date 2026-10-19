@@ -613,13 +613,13 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
         }),
       ).toMatchObject({ t: "opened" });
       subscribe(lost, 1);
-      // The agent answers the transport's capability probe, then its host goes
-      // dark: it takes the request and never answers.
-      const deliveredToLost: string[] = [];
+      // The agent answers the transport's capability probe; the request then
+      // reaches the host, and the link ends before the agent answers it.
+      const deliveredBeforeHandOff: string[] = [];
       stops.push(
         answerRequests(lost, 1, (frame) => {
           if (frame.subject === `${scope}.rpc`) return pong(frame, true);
-          deliveredToLost.push(frame.subject);
+          deliveredBeforeHandOff.push(frame.subject);
           return null;
         }),
       );
@@ -645,38 +645,42 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
         { timeoutMs: 60_000 },
       );
       const deadline = Date.now() + 5_000;
-      while (deliveredToLost.length === 0 && Date.now() < deadline) await Bun.sleep(10);
-      expect(deliveredToLost).toHaveLength(1);
+      while (deliveredBeforeHandOff.length === 0 && Date.now() < deadline) await Bun.sleep(10);
+      expect(deliveredBeforeHandOff).toHaveLength(1);
 
-      // The host is lost: its link to the first replica ends. The sandbox comes
-      // back on host h2, which links to the second replica.
+      // The sandbox is handed over to host h2 (a hand-off keeps its memory, so
+      // its agent keeps its connection): the link to the first replica ends,
+      // and h2 links to the second replica.
       lost.close();
       await lost.closed();
-      const restored = await linkAs("h2", `ws://127.0.0.1:${secondApi.port}/v1/compute/agent-link`);
-      const deliveredToRestored: string[] = [];
+      const handedOver = await linkAs(
+        "h2",
+        `ws://127.0.0.1:${secondApi.port}/v1/compute/agent-link`,
+      );
+      const deliveredAfterHandOff: string[] = [];
       stops.push(
-        answerRequests(restored, 1, (frame) => {
-          deliveredToRestored.push(frame.subject);
+        answerRequests(handedOver, 1, (frame) => {
+          deliveredAfterHandOff.push(frame.subject);
           return pong(frame, frame.subject === `${scope}.rpc`);
         }),
       );
       expect(
-        await restored.open({
+        await handedOver.open({
           s: 1,
           sandbox: agent.sandbox,
           ticket: await ticketFor(agent, { host: "h2", epoch: 2 }),
           connection: instance,
         }),
       ).toMatchObject({ t: "opened" });
-      subscribe(restored, 1);
+      subscribe(handedOver, 1);
 
       const response = await request;
       expect(response.error).toBeUndefined();
       expect(response.result?.$case).toBe("ping");
       // The same delivery, so the agent's journal would join a duplicate.
-      expect(deliveredToRestored).toEqual([deliveredToLost[0]]);
+      expect(deliveredAfterHandOff).toEqual([deliveredBeforeHandOff[0]]);
       expect(Date.now() - startedAt).toBeLessThan(10_000);
-      restored.close();
+      handedOver.close();
     } finally {
       for (const stop of stops) stop();
       await second.close().catch(() => undefined);

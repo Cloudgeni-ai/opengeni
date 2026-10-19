@@ -1162,7 +1162,7 @@ class OpConsumer {
       throw lostToControlError(result.opStatus);
     }
     // Cancelled before it ever began: no frames will come, and it never ran.
-    if (isTombstone(result.opStatus)) throw new OpTombstonedError(result.opStatus.exit!);
+    if (isOpTombstone(result.opStatus)) throw new OpTombstonedError(result.opStatus.exit!);
     this.markAcknowledged();
     return result.opStatus;
   }
@@ -1417,7 +1417,7 @@ class OpConsumer {
         reject(lostToControlError(status));
         return;
       }
-      if (isTombstone(status)) {
+      if (isOpTombstone(status)) {
         reject(new OpTombstonedError(status.exit!));
         return;
       }
@@ -1543,7 +1543,7 @@ function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedCon
  *  record. A real exit always declares its output totals and digests and
  *  follows at least one frame, so nothing else matches. It proves the op never
  *  ran on that connection and never can. */
-function isTombstone(status: OpStatus): boolean {
+export function isOpTombstone(status: OpStatus): boolean {
   const exit = status.exit;
   return (
     status.state === OpState.OP_STATE_COMPLETE &&
@@ -1554,7 +1554,7 @@ function isTombstone(status: OpStatus): boolean {
   );
 }
 
-/** A start, attach or read met the op's tombstone (see isTombstone). For a
+/** A start, attach or read met the op's tombstone (see isOpTombstone). For a
  *  caller that ran the command it reads as the start refusal it is. */
 export class OpTombstonedError extends SelfhostedControlError {
   constructor(readonly exit: OpExit) {

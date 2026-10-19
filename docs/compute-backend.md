@@ -153,29 +153,41 @@ skips sandbox enrollments, and machine routes list machines only.
   holds up deleting the chat: a command already asked to stop on the chat's
   own sandbox does not hold the deletion, because ending the group deletes
   the sandbox and the deletion waits for that.
-- **Host loss**: when a sandbox's host is lost, the fabric resumes the
-  sandbox from its last snapshot on another host. Its agent keeps the same
-  connection instance, so a request is not ended as replaced; the snapshot can
-  predate the request, so the restored agent may never have seen it. A request
-  forwarded into a session whose host link then ends is not left waiting: when
-  any session ends (its link closed, its lease lost, superseded or revoked),
-  the gateway that held it answers every request the agent had not yet
-  answered with an empty reply carrying `Opengeni-Agent-Link-Lost: 1`. The
-  requester takes that as a lost attempt, whichever API pod it runs on: a
-  replayable request is delivered again under the same delivery identity, so
-  the agent's journal runs it at most once and it reaches the agent wherever
-  it returns (waking the sandbox if no host serves it yet); a one-shot request
-  ends with an unknown outcome, never as unsent. Only a gateway sends the
-  marker: it drops the header from anything an agent publishes, and a
+- **Host loss**: the fabric never brings an agent back rewound. After a host
+  loss the sandbox boots fresh on another host from its newest stored copy's
+  files (programs end; the guest flushes its disk before each capture, so the
+  files are as the guest last wrote them before that copy), and its agent is a
+  new process on a new connection instance, exactly as after a VM crash (see
+  Restart). A copy handed over by a move or a drain is current, so that
+  sandbox keeps its memory and its agent keeps its connection. The agent's
+  replay journal therefore makes a request run at most once per agent
+  connection instance, and nothing in this backend assumes that an instance
+  survives a host loss: a request that may have reached the lost agent ends
+  with an unknown outcome once the new instance is live, and only one that
+  provably reached no agent is sent to the new one.
+- **Link loss**: a request forwarded into a session whose host link then ends
+  is not left waiting. When any session ends (its link closed, its lease
+  lost, superseded or revoked), the gateway that held it answers every
+  request the agent had not yet answered with an empty reply carrying
+  `Opengeni-Agent-Link-Lost: 1`, and so does a request it cannot forward
+  because its session has ended or the forward fails. The requester takes
+  that as a lost attempt, whichever API pod it runs on: a replayable request
+  is delivered again under the same delivery identity, to the same connection
+  instance (the instance is part of the subject), so it reaches that agent
+  wherever its link returns, waking the sandbox if no host serves it yet, and
+  it ends as an unknown outcome if that instance has been replaced; a one-shot
+  request ends with an unknown outcome, never as unsent. Only a gateway sends
+  the marker: it drops the header from anything an agent publishes, and a
   requester reads it only on the reply to its own request (a Connected
   Machine's agent that sent it would only end its own request early, which it
   can already do by not answering). Each session remembers at most 4,096
-  unanswered requests, oldest forgotten first; an answer removes its request,
-  and the set goes with the session. A stop that reaches the
-  restored agent before the start it stops leaves a tombstone, and the command
-  settles as cancelled ("Control transport recovery" in
-  `docs/connected-machines.md`). A gateway pod that dies outright sends no
-  such reply; its requests end at their own timeout.
+  unanswered requests; one past that is not forwarded and is told at once, so
+  its requester delivers it again; an answer removes its request, and the set
+  goes with the session. A stop that reaches the agent before the start it
+  stops leaves a tombstone, and the command settles as cancelled with no
+  output ("Control transport recovery" in `docs/connected-machines.md`). A
+  gateway pod that dies outright sends no such reply; its requests end at
+  their own timeout.
 - **Request epoch**: compute requests are machine-addressed (epoch 0), like
   `run_on`. The agent in a sandbox has no session route epoch: nothing
   acknowledges its Hello with one, so it holds 0, and a nonzero epoch (the

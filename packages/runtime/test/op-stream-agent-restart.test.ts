@@ -96,20 +96,10 @@ function rig(
   const loseHost = () => {
     state.gone.add(OLD);
   };
-  /** The sandbox is restored on another host from its last snapshot: the SAME
-   * connection instance answers again, as it was before the requests its old
-   * host took, knowing none of their ops. */
-  const restoreFromSnapshot = () => {
-    runners.set(
-      OLD,
-      new FakeOpRunner({
-        transport: streams.get(OLD)!,
-        workspaceId: WORKSPACE,
-        agentId: AGENT,
-        connectionInstanceId: OLD,
-        ...(options.defaultScript ? { defaultScript: options.defaultScript } : {}),
-      }),
-    );
+  /** The agent's link comes back, at this replica or another: the same agent
+   * process answers again on its connection. It never saw the requests its
+   * lost link held. */
+  const relink = () => {
     state.gone.delete(OLD);
   };
   const requests: { request: ControlRequest; instance: string }[] = [];
@@ -199,7 +189,7 @@ function rig(
     restart,
     returnOld,
     loseHost,
-    restoreFromSnapshot,
+    relink,
     requests,
     adoptions,
     transport,
@@ -718,11 +708,11 @@ function expectOutcomeUnknown(
   expect(text).not.toMatch(/did not survive|did not run/);
 }
 
-describe("an exec whose sandbox is restored from a snapshot on another host", () => {
-  // As a direct terminal exec runs on a compute sandbox whose host is lost:
-  // its start goes to the lost host, the caller gives up, and the sandbox comes
-  // back on another host with the same agent connection, rewound.
-  function hostLoss(order: "stop first" | "start first") {
+describe("an exec whose start is held by a link that ends", () => {
+  // As a direct terminal exec runs on a compute sandbox whose host link drops:
+  // its start sits on the link that ended, the caller gives up, and the same
+  // agent comes back on a new link without ever having seen the start.
+  function linkLoss(order: "stop first" | "start first") {
     let lost = false;
     let restored = false;
     const stopSeen = Promise.withResolvers<void>();
@@ -739,10 +729,10 @@ describe("an exec whose sandbox is restored from a snapshot on another host", ()
           context.loseHost();
           setTimeout(() => {
             restored = true;
-            context.restoreFromSnapshot();
+            context.relink();
           }, 1_000);
         }
-        // The restored agent gets the stop before the retried start.
+        // The agent gets the stop before the retried start.
         if (order === "stop first" && request.op?.$case === "opStart" && restored) {
           await stopSeen.promise;
           await Bun.sleep(20);
@@ -752,8 +742,8 @@ describe("an exec whose sandbox is restored from a snapshot on another host", ()
     return context;
   }
 
-  test("a stop that reaches the restored agent first settles the command: it never ran there", async () => {
-    const { session, runners, requests } = hostLoss("stop first");
+  test("a stop that reaches the agent before its start settles the command: it never ran", async () => {
+    const { session, runners, requests } = linkLoss("stop first");
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
     // The caller gives up while the start is still unanswered.
@@ -775,15 +765,15 @@ describe("an exec whose sandbox is restored from a snapshot on another host", ()
     } finally {
       clearTimeout(timer);
     }
-    const restoredRunner = runners.get(OLD)!;
-    expect(restoredRunner.starts).toEqual([]);
-    expect(restoredRunner.runs.size).toBe(0);
+    const runner = runners.get(OLD)!;
+    expect(runner.starts).toEqual([]);
+    expect(runner.runs.size).toBe(0);
     // No probing storm after the proof.
     expect(requests.filter((r) => r.request.op?.$case === "opAttach").length).toBeLessThan(10);
   });
 
-  test("a start that reaches the restored agent first runs there once", async () => {
-    const { session, runners } = hostLoss("start first");
+  test("a start that reaches the agent first runs once", async () => {
+    const { session, runners } = linkLoss("start first");
     const controller = createTurnToolCancellationController(new AbortController().signal);
     const result = await controller.runSandboxCommandStructured(session, {
       cmd: "touch once",

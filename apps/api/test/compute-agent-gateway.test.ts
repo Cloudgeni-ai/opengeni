@@ -323,8 +323,11 @@ class FakeSocket {
   readonly frames: GatewayFrame[] = [];
   pings = 0;
   closedWith: { code: number | undefined; reason: string | undefined } | null = null;
+  /** Drop every send, as Bun does for an overloaded socket. */
+  dropSends = false;
   constructor(readonly data: ApiWebSocketConnection) {}
   send(bytes: Uint8Array): number {
+    if (this.dropSends) return 0;
     this.frames.push(decodeGatewayFrame(bytes));
     return bytes.byteLength;
   }
@@ -768,7 +771,30 @@ describe("agent gateway sessions", () => {
     ]);
   });
 
-  test("a session remembers a bounded number of unanswered requests, oldest forgotten first", async () => {
+  test("a request the gateway cannot forward is told the link was lost", async () => {
+    const { socket, send, settle, nats } = await gatewayWithLink();
+    send({ t: "open", s: 1, sandbox: "sbx", ticket: "t", connection: INSTANCE });
+    send({ t: "sub", s: 1, sid: "r", subject: `${SCOPE}.rpc` });
+    await settle();
+    const [subscription] = [...nats.subscriptions.values()];
+    socket.dropSends = true;
+    subscription!.deliver({
+      subject: `${SCOPE}.rpc`,
+      reply: "_INBOX.dropped",
+      data: new Uint8Array([1]),
+    });
+    await settle();
+    expect(socket.closedWith?.code).toBe(1011);
+    expect(nats.published).toEqual([
+      {
+        subject: "_INBOX.dropped",
+        data: new Uint8Array(0),
+        headers: [[AGENT_LINK_LOST_HEADER, "1"]],
+      },
+    ]);
+  });
+
+  test("a session remembers a bounded number of unanswered requests and turns away the rest", async () => {
     const { socket, send, settle, nats } = await gatewayWithLink();
     send({ t: "open", s: 1, sandbox: "sbx", ticket: "t", connection: INSTANCE });
     send({ t: "sub", s: 1, sid: "r", subject: `${SCOPE}.rpc` });
@@ -781,12 +807,22 @@ describe("agent gateway sessions", () => {
         data: new Uint8Array([1]),
       });
     }
+    // The one past the bound is not forwarded, and is told at once.
+    expect(nats.published.map((message) => message.subject)).toEqual(["_INBOX.4096"]);
+    const forwarded = socket.frames.filter((frame) => frame.t === "msg");
+    expect(forwarded).toHaveLength(4096);
     socket.data.transportClosed();
     await settle();
+    // Every requester is told exactly once.
     const told = nats.published.map((message) => message.subject);
-    expect(told).toHaveLength(4096);
-    expect(told[0]).toBe("_INBOX.1");
-    expect(told.at(-1)).toBe("_INBOX.4096");
+    expect(told).toHaveLength(4097);
+    expect(new Set(told).size).toBe(4097);
+    expect(
+      nats.published.every(
+        (message) =>
+          message.data.byteLength === 0 && message.headers?.[0]?.[0] === AGENT_LINK_LOST_HEADER,
+      ),
+    ).toBe(true);
   });
 
   test("a session the gateway ends tells its unanswered requesters too", async () => {

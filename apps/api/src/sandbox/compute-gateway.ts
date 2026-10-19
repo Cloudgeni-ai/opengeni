@@ -126,8 +126,8 @@ const RENEW_CONCURRENCY = 16;
 /** Room for a frame's JSON header inside one WebSocket message. */
 const FRAME_HEADER_ALLOWANCE = 64 * 1024;
 const MAX_SUBSCRIPTIONS_PER_SESSION = 1024;
-/** Unanswered requests one session remembers; past this the oldest is
- * forgotten (its requester then waits out its own timeout). */
+/** Unanswered requests one session remembers. A request past it is not
+ * forwarded: its requester is told the link was lost and delivers it again. */
 const MAX_UNANSWERED_REQUESTS_PER_SESSION = 4096;
 /** Frames waiting behind an open or a close on one link; a host that floods
  * past this is cut off (it dials again and reopens its sessions). */
@@ -777,7 +777,11 @@ class AgentLink implements ApiWebSocketConnection {
           frame.subject,
           frame.queue,
           (message) => {
-            if (!this.gateway.authorized(session)) return;
+            if (!this.gateway.authorized(session)) {
+              // The session has ended: nothing reaches the agent through it.
+              if (message.reply) this.tellLinkLost(message.reply);
+              return;
+            }
             // Only a request (a message with a reply subject) wakes a sleeping
             // sandbox at its host; any other message waits there until the
             // agent next runs. Name each waker: an idle sandbox should get none.
@@ -802,6 +806,15 @@ class AgentLink implements ApiWebSocketConnection {
                 );
               }
             }
+            if (message.reply) {
+              if (session.unanswered.size >= MAX_UNANSWERED_REQUESTS_PER_SESSION) {
+                this.tellLinkLost(message.reply);
+                return;
+              }
+              // Recorded before it is forwarded: a forward that fails ends the
+              // session, and its teardown must tell this requester too.
+              session.unanswered.add(message.reply);
+            }
             this.send({
               t: "msg",
               s: session.s,
@@ -811,13 +824,6 @@ class AgentLink implements ApiWebSocketConnection {
               ...(message.headers ? { headers: message.headers } : {}),
               payload: message.data,
             });
-            if (message.reply && session.state === "open") {
-              session.unanswered.add(message.reply);
-              if (session.unanswered.size > MAX_UNANSWERED_REQUESTS_PER_SESSION) {
-                const oldest = session.unanswered.values().next().value;
-                if (oldest !== undefined) session.unanswered.delete(oldest);
-              }
-            }
           },
         );
         session.subscriptions.set(key, { sid, unsubscribe });
@@ -883,18 +889,23 @@ class AgentLink implements ApiWebSocketConnection {
     // The agent can no longer answer these through this session. Tell each
     // requester at once, from whichever replica held the link: a replayable
     // request is delivered again, to wherever the agent is now.
-    for (const reply of session.unanswered) {
-      try {
-        this.gateway.options.nats.publish(reply, new Uint8Array(0), {
-          headers: [[AGENT_LINK_LOST_HEADER, "1"]],
-        });
-      } catch {
-        // A closed connection drops it; the requester's own timeout ends it.
-      }
-    }
+    const unanswered = [...session.unanswered];
     session.unanswered.clear();
+    for (const reply of unanswered) this.tellLinkLost(reply);
     if (this.sessions.get(session.s) === session) this.sessions.delete(session.s);
     this.gateway.forget(session);
+  }
+
+  /** Tell a requester that the link that was to carry its request to the
+   * agent is gone (AGENT_LINK_LOST_HEADER); it may have been delivered. */
+  private tellLinkLost(reply: string): void {
+    try {
+      this.gateway.options.nats.publish(reply, new Uint8Array(0), {
+        headers: [[AGENT_LINK_LOST_HEADER, "1"]],
+      });
+    } catch {
+      // A closed connection drops it; the requester's own timeout ends it.
+    }
   }
 
   /** The link ended: drop its sessions and release their claims, so a host

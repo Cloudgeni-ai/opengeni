@@ -166,6 +166,7 @@ import {
   sweepModalOrphanSandboxes,
   ComputeFabricClient,
   wakeComputeSandboxOnNoResponders,
+  isOpTombstone,
   createComputeOrphanSweepProgress,
   reconcileStaleComputeEnrollments,
   sweepComputeOrphans,
@@ -1888,7 +1889,9 @@ export async function reconcileConnectedCommandOutputReleases(
             opId: claim.opId,
             controlTimeoutMs,
           });
-          if (status.state === OpState.OP_STATE_LOST) {
+          // Lost, or cancelled before it ever began (its tombstone): there is
+          // no output to read, so none is recorded and nothing is acknowledged.
+          if (status.state === OpState.OP_STATE_LOST || isOpTombstone(status)) {
             if (
               !(await settleConnectedCommandOutputReleaseClaim(db, {
                 claim,

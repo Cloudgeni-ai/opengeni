@@ -252,7 +252,7 @@ test("offline commands remain tracked while one sweep shares failed connection o
   expect(row!.max_attempts).toBe(1);
 });
 
-async function terminalOutputFixture() {
+async function terminalOutputFixture(options: { cancelledBeforeStart?: boolean } = {}) {
   const sessionId = await seed(1);
   const [row] =
     await shared.admin`select * from session_background_commands where session_id=${sessionId}`;
@@ -269,7 +269,7 @@ async function terminalOutputFixture() {
   await settleConnectedMachineSessionBackgroundCommand(client.db, {
     ...identity,
     outcome: "exited",
-    exitCode: 0,
+    exitCode: options.cancelledBeforeStart ? -1 : 0,
     reason: "op_exit",
   });
   const transport = new InMemoryOpStreamTransport();
@@ -287,6 +287,18 @@ async function terminalOutputFixture() {
     identity.enrollmentId,
     identity.connectionInstanceId,
   );
+  // The stop reached the runner first: it refuses the start and keeps a tombstone.
+  if (options.cancelledBeforeStart) {
+    await runner.request(
+      subject,
+      {
+        requestId: `cancel-${identity.opId}`,
+        epoch: 0,
+        op: { $case: "opCancel", opCancel: { opId: identity.opId } },
+      },
+      { timeoutMs: 1000 },
+    );
+  }
   await runner.request(
     subject,
     {
@@ -479,6 +491,24 @@ test("pre-capture native loss records unavailable output without manufacturing c
   expect(row.completion_observed_at).toBeNull();
   expect(fixture.operations).toEqual(["opQuery"]);
   expect(fixture.transport.decodedAcks().some((ack) => ack.final)).toBe(false);
+});
+
+test("a command cancelled before its runner began settles its output once, without consumption or ACK", async () => {
+  const fixture = await terminalOutputFixture({ cancelledBeforeStart: true });
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+  const row = await fixture.stored();
+  expect(row.state).toBe("exited");
+  expect(row.exit_code).toBe(-1);
+  expect(row.output_unavailable_at).toBeInstanceOf(Date);
+  expect(row.output_consumed_at).toBeNull();
+  expect(row.output_release_observed_at).toBeNull();
+  expect(row.last_reconcile_outcome).toBe("output_unavailable");
+  expect(fixture.operations).toEqual(["opQuery"]);
+  expect(fixture.transport.decodedAcks().some((ack) => ack.final)).toBe(false);
+  // Settled: a later pass has nothing left to do for it.
+  await fixture.due();
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+  expect(fixture.operations).toEqual(["opQuery"]);
 });
 
 test("custody and release claims reject locator drift, divergent receipts and stale claims", async () => {

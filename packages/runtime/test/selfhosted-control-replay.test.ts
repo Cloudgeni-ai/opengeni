@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
-import { NatsControlRpc, timeoutAgentError } from "../src/sandbox/selfhosted/control-rpc";
+import {
+  connectionReplacedAgentError,
+  NatsControlRpc,
+  timeoutAgentError,
+} from "../src/sandbox/selfhosted/control-rpc";
 import {
   AGENT_LINK_LOST_HEADER,
   ControlReplyRecovery,
@@ -194,6 +198,30 @@ describe("a request whose agent link ends before the answer", () => {
     expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(deliveries).toHaveLength(2);
     expect(deliveries[1]).toBe(deliveries[0]);
+  });
+
+  test("is never sent to another connection instance: once replaced, its outcome is unknown", async () => {
+    const deliveries: string[] = [];
+    let replaced = false;
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      async request(target: string, payload: Uint8Array) {
+        if (ControlRequest.decode(payload).op?.$case === "ping") {
+          return { data: result, headers: replayHeaders };
+        }
+        deliveries.push(target);
+        // The link ends, and the sandbox comes back as a new agent process.
+        replaced = true;
+        return linkLost;
+      },
+    }));
+    const response = await rpc.request(subject, mutation, {
+      timeoutMs: 30_000,
+      connectionCurrent: async () => !replaced,
+    });
+    expect(response.error).toEqual(connectionReplacedAgentError(false));
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]!.startsWith(`${subject}.`)).toBe(true);
   });
 
   test("a one-shot request ends as the ambiguous timeout it is, never as never-sent", async () => {

@@ -674,6 +674,7 @@ export {
 } from "./selfhosted/op-transport";
 export {
   cancelSelfhostedOp,
+  isOpTombstone,
   OP_STREAM_ACK_INTERVAL_MS,
   OP_STREAM_DEFAULT_WINDOW_BYTES,
   OP_STREAM_RECONNECT_HOLD_MS,
