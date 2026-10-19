@@ -282,6 +282,11 @@ impl<T> OpRegistry<T> {
         QueryAnswer::Unknown
     }
 
+    /// Every live entry (Running or Complete).
+    pub fn live(&self) -> impl Iterator<Item = (&OpId, &OpEntry<T>)> {
+        self.ops.iter()
+    }
+
     /// Mutable access to a live entry (Running or Complete).
     pub fn get_mut(&mut self, id: &OpId) -> Option<&mut OpEntry<T>> {
         self.ops.get_mut(id)

@@ -128,6 +128,20 @@ passed), and a start re-admitted to a new connection is sent only the time
 left. A start that timeout or deadline ended before any OpStart was sent fails
 as never sent, so nothing keeps custody of it or waits on its agent.
 
+A runner process whose connection another process took keeps running what it
+ran; Opengeni settled those commands without reaching it. On every connection,
+the agent therefore reports the operations it still runs or retains, each with
+the connection generation it started on (the enrollment's generation moves only
+when a different process claims the connection). The API answers each page of
+that report, in the same exchange and only to the process that holds the
+connection, with the operations it no longer recognises: one whose command is
+settled, and one without a command (foreground work, or a command deleted with
+its chat) that started on an earlier generation. The agent cancels those that
+run and drops those that retain output; none of them runs again or writes into
+a settled record. Nothing is recorded for this and nothing is sent to an agent
+that is not talking, so it never wakes a sleeping compute sandbox. An agent
+that does not report keeps the earlier behaviour.
+
 A stop can reach an agent before the start it stops, for example when the
 start sat on a link that ended and is delivered again. The agent then refuses
 the start and keeps a tombstone for the operation: a query or attach answers

@@ -2479,6 +2479,7 @@ export interface AgentEvent {
     | { $case: "goingOffline"; goingOffline: GoingOffline }
     | { $case: "agentUpdateProgress"; agentUpdateProgress: AgentUpdateProgress }
     | { $case: "operationCompleted"; operationCompleted: OperationCompleted }
+    | { $case: "operationInventory"; operationInventory: OperationInventory }
     | undefined;
 }
 
@@ -2492,12 +2493,55 @@ export interface OperationCompleted {
   exit: OpExit | undefined;
 }
 
+/**
+ * The operations one runner process still runs or retains, reported on every
+ * connection of a link so Opengeni can name the ones it no longer recognises
+ * (their commands were settled, or another process held the connection when
+ * they started and every requester was already answered). Sent in pages until
+ * each page is answered on the ack subject; the authenticated events subject
+ * supplies the exact connection identity. A runner that never sends it keeps
+ * every operation until its own retention ends it.
+ */
+export interface OperationInventory {
+  /** Identifies this connection's report (unique within the runner process). */
+  reportId: string;
+  /** Zero-based page index and the page count of this report. */
+  page: number;
+  pages: number;
+  operations: InventoryOperation[];
+}
+
+export interface InventoryOperation {
+  opId: string;
+  /**
+   * The connection generation (OperationInventoryAck.connection_generation)
+   * of the connection the operation started on; 0 when the runner never
+   * learned it.
+   */
+  connectionGeneration: string;
+}
+
 /** The control plane's ack of an AgentEvent (e.g. a HeartbeatAck). */
 export interface AgentEventAck {
-  ack: { $case: "heartbeat"; heartbeat: HeartbeatAck } | {
-    $case: "operationCompleted";
-    operationCompleted: OperationCompletedAck;
-  } | undefined;
+  ack:
+    | { $case: "heartbeat"; heartbeat: HeartbeatAck }
+    | { $case: "operationCompleted"; operationCompleted: OperationCompletedAck }
+    | { $case: "operationInventory"; operationInventory: OperationInventoryAck }
+    | undefined;
+}
+
+/**
+ * Answers one OperationInventory page. The runner stops each listed operation
+ * (cancels it if it runs, drops it if it is retained) and never reports it
+ * again. Sent only while the reporting process holds its enrollment's
+ * connection, so `connection_generation` is the generation of that connection.
+ */
+export interface OperationInventoryAck {
+  reportId: string;
+  page: number;
+  /** Increments each time a different runner process claims the connection. */
+  connectionGeneration: string;
+  stopOpIds: string[];
 }
 
 /**
@@ -17261,6 +17305,9 @@ export const AgentEvent: MessageFns<AgentEvent> = {
       case "operationCompleted":
         OperationCompleted.encode(message.event.operationCompleted, writer.uint32(106).fork()).join();
         break;
+      case "operationInventory":
+        OperationInventory.encode(message.event.operationInventory, writer.uint32(114).fork()).join();
+        break;
     }
     return writer;
   },
@@ -17318,6 +17365,17 @@ export const AgentEvent: MessageFns<AgentEvent> = {
           };
           continue;
         }
+        case 14: {
+          if (tag !== 114) {
+            break;
+          }
+
+          message.event = {
+            $case: "operationInventory",
+            operationInventory: OperationInventory.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -17354,6 +17412,10 @@ export const AgentEvent: MessageFns<AgentEvent> = {
         ? { $case: "operationCompleted", operationCompleted: OperationCompleted.fromJSON(object.operationCompleted) }
         : isSet(object.operation_completed)
         ? { $case: "operationCompleted", operationCompleted: OperationCompleted.fromJSON(object.operation_completed) }
+        : isSet(object.operationInventory)
+        ? { $case: "operationInventory", operationInventory: OperationInventory.fromJSON(object.operationInventory) }
+        : isSet(object.operation_inventory)
+        ? { $case: "operationInventory", operationInventory: OperationInventory.fromJSON(object.operation_inventory) }
         : undefined,
     };
   },
@@ -17371,6 +17433,8 @@ export const AgentEvent: MessageFns<AgentEvent> = {
       obj.agentUpdateProgress = AgentUpdateProgress.toJSON(message.event.agentUpdateProgress);
     } else if (message.event?.$case === "operationCompleted") {
       obj.operationCompleted = OperationCompleted.toJSON(message.event.operationCompleted);
+    } else if (message.event?.$case === "operationInventory") {
+      obj.operationInventory = OperationInventory.toJSON(message.event.operationInventory);
     }
     return obj;
   },
@@ -17408,6 +17472,15 @@ export const AgentEvent: MessageFns<AgentEvent> = {
           message.event = {
             $case: "operationCompleted",
             operationCompleted: OperationCompleted.fromPartial(object.event.operationCompleted),
+          };
+        }
+        break;
+      }
+      case "operationInventory": {
+        if (object.event?.operationInventory !== undefined && object.event?.operationInventory !== null) {
+          message.event = {
+            $case: "operationInventory",
+            operationInventory: OperationInventory.fromPartial(object.event.operationInventory),
           };
         }
         break;
@@ -17497,6 +17570,204 @@ export const OperationCompleted: MessageFns<OperationCompleted> = {
   },
 };
 
+function createBaseOperationInventory(): OperationInventory {
+  return { reportId: "0", page: 0, pages: 0, operations: [] };
+}
+
+export const OperationInventory: MessageFns<OperationInventory> = {
+  encode(message: OperationInventory, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reportId !== "0") {
+      writer.uint32(8).uint64(message.reportId);
+    }
+    if (message.page !== 0) {
+      writer.uint32(16).uint32(message.page);
+    }
+    if (message.pages !== 0) {
+      writer.uint32(24).uint32(message.pages);
+    }
+    for (const v of message.operations) {
+      InventoryOperation.encode(v!, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OperationInventory {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOperationInventory();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reportId = reader.uint64().toString();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.page = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.pages = reader.uint32();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.operations.push(InventoryOperation.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OperationInventory {
+    return {
+      reportId: isSet(object.reportId)
+        ? globalThis.String(object.reportId)
+        : isSet(object.report_id)
+        ? globalThis.String(object.report_id)
+        : "0",
+      page: isSet(object.page) ? globalThis.Number(object.page) : 0,
+      pages: isSet(object.pages) ? globalThis.Number(object.pages) : 0,
+      operations: globalThis.Array.isArray(object?.operations)
+        ? object.operations.map((e: any) => InventoryOperation.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: OperationInventory): unknown {
+    const obj: any = {};
+    if (message.reportId !== "0") {
+      obj.reportId = message.reportId;
+    }
+    if (message.page !== 0) {
+      obj.page = Math.round(message.page);
+    }
+    if (message.pages !== 0) {
+      obj.pages = Math.round(message.pages);
+    }
+    if (message.operations?.length) {
+      obj.operations = message.operations.map((e) => InventoryOperation.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<OperationInventory>, I>>(base?: I): OperationInventory {
+    return OperationInventory.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OperationInventory>, I>>(object: I): OperationInventory {
+    const message = createBaseOperationInventory();
+    message.reportId = object.reportId ?? "0";
+    message.page = object.page ?? 0;
+    message.pages = object.pages ?? 0;
+    message.operations = object.operations?.map((e) => InventoryOperation.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseInventoryOperation(): InventoryOperation {
+  return { opId: "", connectionGeneration: "0" };
+}
+
+export const InventoryOperation: MessageFns<InventoryOperation> = {
+  encode(message: InventoryOperation, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.opId !== "") {
+      writer.uint32(10).string(message.opId);
+    }
+    if (message.connectionGeneration !== "0") {
+      writer.uint32(16).uint64(message.connectionGeneration);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InventoryOperation {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInventoryOperation();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.opId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.connectionGeneration = reader.uint64().toString();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): InventoryOperation {
+    return {
+      opId: isSet(object.opId)
+        ? globalThis.String(object.opId)
+        : isSet(object.op_id)
+        ? globalThis.String(object.op_id)
+        : "",
+      connectionGeneration: isSet(object.connectionGeneration)
+        ? globalThis.String(object.connectionGeneration)
+        : isSet(object.connection_generation)
+        ? globalThis.String(object.connection_generation)
+        : "0",
+    };
+  },
+
+  toJSON(message: InventoryOperation): unknown {
+    const obj: any = {};
+    if (message.opId !== "") {
+      obj.opId = message.opId;
+    }
+    if (message.connectionGeneration !== "0") {
+      obj.connectionGeneration = message.connectionGeneration;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<InventoryOperation>, I>>(base?: I): InventoryOperation {
+    return InventoryOperation.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InventoryOperation>, I>>(object: I): InventoryOperation {
+    const message = createBaseInventoryOperation();
+    message.opId = object.opId ?? "";
+    message.connectionGeneration = object.connectionGeneration ?? "0";
+    return message;
+  },
+};
+
 function createBaseAgentEventAck(): AgentEventAck {
   return { ack: undefined };
 }
@@ -17509,6 +17780,9 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
         break;
       case "operationCompleted":
         OperationCompletedAck.encode(message.ack.operationCompleted, writer.uint32(90).fork()).join();
+        break;
+      case "operationInventory":
+        OperationInventoryAck.encode(message.ack.operationInventory, writer.uint32(98).fork()).join();
         break;
     }
     return writer;
@@ -17540,6 +17814,17 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
           };
           continue;
         }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.ack = {
+            $case: "operationInventory",
+            operationInventory: OperationInventoryAck.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -17560,6 +17845,13 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
           $case: "operationCompleted",
           operationCompleted: OperationCompletedAck.fromJSON(object.operation_completed),
         }
+        : isSet(object.operationInventory)
+        ? { $case: "operationInventory", operationInventory: OperationInventoryAck.fromJSON(object.operationInventory) }
+        : isSet(object.operation_inventory)
+        ? {
+          $case: "operationInventory",
+          operationInventory: OperationInventoryAck.fromJSON(object.operation_inventory),
+        }
         : undefined,
     };
   },
@@ -17570,6 +17862,8 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
       obj.heartbeat = HeartbeatAck.toJSON(message.ack.heartbeat);
     } else if (message.ack?.$case === "operationCompleted") {
       obj.operationCompleted = OperationCompletedAck.toJSON(message.ack.operationCompleted);
+    } else if (message.ack?.$case === "operationInventory") {
+      obj.operationInventory = OperationInventoryAck.toJSON(message.ack.operationInventory);
     }
     return obj;
   },
@@ -17595,7 +17889,136 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
         }
         break;
       }
+      case "operationInventory": {
+        if (object.ack?.operationInventory !== undefined && object.ack?.operationInventory !== null) {
+          message.ack = {
+            $case: "operationInventory",
+            operationInventory: OperationInventoryAck.fromPartial(object.ack.operationInventory),
+          };
+        }
+        break;
+      }
     }
+    return message;
+  },
+};
+
+function createBaseOperationInventoryAck(): OperationInventoryAck {
+  return { reportId: "0", page: 0, connectionGeneration: "0", stopOpIds: [] };
+}
+
+export const OperationInventoryAck: MessageFns<OperationInventoryAck> = {
+  encode(message: OperationInventoryAck, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reportId !== "0") {
+      writer.uint32(8).uint64(message.reportId);
+    }
+    if (message.page !== 0) {
+      writer.uint32(16).uint32(message.page);
+    }
+    if (message.connectionGeneration !== "0") {
+      writer.uint32(24).uint64(message.connectionGeneration);
+    }
+    for (const v of message.stopOpIds) {
+      writer.uint32(34).string(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OperationInventoryAck {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOperationInventoryAck();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reportId = reader.uint64().toString();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.page = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.connectionGeneration = reader.uint64().toString();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.stopOpIds.push(reader.string());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OperationInventoryAck {
+    return {
+      reportId: isSet(object.reportId)
+        ? globalThis.String(object.reportId)
+        : isSet(object.report_id)
+        ? globalThis.String(object.report_id)
+        : "0",
+      page: isSet(object.page) ? globalThis.Number(object.page) : 0,
+      connectionGeneration: isSet(object.connectionGeneration)
+        ? globalThis.String(object.connectionGeneration)
+        : isSet(object.connection_generation)
+        ? globalThis.String(object.connection_generation)
+        : "0",
+      stopOpIds: globalThis.Array.isArray(object?.stopOpIds)
+        ? object.stopOpIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.stop_op_ids)
+        ? object.stop_op_ids.map((e: any) => globalThis.String(e))
+        : [],
+    };
+  },
+
+  toJSON(message: OperationInventoryAck): unknown {
+    const obj: any = {};
+    if (message.reportId !== "0") {
+      obj.reportId = message.reportId;
+    }
+    if (message.page !== 0) {
+      obj.page = Math.round(message.page);
+    }
+    if (message.connectionGeneration !== "0") {
+      obj.connectionGeneration = message.connectionGeneration;
+    }
+    if (message.stopOpIds?.length) {
+      obj.stopOpIds = message.stopOpIds;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<OperationInventoryAck>, I>>(base?: I): OperationInventoryAck {
+    return OperationInventoryAck.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OperationInventoryAck>, I>>(object: I): OperationInventoryAck {
+    const message = createBaseOperationInventoryAck();
+    message.reportId = object.reportId ?? "0";
+    message.page = object.page ?? 0;
+    message.connectionGeneration = object.connectionGeneration ?? "0";
+    message.stopOpIds = object.stopOpIds?.map((e) => e) || [];
     return message;
   },
 };

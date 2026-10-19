@@ -170,6 +170,7 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
                         request_id: request_id.clone(),
                         subject,
                         window_bytes: window,
+                        connection_generation: 0,
                     },
                 );
             }
@@ -398,6 +399,43 @@ pub fn handle_completion_ack_scoped(engine: &Engine, scope: &str, payload: &[u8]
         true
     } else {
         false
+    }
+}
+
+/// Handle an `AgentEventAck` on a link's ack subject: a completion receipt or
+/// an inventory answer. `false` when the payload is neither (an `OpAck`).
+pub fn handle_event_ack_scoped(engine: &Engine, scope: &str, payload: &[u8]) -> bool {
+    handle_completion_ack_scoped(engine, scope, payload)
+        || handle_inventory_ack_scoped(engine, scope, payload)
+}
+
+/// Decode Opengeni's answer to one page of a link's operation inventory and
+/// stop what it no longer recognises. `true` when the payload was such an
+/// answer (applied or stale).
+pub fn handle_inventory_ack_scoped(engine: &Engine, scope: &str, payload: &[u8]) -> bool {
+    if let Ok(v1::AgentEventAck {
+        ack: Some(v1::agent_event_ack::Ack::OperationInventory(ack)),
+    }) = v1::AgentEventAck::decode(payload)
+    {
+        if engine.apply_inventory_answer(scope, &ack).is_none() {
+            debug!(
+                scope,
+                report = ack.report_id,
+                page = ack.page,
+                "stale inventory answer ignored"
+            );
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// One page of a link's operation inventory, as the event that carries it.
+pub(crate) fn inventory_event(page: v1::OperationInventory) -> v1::AgentEvent {
+    v1::AgentEvent {
+        agent_id: String::new(),
+        event: Some(v1::agent_event::Event::OperationInventory(page)),
     }
 }
 
@@ -1565,6 +1603,233 @@ mod tests {
             panic!("not a completion event");
         };
         assert_eq!(completed.exit.unwrap().failure_code, "OP_OVERFLOW");
+    }
+
+    /// A returning process reports what it holds; Opengeni's answer names
+    /// what it no longer recognises, and only that is stopped: a running op
+    /// is cancelled and released when it exits, a retained one is released at
+    /// once, neither ever runs again, and the next report holds only what is
+    /// left, with the generation each op started on.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One takeover story, read top to bottom.
+    async fn an_inventory_answer_stops_what_opengeni_no_longer_recognises() {
+        fn answer(report_id: u64, generation: u64, stop: &[&str]) -> Vec<u8> {
+            v1::AgentEventAck {
+                ack: Some(v1::agent_event_ack::Ack::OperationInventory(
+                    v1::OperationInventoryAck {
+                        report_id,
+                        page: 0,
+                        connection_generation: generation,
+                        stop_op_ids: stop.iter().map(ToString::to_string).collect(),
+                    },
+                )),
+            }
+            .encode_to_vec()
+        }
+        fn reported(pages: &[v1::OperationInventory]) -> Vec<(String, u64)> {
+            let mut ops: Vec<(String, u64)> = pages
+                .iter()
+                .flat_map(|page| page.operations.iter())
+                .map(|op| (op.op_id.clone(), op.connection_generation))
+                .collect();
+            ops.sort();
+            ops
+        }
+        async fn settle(engine: &Engine, op: &OpId, want: impl Fn(&QueryAnswer) -> bool) {
+            for _ in 0..500 {
+                if want(&engine.query(op)) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("{op:?} never settled: {:?}", engine.query(op));
+        }
+        let released = |answer: &QueryAnswer| *answer == QueryAnswer::Lost(LostReason::Released);
+        let rig = rig();
+        let engine = &rig.engine;
+
+        // Connection 1 (generation 1): one op keeps running, one completes
+        // and retains its output.
+        let first = engine.begin_link_connection("default");
+        assert!(started_status(&rig.start_exec("op-run", "sleep 30", 1 << 20).await).0);
+        assert!(started_status(&rig.start_exec("op-done", "printf out", 1 << 20).await).0);
+        let run = scoped_op_id("default", "op-run");
+        let done = scoped_op_id("default", "op-done");
+        settle(engine, &done, |a| matches!(a, QueryAnswer::Complete { .. })).await;
+        let pages = engine.inventory_pages("default");
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].report_id, first);
+        assert_eq!(
+            reported(&pages),
+            vec![("op-done".to_string(), 0), ("op-run".to_string(), 0)],
+            "generations are unknown until the first answer"
+        );
+        assert!(handle_event_ack_scoped(
+            engine,
+            "default",
+            &answer(first, 1, &[])
+        ));
+        assert!(
+            engine.inventory_pages("default").is_empty(),
+            "an answered report is not repeated"
+        );
+
+        // Another process held the connection meanwhile; this one is back on
+        // generation 3 and starts a new op there.
+        let third = engine.begin_link_connection("default");
+        assert!(started_status(&rig.start_exec("op-new", "sleep 30", 1 << 20).await).0);
+        let new = scoped_op_id("default", "op-new");
+        let pages = engine.inventory_pages("default");
+        assert_eq!(pages[0].report_id, third);
+        assert_eq!(
+            reported(&pages),
+            vec![
+                ("op-done".to_string(), 1),
+                ("op-new".to_string(), 0),
+                ("op-run".to_string(), 1)
+            ]
+        );
+
+        // An answer to the previous connection's report stops nothing.
+        assert!(handle_event_ack_scoped(
+            engine,
+            "default",
+            &answer(first, 3, &["op-run", "op-done", "op-new"])
+        ));
+        assert!(matches!(engine.query(&run), QueryAnswer::Running { .. }));
+        assert!(matches!(engine.query(&done), QueryAnswer::Complete { .. }));
+        assert!(matches!(engine.query(&new), QueryAnswer::Running { .. }));
+
+        // The answer: the two generation-1 ops are no longer recognised; an
+        // id this report never held is ignored.
+        assert_eq!(
+            engine.apply_inventory_answer(
+                "default",
+                &v1::OperationInventoryAck {
+                    report_id: third,
+                    page: 0,
+                    connection_generation: 3,
+                    stop_op_ids: vec!["op-run".into(), "op-done".into(), "op-other".into()],
+                },
+            ),
+            Some(2)
+        );
+        assert!(
+            released(&engine.query(&done)),
+            "retained output dropped at once"
+        );
+        assert!(engine.handles(&done).is_none());
+        settle(engine, &run, released).await;
+        assert!(
+            engine.handles(&run).is_none(),
+            "the cancelled op left nothing"
+        );
+        assert!(
+            rig.frames
+                .lock()
+                .expect("frames")
+                .iter()
+                .any(|frame| matches!(
+                    &frame.body,
+                    Some(v1::op_frame::Body::Exit(exit)) if exit.cancelled
+                )),
+            "the running op was cancelled"
+        );
+        assert_eq!(
+            engine.retained_completions("default"),
+            vec![],
+            "nothing stopped is reported as a completion again"
+        );
+        assert!(matches!(engine.query(&new), QueryAnswer::Running { .. }));
+
+        // A stopped op never runs again: a duplicate start answers released.
+        let (_, restarted) = started_status(&rig.start_exec("op-run", "sleep 30", 1 << 20).await);
+        assert_eq!(restarted.state, v1::OpState::Lost as i32);
+        assert_eq!(restarted.lost_reason, v1::OpLostReason::Released as i32);
+        assert!(released(&engine.query(&run)));
+
+        // The next connection reports only what is left, with generation 3.
+        let fourth = engine.begin_link_connection("default");
+        let pages = engine.inventory_pages("default");
+        assert_eq!(pages[0].report_id, fourth);
+        assert_eq!(reported(&pages), vec![("op-new".to_string(), 3)]);
+
+        let _ = serve_op_cancel(
+            engine,
+            "c".to_string(),
+            &v1::OpCancel {
+                op_id: "op-new".to_string(),
+            },
+        );
+    }
+
+    /// An op carried to a successor process image keeps the connection
+    /// generation it started on, so the successor's report still lets
+    /// Opengeni tell it from an op of the current connection.
+    #[tokio::test]
+    async fn a_handed_over_op_keeps_the_generation_it_started_on() {
+        let rig = rig();
+        let report = rig.engine.begin_link_connection("link");
+        let started = serve_op_start_scoped_with_policy(
+            &rig.engine,
+            &rig.platform,
+            "link",
+            rig.sink(),
+            "carried".to_string(),
+            v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                    command: vec!["sleep 30".to_string()],
+                    shell: true,
+                    ..Default::default()
+                })),
+                window_bytes: 1 << 20,
+                deadline_ms: 0,
+                origin_id: "session-1".to_string(),
+            },
+            None,
+            Some("agent.w.a.connection.i.op.carried".to_string()),
+            None,
+        )
+        .await;
+        assert!(started_status(&started).0);
+        assert_eq!(rig.engine.inventory_pages("link").len(), 1);
+        assert_eq!(
+            rig.engine.apply_inventory_answer(
+                "link",
+                &v1::OperationInventoryAck {
+                    report_id: report,
+                    page: 0,
+                    connection_generation: 4,
+                    stop_op_ids: Vec::new(),
+                },
+            ),
+            Some(0)
+        );
+
+        let handed = rig.engine.handover_all().await.expect("handed over");
+        assert_eq!(handed.len(), 1);
+        assert_eq!(handed[0].tag.connection_generation, 4);
+
+        // The successor (its process could not be adopted here, so the op
+        // ends typed and retains its record) reports it with generation 4.
+        let successor = self::rig();
+        successor.engine.begin_link_connection("link");
+        for op in handed {
+            successor.engine.adopt_job(
+                op,
+                Err("not adopted in this test".to_string()),
+                |_| {},
+                |_| Vec::new(),
+                |_, _| {},
+            );
+        }
+        let pages = successor.engine.inventory_pages("link");
+        let reported: Vec<(String, u64)> = pages
+            .iter()
+            .flat_map(|page| page.operations.iter())
+            .map(|op| (op.op_id.clone(), op.connection_generation))
+            .collect();
+        assert_eq!(reported, vec![("carried".to_string(), 4)]);
     }
 
     #[test]

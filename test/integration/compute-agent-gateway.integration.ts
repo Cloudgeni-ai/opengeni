@@ -13,6 +13,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AgentEvent,
+  AgentEventAck,
   ControlRequest,
   ControlResponse,
   Hello,
@@ -58,6 +60,7 @@ import {
   releaseClaimedConnectedCommandOutput,
 } from "../../apps/worker/src/activities/sandbox-lease";
 import type { GatewayFrame } from "../../apps/api/src/sandbox/compute-link-frames";
+import { handleAgentEventPayload } from "../../apps/api/src/sandbox/metrics-ingestion";
 import { dispatchApiWebSocketUpgrade } from "../../apps/api/src/http/websocket-upgrade-dispatch";
 import {
   startComputeAgentGateway,
@@ -1132,6 +1135,127 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       await bus.close().catch(() => undefined);
     }
   }, 30_000);
+
+  test("a returning agent's operation inventory is answered through the link with what Opengeni no longer recognises, and the answer never wakes the sandbox", async () => {
+    if (!available) return;
+    // The API's agent-event ingestion over the real NATS bus, answering on
+    // the op-stream connection exactly as the API process does.
+    const bus = await createNatsEventBus(nats.url);
+    const events = controlPlane.subscribe("agent.*.*.connection.*.events");
+    const ingesting = (async () => {
+      for await (const message of events) {
+        await handleAgentEventPayload(db, undefined, message.data, message.subject, bus);
+      }
+    })();
+    try {
+      const agent = await sandboxAgent();
+      const link = await linkAs("h1");
+      const generation = async () =>
+        (
+          await shared!.admin<{ connection_generation: number }[]>`
+            select connection_generation from enrollments where id = ${agent.agentId}`
+        )[0]!.connection_generation;
+      const open = async (s: number, connection: string) => {
+        expect(
+          await link.open({
+            s,
+            sandbox: agent.sandbox,
+            ticket: await ticketFor(agent, { host: "h1", epoch: 1 }),
+            connection,
+          }),
+        ).toMatchObject({ t: "opened" });
+        const scope = `agent.${agent.workspaceId}.${agent.agentId}.connection.${connection}`;
+        link.send({ t: "sub", s, sid: 8, subject: `${scope}.ack` });
+        await Bun.sleep(100);
+        return scope;
+      };
+      /** The agent reports one page and reads the answer off its ack sid. */
+      const report = async (
+        s: number,
+        scope: string,
+        reportId: string,
+        operations: Array<[string, number]>,
+      ) => {
+        const answered = link.next(
+          (frame) => frame.t === "msg" && frame.s === s && frame.sid === 8,
+          5_000,
+        );
+        link.send({
+          t: "pub",
+          s,
+          subject: `${scope}.events`,
+          payload: AgentEvent.encode({
+            agentId: "",
+            event: {
+              $case: "operationInventory",
+              operationInventory: {
+                reportId,
+                page: 0,
+                pages: 1,
+                operations: operations.map(([opId, startedOn]) => ({
+                  opId,
+                  connectionGeneration: String(startedOn),
+                })),
+              },
+            },
+          }).finish(),
+        });
+        const frame = (await answered) as Extract<GatewayFrame, { t: "msg" }>;
+        // A plain message, never a request: the host delivers it when the
+        // agent next runs and never wakes a sleeping sandbox for it.
+        expect(frame.reply).toBeUndefined();
+        expect(frame.subject).toBe(`${scope}.ack`);
+        const ack = AgentEventAck.decode(frame.payload).ack;
+        if (ack?.$case !== "operationInventory") throw new Error("not an inventory answer");
+        return ack.operationInventory;
+      };
+
+      // old: the agent's first connection (generation 1).
+      const oldInstance = crypto.randomUUID();
+      const oldScope = await open(1, oldInstance);
+      expect(await generation()).toBe(1);
+      expect(await report(1, oldScope, "1", [["old-op", 0]])).toEqual({
+        reportId: "1",
+        page: 0,
+        connectionGeneration: "1",
+        stopOpIds: [],
+      });
+
+      // new: another process holds the sandbox's connection (generation 2).
+      link.send({ t: "close", s: 1 });
+      const newInstance = crypto.randomUUID();
+      const newScope = await open(2, newInstance);
+      expect(await generation()).toBe(2);
+      expect((await report(2, newScope, "1", [["new-op", 0]])).stopOpIds).toEqual([]);
+
+      // old again (generation 3): what it started on generation 1 is no
+      // longer recognised; what it started now, or never learned, is kept.
+      link.send({ t: "close", s: 2 });
+      const returned = await open(3, oldInstance);
+      expect(await generation()).toBe(3);
+      expect(
+        await report(3, returned, "2", [
+          ["old-op", 1],
+          ["current-op", 3],
+          ["unlearned-op", 0],
+        ]),
+      ).toEqual({ reportId: "2", page: 0, connectionGeneration: "3", stopOpIds: ["old-op"] });
+
+      // The sandbox falls asleep right after reporting: the answer still
+      // reaches the host as a plain message, and no request is ever sent.
+      link.send({ t: "state", s: 3, state: "asleep" });
+      await Bun.sleep(100);
+      expect((await report(3, returned, "3", [["old-op", 1]])).stopOpIds).toEqual(["old-op"]);
+      expect(link.frames.filter((frame) => frame.t === "msg" && frame.reply !== undefined)).toEqual(
+        [],
+      );
+      link.close();
+    } finally {
+      events.unsubscribe();
+      await ingesting.catch(() => undefined);
+      await bus.close().catch(() => undefined);
+    }
+  }, 60_000);
 
   test("a text frame or a malformed frame ends the link", async () => {
     if (!available) return;

@@ -43,6 +43,7 @@ use opengeni_agent_platform::ContainedExec;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::{info, warn};
 
+use crate::inventory::Inventory;
 use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobParams};
 
 /// The admission-fairness origin for request/reply Git work, which carries no
@@ -159,6 +160,10 @@ pub struct OpHandoverTag {
     /// The send window granted at OpStart.
     #[serde(default)]
     pub window_bytes: u64,
+    /// The connection generation the op started on, 0 when never learned
+    /// (see [`crate::inventory`]).
+    #[serde(default)]
+    pub connection_generation: u64,
 }
 
 /// One op handed to a successor process image.
@@ -282,6 +287,9 @@ pub struct Engine {
     frames_dropped: AtomicU64,
     /// Monotonic clock base for the pure engine's injected `now_ms`.
     started: std::time::Instant,
+    /// What each link reports it holds on a new connection, and the
+    /// connection generations the answers taught it.
+    inventory: Mutex<Inventory>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -350,6 +358,7 @@ impl Engine {
             transport_payloads: Mutex::new(HashMap::new()),
             frames_dropped: AtomicU64::new(0),
             started: std::time::Instant::now(),
+            inventory: Mutex::new(Inventory::default()),
         })
     }
 
@@ -585,6 +594,10 @@ impl Engine {
                 BeginOutcome::BornCancelled => return StartOutcome::BornCancelled,
             }
         }
+        self.inventory
+            .lock()
+            .expect("inventory lock")
+            .note_started(op_id);
 
         let child = match spawn() {
             Ok(child) => child,
@@ -628,11 +641,13 @@ impl Engine {
             let watermark = handles.watermark.clone();
             JobHooks::new(emit, encode_exit, move |exit_seq, exit: &JobExit| {
                 let _ = exit_stash.set(exit.clone());
+                let terminal_seq = exit_seq.unwrap_or_else(|| watermark.load(Ordering::Relaxed));
                 engine.registry.lock().expect("registry lock").complete(
                     &id,
-                    exit_seq.unwrap_or_else(|| watermark.load(Ordering::Relaxed)),
+                    terminal_seq,
                     engine.now_ms(),
                 );
+                engine.drop_if_stopping(&id, terminal_seq);
                 drop(ticket);
                 on_exit(exit_seq, exit);
             })
@@ -727,6 +742,11 @@ impl Engine {
                 continue;
             };
             tag.window_bytes = handles.window_bytes.load(Ordering::Relaxed);
+            tag.connection_generation = self
+                .inventory
+                .lock()
+                .expect("inventory lock")
+                .generation_of(&op_id);
             let (reply, receipt) = oneshot::channel();
             if sender.send(JobCommand::Handover { reply }).await.is_err() {
                 // It ended meanwhile; nothing is left to carry.
@@ -763,6 +783,10 @@ impl Engine {
     ) {
         let HandedOverOp { tag, job } = handed;
         let op_id = scoped_op_id(&tag.scope, &tag.request_id);
+        self.inventory
+            .lock()
+            .expect("inventory lock")
+            .note_handed_over(&op_id, tag.connection_generation);
         let carried_exit = match job.state.exit() {
             Ok(carried) => carried,
             Err(error) => {
@@ -812,11 +836,13 @@ impl Engine {
             let watermark = handles.watermark.clone();
             JobHooks::new(emit, encode_exit, move |exit_seq, exit: &JobExit| {
                 let _ = exit_stash.set(exit.clone());
+                let terminal_seq = exit_seq.unwrap_or_else(|| watermark.load(Ordering::Relaxed));
                 engine.registry.lock().expect("registry lock").complete(
                     &id,
-                    exit_seq.unwrap_or_else(|| watermark.load(Ordering::Relaxed)),
+                    terminal_seq,
                     engine.now_ms(),
                 );
+                engine.drop_if_stopping(&id, terminal_seq);
                 drop(ticket);
                 on_exit(exit_seq, exit);
             })
@@ -1065,6 +1091,114 @@ impl Engine {
         let mut registry = self.registry.lock().expect("registry lock");
         for (op_id, reason, remaining_ms) in markers {
             registry.restore_lost(op_id, reason, remaining_ms, now);
+        }
+    }
+
+    /// A new connection of a link: its operation inventory is reported
+    /// afresh, and ops started from now on carry this connection's
+    /// generation once an answer teaches it (see [`crate::inventory`]).
+    pub fn begin_link_connection(&self, scope: &str) -> u64 {
+        self.inventory
+            .lock()
+            .expect("inventory lock")
+            .begin_connection(scope)
+    }
+
+    /// The unanswered pages of a link's operation inventory for its current
+    /// connection: every op of the link that still runs or retains output.
+    pub fn inventory_pages(
+        &self,
+        scope: &str,
+    ) -> Vec<opengeni_agent_proto::v1::OperationInventory> {
+        let prefix = format!("{scope}:");
+        let live = || {
+            use opengeni_agent_engine::registry::OpEntry;
+            self.registry
+                .lock()
+                .expect("registry lock")
+                .live()
+                .filter(|(_, entry)| {
+                    !matches!(
+                        entry,
+                        OpEntry::Complete {
+                            final_acked: true,
+                            ..
+                        }
+                    )
+                })
+                .filter_map(|(op, _)| {
+                    let wire = op.as_str().strip_prefix(&prefix)?.to_string();
+                    Some((op.clone(), wire))
+                })
+                .collect()
+        };
+        self.inventory
+            .lock()
+            .expect("inventory lock")
+            .pending_pages(scope, live)
+    }
+
+    /// Applies Opengeni's answer to one inventory page of a link: each op it
+    /// no longer recognises is stopped (a running one is cancelled and
+    /// dropped when it exits, a retained one is dropped now). Returns how
+    /// many were stopped, or `None` for an answer that does not belong to the
+    /// link's current report.
+    pub fn apply_inventory_answer(
+        &self,
+        scope: &str,
+        ack: &opengeni_agent_proto::v1::OperationInventoryAck,
+    ) -> Option<usize> {
+        let stop = self
+            .inventory
+            .lock()
+            .expect("inventory lock")
+            .answer(scope, ack)?;
+        let stopped = stop
+            .iter()
+            .filter(|wire| self.stop_unrecognised(&scoped_op_id(scope, wire)))
+            .count();
+        if stopped > 0 {
+            info!(
+                scope,
+                stopped, "stopped operations Opengeni no longer recognises"
+            );
+        }
+        Some(stopped)
+    }
+
+    /// Stops one op Opengeni no longer recognises. Nothing it produces is
+    /// collected any more, so it leaves the registry as released.
+    fn stop_unrecognised(&self, op_id: &OpId) -> bool {
+        match self.query(op_id) {
+            QueryAnswer::Running { .. } => {
+                self.inventory
+                    .lock()
+                    .expect("inventory lock")
+                    .mark_stopping(op_id);
+                self.cancel(op_id);
+                // It may have exited between the query and the mark.
+                if let QueryAnswer::Complete { exit_seq, .. } = self.query(op_id) {
+                    self.drop_if_stopping(op_id, exit_seq);
+                }
+                true
+            }
+            QueryAnswer::Complete { exit_seq, .. } => {
+                self.release(op_id, exit_seq);
+                true
+            }
+            QueryAnswer::Lost(_) | QueryAnswer::Tombstoned | QueryAnswer::Unknown => false,
+        }
+    }
+
+    /// Drops an op that exited after Opengeni asked to stop it.
+    fn drop_if_stopping(&self, op_id: &OpId, exit_seq: u64) {
+        let stopping = self
+            .inventory
+            .lock()
+            .expect("inventory lock")
+            .take_stopping(op_id);
+        if stopping {
+            self.release(op_id, exit_seq);
         }
     }
 

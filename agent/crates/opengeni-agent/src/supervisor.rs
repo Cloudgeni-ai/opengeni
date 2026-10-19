@@ -146,6 +146,16 @@ async fn publish_bulk_lane(
                         return;
                     }
                 }
+                // This connection's inventory, until every page is answered:
+                // Opengeni names what it no longer recognises (inventory.rs).
+                for page in engine.inventory_pages(&scope) {
+                    let event = crate::ops::inventory_event(page);
+                    if let Err(error) = client.publish(completion_subject.clone(), event.encode_to_vec().into()).await {
+                        warn!(%error, "inventory report failed; it retries after reconnect");
+                        transport_lost.request(TransportLossKind::Disconnected);
+                        return;
+                    }
+                }
                 continue;
             }
             next = receiver.recv() => next,
@@ -1437,6 +1447,8 @@ impl<P: Platform + 'static> Supervisor<P> {
         };
         let (bulk_tx, bulk_rx) =
             tokio::sync::mpsc::channel::<(String, Vec<u8>)>(BULK_CHANNEL_DEPTH);
+        // A new connection reports the link's operations afresh.
+        self.engine.begin_link_connection(&link.connection_id);
         let publisher = tokio::spawn(publish_bulk_lane(
             self.engine.clone(),
             bulk_client,
@@ -1555,7 +1567,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // served inline.
                 ack = ack_subscription.next() => match ack {
                     Some(message) => {
-                        if crate::ops::handle_completion_ack_scoped(&self.engine, &link.connection_id, message.payload.as_ref()) {
+                        if crate::ops::handle_event_ack_scoped(&self.engine, &link.connection_id, message.payload.as_ref()) {
                             continue;
                         }
                         match v1::OpAck::decode(message.payload.as_ref()) {
@@ -3894,6 +3906,7 @@ mod tests {
                 request_id: "carried".into(),
                 subject: "agent.w.a.connection.i.op.carried".into(),
                 window_bytes: 0,
+                connection_generation: 0,
             },
         );
         assert_eq!(engine.handover_counts(), (1, 1));

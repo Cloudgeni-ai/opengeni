@@ -1595,6 +1595,46 @@ export async function locateConnectedCommandCompletion(
   return rows[0] ?? null;
 }
 
+/** The most operations one inventory classification reads. */
+export const CONNECTED_COMMAND_CLASSIFY_LIMIT = 1_000;
+
+/**
+ * For the operations a runner process reports it still runs or retains, the
+ * ones with a command row of that exact enrollment and connection instance,
+ * and whether that command is settled. Operations without a row (foreground
+ * work, or commands deleted with their chat) are absent. Read-only.
+ */
+export async function classifyConnectedCommandOps(
+  db: Database,
+  input: {
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    opIds: readonly string[];
+  },
+): Promise<Map<string, { terminal: boolean }>> {
+  if (input.opIds.length > CONNECTED_COMMAND_CLASSIFY_LIMIT) {
+    throw new Error(
+      `At most ${CONNECTED_COMMAND_CLASSIFY_LIMIT} operations are classified at once`,
+    );
+  }
+  const classified = new Map<string, { terminal: boolean }>();
+  if (input.opIds.length === 0) return classified;
+  const rows = await db.execute<{ opId: string; terminal: boolean }>(sql`
+    select op_id as "opId", terminal
+    from opengeni_private.classify_connected_command_ops(
+      ${input.controlWorkspaceId}::uuid, ${input.enrollmentId}::uuid,
+      ${input.connectionInstanceId}::text,
+      array(select jsonb_array_elements_text(${JSON.stringify(input.opIds)}::jsonb))
+    )`);
+  for (const row of rows as Array<{ opId: string; terminal: boolean }>) {
+    // A command still in flight wins over any settled row for the same id.
+    const known = classified.get(row.opId);
+    classified.set(row.opId, { terminal: (known?.terminal ?? true) && row.terminal });
+  }
+  return classified;
+}
+
 /** Observe terminal state, not output consumption. Native terminal-result adapters
  * call this after settlement. Session-first ordering serializes settlement and
  * inbox claiming; already delivered history is never rewritten. */

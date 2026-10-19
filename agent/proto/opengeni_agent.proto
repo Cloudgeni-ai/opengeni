@@ -1520,6 +1520,7 @@ message AgentEvent {
     GoingOffline going_offline = 11;
     AgentUpdateProgress agent_update_progress = 12;
     OperationCompleted operation_completed = 13;
+    OperationInventory operation_inventory = 14;
   }
 }
 
@@ -1531,12 +1532,49 @@ message OperationCompleted {
   OpExit exit = 2;
 }
 
+// The operations one runner process still runs or retains, reported on every
+// connection of a link so Opengeni can name the ones it no longer recognises
+// (their commands were settled, or another process held the connection when
+// they started and every requester was already answered). Sent in pages until
+// each page is answered on the ack subject; the authenticated events subject
+// supplies the exact connection identity. A runner that never sends it keeps
+// every operation until its own retention ends it.
+message OperationInventory {
+  // Identifies this connection's report (unique within the runner process).
+  uint64 report_id = 1;
+  // Zero-based page index and the page count of this report.
+  uint32 page = 2;
+  uint32 pages = 3;
+  repeated InventoryOperation operations = 4;
+}
+
+message InventoryOperation {
+  string op_id = 1;
+  // The connection generation (OperationInventoryAck.connection_generation)
+  // of the connection the operation started on; 0 when the runner never
+  // learned it.
+  uint64 connection_generation = 2;
+}
+
 // The control plane's ack of an AgentEvent (e.g. a HeartbeatAck).
 message AgentEventAck {
   oneof ack {
     HeartbeatAck heartbeat = 10;
     OperationCompletedAck operation_completed = 11;
+    OperationInventoryAck operation_inventory = 12;
   }
+}
+
+// Answers one OperationInventory page. The runner stops each listed operation
+// (cancels it if it runs, drops it if it is retained) and never reports it
+// again. Sent only while the reporting process holds its enrollment's
+// connection, so `connection_generation` is the generation of that connection.
+message OperationInventoryAck {
+  uint64 report_id = 1;
+  uint32 page = 2;
+  // Increments each time a different runner process claims the connection.
+  uint64 connection_generation = 3;
+  repeated string stop_op_ids = 4;
 }
 
 // The server durably owns exit reconciliation. This acknowledges notification

@@ -81,6 +81,7 @@ import {
 import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
 import { reconcileScreenControlOnHello } from "./screen-control";
 import { ingestConnectedCommandCompletion } from "./command-completion";
+import { answerOperationInventory } from "./operation-inventory";
 
 /** The wildcard subject the agent event plane publishes heartbeats on. */
 export const AGENT_EVENTS_SUBJECT = "agent.*.*.connection.*.events";
@@ -568,6 +569,18 @@ export async function handleAgentEventPayload(
       await ingestConnectedCommandCompletion(db, ids, event.event.operationCompleted, bus);
     } catch (error) {
       observability?.warn?.("Failed to settle a Connected Machine completion event", {
+        subject,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
+  if (event.event?.$case === "operationInventory") {
+    try {
+      await answerOperationInventory(db, ids, event.event.operationInventory, bus, observability);
+    } catch (error) {
+      // Unanswered, the runner repeats the page on its next tick.
+      observability?.warn?.("Failed to answer a runner's operation inventory", {
         subject,
         error: error instanceof Error ? error.message : String(error),
       });
