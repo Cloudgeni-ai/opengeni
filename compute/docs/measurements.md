@@ -1468,3 +1468,120 @@ the gateway line is in `api.log`, the reaper's dispatch in
 `worker-control.log`, the sleep and resume in
 `host-sbx-p4-e-host-66vl.log`, and the 5 s samples of the command rows
 in `bgc-sampler.log`.
+
+### r20a: the backend fixes, the host-loss alarm
+
+r20a (2026-10-19, 07:42 to 07:49:57) ran on hosts, a guest image and a
+fleet service rebuilt from compute f25df32f5 (hosts first), with the
+backend ec9a064c7 (output release only while the sandbox is awake, and
+no exit status 124 for a request whose outcome is not known) and the same
+database. It ran a subset:
+
+```sh
+. p4.env
+export OPENGENI_REF=ec9a064c7 COMPUTE_REF=f25df32f5
+compute/e2e/env.sh build && compute/e2e/env.sh fleet && compute/e2e/env.sh deploy &&
+  RUN=r20a ONLY=background,sleep-saved,sleep-archived,host-loss compute/e2e/env.sh suite
+```
+
+9 checks passed and 1 failed. background passed (18.0 s, the stopped
+command's process gone 2.3 s after the stop) and sleep-archived passed
+(archived in 11.2 s, woke in 0.3 s). Neither sleep was woken by the
+reaper: every "a request wakes a sleeping sandbox" line in `api.log`
+during the sleeps (07:44:53.4, 07:44:54.2 and 07:45:14.9) follows the
+suite's own requests.
+
+host-loss passed with every assertion of the boot from files, the first
+live run of the full check. The suite stopped sbx-p4-e-host-dnv0 at
+07:47:06; sbx-p4-e-host-kvm8 logged "adopted from its files" and the
+`programs_lost` alarm for the sandbox at 07:49:27.65, and the sandbox was
+back there 165.9 s after the stop (owner epoch 1 -> 3), after a fetch and
+a boot step, with a new guest boot id and agent connection instance. The
+program and the command in flight were gone and not run again, the
+archived and checkpointed files were kept, and the late write was lost.
+Either outcome was allowed for it: the stop operation finished 170.4 s
+after the last checkpoint began, too late to rule out a later copy. The
+request in flight ended after 152.1 s with HTTP 409 and the
+outcome-unknown answer.
+
+sleep-saved failed, in the verifier only, for the reason r19b gave: with
+no stored copy yet, the save and drop at 07:44:20 was followed at once by
+an idle archive that ended at 07:44:50.32, so the sandbox was archived,
+not saved, when the check's request came. The live check had accepted
+it. This is an artefact of a subset that runs sleep-saved before anything
+has stored a copy, not a fabric fault; in the full order the checkpoint
+check stores one first.
+
+The figures are the rows of `runs/r20a/results.md`; the stop is in its
+`suite.log`, the adoption and the alarm in
+`host-sbx-p4-e-host-kvm8.log`, the archive at 07:44:50.32 in
+`host-sbx-p4-e-host-dnv0.log`, and the wake lines in `api.log`.
+
+### r21: the final run, every check
+
+r21 (2026-10-19, 08:12:29 to 08:34:09) is the final full-order run. It
+ran every check on hosts, a guest image (with the agent's new
+supervisor from the merged main) and a fleet service rebuilt from
+compute f25df32f5, hosts first, with the backend d9d4cad74
+(ec9a064c7, origin/main 4c9015433 merged, and the tombstone-identity
+fix) and the same database (no `FRESH`). The fleet step replaced all
+three hosts with the new template. The whole chain ran as one launchd job
+on the operator's machine, so a restart of the agent driving it could not
+end it:
+
+```sh
+. p4.env
+export OPENGENI_REF=d9d4cad74 COMPUTE_REF=f25df32f5
+compute/e2e/env.sh build && compute/e2e/env.sh fleet && compute/e2e/env.sh deploy &&
+  RUN=r21 compute/e2e/env.sh suite
+```
+
+26 checks passed, none failed and one was not applicable (run-as:
+Opengeni offers no way to ask for it), with the verifier's agreement.
+
+| check | r21 |
+| --- | --- |
+| create | first turn in 22.1 s |
+| background | read back by id with exit status 3; the stopped one unlisted and its process gone 2.3 s after the stop |
+| checkpoint | all 150 terminal ticks and 110 command ticks through 2 checkpoints, longest quiet 1.2 s |
+| ui | file browser, terminal and desktop pass (Playwright) |
+| sleep-paused | paused in 0.3 s, woke in 0.1 s |
+| sleep-saved | saved in 6.6 s, woke in 0.4 s |
+| sleep-archived | archived in 16.5 s, woke in 0.4 s |
+| sleep-remote | remote in 19.5 s, woke in 8.8 s |
+| link-stream | 88 cycles in 177 s, 352 MiB in and 704 MiB out, every sha256 matching; saved in 11.7 s, woken by a read in 1.1 s |
+| vm-crash | the next command answered 5.0 s after the kill, generation 1 -> 2 on the same host, both writes kept, the program lost and reported |
+| move | k000 -> 745g in 23.9 s |
+| host-loss | back on k0zb 161.6 s after the stop, booted from files, the in-flight request ended as outcome unknown (HTTP 409) after 148.1 s |
+| delete | the fabric sandbox gone 5.3 s after the delete |
+| connected-machine | online 3.1 s after connecting; exec in 0.1 s after 90 s idle |
+| cleanup | nothing left |
+
+The sleeps passed after the background check had run, which in r19 was
+enough for the reaper's output release to wake them every 30 s: every
+"a request wakes a sleeping sandbox" line in `api.log` during the sleeps
+(08:17:34.8, 08:17:47.5, 08:18:13.3 and 08:18:39.2) follows the suite's
+own requests.
+
+host-loss asked for sbx-p4-e-host-745g to stop at 08:26:31, a few
+seconds after its last checkpoint (08:26:27.38) and a late write; the
+stop operation finished 169.5 s after that checkpoint began, too late to
+rule out a later copy, so the late write could be kept or lost (it was
+lost). sbx-p4-e-host-k0zb logged "adopted from its files" and the
+`programs_lost` alarm for the sandbox at 08:28:50.39, then fetched the
+copy and booted it with one VMM launch and no restore: a new guest boot
+id and agent connection instance, owner epoch 3 -> 5, the program and
+the command in flight gone and not run again, and the archived and
+checkpointed files kept. The generation read 0
+under the old owner, where the sandbox had arrived by a move (restored,
+not booted), and 1 under the new one. The request in flight came back as
+HTTP 409 with the outcome-unknown answer. No run logged a warning that
+the guest did not write its disks out before a pause.
+
+The figures are the rows of `runs/r21/results.md` (and
+`results.json`); the stop is in its `suite.log`, the adoption and the
+alarm in `host-sbx-p4-e-host-k0zb.log`, the last checkpoint in the kept
+journal `host-sbx-p4-e-host-745g@5571071858708082430.log`, the wake lines
+in `api.log`, and the UI screenshots in `ui-*.png`. The in-flight check
+still reads the API's answer, not a model turn's tool result; both carry
+the same text.
