@@ -921,9 +921,9 @@ export class CuaComputerBackend implements ComputerBackend {
 
 const RECENT_OBSERVATIONS = 4;
 
-/** Whether two readings of a window show the same elements in the same order:
- * everything but the snapshot-bound tokens. Then an element's position is
- * its identity. */
+/** Whether two readings show the same window (title, process, generation,
+ * place) with the same elements in the same order: everything but the
+ * snapshot-bound tokens. Then an element's position is its identity. */
 function sameContent(
   earlier: ComputerBackendObservation,
   latest: ComputerBackendObservation,
@@ -931,6 +931,7 @@ function sameContent(
   const content = (node: InteractionSemanticNodeValue) =>
     JSON.stringify({ ...node, ref: node.ref.startsWith("read-only:") ? node.ref : null });
   return (
+    JSON.stringify(earlier.target) === JSON.stringify(latest.target) &&
     earlier.roots.length === latest.roots.length &&
     (earlier.incomplete === undefined) === (latest.incomplete === undefined) &&
     earlier.roots.every((node, index) => content(node) === content(latest.roots[index]!))

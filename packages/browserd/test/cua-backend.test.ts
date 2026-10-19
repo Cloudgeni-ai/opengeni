@@ -30,6 +30,7 @@ class Fixture implements CuaDesktopRuntime {
   stopped = false;
   applyLabel = "Apply";
   fieldLabel = "Password";
+  title = "Fixture";
   mutation = result({ effect: "confirmed", route: "accessibility" });
   async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
     const args = JSON.parse(argumentsJson) as Record<string, unknown>;
@@ -44,7 +45,7 @@ class Fixture implements CuaDesktopRuntime {
               {
                 pid: 42,
                 window_id: 1,
-                title: "Fixture",
+                title: this.title,
                 app_name: "Fixture",
                 bounds: { x: 50, y: 50, width: 200, height: 100 },
               },
@@ -767,16 +768,25 @@ describe("CUA desktop boundary", () => {
           action: { type: "semantic", locator: { kind: "role", role: "button" }, action: "invoke" },
         }),
       ).rejects.toMatchObject({ code: "observation_stale", dispatched: false });
-      // Once anything in the window changed, even another element (a row's
-      // Delete button can look the same for a different row), an earlier ref
-      // is refused before any input, without quoting any label.
+      // Once anything in the window changed, even another element or only
+      // the window's title (a Delete button can look the same for a different
+      // row or document), an earlier ref is refused before any input, without
+      // quoting any label.
       const clicks = fixture.calls.filter((call) => call.name === "click").length;
       for (const change of [
-        () => (fixture.fieldLabel = "Password again"),
-        () => (fixture.applyLabel = "Apply all"),
+        async () => {
+          fixture.fieldLabel = "Password again";
+        },
+        async () => {
+          fixture.applyLabel = "Apply all";
+        },
+        async () => {
+          fixture.title = "Another document";
+          await backend.targets();
+        },
       ]) {
         const before = await backend.observe(target.id);
-        change();
+        await change();
         const changed = await backend.observe(target.id);
         await expect(
           backend.dispatch({
@@ -816,6 +826,8 @@ describe("CUA desktop boundary", () => {
       fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
       fixture.applyLabel = "Apply";
       fixture.fieldLabel = "Password";
+      fixture.title = "Fixture";
+      await backend.targets();
       const latest = await backend.observe(target.id);
       await expect(
         backend.dispatch({
