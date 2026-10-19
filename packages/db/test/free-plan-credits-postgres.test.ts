@@ -81,7 +81,7 @@ const charge = (
   applyCreditDebitUpToBalance(client!.db, {
     accountId,
     requestedAmountMicros: amountMicros,
-    modelId,
+    ...(modelId ? { modelId } : {}),
     type: "model_debit",
     idempotencyKey: key,
   });
@@ -96,7 +96,7 @@ const ledger = (
     amountMicros,
     type,
     sourceType: "test",
-    sourceId,
+    sourceId: sourceId ?? null,
     idempotencyKey: crypto.randomUUID(),
   });
 
