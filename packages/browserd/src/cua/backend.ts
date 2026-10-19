@@ -253,6 +253,18 @@ export class CuaComputerBackend implements ComputerBackend {
               false,
               true,
             );
+          // CUA's own wording names its raw tools; say what the caller does.
+          if (
+            error instanceof ComputerBackendError &&
+            error.code === "observation_stale" &&
+            !error.dispatched
+          )
+            throw new ComputerBackendError(
+              "observation_stale",
+              "CUA refused the element reference because the window was read again since; observe it again and act on a ref from that observation",
+              false,
+              false,
+            );
           throw error;
         }
       }
@@ -676,10 +688,19 @@ export class CuaComputerBackend implements ComputerBackend {
     if (action.type !== "semantic" && action.type !== "keyboard")
       throw unsupported("This CUA operation is not admitted by the desktop adapter");
     const observed = this.observations.get(command.targetId);
+    // A ref is its own fence: it resolves only to the same element, unchanged,
+    // in the latest reading of the window (see locateObserved). So a ref
+    // action may name any recent observation of this window.
+    const refFenced =
+      action.type === "semantic" &&
+      action.locator.kind === "ref" &&
+      (this.recentObservations.get(command.targetId) ?? []).some(
+        (recent) => recent.observationId === command.expectedObservationId,
+      );
     if (
       !observed ||
       !command.expectedObservationId ||
-      observed.observationId !== command.expectedObservationId
+      (observed.observationId !== command.expectedObservationId && !refFenced)
     )
       throw new ComputerBackendError(
         "observation_stale",
@@ -842,8 +863,11 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   /** The element a locator names. A ref from an earlier observation of the
-   * same window resolves there (its token stays CUA's to accept or reject as
-   * stale); a ref seen nowhere says which observation is current. */
+   * same window names the same element in the latest one only while the
+   * window is unchanged: CUA honours only the tokens of its latest reading,
+   * so when every element still reads the same, in the same order, the ref
+   * acts through its element's current token. Otherwise it is refused. A ref
+   * seen nowhere says which observation is current. */
   private locateObserved(
     targetId: string,
     observed: ComputerBackendObservation,
@@ -858,9 +882,21 @@ export class CuaComputerBackend implements ComputerBackend {
         error.code !== "locator_not_found"
       )
         throw error;
-      for (const earlier of [...(this.recentObservations.get(targetId) ?? [])].reverse()) {
+      const recent = this.recentObservations.get(targetId) ?? [];
+      const latest = recent.at(-1);
+      for (const earlier of [...recent].reverse()) {
         const node = earlier.roots.find((candidate) => candidate.ref === locator.ref);
-        if (node) return node;
+        if (!node) continue;
+        if (earlier === latest) return node;
+        if (!locator.ref.startsWith("read-only:") && sameContent(earlier, latest!))
+          return latest!.roots[earlier.roots.indexOf(node)]!;
+        // Names no label: one could be a typed secret.
+        throw new ComputerBackendError(
+          "observation_stale",
+          `CUA ref ${locator.ref} is from an earlier observation, and the window has changed since; use a ref from the latest observation (${latest!.observationId.split(":").pop()})`,
+          false,
+          false,
+        );
       }
       throw new ComputerBackendError(
         "locator_not_found",
@@ -884,6 +920,23 @@ export class CuaComputerBackend implements ComputerBackend {
 }
 
 const RECENT_OBSERVATIONS = 4;
+
+/** Whether two readings show the same window (title, process, generation,
+ * place) with the same elements in the same order: everything but the
+ * snapshot-bound tokens. Then an element's position is its identity. */
+function sameContent(
+  earlier: ComputerBackendObservation,
+  latest: ComputerBackendObservation,
+): boolean {
+  const content = (node: InteractionSemanticNodeValue) =>
+    JSON.stringify({ ...node, ref: node.ref.startsWith("read-only:") ? node.ref : null });
+  return (
+    JSON.stringify(earlier.target) === JSON.stringify(latest.target) &&
+    earlier.roots.length === latest.roots.length &&
+    (earlier.incomplete === undefined) === (latest.incomplete === undefined) &&
+    earlier.roots.every((node, index) => content(node) === content(latest.roots[index]!))
+  );
+}
 /** A Linux process's parent from /proc, or null when it cannot be read. */
 function procParentPid(pid: number): number | null {
   try {
