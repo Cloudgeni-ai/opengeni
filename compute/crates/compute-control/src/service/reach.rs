@@ -251,6 +251,7 @@ impl<S: Store> Service<S> {
             id: row.id,
             config: self.sent_config(row, target),
             owner_epoch: epoch.0,
+            whole: row.ownership.whole_copy(),
         };
         let answered = match self
             .hosts

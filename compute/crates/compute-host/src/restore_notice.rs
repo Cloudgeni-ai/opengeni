@@ -65,6 +65,15 @@
 //! caller can start one that does not). A sandbox running such a command
 //! stays awake however quiet the command is. A guest that does not know
 //! the question gives no count, and only processor use and traffic count.
+//!
+//! And one request, made before the host pauses a guest to save it or to
+//! checkpoint it: the line `sync`, answered `synced` once the guest has
+//! written everything it holds for its disks to them. A saved disk is then
+//! whole without the memory saved beside it, which matters when that
+//! memory cannot be used: the sandbox's host was lost, and the next one
+//! boots the disk (see [`crate::protocol::Request::Adopt`]). A guest that
+//! does not know the request does not answer; the host waits a short
+//! while and saves anyway, so the disk is then as after a power cut.
 
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -235,7 +244,7 @@ async fn exchange(
     ))
 }
 
-/// Longest answer to `activity` a guest may give.
+/// Longest answer to `activity` or `sync` a guest may give.
 const MAX_ACTIVITY: usize = 32;
 
 /// Asks a running guest how many commands started through its helper are
@@ -272,6 +281,39 @@ pub async fn ask_commands(vsock_socket: &Path, port: u32, limit: Duration) -> io
     tokio::time::timeout(limit, asked)
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the guest did not answer activity"))?
+}
+
+/// Asks a running guest to write everything it holds for its disks to
+/// them (see the module documentation), giving up after `limit`.
+///
+/// # Errors
+///
+/// The guest did not answer in time, or answered something else.
+pub async fn ask_sync(vsock_socket: &Path, port: u32, limit: Duration) -> io::Result<()> {
+    let asked = async {
+        let mut stream = vsock::connect(vsock_socket, port).await?;
+        stream.write_all(b"sync\n").await?;
+        let mut answer = Vec::with_capacity(MAX_ACTIVITY);
+        let mut byte = [0_u8; 1];
+        while answer.len() <= MAX_ACTIVITY {
+            stream.read_exact(&mut byte).await?;
+            if byte[0] == b'\n' {
+                break;
+            }
+            answer.push(byte[0]);
+        }
+        if answer == b"synced" {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected answer to sync",
+            ))
+        }
+    };
+    tokio::time::timeout(limit, asked)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the guest did not answer sync"))?
 }
 
 #[cfg(test)]
@@ -379,9 +421,13 @@ mod tests {
         }
     }
 
-    /// A guest that answers each `activity` question with one of `answers`.
-    fn activity_guest(name: &str, answers: &'static [&'static [u8]]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("activity-{name}-{}", std::process::id()));
+    /// A guest that answers each `question` with one of `answers`.
+    fn asked_guest(
+        name: &str,
+        question: &'static str,
+        answers: &'static [&'static [u8]],
+    ) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("{question}-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("vsock.sock");
@@ -394,7 +440,7 @@ mod tests {
                 let mut lines = BufReader::new(read).lines();
                 assert_eq!(lines.next_line().await.unwrap().unwrap(), "CONNECT 53");
                 write.write_all(b"OK 1073741824\n").await.unwrap();
-                assert_eq!(lines.next_line().await.unwrap().unwrap(), "activity");
+                assert_eq!(lines.next_line().await.unwrap().unwrap(), question);
                 write.write_all(answer).await.unwrap();
                 held.push((lines, write));
             }
@@ -405,8 +451,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_guest_counts_the_commands_that_keep_it_awake() {
-        let socket = activity_guest(
+        let socket = asked_guest(
             "counts",
+            "activity",
             &[
                 b"commands 2\n",
                 b"commands 0\n",
@@ -423,6 +470,21 @@ mod tests {
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
         let error = ask_commands(&socket, 53, limit).await.unwrap_err();
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::TimedOut,
+            "a guest that never answers"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_guest_says_when_its_disks_hold_what_it_wrote() {
+        let socket = asked_guest("synced", "sync", &[b"synced\n", b"what?\n", b""]);
+        let limit = Duration::from_millis(200);
+        ask_sync(&socket, 53, limit).await.unwrap();
+        let error = ask_sync(&socket, 53, limit).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let error = ask_sync(&socket, 53, limit).await.unwrap_err();
         assert_eq!(
             error.kind(),
             io::ErrorKind::TimedOut,

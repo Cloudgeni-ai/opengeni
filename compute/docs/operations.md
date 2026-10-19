@@ -298,7 +298,16 @@ authority alone for agent links.
   memory runs short (`--scale-*` flags); to add one by hand, resize the
   group. A new host registers with the service when its agent starts and
   takes sandboxes at once. A host installed by hand joins the same way.
-  List hosts with the operator key:
+  A member of the group counts as booting, its memory as coming, for
+  `--scale-boot-within-s` (10 minutes by default) without a registered
+  host; past that the service logs "a host group member has not
+  registered in time" and grows the group around it. Look at that
+  instance in the cloud console (quota, a stockout, a boot that fails);
+  the service never deletes it, and counts it again once its host
+  registers. A stalled member and a draining host each keep their place
+  in the group's size, so a growth asks for the hosts it is short on top
+  of them, and the service does not suggest shrinking while a member is
+  stalled. List hosts with the operator key:
 
   ```sh
   curl -s -H "X-API-Key: $operator_key" "$COMPUTE_API/v1/hosts" | jq
@@ -319,9 +328,15 @@ authority alone for agent links.
   its term and margin: the service fences it first (on GCP it resets the
   instance, or finds it stopped or gone), then clears its sandboxes'
   owner with a raised epoch, and each wakes on another host from its
-  latest archived copy on its next request. Work since that copy is lost,
-  which is why sandboxes archive soon after they go idle. Nothing has to
-  be done by hand, except replacing the machine where no group does it.
+  latest archived copy on its next request. It boots from that copy's
+  files: its programs end and start afresh, and what it wrote since the
+  copy is lost, which is why sandboxes archive soon after they go idle
+  and are checkpointed while they run. Its memory is not brought back
+  because the lost host may have run it on past the copy (ADR 18); a
+  drain or move hands the latest state off, memory and all. The adopting
+  host raises the `programs_lost` alarm for each sandbox whose memory it
+  set aside, as a host does for a VM that died. Nothing has to be done by
+  hand, except replacing the machine where no group does it.
   If the host comes back, its guard has already stopped its VMs (its
   lease ran out), and it registers again; the raised epochs keep it from
   running any sandbox that moved (ADR 18). A host whose fence
@@ -554,6 +569,17 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
 
 ## Upgrades
 
+- **Order.** Upgrade every host before the fleet service. A host restores
+  an adopted copy's memory only when the service says the copy is whole
+  (`whole`, ADR 18), and otherwise boots it from its files; a host from
+  before that ignores the field and always restores memory, including a
+  lost host's copy, which may be older than the sandbox had become.
+  Nothing refuses it, so the order is what keeps it from happening. A
+  newer host works with an older service, whose adopts then always boot
+  from files, so replicas of the earlier release serving during the
+  rollout, or after a rollback, never restore a stale copy; beside the
+  new schema they can only make a copy count as not whole. A host whose
+  guest image predates the `sync` request warns and saves without it.
 - **The agent** can be replaced at any time; running VMs keep running
   ([ADR 9](adr/0009-vms-outlive-the-agent.md)). Run the new bundle's
   `install.sh` (without `--config`, the installed configuration stays):
@@ -576,6 +602,10 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   replicas keep working beside new ones during a rollout, and a rollback
   to the previous image starts (it logs that the schema is newer than it
   knows). Version 1 upgrades a database made before versions existed.
+  The answer to a host's registration is stored (`compute_hosts.answer`)
+  and read back by whichever replica sees that attempt again, so it is
+  part of the schema too: a release adds to a ruling only what the
+  previous release's decoder accepts (`whole` is in the first release).
   Back up the schema before an upgrade that adds a version.
 - **Firecracker**: a wake uses whichever configured Firecracker (the
   current one or one kept with `--retained-firecracker`) reads the image's

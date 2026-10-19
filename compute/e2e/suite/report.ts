@@ -5,13 +5,15 @@ export type Status = "pass" | "fail" | "skip" | "n/a";
 
 /** What a check claims that only a host's journal can show: that the
  * sandbox reached `level` (a completed step to it, the last one) between
- * `from` and `to`, when the next request woke it. */
+ * `from` and `to`, when the next request woke it (through `by`, the step's
+ * compute.wake.by, when given). */
 export type LevelProof = {
   kind: "level";
   sandbox: string;
   level: string;
   from: string;
   to: string;
+  by?: string;
 };
 
 /** That the host checkpointed the running sandbox (at least `min`, default
@@ -25,7 +27,17 @@ export type CheckpointProof = {
   min?: number;
 };
 
-export type Proof = LevelProof | CheckpointProof;
+/** That the suite kept `host`'s journal before stopping it, read on the
+ * machine itself: instance `instance` (its metadata server's id) in boot
+ * `boot`. The verifier wants `host-<host>@<instance>.log` with that header. */
+export type JournalProof = {
+  kind: "journal";
+  host: string;
+  instance: string;
+  boot: string;
+};
+
+export type Proof = LevelProof | CheckpointProof | JournalProof;
 
 export type Result = {
   id: string;

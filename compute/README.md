@@ -307,13 +307,17 @@ group.
 
 A sandbox moves between hosts while it sleeps, through object storage, and
 a lost host's sandboxes come back on others from their newest stored copy.
+A move hands the sandbox off whole, memory and all; after a host loss the
+new host boots it from that copy's files, as after a crash, because the
+lost host may have run its programs on past the copy (ADR 18).
 A running sandbox is checkpointed to object storage too: by default once it
 has run ten minutes since its last stored copy (`checkpoint_every_ms` in
 its sleep rules). That period is a scheduling target, not a bound on loss:
 a checkpoint may wait for disk admission or retries, and it protects the
 sandbox only once it is published. Losing its host costs a sandbox what it
-did since the capture of its newest published copy, which its status
-reports as `backed_up_ms`. Only a host whose files share extents (XFS,
+wrote to its files since the capture of its newest published copy, which
+its status reports as `backed_up_ms`, and its running programs. Only a
+host whose files share extents (XFS,
 btrfs) takes checkpoints; on any other its status says so, and its
 sandboxes reach the store only as they sleep. With `--gcp-group` the
 leader grows a Google Cloud managed instance group before spare memory runs

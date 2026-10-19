@@ -132,7 +132,10 @@ pub enum Next {
     /// nothing.
     AdoptHere(Change),
     /// The host no longer has it: leave it without an owner under a new
-    /// epoch, for the next wake to adopt elsewhere.
+    /// epoch, for the next wake to adopt elsewhere. The change vouches for
+    /// the stored copy only when the host answered that it handed it off
+    /// ([`Ownership::release`]); one that answered it holds nothing
+    /// leaves the copy as whole as it was ([`Ownership::clear`]).
     Clear(Change),
 }
 
@@ -169,7 +172,7 @@ pub fn answered(
         (Op::Wake, Outcome::NotFound) if still && settled && archived => {
             Next::AdoptHere(row.give(host))
         }
-        (Op::HandOff, Outcome::Done) if still => Next::Clear(row.clear()),
+        (Op::HandOff, Outcome::Done) if still => Next::Clear(row.release()),
         (Op::HandOff, Outcome::NotFound) if still && settled => Next::Clear(row.clear()),
         _ => Next::Nothing,
     }
@@ -196,6 +199,7 @@ mod tests {
             owner: Some(host),
             epoch: E,
             taken: E,
+            whole: None,
         }
     }
 
@@ -310,8 +314,18 @@ mod tests {
                 (0, 3),
             )
         };
-        assert_eq!(hand_off(Outcome::Done, row), Next::Clear(row.clear()));
+        assert_eq!(hand_off(Outcome::Done, row), Next::Clear(row.release()));
         assert_eq!(hand_off(Outcome::NotFound, row), Next::Clear(row.clear()));
+        // Only a hand-off vouches for the stored copy: an owner that holds
+        // nothing may have been given a copy a lost owner left.
+        let Next::Clear(done) = hand_off(Outcome::Done, row) else {
+            panic!("cleared");
+        };
+        assert!(done.set.whole_copy());
+        let Next::Clear(not_found) = hand_off(Outcome::NotFound, row) else {
+            panic!("cleared");
+        };
+        assert!(!not_found.set.whole_copy());
         assert_eq!(hand_off(Outcome::Other, row), Next::Nothing);
         assert_eq!(hand_off(Outcome::Done, owned_by(B)), Next::Nothing);
     }

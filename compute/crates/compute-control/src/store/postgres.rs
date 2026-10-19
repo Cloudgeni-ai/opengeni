@@ -28,7 +28,7 @@ const LEADER_LOCK: i64 = 7_231_402;
 
 const SANDBOX_COLUMNS: &str = "id, team, spec, metadata, owner, epoch, taken, \
      unanswered_epoch, unanswered_stamp, landed_epoch, landed_host_epoch, landed_seq, \
-     class, created_ms, version";
+     class, created_ms, version, whole_epoch";
 
 const LIFECYCLE_COLUMNS: &str = "id, team, record, version";
 
@@ -212,6 +212,7 @@ fn sandbox_row(row: &Row) -> Result<SandboxRow> {
             owner: optional(row, "owner")?.map(HostId),
             epoch: OwnerEpoch(small(row.try_get("epoch").map_err(corrupt)?)?),
             taken: OwnerEpoch(small(row.try_get("taken").map_err(corrupt)?)?),
+            whole: optional(row, "whole_epoch")?.map(OwnerEpoch),
         },
         sends: sends_of(row)?,
         class: row.try_get("class").map_err(corrupt)?,
@@ -232,6 +233,7 @@ struct Fields {
     unanswered: (Option<i64>, Option<i64>),
     landed: (Option<i64>, Option<i64>, Option<i64>),
     created_ms: i64,
+    whole: Option<i64>,
 }
 
 impl Fields {
@@ -258,6 +260,7 @@ impl Fields {
             unanswered,
             landed,
             created_ms: big(row.created_ms)?,
+            whole: row.ownership.whole.map(|epoch| big(epoch.0)).transpose()?,
         })
     }
 }
@@ -325,7 +328,7 @@ impl PostgresStore {
         // A retired request's row is locked by the delete that retires it,
         // so this waits for that delete and then reads the row again.
         let request = "request as (select 1 from compute_create_requests \
-             where team = $2 and request_id = $16 and gone_ms is null for share)";
+             where team = $2 and request_id = $17 and gone_ms is null for share)";
         let (request, live) = if request_id.is_some() {
             (
                 format!("{request}, "),
@@ -351,6 +354,7 @@ impl PostgresStore {
             &row.class,
             &fields.created_ms,
             &version,
+            &fields.whole,
         ];
         if let Some(request_id) = &request_id {
             params.push(request_id);
@@ -364,7 +368,7 @@ impl PostgresStore {
                      insert into compute_sandboxes ({SANDBOX_COLUMNS}) \
                      select $1::text, $2::text, $3::jsonb, $4::jsonb, $5::bigint, $6::bigint, \
                      $7::bigint, $8::bigint, $9::bigint, $10::bigint, $11::bigint, $12::bigint, \
-                     $13::text, $14::bigint, $15::bigint \
+                     $13::text, $14::bigint, $15::bigint, $16::bigint \
                      where not exists (select 1 from owner where lost){live} \
                      on conflict (id) do nothing returning 1) {WRITTEN}{}",
                     owner_lost(5),
@@ -410,7 +414,7 @@ impl PostgresStore {
         let mut rows = BTreeMap::new();
         for row in tx
             .query(
-                "select id, owner, epoch, taken from compute_sandboxes \
+                "select id, owner, epoch, taken, whole_epoch from compute_sandboxes \
                  where id = any($1) order by id for update",
                 &[&ids],
             )
@@ -422,6 +426,7 @@ impl PostgresStore {
                 owner: optional(&row, "owner")?.map(HostId),
                 epoch: OwnerEpoch(small(row.get("epoch"))?),
                 taken: OwnerEpoch(small(row.get("taken"))?),
+                whole: optional(&row, "whole_epoch")?.map(OwnerEpoch),
             };
             rows.insert(id, ownership);
         }
@@ -432,12 +437,13 @@ impl PostgresStore {
                 let owner = change.set.owner.map(|host| big(host.0)).transpose()?;
                 tx.execute(
                     "update compute_sandboxes set owner = $2, epoch = $3, taken = $4, \
-                     version = version + 1 where id = $1",
+                     whole_epoch = $5, version = version + 1 where id = $1",
                     &[
                         name,
                         &owner,
                         &big(change.set.epoch.0)?,
                         &big(change.set.taken.0)?,
+                        &change.set.whole.map(|epoch| big(epoch.0)).transpose()?,
                     ],
                 )
                 .await
@@ -703,7 +709,7 @@ impl Store for PostgresStore {
                      update compute_sandboxes set metadata = $2, owner = $3, epoch = $4, \
                      taken = $5, unanswered_epoch = $6, unanswered_stamp = $7, \
                      landed_epoch = $8, landed_host_epoch = $9, landed_seq = $10, class = $11, \
-                     version = version + 1 where id = $1 and version = $12 \
+                     whole_epoch = $13, version = version + 1 where id = $1 and version = $12 \
                      and not exists (select 1 from owner where lost) returning 1) {WRITTEN}",
                     owner_lost(3)
                 ),
@@ -720,6 +726,7 @@ impl Store for PostgresStore {
                     &fields.landed.2,
                     &row.class,
                     &big(row.version)?,
+                    &fields.whole,
                 ],
             )
             .await

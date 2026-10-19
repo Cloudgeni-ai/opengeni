@@ -305,8 +305,8 @@ impl Guest {
     }
 
     /// Handles one connection to the notice port. Notices are handled one
-    /// at a time, on the listener's thread, and so is the host's
-    /// `activity` question.
+    /// at a time, on the listener's thread, and so are the host's
+    /// `activity` question and `sync` request.
     pub fn notice(&self, mut stream: Stream) {
         let _ = stream.set_read_timeout(Some(LINE_LIMIT));
         let Ok((line, _)) = read_line(&mut stream, notice::MAX_LINE) else {
@@ -314,6 +314,13 @@ impl Guest {
         };
         if line == "activity" {
             let _ = stream.write_all(crate::agent::activity_answer(agent::activity()).as_bytes());
+            return;
+        }
+        if line == "sync" {
+            // The host is about to save the disks: what they would hold
+            // only in this memory reaches them first.
+            sys::sync();
+            let _ = stream.write_all(notice::SYNCED);
             return;
         }
         let Some(notice) = Notice::parse(&line) else {

@@ -274,6 +274,7 @@ impl CreateInit {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WokenView {
     pub waited_us: u64,
+    /// Its execution on its owner, as in [`StateView::generation`].
     pub generation: u64,
     pub host: Option<String>,
 }
@@ -288,8 +289,9 @@ pub struct StateView {
     /// The step under way, such as a save or a restore, if any: `level`
     /// stays where it was until the step finishes.
     pub step: Option<String>,
-    /// Its execution: raised by every boot, kept by pausing, saving and
-    /// restoring. None with no host.
+    /// Its execution on its owner: raised by every boot there, kept by
+    /// pausing, saving and restoring there. Each owner numbers afresh, so
+    /// two compare only under one owner epoch. None with no host.
     pub generation: Option<u64>,
 }
 

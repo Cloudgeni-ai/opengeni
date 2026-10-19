@@ -13,8 +13,8 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use compute_fleet::{
-    Capacity, ClassId, Demand, Fleet, GroupView, HostEpoch, HostId, HostInfo, HostState, Placement,
-    Rng, ShapeKey, ZoneId,
+    Capacity, ClassId, Demand, Fleet, HostEpoch, HostId, HostInfo, HostState, Placement, Rng,
+    ShapeKey, ZoneId,
 };
 use compute_protocol::fleet::{Capacity as Reported, HostInfo as Described};
 
@@ -232,28 +232,36 @@ impl View {
         hosts
     }
 
-    /// The hosts whose names `member` accepts, as a host group for
-    /// autoscaling, counting none as booting.
+    /// The hosts whose names `member` accepts and that the service counts
+    /// on (not given up on), by name, from one read: what a host group's
+    /// members are counted against for autoscaling. A name has one host.
     #[must_use]
-    pub fn group(&self, member: impl Fn(&str) -> bool) -> GroupView {
-        let inner = self.read();
-        let mut group = GroupView::default();
-        for known in inner.hosts.values() {
-            if !member(&known.target.name) {
-                continue;
-            }
-            match known.state {
-                HostState::Live => {
-                    group.hosts += 1;
-                    group.memory_mib += known.info.memory_mib;
-                    group.free_memory_mib += known.capacity.memory_free_mib;
-                }
-                HostState::Draining => group.draining += 1,
-                HostState::Lost => {}
-            }
-        }
-        group
+    pub fn group(&self, member: impl Fn(&str) -> bool) -> HashMap<String, GroupHost> {
+        self.read()
+            .hosts
+            .values()
+            .filter(|known| known.state != HostState::Lost && member(&known.target.name))
+            .map(|known| {
+                let host = GroupHost {
+                    draining: known.state == HostState::Draining,
+                    memory_mib: known.info.memory_mib,
+                    free_memory_mib: known.capacity.memory_free_mib,
+                };
+                (known.target.name.clone(), host)
+            })
+            .collect()
     }
+}
+
+/// A host as a host group's autoscaling counts it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupHost {
+    /// Whether it is draining ahead of removal; otherwise it is live.
+    pub draining: bool,
+    /// Memory in MiB it has for sandboxes.
+    pub memory_mib: u64,
+    /// Memory in MiB it can still promise.
+    pub free_memory_mib: u64,
 }
 
 /// Keeps `view` following the store's host rows, for as long as it runs.

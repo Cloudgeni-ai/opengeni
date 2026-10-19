@@ -232,9 +232,10 @@ pub(crate) fn rule(host: HostId, held: Held, row: Option<Ownership>) -> (Ruling,
             },
             Some(change),
         ),
-        Verdict::Refetch { epoch } => (
+        Verdict::Refetch { epoch, from_files } => (
             Wire::Refetch {
                 owner_epoch: epoch.0,
+                whole: !from_files,
             },
             None,
         ),
@@ -486,6 +487,7 @@ mod tests {
             owner: None,
             epoch: OwnerEpoch(3),
             taken: OwnerEpoch(2),
+            whole: Some(OwnerEpoch(3)),
         };
         let (ruling, change) = rule(host, held, Some(cleared));
         let change = change.expect("a reclaim");
@@ -503,7 +505,23 @@ mod tests {
             owner: Some(HostId(5)),
             epoch: OwnerEpoch(4),
             taken: OwnerEpoch(4),
+            whole: Some(OwnerEpoch(4)),
         };
         assert_eq!(rule(host, held, Some(taken_since)).0.verdict, Wire::Drop);
+        // Its own again since, but from a copy nothing vouched for since it
+        // was lost: it starts from that copy's files.
+        let lost_since = Ownership {
+            owner: Some(host),
+            epoch: OwnerEpoch(6),
+            taken: OwnerEpoch(5),
+            whole: Some(OwnerEpoch(4)),
+        };
+        assert_eq!(
+            rule(host, held, Some(lost_since)).0.verdict,
+            Wire::Refetch {
+                owner_epoch: 6,
+                whole: false
+            }
+        );
     }
 }

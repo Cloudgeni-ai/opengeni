@@ -19,18 +19,18 @@
 //! up on until one succeeds. A host outside any group has only its own
 //! deadline, the guard and the watchdog to stop it (ADR 18).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_fleet::{At, Expiry, HostId, HostState, LeaseTerms, ScaleDecision, ScalePolicy};
+use compute_fleet::{At, Expiry, GroupView, HostId, LeaseTerms, ScaleDecision, ScalePolicy};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use crate::group::{Fenced, GcpGroup};
+use crate::group::{Fenced, GcpGroup, Member, Started};
 use crate::store::{self, Store};
-use crate::view::View;
+use crate::view::{GroupHost, View};
 
 /// How often the leader looks at renewal counts.
 const EVERY: Duration = Duration::from_millis(250);
@@ -48,6 +48,11 @@ pub struct Scaling {
     pub policy: ScalePolicy,
     /// How often it looks.
     pub every: Duration,
+    /// How long a member of the group without a registered host counts as
+    /// booting, its memory as coming. Past it the member is stalled: it
+    /// keeps its place in the group but no longer stands in for capacity,
+    /// so the group grows around it.
+    pub boot_within: Duration,
 }
 
 /// What the leader needs of the store.
@@ -133,6 +138,7 @@ async fn led<S: Store>(
     let mut tick = tokio::time::interval(EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut scaled: Option<Instant> = None;
+    let mut boots = Boots::default();
     loop {
         tick.tick().await;
         if !store.leads(&mut lead).await {
@@ -143,7 +149,7 @@ async fn led<S: Store>(
             && scaled.is_none_or(|when| when.elapsed() >= scaling.every)
         {
             scaled = Some(Instant::now());
-            match scale(scaling, view).await {
+            match scale(scaling, view, &mut boots).await {
                 Ok(prefix) => leading.prefix = Some(prefix),
                 Err(error) => tracing::warn!(%error, "sizing the host group failed"),
             }
@@ -331,12 +337,14 @@ async fn fence_and_give_up<L: Leases>(
             .give_up(host, renewals)
             .await
             .map_err(|error| error.to_string())?;
-        if given_up.is_some()
-            && fenced == Fenced::Stopped
-            && let Err(error) = group.start(&name).await
-        {
-            // The group's next look starts it.
-            tracing::warn!(%error, %name, "starting a fenced host failed");
+        if given_up.is_some() && fenced == Fenced::Stopped {
+            match group.start(&name).await {
+                Ok(Started::Asked) => {}
+                // The group deleted it to recreate it.
+                Ok(Started::Gone) => tracing::info!(%name, "a fenced host is gone"),
+                // The group's next look starts it.
+                Err(error) => tracing::warn!(%error, %name, "starting a fenced host failed"),
+            }
         }
         Ok(given_up)
     }
@@ -344,50 +352,177 @@ async fn fence_and_give_up<L: Leases>(
     (host, result)
 }
 
-/// Starts the group's stopped instances whose hosts are given up on or
-/// never registered: a fenced host stopped before the leader could start
-/// it again, or one stopped for any other reason. One still live in the
-/// view is started once it is given up on.
-async fn start_stopped(scaling: &Scaling, view: &View) -> anyhow::Result<()> {
-    for name in scaling.group.stopped().await? {
-        let given_up = view
-            .named(&name)
-            .is_none_or(|known| known.state == HostState::Lost);
-        if given_up {
-            tracing::info!(%name, "starting a stopped host");
-            scaling.group.start(&name).await?;
+/// Starts the group's stopped members whose hosts are given up on or never
+/// registered, and that the group itself is doing nothing to: a fenced
+/// host stopped before the leader could start it again, or one stopped
+/// for any other reason. One still live in the view is started once it is
+/// given up on. One that fails to start is tried again at the next look,
+/// and keeps neither the others from starting nor the group from growing.
+async fn start_stopped(scaling: &Scaling, hosts: &HashMap<String, GroupHost>, members: &[Member]) {
+    for member in members {
+        if !member.stopped || !member.idle || hosts.contains_key(&member.name) {
+            continue;
+        }
+        let name = &member.name;
+        tracing::info!(%name, "starting a stopped host");
+        match scaling.group.start(name).await {
+            Ok(Started::Asked) => {}
+            Ok(Started::Gone) => tracing::info!(%name, "a stopped host is gone"),
+            Err(error) => tracing::warn!(%error, %name, "starting a stopped host failed"),
         }
     }
-    Ok(())
+}
+
+/// When each member of the group without a registered host was first seen
+/// so, as one leadership has watched it.
+#[derive(Debug, Default)]
+struct Boots(HashMap<String, Boot>);
+
+#[derive(Clone, Copy, Debug)]
+struct Boot {
+    since: Instant,
+    stalled: bool,
+}
+
+impl Boots {
+    /// Counts a group of `target_size` places, whose manager lists
+    /// `members`, against the `hosts` registered under its names, so that
+    /// each place counts once:
+    ///
+    /// - a listed member with a host brings that host, live or draining;
+    /// - one without a host is booting, within `within` of when this
+    ///   leadership first saw it without one, and stalled past it;
+    /// - one the group is removing holds no place and brings nothing;
+    /// - a host the listing does not name may be one the group has not
+    ///   listed yet, or one it has let go: such hosts take the places
+    ///   asked for and not listed, as many as there are, the ones with
+    ///   least to bring first, and only those bring anything;
+    /// - the places left of those are booting.
+    ///
+    /// Says once when a member stalls, and when a stalled one registers.
+    fn count(
+        &mut self,
+        target_size: u32,
+        members: &[Member],
+        hosts: &HashMap<String, GroupHost>,
+        within: Duration,
+    ) -> GroupView {
+        let now = Instant::now();
+        let mut before = std::mem::take(&mut self.0);
+        let mut seen = GroupView::default();
+        let mut listed = 0u32;
+        for member in members {
+            if member.leaving {
+                continue;
+            }
+            listed += 1;
+            let boot = before.remove(&member.name);
+            if let Some(host) = hosts.get(&member.name) {
+                if boot.is_some_and(|boot| boot.stalled) {
+                    tracing::info!(name = %member.name, "a stalled host registered");
+                }
+                bring(&mut seen, host);
+                continue;
+            }
+            let mut boot = boot.unwrap_or(Boot {
+                since: now,
+                stalled: false,
+            });
+            if now.duration_since(boot.since) < within {
+                seen.booting += 1;
+            } else {
+                if !boot.stalled {
+                    tracing::warn!(
+                        name = %member.name,
+                        ?within,
+                        "a host group member has not registered in time; its memory no longer counts as coming"
+                    );
+                    boot.stalled = true;
+                }
+                seen.stalled += 1;
+            }
+            self.0.insert(member.name.clone(), boot);
+        }
+        let names: HashSet<&str> = members.iter().map(|member| member.name.as_str()).collect();
+        let mut unnamed: Vec<&GroupHost> = hosts
+            .iter()
+            .filter(|(name, _)| !names.contains(name.as_str()))
+            .map(|(_, host)| host)
+            .collect();
+        // Least spare first, so a host the group has let go never makes
+        // the group look roomier than one it is yet to list would.
+        unnamed.sort_by_key(|host| {
+            if host.draining {
+                0
+            } else {
+                host.free_memory_mib
+            }
+        });
+        let mut unlisted = target_size.saturating_sub(listed);
+        for host in unnamed {
+            if unlisted == 0 {
+                break;
+            }
+            bring(&mut seen, host);
+            unlisted -= 1;
+        }
+        seen.booting += unlisted;
+        seen
+    }
+}
+
+/// Adds what `host` brings to `seen`.
+fn bring(seen: &mut GroupView, host: &GroupHost) {
+    if host.draining {
+        seen.draining += 1;
+    } else {
+        seen.hosts += 1;
+        seen.memory_mib += host.memory_mib;
+        seen.free_memory_mib += host.free_memory_mib;
+    }
+}
+
+/// The group size that gives `seen` the `usable` hosts the policy asks
+/// for: the group holds its draining and stalled places besides, so it
+/// grows from its present size by as many as are short, up to `max_hosts`.
+fn grown_size(target_size: u32, seen: &GroupView, usable: u32, max_hosts: u32) -> u32 {
+    let short = usable.saturating_sub(seen.hosts + seen.booting);
+    target_size.saturating_add(short).min(max_hosts)
 }
 
 /// Grows the group if its spare memory would run short, and starts its
-/// stopped instances whose hosts are gone. Returns the prefix of its
-/// instances' names.
-async fn scale(scaling: &Scaling, view: &View) -> anyhow::Result<String> {
+/// stopped members whose hosts are gone. A member without a host counts
+/// as booting for [`Scaling::boot_within`]; one stalled past that keeps
+/// its place in the group but brings nothing, so the group grows past it.
+/// Returns the prefix of its instances' names.
+async fn scale(scaling: &Scaling, view: &View, boots: &mut Boots) -> anyhow::Result<String> {
     let described = scaling.group.describe().await?;
     let prefix = format!("{}-", described.base_instance_name);
-    start_stopped(scaling, view).await?;
-    let mut seen = view.group(|name| name.starts_with(&prefix));
-    seen.booting = described
-        .target_size
-        .saturating_sub(seen.hosts + seen.draining);
+    let members = scaling.group.members().await?;
+    let hosts = view.group(|name| name.starts_with(&prefix));
+    start_stopped(scaling, &hosts, &members).await;
+    let seen = boots.count(described.target_size, &members, &hosts, scaling.boot_within);
     match scaling.policy.decide(&seen) {
-        ScaleDecision::Grow { to } if to > described.target_size => {
-            tracing::info!(
-                from = described.target_size,
-                to,
-                free_mib = seen.free_memory_mib,
-                "growing the host group"
-            );
-            scaling.group.resize(to).await?;
+        ScaleDecision::Grow { to } => {
+            let to = grown_size(described.target_size, &seen, to, scaling.policy.max_hosts);
+            if to > described.target_size {
+                tracing::info!(
+                    from = described.target_size,
+                    to,
+                    draining = seen.draining,
+                    stalled = seen.stalled,
+                    free_mib = seen.free_memory_mib,
+                    "growing the host group"
+                );
+                scaling.group.resize(to).await?;
+            }
         }
         ScaleDecision::Shrink => {
             tracing::info!(
                 "the host group has more spare than it needs; drain a host to shrink it"
             );
         }
-        ScaleDecision::Grow { .. } | ScaleDecision::Hold => {}
+        ScaleDecision::Hold => {}
     }
     Ok(prefix)
 }
@@ -491,6 +626,141 @@ mod tests {
             "gave up {:?} after the start, the lease ran {:?}",
             given_up - begun,
             lease_ends - begun
+        );
+    }
+
+    const GIB: u64 = 1024;
+
+    fn member(name: &str) -> Member {
+        Member {
+            name: name.to_owned(),
+            stopped: false,
+            idle: true,
+            leaving: false,
+        }
+    }
+
+    fn live(free_gib: u64) -> GroupHost {
+        GroupHost {
+            draining: false,
+            memory_mib: 64 * GIB,
+            free_memory_mib: free_gib * GIB,
+        }
+    }
+
+    fn hosts(named: &[(&str, GroupHost)]) -> HashMap<String, GroupHost> {
+        named
+            .iter()
+            .map(|(name, host)| ((*name).to_owned(), *host))
+            .collect()
+    }
+
+    /// An allowance every member without a host is within, and one every
+    /// such member is past.
+    const BOOTING: Duration = Duration::from_secs(3_600);
+    const STALLED: Duration = Duration::ZERO;
+
+    #[tokio::test]
+    async fn a_registered_host_the_listing_does_not_name_takes_one_place() {
+        // One place asked for, nothing listed yet, and its host registered.
+        let seen = Boots::default().count(1, &[], &hosts(&[("hosts-a", live(1))]), BOOTING);
+        assert_eq!((seen.hosts, seen.booting), (1, 0), "{seen:?}");
+        assert_eq!(grown_size(1, &seen, 2, 10), 2);
+        // Two places asked for: the other is booting.
+        let seen = Boots::default().count(2, &[], &hosts(&[("hosts-a", live(1))]), BOOTING);
+        assert_eq!((seen.hosts, seen.booting), (1, 1), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_host_the_group_let_go_brings_nothing_without_a_place_for_it() {
+        // One place, listed; the other host was let go (abandoned, its
+        // listing gone) but is still registered.
+        let members = [member("hosts-a")];
+        let registered = hosts(&[("hosts-a", live(1)), ("hosts-b", live(64))]);
+        let seen = Boots::default().count(1, &members, &registered, BOOTING);
+        assert_eq!(
+            (seen.hosts, seen.booting, seen.free_memory_mib),
+            (1, 0, GIB),
+            "{seen:?}"
+        );
+        assert_eq!(grown_size(1, &seen, 2, 10), 2);
+        // With one place not listed, only the host with least spare takes it.
+        let registered = hosts(&[
+            ("hosts-a", live(1)),
+            ("hosts-b", live(64)),
+            ("hosts-c", live(2)),
+        ]);
+        let seen = Boots::default().count(2, &members, &registered, BOOTING);
+        assert_eq!(
+            (seen.hosts, seen.booting, seen.free_memory_mib),
+            (2, 0, 3 * GIB),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn draining_and_stalled_places_are_grown_around() {
+        let mut draining = live(64);
+        draining.draining = true;
+        let members = [member("hosts-a"), member("hosts-b"), member("hosts-c")];
+        let registered = hosts(&[("hosts-a", live(1)), ("hosts-b", draining)]);
+        let seen = Boots::default().count(3, &members, &registered, STALLED);
+        assert_eq!(
+            (seen.hosts, seen.draining, seen.stalled, seen.booting),
+            (1, 1, 1, 0),
+            "{seen:?}"
+        );
+        // Two usable hosts wanted, one live: one more on top of the three
+        // places.
+        assert_eq!(grown_size(3, &seen, 2, 10), 4);
+        assert_eq!(grown_size(3, &seen, 2, 3), 3, "never past the maximum");
+        // Within the allowance the third member is coming.
+        let seen = Boots::default().count(3, &members, &registered, BOOTING);
+        assert_eq!((seen.booting, seen.stalled), (1, 0), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stalled_member_holds_off_a_shrink() {
+        let policy = ScalePolicy {
+            spare_per_mille: 200,
+            spare_largest: 2,
+            largest_mib: 4 * GIB,
+            host_memory_mib: 64 * GIB,
+            min_hosts: 1,
+            max_hosts: 10,
+        };
+        let members = [
+            member("hosts-a"),
+            member("hosts-b"),
+            member("hosts-c"),
+            member("hosts-d"),
+        ];
+        let registered = hosts(&[
+            ("hosts-a", live(64)),
+            ("hosts-b", live(64)),
+            ("hosts-c", live(64)),
+        ]);
+        let mut boots = Boots::default();
+        let booting = boots.count(4, &members, &registered, BOOTING);
+        assert_eq!(policy.decide(&booting), ScaleDecision::Hold);
+        let stalled = boots.count(4, &members, &registered, STALLED);
+        assert_eq!(stalled.stalled, 1, "{stalled:?}");
+        assert_eq!(policy.decide(&stalled), ScaleDecision::Hold);
+        let settled = boots.count(3, &members[..3], &registered, STALLED);
+        assert_eq!(policy.decide(&settled), ScaleDecision::Shrink, "control");
+    }
+
+    #[tokio::test]
+    async fn a_member_the_group_is_removing_holds_no_place() {
+        let mut leaving = member("hosts-a");
+        leaving.leaving = true;
+        let members = [leaving, member("hosts-b")];
+        let registered = hosts(&[("hosts-a", live(64)), ("hosts-b", live(1))]);
+        let seen = Boots::default().count(1, &members, &registered, BOOTING);
+        assert_eq!(
+            (seen.hosts, seen.booting, seen.free_memory_mib),
+            (1, 0, GIB),
+            "{seen:?}"
         );
     }
 }

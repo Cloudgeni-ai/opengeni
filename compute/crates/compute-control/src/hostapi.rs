@@ -147,7 +147,7 @@ async fn with_links<S: Store>(
         .map(|linked| (linked.id, linked))
         .collect();
     for ruling in &mut rulings {
-        let (Verdict::Keep { owner_epoch } | Verdict::Refetch { owner_epoch }) = ruling.verdict
+        let (Verdict::Keep { owner_epoch } | Verdict::Refetch { owner_epoch, .. }) = ruling.verdict
         else {
             continue;
         };

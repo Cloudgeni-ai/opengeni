@@ -161,6 +161,11 @@ struct Serve {
     /// Seconds between looks at the group.
     #[arg(long, default_value_t = 10)]
     scale_every_s: u64,
+    /// Seconds a member of the group without a registered host counts as
+    /// booting; past it, it no longer stands in for capacity and the group
+    /// grows around it.
+    #[arg(long, default_value_t = 600)]
+    scale_boot_within_s: u64,
     /// Where the E2B front door listens; without it there is none.
     #[arg(long)]
     e2b_listen: Option<SocketAddr>,
@@ -290,6 +295,7 @@ impl Serve {
                 max_hosts: self.scale_max,
             },
             every: Duration::from_secs(self.scale_every_s),
+            boot_within: Duration::from_secs(self.scale_boot_within_s),
         }))
     }
 }

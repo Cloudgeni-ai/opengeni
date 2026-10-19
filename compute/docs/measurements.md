@@ -345,6 +345,15 @@ checkpoint (in 933 ms in the run that timed it); what the guest wrote after
 it (a file on disk and one in memory) was lost, as it should be, and the
 first host's next checkpoint was fenced off and dropped its copy.
 
+Since 2026-10-19 an adopt after a host loss no longer restores the copy's
+memory: a host restores memory only when the fleet service says the copy
+is whole, as after a hand-off, and otherwise boots the sandbox from the
+copy's files with its programs ended (ADR 18). The runs above adopt with
+`whole`, so they measure the memory restore a move or drain still uses.
+The host also asks the guest to
+sync its disks before each pause. The host-loss rows of the end-to-end
+suite below measure the boot from files.
+
 ## Multi-host fleet on GCP (2026-10-17)
 
 Measured on 2026-10-17 by `compute-control`'s `cloud` tests (release
@@ -881,6 +890,9 @@ from that commit. Results carry the commits as `backend+agent`.
 | r14 22:49 | 130eeb930+ac1951242+6270b6eae | 40a9c32dc | 24 | 0 | none; run-as is n/a (Opengeni cannot ask for it); see below |
 | r15 23:06 | 8e8577dba | e53aa9512 | 24 | 3 | the suite's own host access (OS Login lacked `compute.projects.get`; fixed in the e2e); every product check passes |
 | r16 00:51 | 41f1e7bae+58d022965+6270b6eae | b593c5e25 | 19 | 7 | ui desktop (the chart predated the relay's owner routing); vm-crash, move, host-loss, delete (a request in flight across a VM crash never ends); link-stream (the window was too short for two checkpoints under load); see below |
+| r17 01:58 | 35d102db7+dc048ebe1+6270b6eae | 939d29e3b | 24 | 2 | vm-crash (the suite read the journal before the stream-end line), host-loss (the instance group recreated the host under its old name); both were check defects, fixed and passing in reruns; every product check passes; see below |
+| r18 04:17 | 4da6a3229+971f1b9b6+6270b6eae | 167d351ea | 10 | 0 | none; a rerun of background, vm-crash, host-loss and delete on the link-lost fix; see below |
+| r19 05:50 | 2c15dcf7d | 85708a8a7 | 8 | 6 | the first run of host-loss as a boot from files: the boot held, but the request in flight ended as a timeout (exit 124), not outcome unknown, and the check wrongly required the generation to rise across owners; sleep-saved and sleep-archived were woken by the reaper; three more failed only in the verifier (a suite defect, fixed); see below |
 
 Checks after create were skipped through r6 because they need create.
 In r8 (every request now carries a nonzero agent epoch) create and most
@@ -1105,7 +1117,7 @@ run-as is not applicable; what each proves and how long it took:
 | browser | the agent's browser tool loads a page served in the sandbox and returns its random title | 14.7 s |
 | desktop | the agent opens a computer session, takes a screenshot, and the API's frame decodes to a real screen | 1024x640, 157 colours |
 | ui | Playwright: the web app's file browser, terminal and desktop view | 64.8 s |
-| sleep-paused, -saved, -archived, -remote | the host reached the level (state and journal), nothing began to wake it before the suite's request, the request woke it over the agent link, and a 32 MiB process kept its pid and memory under the same boot generation | reached in 0.3, 6.6, 15.2 and 19.0 s; first answer 0.1, 0.5, 0.5 and 8.3 s; each woken by `agent_link` 0.04 to 0.07 s after the request |
+| sleep-paused, -saved, -archived, -remote | the host reached the level (state and journal), nothing began to wake it before the suite's request, the request woke it over the agent link (the journal step's `compute.wake.by` is `agent_link`), and a 32 MiB process kept its pid and memory under the same boot generation | reached in 0.3, 6.6, 15.2 and 19.0 s; first answer 0.1, 0.5, 0.5 and 8.3 s; each woken by `agent_link` 0.04 to 0.07 s after the request |
 | move | a saved sandbox moves to another host and answers there with its files | 29.9 s |
 | host-loss | a stopped host's sandbox comes back on another live host under a higher owner epoch, the old host fenced, from the archived copy | back in 280.9 s, owner epoch 3 to 5 |
 | delete | deleting the session deletes its fabric sandbox | 25.3 s |
@@ -1202,3 +1214,262 @@ short.
 | delete | deleting the session deletes its fabric sandbox | failed: 409 for 10 minutes |
 | connected-machine | the same agent build enrolled on the stack VM comes online, runs a turn and an exec, and still answers after 90 s idle with the same process | online in 3.1 s |
 | cleanup | the run's sessions are deleted and its enrollment revoked | failed with delete; nothing left in r16b, r16c and r16d |
+
+### r17: the restart fix, every check
+
+r17 (2026-10-19, 01:58 to 02:33) ran every check on three freshly
+replaced hosts and a new database (`FRESH=1`), with the stock two-replica
+relays and no channel affinity. The backend was 35d102db7, which adopts a
+command that may have started when its agent restarted and never lets a
+request bound to a replaced connection wake the sandbox. It was merged
+with the run-as branch dc048ebe1 and the agent's fabric branch 6270b6eae,
+and compute was 939d29e3b. The shapes are those of r14. Rerun it with:
+
+```sh
+. p4.env   # PROJECT, PREFIX, LABELS, the three refs, the Azure account
+compute/e2e/env.sh build && compute/e2e/env.sh fleet &&
+  FRESH=1 compute/e2e/env.sh deploy && RUN=r17 compute/e2e/env.sh suite
+# a single check against the same stack:
+RUN=r17d ONLY=vm-crash,host-loss compute/e2e/env.sh suite
+```
+
+24 checks passed, 2 failed and run-as is not applicable. Every check that
+r16's in-flight request broke now passes: the four sleeps, move, delete
+(the sandbox was gone 20.4 s after the delete) and cleanup. Both failures
+were in the checks, not the product:
+
+- vm-crash: every assertion held except the evidence that the old streams
+  ended. The host logged it ("agent-link streams the guest no longer has
+  ended", naming the sandbox) 12 s after the kill. The check read the
+  journal as soon as the first command on the new boot answered, before
+  the rebooted agent's hello. It now reads the journal after the reconnect,
+  retries for up to 30 s, and then counts the console again from the same
+  mark, so a second reconnect during that wait would also be caught.
+- host-loss: the sandbox came back as designed, but the check rejected it.
+  The instance group's autohealer replaced the stopped host with a new
+  machine under the same name. The new machine registered under a new host
+  epoch with no sandboxes, adopted the sandbox, fetched it from the archive
+  and restored its memory from there. The check compared host names. It
+  now tells machines apart by their GCE instance id, and also requires a
+  host epoch known before the stop and strictly higher after. It also keeps
+  the stopped host's journal as `host-<name>@<instance>.log` before stopping
+  it, so that the verifier can still check an earlier proof made on that
+  host. Without that, r17b failed vm-crash's checkpoint proof after the
+  host was replaced.
+
+The reruns, against the same stack:
+
+| run | compute | vm-crash | host-loss | cleanup |
+| --- | --- | --- | --- | --- |
+| r17b 02:34 | 17404e753 | assertions held; verifier failed (the replaced host took the journal with it) | pass, 285.8 s | pass |
+| r17c 02:44 | bd065b066 | pass | pass, 446.0 s | fail: the session's delete answered 409 for 5 minutes |
+| r17d 02:59 | 70dc8de19 | pass | pass, 293.3 s | pass |
+| r17e 03:12 | 298ffb689 | pass | not finished: the workstation's agent restarted during the check and ended the suite after it had stopped the host | not run |
+| r17f 03:22 | 298ffb689 | pass | pass, 297.4 s, back on another live host; the kept journal's instance and boot checked | pass |
+
+r17c's cleanup failure is a backend bug. The suite's exec poll reached one
+API replica just as the stopped host powered off, and was delivered into a
+gateway session on that host's link. The gateway ended the link 38 s
+later, but the request was neither failed nor sent again. The replacement
+host restored the sandbox and linked through the other replica, and the
+first request never ended. It held the session's live-sandbox mark, so
+every delete answered 409 with `session_delete_live_sandboxes`. The fix is
+the backend's (a reply to such a request when its link is lost);
+host-loss and delete are rerun at its head.
+
+The recovery takes 4.8 to 7.4 minutes. `gcloud compute instances stop`
+shuts the guest down gracefully, which took 2 minutes 14 s to 2 minutes
+23 s in r17, r17b and r17c, and the host kept running its sandbox and
+re-linking meanwhile. The leader fenced the host as stopped in the last
+seconds of that shutdown and gave up on it. The instance group recreated
+it at once, and the new machine registered about a minute after its
+insert. In r17 the request was delivered into a gateway session on the
+old host's link while that host was still shutting down, and the gateway
+dropped that link 29 s later. While the request sat in that session, no
+fabric wake was needed or made, until the session ended: the same backend
+bug as r17c's, which there kept the request from ever ending. When the
+wake request itself reached the fabric was not measured; neither the
+fleet service nor the API logs wake requests at info. The adopt landed on
+the new, empty host 61 s after it registered, although the other two
+hosts had been live and empty all along. In r17f the sandbox came back on
+another live host.
+
+In vm-crash, the command in flight at the kill ended after 30.1 s in
+r17b, r17c and r17d. The API answered 409, from agent code 9: the outcome
+is unknown. The next command answered 4.2 to 5.2 s after the kill, on its
+second try.
+
+| check | what it proves | r17 (reruns) |
+| --- | --- | --- |
+| health, hosts, workspace | the API answers; three hosts are live in the fleet | 0.1 s |
+| create | a session on the compute backend gets a fabric sandbox and its first model turn runs a shell command in it | 22.2 s to the reply (25.0, 25.0 and 19.1 s in r17b, r17c and r17d) |
+| commands | stdout, stderr and a nonzero exit status come back as the guest produced them | 0.3 s |
+| egress | the sandbox reaches the internet (HTTPS 200) | 0.4 s |
+| background | the agent's background command is read back by id with its output and status; a running one stopped through the API ends and its processes are gone | stopped in 2.2 s |
+| files, git | write, read and list agree; git works in the workspace | 0.4 and 0.3 s |
+| terminal | a viewer terminal through a stock two-replica relay runs a typed command whose file appears | 0.8 s |
+| checkpoint | a viewer terminal (150 ticks) and a command (110 ticks) stream without a gap across running checkpoints the journal shows | 2 checkpoints, quiet at most 1.0 s |
+| port | a guest TCP port answers through the fabric's connect stream | 2.1 s |
+| browser | the agent's browser tool loads a page served in the sandbox and returns its random title | 14.8 s |
+| desktop | the agent opens a computer session, takes a screenshot, and the API's frame decodes to a real screen | 1024x640, 157 colours |
+| ui | Playwright: the web app's file browser, terminal and desktop view, through the stock relays | 64.8 s; the desktop view drew 1422x888 |
+| sleep-paused, -saved, -archived, -remote | the host reached the level (state and journal), nothing began to wake it before the suite's request, the request woke it over the agent link, and a 32 MiB process kept its pid and memory under the same boot generation | reached in 0.3, 6.6, 15.0 and 18.3 s; first answer 0.1, 0.3, 0.5 and 8.8 s; each woken by `agent_link` 0.03 to 0.04 s after the request (observed in r17; the verifier asserts it from r17f's fixes on); the saved wake's pager wrote `learned.json` 3 s after it, no "Permission denied" |
+| link-stream | 4 MiB files both ways through the agent's link across at least two running checkpoints and a Saved sleep, every file matching both ways, with no agent reconnect and one VMM launch for the wake | 87 cycles in 173 s (348 MiB in, 696 MiB out), 2 checkpoints, saved in 11.9 s, woken by a read in 1.1 s, 0 reconnects |
+| vm-crash | a killed VM process boots again from its live disk (ADR 10): both writes kept, generation +1, programs lost and reported, one reconnect, old streams ended on host lines naming the sandbox, no protocol error; the request in flight ends with an error within its bound | failed in the check (see above); passed in r17c, r17d and r17f, the request in flight ending with 409 after 30.1 s |
+| move | a saved sandbox moves to another host and answers there with its files | 21.8 s |
+| host-loss | a stopped host's sandbox comes back on another live machine (a new instance id and host epoch, if the instance group reused the name) under a higher owner epoch, from its archived copy, the old host fenced | failed in the check (see above); passed in r17b, r17c, r17d and r17f in 285.8, 446.0, 293.3 and 297.4 s, the archived file kept and the late write lost |
+| delete | deleting the session deletes its fabric sandbox | 20.4 s |
+| connected-machine | the same agent build enrolled on the stack VM comes online, runs a turn and an exec, and still answers after 90 s idle with the same process | online in 3.1 s |
+| cleanup | the run's sessions are deleted and its enrollment revoked | nothing left; r17c failed (see above) |
+
+### r18: a request on a lost host's link
+
+r18 (2026-10-19, 04:17 to 04:23) reran the checks that r17c's bug
+touched, on three fresh hosts built for the new compute commit and the
+same database (no `FRESH`). The backend was 4da6a3229. When a host's link
+session ends, the gateway now answers every request that session had not
+answered with an empty reply marked as link-lost, so the requester sends
+it again at once under the same delivery id, or ends a one-shot request
+as outcome unknown. A cancelled-before-start answer from the agent now
+settles a command's read as cancelled. It was merged with the run-as
+branch 971f1b9b6 and the agent's fabric branch 6270b6eae. Compute was
+167d351ea, whose fleet service no longer starts a stopped host that the
+instance group is recreating. Rerun it with:
+
+```sh
+. p4.env
+compute/e2e/env.sh build && compute/e2e/env.sh fleet && compute/e2e/env.sh deploy &&
+  RUN=r18 ONLY=background,vm-crash,host-loss,delete compute/e2e/env.sh suite
+```
+
+All 10 checks passed, cleanup included:
+
+| check | r18 |
+| --- | --- |
+| create | first turn in 25.1 s |
+| background | read back by id with exit status 3; the stopped one unlisted and its process gone 2.3 s after the stop |
+| vm-crash | the next command answered 4.5 s after the kill, on its second try; generation 1 -> 2; both writes kept; programs lost and reported; the request in flight ended with 409 after 30.1 s; one reconnect; the stream-end line names the sandbox |
+| host-loss | back on another live host in 177.7 s (owner epoch 1 -> 3), against 285.8 to 446.0 s in r17; the archived file kept, the late write lost; the kept journal's instance and boot checked |
+| delete | the fabric sandbox gone 10.2 s after the delete |
+| cleanup | nothing left |
+
+The session that r17c left stuck could be deleted once the API pods had
+been replaced by the deploy. Its stale holder was gone by then, the first
+delete answered 409 while its sandbox drained, and a delete 35 s later
+succeeded. That shows the new deploy clearing it, not the fix clearing a
+request it already held.
+
+This host-loss result restores the archived copy's memory, as the fabric
+did until 2026-10-19. r19 below is the first run against the change that
+makes a sandbox that was not handed off boot from its newest copy's files
+after a host loss.
+
+### r19: host loss boots from files
+
+r19 (2026-10-19; r19 started at 05:50 and wrote its results at 06:00:23,
+r19b and r19c at 06:08:12 and 06:12:43) ran on hosts, a guest image and a fleet
+service rebuilt from compute 85708a8a7 (hosts first), with the backend
+2c15dcf7d, which already carries the run-as and agent branches, and the
+same database (it never ran 16d85d2b9's schema, so no `FRESH`). Its
+host-loss check now asserts the boot from files listed in the suite's
+README: one VMM launch and one `boot` step on the adopting host, no
+`restore`, a new guest boot id and agent connection instance, the program gone, the checkpointed write kept and the late one
+lost, and the request in flight ended as outcome unknown. In r19 it also
+required the boot generation to rise, which was the check's own defect
+(below). Rerun it with:
+
+```sh
+. p4.env   # OPENGENI_REF=origin/feat/compute-backend, COMPUTE_REF=origin/feat/compute-prod
+compute/e2e/env.sh build && compute/e2e/env.sh fleet && compute/e2e/env.sh deploy &&
+  RUN=r19 ONLY=background,sleep-paused,sleep-saved,sleep-archived,sleep-remote,vm-crash,host-loss,delete compute/e2e/env.sh suite
+# the two narrower reruns below:
+RUN=r19b ONLY=sleep-paused,sleep-saved,sleep-archived,sleep-remote compute/e2e/env.sh suite
+RUN=r19c ONLY=background,sleep-saved,sleep-archived compute/e2e/env.sh suite
+```
+
+A control run first, r19dry (05:20), ran the new host-loss check against
+the previous fabric (compute 167d351ea, backend 4da6a3229), which still
+restored memory after a loss. The check failed it as it should: the same
+guest boot id before and after, generation 1 -> 1, the program running
+again, and the request in flight back as exit 124 after 148.2 s.
+
+| check | r19 | r19b | r19c |
+| --- | --- | --- | --- |
+| create | first turn in 25.2 s | 25.1 s | 22.0 s |
+| background | read back by id with exit status 3; the stopped one unlisted and its process gone 2.3 s after the stop | not run | the same, 2.3 s |
+| sleep-paused | paused in 0.3 s, woke in 0.1 s; failed only in the verifier (below) | pass: paused in 0.3 s, woke in 0.1 s | not run |
+| sleep-saved | failed: woken before reaching saved, with no request | failed in the verifier: with no stored copy yet, the sandbox archived at once on reaching saved (an artefact of running it first) | failed: woken before reaching saved, with no request |
+| sleep-archived | failed: woken before reaching archived, with no request | pass: archived in 12.4 s, woke in 0.2 s | pass: archived in 36.5 s, woke by agent link in 0.2 s |
+| sleep-remote | remote in 53.1 s; failed only in the verifier | pass: remote in 16.2 s, woke in 7.0 s | not run |
+| vm-crash | the next command answered 4.9 s after the kill, generation 1 -> 2, both writes kept, programs lost and reported; failed only in the verifier | not run | not run |
+| host-loss | failed on two items (below); the boot from files held, adopted 139 s after the stop | not run | not run |
+| delete | the fabric sandbox gone 5.2 s after the delete | not run | not run |
+| cleanup | nothing left | nothing left | nothing left |
+
+No run logged a warning that the guest did not write its disks out
+before a pause.
+
+The host loss itself behaved as designed. The suite stopped
+sbx-p4-e-host-66vl at 05:57:36; sbx-p4-e-host-jqh8 logged "adopted from
+its files" at 05:59:55.6, fetched the copy and booted it with one VMM
+launch and no restore. The guest's boot id and the agent's connection
+instance changed, the program was gone, the archived and checkpointed
+files were there and the late write was not. Two assertions failed:
+
+- The generation went from 2 to 1, and the check required it to rise.
+  That was a defect in the check's assertion, not in the fabric, and the
+  failure stays recorded as it ran: each owner numbers its boots afresh, so
+  generations compare only under one owner epoch (the restore notice
+  orders by owner epoch first). The adopting host's boot step logged
+  `generation=1` at 06:00:03.8, as designed. The check now reports the
+  generation and no longer compares it across owners; the boot itself is
+  shown by the new guest boot id and the adopting host's journal.
+- The request in flight at the loss (a 120 s command) came back as HTTP
+  200 with exit status 124 after 149.1 s, not as outcome unknown. The API
+  logged it as still running at 05:58:35.8 and 05:59:35.8, the new agent
+  session opened at 06:00:04.77, and the exit 124 followed at 06:00:04.86,
+  while a recovery probe at 06:00:04.81 got outcome unknown (409, agent
+  code 9). Once the command's own timeout has passed, the request ends
+  through the timeout path, not the replaced-connection path. It was not
+  run again. This is in the backend.
+
+The wakes of sleep-saved and sleep-archived come from the worker's
+background-command reaper. After a background command ends and its
+output has been read, the reaper sends the agent a release of that
+output. It counts the send as unconfirmed until the agent's release is
+observed, so it sends it again on every 30 s pass, and each send to a
+sleeping sandbox wakes it. r19c reproduced it with the two background
+commands' rows sampled every 5 s: the release was never observed, and
+the second send (between 06:11:48 and 06:11:54, outcome
+`output_ack_published`) matches the gateway's "a request wakes a sleeping
+sandbox" at 06:11:49.3, 0.2 s after the sandbox paused for the save.
+r19b, with no background command, had no such wake. The fix is in the
+backend.
+
+sleep-paused, sleep-remote and vm-crash passed in the run but failed in
+the verifier, which refused the journal that host-loss had kept of the
+stopped host because a failed check's proofs were not saved. The runner
+now saves a check's proofs whatever its outcome (54424e676), so earlier
+passes on a stopped host keep their evidence. r19's saved results predate
+that and cannot be re-verified.
+
+A boot from files after a host loss raised no programs-lost alarm in
+r19, unlike a VM crash; that holds for the build r19 ran. The alarm
+exists from compute 1d58a47c0, raised when an adoption sets the memory
+image aside, and host-loss now requires one for the sandbox on the
+adopting machine's boot, between the stop and the recovery. The next run
+is the first to verify it. One gap stays open: the in-flight check reads the API's
+answer, not a model turn's tool result; both carry the same text.
+
+Where the figures come from, under each run's directory (`runs/<run>/`
+in the suite's output): the table's per-check figures, the deletion
+time, "nothing left" and r19dry's 148.2 s are the rows of `results.md`
+(and `results.json`); the stop at 05:57:36 is in r19's `suite.log`; the
+adoption at 05:59:55.6 (139 s after the stop) and the boot step's
+`generation=1` at 06:00:03.8 are in `host-sbx-p4-e-host-jqh8.log`; the
+in-flight request's API lines and the recovery probe are in `api.log`
+(trace 8a57c1e67b392c70ada44e741e818363). For the reaper wake in r19c,
+the gateway line is in `api.log`, the reaper's dispatch in
+`worker-control.log`, the sleep and resume in
+`host-sbx-p4-e-host-66vl.log`, and the 5 s samples of the command rows
+in `bgc-sampler.log`.

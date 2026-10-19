@@ -19,6 +19,7 @@
 //! and the step retried.
 
 mod checkpoint;
+mod guest;
 mod remote;
 #[cfg(test)]
 mod tests;
@@ -27,7 +28,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use compute_core::{Failure, Outcome, Step};
 use compute_engine::{
@@ -45,22 +46,10 @@ use crate::observe::notes::{self, Notes};
 #[cfg(target_os = "linux")]
 use crate::paging::Paging;
 use crate::protocol::Id;
-use crate::restore_notice::tell_restored;
 use crate::state::{Change, Disk, Identity, Record, Records, StateError, apply};
 use crate::store::{Receipt, Store};
 #[cfg(target_os = "linux")]
 use crate::working_set::{PageSet, READY_BYTES, WakeProfile};
-
-/// How long a restore keeps trying to tell the guest of it. A listening
-/// guest answers in milliseconds, but only once its kernel has handled the
-/// vsock transport reset that follows every restore; under a burst of
-/// restores that can take a while.
-const NOTICE_DEADLINE: Duration = Duration::from_secs(5);
-/// The same for a guest that must learn which sandbox it is. It is never
-/// used without answering, and the alternative, booting from its disk, is
-/// slower still under the same burst: a burst of 100 restores on a nested
-/// host keeps many guests from answering for well over five seconds.
-const IDENTITY_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Longest a wake waits for its learned working set before resuming the
 /// guest anyway; whatever is missing then arrives on demand.
@@ -462,6 +451,9 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// time from the record. Recorded first, so a pause that fails to be
     /// recorded leaves the VM as it was.
     async fn pause(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        if !self.sync_guest().await {
+            return (Outcome::Cancelled, After::Kept(live));
+        }
         if self
             .record
             .last_used_ms
@@ -1163,73 +1155,6 @@ impl<E: Engine, S: Store> Job<E, S> {
             memory.close().await;
         }
         outcome
-    }
-
-    /// Lets the guest fix its clock, drop dead connections and learn which
-    /// sandbox it is before the sandbox counts as awake.
-    ///
-    /// Failing to is not fatal for a guest that knows which sandbox it is:
-    /// a guest without an agent still runs, just with a stale clock. One
-    /// that does not (see [`Identity::Pending`]) must acknowledge the notice
-    /// before anything may use it, so otherwise this reports its memory
-    /// lost: the caller's VM is ended, and the sandbox's next wake boots
-    /// from its disk, where the guest finds its id on the kernel command
-    /// line and must still acknowledge the notice (see `boot`).
-    async fn tell_guest_restored(&mut self) -> Result<(), Outcome> {
-        const LOST: Outcome = Outcome::Failed(Failure::MemoryLost);
-        let must = self.record.identity == Identity::Pending;
-        let Some(port) = self.restore_notice_port else {
-            if must {
-                tracing::error!(id = %self.id, "the guest must learn which sandbox it is, but no restore notice port is set");
-                return Err(LOST);
-            }
-            return Ok(());
-        };
-        let started = Instant::now();
-        let deadline = if must {
-            IDENTITY_DEADLINE
-        } else {
-            NOTICE_DEADLINE
-        };
-        // Every way here wrote the record since the guest's last notice, so
-        // its fence is above that notice's, if this owner sent it; one from
-        // an earlier owner (on another host, whose record this one does not
-        // continue) is at a lower epoch.
-        let order = (
-            self.record.owner_epoch,
-            self.record.generation,
-            self.record.revision,
-        );
-        match tell_restored(&self.spec.vsock_path(), port, self.id, order, deadline).await {
-            Ok(told) if must && !told.seeded => {
-                // It took its id but draws the numbers every other clone
-                // of its snapshot draws.
-                tracing::error!(id = %self.id, "the guest did not apply the restore notice's seed; it is not used");
-                return Err(LOST);
-            }
-            Ok(told) => tracing::debug!(
-                id = %self.id,
-                us = started.elapsed().as_micros(),
-                attempts = told.attempts,
-                seeded = told.seeded,
-                "guest acknowledged the restore"
-            ),
-            Err(error) if must => {
-                tracing::error!(id = %self.id, %error, "the guest did not learn which sandbox it is; it is not used");
-                return Err(LOST);
-            }
-            Err(error) => {
-                tracing::warn!(id = %self.id, %error, "guest not told of its restore");
-                return Ok(());
-            }
-        }
-        if must && let Err(error) = self.commit(Change::new().identity(Identity::Known)).await {
-            // A record that still says the guest must be told ends the VM
-            // after a restart anyway.
-            tracing::error!(id = %self.id, %error, "could not record that the guest knows which sandbox it is");
-            return Err(LOST);
-        }
-        Ok(())
     }
 
     /// Frees the step's place under its kind's concurrency limit: the work

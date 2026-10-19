@@ -225,7 +225,7 @@ fn decisions_stay_well_under_a_millisecond_at_5000_hosts_and_500000_sandboxes() 
         lose.time(|| {
             for sandbox in &owned {
                 if let Some(row) = rows.get_mut(sandbox) {
-                    *row = row.clear().set;
+                    *row = row.lose().set;
                 }
             }
         });

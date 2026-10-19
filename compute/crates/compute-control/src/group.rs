@@ -92,6 +92,38 @@ struct ManagedInstance {
     instance: String,
     #[serde(default)]
     instance_status: Option<String>,
+    /// What the group itself is doing to the instance, `NONE` when nothing
+    /// (recreating it, as its autohealing does, or deleting, starting or
+    /// stopping it).
+    #[serde(default)]
+    current_action: Option<String>,
+}
+
+/// What starting an instance came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Started {
+    /// It was asked to start.
+    Asked,
+    /// It no longer exists: the group deleted it, as it does to recreate
+    /// it, and nothing is left to start.
+    Gone,
+}
+
+/// One instance of the group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Member {
+    /// Its instance name.
+    pub name: String,
+    /// Whether it is stopped.
+    pub stopped: bool,
+    /// Whether the group itself is doing nothing to it. One it is
+    /// recreating, deleting or starting is left to it: starting it
+    /// meanwhile races the group, and fails once the group has deleted it.
+    pub idle: bool,
+    /// Whether the group is removing it (deleting or abandoning it): it
+    /// holds no place in the group's size, and what its host has counts
+    /// for nothing.
+    pub leaving: bool,
 }
 
 /// How often a fence looks again at an instance or operation.
@@ -303,14 +335,27 @@ impl GcpGroup {
         }
     }
 
-    /// Starts stopped instance `name`, without waiting for it to run.
-    pub async fn start(&self, name: &str) -> anyhow::Result<()> {
-        self.act(name, "start").await.map(|_| ())
+    /// Starts stopped instance `name`, without waiting for it to run. An
+    /// instance that no longer exists is [`Started::Gone`], not an error.
+    pub async fn start(&self, name: &str) -> anyhow::Result<Started> {
+        let token = self.token().await?;
+        let response = self
+            .http
+            .post(format!("{}/start", self.instance_url(name)))
+            .bearer_auth(token)
+            .header(reqwest::header::CONTENT_LENGTH, 0)
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Started::Gone);
+        }
+        response.error_for_status()?;
+        Ok(Started::Asked)
     }
 
-    /// The names of the group's instances that are stopped.
-    pub async fn stopped(&self) -> anyhow::Result<Vec<String>> {
-        let mut stopped = Vec::new();
+    /// The group's instances, as its manager lists them.
+    pub async fn members(&self) -> anyhow::Result<Vec<Member>> {
+        let mut members = Vec::new();
         let mut page: Option<String> = None;
         loop {
             let token = self.token().await?;
@@ -326,16 +371,19 @@ impl GcpGroup {
                 request = request.query(&[("pageToken", page)]);
             }
             let managed: Managed = request.send().await?.error_for_status()?.json().await?;
-            stopped.extend(
-                managed
-                    .managed_instances
-                    .into_iter()
-                    .filter(|managed| managed.instance_status.as_deref() == Some("TERMINATED"))
-                    .filter_map(|managed| managed.instance.rsplit('/').next().map(str::to_owned)),
-            );
+            members.extend(managed.managed_instances.into_iter().filter_map(|managed| {
+                let name = managed.instance.rsplit('/').next()?.to_owned();
+                let action = managed.current_action.as_deref();
+                Some(Member {
+                    name,
+                    stopped: managed.instance_status.as_deref() == Some("TERMINATED"),
+                    idle: action.is_none_or(|action| action == "NONE"),
+                    leaving: matches!(action, Some("DELETING" | "ABANDONING")),
+                })
+            }));
             match managed.next_page_token {
                 Some(next) if !next.is_empty() => page = Some(next),
-                _ => return Ok(stopped),
+                _ => return Ok(members),
             }
         }
     }

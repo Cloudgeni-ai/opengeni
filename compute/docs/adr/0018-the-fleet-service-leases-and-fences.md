@@ -116,9 +116,23 @@ can be built and tested.
   handed on from a host whose VMs might still run. Once given up on, a
   stopped instance is started again, and the scaling step starts any
   stopped member whose host is lost or never registered, so the group
-  keeps its size. Only zonal groups are supported, since a fence must name
-  the instance's zone. Hosts outside a group rely on their deadline, guard
-  and watchdog alone.
+  keeps its size. A member the group is itself acting on (recreating it,
+  as its autohealing does, or deleting or starting it) is left to the
+  group, an instance already deleted is nothing to start, and one that
+  fails to start is tried at the next look without holding up the rest
+  of the step. A member without a registered host counts as booting for
+  a boot allowance (ten minutes by default); one past it keeps its place
+  but no longer stands in for capacity, so the group grows around a
+  member the cloud never gets running. Each place in the group's size
+  counts once, from one look at the group and one read of the hosts: a
+  member brings its host, live or draining; a host the listing does not
+  name takes one of the places asked for and not listed, and brings
+  nothing once none is left (the group has let it go); a member the
+  group is removing holds none; growth adds the usable hosts it is short on top
+  of the places draining and stalled hosts hold; and no shrink is
+  suggested while a member is stalled. Only zonal groups are supported,
+  since a fence must name the instance's zone. Hosts outside a group rely
+  on their deadline, guard and watchdog alone.
 - **A host that comes back is fenced until it has caught up.** It
   registers again only once its last registration lapsed (the store
   refuses while that one is live, since its VMs may still run), and lists
@@ -240,14 +254,68 @@ can be built and tested.
 - **Recovery.** When the leader marks a host lost (so a late renewal fails
   and the host must register again), it raises the owner epoch of each of
   its sandboxes and clears their owner. Each comes back on its next wake,
-  from its latest archive, on another host. A sandbox never archived is
-  lost with its host; checkpoints, below, keep that window short. A lost
-  host that comes back gets back each sandbox nobody
-  adopted since, with its local state, which is at least as new as the
-  archive, and drops the rest.
+  from its latest
+  archive, on another host. A sandbox never archived is lost with its
+  host; checkpoints, below, keep that window short. A lost host that
+  comes back gets back each sandbox nobody adopted since, with its local
+  state, which is at least as new as the archive, and drops the rest.
+- **A lost owner's copy comes back from its files.** A host that releases
+  a sandbox hands its latest state off first, so its archive is the
+  sandbox as it was. A lost host hands nothing off: the archive is the
+  last copy it made, and the sandbox may have run on past it, its
+  programs answering requests and telling others what they did. A guest
+  restored from that copy's memory would run that stretch again, with
+  the same identity and connections, as if it had not happened (an
+  agent that deduplicates requests in memory would take a request it
+  already carried out for a new one). So the adopt that follows a loss
+  does not say `whole`: a host restores a copy's memory only when the
+  adopt (or a refetch verdict) says the copy is whole, and otherwise
+  deletes the memory image from the store's copy as it claims it, under
+  the claim's next save, and the next wake boots the copy's disk, as
+  after a crash. Programs end; files are as the copy left them; a new
+  guest agent starts and connects afresh. Vouching rather than warning
+  keeps a service from before the field safe on new hosts: its adopts
+  never say `whole`, so they always boot from files.
+
+  The row says which copy it may restore whole: `whole_epoch`, the owner
+  epoch under which the store's copy is the sandbox's whole latest state.
+  An adopt or refetch says `whole` only under that very epoch. A create
+  sets it to the first epoch
+  and a hand-off to the epoch it leaves. A change whose owner held
+  nothing of the sandbox carries it on to the change's new epoch: a give
+  (to a host that adopts it, or to another after one refused it outright)
+  and clearing an owner that answered it holds nothing. Every other change
+  raises the epoch past it: a give-up, a reclaim, and any change by a
+  replica from before the column, which writes epochs but not the mark.
+  So a stale copy can never count as whole, while needless boots from
+  files are confined to rare paths: a hand-off whose answer was lost, of
+  a sandbox whose copy was not whole when it was given, and rows from
+  before the column, which start with no mark. The mark cannot
+  be a "lost" flag that a give-up sets, because a replica of the earlier
+  release, still serving during a rolling upgrade or after a rollback,
+  gives up on hosts without setting it; nor can a clear vouch for a copy
+  unless the owner proved it handed the state off, because an owner that
+  held nothing may itself have been given a lost owner's copy. The fleet
+  simulation checks the rule: every adopt that restores memory finds the
+  archive holding every write of the sandbox's latest run.
+
+  An earlier host ignores `whole` and always restores the memory image,
+  so every host must run this release before the service does
+  (operations.md, Upgrades); a replica of the earlier service still
+  serving during the rollout, or after a rollback, then only ever has
+  copies booted from their files. Before the host pauses a guest to
+  save or checkpoint it, it asks the guest to write what it holds for
+  its disks to them (`sync` on the notice port), so a disk copied while
+  its guest ran holds what the guest had written. A sandbox asleep in
+  object storage when its host was lost had not run past its copy, but
+  nothing durable says so, and it boots from its files too: telling
+  the two apart would take a mark in the stored copy that every eviction
+  sets and every wake from it clears before the guest runs, one more
+  store write on each.
 - **Checkpoints.** A sandbox whose sleep rules set `checkpoint_every_ms`
   is copied to object storage while it runs, so losing its host costs
-  only what changed since. The fleet sets it to 10 minutes for every
+  only what its files took on since, and its running programs (see the
+  previous item). The fleet sets it to 10 minutes for every
   sandbox whose create names no sleep rules. Protection starts once a
   copy is in the store, not when it was captured, and the period counts
   running time from the later of when its newest copy got there and its
