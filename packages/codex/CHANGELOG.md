@@ -1,5 +1,16 @@
 # @opengeni/codex
 
+## 4.1.1
+
+### Patch Changes
+
+- 84688e2: Reuse familiar Codex prompt prefixes across sessions for the same person in a workspace by separating Responses cache affinity from session identity. Keep request bodies, per-session cache keys, conversation sockets, and continuation chains unchanged.
+- Updated dependencies [afff3f9]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [9be9a82]
+  - @opengeni/contracts@4.1.0
+  - @opengeni/network@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes
