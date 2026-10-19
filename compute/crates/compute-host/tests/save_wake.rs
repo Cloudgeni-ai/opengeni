@@ -1017,7 +1017,7 @@ async fn adopt_checkpointed(
             id,
             config,
             owner_epoch: 2,
-            from_files: false,
+            whole: true,
         })
         .await
         .unwrap();

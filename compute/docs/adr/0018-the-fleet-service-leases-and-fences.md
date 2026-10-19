@@ -253,8 +253,8 @@ can be built and tested.
   places the sandbox again elsewhere.
 - **Recovery.** When the leader marks a host lost (so a late renewal fails
   and the host must register again), it raises the owner epoch of each of
-  its sandboxes and clears their owner, marking each as left by a lost
-  owner (`lost`). Each comes back on its next wake, from its latest
+  its sandboxes and clears their owner. Each comes back on its next wake,
+  from its latest
   archive, on another host. A sandbox never archived is lost with its
   host; checkpoints, below, keep that window short. A lost host that
   comes back gets back each sandbox nobody adopted since, with its local
@@ -268,14 +268,42 @@ can be built and tested.
   the same identity and connections, as if it had not happened (an
   agent that deduplicates requests in memory would take a request it
   already carried out for a new one). So the adopt that follows a loss
-  says `from_files`: the new owner deletes the memory image from the
-  store's copy as it claims it, under the claim's next save, and the
-  next wake boots the copy's disk, as after a crash. Programs end;
-  files are as the copy left them; a new guest agent starts and
-  connects afresh. The mark stays through any number of gives and
-  reclaims and only a release (a hand-off, whose copy is current) or a
-  new create clears it, so a refetch or a placement tried again after a
-  loss takes the copy up the same way. Before the host pauses a guest to
+  does not say `whole`: a host restores a copy's memory only when the
+  adopt (or a refetch verdict) says the copy is whole, and otherwise
+  deletes the memory image from the store's copy as it claims it, under
+  the claim's next save, and the next wake boots the copy's disk, as
+  after a crash. Programs end; files are as the copy left them; a new
+  guest agent starts and connects afresh. Vouching rather than warning
+  keeps a service from before the field safe on new hosts: its adopts
+  never say `whole`, so they always boot from files.
+
+  The row says which copy it may restore whole: `whole_epoch`, the owner
+  epoch under which the store's copy is the sandbox's whole latest state.
+  An adopt or refetch says `whole` only under that very epoch. A create
+  sets it to the first epoch
+  and a hand-off to the epoch it leaves. A change whose owner held
+  nothing of the sandbox carries it on to the change's new epoch: a give
+  (to a host that adopts it, or to another after one refused it outright)
+  and clearing an owner that answered it holds nothing. Every other change
+  raises the epoch past it: a give-up, a reclaim, and any change by a
+  replica from before the column, which writes epochs but not the mark.
+  So a stale copy can never count as whole, while needless boots from
+  files are confined to rare paths: a hand-off whose answer was lost, of
+  a sandbox whose copy was not whole when it was given, and rows from
+  before the column, which start with no mark. The mark cannot
+  be a "lost" flag that a give-up sets, because a replica of the earlier
+  release, still serving during a rolling upgrade or after a rollback,
+  gives up on hosts without setting it; nor can a clear vouch for a copy
+  unless the owner proved it handed the state off, because an owner that
+  held nothing may itself have been given a lost owner's copy. The fleet
+  simulation checks the rule: every adopt that restores memory finds the
+  archive holding every write of the sandbox's latest run.
+
+  An earlier host ignores `whole` and always restores the memory image,
+  so every host must run this release before the service does
+  (operations.md, Upgrades); a replica of the earlier service still
+  serving during the rollout, or after a rollback, then only ever has
+  copies booted from their files. Before the host pauses a guest to
   save or checkpoint it, it asks the guest to write what it holds for
   its disks to them (`sync` on the notice port), so a disk copied while
   its guest ran holds what the guest had written. A sandbox asleep in

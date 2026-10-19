@@ -90,14 +90,16 @@ create index if not exists compute_create_requests_gone_ms on compute_create_req
     where gone_ms is not null;
 ";
 
-/// Version 2: whether a sandbox's last owner was lost rather than handing
-/// it off, for which its next owner starts it from its files. Which earlier
-/// releases were losses is not recorded, so a sandbox nobody owns counts as
-/// lost: its next owner boots it rather than restore a copy that may be
-/// stale. One with an owner has been taken up already.
+/// Version 2: the owner epoch under which a sandbox's stored copy is its
+/// whole latest state (`whole_epoch`, see `Ownership::whole`); a host
+/// taking the sandbox up under any other epoch starts it from the copy's
+/// files. Nothing recorded which earlier copies were handed off, so every
+/// sandbox from before starts with none. A replica of an earlier release
+/// changes a row's epoch without this column, which leaves the copy
+/// counted as not whole: beside this version it can make a copy start
+/// from its files needlessly, never be restored when it should not.
 const MIGRATION_2: &str = "
-alter table compute_sandboxes add column if not exists lost_owner boolean not null default false;
-update compute_sandboxes set lost_owner = true where owner is null;
+alter table compute_sandboxes add column if not exists whole_epoch bigint;
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take

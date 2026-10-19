@@ -74,7 +74,7 @@ async fn adopt(lab: &Lab, id: Id, owner_epoch: u64) -> Reply {
             id,
             config: config(NEVER),
             owner_epoch,
-            from_files: false,
+            whole: true,
         })
         .await
         .unwrap()
@@ -348,7 +348,7 @@ async fn a_registering_host_keeps_what_the_service_rules_and_drops_the_rest() {
                 refetched,
                 Verdict::Refetch {
                     owner_epoch: 4,
-                    from_files: false,
+                    whole: true,
                 },
             ),
         ])

@@ -526,12 +526,17 @@ pub enum Request {
     /// store's, it is refused with [`ErrorCode::Stale`], and without a
     /// stored copy with [`ErrorCode::NotFound`].
     ///
-    /// With `from_files`, sent when the sandbox's last owner was lost
-    /// rather than handing it off, the copy may be older than the sandbox
-    /// had become: its memory image would bring back programs at a point
-    /// they had already run past. The host deletes the image from the
+    /// The host restores the copy's memory only with `whole`, which the
+    /// service sends when it knows the copy to be the sandbox's whole
+    /// latest state (its last owner handed it off). Otherwise the copy may
+    /// be older than the sandbox had become, as when its last owner was
+    /// lost, and its memory image would bring back programs at a point
+    /// they had already run past: the host deletes the image from the
     /// store's copy as it claims it, and the next wake boots from the
-    /// copy's files, as after a crash.
+    /// copy's files, as after a crash. So a service from before the field
+    /// never has a copy's memory restored; a host from before it ignores
+    /// the field and always restores memory, so hosts are upgraded before
+    /// the service.
     Adopt {
         /// Its id.
         id: Id,
@@ -539,9 +544,9 @@ pub enum Request {
         config: SandboxConfig,
         /// The owner epoch the host takes it under.
         owner_epoch: u64,
-        /// Whether to take up the copy's files alone.
+        /// Whether the copy is whole, memory and all.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        from_files: bool,
+        whole: bool,
     },
     /// Hand a sandbox off to whichever host adopts it next: the host stops
     /// taking wakes for it (they are refused with [`ErrorCode::Busy`]),

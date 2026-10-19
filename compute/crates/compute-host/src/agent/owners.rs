@@ -691,16 +691,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         continue;
                     }
                 }
-                Verdict::Refetch {
-                    owner_epoch,
-                    from_files,
-                } => {
+                Verdict::Refetch { owner_epoch, whole } => {
                     let mut config = record.config.clone();
                     config.link = link;
                     let then = Then {
                         config,
                         owner: OwnerEpoch(owner_epoch),
-                        from_files,
+                        from_files: !whole,
                         reply: done,
                         under: None,
                     };

@@ -567,12 +567,17 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
 
 ## Upgrades
 
-- **Order.** Upgrade the hosts before the fleet service. A newer service
-  may send a host fields an older one refuses (it rejects fields it does
-  not know): the adopt after a host loss carries `from_files`, which
-  only a newer host reads. A newer host works with an older service,
-  and a host whose guest image predates the `sync` request warns and
-  saves without it.
+- **Order.** Upgrade every host before the fleet service. A host restores
+  an adopted copy's memory only when the service says the copy is whole
+  (`whole`, ADR 18), and otherwise boots it from its files; a host from
+  before that ignores the field and always restores memory, including a
+  lost host's copy, which may be older than the sandbox had become.
+  Nothing refuses it, so the order is what keeps it from happening. A
+  newer host works with an older service, whose adopts then always boot
+  from files, so replicas of the earlier release serving during the
+  rollout, or after a rollback, never restore a stale copy; beside the
+  new schema they can only make a copy count as not whole. A host whose
+  guest image predates the `sync` request warns and saves without it.
 - **The agent** can be replaced at any time; running VMs keep running
   ([ADR 9](adr/0009-vms-outlive-the-agent.md)). Run the new bundle's
   `install.sh` (without `--config`, the installed configuration stays):

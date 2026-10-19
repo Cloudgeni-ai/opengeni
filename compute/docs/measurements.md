@@ -341,10 +341,11 @@ it (a file on disk and one in memory) was lost, as it should be, and the
 first host's next checkpoint was fenced off and dropped its copy.
 
 Since 2026-10-19 an adopt after a host loss no longer restores the copy's
-memory: the fleet service tells the new host to take it up from its files
-alone, and the sandbox boots from them with its programs ended (ADR 18).
-The runs above adopt under a later epoch without that, so they measure the
-memory restore a move or drain still uses. The host also asks the guest to
+memory: a host restores memory only when the fleet service says the copy
+is whole, as after a hand-off, and otherwise boots the sandbox from the
+copy's files with its programs ended (ADR 18). The runs above adopt with
+`whole`, so they measure the memory restore a move or drain still uses.
+The host also asks the guest to
 sync its disks before each pause. The host-loss rows of the end-to-end
 suite below measure the boot from files.
 

@@ -3,10 +3,11 @@
 
 use std::time::{Duration, Instant};
 
-use compute_protocol::fleet::Registered;
+use compute_protocol::fleet::{Envelope, Registered};
+use compute_protocol::host::{ErrorCode, Reply, Request};
 use serde_json::json;
 
-use super::support::{Fleet, counted, given_up, id, until};
+use super::support::{Act, Fleet, counted, given_up, id, until};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_host_is_given_up_on_no_sooner_than_its_term_and_margin_after_it_stopped() {
@@ -68,6 +69,50 @@ async fn a_sandbox_of_a_host_given_up_on_wakes_elsewhere_from_its_archive() {
         .await;
     assert_eq!(status, 200, "{moved}");
     assert_eq!(c.adopts(id(&archived)), [false]);
+}
+
+fn refuse_adopts(envelope: &Envelope) -> Act {
+    match envelope.request {
+        Request::Adopt { .. } => Act::Reply(Reply::Error {
+            message: "full".into(),
+            code: ErrorCode::HostFull,
+        }),
+        _ => Act::Ordinary,
+    }
+}
+
+/// A host given a lost owner's copy that refused it holds nothing of it,
+/// so moving the sandbox off that host vouches for nothing: the next host
+/// still takes the copy up from its files.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_owners_copy_stays_unvouched_through_a_host_that_refused_it() {
+    let fleet = Fleet::start().await;
+    let a = fleet.host("host-a.example").await;
+    let sandbox = fleet.create(json!({})).await;
+    a.archive(id(&sandbox), 1).await;
+    let b = fleet.host("host-b.example").await;
+    b.behave(refuse_adopts);
+    a.renewing(false);
+    given_up(&fleet, &a).await;
+    let (status, refused) = fleet
+        .post(&format!("/v1/sandboxes/{sandbox}/wake"), json!({}))
+        .await;
+    assert_ne!(status, 200, "{refused}");
+    assert_eq!(b.holds(id(&sandbox)), None);
+    let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
+    assert_eq!(row["host"], json!("host-b.example"), "given to b: {row}");
+
+    b.behave(|_| Act::Ordinary);
+    let c = fleet.host("host-c.example").await;
+    let (status, moved) = fleet
+        .post(
+            &format!("/v1/sandboxes/{sandbox}/move"),
+            json!({ "to": "host-c.example" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{moved}");
+    assert!(b.ops().contains(&"hand_off"), "{:?}", b.ops());
+    assert_eq!(c.adopts(id(&sandbox)), [true]);
 }
 
 /// A host given up on that comes back lists what it holds: what went

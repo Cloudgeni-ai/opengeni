@@ -148,12 +148,12 @@ pub enum Verdict {
     Keep { owner_epoch: u64 },
     /// It is still this host's, but its copy is older than the latest
     /// archive: drop the copy and adopt the archive under `owner_epoch`,
-    /// from its files alone when `from_files` says so, as
+    /// restoring its memory only with `whole`, as
     /// [`Request::Adopt`](crate::host::Request::Adopt) does.
     Refetch {
         owner_epoch: u64,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        from_files: bool,
+        whole: bool,
     },
     /// Drop the local copy: it belongs to someone else, or no longer
     /// exists.

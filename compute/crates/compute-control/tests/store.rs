@@ -225,7 +225,7 @@ async fn owner_lost<S: Store>(store: S) {
     assert!(cleared.ownership.epoch > owned.ownership.epoch);
     assert!(cleared.version > owned.version);
     // Its next owner starts it from its stored files.
-    assert!(cleared.ownership.lost, "{cleared:?}");
+    assert!(!cleared.ownership.whole_copy(), "{cleared:?}");
 
     // Nothing can make it, or a new sandbox, the lost host's again.
     assert_eq!(
@@ -241,13 +241,23 @@ async fn owner_lost<S: Store>(store: S) {
     assert_eq!(store.replace(&elsewhere).await.unwrap(), Write::Done);
     let given = store.owned_by(live).await.unwrap().remove(0);
     assert_eq!(given.ownership.owner, Some(live));
-    assert!(given.ownership.lost, "giving it on keeps that");
-    // Until an owner hands it off.
+    assert!(!given.ownership.whole_copy(), "giving it on keeps that");
+    // Cleared from an owner that held nothing, it is no more whole...
+    let mut cleared = given.clone();
+    cleared.ownership = given.ownership.clear().set;
+    assert_eq!(store.replace(&cleared).await.unwrap(), Write::Done);
+    let cleared = store.sandbox(owned.id).await.unwrap().unwrap();
+    assert!(!cleared.ownership.whole_copy(), "{cleared:?}");
+    // ...until an owner hands it off.
+    let mut given = cleared.clone();
+    given.ownership = cleared.ownership.give(live).set;
+    assert_eq!(store.replace(&given).await.unwrap(), Write::Done);
+    let given = store.sandbox(owned.id).await.unwrap().unwrap();
     let mut released = given.clone();
-    released.ownership = given.ownership.clear().set;
+    released.ownership = given.ownership.release().set;
     assert_eq!(store.replace(&released).await.unwrap(), Write::Done);
     let handed_off = store.sandbox(owned.id).await.unwrap().unwrap();
-    assert!(!handed_off.ownership.lost, "{handed_off:?}");
+    assert!(handed_off.ownership.whole_copy(), "{handed_off:?}");
 }
 
 #[tokio::test]
@@ -756,12 +766,12 @@ async fn a_database_from_before_schema_versions_is_upgraded_keeping_its_requests
         .unwrap();
 }
 
-/// A database at version 1 kept no record of which releases were losses:
-/// upgraded, every sandbox nobody owns counts as left by a lost owner, so
-/// its next owner starts it from its files, and one with an owner, already
-/// taken up, keeps its copy.
+/// The copies a database at version 1 holds are next taken up from their
+/// files, and a replica from before version 2 writing beside it can only
+/// leave a copy counted as not whole: the exact statement it gives up on a
+/// host with raises the epoch past the mark.
 #[tokio::test]
-async fn a_database_at_version_one_counts_its_ownerless_sandboxes_as_lost() {
+async fn a_replica_from_before_version_two_never_makes_a_copy_count_as_whole() {
     let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
         return;
     };
@@ -775,23 +785,59 @@ async fn a_database_at_version_one_counts_its_ownerless_sandboxes_as_lost() {
     client
         .batch_execute(&format!(
             "set search_path = {schema}; \
-             alter table compute_sandboxes drop column lost_owner; \
-             update compute_sandboxes set owner = null where id = '{}'; \
+             alter table compute_sandboxes drop column whole_epoch; \
+             update compute_sandboxes set owner = null, epoch = epoch + 1 where id = '{}'; \
              update compute_schema set version = 1;",
             ownerless.id
         ))
         .await
         .unwrap();
     let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
-    let lost = async |id| store.sandbox(id).await.unwrap().unwrap().ownership.lost;
-    assert!(!lost(owned.id).await, "taken up already");
-    assert!(lost(ownerless.id).await);
+    let whole = async |id| {
+        store
+            .sandbox(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .ownership
+            .whole_copy()
+    };
+    assert!(!whole(owned.id).await);
+    assert!(!whole(ownerless.id).await);
     let version: i32 = client
         .query_one(&format!("select version from {schema}.compute_schema"), &[])
         .await
         .unwrap()
         .get(0);
     assert_eq!(version, 2);
+
+    // Handed off and given on by this release, the copy is whole...
+    let row = store.sandbox(ownerless.id).await.unwrap().unwrap();
+    let mut given = row.clone();
+    given.ownership = Ownership {
+        whole: Some(row.ownership.epoch),
+        ..row.ownership
+    }
+    .give(HostId(2))
+    .set;
+    assert_eq!(store.replace(&given).await.unwrap(), Write::Done);
+    assert!(whole(ownerless.id).await);
+    // ...until an earlier release gives up on its host with its own
+    // statement, which knows nothing of the mark.
+    client
+        .execute(
+            &format!(
+                "update {schema}.compute_sandboxes set owner = null, epoch = epoch + 1, \
+                 version = version + 1 where owner = $1"
+            ),
+            &[&2_i64],
+        )
+        .await
+        .unwrap();
+    let after = store.sandbox(ownerless.id).await.unwrap().unwrap();
+    assert_eq!(after.ownership.owner, None);
+    assert!(!after.ownership.whole_copy(), "{after:?}");
+    assert!(!after.ownership.give(HostId(3)).set.whole_copy());
     drop(store);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))

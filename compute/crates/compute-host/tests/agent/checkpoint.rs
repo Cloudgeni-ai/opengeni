@@ -311,7 +311,7 @@ async fn a_running_sandbox_is_checkpointed_and_boots_elsewhere_from_its_files_th
                 id: sandbox,
                 config: config(CHECKPOINTED),
                 owner_epoch: 2,
-                from_files: true,
+                whole: false,
             })
             .await
             .unwrap(),
@@ -371,7 +371,7 @@ async fn a_checkpoint_that_finds_a_later_owner_drops_this_hosts_copy() {
                 id: sandbox,
                 config: config(CHECKPOINTED),
                 owner_epoch: 2,
-                from_files: false,
+                whole: true,
             })
             .await
             .unwrap(),
@@ -553,7 +553,7 @@ async fn a_new_sandbox_that_checkpoints_is_archived_before_it_ever_runs() {
                 id: sandbox,
                 config: config(CHECKPOINTED),
                 owner_epoch: 2,
-                from_files: false,
+                whole: true,
             })
             .await
             .unwrap(),

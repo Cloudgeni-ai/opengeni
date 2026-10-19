@@ -14,7 +14,10 @@
 //! - an archive pointer's stamp never goes back, so a former owner never
 //!   publishes over a new one and an older save never over a newer one;
 //! - a move loses nothing: the archive holds every write when the host
-//!   releases the sandbox.
+//!   releases the sandbox;
+//! - nothing is brought back rewound: an adopt restores the archive's
+//!   memory only when no run of the sandbox wrote past the archive, and
+//!   takes it up from its files alone otherwise.
 //!
 //! At the end faults stop and every sandbox is woken: each must run on its
 //! owner under the store's epoch, except those whose host died for good
@@ -258,6 +261,9 @@ enum Event {
         op: Op,
         id: SandboxId,
         epoch: OwnerEpoch,
+        /// For an adopt, whether to take the archive up from its files
+        /// alone, as the row said when it was sent.
+        from_files: bool,
         tries: u32,
     },
     Answered {
@@ -309,6 +315,8 @@ struct Stats {
     recoveries: u64,
     reclaims: u64,
     adopts: u64,
+    /// Adopts that took an archive up from its files alone.
+    adopts_from_files: u64,
     moves: u64,
     fenced: u64,
     lost_writes: u64,
@@ -570,8 +578,16 @@ impl Sim {
                 op,
                 id,
                 epoch,
+                from_files,
                 tries,
-            } => self.host_request(host, Some((host_epoch, stamp)), op, id, epoch, tries),
+            } => self.host_request(
+                host,
+                Some((host_epoch, stamp)),
+                (op, from_files),
+                id,
+                epoch,
+                tries,
+            ),
             Event::Answered {
                 host,
                 op,
@@ -860,7 +876,9 @@ impl Sim {
                     kept.insert(*id, *epoch);
                 }
                 Verdict::Drop => {}
-                Verdict::Refetch { epoch, .. } => refetch.push((*id, *epoch)),
+                Verdict::Refetch { epoch, from_files } => {
+                    refetch.push((*id, *epoch, *from_files));
+                }
                 Verdict::Reclaim { .. } => unreachable!("the store resolves reclaims"),
             }
         }
@@ -877,8 +895,8 @@ impl Sim {
         if self.hosts[index].lease.registered(renewal, epoch) {
             self.write_file(index);
         }
-        for (id, epoch) in refetch {
-            self.host_request(index, None, Op::Adopt, id, epoch, 0);
+        for (id, epoch, from_files) in refetch {
+            self.host_request(index, None, (Op::Adopt, from_files), id, epoch, 0);
         }
     }
 
@@ -899,12 +917,13 @@ impl Sim {
 
     /// A request from the service, sent under the host's registration
     /// and stamped with its renewal then (`None` for work the host gives
-    /// itself).
+    /// itself); an adopt says whether to take the archive up from its
+    /// files alone.
     fn host_request(
         &mut self,
         index: usize,
         sent: Option<(HostEpoch, u64)>,
-        op: Op,
+        (op, from_files): (Op, bool),
         id: SandboxId,
         epoch: OwnerEpoch,
         tries: u32,
@@ -928,7 +947,7 @@ impl Sim {
             match op {
                 Op::Create => self.host_create(index, id, epoch),
                 Op::Wake => self.host_wake(index, id, epoch),
-                Op::Adopt => self.host_adopt(index, id, epoch),
+                Op::Adopt => self.host_adopt(index, id, epoch, from_files),
                 Op::HandOff => match self.host_release(index, id, epoch) {
                     Some(answer) => answer,
                     None => return,
@@ -1004,7 +1023,13 @@ impl Sim {
         Answer::Ok
     }
 
-    fn host_adopt(&mut self, index: usize, id: SandboxId, epoch: OwnerEpoch) -> Answer {
+    fn host_adopt(
+        &mut self,
+        index: usize,
+        id: SandboxId,
+        epoch: OwnerEpoch,
+        from_files: bool,
+    ) -> Answer {
         let host = &self.hosts[index];
         match host.sandboxes.get(&id) {
             Some(local) if local.epoch == epoch => return Answer::Ok,
@@ -1030,6 +1055,19 @@ impl Sim {
             },
         );
         let written = self.ghost.written.insert(id, pointer.content).unwrap_or(0);
+        if from_files {
+            self.stats.adopts_from_files += 1;
+        } else if written > pointer.content {
+            // Its memory would be of a past its programs had already run
+            // through, and told others of.
+            self.fail(
+                id,
+                &format!(
+                    "{id:?} restored rewound: archive at {}, but a run wrote up to {written}",
+                    pointer.content
+                ),
+            );
+        }
         self.stats.lost_writes += written.saturating_sub(pointer.content);
         self.stats.adopts += 1;
         self.hosts[index].sandboxes.insert(
@@ -1609,6 +1647,7 @@ impl Sim {
         if op.takes() {
             self.sends.entry(id).or_default().send(epoch, stamp);
         }
+        let from_files = op == Op::Adopt && !self.rows.get(&id).is_some_and(|row| row.whole_copy());
         self.send(
             index,
             Event::Request {
@@ -1618,6 +1657,7 @@ impl Sim {
                 op,
                 id,
                 epoch,
+                from_files,
                 tries,
             },
         );
@@ -1861,6 +1901,7 @@ fn run_seeds(params: Params) -> Stats {
         total.recoveries += stats.recoveries;
         total.reclaims += stats.reclaims;
         total.adopts += stats.adopts;
+        total.adopts_from_files += stats.adopts_from_files;
         total.moves += stats.moves;
         total.fenced += stats.fenced;
         total.lost_writes += stats.lost_writes;
@@ -1907,6 +1948,12 @@ fn the_protocol_keeps_every_sandbox_on_one_host_through_faults() {
     // The run exercised every path it checks.
     assert!(
         total.recoveries > 0 && total.reclaims > 0 && total.adopts > 0,
+        "{total:?}"
+    );
+    // Both kinds of adopt happened: from a handed-off archive's memory and
+    // from a lost owner's files.
+    assert!(
+        total.adopts_from_files > 0 && total.adopts > total.adopts_from_files,
         "{total:?}"
     );
     assert!(

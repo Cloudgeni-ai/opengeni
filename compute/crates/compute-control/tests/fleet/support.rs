@@ -589,10 +589,8 @@ impl FakeHost {
             .iter()
             .filter_map(|seen| match &seen.envelope.request {
                 Request::Adopt {
-                    id: adopted,
-                    from_files,
-                    ..
-                } if *adopted == id => Some(*from_files),
+                    id: adopted, whole, ..
+                } if *adopted == id => Some(!*whole),
                 _ => None,
             })
             .collect()
