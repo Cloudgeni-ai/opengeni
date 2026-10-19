@@ -1952,6 +1952,20 @@ check(
       await sleep(5_000);
       restored = consoleSince(host, dead.mark);
     }
+    let journal = readJournal();
+    for (
+      let tries = 0;
+      tries < 6 &&
+      ((journal[0] ?? 0) < 1 ||
+        (dead.lost + restored.lost < 1 && (journal[1] ?? 0) + (journal[2] ?? 0) < 1));
+      tries += 1
+    ) {
+      await sleep(5_000);
+      journal = readJournal();
+    }
+    // Counted once the journal's evidence is in, from the same mark: a
+    // reconnect while it was awaited counts too.
+    restored = consoleSince(host, dead.mark);
     if (dead.launches !== 0) {
       failures.push(`the VMM launched again before the kill: ${describeGrowth(dead)}`);
     }
@@ -1972,16 +1986,6 @@ check(
       failures.push(
         `the agent connected ${growth.connected} times after the crash, not once: ${describeGrowth(growth)}`,
       );
-    }
-    let journal = readJournal();
-    for (
-      let tries = 0;
-      tries < 6 &&
-      ((journal[0] ?? 0) < 1 || (growth.lost < 1 && (journal[1] ?? 0) + (journal[2] ?? 0) < 1));
-      tries += 1
-    ) {
-      await sleep(5_000);
-      journal = readJournal();
     }
     const [lostAlarm = 0, cannotOwn = 0, endedOwn = 0, broke = 0, nohello = 0, tooMany = 0] =
       journal;
@@ -2073,11 +2077,14 @@ check(
     const before = await sandbox();
     const lost = before.host!;
     const lostEpoch = (await hosts()).find((host) => host.name === lost)?.epoch;
+    if (typeof lostEpoch !== "number") {
+      throw new Error(`the fleet lists no host epoch for ${lost} before the stop`);
+    }
     // The instance group heals a stopped host by recreating it under the
     // same name, so a name alone does not say which machine it is: the
     // instance id does.
-    const instanceId = (name: string) =>
-      gcloud([
+    const instanceId = (name: string) => {
+      const found = gcloud([
         "compute",
         "instances",
         "describe",
@@ -2089,6 +2096,11 @@ check(
         "--format",
         "value(id)",
       ]);
+      if (!/^[0-9]+$/.test(found)) {
+        throw new Error(`${name}'s instance id reads ${JSON.stringify(found)}, not an id`);
+      }
+      return found;
+    };
     const lostInstance = instanceId(lost);
     // Its journal goes with it when the instance group replaces it: keep
     // it, from the run's start, for the verifier (as host-<name>@<instance>).
@@ -2160,8 +2172,16 @@ check(
         );
       }
     }
+    // Under the same name: a distinct instance id, and a host epoch known
+    // and strictly higher than the lost machine's.
     const sameMachine =
-      after.host === lost && (ownerInstance === lostInstance || owner?.epoch === lostEpoch);
+      after.host === lost &&
+      !(
+        ownerInstance !== "" &&
+        ownerInstance !== lostInstance &&
+        typeof owner?.epoch === "number" &&
+        owner.epoch > lostEpoch
+      );
     if (!after.host || sameMachine || owner?.state !== "live") {
       throw new Error(
         `answered, but owned by ${after.host ?? "no host"} (${owner?.state ?? "unknown"}` +
