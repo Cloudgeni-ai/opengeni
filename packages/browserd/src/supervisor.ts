@@ -416,8 +416,13 @@ type Runtime = {
   creationObservation: BrowserObservation | null;
   recovery: Promise<void> | null;
   externalAuthTail: Promise<void> | null;
+  /** Outstanding uses that keep the browser's windows presented. Each is
+   * bound to the current driver and moves to its replacement on recovery. */
+  presence: Set<PresenceHold>;
   lifecycle: "active" | "recovering" | "reconfiguring" | "capturing" | "captured" | "ending";
 };
+
+type PresenceHold = { driver: BrowserSupervisorDriver | null; release: () => void };
 
 type BrowserRuntimeOptions = Omit<
   BrowserSupervisorSessionOptions,
@@ -1881,24 +1886,32 @@ export class BrowserSupervisor {
         lastTargets: [],
         creationObservation: null,
         recovery: null,
+        presence: new Set(),
       };
       runtime.controller = this.createController(runtime, driver);
-      if (restoredManifest) {
-        await restoreTabs(
-          driver,
-          options.initialUrl
-            ? [{ url: options.initialUrl, selected: true }]
-            : restoredManifest.tabs,
-        );
-        runtime.lastSnapshot = await driver.runtimeSnapshot();
-        assertRestoredRuntimeCompatible(restoredManifest, runtime.lastSnapshot);
-        runtime.lastTargets = await driver.listTargets();
-        runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
-      } else {
-        const observation = await driver.start(options.initialUrl);
-        runtime.creationObservation = observation;
-        runtime.lastTargets = [observation.target];
-        runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+      // Startup and tab restoration are a use of the browser: nothing may park
+      // its windows before they finish.
+      const startupPresence = await this.acquirePresence(runtime);
+      try {
+        if (restoredManifest) {
+          await restoreTabs(
+            driver,
+            options.initialUrl
+              ? [{ url: options.initialUrl, selected: true }]
+              : restoredManifest.tabs,
+          );
+          runtime.lastSnapshot = await driver.runtimeSnapshot();
+          assertRestoredRuntimeCompatible(restoredManifest, runtime.lastSnapshot);
+          runtime.lastTargets = await driver.listTargets();
+          runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+        } else {
+          const observation = await driver.start(options.initialUrl);
+          runtime.creationObservation = observation;
+          runtime.lastTargets = [observation.target];
+          runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+        }
+      } finally {
+        startupPresence();
       }
       delete driverContext.headlessSessionCookies;
       if (workingJournal && workingReceipt) {
@@ -2200,11 +2213,15 @@ export class BrowserSupervisor {
           })
         : null;
     const driver = await this.createDriver(runtime.driverContext);
+    // The replacement stays presented while it restores tabs and until every
+    // outstanding use has moved to it.
+    const restorePresence = (await driver.acquirePresence?.()) ?? (() => undefined);
     try {
       await restoreTabs(driver, snapshot.tabs);
       const currentSnapshot = await driver.runtimeSnapshot();
       const currentTargets = await driver.listTargets();
       runtime.driver = driver;
+      for (const hold of runtime.presence) await this.bindPresence(runtime, hold);
       runtime.controller = this.createController(runtime, driver);
       runtime.lastTargets = currentTargets;
       runtime.lastSnapshot = snapshotWithTargets(currentSnapshot, currentTargets);
@@ -2232,6 +2249,8 @@ export class BrowserSupervisor {
         );
       }
       throw error;
+    } finally {
+      restorePresence();
     }
   }
 
@@ -2322,8 +2341,37 @@ export class BrowserSupervisor {
   }
 
   private async acquirePresence(runtime: Runtime): Promise<() => void> {
-    const acquire = runtime.driver.acquirePresence;
-    return acquire ? await acquire.call(runtime.driver) : () => undefined;
+    const hold: PresenceHold = { driver: null, release: () => undefined };
+    runtime.presence.add(hold);
+    await this.bindPresence(runtime, hold);
+    return () => {
+      if (!runtime.presence.delete(hold)) return;
+      hold.driver = null;
+      hold.release();
+    };
+  }
+
+  /** Moves a presence hold onto the runtime's current driver. Presenting is
+   * best effort, so this never fails an operation. */
+  private async bindPresence(runtime: Runtime, hold: PresenceHold): Promise<void> {
+    while (runtime.presence.has(hold) && hold.driver !== runtime.driver) {
+      const driver = runtime.driver;
+      let release: () => void = () => undefined;
+      try {
+        release = (await driver.acquirePresence?.()) ?? release;
+      } catch {
+        /* Best effort. */
+      }
+      // Released, or recovery replaced the driver, while acquiring.
+      if (!runtime.presence.has(hold) || runtime.driver !== driver) {
+        release();
+        continue;
+      }
+      const previous = hold.release;
+      hold.driver = driver;
+      hold.release = release;
+      previous();
+    }
   }
 
   private async recoverIfUnavailable(runtime: Runtime): Promise<boolean> {

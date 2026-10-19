@@ -10,9 +10,11 @@ function harness(options: {
 }) {
   const calls: string[] = [];
   let failPresent = false;
+  const failLookup = new Set<string>();
   const connection: WindowParkingConnection = {
     async send<T>(method: string, params?: Readonly<Record<string, unknown>>): Promise<T> {
       if (method === "Browser.getWindowForTarget") {
+        if (failLookup.has(params?.targetId as string)) throw new Error("timed out");
         const windowId = options.targets[params?.targetId as string];
         if (windowId === undefined) throw new Error("No target with given id");
         return { windowId, bounds: { windowState: options.windows[windowId]!.state } } as T;
@@ -60,6 +62,10 @@ function harness(options: {
     errors,
     failPresent: (value: boolean) => {
       failPresent = value;
+    },
+    failLookup: (targetId: string, value: boolean) => {
+      if (value) failLookup.add(targetId);
+      else failLookup.delete(targetId);
     },
     hasPendingPark: () => pending !== null,
     /** Fires the idle timer and waits for the parking step to finish. */
@@ -155,5 +161,33 @@ describe("BrowserWindowParking", () => {
     expect(h.calls).toEqual(["suspend", "1:minimized", "1:normal", "resume"]);
     (await h.parking.acquire())();
     expect(h.calls.length).toBe(4);
+  });
+
+  test("a failed window lookup keeps that window eligible for presenting on the next use", async () => {
+    const h = harness({
+      windows: { 1: { state: "normal" }, 2: { state: "maximized" } },
+      targets: { a: 1, b: 2 },
+    });
+    h.parking.arm();
+    await h.idle();
+    expect(h.calls).toEqual(["1:minimized", "2:minimized"]);
+    h.failLookup("b", true);
+    (await h.parking.acquire())();
+    expect(h.calls.slice(2)).toEqual(["1:normal"]);
+    h.failLookup("b", false);
+    (await h.parking.acquire())();
+    expect(h.calls.slice(3)).toEqual(["2:maximized"]);
+    const before = h.calls.length;
+    (await h.parking.acquire())();
+    expect(h.calls.length).toBe(before);
+  });
+
+  test("presentNow presents windows left minimized without holding the browser", async () => {
+    const h = harness({ windows: { 7: { state: "minimized" } }, targets: { a: 7 } });
+    const startup = await h.parking.acquire();
+    await h.parking.presentNow();
+    expect(h.calls).toEqual(["7:normal"]);
+    startup();
+    expect(h.hasPendingPark()).toBe(true);
   });
 });

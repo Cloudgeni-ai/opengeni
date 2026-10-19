@@ -683,6 +683,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let target: TargetInfo;
     if (this.targetLifecycle === "cdp") {
       connection = await this.ensureConnection();
+      await this.windowParking?.presentNow();
       if (deferNavigation) connection.assertNavigable?.(url);
       const created = await connection.send<{ targetId?: unknown }>(
         "Target.createTarget",
@@ -710,6 +711,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
     } else {
       connection = await this.ensureConnection();
+      // A browser reattached after a controller restart may still have the
+      // windows its previous controller parked.
+      await this.windowParking?.presentNow();
       if (this.headlessSessionCookies) {
         await restoreHeadlessSessionCookies(connection, this.headlessSessionCookies);
         this.headlessSessionCookies = null;

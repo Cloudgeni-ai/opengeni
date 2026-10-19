@@ -93,6 +93,13 @@ export class BrowserWindowParking {
     this.schedule();
   }
 
+  /** Presents any parked windows now, for example once a connection to a
+   * reattached browser exists. Holders are unaffected. */
+  async presentNow(): Promise<void> {
+    if (this.closed) return;
+    await this.serialize(async () => await this.present());
+  }
+
   close(): void {
     this.closed = true;
     this.cancelTimer();
@@ -128,7 +135,7 @@ export class BrowserWindowParking {
         this.renderingSuspended = true;
         await this.options.suspendRendering();
       }
-      for (const { windowId, state } of await this.windows(connection)) {
+      for (const { windowId, state } of (await this.windows(connection)).windows) {
         if (this.holders > 0 || this.closed) return;
         // Already minimized (for example by a previous controller of this
         // browser): the next operation presents it again.
@@ -166,7 +173,8 @@ export class BrowserWindowParking {
 
   private async presentWindows(connection: WindowParkingConnection): Promise<void> {
     try {
-      for (const { windowId, state } of await this.windows(connection)) {
+      const { windows, complete } = await this.windows(connection);
+      for (const { windowId, state } of windows) {
         if (state !== "minimized") {
           this.parked.delete(windowId);
           continue;
@@ -178,6 +186,9 @@ export class BrowserWindowParking {
         );
         this.parked.delete(windowId);
       }
+      // A window whose lookup failed may still be minimized: keep it eligible
+      // for the next presentation instead of forgetting it.
+      if (!complete) return;
       this.parked.clear();
       this.mayHaveParkedWindows = false;
     } catch (error) {
@@ -185,10 +196,12 @@ export class BrowserWindowParking {
     }
   }
 
-  private async windows(
-    connection: WindowParkingConnection,
-  ): Promise<Array<{ windowId: number; state: WindowState }>> {
+  private async windows(connection: WindowParkingConnection): Promise<{
+    windows: Array<{ windowId: number; state: WindowState }>;
+    complete: boolean;
+  }> {
     const windows = new Map<number, WindowState>();
+    let complete = true;
     for (const targetId of await this.options.pageTargetIds()) {
       let response: { windowId?: unknown; bounds?: { windowState?: unknown } };
       try {
@@ -198,13 +211,15 @@ export class BrowserWindowParking {
           { timeoutMs: WINDOW_COMMAND_TIMEOUT_MS },
         );
       } catch {
-        // The tab closed meanwhile, or has no window of its own.
+        // The tab closed meanwhile, or the lookup failed transiently. Either
+        // way this enumeration cannot prove every window was seen.
+        complete = false;
         continue;
       }
       if (typeof response.windowId !== "number" || windows.has(response.windowId)) continue;
       windows.set(response.windowId, windowState(response.bounds?.windowState));
     }
-    return [...windows].map(([windowId, state]) => ({ windowId, state }));
+    return { windows: [...windows].map(([windowId, state]) => ({ windowId, state })), complete };
   }
 }
 
