@@ -31,7 +31,7 @@ const PAGE = `data:text/html,${encodeURIComponent(`<!doctype html><title>Dialog 
 <div id="menu" hidden><button onclick="out.textContent = confirm('Delete this revision?') ? 'deleted' : 'kept'">Delete revision</button></div>
 <button onclick="others += 1">Other</button><p id="out">untouched</p>
 <button onclick="setTimeout(() => alert('Later'), 300)">Alert later</button>
-<input aria-label="Code" oninput="alert('Typed ' + this.value)">
+<textarea aria-label="Code" oninput="alert('Typed ' + this.value)"></textarea>
 <script>var others = 0</script>`)}`;
 
 type Driver = Pick<AgentBrowserDriver, "dispatch" | "observe" | "captureScreenshot">;
@@ -136,7 +136,9 @@ async function provesCutShortActionsNeverRunLater(
 async function provesDialogTextIsRedacted(driver: Driver, start: BrowserObservation) {
   const current = await driver.observe(start.target.id);
   const raw = ["{{", "secret:Desk/code", "}}"].join("");
-  const secret = "s3cret-value-42";
+  // Long and multi-line, so shortening or collapsing the dialog text first
+  // would leave a recognizable part of it.
+  const secret = `s3cret-${"x".repeat(320)}\nsecond line`;
   const typed = await driver
     .dispatch({
       ...command(current, {
@@ -153,11 +155,18 @@ async function provesDialogTextIsRedacted(driver: Driver, start: BrowserObservat
       (error: unknown) => error as Error & { observation?: BrowserObservation },
     );
   expect(typed?.message).toContain("A JavaScript alert dialog is open");
-  expect(typed?.message).not.toContain(secret);
+  expect(typed?.message).not.toContain("s3cret-x");
+  expect(typed?.message).not.toContain("second line");
   expect(JSON.stringify(typed?.observation)).not.toContain(secret);
-  await driver.dispatch(
-    command(typed!.observation!, { type: "handle_dialog", response: "accept" }),
-  );
+  // Each answer returns promptly, including when the page opens the next
+  // dialog straight away.
+  let page: BrowserObservation | null = typed!.observation!;
+  for (let answered = 0; page?.dialog && answered < 5; answered += 1) {
+    const before = Date.now();
+    page = await driver.dispatch(command(page, { type: "handle_dialog", response: "accept" }));
+    expect(Date.now() - before).toBeLessThan(5_000);
+  }
+  expect(page?.dialog ?? null).toBeNull();
 }
 
 e2e(

@@ -252,9 +252,16 @@ const DIALOG_WORK_SETTLE_MS = 250;
 const DIALOG_GUIDANCE =
   'Accept or dismiss it with browser_act action {type:"handle_dialog"} before anything else in this tab.';
 
-function dialogSummary(dialog: BrowserDialog | null): string {
+/** Dialog text is page content: it can echo a secret the action typed, so
+ * it is redacted before it is shortened. */
+function dialogSummary(
+  dialog: BrowserDialog | null,
+  secretValues?: BrowserActionCommandValue["secretValues"],
+): string {
   if (!dialog) return "A JavaScript dialog is open in this tab.";
-  const message = dialog.message.replace(/\s+/gu, " ").trim();
+  const message = redactInteractionSecretValues(dialog.message, secretValues)
+    .replace(/\s+/gu, " ")
+    .trim();
   const shown = message.length > 300 ? `${message.slice(0, 300)}…` : message;
   return `A JavaScript ${dialog.type} dialog is open in this tab${shown ? `: "${shown}"` : ""}.`;
 }
@@ -1639,14 +1646,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         // Navigation already waits for the new document to load, and an
         // explicit wait has its own condition; only page input settles here.
         const last = actions.at(-1)?.type;
-        if (last !== "navigate" && last !== "history" && last !== "wait")
-          await this.settleActionRequests(state, requestsBeforeActions);
-        await this.settleFiniteAnimations(state);
-        const currentInfo = await this.requireTargetInfo(
-          await this.ensureConnection(),
-          info.targetId,
-        );
-        return await this.observeUnlocked(state, currentInfo);
+        // The page may open another dialog while it settles (for example the
+        // next one in a sequence after handle_dialog): report that one.
+        try {
+          return await this.untilDialog(state, async () => {
+            if (last !== "navigate" && last !== "history" && last !== "wait")
+              await this.settleActionRequests(state, requestsBeforeActions);
+            await this.settleFiniteAnimations(state);
+            const currentInfo = await this.requireTargetInfo(
+              await this.ensureConnection(),
+              info.targetId,
+            );
+            return await this.observeUnlocked(state, currentInfo);
+          });
+        } catch (error) {
+          if (!(error instanceof DialogBlockedError)) throw error;
+          return await this.observeUnlocked(
+            state,
+            await this.requireTargetInfo(await this.ensureConnection(), info.targetId),
+          );
+        }
       } catch (error) {
         // Input has already been dispatched. A closing popup or failed
         // follow-up read cannot prove that the mutation itself failed.
@@ -1748,8 +1767,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     total: number,
     completed: number,
   ): Promise<Error> {
-    // Dialog text is page content: it can echo a secret the action typed.
-    const summary = redactInteractionSecretValues(dialogSummary(state.dialog), secretValues);
+    const summary = dialogSummary(state.dialog, secretValues);
     const error =
       completed === 0
         ? new InteractionDefiniteDriverError(
