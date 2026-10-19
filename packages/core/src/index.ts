@@ -175,17 +175,7 @@ export {
   withSiteSessionOrigin,
   type SiteSessionOrigin,
 } from "./site-session-origin";
-export {
-  assertNotSiteClampedAgent,
-  assertSiteAgentMayChooseCompute,
-  SITE_AGENT_COMPUTE_MESSAGE,
-  siteAgentClamp,
-  siteAgentMayReachSession,
-  siteClampedAgentMessage,
-  siteSessionClamp,
-  type SiteAgentClamp,
-  type SiteClampedResource,
-} from "./site-agent-clamp";
+
 export {
   currentHostSessionUsageLimit,
   withHostSessionUsageLimit,

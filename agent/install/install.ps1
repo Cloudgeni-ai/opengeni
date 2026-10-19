@@ -3,7 +3,7 @@
   Opengeni self-hosted agent installer — Windows (PowerShell 5.1+ / 7+).
 
 .DESCRIPTION
-  irm https://get.opengeni.ai/install.ps1 | iex
+  irm https://app.opengeni.ai/install.ps1 | iex
 
   READ THIS BEFORE PIPING IT TO iex. This script downloads the opengeni-agent.exe
   for your arch, VERIFIES it two independent ways (a minisign signature against a
@@ -19,7 +19,7 @@
   placing the new one (the same trick self-update uses).
 
 .PARAMETER -* (environment overrides, all optional)
-  OPENGENI_INSTALL_BASE_URL  Release asset base URL (default https://get.opengeni.ai).
+  OPENGENI_INSTALL_BASE_URL  Release asset base URL (default https://app.opengeni.ai).
                              Point at a local mock (http://localhost/...) to test offline.
   OPENGENI_AGENT_VERSION     Pin a version (default "latest").
   OPENGENI_ALLOW_DOWNGRADE   "1" explicitly allows an older verified agent to
@@ -55,7 +55,7 @@ function Get-EnvOr($name, $default) {
 # installer pulls the matching baked agent from the same host it was fetched from.
 # Keep the line's shape stable (rewritten by exact match). OPENGENI_INSTALL_BASE_URL
 # still wins.
-$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'
+$OpengeniInstallDefaultBaseUrl = 'https://app.opengeni.ai'
 $BaseUrl = Get-EnvOr 'OPENGENI_INSTALL_BASE_URL' $OpengeniInstallDefaultBaseUrl
 $Version = Get-EnvOr 'OPENGENI_AGENT_VERSION' 'latest'
 # A served installer rewrites this stable marker to the deployment that served

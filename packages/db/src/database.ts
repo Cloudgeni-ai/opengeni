@@ -101,6 +101,15 @@ export function currentSessionRlsActorContext(): Readonly<SessionRlsActorContext
 }
 
 /**
+ * Runs `fn` with no session RLS actor, so its reads see the tenant as the
+ * system does (private chats included). Only for narrow reads whose result is
+ * never disclosed to the request; not re-exported from the package.
+ */
+export async function withoutSessionRlsActor<T>(fn: () => Promise<T>): Promise<T> {
+  return await sessionRlsActorContext.exit(() => siteViewerRlsContext.exit(fn));
+}
+
+/**
  * Stable identity of the ambient session RLS actor: every field that
  * `setRlsContext` turns into database-visible GUCs or that scoped reads
  * consult. Two callers with equal keys see exactly the same rows, so the key

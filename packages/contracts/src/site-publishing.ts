@@ -368,13 +368,12 @@ export const SiteEmbeddedAgent = /* @__PURE__ */ defineSchema(() =>
     enabled: z.boolean(),
     /** Model for new conversations; must be allowed by the effective limits. */
     model: z.string().min(1).max(200).nullable().default(null),
-    /** Extra instructions for the Site's agent, appended to the platform's. */
+    /** Author instructions; member chats receive these without a Site restriction profile. */
     instructions: z.string().max(8000).nullable().default(null),
     /**
-     * Workspace MCP connections (server ids) the agent may use for workspace
-     * members, further limited to what each member may do. null or empty: no
-     * workspace tools. People outside the workspace never get them. Setting a
-     * non-empty list needs a workspace admin.
+     * Retired publication selection, retained for stored/wire compatibility.
+     * Members use normal chat tools; visitors never get workspace connections.
+     * This field does not narrow or widen the agent's authority.
      */
     tools: z.array(z.string().min(1).max(300)).max(100).nullable().default(null),
     /**

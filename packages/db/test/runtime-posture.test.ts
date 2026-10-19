@@ -1721,11 +1721,11 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
-          // 0842 adds explicit owner-scoped Site chat access, full DML and FORCE RLS.
+          // 0842 Site chat access and 0846 title jobs: full DML and FORCE RLS.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
-            ? 1
+            ? 2
             : 0) +
           // 0820 adds retained browser downloads: read, insert and update, FORCE RLS.
           (tables === FORCE_RLS_TABLES ||
@@ -1777,7 +1777,10 @@ describe("runtime database posture evaluator", () => {
         2 + // 0797 subscription plan state and periods: read-only, FORCE-RLS.
         1 + // 0796 subscription operation receipts: read-only, FORCE-RLS.
         1 + // 0820 retained browser downloads: read, insert and update, FORCE-RLS.
-        1; // 0842 owner-scoped Site chat access: full-DML, FORCE-RLS.
+        1 + // 0842 owner-scoped Site chat access: full-DML, FORCE-RLS.
+        1; // 0846 independently owned session title jobs: full-DML, FORCE-RLS.
+      expect(FORCE_RLS_TABLES).toContain("session_title_operations");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("session_title_operations");
       expect(FORCE_RLS_TABLES).toContain("site_session_access");
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_session_access");
       expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");

@@ -254,7 +254,6 @@ import {
   requireRigForApi,
 } from "@opengeni/core";
 import {
-  assertNotSiteClampedAgent,
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
@@ -385,15 +384,9 @@ import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
 import {
   afterSiteArtifactMutation,
   requireSiteVersionPublishOpen,
-  SITE_AGENT_OTHER_SITE_MESSAGE,
-  siteAgentMayChangeArtifact,
 } from "../site-publishing/service";
 import { sitePlatformBrakeToolRefusal } from "../site-publishing/platform-usage";
-import {
-  siteAgentClampRefusal,
-  siteAgentClampedToolResult,
-  siteAgentComputeRefusal,
-} from "./site-agent-clamp-tools";
+
 import {
   registerSessionAdminAccessTools,
   type SessionAdminAccessDispatch,
@@ -1180,9 +1173,7 @@ export function buildOpenGeniMcpServer(
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
-      // A Site-started agent does not propose or confirm the organization profile.
-      refuseSiteAgent: async () =>
-        await siteAgentClampRefusal(deps, grant, "the organization profile"),
+
       json,
     });
   }
@@ -2059,7 +2050,6 @@ export function buildOpenGeniMcpServer(
         const adminPause =
           viewer.admin &&
           (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId);
-        if (adminPause) await assertNotSiteClampedAgent(deps.db, grant, "schedules");
         const task = adminPause
           ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
           : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
@@ -3429,12 +3419,7 @@ function registerWorkspaceArtifactTools(
   // the same hook resyncs the edge and scans a version that became current.
   const siteMutation = async (response: WorkspaceArtifactMutationResponse, scan: boolean) =>
     await mutation(await afterSiteArtifactMutation(deps, response, { scan }));
-  // An agent started from a Site page changes only the Sites it was started
-  // from and Sites its own session tree created (the HTTP routes check the same).
-  const otherSiteRefusal = async (artifactId: string) =>
-    (await siteAgentMayChangeArtifact(deps, grant, artifactId))
-      ? null
-      : siteAgentClampedToolResult(SITE_AGENT_OTHER_SITE_MESSAGE);
+
   const prepare = (
     html: string | undefined,
     source?: {
@@ -3661,8 +3646,7 @@ function registerWorkspaceArtifactTools(
       idempotencyKey,
     }) => {
       await authorize();
-      const refused = await otherSiteRefusal(artifactId);
-      if (refused) return refused;
+
       const braked = await sitePlatformBrakeToolRefusal(() =>
         requireSiteVersionPublishOpen(
           deps,
@@ -3703,8 +3687,7 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
-      const refused = await otherSiteRefusal(artifactId);
-      if (refused) return refused;
+
       return json(
         await siteMutation(
           await rollbackWorkspaceArtifact(deps.db, {
@@ -3735,8 +3718,7 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
-      const refused = await otherSiteRefusal(artifactId);
-      if (refused) return refused;
+
       return json(
         await siteMutation(
           await setWorkspaceArtifactStatus(deps.db, {
@@ -3767,8 +3749,7 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
-      const refused = await otherSiteRefusal(artifactId);
-      if (refused) return refused;
+
       return json(
         await siteMutation(
           await setWorkspaceArtifactStatus(deps.db, {
@@ -4318,9 +4299,7 @@ function registerFleetTools(
         'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for the session\'s own managed sandbox when the deployment has one.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) =>
-      (await siteAgentComputeRefusal(deps, grant)) ??
-      json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
   );
 
   server.registerTool(
@@ -4330,9 +4309,7 @@ function registerFleetTools(
         'Swap the active sandbox for this session mid-conversation: commands, files, computer_open and browser_open then work on that machine. Staying on it is a fine end state; there is no need to swap back. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for the session\'s own managed sandbox when the deployment has one.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) =>
-      (await siteAgentComputeRefusal(deps, grant)) ??
-      json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
   );
 
   server.registerTool(
@@ -4358,8 +4335,6 @@ function registerFleetTools(
       },
     },
     async ({ target, op }) => {
-      const refused = await siteAgentComputeRefusal(deps, grant);
-      if (refused) return refused;
       const typedOp = op as RunOnOp;
       const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
       // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
@@ -4393,8 +4368,6 @@ function registerFleetTools(
       },
     },
     async ({ kind, name }) => {
-      const refused = await siteAgentComputeRefusal(deps, grant);
-      if (refused) return refused;
       if (kind === "selfhosted" && exactAgentAttemptClaims(grant)) {
         // Same live-attempt authority the other fleet tools resolve, without
         // requiring a session box: a chat with no sandbox can still connect one.
@@ -4467,8 +4440,7 @@ function registerConnectedMachineTools(
       if (sessionId) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
-      const refused = await siteAgentClampRefusal(deps, grant, "Connected Machines");
-      if (refused) return refused;
+
       const minted = await mintEnrollToken(deps, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -4500,8 +4472,7 @@ function registerConnectedMachineTools(
       if (sessionId) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
-      const refused = await siteAgentClampRefusal(deps, grant, "Connected Machines");
-      if (refused) return refused;
+
       // Personal machines belong to the person the attempt acts for.
       const attempt = sessionId ? exactAgentAttemptClaims(grant) : null;
       const resourceGrant =
@@ -4574,8 +4545,6 @@ function registerConnectedMachineTools(
       },
     },
     async ({ enrollmentId, expectedUpdatedAt, idempotencyKey }) => {
-      const refused = await siteAgentClampRefusal(deps, grant, "Connected Machines");
-      if (refused) return refused;
       const resourceGrant =
         sessionId && exactAgentAttemptClaims(grant)
           ? {
@@ -4713,9 +4682,6 @@ function registerRigTools(
         },
       },
       async ({ rigId, command, note }) => {
-        // A Site-started agent does not change sandbox environments.
-        const refused = await siteAgentClampRefusal(deps, grant, "sandbox environments");
-        if (refused) return refused;
         const rig = await requireMutableRig(rigId);
         const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };
         const change = await proposeRigChangeForApi(
@@ -4797,9 +4763,6 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
-        // A Site-started agent does not change sandbox environments.
-        const refused = await siteAgentClampRefusal(deps, grant, "sandbox environments");
-        if (refused) return refused;
         const rig = await requireMutableRig(rigId);
         if (changeId) {
           const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
@@ -4903,9 +4866,6 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
-        // A Site-started agent does not change sandbox environments.
-        const refused = await siteAgentClampRefusal(deps, grant, "sandbox environments");
-        if (refused) return refused;
         const rig = await requireMutableRig(rigId);
         const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
         const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };

@@ -15,6 +15,36 @@ function graphemeCount(value: string): number {
 }
 
 describe("automatic session titles", () => {
+  test("preserves real words that begin with greeting or request prefixes", () => {
+    for (const title of [
+      "History of Coastal Lighthouses",
+      "Hiking route planning",
+      "HelloWorld examples",
+      "Heyday of steam engines",
+      "Hi世界 overview",
+      "Pleased with the results",
+      "Help memory usage analysis",
+      "Can youthful teams succeed",
+      "Your task is tooling research",
+      "I want you today",
+      "Titlecase formatting",
+    ]) {
+      expect(normalizeAutomaticSessionTitle(title)).toBe(title);
+    }
+  });
+
+  test("cleans complete greetings without cutting the following word", () => {
+    for (const prefix of ["Hi, ", "Hello! ", "Hey ", "Hi there, ", "HELLO THERE: "]) {
+      expect(normalizeAutomaticSessionTitle(`${prefix}Review deployment`)).toBe(
+        "Review deployment",
+      );
+    }
+    expect(normalizeAutomaticSessionTitle("Hi thereabouts research")).toBe("thereabouts research");
+    expect(normalizeAutomaticSessionTitle("Hello therefore planning")).toBe("therefore planning");
+    expect(normalizeAutomaticSessionTitle("Hi")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Hey there!")).toBeNull();
+  });
+
   test("removes prompt labels and request boilerplate instead of preserving a first-prompt prefix", () => {
     expect(
       normalizeAutomaticSessionTitle(

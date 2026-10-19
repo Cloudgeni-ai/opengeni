@@ -16,6 +16,7 @@ import {
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
 import { projectErrorCauseAttributes } from "./error-cause";
+import { operationalErrorDiagnostic } from "./operational-error";
 export {
   errorCauseAttributes,
   PUBLIC_ERROR_CAUSE_NAMES,
@@ -395,6 +396,9 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "durationMs",
   "attempt",
   "attempts",
+  "examined",
+  "registered",
+  "failed",
   "delayMs",
   "provider",
   "providerApi",
@@ -663,6 +667,7 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "worker_draining",
   "worker_operation_failed",
   "worker_shutdown_request_failed",
+  "worker_cleanup_drain_exhausted",
   "workspace_control_live_publish_failed",
 ]);
 
@@ -891,14 +896,54 @@ export class Observability {
     this.log("warn", message, attributes);
   }
 
-  error(message: string, attributes: Attributes = {}): void {
-    this.log("error", message, attributes);
+  error(message: string, attributes: Record<string, unknown> = {}): void {
+    const context: Attributes = Object.fromEntries(
+      Object.entries(attributes).filter(
+        ([key, value]) =>
+          key !== "error" &&
+          (value == null || ["string", "number", "boolean"].includes(typeof value)),
+      ),
+    ) as Attributes;
+    if (attributes.error === undefined) {
+      this.log("error", message, context);
+      return;
+    }
+    const error = attributes.error;
+    const sessionId = context.childSessionId ?? context.sessionId ?? context["opengeni.session_id"];
+    const attemptId = context.attemptId ?? context["opengeni.attempt_id"];
+    const input: FailureDiagnosticInput = {
+      code: "operational_failure",
+      stage: "observability.error",
+      error,
+      ...(typeof sessionId === "string" ? { sessionId } : {}),
+      ...(typeof context.parentSessionId === "string"
+        ? { parentSessionId: context.parentSessionId }
+        : {}),
+      ...(typeof context.turnId === "string" ? { turnId: context.turnId } : {}),
+      ...(typeof attemptId === "string" ? { attemptId } : {}),
+    };
+    const projected = operationalErrorDiagnostic(input);
+    try {
+      this.recordFailureDiagnostic({ ...input, diagnosticId: projected.diagnostic.diagnosticId });
+    } catch {
+      // An unavailable diagnostic exporter must not suppress the local failure.
+    }
+    this.emitLog("error", message, context, projected.attributes);
   }
 
   log(
     level: "debug" | "info" | "warn" | "error",
     message: string,
     attributes: Attributes = {},
+  ): void {
+    this.emitLog(level, message, attributes);
+  }
+
+  private emitLog(
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    attributes: Attributes,
+    failureAttributes: Attributes = {},
   ): void {
     const publicAttributes = projectPublicTelemetryAttributes(attributes);
     if (!this.settings.observabilityStructuredLogs) {
@@ -920,6 +965,7 @@ export class Observability {
       environment: this.settings.environment,
       component: this.options.component,
       ...cleanAttributes(publicAttributes),
+      ...failureAttributes,
       ...(context ? { traceId: context.traceId, spanId: context.spanId } : {}),
     };
     const serialized = JSON.stringify(record);

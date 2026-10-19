@@ -228,7 +228,9 @@ export function SubscriptionPlans({
                     </p>
                   ) : null}
                   {item.freeCredit ? (
-                    <p className="text-xs text-fg-muted">Monthly credit for eligible accounts</p>
+                    <p className="text-xs text-fg-muted">
+                      For free-credit models · Eligible accounts only
+                    </p>
                   ) : null}
                 </div>
                 <div className="mt-auto pt-1">

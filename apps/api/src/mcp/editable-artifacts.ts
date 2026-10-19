@@ -19,7 +19,6 @@ import * as z from "zod/v4";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { EditableArtifactQueryRequestSchema } from "./editable-artifact-query-schema";
-import { siteAgentEditableArtifactRefusal } from "./site-agent-clamp-tools";
 
 const ArtifactId = z
   .string()
@@ -102,13 +101,6 @@ export function registerEditableArtifactAgentTools(
     await input.authorize();
     return jsonResult(await operation());
   };
-  /** Writes: an agent started from a Site page edits only what the Site declared. */
-  const executeWrite = async <T>(operation: () => Promise<T>, artifactId?: string) => {
-    await input.authorize();
-    const refused = await siteAgentEditableArtifactRefusal(input.deps, input.grant, artifactId);
-    if (refused) return refused;
-    return jsonResult(await operation());
-  };
 
   input.server.registerTool(
     "editable_artifact_list",
@@ -144,7 +136,7 @@ export function registerEditableArtifactAgentTools(
     },
     async ({ modality, title }, extra) => {
       const invocation = context("editable_artifact_create", extra);
-      return await executeWrite(
+      return await execute(
         async () =>
           await application().create({
             ...invocation,
@@ -173,7 +165,7 @@ export function registerEditableArtifactAgentTools(
     },
     async ({ fileId, modality, title }, extra) => {
       const invocation = context("editable_artifact_import", extra);
-      return await executeWrite(
+      return await execute(
         async () =>
           await application().import({
             ...invocation,
@@ -257,7 +249,7 @@ export function registerEditableArtifactAgentTools(
     },
     async ({ artifactId, modality, expectedHeadSequence, expectedStateHash, commands }, extra) => {
       const invocation = context("editable_artifact_apply", extra);
-      return await executeWrite(
+      return await execute(
         async () =>
           await application().apply({
             ...invocation,
@@ -267,7 +259,6 @@ export function registerEditableArtifactAgentTools(
             expectedStateHash,
             batch: { modality, commands } as EditableArtifactAgentCommandBatch,
           }),
-        artifactId,
       );
     },
   );
@@ -297,7 +288,7 @@ export function registerEditableArtifactAgentTools(
     async ({ artifactId, format, options }, extra) => {
       const invocation = context("editable_artifact_export", extra);
       // HTTP refuses the matching materialization for the same agent.
-      return await executeWrite(
+      return await execute(
         async () =>
           await application().startExport({
             ...invocation,
@@ -307,7 +298,6 @@ export function registerEditableArtifactAgentTools(
             ...(options ? { options } : {}),
             signal: extra.signal,
           }),
-        artifactId,
       );
     },
   );
@@ -336,7 +326,7 @@ export function registerEditableArtifactAgentTools(
       annotations: mutationAnnotations("Get artifact export", { idempotent: true }),
     },
     async ({ artifactId, versionId, jobId }, extra) =>
-      await executeWrite(
+      await execute(
         async () =>
           await application().exportStatus({
             ...context("editable_artifact_export_status", extra),
@@ -345,7 +335,6 @@ export function registerEditableArtifactAgentTools(
             jobId,
             signal: extra.signal,
           }),
-        artifactId,
       ),
   );
 }

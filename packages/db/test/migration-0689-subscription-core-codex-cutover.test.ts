@@ -725,9 +725,11 @@ describe.skipIf(!realDb)(
       // 0689, so it is withheld with it and applied by the same cutover run.
       await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES}), (${PERSONAL_CONNECTION_VERSIONS}), (${FAILOVER_READINESS}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${RETIREMENT}), ('0749_subscription_shared_personal_choice.sql'), ('0752_subscription_personal_sharing.sql')`;
       await owner`insert into schema_migrations(name) values ('0843_indexed_inbox_lineage.sql')`;
+      await owner`insert into schema_migrations(name) values ('0846_independent_session_titles.sql')`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
       await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${COMPAT}, ${FENCES}, ${PERSONAL_CONNECTION_VERSIONS}, ${FAILOVER_READINESS}, '0752_subscription_personal_sharing.sql')`;
       await owner`delete from schema_migrations where name = '0843_indexed_inbox_lineage.sql'`;
+      await owner`delete from schema_migrations where name = '0846_independent_session_titles.sql'`;
       await seed();
     }, 180_000);
 

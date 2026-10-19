@@ -724,18 +724,31 @@ export function ModelAccessOnboardingPanel({
 
   if (startingCredits || won) {
     const currency = startingCredits?.balance?.currency ?? "usd";
-    const trialAmount = startingCredits?.balance
+    const startingAmount = startingCredits?.balance
       ? formatCreditAmount(startingCredits.balance.balanceMicros, currency)
+      : null;
+    const monthlyPlan =
+      !won &&
+      startingCredits?.balance?.plan?.key === "free" &&
+      startingCredits.balance.plan.creditScoped
+        ? startingCredits.balance.plan
+        : null;
+    const monthlyAmount = monthlyPlan
+      ? formatCreditAmount(monthlyPlan.creditGrantedMicros, currency)
       : null;
     const wonAmount = won ? formatCreditAmount(won.amountMicros, "usd") : null;
     const heading = won
       ? won.free
         ? `You got ${wonAmount} in free credits`
         : `You added ${wonAmount} in credits`
-      : trialAmount
-        ? `You got ${trialAmount} in free credits`
-        : "You got free Opengeni credits";
-    const prizeMicros = won ? won.amountMicros : (startingCredits?.balance?.balanceMicros ?? null);
+      : monthlyAmount
+        ? `${monthlyAmount} in free credits every month`
+        : startingAmount
+          ? `You got ${startingAmount} in free credits`
+          : "You got free Opengeni credits";
+    const prizeMicros = won
+      ? won.amountMicros
+      : (monthlyPlan?.creditRemainingMicros ?? startingCredits?.balance?.balanceMicros ?? null);
     return (
       <section className="og-page-glow flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
         <CelebrationBurst key={won?.celebration ?? 0} />
@@ -745,11 +758,21 @@ export function ModelAccessOnboardingPanel({
               key={won?.celebration ?? 0}
               amountMicros={prizeMicros}
               currency={won ? "usd" : currency}
-              label={won ? (won.free ? "Coupon redeemed" : "Credits added") : "Free credits"}
+              label={
+                won
+                  ? won.free
+                    ? "Coupon redeemed"
+                    : "Credits added"
+                  : monthlyPlan
+                    ? "Monthly Free credit"
+                    : "Free credits"
+              }
               caption={
                 won && won.balanceMicros !== null
                   ? `Your balance is now ${formatCreditAmount(won.balanceMicros, "usd")}`
-                  : `Added to ${organizationName || "your organization"}`
+                  : monthlyPlan
+                    ? "Resets monthly · Unused credit doesn't roll over"
+                    : `Added to ${organizationName || "your organization"}`
               }
             />
           ) : null}
@@ -759,7 +782,9 @@ export function ModelAccessOnboardingPanel({
             {heading}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-            Start chatting. No card or API key needed.
+            {monthlyPlan
+              ? "For the free-credit models. No card or API key needed."
+              : "Start chatting. No card or API key needed."}
           </p>
           <Button
             type="button"

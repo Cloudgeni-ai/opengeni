@@ -39,8 +39,8 @@ const SITE_DATA = /^\/v1\/workspaces\/[^/]+\/published-artifacts\/([^/]+)\/(?:da
  *   Approval decisions, answers to questions, resources, personal resource
  *   attachments, MCP credential updates, connection accounts and model
  *   context are refused with 403 `site_frame_field_forbidden`; the person
- *   gives those in the console. Session creates get the same treatment in
- *   the create route, which also applies the minimal Site profile;
+ *   gives those in the console. Session creates use the same body checks,
+ *   then resolve the ordinary viewer's agent settings;
  * - a session operation runs inside its validated Site origin, so every
  *   session or turn it starts records which Site it came from.
  *

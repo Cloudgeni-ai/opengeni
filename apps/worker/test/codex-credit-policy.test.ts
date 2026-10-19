@@ -18,6 +18,46 @@ function headers(primary = 20, secondary = 40, at = now): CodexUsageHeaderSnapsh
 }
 
 describe("Codex extra credit protection", () => {
+  test("retained exhaustion with no known reset never expires without live consent", async () => {
+    let clock = now;
+    let allowed = false;
+    const guard = createCodexCreditGuard({
+      canSpendCredits: async () => allowed,
+      now: () => clock,
+    });
+    guard.observeIncludedExhaustion(null);
+    clock += 86_400_000;
+    await expect(guard.assertKnownUsageAllowsDispatch()).rejects.toBeInstanceOf(
+      CodexIncludedUsageExhaustedError,
+    );
+    allowed = true;
+    await guard.assertKnownUsageAllowsDispatch();
+    allowed = false;
+    await expect(guard.assertKnownUsageAllowsDispatch()).rejects.toBeInstanceOf(
+      CodexIncludedUsageExhaustedError,
+    );
+  });
+
+  test("retained included exhaustion requires live consent only until its reset", async () => {
+    let clock = now;
+    let allowed = false;
+    const canSpendCredits = mock(async () => allowed);
+    const guard = createCodexCreditGuard({ canSpendCredits, now: () => clock });
+    guard.observeIncludedExhaustion(now + 60_000);
+    await expect(guard.assertKnownUsageAllowsDispatch()).rejects.toBeInstanceOf(
+      CodexIncludedUsageExhaustedError,
+    );
+    allowed = true;
+    await guard.assertKnownUsageAllowsDispatch();
+    allowed = false;
+    await expect(guard.assertKnownUsageAllowsDispatch()).rejects.toBeInstanceOf(
+      CodexIncludedUsageExhaustedError,
+    );
+    clock += 60_001;
+    await guard.assertKnownUsageAllowsDispatch();
+    expect(canSpendCredits).toHaveBeenCalledTimes(3);
+  });
+
   test("unknown usage admits a dispatch without any read or credit query", async () => {
     const canSpendCredits = mock(async () => false);
     const guard = createCodexCreditGuard({ canSpendCredits, now: () => now });

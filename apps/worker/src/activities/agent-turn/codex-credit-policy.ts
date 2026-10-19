@@ -41,6 +41,7 @@ export function createCodexCreditGuard(input: {
   const now = input.now ?? Date.now;
   type Observation = { windows: Array<{ used: number; reset: Date | null }>; checkedAt: Date };
   let snapshot: Observation | null = null;
+  let retainedExhaustionUntil: number | null = 0;
   const observe = (next: CodexUsageHeaderSnapshot) => {
     // Out-of-order responses cannot replace newer evidence with older.
     if (snapshot && next.checkedAt.getTime() < snapshot.checkedAt.getTime()) return;
@@ -54,8 +55,11 @@ export function createCodexCreditGuard(input: {
   };
   /** The refusal the latest observation proves, or null when none is known. */
   const knownExhaustion = (): CodexIncludedUsageExhaustedError | null => {
-    if (!snapshot) return null;
     const at = now();
+    if (retainedExhaustionUntil === null) return new CodexIncludedUsageExhaustedError(null);
+    if (retainedExhaustionUntil > at)
+      return new CodexIncludedUsageExhaustedError(Math.ceil((retainedExhaustionUntil - at) / 1000));
+    if (!snapshot) return null;
     // A window whose reset has passed is no longer known to be exhausted.
     const exhausted = snapshot.windows.filter(
       (w) => Number.isFinite(w.used) && w.used >= 100 && (!w.reset || w.reset.getTime() > at),
@@ -70,6 +74,12 @@ export function createCodexCreditGuard(input: {
   };
   return {
     observe,
+    /** Independent metadata jobs inherit proven included exhaustion, not rate limits. */
+    observeIncludedExhaustion: (until: number | null) => {
+      if (until === null) retainedExhaustionUntil = null;
+      else if (retainedExhaustionUntil !== null && Number.isFinite(until))
+        retainedExhaustionUntil = Math.max(retainedExhaustionUntil, until);
+    },
     /** Refuses only known exhaustion without live consent to spend credits. */
     assertKnownUsageAllowsDispatch: async () => {
       if (input.allowExtraCredits) return;

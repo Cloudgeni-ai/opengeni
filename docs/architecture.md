@@ -15,6 +15,12 @@ Organization subscription plans (runtime catalog, period credit and seats):
 `billing-subscription-store.ts` composes the accounting seams in one org-fenced
 transaction. `/v1/billing/subscription/*` and webhook plan writes are default-off
 behind `OPENGENI_SUBSCRIPTION_PLANS_ENABLED`; prepaid credit billing is independent.
+New Free monthly grants share signup credit's live model coverage and use explicit
+grant allocations, ahead of other promotions. Pro/Max and existing unrestricted
+periods remain general credit. Expiry removes only the monthly grant's own unused
+funding. Migration 0845 retains the canonical signup issuer and one-human/one-org
+receipt but issues zero money; monthly Free funding replaces new signup bonuses.
+Legacy positive receipts remain eligible and retain their balances; no backfill.
 
 ## 1. Startup
 
@@ -50,21 +56,23 @@ owns turn refs: ordinary work uses session policy; scheduled work retains frozen
 selection. Credential-provider targeting/MCP preparation consume these refs,
 never omitted-tools queue arrays. Connection-backed MCPs use native authentication, including historical work.
 An optional `ToolRef.allowedTools` narrows a connection's catalog and direct calls;
-merged refs intersect that ceiling and children cannot widen it. Console Site
-agents use it for the overlap of Site-declared tools and the viewer's permissions.
+merged refs intersect that ceiling and children cannot widen it. Site and console
+turns use identical native authority and tool policies; the surface is provenance,
+not a permission profile. Authors can explicitly narrow ordinary chat settings.
 Private console Sites may also reach an existing chat only through its owner's
 explicit, viewer-bound Site/chat grant. This uses native session routes and
 live revocation, not a changed origin or audience; see [Site conversations](site-conversations.md).
-Their editable-artifact writes also require immutable create/import provenance
-within the same Site-clamped session tree; read-created session links grant no edits.
+Artifact writes use the same native authorization as any other agent session.
 After a worker claims a turn, its session RLS actor carries the canonical
 authority projection's root into preparation and execution. This lets a guest's
 worker read its own frozen attempt policies without a human identity or a
 viewer-cookie impersonation; other Site roots remain outside that audience.
-Published-host continuation normalizes legacy tool-less chats through
+Published-host guest continuation normalizes legacy tool-less chats through
 `apps/api/src/site-publishing/agent-session.ts` before admission: the locked
 session update installs only viewer-bound Site data tools, matching permissions
 and no sandbox, without restoring workspace defaults or rewriting accepted work.
+Workspace members use their live member authority and ordinary new-chat defaults.
+Existing stored member settings are never rewritten by the Site host.
 Published page connector tools use `site-publishing/page-tool-authority.ts`:
 the signed gateway's opaque Site session resolves its live workspace member,
 never a fabricated console authorization. Its request-local capability admits
@@ -1495,6 +1503,15 @@ one conversation lifecycle, continuation fingerprints and transport diagnostics 
 Codex, OpenAI API and Azure. Providers supply endpoint/authentication and framing;
 only explicit main-conversation scopes own pooled sockets. Title side requests
 leave that scope and retain HTTP, without changing their content or custody.
+Automatic session titles have separately admitted metadata ownership:
+`apps/worker/src/activities/independent-session-title.ts` and
+`packages/db/src/session-title-operations.ts` own the durable title job;
+`sessionTitleWorkflow` executes it independently of conversation handover.
+The source attempt joins admission only. The job pins its source authority and
+route, holds an independent operation lease, and settles retained usage and the
+title compare-and-set atomically. Steer and cancellation do not cancel a naming
+request already admitted to that job. See
+[`independent-session-title.md`](design/independent-session-title.md).
 Providers without socket support retain HTTP keep-alive. The durable worker owns
 the step retry budget, with its last retry reserved for HTTP. Turn-only HTTP
 selection survives recovery in turn metadata and never carries into a new turn.

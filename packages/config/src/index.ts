@@ -480,6 +480,8 @@ const SettingsSchema = z.object({
   billingMode: BillingMode.default("disabled"),
   // Explicit launch gate for the one-time $10 verified self-service signup grant.
   // A migration or deployment alone must not start issuing live credits.
+  // Legacy pre-0845 money switch; current signup eligibility is unconditional
+  // and zero-valued. Kept for compatibility with existing deployment config.
   verifiedSignupTrialCreditsEnabled: EnvBoolean.default(false),
   creditPromotionPolicy: EnvCreditPromotionPolicy,
   entitlementsMode: EntitlementsMode.default("none"),

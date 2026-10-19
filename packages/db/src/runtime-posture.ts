@@ -201,6 +201,7 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "guard_session_title_operation()",
   "subscription_plan_definition(text)",
   "plan_period_usage(plan_credit_periods, timestamp with time zone)",
   "plan_general_balance(uuid)",
@@ -1866,6 +1867,7 @@ export const FORCE_RLS_TABLES = [
   "session_tenancy_activations",
   "session_tenancy_additional_organization_activation_evidence",
   "session_tenancy_greenfield_activation_evidence",
+  "session_title_operations",
   "session_turn_attempts",
   "session_turn_machine_consents",
   "session_turn_startup_milestones",
@@ -2174,6 +2176,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "session_stream_acknowledgments",
   "session_system_update_outbox",
   "session_system_updates",
+  "session_title_operations",
   "session_turn_attempts",
   "session_turns",
   "session_workflow_wake_outbox",

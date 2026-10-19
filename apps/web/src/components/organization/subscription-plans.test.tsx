@@ -248,6 +248,46 @@ test("late catalog reads cannot display another organization's plan", async () =
   expect(document.body.textContent).toBe("Legacy billing");
 });
 
+test("scoped monthly credit appears once and is not subtracted from purchased general credit", async () => {
+  const container = await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 35_000_000,
+          generalBalanceMicros: 25_000_000,
+          currency: "usd",
+          updatedAt: new Date().toISOString(),
+          plan: previewPlan("free"),
+          promotionalCredits: [
+            {
+              grantId: "00000000-0000-4000-8000-000000000002",
+              label: "Monthly plan credit",
+              remainingMicros: 10_000_000,
+              eligibleModelIds: ["gpt-6-luna"],
+              planCredit: true,
+            },
+          ],
+        },
+      }}
+    />,
+  );
+  expect(container.textContent?.match(/Monthly plan credit/g)).toHaveLength(1);
+  expect(container.textContent).toContain("$35.00");
+  expect(container.textContent).toContain("$25.00");
+  expect(container.textContent).not.toContain("$15.00");
+  expect(container.textContent).toContain("Used first · Resets monthly · View models");
+  const disclosure = container.querySelector("button")!;
+  await act(async () => disclosure.click());
+  expect(container.textContent).toContain("GPT-6 Luna");
+});
+
 test("balance splits monthly, promotional and other general credit without double counting", async () => {
   await mount(
     <OrganizationCreditBalance

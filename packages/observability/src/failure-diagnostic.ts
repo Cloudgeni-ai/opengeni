@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { SessionEventType } from "@opengeni/contracts";
 
 const CODES = [
+  "operational_failure",
   "api_startup_failed",
   "api_unhandled_rejection",
   "api_uncaught_exception",
@@ -14,6 +15,7 @@ const CODES = [
   "mcp_orchestration_failed",
 ] as const;
 const STAGES = [
+  "observability.error",
   "startup",
   "running",
   "http.request",
@@ -61,6 +63,8 @@ export const DIAGNOSTIC_SOURCE_FILES = [
   "apps/worker/src/activities/agent-turn/run.ts",
   "apps/worker/src/activities/agent-turn/claim.ts",
   "apps/worker/src/activities/agent-turn/failure-settlement.ts",
+  "apps/worker/src/activities/parent-wake.ts",
+  "apps/worker/src/activities/session-state.ts",
   "apps/worker/src/activities/sandbox-lease.ts",
   "apps/worker/dist/process/index.js",
   "packages/db/src/index.ts",
@@ -133,6 +137,7 @@ export type FailureDiagnosticInput = {
   diagnosticId?: string;
   attemptId?: string;
   sessionId?: string;
+  parentSessionId?: string;
   processId?: string;
   turnId?: string;
   executionGeneration?: number;
@@ -241,6 +246,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
         : "unknown",
     attemptId: uuid(input.attemptId),
     sessionId: uuid(input.sessionId),
+    parentSessionId: uuid(input.parentSessionId),
     processId: uuid(input.processId),
     turnId: uuid(input.turnId),
     executionGeneration:

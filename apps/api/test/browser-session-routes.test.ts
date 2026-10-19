@@ -840,6 +840,26 @@ describe("BrowserSession route discipline", () => {
       expect(browserScreenshotError(error)).toBe(error);
   });
 
+  test("names an open JavaScript dialog as the reason a tab cannot be captured, without page text", async () => {
+    const internal = new BrowserControlRequestError(409, {
+      code: "invalid_action",
+      message: 'A JavaScript confirm dialog is open in this tab: "PRIVATE page text".',
+      retryable: false,
+    });
+    const projected = browserScreenshotError(internal);
+    expect(projected).toBeInstanceOf(HTTPException);
+    expect((projected as HTTPException).status).toBe(409);
+    expect((projected as Error).cause).toBe(internal);
+    expect((projected as Error).message).toContain("handle_dialog");
+    expect((projected as Error).message).not.toContain("PRIVATE");
+    const other = new BrowserControlRequestError(400, {
+      code: "invalid_action",
+      message: "screenshot quality is out of range",
+      retryable: false,
+    });
+    expect(browserScreenshotError(other)).toBe(other);
+  });
+
   test("existing managed browser control retains the durable provider instance across image upgrades", async () => {
     const source = await readFile(routeUrl, "utf8");
     const placement = source.slice(source.indexOf("async function withBrowserPlacement"));
@@ -1493,13 +1513,20 @@ describe("BrowserSession route discipline", () => {
     expect(recovery).toContain("await sessionClient.listTargets();");
     // Recovery that fails leaves suspension to record the loss as before.
     expect(recovery).toContain('console.warn("browser.suspend_controller_recovery_failed"');
+    // Signing the upload and reaching the controller can fail, so both happen
+    // while the operation is only prepared: a failure restores the browser to
+    // active instead of stranding it mid-suspension.
+    expect(suspend.indexOf("createPutUrl")).toBeGreaterThan(0);
+    expect(suspend.indexOf("createPutUrl")).toBeLessThan(suspend.indexOf("provisionController("));
+    expect(suspend.indexOf("provisionController(")).toBeLessThan(
+      suspend.indexOf("dispatchBrowserSessionOperation"),
+    );
     expect(suspend.indexOf("dispatchBrowserSessionOperation")).toBeLessThan(
       suspend.indexOf("stateUpload"),
     );
-    expect(suspend.indexOf("stateUpload")).toBeLessThan(suspend.indexOf("createPutUrl"));
-    expect(suspend.indexOf("createPutUrl")).toBeLessThan(suspend.indexOf("client.captureState"));
+    expect(suspend.indexOf("stateUpload")).toBeLessThan(suspend.indexOf("client.captureState"));
     // Suspension removes the working directory: completed downloads are kept
-    // as workspace files before the capture stops the browser.
+    // as files before the capture stops the browser.
     expect(suspend.indexOf("retainBrowserDownloads(")).toBeGreaterThanOrEqual(0);
     expect(suspend.indexOf("retainBrowserDownloads(")).toBeLessThan(
       suspend.indexOf("client.captureState"),
@@ -1561,14 +1588,22 @@ describe("BrowserSession route discipline", () => {
       source.indexOf("async function suspendBrowserSessionCheckpoint(", helperStart),
     );
     // Candidates come from the same controller instance, least recently used
-    // first, re-checked as still idle, and saved through the ordinary private
-    // checkpoint routed via the creating chat on that same placement.
+    // first, and are claimed atomically as still idle on that controller
+    // before being saved through the ordinary private checkpoint routed via
+    // the creating chat on that same placement.
     expect(helper).toContain("placementInstanceId: full.placementInstanceId");
     expect(helper).toContain("excludeBrowserSessionId: creatingBrowserSessionId");
     expect(helper).toContain("Date.parse(before.session.lastUsedAt) >= idleBefore");
+    expect(helper).toContain("recoverController: false");
     expect(helper).toContain(
-      "{ before, recoverController: false, capacityFor: { routeSourceSession } }",
+      "controllerGeneration: before.session.controller.controllerGeneration",
     );
+    // A candidate that no longer qualifies is skipped; a save that failed in
+    // an uncertain state ends the search, so one outage strands at most one.
+    expect(helper).toContain(
+      "if (error instanceof BrowserCapacitySuspendClaimRejectedError) continue;",
+    );
+    expect(helper).toContain('if (after?.session.lifecycle !== "active") return false;');
     expect(helper).toContain('console.warn("browser.capacity_suspend_failed"');
   });
 

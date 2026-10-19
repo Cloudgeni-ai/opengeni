@@ -235,7 +235,7 @@ pub struct UpdateArgs {
     pub check: bool,
 
     /// Override the release base URL (defaults to the enrolled value /
-    /// `https://get.opengeni.ai`). Honors `$OPENGENI_INSTALL_BASE_URL`.
+    /// `https://app.opengeni.ai`). Honors `$OPENGENI_INSTALL_BASE_URL`.
     #[arg(long, env = "OPENGENI_INSTALL_BASE_URL")]
     pub base_url: Option<String>,
 

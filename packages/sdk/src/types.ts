@@ -9248,6 +9248,8 @@ export type PromotionalCreditBalance = PromotionalCreditScope & {
   remainingMicros: number;
   /** Also pays for dictation and live voice, like general credits (signup credits). */
   coversVoice?: boolean | undefined;
+  /** Monthly scoped allowance; allocated before other promotions. */
+  planCredit?: boolean | undefined;
 };
 
 export type {

@@ -1185,6 +1185,134 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("monthly Free credit explains recurring covered funding without calling top-ups a bonus", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={{} as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            billingMode="stripe"
+            startingCredits={{
+              balance: {
+                balanceMicros: 32_000_000,
+                currency: "usd",
+                plan: {
+                  key: "free",
+                  label: "Free",
+                  status: "active",
+                  creditGrantedMicros: 10_000_000,
+                  creditRemainingMicros: 7_000_000,
+                  creditScoped: true,
+                  periodResetAt: "2026-11-19T00:00:00Z",
+                  seatLimit: 5,
+                  seatsUsed: 1,
+                  cancelAtPeriodEnd: false,
+                },
+              },
+              model: { id: "gpt-6-luna", label: "GPT-6 Luna", reasoningEffort: "none" },
+            }}
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      expect(container.querySelector("h1")!.textContent).toBe("$10 in free credits every month");
+      expect(container.textContent).toContain("For the free-credit models");
+      expect(container.textContent).toContain("Unused credit doesn't roll over");
+      expect(container.textContent).toContain("Monthly Free credit");
+      expect(container.querySelector("[data-slot=credits-prize]")?.textContent).not.toContain("32");
+      expect(container.textContent).not.toContain("You got");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the mounted onboarding revalidates zero funds when monthly maintenance grants credit", async () => {
+    let funded = false;
+    const refreshes: { run: () => void; cancel: () => void }[] = [];
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((handler: () => void, delay?: number, ...args: unknown[]) => {
+      const timer = originalSetTimeout(handler, delay, ...args);
+      if (delay === 15_000) refreshes.push({ run: handler, cancel: () => clearTimeout(timer) });
+      return timer;
+    }) as typeof setTimeout;
+    const getWorkspaceModelCatalog = mock(async () => ({
+      models: [
+        {
+          ...baseModel,
+          id: "credits-model",
+          label: "Credits Model",
+          cost: "credits",
+          creditFunding: funded ? "promotional" : "unavailable",
+          billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+        },
+      ],
+      defaultSelection: { model: "credits-model", reasoningEffort: "none", source: "deployment" },
+    }));
+    const getBilling = mock(async () => ({
+      mode: "stripe",
+      balance: {
+        balanceMicros: funded ? 10_000_000 : 0,
+        currency: "usd",
+        plan: funded
+          ? {
+              key: "free",
+              label: "Free",
+              status: "active",
+              creditGrantedMicros: 10_000_000,
+              creditRemainingMicros: 10_000_000,
+              creditScoped: true,
+              periodResetAt: "2026-11-19T00:00:00Z",
+              seatLimit: 5,
+              seatsUsed: 1,
+              cancelAtPeriodEnd: false,
+            }
+          : null,
+      },
+    }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            initialUseCase="cloud"
+            client={{ ...setupClient, getWorkspaceModelCatalog, getBilling } as never}
+            billingMode="stripe"
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await flush();
+      await enter(container.querySelector("#organization-onboarding-name")!, "Monthly Research");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.querySelector("h1")!.textContent).toBe("Choose how to power your chats");
+      expect(container.textContent).not.toContain("$10 in free credits every month");
+      expect(refreshes).toHaveLength(1);
+      funded = true;
+      refreshes[0]!.cancel();
+      await act(async () => refreshes[0]!.run());
+      await flush();
+      expect(getWorkspaceModelCatalog).toHaveBeenCalledTimes(2);
+      expect(getBilling).toHaveBeenCalledTimes(1);
+      expect(container.querySelector("h1")!.textContent).toBe("$10 in free credits every month");
+      expect(container.textContent).toContain("For the free-credit models");
+      expect(refreshes).toHaveLength(1);
+    } finally {
+      await act(async () => root.unmount());
+      for (const refresh of refreshes) refresh.cancel();
+      globalThis.setTimeout = originalSetTimeout;
+      container.remove();
+    }
+  });
+
   test("an unreadable balance confirms credits without promising a model or amount", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
