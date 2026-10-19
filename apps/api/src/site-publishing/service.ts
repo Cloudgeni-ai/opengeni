@@ -18,10 +18,8 @@ import {
 } from "@opengeni/contracts";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
-  assertNotSiteClampedAgent,
   currentSiteSessionOrigin,
   hasLiteralPermission,
-  siteAgentClamp,
   siteViewerForGrant,
   type ApiRouteDeps,
   type cancelPublishedSiteSession,
@@ -32,7 +30,6 @@ import {
   countOpenSiteAbuseReports,
   getPublishedSiteVersion,
   getSiteDataSite,
-  artifactCreatedInSessionTree,
   getSitePublication,
   isSitePublishingUuid,
   getWorkspaceSiteLimitProfile,
@@ -55,7 +52,6 @@ import {
   type StoredSiteLimitProfile,
 } from "@opengeni/db";
 import { resolveFirstPartyDelegationSecret } from "@opengeni/config";
-import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
 import { siteDataRole } from "../site-data/service";
 import { createSiteContentScanner, type SiteContentScanner } from "./content-scanner";
@@ -672,8 +668,6 @@ export async function stopSiteViewers(
   options: {
     revokeSessions?: boolean;
     cancelConversations?: boolean;
-    /** Cancel only conversations holding tools outside these (see `siteAgentToolsNarrowed`). */
-    toolsNarrowedTo?: { tools: readonly string[]; everyoneTools: boolean };
     reason: string;
   },
 ): Promise<{ revokedSessions: number }> {
@@ -710,7 +704,6 @@ export async function stopSiteViewers(
           limit: STOP_CONVERSATIONS_PAGE_SIZE,
           startedBefore,
           ...(after ? { after } : {}),
-          ...(options.toolsNarrowedTo ? { toolsNarrowedTo: options.toolsNarrowedTo } : {}),
         });
         if (sessionIds.length === 0) break;
         for (const sessionId of sessionIds) {
@@ -823,13 +816,12 @@ export type SiteManagement = {
 
 /**
  * Publication changes come from people and their own agents, never from a
- * Site page: refuse a request that carries a validated Site origin (a Site or
- * frame page reaching the API through a host) and an agent started from a
- * Site page, or acting in a turn one sent (the Site clamp).
+ * Site page: refuse a direct request that carries a validated frame origin.
+ * Agents use the person's ordinary authorization regardless of turn origin.
  */
 export async function requireSitePublicationWriter(
-  deps: SitePublishingDeps,
-  grant: AccessGrant,
+  _deps: SitePublishingDeps,
+  _grant: AccessGrant,
 ): Promise<void> {
   if (currentSiteSessionOrigin())
     throw sitePublishingError(
@@ -837,62 +829,6 @@ export async function requireSitePublicationWriter(
       "forbidden",
       "site_page_forbidden",
       "A Site page cannot change Site publications",
-    );
-  try {
-    await assertNotSiteClampedAgent(deps.db, grant, "Site publications");
-  } catch (error) {
-    if (error instanceof HTTPException && error.status === 403)
-      throw sitePublishingError(
-        403,
-        "forbidden",
-        "site_agent_forbidden",
-        "An agent started from a Site page cannot change Site publications",
-      );
-    throw error;
-  }
-}
-
-export const SITE_AGENT_OTHER_SITE_MESSAGE =
-  "An agent started from a Site page can change only its own Site and Sites it created";
-
-/**
- * Whether `grant` may change a Site's content (new versions, rollback,
- * archive, restore, audience). An agent started from a Site page may only
- * for a Site it was started from, or one an agent in its own session tree
- * created with the artifact tools (the Site's first version records that
- * session). It never rewrites another Site the person can edit, published
- * or not, so a page cannot spread itself through the person's drafts. Other
- * callers are not limited here.
- */
-export async function siteAgentMayChangeArtifact(
-  deps: SitePublishingDeps,
-  grant: AccessGrant,
-  artifactId: string,
-): Promise<boolean> {
-  const clamp = await siteAgentClamp(deps.db, grant);
-  if (!clamp?.clamped || clamp.originSiteIds.includes(artifactId)) return true;
-  const sessionId = grant.metadata?.sessionId;
-  if (typeof sessionId !== "string") return false;
-  return await artifactCreatedInSessionTree(
-    deps.db,
-    { accountId: grant.accountId, workspaceId: grant.workspaceId },
-    artifactId,
-    sessionId,
-  );
-}
-
-/** `siteAgentMayChangeArtifact`, refusing with 403 `site_agent_forbidden`. */
-export async function requireSiteAgentMayChangeArtifact(
-  deps: SitePublishingDeps,
-  grant: AccessGrant,
-  artifactId: string,
-): Promise<void> {
-  if (!(await siteAgentMayChangeArtifact(deps, grant, artifactId)))
-    throw sitePublishingError(
-      403,
-      "forbidden",
-      "site_agent_forbidden",
-      SITE_AGENT_OTHER_SITE_MESSAGE,
     );
 }
 
@@ -1217,14 +1153,6 @@ export async function upsertSitePublicationForManager(
       reason: stopping,
       revokeSessions: stopping !== "agent_disabled",
     });
-  else if (existing && siteAgentToolsNarrowed(existing.agent, publication.agent))
-    // Fewer tools, or no longer for everyone: stop the conversations that hold
-    // tools they would not get now. Viewers stay signed in.
-    await stopSiteViewers(deps, scope, record.id, {
-      reason: "agent_tools_narrowed",
-      revokeSessions: false,
-      toolsNarrowedTo: { tools: publication.agent.tools ?? [], everyoneTools: false },
-    });
   scheduleSiteEdgeSync(deps, [publication.label, previousLabel], {
     siteIdHint: record.id,
     purge: stopping === "unpublished",
@@ -1253,15 +1181,6 @@ export function siteAccessNarrowed(
   }
   if (before.agent.enabled && !after.agent.enabled) return "agent_disabled";
   return null;
-}
-
-/** Whether a Site's workspace tools narrowed: a tool removed. */
-export function siteAgentToolsNarrowed(
-  before: Pick<SitePublicationRecord["agent"], "tools">,
-  after: Pick<SitePublicationRecord["agent"], "tools">,
-): boolean {
-  const kept = new Set(after.tools ?? []);
-  return (before.tools ?? []).some((tool) => !kept.has(tool));
 }
 
 /** MCP server ids (the session tool reference format). */

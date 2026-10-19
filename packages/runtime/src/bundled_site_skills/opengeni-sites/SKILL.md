@@ -458,10 +458,9 @@ and `site_data_export` (JSON or CSV), `site_data_reset` (needs
 collection, then have the scheduled task upsert records with `put` keyed by a
 stable id, so reruns replace instead of duplicating. A person-less scheduled
 task owns `per_viewer` records as the schedule, so each run sees the last
-run's. An agent session started from the Site page acts like the page: only
-that Site's data with viewer rights, and no managing collections, for the
-session's whole life (even when its owner later chats in it from the
-console), so do management from your authoring session or a schedule. The Site page's Data tab
+run's. An agent session started from a Site uses the person's ordinary chat
+permissions, just like a console turn. Only outside-workspace visitor agents
+use the Site's viewer-bound service identity. The Site page's Data tab
 lets the Site's managers browse, export and delete records.
 
 ## Tables and SQL with Site SQL (optional)
@@ -557,12 +556,11 @@ Non-member execution is funded in increments ($0.25 by default), with the
 session ceiling equal to metered spend plus reserved funding. Further work
 must fund its next increment; one provider call can overshoot before metering.
 
-For documents, spreadsheets and presentations, a Site-started agent needs the
-declared editing tools and may edit or export only artifacts created in its own
-Site-clamped session tree. Parent and child sessions share those creations;
-another conversation on the same Site does not. Reading or linking an existing
-workspace artifact does not grant editing access. There is no existing-artifact
-declaration field yet; use an ordinary authorized authoring session for those edits.
+For documents, spreadsheets and presentations, agents use the same native
+artifact permissions in Site and console turns. The page's declared tools
+govern direct page calls, not the agent's default tool catalog. Authors may
+explicitly request narrower ordinary chat settings; restrictions are not added
+merely because the chat is embedded in a Site.
 
 There are two client surfaces:
 

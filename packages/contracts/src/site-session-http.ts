@@ -287,11 +287,9 @@ const SITE_FRAME_BODY_FIELDS: Readonly<Record<string, readonly string[]>> = Obje
 const SITE_FRAME_EMPTY_ONLY_FIELDS = new Set(["resources", "connectionAccounts"]);
 
 /**
- * Session create fields a Site frame may send. The API starts the session
- * with a minimal Site profile: no tools, servers, connections, permissions,
- * vaults, sandbox or environment choice, resources, Skills, agent overrides,
- * hidden model context, learning overrides, goals, channels, visibility,
- * usage limits or nesting. Metadata keeps only keys outside `_opengeni`.
+ * Session create fields a Site frame may send. Agent/tool choices use the
+ * ordinary viewer's defaults, never a platform-imposed Site profile.
+ * Ownership, settings, approvals and credentials remain host-owned.
  */
 export const SITE_FRAME_SESSION_CREATE_FIELDS: readonly string[] = Object.freeze([
   "initialMessage",

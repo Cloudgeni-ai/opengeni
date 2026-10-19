@@ -50,21 +50,23 @@ owns turn refs: ordinary work uses session policy; scheduled work retains frozen
 selection. Credential-provider targeting/MCP preparation consume these refs,
 never omitted-tools queue arrays. Connection-backed MCPs use native authentication, including historical work.
 An optional `ToolRef.allowedTools` narrows a connection's catalog and direct calls;
-merged refs intersect that ceiling and children cannot widen it. Console Site
-agents use it for the overlap of Site-declared tools and the viewer's permissions.
+merged refs intersect that ceiling and children cannot widen it. Site and console
+turns use identical native authority and tool policies; the surface is provenance,
+not a permission profile. Authors can explicitly narrow ordinary chat settings.
 Private console Sites may also reach an existing chat only through its owner's
 explicit, viewer-bound Site/chat grant. This uses native session routes and
 live revocation, not a changed origin or audience; see [Site conversations](site-conversations.md).
-Their editable-artifact writes also require immutable create/import provenance
-within the same Site-clamped session tree; read-created session links grant no edits.
+Artifact writes use the same native authorization as any other agent session.
 After a worker claims a turn, its session RLS actor carries the canonical
 authority projection's root into preparation and execution. This lets a guest's
 worker read its own frozen attempt policies without a human identity or a
 viewer-cookie impersonation; other Site roots remain outside that audience.
-Published-host continuation normalizes legacy tool-less chats through
+Published-host guest continuation normalizes legacy tool-less chats through
 `apps/api/src/site-publishing/agent-session.ts` before admission: the locked
 session update installs only viewer-bound Site data tools, matching permissions
 and no sandbox, without restoring workspace defaults or rewriting accepted work.
+Workspace members use their live member authority and ordinary new-chat defaults.
+Existing stored member settings are never rewritten by the Site host.
 Published page connector tools use `site-publishing/page-tool-authority.ts`:
 the signed gateway's opaque Site session resolves its live workspace member,
 never a fabricated console authorization. Its request-local capability admits

@@ -1105,7 +1105,7 @@ test("an agent acting for the owner manages Site SQL with the tools", async () =
   ).toEqual([]);
 }, 120_000);
 
-test("agents started from a Site page run only the queries the page could", async () => {
+test("Site-origin and console agents have identical native SQL manager authority", async () => {
   const f = await fixture();
   const siteId = await f.publish("Notes");
   const otherId = await f.publish("Other notes");
@@ -1145,25 +1145,19 @@ test("agents started from a Site page run only the queries the page could", asyn
       siteId: otherId,
       sql: "SELECT * FROM notes",
     });
-    expect(crossSite.value.error.code).toBe("forbidden");
+    expect(crossSite.isError, JSON.stringify(crossSite.value)).toBe(false);
     const write = await agent.callTool("site_sql_query", { siteId, sql: "DELETE FROM notes" });
     expect(write.value.error.code).toBe("validation");
-    // Every management tool refuses an agent started from the page.
+    // Native management works without a Site-specific downgrade.
     for (const [tool, args] of [
       ["site_sql_inspect", {}],
-      ["site_sql_enable", { enabled: false }],
-      ["site_sql_migrate", { name: "more", sql: "CREATE TABLE more (a);" }],
-      ["site_sql_define_query", { name: "x", sql: "SELECT 1 AS one" }],
-      ["site_sql_execute", { sql: "DELETE FROM notes" }],
       ["site_sql_export", { format: "json" }],
-      ["site_sql_import", { format: "json", table: "notes", rows: [{ who: "x", note: "y" }] }],
-      ["site_sql_reset", { confirm: true }],
     ] as const) {
       const refused = await agent.callTool(tool, { siteId, ...args });
       expect({ tool, isError: refused.isError, code: refused.value?.error?.code }).toEqual({
         tool,
-        isError: true,
-        code: "forbidden",
+        isError: false,
+        code: undefined,
       });
     }
     // Named queries run with the page's reach: :viewer is the agent's person.
@@ -1180,12 +1174,10 @@ test("agents started from a Site page run only the queries the page could", asyn
     expect(mine.value.rows.map((row: { note: string }) => row.note)).not.toContain("member");
     // Managers-only queries stay out of reach, as on the page.
     const everything = await agent.callTool("site_sql_run", { siteId, name: "everything" });
-    expect(everything.isError).toBe(true);
-    expect(everything.value.error.code).toBe("forbidden");
+    expect(everything.isError, JSON.stringify(everything.value)).toBe(false);
     // Another Site is out of reach.
     const elsewhere = await agent.callTool("site_sql_run", { siteId: otherId, name: "mine" });
-    expect(elsewhere.isError).toBe(true);
-    expect(elsewhere.value.error.code).toBe("forbidden");
+    expect(elsewhere.isError, JSON.stringify(elsewhere.value)).toBe(false);
   };
 
   // A session the page created.
@@ -1206,8 +1198,7 @@ test("agents started from a Site page run only the queries the page could", asyn
   const sent = await agentTools(f, { surface: "site" });
   try {
     const refused = await sent.callTool("site_sql_run", { siteId, name: "mine" });
-    expect(refused.isError).toBe(true);
-    expect(refused.value.error.code).toBe("forbidden");
+    expect(refused.isError, JSON.stringify(refused.value)).toBe(false);
   } finally {
     await sent.mcp.close();
   }
@@ -1381,6 +1372,11 @@ test("a Site's own agent gets the Site's data tools, pinned to the Site and acti
     const sessionId = String(created.json.id);
     const [row] = await shared.admin`select first_party_mcp_tools, first_party_mcp_permissions,
         sandbox_backend from sessions where id = ${sessionId}`;
+    if (kind === "member") {
+      expect(row!.first_party_mcp_tools).toContain("sessions_list");
+      expect(row!.first_party_mcp_permissions).toContain("sessions:read");
+      continue;
+    }
     // Exactly the Site's own data tools for this viewer, and no sandbox.
     expect({ kind, tools: [...row!.first_party_mcp_tools].sort() }).toEqual({
       kind,
@@ -1519,14 +1515,11 @@ test("a Site's own agent gets the Site's data tools, pinned to the Site and acti
       await agent.mcp.close();
     }
   }
-  // The members' and invited person's notes carry their own principals.
+  // The invited person's writes carry that visitor's own principal.
   const stored = await f.sql(siteId).request(f.owner, "POST", "/query", {
     sql: "SELECT who FROM notes ORDER BY rowid",
   });
-  expect(stored.json.rows).toEqual([
-    { who: viewers.member.principal },
-    { who: viewers.invited.principal },
-  ]);
+  expect(stored.json.rows).toEqual([{ who: viewers.invited.principal }]);
   // An ordinary agent of the owner is unaffected: manager reach on any Site.
   const plain = await agentTools(f);
   try {

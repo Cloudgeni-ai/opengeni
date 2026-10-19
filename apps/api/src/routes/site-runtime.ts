@@ -28,9 +28,7 @@ import {
   ToolGatewayInvokeRequest,
   type Permission,
   type SiteAuthExchangeResponse,
-  type SiteEmbeddedAgent,
   type SiteRuntimeConfig,
-  type ToolRef,
 } from "@opengeni/contracts";
 import {
   cancelPublishedSiteSession,
@@ -237,7 +235,6 @@ const SteerRequest = z
     clientEventId: ClientEventId,
   })
   .passthrough();
-const SessionMcpServerIdPattern = /^[A-Za-z0-9_-]{1,200}$/u;
 
 function invalid(message: string) {
   return sitePublishingError(400, "validation_failed", "site_invalid_request", message);
@@ -451,40 +448,6 @@ function allowedQuery(url: URL, names: readonly string[], extra: Record<string, 
   for (const [name, value] of Object.entries(extra)) params.set(name, value);
   const text = params.toString();
   return text ? `?${text}` : "";
-}
-
-/**
- * The workspace tools a Site conversation gets: the OVERLAP of what the Site
- * declares (its admin-chosen MCP connections) and what the viewer may do in
- * the workspace. Only workspace members who may attach MCP connections to
- * their own sessions (`mcp_servers:attach`, or workspace admins) get them.
- * People outside the workspace (invited people and public visitors, signed in
- * or anonymous) never get workspace tools: only the Site's own data and the
- * page. There is no setting that changes this; `guestTools` is ignored.
- * Optional references: a connection the workspace does not have is skipped
- * rather than failing the conversation.
- */
-export function siteAgentToolRefs(
-  agent: Pick<SiteEmbeddedAgent, "tools">,
-  viewer: Pick<SiteRuntimeViewer, "kind">,
-  memberPermissions: readonly string[] | null = null,
-): ToolRef[] {
-  const toolIds = siteViewerGetsTools(viewer, memberPermissions) ? (agent.tools ?? []) : [];
-  return toolIds
-    .filter((tool) => SessionMcpServerIdPattern.test(tool))
-    .map((tool) => ({ kind: "mcp", id: tool, optional: true }));
-}
-
-/** Only workspace members who may use MCP connections get the Site's tools. */
-export function siteViewerGetsTools(
-  viewer: Pick<SiteRuntimeViewer, "kind">,
-  memberPermissions: readonly string[] | null,
-): boolean {
-  if (viewer.kind !== "member" || !memberPermissions) return false;
-  return (
-    memberPermissions.includes("mcp_servers:attach") ||
-    memberPermissions.includes("workspace:admin")
-  );
 }
 
 /** A session id derived from the viewer's create idempotency key (same key, same conversation). */
@@ -1474,11 +1437,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       }))
         await settleSiteRuntimeSpend(deps, host, conversation);
       const agent = host.publication.agent;
-      const memberPermissions =
-        viewer.kind === "member" && viewer.subjectId
-          ? await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId)
-          : null;
-      const mcpTools = siteAgentToolRefs(agent, viewer, memberPermissions);
+
       if (repair) {
         const previous = repair.conversation;
         const legacyMember =
@@ -1487,7 +1446,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           previous.budgetKey === SITE_RUNTIME_SITE_PRINCIPAL;
         if (
           (previous.budgetKey !== siteRuntimeBudgetKey(viewer) && !legacyMember) ||
-          previous.toolIds.some((tool) => !mcpTools.some((allowed) => allowed.id === tool))
+          (viewer.kind !== "member" && previous.toolIds.length > 0)
         )
           throw sitePublishingError(
             409,
@@ -1515,13 +1474,16 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       // Every conversation gets this Site's own data tools, pinned to this
       // Site and acting as this viewer (site-publishing/agent-data-tools.ts).
-      const dataTools = await siteAgentDataToolsForStart(
-        deps,
-        host.scope,
-        host.site.id,
-        viewer.kind,
-        viewer.kind === "member" ? (memberPermissions ?? []) : undefined,
-      );
+      const dataTools =
+        viewer.kind === "member"
+          ? []
+          : await siteAgentDataToolsForStart(
+              deps,
+              host.scope,
+              host.site.id,
+              viewer.kind,
+              undefined,
+            );
       const dataToolPermissions = permissionsRequiredByFirstPartyTools(dataTools);
       // One transaction counts the start and reserves a per-turn estimate
       // against the visitor's and the Site's windows; only the funded allowance
@@ -1546,7 +1508,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
               viewerPrincipal: viewer.principal,
               viewerKind: viewer.kind,
               viewerEmail: viewer.email,
-              toolIds: mcpTools.map((tool) => tool.id),
+              toolIds: [],
               versionId: host.versionId,
               limits: budgets,
               budgetKey: siteRuntimeBudgetKey(viewer),
@@ -1560,23 +1522,28 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         requestedSessionId,
         ...(viewer.kind === "member" ? { visibility: "private" } : {}),
         startMode: "standard",
-        agentAccess: "session",
-        memoryScope: "off",
-        rigId: null,
-        // Only this Site's data tools; never management or workspace tools.
-        firstPartyMcpTools: dataTools,
-        ...(dataTools.length > 0 ? { firstPartyMcpPermissions: dataToolPermissions } : {}),
-        agent: {
-          capabilities: {
-            from: "none",
-            humanInput: false,
-            skills: false,
-            ...(dataTools.length > 0 ? { artifacts: true } : {}),
-          },
-        },
-        // No sandbox: a Site's agent answers from the page and the Site's
-        // data, with no shell or workspace files.
-        sandboxBackend: "none",
+        ...(viewer.kind === "member"
+          ? {}
+          : {
+              agentAccess: "session",
+              memoryScope: "off",
+              rigId: null,
+              // Only this Site's data tools; never management or workspace tools.
+              firstPartyMcpTools: dataTools,
+              ...(dataTools.length > 0 ? { firstPartyMcpPermissions: dataToolPermissions } : {}),
+              agent: {
+                capabilities: {
+                  from: "none",
+                  humanInput: false,
+                  skills: false,
+                  ...(dataTools.length > 0 ? { artifacts: true } : {}),
+                },
+              },
+              // No sandbox: a Site's agent answers from the page and the Site's
+              // data, with no shell or workspace files.
+              sandboxBackend: "none",
+              tools: [],
+            }),
         ...(repair
           ? { model: repair.model }
           : input.model || models.default
@@ -1584,15 +1551,19 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
             : {}),
         ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
         ...(input.latencyMode === undefined ? {} : { latencyMode: input.latencyMode }),
-        instructions: siteAgentInstructions(host, viewer, dataTools, agent.instructions),
-        // Always explicit: an empty list means no workspace tools at all.
-        tools: mcpTools,
+        ...(viewer.kind === "member"
+          ? agent.instructions?.trim()
+            ? { instructions: agent.instructions.trim() }
+            : {}
+          : { instructions: siteAgentInstructions(host, viewer, dataTools, agent.instructions) }),
         metadata: {
           opengeniPublishedSite: {
             siteId: host.site.id,
             versionId: host.versionId,
             viewerKind: viewer.kind,
-            agentDefaultsVersion: SITE_AGENT_DEFAULTS_VERSION,
+            ...(viewer.kind === "member"
+              ? {}
+              : { agentDefaultsVersion: SITE_AGENT_DEFAULTS_VERSION }),
           },
         },
         ...(input.idempotencyKey ? { idempotencyKey: `site-runtime:${requestedSessionId}` } : {}),
@@ -1721,13 +1692,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       // tool the Site no longer gives this viewer (removed, or the viewer left
       // the workspace or lost the permission), or counted as a member's while
       // the viewer no longer is one (or the reverse), takes no more work.
-      const memberPermissions =
-        viewer.kind === "member" && viewer.subjectId
-          ? await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId)
-          : null;
-      const allowedTools = new Set(
-        siteAgentToolRefs(host.publication.agent, viewer, memberPermissions).map((t) => t.id),
-      );
+
       // A member's conversation started before members were kept out of the
       // Site's windows counts in `*` and stays usable; its reservations stay
       // in the windows they were made in.
@@ -1737,7 +1702,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         conversation.budgetKey === SITE_RUNTIME_SITE_PRINCIPAL;
       if (
         (conversation.budgetKey !== siteRuntimeBudgetKey(viewer) && !legacyMember) ||
-        conversation.toolIds.some((tool) => !allowedTools.has(tool))
+        (viewer.kind !== "member" && conversation.toolIds.length > 0)
       )
         throw sitePublishingError(
           409,
@@ -1765,7 +1730,6 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         viewer,
         conversation.sessionId,
         conversation.toolIds,
-        viewer.kind === "member" ? (memberPermissions ?? []) : undefined,
       );
       const usage = await settleSiteRuntimeSpend(deps, host, conversation);
       // Clear the stamped session cap before dropping the durable conversation
