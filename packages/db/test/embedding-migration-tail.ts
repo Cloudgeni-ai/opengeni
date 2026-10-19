@@ -333,5 +333,10 @@ export const embeddingMigrationTail = [
   // Replaces the file ownership trigger from withheld 0461 and reads the file
   // read-capability table from withheld 0499.
   "0854_file_visibility.sql",
+  // Rewrites the fork routines that withheld 0738 rewrites; replay after it.
+  "0855_session_fork_agent_parity.sql",
+  // Patches 0855's fork routines and temporarily disables the sessions fence
+  // trigger installed by withheld 0345.
+  "0856_session_fork_workflow_identity.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];
