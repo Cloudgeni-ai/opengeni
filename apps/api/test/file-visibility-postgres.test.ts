@@ -223,6 +223,8 @@ test("an upload says who will be able to open it", async () => {
   const access = ((await mine.json()) as { access: { visibility: string; whoCanOpen: string } })
     .access;
   expect(access.visibility).toBe("private");
-  expect(access.whoCanOpen).toStartWith("Only you");
+  // Names the owner, never "you": an agent or a shared chat may read it.
+  expect(access.whoCanOpen).toStartWith("Only ");
+  expect(access.whoCanOpen).not.toMatch(/\byou\b/iu);
   expect(access.whoCanOpen).toContain("is told it is private");
 });

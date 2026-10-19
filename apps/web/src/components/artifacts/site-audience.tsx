@@ -79,7 +79,7 @@ export const FILE_AUDIENCE_COPY: AudienceCopy = {
   onlyMeDescription: "Only you can open this file.",
   workspaceDescription: (workspaceName) => `Everyone in ${workspaceName} can open this file.`,
   shareConfirm: (workspaceName) =>
-    `Everyone in ${workspaceName} will be able to open this file and its link. The chat it came from keeps its own audience.`,
+    `Everyone in ${workspaceName} will be able to open this file from its link. The chat it came from keeps its own audience.`,
   limitConfirm:
     "Only you will be able to open this file. Other people in the workspace lose access to it, and its link stops working for them.",
   whoCan: "Who can open this file",

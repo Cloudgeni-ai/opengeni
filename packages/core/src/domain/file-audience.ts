@@ -45,7 +45,8 @@ async function personName(db: Database, subjectId: string | null): Promise<strin
 /**
  * One plain sentence saying who can open a file, for the agent that made or
  * shared it. It names only the owner the agent already acts for, and the
- * workspace it already works in.
+ * workspace it already works in. It names the owner rather than saying "you":
+ * the reader may be an agent, or a shared chat where others see the link.
  */
 export async function fileAccessFor(
   db: Database,
@@ -61,7 +62,7 @@ export async function fileAccessFor(
       whoCanOpen: `Everyone in the workspace “${input.workspace.name.slice(0, 200)}” can open this file.`,
     };
   const name = await personName(db, input.file.ownerSubjectId ?? null);
-  const only = name ? `Only you (${name}) can open this file` : "Only you can open this file";
+  const only = name ? `Only ${name} can open this file` : "Only its owner can open this file";
   return {
     visibility,
     whoCanOpen:

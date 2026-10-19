@@ -98,7 +98,7 @@ describe("who can open a file", () => {
     ).toEqual({
       visibility: "private",
       whoCanOpen:
-        "Only you can open this file. Anyone else who opens its link is told it is private.",
+        "Only its owner can open this file. Anyone else who opens its link is told it is private.",
     });
     expect(
       (
@@ -107,7 +107,7 @@ describe("who can open a file", () => {
           file: { scope: "personal", ownerSubjectId: null },
         })
       ).whoCanOpen,
-    ).toBe("Only you can open this file; it is in a personal workspace.");
+    ).toBe("Only its owner can open this file; it is in a personal workspace.");
     expect(fileVisibility({ scope: "personal" })).toBe("private");
     expect(fileVisibility({ scope: "workspace" })).toBe("workspace");
   });

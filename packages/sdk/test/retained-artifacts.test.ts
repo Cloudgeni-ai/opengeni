@@ -113,7 +113,7 @@ describe("retained sandbox file wire validation", () => {
   test("accepts who can open the file, and only that exact shape", () => {
     const withAccess = {
       ...receipt,
-      access: { visibility: "private" as const, whoCanOpen: "Only you can open this file." },
+      access: { visibility: "private" as const, whoCanOpen: "Only Ada can open this file." },
     };
     expect(parseSandboxFileArtifactReceipt(withAccess, workspaceId)).toEqual(withAccess);
     expect(

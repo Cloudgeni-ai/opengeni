@@ -2290,7 +2290,7 @@ function registerSandboxFileArtifactTool(
           .enum(["private", "workspace"])
           .optional()
           .describe(
-            '"private" is Only me (only the chat\'s owner); "workspace" is everyone in it.',
+            '"private" is Only me (only the person you work for); "workspace" is everyone in the workspace.',
           ),
       },
     },
