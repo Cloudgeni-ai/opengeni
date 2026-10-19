@@ -351,7 +351,10 @@ mod tests {
             with("bearer", r#""x""#),
         ] {
             assert!(
-                matches!(ComputeConfig::parse(&bad), Err(ComputeError::Invalid { .. })),
+                matches!(
+                    ComputeConfig::parse(&bad),
+                    Err(ComputeError::Invalid { .. })
+                ),
                 "{bad}"
             );
         }

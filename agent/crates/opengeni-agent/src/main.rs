@@ -42,13 +42,13 @@ mod browser_sidecar;
 mod capacity;
 mod cli;
 mod codemode;
+mod compute;
 mod config;
 mod credential_renewal;
 mod dispatch;
 mod embedded_runtime;
 mod engine;
 mod enrollment;
-mod compute;
 #[cfg(unix)]
 mod handover;
 mod instance_lock;
