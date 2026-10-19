@@ -41,9 +41,12 @@
 # and they do not (a run stopped between the two, as when moving from the
 # old layout of plain files), and a restart the agent is owed is done. The
 # file restart-owed is written, durably, before a pair is switched in, and
-# removed only once the agent restarted (or was not running, so it starts
-# with the new pair): a run that fails after the switch, in cleaning up or
-# in the restart, leaves it for the next run.
+# removed only once the agent restarted (or systemd reported it not
+# running, so it starts with the new pair): a run that fails after the
+# switch, in cleaning up, in asking systemd or in the restart, leaves it
+# for the next run. Once a restart was tried, the file says so, and the
+# next run restarts the agent whatever its state, because a restart that
+# failed may have stopped it.
 set -euo pipefail
 
 config=/etc/compute/host.env
@@ -94,10 +97,22 @@ link_public() {
   done
 }
 
-# Restarts the agent if it runs, so it takes up the published pair, then
-# clears the restart owed; a failed restart leaves it owed.
+# Pays the restart owed: restarts the agent if it runs (or if a restart was
+# tried before, which may have stopped it), so it takes up the published
+# pair, then clears the debt. A failed restart, or a state systemd cannot
+# report, leaves it owed.
 activate() {
-  if systemctl is-active -q compute-host.service; then
+  local state=tried
+  if [ "$(cat restart-owed)" != tried ]; then
+    state=$(systemctl show -p ActiveState --value compute-host.service) && [ -n "$state" ] ||
+      fail "systemd did not report whether compute-host.service runs; the restart stays owed"
+    case "$state" in
+      inactive | failed) state= ;;
+    esac
+  fi
+  if [ -n "$state" ]; then
+    echo tried >restart-owed
+    sync -f restart-owed 2>/dev/null || sync
     systemctl restart compute-host.service
   fi
   rm -f restart-owed
