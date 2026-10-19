@@ -261,7 +261,7 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
         // Model elapsed sleep without suspending the host or advancing timers.
         await writeFile(bootOffsetFile, "3600");
         const refusal = await connection.request(
-          `${subject}.replay.${issued.ping.controlReplayToken}`,
+          `${subject}.replay.${issued.ping.controlReplayTokens[0]}`,
           ControlRequest.encode(
             ControlRequest.fromPartial({
               requestId: "delayed-after-suspend",
@@ -274,7 +274,18 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
           code: ErrorCode.ERROR_CODE_PROTOCOL,
           detail: { failure_code: "control_delivery_expired", outcome_unknown: "true" },
         });
-        await invoke(false); // A fresh lease works immediately after resume.
+        // Prefetched tokens also expired during sleep. Refuse promptly, without
+        // replaying under a different identity, then refresh for the next call.
+        const stale = await rpc.request(
+          subject,
+          ControlRequest.fromPartial({
+            requestId: "pooled-after-suspend",
+            op: { $case: "ping", ping: {} },
+          }),
+          { timeoutMs: 1000 },
+        );
+        expect(stale.error?.detail.failure_code).toBe("control_delivery_expired");
+        await invoke(false);
       }
       console.info(
         JSON.stringify({

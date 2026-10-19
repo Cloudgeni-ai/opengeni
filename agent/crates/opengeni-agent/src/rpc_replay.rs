@@ -105,6 +105,10 @@ impl Registry {
         self.issue_at(lifetime, Self::now()?)
     }
 
+    pub fn issue_batch(&mut self, lifetime: Duration) -> Result<Vec<String>, Rejection> {
+        (0..64).map(|_| self.issue(lifetime)).collect()
+    }
+
     fn now() -> Result<Duration, Rejection> {
         opengeni_agent_platform::continuous_time().map_err(|error| {
             tracing::warn!(%error, "control delivery elapsed clock unavailable");
@@ -135,7 +139,19 @@ impl Registry {
         }
     }
 
-    fn admit_at(&mut self, token: &str, payload: &[u8], now: Duration) -> Admission {
+    fn admit_at(&mut self, delivery: &str, payload: &[u8], now: Duration) -> Admission {
+        let mut parts = delivery.split('.');
+        let token = parts.next().unwrap_or_default();
+        let timing = match (parts.next(), parts.next(), parts.next()) {
+            (None, None, None) => None,
+            (Some(age), Some(lifetime), None) => {
+                let (Ok(age), Ok(lifetime)) = (age.parse::<u64>(), lifetime.parse::<u64>()) else {
+                    return Admission::Rejected(Rejection::ExpiredOrUnknown);
+                };
+                Some((Duration::from_millis(age), Duration::from_millis(lifetime)))
+            }
+            _ => return Admission::Rejected(Rejection::ExpiredOrUnknown),
+        };
         let Some(lease) = self.entries.get_mut(token) else {
             return Admission::Rejected(Rejection::ExpiredOrUnknown);
         };
@@ -144,15 +160,34 @@ impl Registry {
         }
         let digest = blake3::hash(payload);
         if let Some(entry) = &lease.receipt {
-            return if entry.digest == digest {
+            return if entry.digest == digest && entry.delivery == delivery {
                 Admission::Existing(entry.clone())
             } else {
                 Admission::Rejected(Rejection::ConflictingPayload)
             };
         }
+        // Prefetch age is measured by the caller from receipt of the batch.
+        // Anchoring that age at issuance is conservative by the return-path
+        // latency. Neither retries nor time spent buffered can reset a budget.
+        let (issued_at, expires_at) = if let Some((age, lifetime)) = timing {
+            let Some(start) = lease.issued_at.checked_add(age) else {
+                return Admission::Rejected(Rejection::ExpiredOrUnknown);
+            };
+            let Some(end) = start.checked_add(lifetime) else {
+                return Admission::Rejected(Rejection::ExpiredOrUnknown);
+            };
+            if start > now || lifetime.is_zero() || end <= now {
+                return Admission::Rejected(Rejection::ExpiredOrUnknown);
+            }
+            (start, end.min(lease.expires_at))
+        } else {
+            (lease.issued_at, lease.expires_at)
+        };
+        lease.expires_at = expires_at;
         let (reply, _) = watch::channel(None);
         let entry = Arc::new(Receipt {
-            issued_at: lease.issued_at,
+            issued_at,
+            delivery: delivery.to_owned(),
             digest,
             reply,
             reservation: Mutex::new(None),
@@ -164,6 +199,7 @@ impl Registry {
 
 pub struct Receipt {
     issued_at: Duration,
+    delivery: String,
     digest: blake3::Hash,
     reply: watch::Sender<Option<Arc<Vec<u8>>>>,
     // Keep the original guard through publication or receipt expiry. Physical
@@ -172,7 +208,7 @@ pub struct Receipt {
 }
 
 impl Receipt {
-    /// The existing relative exec budget starts at lease issuance, not at a
+    /// The existing relative exec budget starts at call issuance, not at a
     /// delayed delivery or retry. A zero budget still means no process deadline.
     pub fn exec_deadline(
         &self,
@@ -326,6 +362,58 @@ mod tests {
         );
         assert_eq!(registry.issue(Duration::MAX), Err(Rejection::InvalidWindow));
         assert!(registry.entries.is_empty());
+    }
+
+    #[test]
+    fn prefetched_token_binds_call_timing_and_cannot_extend_expiry() {
+        let mut registry = Registry::default();
+        let start = Duration::from_secs(100);
+        let token = registry.issue_at(Duration::from_secs(240), start).unwrap();
+        let delivery = format!("{token}.60000.120000");
+        let now = start + Duration::from_secs(61);
+        let Admission::New(receipt) = registry.admit_at(&delivery, b"exec", now) else {
+            panic!("prefetched call admitted")
+        };
+        assert_eq!(
+            receipt.exec_remaining(10_000, now),
+            Some(Duration::from_secs(9))
+        );
+        assert!(matches!(
+            registry.admit_at(&format!("{token}.61000.120000"), b"exec", now),
+            Admission::Rejected(Rejection::ConflictingPayload)
+        ));
+        assert!(matches!(
+            registry.admit_at(&delivery, b"exec", now),
+            Admission::Existing(_)
+        ));
+        let expiry = start + Duration::from_secs(180);
+        assert!(matches!(
+            registry.admit_at(&delivery, b"exec", expiry),
+            Admission::Rejected(Rejection::ExpiredOrUnknown)
+        ));
+        registry.collect_at(expiry);
+        assert!(matches!(
+            registry.admit_at(&format!("{token}.180000.120000"), b"exec", expiry),
+            Admission::Rejected(Rejection::ExpiredOrUnknown)
+        ));
+    }
+
+    #[test]
+    fn prefetched_delayed_calls_and_future_offsets_are_refused_before_execution() {
+        let mut registry = Registry::default();
+        let start = Duration::from_secs(100);
+        let token = registry.issue_at(Duration::from_secs(240), start).unwrap();
+        for delivery in [
+            format!("{token}.10000.1000"),
+            format!("{token}.30000.1000"),
+            format!("{token}.10.0"),
+        ] {
+            assert!(matches!(
+                registry.admit_at(&delivery, b"exec", start + Duration::from_secs(20)),
+                Admission::Rejected(Rejection::ExpiredOrUnknown)
+            ));
+        }
+        assert!(registry.entries.get(&token).unwrap().receipt.is_none());
     }
 
     #[test]

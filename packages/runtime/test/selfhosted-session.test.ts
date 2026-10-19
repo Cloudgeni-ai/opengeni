@@ -1276,7 +1276,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
               requestId: req.requestId,
               result: {
                 $case: "ping",
-                ping: { nonce: "1", agentMonotonicMs: "1", controlReplayToken: "" },
+                ping: { nonce: "1", agentMonotonicMs: "1", controlReplayTokens: [] },
               },
             }).finish(),
           };
@@ -1313,7 +1313,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
               requestId: req.requestId,
               result: {
                 $case: "ping",
-                ping: { nonce: "1", agentMonotonicMs: "1", controlReplayToken: "" },
+                ping: { nonce: "1", agentMonotonicMs: "1", controlReplayTokens: [] },
               },
             }).finish(),
           };
@@ -1391,7 +1391,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
             ping: {
               nonce: req.op?.$case === "ping" ? req.op.ping.nonce : "",
               agentMonotonicMs: "1",
-              controlReplayToken: "",
+              controlReplayTokens: [],
             },
           },
         };

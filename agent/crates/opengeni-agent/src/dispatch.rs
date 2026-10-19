@@ -162,7 +162,7 @@ async fn dispatch_future<P: Platform>(
             RespResult::Ping(v1::PingResponse {
                 nonce: req.nonce,
                 agent_monotonic_ms: ctx.monotonic_ms(),
-                control_replay_token: String::new(),
+                control_replay_tokens: Vec::new(),
             }),
         ),
         Op::Metrics(_) => metrics_response(request_id).await,

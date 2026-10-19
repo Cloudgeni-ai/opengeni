@@ -1873,7 +1873,7 @@ export interface PingRequest {
   /** Echoed back so the caller can correlate / measure RTT. */
   nonce: string;
   /**
-   * Optional receiver-issued control delivery lease, measured on the agent's
+   * Optional receiver-issued control delivery batch, measured on the agent's
    * suspend-inclusive monotonic clock. Zero is an ordinary liveness-only ping.
    */
   controlReplayWindowMs: string;
@@ -1884,10 +1884,11 @@ export interface PingResponse {
   /** The agent's monotonic clock, for skew estimation. */
   agentMonotonicMs: string;
   /**
-   * Opaque, single-delivery identity. Empty on older agents or ordinary pings.
-   * Reuse the exact token and request bytes across transport retries.
+   * Opaque, single-delivery identities for background replenishment. Empty on
+   * older agents or ordinary pings. Each token is used for only one call;
+   * retries retain its exact subject (including timing) and request bytes.
    */
-  controlReplayToken: string;
+  controlReplayTokens: string[];
 }
 
 /**
@@ -2139,7 +2140,7 @@ export interface OpStart {
    * Absolute runner-enforced deadline, unix-epoch ms (0 = none). Runner-side
    * enforcement is authoritative (process-tree kill + Exit{timed_out}); the
    * server wall-clock is advisory. Legacy one-shot delivery uses this field;
-   * replay v2 uses ExecRequest.timeout_ms from receiver lease issuance instead.
+   * replay v2 uses ExecRequest.timeout_ms from the token's fixed call offset instead.
    */
   deadlineMs: string;
   /** The originating session id, for per-origin fair admission. */
@@ -11283,7 +11284,7 @@ export const PingRequest: MessageFns<PingRequest> = {
 };
 
 function createBasePingResponse(): PingResponse {
-  return { nonce: "0", agentMonotonicMs: "0", controlReplayToken: "" };
+  return { nonce: "0", agentMonotonicMs: "0", controlReplayTokens: [] };
 }
 
 export const PingResponse: MessageFns<PingResponse> = {
@@ -11294,8 +11295,8 @@ export const PingResponse: MessageFns<PingResponse> = {
     if (message.agentMonotonicMs !== "0") {
       writer.uint32(16).uint64(message.agentMonotonicMs);
     }
-    if (message.controlReplayToken !== "") {
-      writer.uint32(26).string(message.controlReplayToken);
+    for (const v of message.controlReplayTokens) {
+      writer.uint32(26).string(v!);
     }
     return writer;
   },
@@ -11328,7 +11329,7 @@ export const PingResponse: MessageFns<PingResponse> = {
             break;
           }
 
-          message.controlReplayToken = reader.string();
+          message.controlReplayTokens.push(reader.string());
           continue;
         }
       }
@@ -11348,11 +11349,11 @@ export const PingResponse: MessageFns<PingResponse> = {
         : isSet(object.agent_monotonic_ms)
         ? globalThis.String(object.agent_monotonic_ms)
         : "0",
-      controlReplayToken: isSet(object.controlReplayToken)
-        ? globalThis.String(object.controlReplayToken)
-        : isSet(object.control_replay_token)
-        ? globalThis.String(object.control_replay_token)
-        : "",
+      controlReplayTokens: globalThis.Array.isArray(object?.controlReplayTokens)
+        ? object.controlReplayTokens.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.control_replay_tokens)
+        ? object.control_replay_tokens.map((e: any) => globalThis.String(e))
+        : [],
     };
   },
 
@@ -11364,8 +11365,8 @@ export const PingResponse: MessageFns<PingResponse> = {
     if (message.agentMonotonicMs !== "0") {
       obj.agentMonotonicMs = message.agentMonotonicMs;
     }
-    if (message.controlReplayToken !== "") {
-      obj.controlReplayToken = message.controlReplayToken;
+    if (message.controlReplayTokens?.length) {
+      obj.controlReplayTokens = message.controlReplayTokens;
     }
     return obj;
   },
@@ -11377,7 +11378,7 @@ export const PingResponse: MessageFns<PingResponse> = {
     const message = createBasePingResponse();
     message.nonce = object.nonce ?? "0";
     message.agentMonotonicMs = object.agentMonotonicMs ?? "0";
-    message.controlReplayToken = object.controlReplayToken ?? "";
+    message.controlReplayTokens = object.controlReplayTokens?.map((e) => e) || [];
     return message;
   },
 };

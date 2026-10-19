@@ -44,25 +44,43 @@ it does not carry these NATS control requests. Codemode's NATS dispatch is only
 a wake-up for its PostgreSQL operation journal; clients re-notify the same
 operation, and the worker claims that row before execution.
 
-For control reply recovery, each call first uses a read-only ping to request a
-lease duration and negotiate the NATS response header `Opengeni-Control-Replay: 2`.
-The receiver issues an opaque random token and retains its deadline on a
+For control reply recovery, a read-only ping obtains a batch of 64 single-use
+tokens and negotiates the NATS response header `Opengeni-Control-Replay: 2`.
+The caller caches them by authenticated bus and exact process subject, including
+across one-off RPC adapters. Warm calls take a token without another round trip;
+at 16 remaining tokens the caller replenishes in the background, sharing one
+pending refill across concurrent callers. Cold, expired or exhausted pools wait
+for a batch. No idle timer or recurring ping is introduced. The batch window is
+twice the requested call timeout plus recovery allowance; the caller discards
+tokens without enough remaining headroom, conservatively measured from before
+the batch request. The receiver retains each opaque token's deadline on a
 suspend-inclusive elapsed clock (Linux BOOTTIME, macOS MONOTONIC_RAW, Windows
 GetTickCount64), never civil time. Sleeping does not extend the delivery window.
 Supporting callers send the immutable delivery to
-`<exact-process-rpc-subject>.replay.<token>`, with the unchanged protobuf request
+`<exact-process-rpc-subject>.replay.<token>.<age-ms>.<lifetime-ms>`, with the unchanged protobuf request
 as its payload. Only issued, unexpired tokens can admit work. First admission
-binds the payload digest; duplicates join its pending reply or retrieve the exact
-retained bytes. Changed payloads are refused. The journal survives
+binds the payload digest and timing; duplicates join its pending reply or retrieve the exact
+retained bytes. Changed payloads or timing are refused. The journal survives
 socket/JWT/credential replacement, including removal and re-addition of the same
 exact origin/connection/process scope, but is not shared across different scopes.
 Receipts and unused tokens are collected after expiry; unknown tokens are never
 admitted, so collection cannot license another execution. Neither admission nor
 the caller's retry budget reads wall time: clock skew, jumps and corrections do
-not poison this transport. Streamed exec uses its existing relative timeout from
-receiver lease issuance as well; delivery or retries cannot reset that deadline.
+not poison this transport. The call offset is elapsed caller time since receiving
+the batch, anchored at the receiver's issuance time. This conservatively includes
+return-path latency in the call budget, but not idle prefetch age. Future offsets
+are refused. Receipt expiry is the earlier of the batch deadline and the fixed
+call offset plus lifetime. Streamed exec uses its existing relative timeout from
+that same call offset; delivery or retries cannot reset the deadline.
 The absolute exec deadline remains only for legacy one-shot peers. This does not
 change external authentication systems' clock requirements.
+
+Private batch allocation avoids distributing the same single-use token to several
+workers through a broadcast hello. It also avoids estimating wall-clock offsets
+from heartbeats, which can become stale when a clock jumps. Long machine sleep can
+expire already-prefetched tokens: the first refused call is not silently retried
+under a fresh identity; the caller discards its pool and refreshes for the next
+call. An unknown token never grants fresh execution.
 
 The requester retries transient transport failures within the operation's request
 timeout plus a two-minute recovery allowance, preserving the delivery identity

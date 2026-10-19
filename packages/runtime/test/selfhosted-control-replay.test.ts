@@ -15,7 +15,10 @@ function leaseReply() {
     data: ControlResponse.encode(
       ControlResponse.fromPartial({
         requestId: "probe",
-        result: { $case: "ping", ping: { controlReplayToken: crypto.randomUUID() } },
+        result: {
+          $case: "ping",
+          ping: { controlReplayTokens: Array.from({ length: 64 }, () => crypto.randomUUID()) },
+        },
       }),
     ).finish(),
     headers: { get: () => "2" },
@@ -23,6 +26,79 @@ function leaseReply() {
 }
 
 describe("control reply recovery", () => {
+  test("warm calls have no negotiation round trip and replenish without blocking", async () => {
+    let probes = 0;
+    let releaseRefill: (() => void) | undefined;
+    const deliveries: string[] = [];
+    const connection = {
+      supportsHeaders: true,
+      async request(target: string) {
+        if (target.endsWith(".rpc")) {
+          probes++;
+          if (probes === 2)
+            await new Promise<void>((resolve) => {
+              releaseRefill = resolve;
+            });
+          return leaseReply();
+        }
+        deliveries.push(target);
+        return { data: result };
+      },
+    };
+    const recovery = new ControlReplyRecovery();
+    for (let index = 0; index < 60; index++) {
+      await recovery.request(connection, subject, new Uint8Array(), 100);
+    }
+    expect(probes).toBe(2);
+    expect(deliveries).toHaveLength(60);
+    expect(
+      new Set(deliveries.map((target) => target.split(".replay.")[1]?.split(".")[0])).size,
+    ).toBe(60);
+    for (let index = 60; index < 64; index++) {
+      await recovery.request(connection, subject, new Uint8Array(), 100);
+    }
+    const exhausted = recovery.request(connection, subject, new Uint8Array(), 100);
+    await Promise.resolve();
+    expect(deliveries).toHaveLength(64);
+    expect(probes).toBe(2); // Exhaustion joins the one refill already in flight.
+    releaseRefill!();
+    await exhausted;
+    expect(deliveries).toHaveLength(65);
+    // run_on creates a fresh RPC facade; it still shares the bus-scoped pool.
+    await new ControlReplyRecovery().request(connection, subject, new Uint8Array(), 100);
+    // A replacement process must not inherit another process's token pool.
+    await recovery.request(
+      connection,
+      subject.replace("process", "successor"),
+      new Uint8Array(),
+      100,
+    );
+    expect(probes).toBe(3);
+  });
+
+  test("an exhausted pool shares the refill, and a longer budget obtains fresh tokens", async () => {
+    let probes = 0;
+    const connection = {
+      supportsHeaders: true,
+      async request(target: string) {
+        if (target === subject) {
+          probes++;
+          return leaseReply();
+        }
+        return { data: result };
+      },
+    };
+    const recovery = new ControlReplyRecovery(10);
+    await Promise.all(
+      Array.from({ length: 100 }, () =>
+        recovery.request(connection, subject, new Uint8Array(), 1_000),
+      ),
+    );
+    expect(probes).toBe(2);
+    await recovery.request(connection, subject, new Uint8Array(), 10_000);
+    expect(probes).toBe(3);
+  });
+
   test("wall-clock jumps and correction do not change lease identity or the retry budget", async () => {
     const realNow = Date.now();
     const wall = spyOn(Date, "now");
@@ -38,7 +114,7 @@ describe("control reply recovery", () => {
               probes++;
               const ping = ControlRequest.decode(payload).op;
               expect(ping?.$case).toBe("ping");
-              if (ping?.$case === "ping") expect(ping.ping.controlReplayWindowMs).toBe("120100");
+              if (ping?.$case === "ping") expect(ping.ping.controlReplayWindowMs).toBe("240200");
               return leaseReply();
             }
             deliveries.push(target);
@@ -54,7 +130,7 @@ describe("control reply recovery", () => {
         expect(probes).toBe(1);
         expect(deliveries).toHaveLength(2);
         expect(deliveries[0]).toBe(deliveries[1]);
-        expect(deliveries[0]).toMatch(/\.replay\.[0-9a-f-]{36}$/);
+        expect(deliveries[0]).toMatch(/\.replay\.[0-9a-f-]{36}\.\d+\.120100$/);
       }
     } finally {
       wall.mockRestore();
@@ -242,7 +318,7 @@ describe("control reply recovery", () => {
       recovery.request(connection, subject, new Uint8Array(), 10),
       recovery.request(connection, subject, new Uint8Array(), 10),
     ]);
-    expect(probes).toBe(3);
+    expect(probes).toBe(2);
     expect(deliveries).toHaveLength(2);
     expect(new Set(deliveries).size).toBe(2);
     expect(deliveries.every((target) => target.startsWith(`${subject}.replay.`))).toBe(true);

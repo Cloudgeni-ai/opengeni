@@ -1547,7 +1547,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                             .replies
                             .lock()
                             .expect("control receipts")
-                            .issue(Duration::from_millis(ping.control_replay_window_ms));
+                            .issue_batch(Duration::from_millis(ping.control_replay_window_ms));
                         let response = match issued {
                             Ok(token) => v1::ControlResponse {
                                 request_id,
@@ -1558,7 +1558,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                                         agent_monotonic_ms: self
                                             .ctx(link, max_payload)
                                             .monotonic_ms(),
-                                        control_replay_token: token,
+                                        control_replay_tokens: token,
                                     },
                                 )),
                             },
@@ -5838,6 +5838,9 @@ mod tests {
             root: root.clone(),
         });
         let mut credentials = it::test_credentials(&url);
+        if let Ok(bearer) = std::env::var("OPENGENI_ROTATION_PROBE_BEARER") {
+            credentials.nats_bearer = bearer;
+        }
         credentials.consented_screen_control = true;
         let definition = SupervisorLink::new(
             "rotation-probe",
@@ -5963,7 +5966,7 @@ mod tests {
         let delivery = format!(
             "{}.replay.{}",
             link.rpc_subject(),
-            lease.control_replay_token
+            lease.control_replay_tokens[0]
         );
         let request = ControlRequest {
             request_id: "move-once".into(),
@@ -6015,7 +6018,7 @@ mod tests {
                 format!(
                     "{}.replay.{}",
                     link.rpc_subject(),
-                    short_lease.control_replay_token
+                    short_lease.control_replay_tokens[0]
                 ),
                 request.encode_to_vec(),
                 "control_delivery_expired",
@@ -6066,7 +6069,7 @@ mod tests {
         let input_delivery = format!(
             "{}.replay.{}",
             link.rpc_subject(),
-            lease.control_replay_token
+            lease.control_replay_tokens[0]
         );
         let input_request = ControlRequest {
             request_id: "input-once".into(),
