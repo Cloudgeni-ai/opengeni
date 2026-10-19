@@ -83,6 +83,15 @@ target workspace must belong to the same organization and remain accessible to
 the owner. `workspace_shared` requires an explicit durable shared-output
 acknowledgement. Revocation is immediate and advances grant generation.
 
+Personal Connected Machines have one bounded tree exception (0851): a machine's
+original `session` grant, or its consumed `once` grant for the originating logical
+turn, can cover true agent-created descendants of the consenting session. Every
+parent/turn link must retain the same workspace, owner and initiating human, with
+live machine snapshots and the original grant's generation/expiry/revocation.
+Claim and dispatch both revalidate that evidence; no independent child grant is
+issued. Other resource kinds and non-descendant sessions retain exact-session
+semantics. See [Connected Machines](connected-machines.md).
+
 Migration `0305_personal_resource_grant_management.sql` replaces the ambient
 owner-management seam with the activated product contract. Only a canonical
 managed-cookie context for the exact subject may use it; API keys, delegated or
