@@ -210,6 +210,27 @@ function capturedRepositorySetupCommand(calls: Array<Record<string, unknown>>): 
     : String(calls[0]?.cmd);
 }
 
+/** The inline per-turn launcher of a content-addressed repository setup program. */
+function capturedRepositorySetupLauncher(calls: Array<Record<string, unknown>>): string {
+  return String(calls.find(({ cmd }) => String(cmd).includes("opengeni_setup_program="))?.cmd);
+}
+
+/** A box without staged setup programs: launchers report the program missing
+ * until a staging command installs it at its content-addressed path. */
+function freshSetupBox<T>(ok: T): (cmd: unknown) => T | Record<string, unknown> {
+  const installed = new Set<string>();
+  return (cmd) => {
+    const text = String(cmd);
+    for (const match of text.matchAll(/mv -f '[^']+' '([^']+)'/gu)) installed.add(match[1]!);
+    const launched = text.match(/opengeni_setup_program='([^']+)'/u);
+    if (launched && !installed.has(launched[1]!)) {
+      const output = "__OPENGENI_SETUP_PROGRAM_MISSING__\n";
+      return { output, stdout: output, stderr: "", exitCode: 86, status: 86 };
+    }
+    return ok;
+  };
+}
+
 function makeCodexAppsAuth(overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {}): {
   clientVersion: string;
   withAuthorization: <T>(use: (token: CodexTokenSnapshot) => Promise<T>) => Promise<T>;
@@ -6460,9 +6481,10 @@ describe("runtime event normalization", () => {
       },
     ]);
 
-    expect(command).toContain(
-      'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
-    );
+    expect(command).toContain('git -C "$tmp" fetch --depth 1 --no-tags origin "$ref"');
+    // The checkout needs every blob of the commit; a blob-less partial clone only
+    // adds a slower second fetch round.
+    expect(command).not.toContain("--filter=blob:none");
     // origin/HEAD is best-effort (branch refs only); a PR ref, tag, or SHA must not
     // fail the clone because `remote set-head` rejects it.
     expect(command).toContain(
@@ -6490,8 +6512,8 @@ describe("runtime event normalization", () => {
     expect(command).not.toContain("ghs_liveToken123");
   });
 
-  test("runs independent repository clones in bounded batches of four", () => {
-    const resources = Array.from({ length: 5 }, (_, index) => ({
+  test("runs independent repository clones concurrently in bounded batches of sixteen", () => {
+    const resources = Array.from({ length: 17 }, (_, index) => ({
       kind: "repository" as const,
       uri: `https://github.com/acme/repo-${index}.git`,
       ref: "main",
@@ -6505,11 +6527,11 @@ describe("runtime event normalization", () => {
       .map((line, index) => ({ line, index }))
       .filter(({ line }) => line === "wait_repository_clone_batch");
 
-    expect(starts).toHaveLength(5);
+    expect(starts).toHaveLength(17);
     expect(waits).toHaveLength(2);
-    expect(waits[0]!.index).toBeGreaterThan(starts[3]!.index);
-    expect(waits[0]!.index).toBeLessThan(starts[4]!.index);
-    expect(waits[1]!.index).toBeGreaterThan(starts[4]!.index);
+    expect(waits[0]!.index).toBeGreaterThan(starts[15]!.index);
+    expect(waits[0]!.index).toBeLessThan(starts[16]!.index);
+    expect(waits[1]!.index).toBeGreaterThan(starts[16]!.index);
     expect(command).toContain('if ! wait "$clone_pid"; then');
     expect(command).toContain('if [ "$clone_failed" -ne 0 ]; then');
   });
@@ -6745,11 +6767,12 @@ describe("runtime event normalization", () => {
   test("runs repository clone hook as a sandbox lifecycle hook", async () => {
     const calls: Array<Record<string, unknown>> = [];
     const events: string[] = [];
+    const box = freshSetupBox({ status: 0, output: "" });
     await runRepositoryCloneHook(
       {
         execCommand: async (args: Record<string, unknown>) => {
           calls.push(args);
-          return { status: 0, output: "" };
+          return box(args.cmd);
         },
       } as any,
       [
@@ -6797,17 +6820,18 @@ describe("runtime event normalization", () => {
 
   test("TOKEN-BROKER (B1): the clone hook seeds the git token PER-EXEC (command prefix), never on the exec env/manifest", async () => {
     const calls: Array<Record<string, unknown>> = [];
+    const box = freshSetupBox({
+      output: "",
+      stdout: "",
+      stderr: "",
+      wallTimeSeconds: 0,
+      exitCode: 0,
+    });
     await runRepositoryCloneHook(
       {
         exec: async (args: Record<string, unknown>) => {
           calls.push(args);
-          return {
-            output: "",
-            stdout: "",
-            stderr: "",
-            wallTimeSeconds: 0,
-            exitCode: 0,
-          };
+          return box(args.cmd);
         },
       } as any,
       [
@@ -6831,26 +6855,23 @@ describe("runtime event normalization", () => {
     // NOT passed as an exec `environment` option (ExecCommandArgs has no such field)
     // and NEVER lands on the box/agent manifest.
     expect(calls[0]?.environment).toBeUndefined();
-    expect(capturedRepositorySetupCommand(calls)).toContain(
-      "export OPENGENI_GIT_GITHUB_TOKEN_SEED='ghs_liveToken123'",
+    // The token-free program is staged once per box; the seeds ride only the
+    // inline launcher that exports them and then runs the verified program.
+    const launcher = capturedRepositorySetupLauncher(calls);
+    const program = capturedRepositorySetupCommand(calls);
+    expect(launcher).toContain("export OPENGENI_GIT_GITHUB_TOKEN_SEED='ghs_liveToken123'");
+    expect(launcher).toContain("export OPENGENI_GIT_TOKEN_SEED='ghs_liveToken123'");
+    expect(launcher.startsWith("set +x\n")).toBe(true);
+    expect(launcher.indexOf("export OPENGENI_GIT_TOKEN_SEED=")).toBeLessThan(
+      launcher.indexOf('exec /bin/sh "$opengeni_setup_program"'),
     );
-    expect(capturedRepositorySetupCommand(calls)).toContain(
-      "export OPENGENI_GIT_TOKEN_SEED='ghs_liveToken123'",
-    );
-    // The prefix precedes the seed writer that writes the file.
-    expect(
-      capturedRepositorySetupCommand(calls).indexOf("export OPENGENI_GIT_TOKEN_SEED="),
-    ).toBeLessThan(
-      capturedRepositorySetupCommand(calls).indexOf("write_git_provider_token github"),
-    );
-    // TOKEN-BROKER (B2): the SAME per-exec command also provisions an EXECUTABLE git
+    expect(program).not.toContain("ghs_liveToken123");
+    expect(program).toContain("write_git_provider_token github");
+    // TOKEN-BROKER (B2): the SAME setup program also provisions an EXECUTABLE git
     // askpass into $GIT_ASKPASS whose Password branch reads the token file — so a warm
     // box on ANY image gets a correct askpass at setup, no baked script required.
-    const cmd = capturedRepositorySetupCommand(calls);
+    const cmd = program;
     expect(cmd.startsWith("set +x\n")).toBe(true);
-    expect(cmd.indexOf("set +x")).toBeLessThan(
-      cmd.indexOf("export OPENGENI_GIT_GITHUB_TOKEN_SEED="),
-    );
     expect(cmd).toContain("cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'");
     expect(cmd).toContain('chmod 0755 "$git_askpass.tmp.$$"');
     expect(cmd).toContain('mv -f "$git_askpass.tmp.$$" "$git_askpass"');
@@ -7078,17 +7099,18 @@ describe("runtime event normalization", () => {
         githubRepositoryId: 456,
       },
     ];
+    const box = freshSetupBox({
+      output: "",
+      stdout: "",
+      stderr: "",
+      wallTimeSeconds: 0,
+      exitCode: 0,
+    });
     await runRepositoryCloneHook(
       {
         exec: async (args: Record<string, unknown>) => {
           calls.push(args);
-          return {
-            output: "",
-            stdout: "",
-            stderr: "",
-            wallTimeSeconds: 0,
-            exitCode: 0,
-          };
+          return box(args.cmd);
         },
       } as any,
       resources,
