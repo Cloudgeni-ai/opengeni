@@ -248,7 +248,7 @@ describe("compiled CSS contract", () => {
   });
 
   test("contains representative utilities for roots and descendants", () => {
-    for (const utility of ["fixed", "flex", "bg-og-surface-1", "rounded-og-lg"]) {
+    for (const utility of ["fixed", "flex", "bg-og-surface-1", "rounded-og-lg", "py-8"]) {
       const selectors = selectorsForUtility(utility);
       expect(selectors.some((selector) => selectorHasDirectRootUtility(selector, utility))).toBe(
         true,
