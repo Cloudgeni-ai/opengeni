@@ -28,7 +28,7 @@ use compute_fleet::{At, Expiry, HostId, HostState, LeaseTerms, ScaleDecision, Sc
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use crate::group::{Fenced, GcpGroup, Started};
+use crate::group::{Fenced, GcpGroup, Member, Started};
 use crate::store::{self, Store};
 use crate::view::View;
 
@@ -48,6 +48,11 @@ pub struct Scaling {
     pub policy: ScalePolicy,
     /// How often it looks.
     pub every: Duration,
+    /// How long a member of the group without a registered host counts as
+    /// booting, its memory as coming. Past it the member is stalled: it
+    /// keeps its place in the group but no longer stands in for capacity,
+    /// so the group grows around it.
+    pub boot_within: Duration,
 }
 
 /// What the leader needs of the store.
@@ -133,6 +138,7 @@ async fn led<S: Store>(
     let mut tick = tokio::time::interval(EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut scaled: Option<Instant> = None;
+    let mut boots = Boots::default();
     loop {
         tick.tick().await;
         if !store.leads(&mut lead).await {
@@ -143,7 +149,7 @@ async fn led<S: Store>(
             && scaled.is_none_or(|when| when.elapsed() >= scaling.every)
         {
             scaled = Some(Instant::now());
-            match scale(scaling, view).await {
+            match scale(scaling, view, &mut boots).await {
                 Ok(prefix) => leading.prefix = Some(prefix),
                 Err(error) => tracing::warn!(%error, "sizing the host group failed"),
             }
@@ -346,56 +352,121 @@ async fn fence_and_give_up<L: Leases>(
     (host, result)
 }
 
-/// Starts the group's stopped instances whose hosts are given up on or
-/// never registered: a fenced host stopped before the leader could start
-/// it again, or one stopped for any other reason. One still live in the
-/// view is started once it is given up on. One that fails to start is
-/// tried again at the next look, and keeps neither the others from
-/// starting nor the group from growing.
-async fn start_stopped(scaling: &Scaling, view: &View) -> anyhow::Result<()> {
-    for name in scaling.group.stopped().await? {
-        let given_up = view
-            .named(&name)
-            .is_none_or(|known| known.state == HostState::Lost);
-        if given_up {
-            tracing::info!(%name, "starting a stopped host");
-            match scaling.group.start(&name).await {
-                Ok(Started::Asked) => {}
-                Ok(Started::Gone) => tracing::info!(%name, "a stopped host is gone"),
-                Err(error) => tracing::warn!(%error, %name, "starting a stopped host failed"),
-            }
+/// Whether `name` is a host the service counts on: registered and not
+/// given up on.
+fn hosted(view: &View, name: &str) -> bool {
+    view.named(name)
+        .is_some_and(|known| known.state != HostState::Lost)
+}
+
+/// Starts the group's stopped members whose hosts are given up on or never
+/// registered, and that the group itself is doing nothing to: a fenced
+/// host stopped before the leader could start it again, or one stopped
+/// for any other reason. One still live in the view is started once it is
+/// given up on. One that fails to start is tried again at the next look,
+/// and keeps neither the others from starting nor the group from growing.
+async fn start_stopped(scaling: &Scaling, view: &View, members: &[Member]) {
+    for member in members {
+        if !member.stopped || !member.idle || hosted(view, &member.name) {
+            continue;
+        }
+        let name = &member.name;
+        tracing::info!(%name, "starting a stopped host");
+        match scaling.group.start(name).await {
+            Ok(Started::Asked) => {}
+            Ok(Started::Gone) => tracing::info!(%name, "a stopped host is gone"),
+            Err(error) => tracing::warn!(%error, %name, "starting a stopped host failed"),
         }
     }
-    Ok(())
+}
+
+/// When each member of the group without a registered host was first seen
+/// so, as one leadership has watched it.
+#[derive(Debug, Default)]
+struct Boots(HashMap<String, Boot>);
+
+#[derive(Clone, Copy, Debug)]
+struct Boot {
+    since: Instant,
+    stalled: bool,
+}
+
+impl Boots {
+    /// How many of `members` without a host are booting, within `within`
+    /// of when they were first seen without one, and how many are past it.
+    /// Says once when a member stalls, and when a stalled one registers.
+    fn count(&mut self, members: &[Member], view: &View, within: Duration) -> (u32, u32) {
+        let now = Instant::now();
+        let mut before = std::mem::take(&mut self.0);
+        let (mut booting, mut stalled) = (0u32, 0u32);
+        for member in members {
+            let seen = before.remove(&member.name);
+            if hosted(view, &member.name) {
+                if seen.is_some_and(|boot| boot.stalled) {
+                    tracing::info!(name = %member.name, "a stalled host registered");
+                }
+                continue;
+            }
+            let mut boot = seen.unwrap_or(Boot {
+                since: now,
+                stalled: false,
+            });
+            if now.duration_since(boot.since) < within {
+                booting += 1;
+            } else {
+                if !boot.stalled {
+                    tracing::warn!(
+                        name = %member.name,
+                        ?within,
+                        "a host group member has not registered in time; its memory no longer counts as coming"
+                    );
+                    boot.stalled = true;
+                }
+                stalled += 1;
+            }
+            self.0.insert(member.name.clone(), boot);
+        }
+        (booting, stalled)
+    }
 }
 
 /// Grows the group if its spare memory would run short, and starts its
-/// stopped instances whose hosts are gone. Returns the prefix of its
-/// instances' names.
-async fn scale(scaling: &Scaling, view: &View) -> anyhow::Result<String> {
+/// stopped members whose hosts are gone. A member without a host counts
+/// as booting for [`Scaling::boot_within`]; one stalled past that keeps
+/// its place in the group but brings nothing, so the group grows past it.
+/// Returns the prefix of its instances' names.
+async fn scale(scaling: &Scaling, view: &View, boots: &mut Boots) -> anyhow::Result<String> {
     let described = scaling.group.describe().await?;
     let prefix = format!("{}-", described.base_instance_name);
-    start_stopped(scaling, view).await?;
+    let members = scaling.group.members().await?;
+    start_stopped(scaling, view, &members).await;
     let mut seen = view.group(|name| name.starts_with(&prefix));
-    seen.booting = described
+    let (booting, stalled) = boots.count(&members, view, scaling.boot_within);
+    // Asked for, and not listed yet.
+    let unlisted = described
         .target_size
-        .saturating_sub(seen.hosts + seen.draining);
+        .saturating_sub(u32::try_from(members.len()).unwrap_or(u32::MAX));
+    seen.booting = booting + unlisted;
     match scaling.policy.decide(&seen) {
-        ScaleDecision::Grow { to } if to > described.target_size => {
-            tracing::info!(
-                from = described.target_size,
-                to,
-                free_mib = seen.free_memory_mib,
-                "growing the host group"
-            );
-            scaling.group.resize(to).await?;
+        ScaleDecision::Grow { to } => {
+            let to = to.saturating_add(stalled).min(scaling.policy.max_hosts);
+            if to > described.target_size {
+                tracing::info!(
+                    from = described.target_size,
+                    to,
+                    stalled,
+                    free_mib = seen.free_memory_mib,
+                    "growing the host group"
+                );
+                scaling.group.resize(to).await?;
+            }
         }
         ScaleDecision::Shrink => {
             tracing::info!(
                 "the host group has more spare than it needs; drain a host to shrink it"
             );
         }
-        ScaleDecision::Grow { .. } | ScaleDecision::Hold => {}
+        ScaleDecision::Hold => {}
     }
     Ok(prefix)
 }

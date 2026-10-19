@@ -120,9 +120,12 @@ can be built and tested.
   as its autohealing does, or deleting or starting it) is left to the
   group, an instance already deleted is nothing to start, and one that
   fails to start is tried at the next look without holding up the rest
-  of the step. Only zonal groups are supported, since a fence must name
-  the instance's zone. Hosts outside a group rely on their deadline, guard
-  and watchdog alone.
+  of the step. A member without a registered host counts as booting for
+  a boot allowance (ten minutes by default); one past it keeps its place
+  but no longer stands in for capacity, so the group grows around a
+  member the cloud never gets running. Only zonal groups are supported,
+  since a fence must name the instance's zone. Hosts outside a group rely
+  on their deadline, guard and watchdog alone.
 - **A host that comes back is fenced until it has caught up.** It
   registers again only once its last registration lapsed (the store
   refuses while that one is live, since its VMs may still run), and lists

@@ -298,7 +298,13 @@ authority alone for agent links.
   memory runs short (`--scale-*` flags); to add one by hand, resize the
   group. A new host registers with the service when its agent starts and
   takes sandboxes at once. A host installed by hand joins the same way.
-  List hosts with the operator key:
+  A member of the group counts as booting, its memory as coming, for
+  `--scale-boot-within-s` (10 minutes by default) without a registered
+  host; past that the service logs "a host group member has not
+  registered in time" and grows the group around it. Look at that
+  instance in the cloud console (quota, a stockout, a boot that fails);
+  the service never deletes it, and counts it again once its host
+  registers. List hosts with the operator key:
 
   ```sh
   curl -s -H "X-API-Key: $operator_key" "$COMPUTE_API/v1/hosts" | jq

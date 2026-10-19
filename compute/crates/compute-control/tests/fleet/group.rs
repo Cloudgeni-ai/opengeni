@@ -24,6 +24,8 @@ use serde_json::{Value, json};
 use super::support::{FakeHost, Fleet, roomy, until};
 
 const GROUP: &str = "projects/p/zones/z/instanceGroupManagers/hosts";
+/// How long a member without a host counts as booting.
+const BOOT_WITHIN: Duration = Duration::from_secs(3);
 
 /// What the fake API holds and was asked.
 #[derive(Default)]
@@ -212,6 +214,7 @@ async fn fleet_with(
             max_hosts: 10,
         },
         every: Duration::from_millis(200),
+        boot_within: BOOT_WITHIN,
     };
     (Fleet::start_with(Some(scaling), |_| {}).await, compute)
 }
@@ -445,16 +448,14 @@ async fn a_stopped_instance_the_group_is_recreating_is_left_to_it() {
 }
 
 /// A stopped instance the group deletes before the leader's start reaches
-/// it is no failure: the group still grows when its spare runs short.
+/// it is no failure, and once it has stood without a host past the boot
+/// allowance it no longer counts as coming: the group grows past it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stopped_instance_deleted_before_its_start_keeps_the_group_growing() {
     let (fleet, compute) = fleet_with(
         &[("hosts-a1b2", "RUNNING"), ("hosts-c3d4", "TERMINATED")],
         |compute| {
             compute.deleted.lock().unwrap().insert("hosts-c3d4".into());
-            // Asks for only the live one, so the deleted one is not
-            // counted as coming.
-            compute.target_size.store(1, Ordering::SeqCst);
         },
     )
     .await;
@@ -469,10 +470,63 @@ async fn a_stopped_instance_deleted_before_its_start_keeps_the_group_growing() {
         memory_free_mib: 1024,
         ..roomy()
     });
-    until(Duration::from_secs(5), "the group grows", async || {
-        compute.asked().contains(&"resize 2".to_owned())
-    })
+    until(
+        BOOT_WITHIN + Duration::from_secs(5),
+        "the group grows",
+        async || compute.asked().contains(&"resize 3".to_owned()),
+    )
     .await;
+    assert!(
+        !compute.asked().contains(&"resize 2".to_owned()),
+        "the stalled member keeps its place: {:?}",
+        compute.asked()
+    );
+}
+
+/// A member the group never gets running, as when it cannot create the
+/// instance, counts as coming only for the boot allowance; past it the
+/// group grows around it rather than waiting on it for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_that_never_registers_stops_counting_as_coming() {
+    let (fleet, compute) = fleet_with(
+        &[("hosts-a1b2", "RUNNING"), ("hosts-c3d4", "PROVISIONING")],
+        |compute| {
+            compute
+                .actions
+                .lock()
+                .unwrap()
+                .insert("hosts-c3d4".into(), "CREATING".into());
+        },
+    )
+    .await;
+    let host = fleet.host("hosts-a1b2").await;
+    host.set_capacity(Capacity {
+        memory_free_mib: 1024,
+        ..roomy()
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        !compute
+            .asked()
+            .iter()
+            .any(|asked| asked.starts_with("resize")),
+        "a booting member counts as coming: {:?}",
+        compute.asked()
+    );
+    until(
+        BOOT_WITHIN + Duration::from_secs(5),
+        "the group grows past it",
+        async || compute.asked().contains(&"resize 3".to_owned()),
+    )
+    .await;
+    assert!(
+        !compute
+            .asked()
+            .iter()
+            .any(|asked| asked.contains("hosts-c3d4")),
+        "left to the group: {:?}",
+        compute.asked()
+    );
 }
 
 /// A host outside the group has no instance to fence: it is given up on
