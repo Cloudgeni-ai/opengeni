@@ -65,13 +65,18 @@ function unquote(value: string): string {
  * instead of an empty AXRow. Keyed by element_index. Rows that are, or sit
  * inside, a protected field (indexed or not) contribute nothing: their label
  * can be the field's value and their value is the protected text itself.
+ *
+ * Not used on Windows. CUA writes names and values into this Markdown without
+ * escaping newlines, so a multi-line Edit value can contain lines shaped like
+ * rows. Every Windows Edit value is protected, and its fake rows would escape
+ * the protected field's indentation, so the tree cannot be read safely there.
  */
 export function unindexedTextByElement(
   markdown: string | undefined,
   platform: Platform = "macos",
 ): Map<number, string[]> {
   const texts = new Map<number, string[]>();
-  if (!markdown) return texts;
+  if (!markdown || platform === "windows") return texts;
   const ancestors: Array<{ indent: number; index: number | null; protected: boolean }> = [];
   for (const line of markdown.split("\n")) {
     const row = MARKDOWN_ROW.exec(line);
