@@ -689,6 +689,9 @@ const norwegian: OpenGeniMessages = {
   catalog: export it to your translation tooling as is.
 - Templates use single-brace parameters (`"Move queued prompt {index} up"`); a
   translation must keep the same parameters.
+- Text that names the product uses `{product}`, filled from `productName`
+  (default "Opengeni"). Pass `productName="Acme"` to `OpenGeniProvider` and the
+  components say Acme there; your own translations can use `{product}` too.
 - Counted text uses plural suffixes (`_zero`, `_one`, `_two`, `_few`, `_many`,
   `_other`) chosen with `Intl.PluralRules` for `locale`, so each language
   supplies the forms it needs. `_other` is always required. Where the runtime
