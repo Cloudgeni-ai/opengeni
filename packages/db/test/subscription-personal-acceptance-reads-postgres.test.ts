@@ -674,6 +674,7 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
       "scheduled_task_blocker_reviews",
+      "session_title_operations",
       "site_abuse_reports",
       "site_auth_codes",
       "site_data_collections",

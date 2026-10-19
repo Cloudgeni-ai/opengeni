@@ -3,6 +3,7 @@ import {
   resolveWebSearchProvider,
   dbSearchPath,
   getSettings,
+  environmentsEncryptionKeyBytes,
   resolveNatsControlPlaneAuth,
 } from "@opengeni/config";
 import {
@@ -86,6 +87,9 @@ export function createSharedActivityServices(
         signalCodexCapacityWorkflow: dependencies.signalCodexCapacityWorkflow ?? null,
         startSandboxReaperWorkflow: dependencies.startSandboxReaperWorkflow ?? null,
         startVideoGenerationWorkflow: dependencies.startVideoGenerationWorkflow ?? null,
+        startSessionTitleWorkflow: environmentsEncryptionKeyBytes(settings)
+          ? (dependencies.startSessionTitleWorkflow ?? null)
+          : null,
         entitlements: dependencies.entitlements ?? null,
         connectionCredentials:
           dependencies.connectionCredentials ??

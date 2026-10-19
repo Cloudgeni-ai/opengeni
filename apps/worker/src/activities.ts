@@ -97,6 +97,7 @@ const defaultTurnActivities = createTurnActivities();
 export const runAgentTurn = defaultTurnActivities.runAgentTurn;
 export const reconcileVideoGenerationOperation =
   defaultTurnActivities.reconcileVideoGenerationOperation;
+export const reconcileSessionTitleOperation = defaultTurnActivities.reconcileSessionTitleOperation;
 export const indexDocument = defaultControlActivities.indexDocument;
 export const indexKnowledge = defaultControlActivities.indexKnowledge;
 export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
@@ -138,6 +139,7 @@ export const maintainSessionStorage = defaultControlActivities.maintainSessionSt
 export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
+export const recoverSessionTitleWorkflows = defaultControlActivities.recoverSessionTitleWorkflows;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
 export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBrowserStateArtifacts;
 export const reconcileRecentModelCallFacts = defaultControlActivities.reconcileRecentModelCallFacts;

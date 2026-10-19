@@ -603,6 +603,7 @@ export type {
   ModelPreparationPhase,
   ModelTransportDispatchClock,
 } from "./model-preparation-diagnostics";
+export { withModelTransportStartedObserver } from "./model-preparation-diagnostics";
 export {
   markModelPreparationFirstSandboxOperation,
   recordModelPreparationMeasurement,

@@ -1214,6 +1214,7 @@ import { probeSlackInteractionTenancy } from "./slack-routing";
 import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
 export * from "./workspace-membership-permissions";
 export * from "./video-generation";
+export * from "./session-title-operations";
 export * from "./user-resource-authority";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
 export * from "./connection-authority";

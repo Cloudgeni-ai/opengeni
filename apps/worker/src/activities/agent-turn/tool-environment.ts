@@ -16,6 +16,7 @@ import {
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   subscriptionCoreCodexAppsRequestAuth,
+  getSessionTitleOperation,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -160,6 +161,7 @@ export type PrepareTurnToolPolicyDeps = {
 };
 
 export type PrepareTurnToolRuntimeDeps = {
+  independentSessionTitles?: boolean;
   /** Connected-vault providers and the shared read budget for this attempt. */
   vaultAccess: AttemptVaultAccess;
   fetchKnowledgeSource?:
@@ -513,17 +515,26 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     selectedFirstPartyMcpTools,
     firstPartyPermissions: effectiveFirstPartyPermissions,
   });
+  const needsTitle = shouldRequestMissingSessionTitle({
+    agentConfig: session.agent,
+    title: session.title,
+    titleSource: session.titleSource,
+    firstPartyMcpTools: selectedFirstPartyMcpTools,
+    firstPartyMcpPermissions: effectiveFirstPartyPermissions,
+  });
+  const activeTitle =
+    deps.independentSessionTitles && needsTitle
+      ? await getSessionTitleOperation(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        })
+      : null;
   const titleToolPlan = sessionTitleToolPlan({
     agentConfig: session.agent,
     tools: turnTools,
     selectedFirstPartyMcpTools,
-    shouldRequestTitle: shouldRequestMissingSessionTitle({
-      agentConfig: session.agent,
-      title: session.title,
-      titleSource: session.titleSource,
-      firstPartyMcpTools: selectedFirstPartyMcpTools,
-      firstPartyMcpPermissions: effectiveFirstPartyPermissions,
-    }),
+    shouldRequestTitle: needsTitle && (!activeTitle || activeTitle.sourceTurnId === turn.id),
     parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });

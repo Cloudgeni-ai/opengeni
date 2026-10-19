@@ -12,6 +12,7 @@
  * persisted refresh and fences quota observations.
  */
 import { sql } from "drizzle-orm";
+import type { SubscriptionCoreOperationLeaseRef } from "./operations";
 
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 
@@ -773,7 +774,10 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
   /** Read live credit consent and placement without changing a binding or lease. */
   async function canSpendSubscriptionCoreExtraCredits(
     db: Database,
-    request: SubscriptionCorePlacementRequest & { connectionId: string },
+    request: SubscriptionCorePlacementRequest & {
+      connectionId: string;
+      operationRef?: SubscriptionCoreOperationLeaseRef;
+    },
   ): Promise<boolean> {
     const { identity } = request;
     const now = new Date();
@@ -782,12 +786,26 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       provider,
       placementWorldRequest(identity, request.productModelId, request.reasoningLevel, now),
       async (tx, worldInput) => {
-        if (
-          !(await cutoverEnabled(tx, identity.accountId)) ||
-          !(await readAttemptFence(tx, request))
-        )
-          return false;
-        if (
+        if (!(await cutoverEnabled(tx, identity.accountId))) return false;
+        if (request.operationRef) {
+          const ref = request.operationRef;
+          if (
+            ref.operationKind !== "session_title" ||
+            ref.attemptId !== request.attemptId ||
+            ref.connectionId !== request.connectionId
+          )
+            return false;
+          await authorizeSubscriptionCoreFrozenPersonal(tx, identity);
+          const [connection] = await rawRows<{ status: string }>(
+            tx,
+            sql`
+            select status from opengeni_private.read_subscription_core_connection_credential(${providerId},
+              ${identity.accountId}::uuid, ${identity.workspaceId}::uuid, ${ref.connectionId}::uuid,
+              ${ref.operationId}::uuid, ${ref.attemptId}::uuid, ${ref.holderId}::text, ${ref.generation}::bigint)`,
+          );
+          if (connection?.status !== "active") return false;
+        } else if (
+          !(await readAttemptFence(tx, request)) ||
           !(await assertSubscriptionTurnLeaseCurrent(tx, {
             ...identity,
             provider: providerId,
