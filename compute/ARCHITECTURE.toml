@@ -7,7 +7,7 @@
 # The branch compute's changes merge into, read with git. Change it when
 # compute moves to another integration branch.
 [base]
-branch = "origin/feat/compute-lab"
+branch = "origin/main"
 
 # Files past a thousand code lines are hard to review and usually hold more
 # than one idea.

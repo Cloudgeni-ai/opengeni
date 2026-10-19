@@ -28,9 +28,6 @@ on:
   push:
     branches:
       - main
-      # Until this branch merges: proves the workflow on its own pushes,
-      # which tag the image sha-<commit> only.
-      - feat/compute-prod
     paths:
       - "compute/**"
       - ".github/workflows/compute-release.yml"

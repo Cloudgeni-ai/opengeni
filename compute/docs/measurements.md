@@ -8,6 +8,11 @@ this branch: template builds book every input they copy on disk, a zero
 `MemAvailable` reading stays zero, the agent refuses a state filesystem
 whose allocation it cannot bound, and tests.
 
+Commit hashes in this file name commits on the branches the fabric was
+built on. They stay reachable after the merge into main through the tags
+`archive/compute-fabric-2026-10` (the fabric) and
+`archive/compute-backend-2026-10` (Opengeni's compute backend).
+
 Each sandbox has 1 vCPU and 512 MiB, except in the memory-pressure test.
 "First response" is the time from the wake request until a command in the
 guest answers; "done" is until that command finishes. "a/b" means p50/p90

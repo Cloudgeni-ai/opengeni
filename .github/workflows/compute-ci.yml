@@ -49,8 +49,6 @@ on:
   push:
     branches:
       - main
-      # Until this branch merges: proves the workflow on its own pushes.
-      - feat/compute-prod
     paths:
       - "compute/**"
       - "deploy/terraform/gcp-compute/**"
