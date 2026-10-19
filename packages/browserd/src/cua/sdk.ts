@@ -48,7 +48,7 @@ export function missingLinuxLibraryError(error: unknown): InteractionControllerE
 }
 
 /** Compiled Bun cannot resolve CUA's native packages inside its virtual FS.
- * Releases carry the unmodified SDK bundle and native assets in the same
+ * Releases carry the SDK bundle and architecture-matched native assets in the same
  * immutable helper generation. No ambient package lookup or runtime download. */
 async function loadCuaSdk(): Promise<typeof import("@trycua/cua-driver")> {
   if (!compiled) {
