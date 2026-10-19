@@ -423,7 +423,7 @@ Rules to keep in mind:
   session starts.
 
 Personal-machine consent also covers the consenting session's agent-created
-descendants (0844). Every causal parent/turn link must remain in the same workspace
+descendants (0849). Every causal parent/turn link must remain in the same workspace
 and belong to the same machine owner and initiating human. Admission and dispatch
 reuse the original grant, never mint child grants, and recheck each parent machine
 snapshot for the exact creating attempt plus live membership, machine authority, grant generation, expiry and

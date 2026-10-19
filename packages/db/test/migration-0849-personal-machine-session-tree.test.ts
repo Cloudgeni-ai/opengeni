@@ -19,7 +19,7 @@ import {
 import { withWorkspaceSubjectSessionActivityRls } from "../src/database";
 import { nestedPostgresSqlState } from "../src/persistence-errors";
 
-const migration = "0844_personal_machine_session_tree.sql";
+const migration = "0849_personal_machine_session_tree.sql";
 let shared: SharedTestDatabase;
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("machine-tree");
