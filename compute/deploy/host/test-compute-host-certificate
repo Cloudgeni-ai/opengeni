@@ -15,8 +15,10 @@
 # - off GCP, with no certificate, the request is left in request/, and the
 #   certificate put back there is installed by the next run;
 # - activation is recoverable: a run that fails after switching the pair,
-#   in cleaning up or in restarting the agent, leaves the restart owed, and
-#   the next run restarts the agent first; with nothing owed, no restart;
+#   in cleaning up, in asking systemd whether the agent runs, or in
+#   restarting the agent, leaves the restart owed, and the next run
+#   restarts the agent first, even when the failed restart stopped it; with
+#   nothing owed, no restart;
 # - a run stopped between pointing host.pem and host.key through the new
 #   pair (moving from the old layout) is finished from the published pair
 #   by the next one, on GCP and off it, with no new certificate.
@@ -46,9 +48,11 @@ sign() {
 
 # The shims: curl answers the metadata server (when $work/gce exists) and
 # the certificate route, logging each call. systemctl logs each call; the
-# agent is active when $work/active exists, and its restart fails when
-# $work/fail-restart does. The failure points: rm fails on a pair under
-# certificates/ when $work/fail-rm exists, and mv on host.key when
+# agent is active when $work/active exists, systemd cannot be asked when
+# $work/fail-show does, and a restart starts the agent, or fails when
+# $work/fail-restart exists (and leaves the agent stopped and failed when
+# $work/stop-on-fail does too). The failure points: rm fails on a pair
+# under certificates/ when $work/fail-rm exists, and mv on host.key when
 # $work/fail-mv does.
 real_rm=$(command -v rm)
 real_mv=$(command -v mv)
@@ -84,7 +88,25 @@ cat >"$work/bin/systemctl" <<EOF
 echo "\$*" >>"$work/systemctl.log"
 case "\$1" in
   is-active) [ -e "$work/active" ] ;;
-  restart) [ ! -e "$work/fail-restart" ] ;;
+  show)
+    if [ -e "$work/fail-show" ]; then
+      echo "Failed to connect to bus: No such file or directory" >&2
+      exit 1
+    fi
+    if [ -e "$work/active" ]; then echo active
+    elif [ -e "$work/unit-failed" ]; then echo failed
+    else echo inactive
+    fi ;;
+  restart)
+    if [ -e "$work/fail-restart" ]; then
+      if [ -e "$work/stop-on-fail" ]; then
+        rm -f "$work/active"
+        : >"$work/unit-failed"
+      fi
+      exit 1
+    fi
+    rm -f "$work/unit-failed"
+    : >"$work/active" ;;
 esac
 EOF
 cat >"$work/bin/rm" <<EOF
@@ -243,11 +265,54 @@ if [ "$(restarts)" = 1 ] && [ "$(requests)" = 0 ] && [ ! -e "$etc/restart-owed" 
 else
   bad "the owed restart: restarts $(restarts), requests $(requests)"
 fi
+
+# systemd cannot be asked whether the agent runs: the restart stays owed.
+touch "$work/fail-show"
+if run --force >/dev/null 2>&1; then
+  bad "a run that could not ask systemd succeeded"
+elif [ "$(restarts)" = 0 ] && [ -e "$etc/restart-owed" ] && matches; then
+  ok "a run that cannot ask systemd leaves the restart owed"
+else
+  bad "without systemd's answer: restarts $(restarts), owed $([ -e "$etc/restart-owed" ] && echo yes || echo no)"
+fi
+rm -f "$work/fail-show"
+run >/dev/null
+if [ "$(restarts)" = 1 ] && [ "$(requests)" = 0 ] && [ ! -e "$etc/restart-owed" ]; then
+  ok "the next run, with systemd's answer, restarts the agent"
+else
+  bad "after systemd answered again: restarts $(restarts), requests $(requests)"
+fi
+
+# A restart that stopped the agent and failed to start it: the next run
+# starts it, though it no longer runs.
+touch "$work/fail-restart" "$work/stop-on-fail"
+if run --force >/dev/null 2>&1; then
+  bad "a run whose restart stopped the agent succeeded"
+elif [ ! -e "$work/active" ] && [ "$(cat "$etc/restart-owed")" = tried ]; then
+  ok "a restart that stopped the agent leaves the restart owed, marked tried"
+else
+  bad "after a restart that stopped the agent: owed $(cat "$etc/restart-owed" 2>/dev/null || echo none)"
+fi
+rm -f "$work/fail-restart" "$work/stop-on-fail"
+run >/dev/null
+if [ "$(restarts)" = 1 ] && [ -e "$work/active" ] && [ "$(requests)" = 0 ] && [ ! -e "$etc/restart-owed" ]; then
+  ok "the next run starts the agent the failed restart stopped"
+else
+  bad "the stopped agent: restarts $(restarts), running $([ -e "$work/active" ] && echo yes || echo no)"
+fi
+
 # The agent not running: nothing to restart, it starts with the new pair.
 rm -f "$work/active"
 run --force >/dev/null
-[ "$(restarts)" = 0 ] && [ ! -e "$etc/restart-owed" ] && ok "an agent not running is owed nothing" ||
+[ "$(restarts)" = 0 ] && [ ! -e "$etc/restart-owed" ] && [ ! -e "$work/active" ] &&
+  ok "an agent not running is owed nothing, and not started" ||
   bad "an agent not running: restarts $(restarts)"
+# Nor one that failed on its own before the switch.
+: >"$work/unit-failed"
+run --force >/dev/null
+[ "$(restarts)" = 0 ] && [ ! -e "$etc/restart-owed" ] && ok "an agent that failed by itself is not started" ||
+  bad "a failed agent: restarts $(restarts)"
+rm -f "$work/unit-failed"
 touch "$work/active"
 
 # Moving from the old layout, stopped after host.pem pointed through the
