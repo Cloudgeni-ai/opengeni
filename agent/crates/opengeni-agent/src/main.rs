@@ -426,18 +426,19 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     }
 
     // A service manager may start us at the filesystem root (launchd does for a
-    // LaunchAgent installed before the plist named a WorkingDirectory). That is
-    // never a usable workspace (read-only on macOS), so work from the user's home
-    // instead; the platform below reports the same directory as the workspace root.
+    // LaunchAgent installed before the plist named a WorkingDirectory) or in the
+    // Windows system directory (a Windows service). Neither is a usable
+    // workspace, so work from the user's home instead; the platform below
+    // reports the same directory as the workspace root.
     match opengeni_agent_platform::adopt_workspace_working_directory() {
         Ok(Some(directory)) => info!(
             directory = %directory.display(),
-            "started at the filesystem root; using the home directory as the workspace"
+            "started at the filesystem root or system directory; using the home directory as the workspace"
         ),
         Ok(None) => {}
         Err(error) => warn!(
             %error,
-            "started at the filesystem root and could not move to the home directory"
+            "started at the filesystem root or system directory and could not move to the home directory"
         ),
     }
 

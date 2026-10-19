@@ -620,6 +620,7 @@ export {
   connectedMachinePathWithinRoot,
   connectedMachineWorkspaceRootsEqual,
   isConnectedMachineAbsolutePath,
+  isUnusableConnectedMachineWorkspace,
   isWindowsConnectedMachinePath,
   normalizeConnectedMachineWorkspaceRoot,
   relativeConnectedMachinePath,

@@ -79,8 +79,11 @@ impl NativePlatform {
     #[must_use]
     pub fn new() -> Self {
         let home_dir = user_home_dir();
-        let workspace_root =
-            resolve_workspace_root(std::env::current_dir().ok(), home_dir.as_deref());
+        let workspace_root = resolve_workspace_root(
+            std::env::current_dir().ok(),
+            home_dir.as_deref(),
+            windows_system_dir().as_deref(),
+        );
         Self {
             workspace_root,
             home_dir,
@@ -231,24 +234,60 @@ fn user_home_dir() -> Option<PathBuf> {
 
 /// Chooses the agent's workspace root from its working directory.
 ///
-/// A filesystem root is never a usable workspace: service managers start a
-/// process there unless told otherwise (launchd does for a LaunchAgent without
-/// `WorkingDirectory`, as does a custom systemd unit), it is read-only on macOS,
-/// and every relative write would land at the top of the disk. In that case
-/// (or when the working directory is unknown) the user's home directory is used.
-/// Any other working directory is kept exactly as the operator chose it.
+/// A filesystem root or the Windows system directory is never a usable
+/// workspace: service managers start a process there unless told otherwise
+/// (launchd does at `/` for a LaunchAgent without `WorkingDirectory`, as does a
+/// custom systemd unit; Windows starts services in `%SystemRoot%\System32`). It
+/// is read-only or protected, and every relative write would land in it. In
+/// that case (or when the working directory is unknown) the user's home
+/// directory is used. Any other working directory is kept exactly as the
+/// operator chose it.
 #[must_use]
-pub fn resolve_workspace_root(current_dir: Option<PathBuf>, home_dir: Option<&Path>) -> PathBuf {
-    let usable_home = home_dir.filter(|home| home.is_absolute() && home.parent().is_some());
+pub fn resolve_workspace_root(
+    current_dir: Option<PathBuf>,
+    home_dir: Option<&Path>,
+    system_dir: Option<&Path>,
+) -> PathBuf {
+    let unusable = |directory: &Path| {
+        directory.parent().is_none()
+            || system_dir.is_some_and(|system| path_within_ignoring_case(directory, system))
+    };
+    let usable_home = home_dir.filter(|home| home.is_absolute() && !unusable(home));
     match (current_dir, usable_home) {
-        (Some(directory), _) if directory.parent().is_some() => directory,
+        (Some(directory), _) if !unusable(&directory) => directory,
         (_, Some(home)) => home.to_path_buf(),
         (directory, None) => directory.unwrap_or_else(|| PathBuf::from("/")),
     }
 }
 
+/// Whether `path` is `parent` or beneath it, comparing case-insensitively with
+/// either separator (Windows paths are case-insensitive, and the system
+/// directory is reported as both `C:\WINDOWS` and `C:\Windows`).
+fn path_within_ignoring_case(path: &Path, parent: &Path) -> bool {
+    let normalize = |value: &Path| {
+        value
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_lowercase()
+    };
+    let (path, parent) = (normalize(path), normalize(parent));
+    !parent.is_empty() && (path == parent || path.starts_with(&format!("{parent}/")))
+}
+
+/// The Windows system directory (`%SystemRoot%`); `None` on other platforms.
+fn windows_system_dir() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("windir"))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Moves the process into its workspace root when it was started at a
-/// filesystem root, so the reported workspace, relative paths and child
+/// filesystem root or in the Windows system directory, so the reported workspace, relative paths and child
 /// processes all agree on the user's home directory. Returns the directory it
 /// moved to, or `None` when the working directory was already usable (or no
 /// usable home directory exists).
@@ -257,7 +296,11 @@ pub fn resolve_workspace_root(current_dir: Option<PathBuf>, home_dir: Option<&Pa
 /// Returns the OS error when changing into the home directory fails.
 pub fn adopt_workspace_working_directory() -> std::io::Result<Option<PathBuf>> {
     let current = std::env::current_dir().ok();
-    let target = resolve_workspace_root(current.clone(), user_home_dir().as_deref());
+    let target = resolve_workspace_root(
+        current.clone(),
+        user_home_dir().as_deref(),
+        windows_system_dir().as_deref(),
+    );
     if current.as_ref() == Some(&target) || !target.is_dir() {
         return Ok(None);
     }
@@ -1823,26 +1866,66 @@ mod tests {
         };
         let home = Path::new(home);
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from(work)), Some(home)),
+            resolve_workspace_root(Some(PathBuf::from(work)), Some(home), None),
             PathBuf::from(work)
         );
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from(root)), Some(home)),
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(home), None),
             home.to_path_buf()
         );
-        assert_eq!(resolve_workspace_root(None, Some(home)), home.to_path_buf());
+        assert_eq!(
+            resolve_workspace_root(None, Some(home), None),
+            home.to_path_buf()
+        );
         // Without a usable home there is nothing better than the directory we have.
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from(root)), None),
+            resolve_workspace_root(Some(PathBuf::from(root)), None, None),
             PathBuf::from(root)
         );
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from(root)), Some(Path::new(root))),
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(Path::new(root)), None),
             PathBuf::from(root)
         );
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from(root)), Some(Path::new("relative"))),
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(Path::new("relative")), None),
             PathBuf::from(root)
+        );
+    }
+
+    #[test]
+    fn workspace_root_replaces_the_windows_system_directory() {
+        // Host-native absolute paths; the comparison ignores case and separators.
+        let (system, launch, home, other) = if cfg!(windows) {
+            (
+                r"C:\Windows",
+                r"C:\WINDOWS\system32",
+                r"C:\Users\me",
+                r"C:\WindowsApps",
+            )
+        } else {
+            ("/Windows", "/WINDOWS/system32", "/Users/me", "/WindowsApps")
+        };
+        let (system, home) = (Path::new(system), Path::new(home));
+        // A service started in the system directory works from the user's home.
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(launch)), Some(home), Some(system)),
+            home.to_path_buf()
+        );
+        // A sibling that merely shares the prefix is kept.
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(other)), Some(home), Some(system)),
+            PathBuf::from(other)
+        );
+        // A system account's profile lives under the system directory too, so it
+        // is no better: keep the launch directory.
+        let system_profile = system.join("system32").join("config").join("systemprofile");
+        assert_eq!(
+            resolve_workspace_root(
+                Some(PathBuf::from(launch)),
+                Some(&system_profile),
+                Some(system)
+            ),
+            PathBuf::from(launch)
         );
     }
 

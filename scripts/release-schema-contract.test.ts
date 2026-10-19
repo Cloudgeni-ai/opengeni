@@ -2868,6 +2868,8 @@ describe("release schema contract", () => {
       "0848_strict_owner_maintenance_probes.sql",
       "0849_strict_owner_maintenance_claims.sql",
       "0851_personal_machine_session_tree.sql",
+      "0852_maintenance_predicate_privileges.sql",
+      "0853_connected_machine_root_working_dirs.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

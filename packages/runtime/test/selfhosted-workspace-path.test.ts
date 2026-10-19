@@ -4,6 +4,7 @@ import {
   connectedMachinePathWithinRoot,
   connectedMachineWorkspaceRootsEqual,
   isConnectedMachineAbsolutePath,
+  isUnusableConnectedMachineWorkspace,
   normalizeConnectedMachineWorkspaceRoot,
   relativeConnectedMachinePath,
   resolveConnectedMachinePath,
@@ -75,6 +76,38 @@ describe("Connected Machine workspace path normalization", () => {
     expect(() => resolveConnectedMachineWorkspaceRoot("/srv/repo", "~/project")).toThrow(
       '"~" is not supported',
     );
+  });
+
+  test("a filesystem root or Windows system directory never becomes the working directory", () => {
+    expect(resolveConnectedMachineWorkspaceRoot("/Users/a", "/")).toBe("/Users/a");
+    expect(resolveConnectedMachineWorkspaceRoot("/home/u", "../..")).toBe("/home/u");
+    expect(resolveConnectedMachineWorkspaceRoot("C:/Users/a", "C:/WINDOWS/system32")).toBe(
+      "C:/Users/a",
+    );
+    expect(resolveConnectedMachineWorkspaceRoot("C:/Users/a", "c:\\Windows\\System32\\")).toBe(
+      "C:/Users/a",
+    );
+    expect(resolveConnectedMachineWorkspaceRoot("C:/Users/a", "\\Windows\\System32")).toBe(
+      "C:/Users/a",
+    );
+    expect(resolveConnectedMachineWorkspaceRoot("C:/Users/a", "D:\\")).toBe("C:/Users/a");
+    expect(resolveConnectedMachineWorkspaceRoot("C:/Users/a", "\\")).toBe("C:/Users/a");
+    // Ordinary chosen directories, including look-alikes, are kept.
+    expect(resolveConnectedMachineWorkspaceRoot("C:/Users/a", "D:/work")).toBe("D:/work");
+    expect(resolveConnectedMachineWorkspaceRoot("C:/Users/a", "C:/WindowsApps")).toBe(
+      "C:/WindowsApps",
+    );
+    expect(resolveConnectedMachineWorkspaceRoot("/home/u", "/windows")).toBe("/windows");
+    expect(resolveConnectedMachineWorkspaceRoot("/home/u", "/opt/project")).toBe("/opt/project");
+  });
+
+  test("unusable workspace detection", () => {
+    expect(isUnusableConnectedMachineWorkspace("/", "/home/u")).toBe(true);
+    expect(isUnusableConnectedMachineWorkspace("C:/", "C:/Users/a")).toBe(true);
+    expect(isUnusableConnectedMachineWorkspace("C:/Windows/Temp", "C:/Users/a")).toBe(true);
+    expect(isUnusableConnectedMachineWorkspace("/Windows/System32", "C:/Users/a")).toBe(true);
+    expect(isUnusableConnectedMachineWorkspace("/home/u", "/home/u")).toBe(false);
+    expect(isUnusableConnectedMachineWorkspace("//server/share", "C:/Users/a")).toBe(false);
   });
 
   test("the patched SDK Manifest accepts truthful drive and UNC roots", () => {

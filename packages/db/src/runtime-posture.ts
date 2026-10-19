@@ -5869,6 +5869,8 @@ export function evaluateRuntimeDatabasePosture(
         !capability ||
         capability.owner !== owner ||
         !capability.securityDefiner ||
+        !capability.execute ||
+        capability.publicExecute ||
         !capability.configuration?.includes("search_path=pg_catalog")
       ) {
         violations.push(`maintenance claim predicate ${name} is missing or unsafe`);

@@ -1,6 +1,5 @@
 ---
 "@opengeni/db": patch
-"@opengeni/testing": patch
 ---
 
 Restore background maintenance when the migration owner cannot bypass FORCE RLS.

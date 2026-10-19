@@ -1,5 +1,6 @@
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
@@ -325,4 +326,7 @@ export const embeddingMigrationTail = [
   "0844_free_plan_credit_scope.sql",
   "0845_signup_eligibility_without_bonus.sql",
   "0846_independent_session_titles.sql",
+  // Extends machine grant predicates rewritten by withheld 0501.
+  "0851_personal_machine_session_tree.sql",
+  ...strictOwnerMaintenanceMigrationTail,
 ];
