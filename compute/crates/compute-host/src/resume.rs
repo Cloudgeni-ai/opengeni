@@ -41,7 +41,8 @@
 //! connection is let in as of a launch ([`Door`]), and one from an
 //! earlier launch than the current is closed unanswered, as are those
 //! still waiting to be let in when a launch begins: no VM process of the
-//! sandbox runs then, so only an earlier one can have made them.
+//! sandbox runs then, so only an earlier one can have made them. A launch
+//! that cannot close them all does not happen.
 //!
 //! A new connection takes the stream over at once, under the stream's
 //! lock, from the one before: what the connection before still reads goes
@@ -168,8 +169,9 @@ impl RunClock {
     /// stream up. Told before the process starts, so before that guest
     /// can connect, and while no other VM process of the sandbox runs: the
     /// connections still waiting at the door are an earlier one's, and are
-    /// closed.
-    pub(crate) fn launched(&self) {
+    /// closed. If they cannot all be, the launch is not counted and must
+    /// not happen: one left waiting would be let in as the new launch's.
+    pub(crate) fn launched(&self) -> io::Result<()> {
         let mut ran = self.lock();
         let door = self
             .inner
@@ -178,9 +180,26 @@ impl RunClock {
             .unwrap_or_else(PoisonError::into_inner)
             .upgrade();
         if let Some(door) = door {
-            close_waiting(&door);
+            close_waiting(&door)?;
         }
         ran.launch += 1;
+        Ok(())
+    }
+
+    /// A clock whose door no connection can be taken from, as tests use:
+    /// every launch it is told of fails while the door returned is kept.
+    #[cfg(test)]
+    pub(crate) fn with_broken_door() -> (Self, Arc<UnixListener>) {
+        let clock = Self::default();
+        // Not a listener: every accept on it fails, and not for want of one.
+        let datagram = std::os::unix::net::UnixDatagram::unbound().expect("a socket");
+        let door = Arc::new(UnixListener::from(std::os::fd::OwnedFd::from(datagram)));
+        *clock
+            .inner
+            .door
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&door);
+        (clock, door)
     }
 
     /// The launches it was told of.
@@ -221,7 +240,7 @@ impl RunClock {
 }
 
 /// Closes every connection waiting on `door`.
-fn close_waiting(door: &UnixListener) {
+fn close_waiting(door: &UnixListener) -> io::Result<()> {
     loop {
         match door.accept() {
             Ok(_) => {}
@@ -230,13 +249,14 @@ fn close_waiting(door: &UnixListener) {
                     error.kind(),
                     io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
                 ) => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
             Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "could not close the agent-link connections an earlier VM process left waiting",
-                );
-                return;
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "closing the agent-link connections an earlier VM process left waiting: {error}"
+                    ),
+                ));
             }
         }
     }

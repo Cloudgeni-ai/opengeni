@@ -273,11 +273,12 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 
 impl<E: Engine, S: Store> Job<E, S> {
     /// Tells the sandbox's agent-link streams that a VM process for it is
-    /// about to start. None of its VM processes runs then.
-    fn launching(&self) {
-        if let Some(clock) = &self.link_clock {
-            clock.launched();
-        }
+    /// about to start. None of its VM processes runs then. On an error the
+    /// process must not start (see [`crate::resume::RunClock::launched`]).
+    fn launching(&self) -> io::Result<()> {
+        self.link_clock
+            .as_ref()
+            .map_or(Ok(()), crate::resume::RunClock::launched)
     }
 
     /// Runs `step` and reports how it went and what VM remains. A step that
@@ -834,7 +835,10 @@ impl<E: Engine, S: Store> Job<E, S> {
         // On any failure below the VM process is gone before its memory's
         // pager and hydration are stopped and joined, so a retry never
         // fills the same file beside them.
-        self.launching();
+        if let Err(error) = self.launching() {
+            live_memory.close().await;
+            return (io_failure(OP, error), After::NoVm);
+        }
         let vm = match self.engine.restore(&self.spec, &files).await {
             Ok(vm) => {
                 self.launches += 1;
@@ -1225,7 +1229,9 @@ impl<E: Engine, S: Store> Job<E, S> {
             Err(error) => return (io_failure("boot", error), After::NoVm),
         };
         notes::phase("prepare");
-        self.launching();
+        if let Err(error) = self.launching() {
+            return (io_failure("boot", error), After::NoVm);
+        }
         match self.engine.boot(&self.spec).await {
             Ok(vm) => {
                 self.launches += 1;
