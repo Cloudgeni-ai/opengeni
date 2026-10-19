@@ -600,6 +600,10 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   replicas keep working beside new ones during a rollout, and a rollback
   to the previous image starts (it logs that the schema is newer than it
   knows). Version 1 upgrades a database made before versions existed.
+  The answer to a host's registration is stored (`compute_hosts.answer`)
+  and read back by whichever replica sees that attempt again, so it is
+  part of the schema too: a release adds to a ruling only what the
+  previous release's decoder accepts (`whole` is in the first release).
   Back up the schema before an upgrade that adds a version.
 - **Firecracker**: a wake uses whichever configured Firecracker (the
   current one or one kept with `--retained-firecracker`) reads the image's

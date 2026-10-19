@@ -141,7 +141,10 @@ impl Ownership {
 
     /// Leaves the sandbox without an owner under a new epoch, once its
     /// owner answered that it holds nothing of it. The store's copy is as
-    /// whole as it was: that owner did not run it.
+    /// whole as it was: that owner either never ran it or already handed
+    /// it off, saving it first, under an earlier attempt whose answer was
+    /// lost. Only a hand-off that answers done vouches for a copy, so the
+    /// second case stays as conservative as the first.
     #[must_use]
     pub const fn clear(self) -> Change {
         let epoch = self.epoch.next();
