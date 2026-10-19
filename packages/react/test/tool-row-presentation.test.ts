@@ -166,7 +166,7 @@ describe("shared tool row presentation", () => {
     );
     expect(
       toolRowPresentation(englishText, call({ name: "opengeni__sandbox_file_publish" })).title,
-    ).toBe("Publish file");
+    ).toBe("Shared a file");
   });
 
   test("error previews show the readable message, not the transport wrapper", () => {
@@ -192,6 +192,6 @@ describe("shared tool row presentation", () => {
     );
     expect(row.tool).toBe("run_on");
     const plain = toolRowPresentation(englishText, call({ name: "tool_invoke", arguments: {} }));
-    expect(plain.title).toBe("Tool invoke");
+    expect(plain.title).toBe("Used a tool");
   });
 });

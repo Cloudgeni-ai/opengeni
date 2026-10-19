@@ -150,7 +150,7 @@ describe("session-only entry", () => {
       reactSources.some((id) => id.endsWith("/src/hooks/use-session-read-acknowledgement.ts")),
     ).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/session-attention-model.ts"))).toBe(true);
-    expect(reactSources.length).toBe(41);
+    expect(reactSources.length).toBe(42);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);
