@@ -152,8 +152,16 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
         }),
       );
       launchedPid = launched.observation?.target.processId ?? undefined;
-      // On failure, CUA's own reason is in the receipt's error.
-      expect(launched).toMatchObject({ state: "completed" });
+      // An elevated CUA driver starts apps only with a standard-user token,
+      // which it cannot do for a restored background launch (hosted CI
+      // runners are elevated). That launch must fail with CUA's own reason,
+      // never silently or as a bare protocol error.
+      if (elevated()) {
+        expect(launched.state).not.toBe("completed");
+        expect(JSON.stringify(launched.error)).toContain("Driver is elevated");
+      } else {
+        expect(launched).toMatchObject({ state: "completed" });
+      }
     } finally {
       await supervisor?.close();
       // Only the process this test launched.
@@ -165,3 +173,8 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
   },
   120_000,
 );
+
+/** Whether this process runs elevated (only an administrator may query sessions). */
+function elevated(): boolean {
+  return Bun.spawnSync(["net", "session"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+}
