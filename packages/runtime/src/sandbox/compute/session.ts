@@ -113,6 +113,7 @@ export type ComputeTurnDeps = Pick<
   SelfhostedSessionDeps,
   | "terminalScopeId"
   | "adoptBackgroundCommand"
+  | "abandonCommand"
   | "settleBackgroundCommand"
   | "captureBackgroundCommandOutput"
   | "onOp"
@@ -481,6 +482,7 @@ export class ComputeSandboxSession extends SelfhostedSession {
       ...(turn.adoptBackgroundCommand
         ? { adoptBackgroundCommand: turn.adoptBackgroundCommand }
         : {}),
+      ...(turn.abandonCommand ? { abandonCommand: turn.abandonCommand } : {}),
       ...(turn.settleBackgroundCommand
         ? { settleBackgroundCommand: turn.settleBackgroundCommand }
         : {}),

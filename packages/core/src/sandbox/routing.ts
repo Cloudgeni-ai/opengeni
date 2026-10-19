@@ -27,6 +27,7 @@ import {
   getSandboxForAttempt,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
+  recordAbandonedDirectConnectedMachineCommand,
   resolvePersonalMachineConnectionForAttempt,
   retainWorkspaceMutationProcess,
   SandboxRetainedProcessPromotionFencedError,
@@ -42,6 +43,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
+  ComputeSandboxSession,
   isProviderSandboxGoneDuringRoutedOperation,
   isInSandboxSupervisedProcess,
   makeActiveBackendResolver,
@@ -63,6 +65,7 @@ import {
   type SelfhostedRelayConfig,
   type SelfhostedConnectionBinding,
   type SelfhostedOpStreamDeps,
+  type SelfhostedSessionDeps,
 } from "@opengeni/runtime/sandbox";
 
 type PersistableMutationAdmission = {
@@ -328,6 +331,30 @@ async function resolveSelfhostedConnection(
   };
 }
 
+/** How a direct request (one outside any turn) hands over a command it
+ * abandoned because its machine stopped answering or its agent restarted:
+ * the session's command ledger records it with a stop request bound to the
+ * exact connection and operation, and the reconciler decides its outcome. */
+export function directRequestAbandonCommand(
+  db: Database,
+  ids: { accountId: string; workspaceId: string; sessionId: string },
+): NonNullable<SelfhostedSessionDeps["abandonCommand"]> {
+  return async (command) => {
+    const recorded = await recordAbandonedDirectConnectedMachineCommand(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      commandId: crypto.randomUUID(),
+      controlWorkspaceId: command.controlWorkspaceId,
+      enrollmentId: command.enrollmentId,
+      connectionInstanceId: command.connectionInstanceId,
+      opId: command.opId,
+      command: command.command,
+    });
+    return { commandId: recorded.id };
+  };
+}
+
 /** Whether the routing proxy should wrap the Channel-A box: gated by the
  *  selfhosted flag (the active pointer + swap are only meaningful then). */
 export function routingEnabled(settings: Settings): boolean {
@@ -373,6 +400,14 @@ export function wrapChannelABoxWithRouting(
 ): EstablishedSandboxSession {
   const { db, settings, bus } = services;
   const homeLease = ids.homeLease;
+  const abandonCommand = directRequestAbandonCommand(db, ids);
+  // A compute home runs the same agent protocol as a Connected Machine, so a
+  // command it abandons enters the same ledger.
+  const homeSession = (
+    established.session instanceof ComputeSandboxSession
+      ? established.session.bindTurn({ abandonCommand })
+      : established.session
+  ) as RoutableBackendSession;
   let machineAuthority: Promise<ChannelAMachineAuthority> | undefined;
   const resolveMachineAuthority = (): Promise<ChannelAMachineAuthority> => {
     machineAuthority ??= ids.machineAuthority
@@ -656,7 +691,7 @@ export function wrapChannelABoxWithRouting(
     : undefined;
   const resolver = makeActiveBackendResolver({
     workspaceId: ids.workspaceId,
-    defaultBackend: established.session as RoutableBackendSession,
+    defaultBackend: homeSession,
     defaultKind: established.backendId,
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
       const authority = await resolveMachineAuthority();
@@ -695,19 +730,20 @@ export function wrapChannelABoxWithRouting(
     relay: relayConfigFromSettings(settings),
     selfhostedTimeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
     selfhostedExecTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+    selfhostedAbandonCommand: abandonCommand,
     ...(ids.pinnedSelfhosted
       ? {
           pinnedSelfhosted: {
             sandboxId: ids.pinnedSelfhosted.sandboxId,
             epoch: ids.pinnedSelfhosted.epoch,
-            session: established.session as RoutableBackendSession,
+            session: homeSession,
           },
         }
       : {}),
     ...(homeLease
       ? {
           resolveDefaultBackend: async () => ({
-            session: established.session as RoutableBackendSession,
+            session: homeSession,
             sandboxId: null,
             kind: established.backendId,
             leaseEpoch: homeLease.leaseEpoch,
@@ -751,7 +787,7 @@ export function wrapChannelABoxWithRouting(
     },
     bindActiveRouteOnFirstResolve: true,
     defaultResolved: {
-      session: established.session as RoutableBackendSession,
+      session: homeSession,
       sandboxId: null,
       kind: established.backendId,
       ...(homeLease

@@ -135,10 +135,16 @@ skips sandbox enrollments, and machine routes list machines only.
   (programs lost, files kept), and its agent comes back on a new connection
   instance. A request still bound to the old instance ends as soon as the new
   one is live, as on a Connected Machine ("Control transport recovery" in
-  `docs/connected-machines.md`): a running command ends as lost because its
-  agent restarted, a read is read again from the new agent, and the request
-  is never moved to the new connection. Abandoned work therefore neither keeps
-  the lease warm nor holds up deleting the chat.
+  `docs/connected-machines.md`): a command that started, or may have, is
+  handed to the session's command ledger with a stop request and reported
+  with an unknown outcome, a read is read again from the new agent, and the
+  request is never moved to the new connection. The reconciler settles the
+  handed-over command as lost once the enrollment shows the new connection
+  instance; the fabric runs at most one VM per sandbox (ADR 18), so the old
+  agent is gone. Abandoned work therefore neither keeps the lease warm nor
+  holds up deleting the chat: a command already asked to stop on the chat's
+  own sandbox does not hold the deletion, because ending the group deletes
+  the sandbox and the deletion waits for that.
 - **Request epoch**: compute requests are machine-addressed (epoch 0), like
   `run_on`. The agent in a sandbox has no session route epoch: nothing
   acknowledges its Hello with one, so it holds 0, and a nonzero epoch (the

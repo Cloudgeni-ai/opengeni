@@ -99,6 +99,7 @@ import {
   relayConfigFromSettings,
   requireLiveAgentAttemptAuthorization,
   resolveChannelAMachineConnection,
+  directRequestAbandonCommand,
   getChannelAMachineSandbox,
   resolveSessionSandboxRuntime,
   wrapChannelABoxWithRouting,
@@ -873,6 +874,11 @@ async function withChannelAOperation<T>(
           enrollment.agentCapabilities.transactionalFsWriteMachine === true,
         browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
         runAsSupported: enrollment.agentCapabilities.runAs === true,
+        abandonCommand: directRequestAbandonCommand(db, {
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+        }),
         ...(settings.agentOpStreamEnabled === true &&
         enrollment?.opStream === true &&
         bus.getOpStreamConnection

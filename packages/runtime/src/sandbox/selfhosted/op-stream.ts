@@ -51,6 +51,7 @@ import {
 } from "@opengeni/agent-proto";
 import {
   agentErrorToControlError,
+  commandOutcomeUnknownAfterRestartAgentError,
   NEVER_SENT_DETAIL_KEY,
   SelfhostedControlError,
   timeoutAgentError,
@@ -859,7 +860,7 @@ class OpConsumer {
       } catch (error) {
         // The agent restarted: the op went with it, and nothing will answer.
         if (error instanceof SelfhostedControlError && error.connectionReplaced) {
-          throw agentRestartedLostError();
+          throw agentRestartedOutcomeUnknownError();
         }
         if (
           error instanceof SelfhostedControlError &&
@@ -968,7 +969,7 @@ class OpConsumer {
         // The agent it was admitted to restarted. A start no attempt delivered
         // did not run; one that any attempt may have delivered was lost with it.
         if (error.connectionReplaced) {
-          throw error.neverSent && !maybeDelivered ? error : agentRestartedLostError();
+          throw error.neverSent && !maybeDelivered ? error : agentRestartedOutcomeUnknownError();
         }
         if (!error.neverSent) maybeDelivered = true;
         const blip = error.reason === "agent_reconnecting" || error.neverSent;
@@ -1079,7 +1080,7 @@ class OpConsumer {
       })
       .catch((error) => {
         if (error instanceof SelfhostedControlError && error.connectionReplaced) {
-          this.settleReject?.(agentRestartedLostError());
+          this.settleReject?.(agentRestartedOutcomeUnknownError());
         } else if (
           error instanceof SelfhostedControlError &&
           !error.retryable &&
@@ -1327,7 +1328,7 @@ class OpConsumer {
       }
       // The agent restarted: the op is gone with it. Waiting cannot bring it back.
       if (error.connectionReplaced) {
-        reject(agentRestartedLostError());
+        reject(agentRestartedOutcomeUnknownError());
         return;
       }
       const transient =
@@ -1412,10 +1413,7 @@ function protocolError(message: string): SelfhostedControlError {
 /** A definitive `lost` status → a typed op-level failure. The result was
  *  bounded-retention collateral (LRU eviction / a runner restart predating the
  *  persistence milestone) — honest, never silent. */
-function lostToControlError(
-  status: Pick<OpStatus, "lostReason">,
-  connectionReplaced = false,
-): SelfhostedControlError {
+function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedControlError {
   const reason =
     status.lostReason === OpLostReason.OP_LOST_REASON_EVICTED
       ? "its retained result was evicted before collection"
@@ -1429,25 +1427,26 @@ function lostToControlError(
     code: ErrorCode.ERROR_CODE_STREAM,
     reason: null,
     retryable: false,
-    connectionReplaced,
     detail: { lost_reason: String(status.lostReason) },
   });
 }
 
-/** The op was lost with an agent connection that a new one replaced: the
- *  agent restarted, and the op ended with its process. Marked so the session
- *  records that loss as the op's terminal outcome. */
-function agentRestartedLostError(): SelfhostedControlError {
-  return lostToControlError({ lostReason: OpLostReason.OP_LOST_REASON_AGENT_RESTARTED }, true);
+/** The op's agent connection was replaced by a new one while the op existed
+ *  or may have. That does not prove the old process is gone (an expired claim
+ *  can be taken over while it still runs), so the outcome is unknown. Marked
+ *  connection-replaced so the session hands the op to its command ledger with
+ *  a stop request bound to the old connection. */
+function agentRestartedOutcomeUnknownError(): SelfhostedControlError {
+  return agentErrorToControlError(commandOutcomeUnknownAfterRestartAgentError());
 }
 
 /** A failure once the op exists (its start was accepted, may have been, or it
- *  was already known) never says it did not run: a replaced connection lost
- *  it, and any other never-sent failure proves only that this one request was
+ *  was already known) never says it did not run: after a replaced connection
+ *  its outcome is unknown, and any other never-sent failure proves only that this one request was
  *  not delivered. */
 function startedOpError(error: unknown): unknown {
   if (!(error instanceof SelfhostedControlError)) return error;
-  if (error.connectionReplaced) return agentRestartedLostError();
+  if (error.connectionReplaced) return agentRestartedOutcomeUnknownError();
   if (!error.neverSent) return error;
   return new SelfhostedControlError({
     message: error.message,

@@ -32,6 +32,11 @@ function rig(
     goneHolds?: boolean;
     onRequest?: (request: ControlRequest, instance: string) => void | Promise<void>;
     defaultScript?: (exec: ExecRequest) => FakeOpScript;
+    /** "turn": a turn's ledger adoption; "direct": a caller without a turn
+     * records only abandoned commands; "failing": recording fails. */
+    ledger?: "turn" | "direct" | "failing";
+    /** Delay of the nth admission (0-based). */
+    admissionDelayMs?: (call: number) => number;
   } = {},
 ) {
   const state = { live: OLD, gone: new Set<string>() };
@@ -77,6 +82,11 @@ function rig(
     state.gone.add(OLD);
     state.live = NEW;
   };
+  /** The old agent answers again and holds the connection once more. */
+  const returnOld = () => {
+    state.gone.delete(OLD);
+    state.live = OLD;
+  };
   const requests: { request: ControlRequest; instance: string }[] = [];
   const controlRpc = new NatsControlRpc(async () => ({
     request: async (subject: string, payload: Uint8Array, opts: { timeout: number }) => {
@@ -103,6 +113,12 @@ function rig(
     },
   }));
   const adoptions: { connectionInstanceId: string; opId: string; abandoned?: boolean }[] = [];
+  const record = async (input: (typeof adoptions)[number]) => {
+    if (options.ledger === "failing") throw new Error("ledger unavailable");
+    adoptions.push(input);
+    return { commandId: `command-${adoptions.length}` };
+  };
+  let admissions = 0;
   const session = new SelfhostedSession({
     workspaceId: WORKSPACE,
     workspaceRoot: ROOT,
@@ -113,26 +129,29 @@ function rig(
     timeoutMs: options.controlTimeoutMs ?? 2_000,
     execTimeoutMs: options.execTimeoutMs ?? 5_000,
     retryClock: { sleep: async () => {}, jitter: () => 0.5 },
-    resolveOperationAdmission: async () => ({
-      connectionInstanceId: state.live,
-      workspaceRoot: ROOT,
-      operationResourcePolicy: {
-        memoryMaxBytes: null,
-        memoryHighBytes: null,
-        cpuMaxMillicores: null,
-        revision: 1,
-      },
-      operationResourcePolicySupported: true,
-      operationCpuQuotaSupported: true,
-      opStream: { transport, ackIntervalMs: 20, silenceTimeoutMs: 120, reconnectHoldMs: 600 },
-    }),
-    adoptBackgroundCommand: async (input) => {
-      adoptions.push(input);
-      return { commandId: `command-${adoptions.length}` };
+    resolveOperationAdmission: async () => {
+      const delay = options.admissionDelayMs?.(admissions++) ?? 0;
+      if (delay > 0) await Bun.sleep(delay);
+      return {
+        connectionInstanceId: state.live,
+        workspaceRoot: ROOT,
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 1,
+        },
+        operationResourcePolicySupported: true,
+        operationCpuQuotaSupported: true,
+        opStream: { transport, ackIntervalMs: 20, silenceTimeoutMs: 120, reconnectHoldMs: 600 },
+      };
     },
+    ...(options.ledger === "direct"
+      ? { abandonCommand: async (input) => await record({ ...input }) }
+      : { adoptBackgroundCommand: record }),
     opStream: { transport, ackIntervalMs: 20, silenceTimeoutMs: 120, reconnectHoldMs: 600 },
   });
-  return { session, runners, restart, requests, adoptions, transport };
+  return { session, runners, restart, returnOld, requests, adoptions, transport };
 }
 
 async function until(condition: () => boolean): Promise<void> {
@@ -144,7 +163,7 @@ async function until(condition: () => boolean): Promise<void> {
 }
 
 describe("an exec whose agent restarts", () => {
-  test("a running command settles as lost and releases the turn at once", async () => {
+  test("a running command is handed to the ledger with a stop request and the turn is released", async () => {
     const { session, runners, restart, adoptions } = rig({
       // The turn's own setup commands finish; the user's command keeps running.
       defaultScript: (exec) =>
@@ -166,9 +185,12 @@ describe("an exec whose agent restarts", () => {
       () => undefined,
       (caught: unknown) => caught,
     );
-    expect(String(error)).toMatch(/agent restarted and the op did not survive/);
-    // Its loss is terminal: nothing is left for a ledger to stop or settle.
-    expect(adoptions).toEqual([]);
+    expectOutcomeUnknown(error);
+    // A new connection does not prove the old process is gone: the command is
+    // handed over once, with a stop request bound to the connection it ran on.
+    expect(adoptions).toEqual([
+      expect.objectContaining({ connectionInstanceId: OLD, opId, abandoned: true }),
+    ]);
     // The turn's fence drains without the old agent ever coming back.
     controller.cancel(error);
     await controller.waitForQuiescence();
@@ -198,9 +220,10 @@ describe("an exec whose agent restarts", () => {
       (caught: unknown) => caught,
     );
     expect(runners.get(OLD)!.runs.get(opId)?.startCount).toBe(1);
-    expect(String(error)).toMatch(/agent restarted and the op did not survive/);
-    expect(String(error)).not.toMatch(/did not run/);
-    expect(adoptions).toEqual([]);
+    expectOutcomeUnknown(error);
+    expect(adoptions).toEqual([
+      expect.objectContaining({ connectionInstanceId: OLD, opId, abandoned: true }),
+    ]);
     // Never repeated on the new agent.
     expect(runners.get(NEW)!.runs.has(opId)).toBe(false);
   });
@@ -221,20 +244,135 @@ describe("an exec whose agent restarts", () => {
         }
       },
     });
-    const { session, runners } = context;
+    const { session, runners, adoptions } = context;
     const controller = createTurnToolCancellationController(new AbortController().signal);
     const startedAt = Date.now();
     const error = await controller.runSandboxCommandStructured(session, { cmd: "touch once" }).then(
       () => undefined,
       (caught: unknown) => caught,
     );
-    // The start may have reached the old agent: lost, never "did not run".
-    expect(String(error)).toMatch(/agent restarted and the op did not survive/);
-    expect(String(error)).not.toMatch(/did not run/);
+    // The start may have reached the old agent: unknown, never "did not run".
+    expectOutcomeUnknown(error);
+    expect(adoptions).toEqual([expect.objectContaining({ connectionInstanceId: OLD })]);
     controller.cancel(error);
     await controller.waitForQuiescence();
     expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect([...runners.get(NEW)!.runs.keys()]).toEqual([]);
+  });
+
+  test("a caller without a turn records the command as abandoned and is released", async () => {
+    const { session, runners, restart, adoptions } = rig({
+      ledger: "direct",
+      defaultScript: () => ({ frames: [], live: true, holdUntilCancel: true }),
+    });
+    const controller = createTurnToolCancellationController(new AbortController().signal);
+    // As a direct terminal request runs, with a long bounded wait.
+    const run = controller.runSandboxCommandStructured(session, {
+      cmd: "sleep 600",
+      yieldTimeMs: 30_000,
+    });
+    await until(() => runners.get(OLD)!.starts.length === 1);
+    const opId = runners.get(OLD)!.starts[0]!.opId;
+    restart();
+    const error = await run.then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expectOutcomeUnknown(error);
+    // Only the abandonment is recorded: a direct request never backgrounds.
+    expect(adoptions).toEqual([{ ...adoptions[0], connectionInstanceId: OLD, opId }]);
+    expect(adoptions[0]).not.toHaveProperty("abandoned");
+    controller.cancel(error);
+    await controller.waitForQuiescence();
+  });
+
+  test("when the ledger cannot record it, cleanup keeps it and stops it once the old agent returns", async () => {
+    const { session, runners, restart, returnOld, adoptions } = rig({
+      ledger: "failing",
+      defaultScript: () => ({ frames: [], live: true, holdUntilCancel: true }),
+    });
+    const controller = createTurnToolCancellationController(new AbortController().signal);
+    const run = controller.runSandboxCommandStructured(session, { cmd: "sleep 600" });
+    await until(() => runners.get(OLD)!.starts.length === 1);
+    const opId = runners.get(OLD)!.starts[0]!.opId;
+    restart();
+    const error = await run.then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expectOutcomeUnknown(error);
+    expect(adoptions).toEqual([]);
+    controller.cancel(error);
+    let quiescent = false;
+    const quiescence = controller.waitForQuiescence().then(() => {
+      quiescent = true;
+    });
+    // Nothing proves the command ended, so cleanup keeps waiting for it.
+    await Bun.sleep(300);
+    expect(quiescent).toBe(false);
+    expect(runners.get(OLD)!.runs.get(opId)?.exit.cancelled).not.toBe(true);
+    // The old agent was still alive and answers again: the stop reaches it.
+    returnOld();
+    await quiescence;
+    expect(runners.get(OLD)!.runs.get(opId)?.exit.cancelled).toBe(true);
+  });
+
+  test("a re-admission that outlasts the exec's deadline is never sent", async () => {
+    let restarted = false;
+    const context = rig({
+      execTimeoutMs: 150,
+      // The re-admission takes longer than the time the exec has left.
+      admissionDelayMs: (call) => (call === 1 ? 200 : 0),
+      onRequest: (request) => {
+        if (request.op?.$case === "opStart" && !restarted) {
+          restarted = true;
+          context.restart();
+        }
+      },
+    });
+    const { session, runners, requests } = context;
+    const startedAt = Date.now();
+    const error = await runWithToolCallCorrelation("call_readmit_late", () =>
+      session.exec({ cmd: "touch once" }),
+    ).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    // It never ran anywhere, and says so.
+    expect(String(error)).toMatch(/so it did not run/);
+    expect(Date.now() - startedAt).toBeLessThan(400);
+    await Bun.sleep(100);
+    expect(
+      requests.filter((r) => r.request.op?.$case === "opStart").map((r) => r.instance),
+    ).toEqual([OLD]);
+    expect([...runners.get(NEW)!.runs.keys()]).toEqual([]);
+  });
+
+  test("a re-admitted start gets only the time its exec has left", async () => {
+    let restarted = false;
+    const context = rig({
+      execTimeoutMs: 1_000,
+      admissionDelayMs: (call) => (call === 1 ? 300 : 0),
+      onRequest: (request) => {
+        if (request.op?.$case === "opStart" && !restarted) {
+          restarted = true;
+          context.restart();
+        }
+      },
+    });
+    const { session, runners, requests } = context;
+    runners.get(NEW)!.script("call_readmit_left:0", { frames: [], exit: { exitCode: 0 } });
+    await runWithToolCallCorrelation("call_readmit_left", () => session.exec({ cmd: "true" }));
+    const starts = requests.filter((r) => r.request.op?.$case === "opStart");
+    expect(starts.map((r) => r.instance)).toEqual([OLD, NEW]);
+    const [first, second] = starts.map((r) =>
+      r.request.op?.$case === "opStart" && r.request.op.opStart.op?.$case === "exec"
+        ? r.request.op.opStart.op.exec.timeoutMs
+        : -1,
+    );
+    expect(first).toBeGreaterThan(900);
+    expect(second).toBeLessThanOrEqual(700);
+    expect(second).toBeGreaterThan(0);
   });
 
   test("a start that never reached the old agent runs once on the new one", async () => {
@@ -324,3 +462,11 @@ describe("an exec whose start outlives its wall", () => {
     expect(new Set(deadlines).size).toBe(1);
   });
 });
+
+function expectOutcomeUnknown(error: unknown): void {
+  const text = String(error);
+  expect(text).toMatch(/restarted while this command was running, so its outcome is unknown/);
+  expect(text).toMatch(/may still be running, or it may have finished/);
+  expect(text).toMatch(/A stop has been requested for it/);
+  expect(text).not.toMatch(/did not survive|did not run/);
+}

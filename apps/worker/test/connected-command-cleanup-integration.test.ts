@@ -6,6 +6,7 @@ import {
   createEnrollment,
   createSandboxEnrollment,
   createSession,
+  recordAbandonedDirectConnectedMachineCommand,
   sandboxMaintenanceDue,
   settleConnectedMachineSessionBackgroundCommand,
 } from "@opengeni/db";
@@ -824,4 +825,159 @@ test("Stop on a compute sandbox's command delivers the cancel once and settles i
   await reconcile(client.db, settings, observability, stopBus, rpc);
   expect(operations.length).toBe(sent);
   await parkSession(session.id);
+});
+
+/** A workspace and chat with one command a request abandoned on `kind`'s
+ * runner "launch" when its agent restarted: it is recorded with a stop request
+ * bound to that exact connection and operation. */
+async function abandonedCommandFixture(kind: "machine" | "sandbox") {
+  const id = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: id,
+    accountName: "Abandoned",
+    workspaceExternalSource: "test",
+    workspaceExternalId: id,
+    workspaceName: "Abandoned",
+    subjectId: `subject-${id}`,
+  });
+  const { accountId, workspaceId } = access.workspaceGrants[0]!;
+  const session = await createSession(client.db, {
+    accountId,
+    workspaceId: workspaceId!,
+    initialMessage: "Abandoned",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: kind === "sandbox" ? "compute" : "none",
+  });
+  const enrollment =
+    kind === "sandbox"
+      ? await createSandboxEnrollment(client.db, {
+          accountId,
+          workspaceId: workspaceId!,
+          enrollmentId: crypto.randomUUID(),
+          sandboxGroupId: session.sandboxGroupId,
+          hasDisplay: false,
+          workspaceRoot: "/workspace",
+        })
+      : await createEnrollment(client.db, {
+          accountId,
+          workspaceId: workspaceId!,
+          pubkey: `ed25519:${id}`,
+        });
+  await shared.admin`update enrollments set connection_instance_id='launch',connection_lease_expires_at=now()+interval '1 hour' where id=${enrollment.id}`;
+  const commandId = crypto.randomUUID();
+  const opId = `op-${commandId}`;
+  const recorded = await recordAbandonedDirectConnectedMachineCommand(client.db, {
+    accountId,
+    workspaceId: workspaceId!,
+    sessionId: session.id,
+    commandId,
+    controlWorkspaceId: workspaceId!,
+    enrollmentId: enrollment.id,
+    connectionInstanceId: "launch",
+    opId,
+    command: "sleep 900",
+  });
+  expect(recorded.state).toBe("stopping");
+  const stored = async () =>
+    (await shared.admin`select * from session_background_commands where id=${commandId}`)[0]!;
+  const due = async () =>
+    shared.admin`update session_background_commands set reconcile_after='2000-01-01T00:00:00Z'::timestamptz,reconcile_claim_id=null,reconcile_claimed_at=null where id=${commandId}`;
+  return {
+    accountId,
+    workspaceId: workspaceId!,
+    session,
+    enrollment,
+    commandId,
+    opId,
+    stored,
+    due,
+  };
+}
+
+test("a command abandoned when its compute sandbox's VM restarted settles through the reconciler without a wake", async () => {
+  const fixture = await abandonedCommandFixture("sandbox");
+  // The VM crashed and booted fresh on its disk: a new agent process holds
+  // the sandbox's connection, and the old one, with its operation, is gone.
+  await shared.admin`update enrollments set connection_instance_id='fresh' where id=${fixture.enrollment.id}`;
+  const rpc = noRunnerRpc();
+  await fixture.due();
+  await reconcile(client.db, settings, observability, bus, rpc);
+  const settled = await fixture.stored();
+  expect(settled.state).toBe("lost");
+  expect(settled.settlement_reason).toBe("op_connection_replaced");
+  expect(settled.exit_code).toBeNull();
+  // Nothing was sent: no message woke the sandbox for it.
+  expect(rpc.requests()).toBe(0);
+  await parkSession(fixture.session.id);
+});
+
+test("a command abandoned while its runner was unreachable is stopped when that exact runner answers again", async () => {
+  const fixture = await abandonedCommandFixture("machine");
+  const transport = new InMemoryOpStreamTransport();
+  const runner = new FakeOpRunner({
+    workspaceId: fixture.workspaceId,
+    agentId: fixture.enrollment.id,
+    connectionInstanceId: "launch",
+    transport,
+  });
+  runner.script(fixture.opId, { frames: [], live: true, holdUntilCancel: true });
+  const subject = subjectFor(fixture.workspaceId, fixture.enrollment.id, "launch");
+  await runner.request(
+    subject,
+    {
+      requestId: fixture.opId,
+      epoch: 0,
+      op: {
+        $case: "opStart",
+        opStart: {
+          op: { $case: "exec", exec: ExecRequest.fromPartial({ command: ["sleep", "900"] }) },
+          windowBytes: "65536",
+          deadlineMs: "0",
+          originId: fixture.session.id,
+        },
+      },
+    },
+    { timeoutMs: 1000 },
+  );
+  // Old -> new -> old: while another process held the connection, the old
+  // runner kept its operation. While it does not answer, the stop waits.
+  let answering = false;
+  const delivered: string[] = [];
+  const rpc: ControlRpc = {
+    request: async (target, request, options) => {
+      if (!answering || target !== subject) {
+        throw new SelfhostedControlError({
+          message: "timed out",
+          code: ErrorCode.ERROR_CODE_TIMEOUT,
+          reason: "timeout",
+          retryable: true,
+        });
+      }
+      delivered.push(request.op?.$case ?? "none");
+      return await runner.request(target, request, options);
+    },
+  };
+  const stopBus = {
+    ...bus,
+    getOpStreamConnection: () => opStreamConnectionFor(transport),
+  } as Parameters<typeof reconcile>[3];
+  await fixture.due();
+  await reconcile(client.db, settings, observability, stopBus, rpc);
+  expect((await fixture.stored()).state).toBe("stopping");
+  expect(delivered).toEqual([]);
+  // The old runner holds the connection again and answers: the stop reaches it.
+  answering = true;
+  await fixture.due();
+  await reconcile(client.db, settings, observability, stopBus, rpc);
+  expect(delivered[0]).toBe("opCancel");
+  expect(delivered).not.toContain("opStart");
+  const settled = await fixture.stored();
+  expect(settled.state).not.toBe("running");
+  expect(settled.state).not.toBe("stopping");
+  await parkSession(fixture.session.id);
 });

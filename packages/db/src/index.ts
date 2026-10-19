@@ -30760,6 +30760,19 @@ export async function deleteSessionTreeIfQuiescent(
             return { status: "externally_referenced" as const };
           }
 
+          // A command already asked to stop on one of this tree's own compute
+          // sandboxes does not hold the deletion: ending the group deletes
+          // that sandbox, which ends the command physically, and the lease
+          // checks below keep the tree until the sandbox is gone.
+          const ownComputeEnrollments = tx
+            .select({ id: schema.enrollments.id })
+            .from(schema.enrollments)
+            .where(
+              and(
+                eq(schema.enrollments.kind, "sandbox"),
+                inArray(schema.enrollments.sandboxGroupId, groupIds),
+              ),
+            );
           const activeBackgroundCommands = await tx
             .select({ id: schema.sessionBackgroundCommands.id })
             .from(schema.sessionBackgroundCommands)
@@ -30767,7 +30780,19 @@ export async function deleteSessionTreeIfQuiescent(
               and(
                 eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
                 inArray(schema.sessionBackgroundCommands.sessionId, sessionIds),
-                inArray(schema.sessionBackgroundCommands.state, ["running", "stopping"]),
+                or(
+                  eq(schema.sessionBackgroundCommands.state, "running"),
+                  and(
+                    eq(schema.sessionBackgroundCommands.state, "stopping"),
+                    or(
+                      isNull(schema.sessionBackgroundCommands.enrollmentId),
+                      notInArray(
+                        schema.sessionBackgroundCommands.enrollmentId,
+                        ownComputeEnrollments,
+                      ),
+                    ),
+                  ),
+                ),
               ),
             )
             .for("update", { noWait: true });
@@ -38770,6 +38795,47 @@ export async function adoptConnectedMachineSessionBackgroundCommand(
           throw new SessionBackgroundCommandAdoptionFencedError("attempt_changed");
         }
         return await insertConnectedMachineSessionBackgroundCommandInTransaction(tx, input);
+      }),
+  );
+}
+
+/** Record one exact Connected Machine or compute operation that a request
+ * outside any turn (a direct terminal or file request) abandoned because its
+ * machine stopped answering or its agent connection was replaced. The row
+ * starts with a stop request bound to the exact enrollment, connection
+ * instance and operation, so the reconciler alone decides its outcome: it
+ * stops the operation if that runner answers again and settles it once the
+ * runner is provably retired. Recording a stop grants nothing, so no turn
+ * fence is needed; the workspace lifecycle locks order it against deletion. */
+export async function recordAbandonedDirectConnectedMachineCommand(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    commandId: string;
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    opId: string;
+    command: string;
+  },
+) {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockBackgroundCommandWorkspaceLifecycle(
+          tx,
+          [input.workspaceId, input.controlWorkspaceId],
+          "share",
+        );
+        return await insertConnectedMachineSessionBackgroundCommandInTransaction(tx, {
+          ...input,
+          abandoned: true,
+        });
       }),
   );
 }

@@ -126,6 +126,8 @@ export interface ActiveBackendResolverDeps {
   selfhostedAdoptBackgroundCommand?: (
     input: SelfhostedBackgroundCommandAdoption,
   ) => Promise<{ commandId: string }>;
+  /** See SelfhostedSessionDeps.abandonCommand: for callers without a turn. */
+  selfhostedAbandonCommand?: SelfhostedSessionDeps["abandonCommand"];
   selfhostedCaptureBackgroundCommandOutput?: (
     commandId: string,
     frames: OpStreamOutputFrame[],
@@ -388,6 +390,9 @@ export function makeActiveBackendResolver(
         ...(deps.selfhostedOnOp !== undefined ? { onOp: deps.selfhostedOnOp } : {}),
         ...(deps.selfhostedAdoptBackgroundCommand !== undefined
           ? { adoptBackgroundCommand: deps.selfhostedAdoptBackgroundCommand }
+          : {}),
+        ...(deps.selfhostedAbandonCommand !== undefined
+          ? { abandonCommand: deps.selfhostedAbandonCommand }
           : {}),
         ...(deps.selfhostedSettleBackgroundCommand !== undefined
           ? { settleBackgroundCommand: deps.selfhostedSettleBackgroundCommand }

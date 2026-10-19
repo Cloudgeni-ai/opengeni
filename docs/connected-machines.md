@@ -85,14 +85,26 @@ reached it, so it did not run." when no attempt reached a responder, otherwise
 is unknown." A request that reached no responder is re-admitted to the new
 connection like any never-sent request, and a read whose outcome is unknown is
 read again; nothing else is re-sent, and the old subject is never rebound to the
-new connection. A streaming exec in flight ends as lost ("the machine agent
-restarted and the op did not survive"), and that loss is its terminal outcome:
-an agent's operations end with its process (an in-place update keeps the same
-connection instance), so turn cleanup and the command ledger have nothing left
-to stop or wait for. Its own timeout also covers its start and first attach, so
-an exec whose agent never answers ends at that timeout; a start that timeout
-abandoned is never sent afterwards, and every retry of a start keeps its first
-deadline.
+new connection. A replaced connection does not prove the old agent process
+exited: an agent keeps its operations across a disconnect, and once the new
+connection's lease expires the old process can hold the connection again. So a
+streaming exec that was started, or may have been, is not settled by the
+requester. It is handed to the session's command ledger with a stop request
+bound to its exact enrollment, connection instance and operation (the same
+adoption used when a machine stops answering), and the exec ends with
+`agent_offline`: "The machine's agent restarted while this command was running,
+so its outcome is unknown: it may still be running, or it may have finished. A
+stop has been requested for it." A turn records it through its own adoption; a
+direct terminal or file request records it in the same ledger without a turn.
+If recording fails, the caller keeps custody and goes on stopping it, as for a
+machine that stopped answering. The reconciler alone decides the outcome: it
+delivers the stop if the old runner answers again, and settles the command as
+lost once the enrollment retires that runner (revoked, a different connection
+instance, or a stopped connection). The exec's own timeout also covers its
+start and first attach, so an exec whose agent never answers ends at that
+timeout; a start that timeout abandoned is never sent afterwards, every retry
+of a start keeps its first deadline, and a start re-admitted to a new
+connection is sent only the time left.
 
 ### Enrollment maintenance boundary
 

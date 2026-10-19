@@ -18,6 +18,7 @@ import {
   releaseLeaseHolder,
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
+  recordAbandonedDirectConnectedMachineCommand,
   recordComputeSandboxPower,
   revokeSandboxEnrollment,
   type Database,
@@ -208,6 +209,82 @@ describe("compute leases and idle drain", () => {
       subjectId: grant.subjectId,
     });
     expect(second.status).toBe("deleted");
+  }, 60_000);
+
+  test("a command abandoned on the chat's own sandbox does not hold its deletion; a running one does", async () => {
+    if (!available) return;
+    const { grant, session, ids } = await fixture("compute");
+    const enrollmentId = crypto.randomUUID();
+    await createSandboxEnrollment(db, {
+      ...ids,
+      enrollmentId,
+      hasDisplay: false,
+      workspaceRoot: "/workspace",
+    });
+    // A direct terminal request lost its command to an agent restart and
+    // handed it to the ledger with a stop request.
+    const command = await recordAbandonedDirectConnectedMachineCommand(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      commandId: crypto.randomUUID(),
+      controlWorkspaceId: ids.workspaceId,
+      enrollmentId,
+      connectionInstanceId: "launch",
+      opId: "op-1",
+      command: "sleep 600",
+    });
+    expect(command.state).toBe("stopping");
+    await releaseLastHolder(ids);
+    const remove = () =>
+      deleteSessionTreeIfQuiescent(db, {
+        workspaceId: ids.workspaceId,
+        sessionId: session.id,
+        subjectId: grant.subjectId,
+      });
+    // A command the user still runs keeps the chat, as on any machine.
+    await admin`update session_background_commands
+      set state = 'running', cancel_requested_at = null, cancel_requested_by = null
+      where id = ${command.id}`;
+    expect((await remove()).status).toBe("active_background_commands");
+    expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("warm");
+    // Once it is only waiting to be stopped, the group ends: deleting the
+    // sandbox stops it, and the tree waits for that as for any live sandbox.
+    await admin`update session_background_commands
+      set state = 'stopping', cancel_requested_at = now(), cancel_requested_by = 'test'
+      where id = ${command.id}`;
+    expect((await remove()).status).toBe("live_sandboxes");
+    expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("draining");
+    await admin`
+      update sandbox_leases set liveness = 'cold', instance_id = null
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+    expect((await remove()).status).toBe("deleted");
+    const [left] = await admin<{ count: number }[]>`
+      select count(*)::int as count from session_background_commands where id = ${command.id}`;
+    expect(left?.count).toBe(0);
+  }, 60_000);
+
+  test("a command abandoned on another machine still holds the deletion until it settles", async () => {
+    if (!available) return;
+    const { grant, session, ids } = await fixture("compute");
+    await recordAbandonedDirectConnectedMachineCommand(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      commandId: crypto.randomUUID(),
+      controlWorkspaceId: ids.workspaceId,
+      enrollmentId: crypto.randomUUID(),
+      connectionInstanceId: "launch",
+      opId: "op-1",
+      command: "sleep 600",
+    });
+    await releaseLastHolder(ids);
+    const result = await deleteSessionTreeIfQuiescent(db, {
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+    });
+    expect(result.status).toBe("active_background_commands");
   }, 60_000);
 
   test("deleting the chat ends the browser and desktop an agent left open on its sandbox", async () => {

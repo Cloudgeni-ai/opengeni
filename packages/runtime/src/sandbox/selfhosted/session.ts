@@ -56,6 +56,7 @@ import {
   execDeadlineHint,
   SelfhostedControlError,
   subjectFor,
+  timeoutAgentError,
   type ControlRpc,
 } from "./control-rpc";
 import {
@@ -390,6 +391,15 @@ export interface SelfhostedSessionDeps {
   adoptBackgroundCommand?: (
     input: SelfhostedBackgroundCommandAdoption,
   ) => Promise<{ commandId: string }>;
+  /** Record, with a stop request bound to its exact connection, a command this
+   * caller already reported as failed because its machine stopped answering
+   * or its agent restarted. The session's command ledger then stops or settles
+   * it, and the caller does not wait for a machine that may never answer.
+   * For callers without a turn (direct requests); without it, a turn records
+   * the command through adoptBackgroundCommand. */
+  abandonCommand?: (
+    input: Omit<SelfhostedBackgroundCommandAdoption, "abandoned">,
+  ) => Promise<{ commandId: string }>;
   captureBackgroundCommandOutput?: (
     commandId: string,
     frames: OpStreamOutputFrame[],
@@ -671,6 +681,7 @@ export class SelfhostedSession {
   private readonly adoptBackgroundCommand:
     | SelfhostedSessionDeps["adoptBackgroundCommand"]
     | undefined;
+  private readonly abandonCommand: SelfhostedSessionDeps["abandonCommand"] | undefined;
   private readonly settleBackgroundCommand:
     | SelfhostedSessionDeps["settleBackgroundCommand"]
     | undefined;
@@ -749,6 +760,10 @@ export class SelfhostedSession {
         ? async () => (await resolveAdmission())?.connectionInstanceId ?? null
         : undefined);
     this.adoptBackgroundCommand = deps.adoptBackgroundCommand;
+    const adopt = deps.adoptBackgroundCommand;
+    this.abandonCommand =
+      deps.abandonCommand ??
+      (adopt ? async (command) => await adopt({ ...command, abandoned: true }) : undefined);
     this.settleBackgroundCommand = deps.settleBackgroundCommand;
     this.captureBackgroundCommandOutput = deps.captureBackgroundCommandOutput;
     // A pre-admission tombstone is safe only for a static connection. Dynamic
@@ -1248,17 +1263,21 @@ export class SelfhostedSession {
     // op-stream: its liveness probes, replay, and cancellation do not depend on a
     // request/reply timer or a monolithic response.
     const totalTimeoutMs = this.effectiveExecDeadlineMs;
-    const execStartedAt = Date.now();
+    // One absolute deadline covers admission, preparation, dispatch and every
+    // re-admission; the runner is sent only the time left.
+    const deadlineAt = totalTimeoutMs > 0 ? Date.now() + totalTimeoutMs : 0;
+    // Why an earlier attempt did not run, if one did not.
+    let notRun: unknown;
+    const expired = () => notRun ?? agentErrorToControlError(timeoutAgentError());
     // A start that provably reached no agent before that agent restarted is
     // admitted again, to the new connection, within the same deadline. The
     // earlier attempt keeps its own destination; nothing is rebound.
     for (let readmissions = 0; ; readmissions += 1) {
-      const executionTimeoutMs =
-        totalTimeoutMs > 0 ? Math.max(1, totalTimeoutMs - (Date.now() - execStartedAt)) : 0;
+      let executionTimeoutMs = 0;
       try {
         // Admission is the only mutable-policy read. Everything below retains
         // its exact connection/capability/policy snapshot through completion.
-        admission = await this.admitCommand();
+        admission = await beforeExecDeadline(this.admitCommand(), deadlineAt, expired);
         const requestedShell = args.shell?.trim();
         // Secret references (design §10.3, connected machines): splice in the
         // machine's dialect and deliver the values natively in ExecRequest.env.
@@ -1266,7 +1285,15 @@ export class SelfhostedSession {
         // (`/bin/sh -c` on POSIX, `powershell -NoProfile -NonInteractive
         // -Command` on Windows) so the splice matches the parser. `args.cmd`
         // (references) remains the command recorded for background adoption.
-        const secret = await this.prepareSecretExec(args, requestedShell);
+        const secret = await beforeExecDeadline(
+          this.prepareSecretExec(args, requestedShell),
+          deadlineAt,
+          expired,
+        );
+        if (deadlineAt > 0) {
+          executionTimeoutMs = deadlineAt - Date.now();
+          if (executionTimeoutMs <= 0) throw expired();
+        }
         const commandText = secret?.command ?? args.cmd;
         const shell = secret?.shell ?? requestedShell;
         execReq = {
@@ -1322,8 +1349,9 @@ export class SelfhostedSession {
         if (startReachedNoReplacedAgent(error)) {
           if (
             readmissions < SELFHOSTED_EXEC_READMISSIONS_MAX &&
-            (totalTimeoutMs === 0 || Date.now() - execStartedAt < totalTimeoutMs)
+            (deadlineAt === 0 || Date.now() < deadlineAt)
           ) {
+            notRun = error;
             continue;
           }
           notifyRemoteOperationNotDispatched(opId);
@@ -1570,45 +1598,29 @@ export class SelfhostedSession {
               reason: null,
               retryable: false,
             });
-      if (controlError.connectionReplaced && !controlError.neverSent && !adoptedCommandId) {
-        // The agent process that ran the op is gone, replaced by a new one, and
-        // the op ended with it: an agent's operations never outlive its process
-        // (an in-place update keeps the same connection). That is terminal
-        // proof of a loss, never an exit. Record it as the op's observed
-        // outcome, so turn cleanup settles at once instead of querying a
-        // connection that will never answer again.
-        retainedOutput.completed = {
-          status: "completed",
-          result: {
-            stdout: retainedOutput.stdout.join(""),
-            stderr: retainedOutput.stderr.join(""),
-            exitCode: null,
-          },
-          failure: controlError,
-        };
-      }
       if (
         !terminalProof &&
         !adoptedCommandId &&
         !controlError.neverSent &&
-        !controlError.connectionReplaced &&
-        machineStoppedAnswering(controlError) &&
-        this.adoptBackgroundCommand
+        (machineStoppedAnswering(controlError) || controlError.connectionReplaced) &&
+        this.abandonCommand
       ) {
-        // The machine went away mid-operation. The command may still run there,
-        // but only the machine can stop or report it, so this turn must not wait
-        // for it. Hand it to the session's command ledger with a stop request;
-        // the reconciler stops or settles it once the machine returns or its
-        // runner is retired. If recording fails, turn cleanup keeps ownership.
+        // The machine went away mid-operation, or its agent came back on a new
+        // connection. The command may still run on the old one (a new
+        // connection does not prove the old process is gone), but only that
+        // agent can stop or report it, so this caller must not wait for it.
+        // Hand it to the session's command ledger with a stop request bound to
+        // the exact old connection; the reconciler stops it if that agent
+        // answers again, or settles it once its runner is retired. If recording
+        // fails, cleanup keeps ownership.
         try {
           notifyDurableOpOwnershipTransferStarted(opId);
-          const abandoned = await this.adoptBackgroundCommand({
+          const abandoned = await this.abandonCommand({
             controlWorkspaceId: admission.controlWorkspaceId,
             enrollmentId: this.agentId,
             connectionInstanceId: admission.connectionInstanceId,
             opId,
             command,
-            abandoned: true,
           });
           adoptedCommandId = abandoned.commandId;
           notifyDurableOpOwnershipTransferred(opId);
@@ -2579,6 +2591,7 @@ export class SelfhostedSandboxClient {
   private readonly adoptBackgroundCommand:
     | SelfhostedSessionDeps["adoptBackgroundCommand"]
     | undefined;
+  private readonly abandonCommand: SelfhostedSessionDeps["abandonCommand"] | undefined;
   private readonly settleBackgroundCommand:
     | SelfhostedSessionDeps["settleBackgroundCommand"]
     | undefined;
@@ -2619,6 +2632,7 @@ export class SelfhostedSandboxClient {
     runAsSupported?: boolean;
     resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
     adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
+    abandonCommand?: SelfhostedSessionDeps["abandonCommand"];
     settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
     captureBackgroundCommandOutput?: SelfhostedSessionDeps["captureBackgroundCommandOutput"];
     /** The run's declared sandbox environment, threaded into every bound session's
@@ -2654,6 +2668,7 @@ export class SelfhostedSandboxClient {
     this.runAsSupported = opts.runAsSupported;
     this.resolveOperationAdmission = opts.resolveOperationAdmission;
     this.adoptBackgroundCommand = opts.adoptBackgroundCommand;
+    this.abandonCommand = opts.abandonCommand;
     this.settleBackgroundCommand = opts.settleBackgroundCommand;
     this.captureBackgroundCommandOutput = opts.captureBackgroundCommandOutput;
     this.environment = opts.environment;
@@ -2705,6 +2720,7 @@ export class SelfhostedSandboxClient {
       ...(this.adoptBackgroundCommand !== undefined
         ? { adoptBackgroundCommand: this.adoptBackgroundCommand }
         : {}),
+      ...(this.abandonCommand !== undefined ? { abandonCommand: this.abandonCommand } : {}),
       ...(this.settleBackgroundCommand !== undefined
         ? { settleBackgroundCommand: this.settleBackgroundCommand }
         : {}),
@@ -2827,6 +2843,7 @@ export interface SelfhostedSessionBuild {
   /** Live last-boundary operation admission resolver; see SelfhostedSessionDeps. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
+  abandonCommand?: SelfhostedSessionDeps["abandonCommand"];
   settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
   captureBackgroundCommandOutput?: SelfhostedSessionDeps["captureBackgroundCommandOutput"];
   /** The per-op observer (out-of-band telemetry). Absent ⇒ no-op. */
@@ -2889,6 +2906,7 @@ export async function buildSelfhostedBackendSession(
     ...(deps.adoptBackgroundCommand !== undefined
       ? { adoptBackgroundCommand: deps.adoptBackgroundCommand }
       : {}),
+    ...(deps.abandonCommand !== undefined ? { abandonCommand: deps.abandonCommand } : {}),
     ...(deps.settleBackgroundCommand !== undefined
       ? { settleBackgroundCommand: deps.settleBackgroundCommand }
       : {}),
@@ -3031,10 +3049,6 @@ function mediaTypeFromPath(path: string): string | undefined {
   return undefined;
 }
 
-/** A random uint64-safe numeric nonce (the wire `PingRequest.nonce` is a uint64,
- *  represented as a numeric string by ts-proto). */
-/** The machine itself stopped answering (offline, reconnecting past the hold
- * window, or draining), as opposed to an answer that the operation failed. */
 /** How many times an exec whose start reached no agent before that agent
  *  restarted is admitted again. */
 const SELFHOSTED_EXEC_READMISSIONS_MAX = 2;
@@ -3046,6 +3060,30 @@ function startReachedNoReplacedAgent(error: unknown): boolean {
   return error instanceof SelfhostedControlError && error.connectionReplaced && error.neverSent;
 }
 
+/** Before an exec is dispatched, nothing of it runs: its preparation ends
+ * with `expired()` once the exec's absolute deadline (0: none) has passed. */
+async function beforeExecDeadline<T>(
+  work: Promise<T>,
+  deadlineAt: number,
+  expired: () => unknown,
+): Promise<T> {
+  if (deadlineAt <= 0) return await work;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(expired()), Math.max(0, deadlineAt - Date.now()));
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+    void work.catch(() => {});
+  }
+}
+
+/** A random uint64-safe numeric nonce (the wire `PingRequest.nonce` is a uint64,
+ *  represented as a numeric string by ts-proto). */
+/** The machine itself stopped answering (offline, reconnecting past the hold
+ * window, or draining), as opposed to an answer that the operation failed. */
 function machineStoppedAnswering(error: SelfhostedControlError): boolean {
   const faultClass = selfhostedFaultClass(error);
   return faultClass === "offline" || faultClass === "reconnecting" || faultClass === "draining";

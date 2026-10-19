@@ -416,6 +416,21 @@ export function connectionReplacedAgentError(neverSent: boolean): AgentError {
   };
 }
 
+/** A command whose agent connection was replaced while it ran. A new
+ *  connection does not prove the old agent process is gone, so the command's
+ *  outcome is unknown; the caller records a stop request for it. */
+export function commandOutcomeUnknownAfterRestartAgentError(): AgentError {
+  return {
+    code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+    message:
+      "The machine's agent restarted while this command was running, so its outcome is " +
+      "unknown: it may still be running, or it may have finished. A stop has been " +
+      "requested for it.",
+    retryable: false,
+    detail: { [CONNECTION_REPLACED_DETAIL_KEY]: "1" },
+  };
+}
+
 /** Build a synthesized AGENT_OFFLINE `AgentError` — the control plane uses this
  *  when no agent responds on the subject at all. `neverSent` marks that the request
  *  provably never reached the machine (no connection / no responder), which makes it
