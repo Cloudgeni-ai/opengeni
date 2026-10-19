@@ -395,31 +395,49 @@ export class CuaComputerBackend implements ComputerBackend {
 
   /** The window a macOS sheet (a Save panel, a Go to Folder prompt) is
    * attached to. A sheet has a window id of its own, but its controls are in
-   * the accessibility tree of its parent: another window of the same process
-   * whose bounds contain it. */
+   * the accessibility tree of its parent, as an AXSheet with the sheet's
+   * bounds, and macOS centers a sheet horizontally on its parent. Another
+   * window of the same app can contain the sheet too, so the parent is the
+   * one whose reading shows the sheet, else the one the sheet is centered on. */
   private sheetParent(target: Target): Target | undefined {
     const inner = target.native.bounds;
     if (this.identity.platform !== "macos" || !inner) return undefined;
-    return [...this.targetsById.values()]
-      .filter((other) => {
-        const outer = other.native.bounds;
-        return (
-          other !== target &&
-          other.pid === target.pid &&
-          outer !== undefined &&
-          outer !== null &&
-          inner.x >= outer.x &&
-          inner.y >= outer.y &&
-          inner.x + inner.width <= outer.x + outer.width &&
-          inner.y + inner.height <= outer.y + outer.height &&
-          inner.width * inner.height < outer.width * outer.height
-        );
-      })
-      .sort(
+    const near = (a: number, b: number) => Math.abs(a - b) <= 2;
+    const center = (rect: NonNullable<typeof inner>) => rect.x + rect.width / 2;
+    const candidates = [...this.targetsById.values()].filter((other) => {
+      const outer = other.native.bounds;
+      return (
+        other !== target &&
+        other.pid === target.pid &&
+        !!outer &&
+        inner.x >= outer.x &&
+        inner.y >= outer.y &&
+        inner.x + inner.width <= outer.x + outer.width &&
+        inner.y + inner.height <= outer.y + outer.height &&
+        inner.width * inner.height < outer.width * outer.height
+      );
+    });
+    const shown = candidates.find((other) =>
+      (this.recentObservations.get(other.native.id) ?? [])
+        .at(-1)
+        ?.roots.some(
+          (node) =>
+            node.role === "AXSheet" &&
+            !!node.bounds &&
+            near(node.bounds.x, inner.x) &&
+            near(node.bounds.y, inner.y) &&
+            near(node.bounds.width, inner.width) &&
+            near(node.bounds.height, inner.height),
+        ),
+    );
+    return (
+      shown ??
+      candidates.sort(
         (a, b) =>
-          a.native.bounds!.width * a.native.bounds!.height -
-          b.native.bounds!.width * b.native.bounds!.height,
-      )[0];
+          Math.abs(center(a.native.bounds!) - center(inner)) -
+          Math.abs(center(b.native.bounds!) - center(inner)),
+      )[0]
+    );
   }
 
   private attachedSheetError(target: Target, parent: Target): ComputerBackendError {
