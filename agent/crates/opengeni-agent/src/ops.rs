@@ -1006,6 +1006,93 @@ mod tests {
         assert!(rig.frames.lock().expect("frames").is_empty(), "zero spawns");
     }
 
+    /// The server tells a cancel-before-start tombstone from a real exit by its
+    /// shape alone, as the wire has no marker for it: COMPLETE, cancelled,
+    /// `next_seq` 0 and no output totals or digests. Pin that shape from both
+    /// sides: the tombstone has it on start, query and attach, and an op
+    /// cancelled after it began never has it.
+    #[tokio::test]
+    async fn a_tombstone_and_a_cancelled_exit_are_told_apart_by_shape() {
+        fn tombstone_shaped(status: &v1::OpStatus) -> bool {
+            let Some(exit) = status.exit.as_ref() else {
+                return false;
+            };
+            status.state == v1::OpState::Complete as i32
+                && exit.cancelled
+                && status.next_seq == 0
+                && exit.totals.is_empty()
+                && exit.digests.is_empty()
+        }
+        fn status_of(resp: &ControlResponse) -> v1::OpStatus {
+            match &resp.result {
+                Some(RespResult::OpStatus(status)) => status.clone(),
+                other => panic!("expected OpStatus, got {other:?} / {:?}", resp.error),
+            }
+        }
+        let rig = rig();
+        let query = |op_id: &str| {
+            status_of(&serve_op_query(
+                &rig.engine,
+                "q".to_string(),
+                &v1::OpQuery {
+                    op_id: op_id.to_string(),
+                },
+            ))
+        };
+
+        let cancel = serve_op_cancel(
+            &rig.engine,
+            "c-tomb".to_string(),
+            &v1::OpCancel {
+                op_id: "op-tomb".to_string(),
+            },
+        );
+        assert!(cancel.error.is_none());
+        let (accepted, refused) =
+            started_status(&rig.start_exec("op-tomb", "echo never", 1 << 20).await);
+        assert!(!accepted, "a tombstoned op is refused");
+        let attached = status_of(&serve_op_attach(
+            &rig.engine,
+            "a-tomb".to_string(),
+            &v1::OpAttach {
+                op_id: "op-tomb".to_string(),
+                from_seq: 0,
+                attach_generation: 1,
+                window_bytes: 0,
+            },
+        ));
+        for status in [&refused, &query("op-tomb"), &attached] {
+            assert!(tombstone_shaped(status), "tombstone: {status:?}");
+            assert_eq!(status.exit.as_ref().map(|exit| exit.exit_code), Some(-1));
+        }
+
+        let started = rig.start_exec("op-began", "sleep 30", 1 << 20).await;
+        assert!(started_status(&started).0);
+        let cancel = serve_op_cancel(
+            &rig.engine,
+            "c-began".to_string(),
+            &v1::OpCancel {
+                op_id: "op-began".to_string(),
+            },
+        );
+        assert!(cancel.error.is_none());
+        let exit = rig.wait_for_exit_frame().await;
+        assert!(exit.cancelled);
+        assert!(!exit.totals.is_empty() && !exit.digests.is_empty());
+        let mut complete = None;
+        for _ in 0..500 {
+            let status = query("op-began");
+            if status.state == v1::OpState::Complete as i32 {
+                complete = Some(status);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let complete = complete.expect("the cancelled op completes");
+        assert!(complete.exit.as_ref().is_some_and(|exit| exit.cancelled));
+        assert!(!tombstone_shaped(&complete), "a real exit: {complete:?}");
+    }
+
     #[tokio::test]
     async fn cancel_kills_a_running_op_and_the_exit_frame_says_cancelled() {
         let rig = rig();
