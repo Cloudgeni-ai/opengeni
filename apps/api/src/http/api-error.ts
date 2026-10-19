@@ -21,6 +21,8 @@ type ApiHttpErrorOptions = {
   retryable?: boolean;
   outcomeUnknown?: boolean;
   details?: Record<string, unknown>;
+  /** Internal only (never serialized): lets callers inspect the source fault. */
+  cause?: unknown;
 };
 
 /** A public, structured API failure whose message and details are safe for clients. */
@@ -31,7 +33,10 @@ export class ApiHttpError extends HTTPException {
   readonly details: Record<string, unknown> | undefined;
 
   constructor(status: number, options: ApiHttpErrorOptions) {
-    super(status as ContentfulStatusCode, { message: options.message });
+    super(status as ContentfulStatusCode, {
+      message: options.message,
+      ...(options.cause === undefined ? {} : { cause: options.cause }),
+    });
     this.name = "ApiHttpError";
     this.code = options.code;
     this.retryable = options.retryable;

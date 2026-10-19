@@ -32,6 +32,8 @@ import {
   runConcurrentChannelAReads,
   shouldEvictChannelAHandleAfterError,
 } from "../src/sandbox/channel-a";
+import { ApiHttpError } from "../src/http/api-error";
+import { httpRejectionFactsFromEnvelope } from "../src/http/rejection-telemetry";
 
 // P4.4 route-discipline guards for all Channel-A structured-service routes (a
 // complement to the real-box runtime test + the docker e2e). The invariants the
@@ -360,6 +362,62 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(channelAOperationFailureDiagnostic(error)).toEqual({
       reason: "provider_unavailable",
       status: 502,
+      errorCode: "sandbox_channel_a_operation_failed",
+    });
+  });
+
+  test.each([
+    ["went offline", "The machine's agent went offline before this request reached it."],
+    [
+      "was replaced mid-command",
+      "The machine's agent was replaced while this command was running, so its outcome is unknown: it may still be running, or it may have finished.",
+    ],
+  ])("a machine agent that %s is a typed 409 counted as provider unavailable", (_name, message) => {
+    const error = agentErrorToControlError({
+      code: AgentErrorCode.ERROR_CODE_AGENT_OFFLINE,
+      message,
+      detail: {},
+      retryable: false,
+    });
+    expect(error.agentOffline).toBe(true);
+    const mapped = mapChannelAError(error);
+    // Status, code and message are what the caller got before; only the
+    // typed detail is new, and the source fault stays inspectable.
+    expect(mapped).toBeInstanceOf(ApiHttpError);
+    expect(mapped).toMatchObject({
+      status: 409,
+      code: "conflict",
+      message,
+      details: { code: "machine_agent_offline" },
+    });
+    expect((mapped as ApiHttpError).retryable).toBeUndefined();
+    expect((mapped as ApiHttpError).outcomeUnknown).toBeUndefined();
+    expect((mapped as ApiHttpError).cause).toBe(error);
+    expect(
+      httpRejectionFactsFromEnvelope(
+        { error: { code: "conflict", message, details: (mapped as ApiHttpError).details } },
+        "conflict",
+      ).reason,
+    ).toBe("machine_agent_offline");
+    expect(channelAOperationFailureDiagnostic(error)).toEqual({
+      reason: "provider_unavailable",
+      status: 409,
+      errorCode: "sandbox_channel_a_provider_unavailable",
+    });
+  });
+
+  test("another machine control failure is still counted as unexpected", () => {
+    const error = agentErrorToControlError({
+      code: AgentErrorCode.ERROR_CODE_PROTOCOL,
+      message: "synthetic protocol failure",
+      detail: {},
+      retryable: false,
+    });
+    expect(error.agentOffline).toBe(false);
+    expect(mapChannelAError(error)).toBe(error);
+    expect(channelAOperationFailureDiagnostic(error)).toEqual({
+      reason: "unexpected",
+      status: 500,
       errorCode: "sandbox_channel_a_operation_failed",
     });
   });

@@ -1436,8 +1436,17 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
       message: "sandbox runtime changed while this session still has active operations; retry",
       retryable: true,
     });
+  // The machine's agent went offline or was replaced mid-operation. The
+  // status and the message (which says whether the command ran) stay as they
+  // are; the typed detail lets callers and rejection telemetry tell this
+  // availability outcome apart from other conflicts.
   if (error instanceof SelfhostedControlError && error.agentOffline)
-    return new HTTPException(409, { message: error.message, cause: error });
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message: error.message,
+      details: { code: "machine_agent_offline" },
+      cause: error,
+    });
   if (error instanceof SelfhostedControlError && error.payloadTooLarge) {
     const outbound = error.detail.direction === "request";
     // Project only the bounded direction. Native free-form diagnostics can
@@ -1546,6 +1555,16 @@ export function channelAOperationFailureDiagnostic(
     return {
       reason: "provider_unavailable",
       status: 503,
+      errorCode: "sandbox_channel_a_provider_unavailable",
+    };
+  }
+  // A Connected Machine whose agent went offline or was replaced mid-operation
+  // is the machine being unavailable, not a server fault. The route answers
+  // 409 (see mapChannelAError); count it as what it is.
+  if (error instanceof SelfhostedControlError && error.agentOffline) {
+    return {
+      reason: "provider_unavailable",
+      status: 409,
       errorCode: "sandbox_channel_a_provider_unavailable",
     };
   }
