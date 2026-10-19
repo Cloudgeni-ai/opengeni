@@ -174,6 +174,67 @@ describe("BrowserSupervisor", () => {
     expect(cleaned).toEqual([46]);
   });
 
+  test("holds the browser's windows presented for each use and while a live view is open", async () => {
+    const directory = await mkdtemp("/tmp/ogb-window-presence-");
+    let holders = 0;
+    const holdersDuring: Record<string, number> = {};
+    let frameStreamClosed = false;
+    const supervisor = await BrowserSupervisor.open({
+      rootDirectory: join(directory, "state"),
+      socketRootDirectory: join(directory, "sockets"),
+      createDriver: async (context) => {
+        const driver = fakeDriver(context);
+        return {
+          ...driver,
+          async acquirePresence() {
+            holders += 1;
+            let released = false;
+            return () => {
+              if (released) return;
+              released = true;
+              holders -= 1;
+            };
+          },
+          async observe(targetId) {
+            holdersDuring.observe = holders;
+            return await driver.observe(targetId);
+          },
+          async dispatch(input) {
+            holdersDuring.dispatch = holders;
+            return await driver.dispatch(input as never);
+          },
+          async subscribeFrames() {
+            return {
+              async close() {
+                frameStreamClosed = true;
+              },
+              async *[Symbol.asyncIterator]() {},
+            };
+          },
+        };
+      },
+    });
+    try {
+      const created = await supervisor.createSession({ ...reference(48), headed: true });
+      await supervisor.observe(reference(48), created.observation.target.id);
+      expect(holdersDuring.observe).toBe(1);
+      expect(holders).toBe(0);
+      await supervisor.action(command(created.observation));
+      expect(holdersDuring.dispatch).toBe(1);
+      expect(holders).toBe(0);
+      const frames = await supervisor.subscribeFrames(reference(48), created.observation.target.id);
+      expect(holders).toBe(1);
+      await frames.close();
+      expect(frameStreamClosed).toBe(true);
+      expect(holders).toBe(0);
+      await frames.close();
+      expect(holders).toBe(0);
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test.skipIf(process.platform === "win32")(
     "rejects a managed socket root before accepting sessions when Unix sockets cannot fit",
     async () => {
