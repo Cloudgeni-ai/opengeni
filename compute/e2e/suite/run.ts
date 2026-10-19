@@ -2050,7 +2050,9 @@ check("move", "a move to another host keeps the sandbox's files", ["files", "hos
   if (after.host !== target.name) throw new Error(`on ${after.host}, not ${target.name}`);
   const now = await sandboxState();
   if (now.host !== target.name)
-    throw new Error(`the control service says ${target.name}, but ${now.host ?? "no host"} holds it`);
+    throw new Error(
+      `the control service says ${target.name}, but ${now.host ?? "no host"} holds it`,
+    );
   return `${before.host} -> ${after.host} in ${seconds(start)}; the first command after it answered; ${describeState(now)}`;
 });
 
@@ -2592,7 +2594,9 @@ check(
           : "gone from the fleet";
     const now = await sandboxState();
     if (now.host !== after.host)
-      throw new Error(`the control service says ${after.host}, but ${now.host ?? "no host"} holds it`);
+      throw new Error(
+        `the control service says ${after.host}, but ${now.host ?? "no host"} holds it`,
+      );
     const newHost = after.host;
     // The command in flight ends with an error once its sandbox is back:
     // its connection was replaced, so the request is answered as lost, not
