@@ -10,7 +10,7 @@
 
 export class BrowserTargetResolutionError extends Error {
   constructor(
-    readonly code: "browser_session_required" | "browser_target_required",
+    readonly code: "browser_session_required" | "browser_target_required" | "browser_resumed",
     message: string,
   ) {
     super(message);
