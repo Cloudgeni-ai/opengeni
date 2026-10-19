@@ -1,6 +1,7 @@
 import { CuaNativeTools } from "./native-tools";
 import type { ComputerNativeCallRequest } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type {
   ComputerLocator,
   ComputerSessionCapabilities,
@@ -71,6 +72,7 @@ export class CuaComputerBackend implements ComputerBackend {
     private readonly runtime: CuaDesktopRuntime,
     permissions: { accessibility: boolean; screen_recording: boolean },
     platform: "macos" | "windows" | "linux",
+    private readonly parentPid: (pid: number) => number | null,
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -93,10 +95,20 @@ export class CuaComputerBackend implements ComputerBackend {
   static async open(
     runtime: CuaDesktopRuntime,
     platform: "macos" | "windows" | "linux" = "macos",
+    options: {
+      /** A process's parent, to tie a Linux launcher's app to its window.
+       * CUA runs in this process, so it sees the same processes. */
+      parentPid?: (pid: number) => number | null;
+    } = {},
   ): Promise<CuaComputerBackend> {
     try {
       const permissions = await readPermissions(runtime, platform);
-      const backend = new CuaComputerBackend(runtime, permissions, platform);
+      const backend = new CuaComputerBackend(
+        runtime,
+        permissions,
+        platform,
+        options.parentPid ?? procParentPid,
+      );
       await backend.startSession(backend.session);
       return backend;
     } catch (error) {
@@ -196,16 +208,7 @@ export class CuaComputerBackend implements ComputerBackend {
     return this.run(async () => {
       if (command.action.type === "launch") {
         await this.target(command.targetId);
-        // The windows open before the launch, to recognise the new one when
-        // the app starts through a launcher process (Linux).
-        const before =
-          this.identity.platform === "linux"
-            ? await this.discover().then(
-                (targets) => new Set(targets.map((target) => target.id)),
-                () => null,
-              )
-            : null;
-        const launched = await this.launch(command.action.applicationId, before);
+        const launched = await this.launch(command.action.applicationId);
         // The app is running: the launch succeeded whatever happens next. Its
         // windows become targets when discovery works. The receipt observes
         // the launched app's window, so the caller can act on it directly,
@@ -781,7 +784,7 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   /** Start an app (or bring up its existing instance) in the background. */
-  private async launch(applicationId: string, before: Set<string> | null): Promise<LaunchedApp> {
+  private async launch(applicationId: string): Promise<LaunchedApp> {
     const id = applicationId.trim();
     const { data } = await callDesktop(
       this.runtime,
@@ -799,32 +802,39 @@ export class CuaComputerBackend implements ComputerBackend {
         true,
       );
     const reported = Windows.safeParse({ windows: data.windows });
-    const pid = typeof data.pid === "number" ? data.pid : null;
-    const launcherPid = typeof data.launcher_pid === "number" ? data.launcher_pid : null;
     return {
-      pids: new Set([pid, launcherPid].filter((value): value is number => value !== null)),
+      pid: typeof data.pid === "number" ? data.pid : null,
+      launcherPid: typeof data.launcher_pid === "number" ? data.launcher_pid : null,
       windows: reported.success ? reported.data.windows : [],
-      // A launcher's app may run as another process (a child, or an instance
-      // already running), so a window that was not open before is its window.
-      before: pid === null ? before : null,
     };
   }
 
   /** The target of the launched app's window: one the launch reported, else
-   * the first listed window of its process, else (for a launcher) the first
-   * window that was not open before. A window can appear a moment after the
-   * process starts, so discovery is retried briefly. */
+   * the first listed window of its process. On Linux the app may run as a
+   * child of the launcher process CUA reports, so a window of a descendant
+   * counts too. A window that cannot be tied to the launch is never guessed.
+   * It can appear a moment after the process starts, so discovery is retried
+   * briefly. */
   private async launchedWindow(launched: LaunchedApp): Promise<string | null> {
+    const ownsWindow = (processId: number | null): boolean => {
+      if (processId === null) return false;
+      if (processId === launched.pid || processId === launched.launcherPid) return true;
+      if (launched.launcherPid === null) return false;
+      // Walk up the window's process ancestry, at most a few generations.
+      let current: number | null = processId;
+      for (let depth = 0; depth < 16 && current !== null && current > 1; depth++) {
+        current = this.parentPid(current);
+        if (current === launched.launcherPid) return true;
+      }
+      return false;
+    };
     for (let attempt = 0; ; attempt++) {
       const targets = await this.discover();
       for (const window of launched.windows) {
         const id = `cua:window:${window.pid}:${window.window_id}`;
         if (this.targetsById.has(id)) return id;
       }
-      const owned =
-        targets.find(
-          (target) => target.processId !== null && launched.pids.has(target.processId),
-        ) ?? targets.find((target) => launched.before !== null && !launched.before.has(target.id));
+      const owned = targets.find((target) => ownsWindow(target.processId));
       if (owned) return owned.id;
       if (attempt >= LAUNCH_WINDOW_RETRIES) return null;
       await new Promise((resolve) => setTimeout(resolve, LAUNCH_WINDOW_RETRY_MS));
@@ -874,16 +884,29 @@ export class CuaComputerBackend implements ComputerBackend {
 }
 
 const RECENT_OBSERVATIONS = 4;
+/** A Linux process's parent from /proc, or null when it cannot be read. */
+function procParentPid(pid: number): number | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    // The command name is in parentheses and may contain spaces or ")".
+    const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+    return Number.isInteger(parent) ? parent : null;
+  } catch {
+    return null;
+  }
+}
+
 /** How long a launch waits for the app's first window: up to a second. */
 const LAUNCH_WINDOW_RETRIES = 4;
 const LAUNCH_WINDOW_RETRY_MS = 250;
 
-/** A launched app's processes, the windows launch_app reported (in
- * list_windows' shape), and for a launcher the windows open before it ran. */
+/** A launched app's processes and the windows launch_app reported, which
+ * have list_windows' shape. */
 type LaunchedApp = {
-  pids: Set<number>;
+  pid: number | null;
+  /** The process a Linux launch started the app through. */
+  launcherPid: number | null;
   windows: { pid: number; window_id: number }[];
-  before: Set<string> | null;
 };
 
 /** A reverse-DNS bundle identifier such as com.apple.TextEdit; anything else is an app name. */

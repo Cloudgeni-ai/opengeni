@@ -812,7 +812,8 @@ describe("CUA desktop boundary", () => {
       launched = false;
       listings = 0;
       reportWindows = false;
-      // Linux reports the launcher process; the app's window belongs to its child.
+      // Linux reports the launcher process; the app's window belongs to its
+      // child, and an unrelated window appears at the same time.
       linux = false;
       async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
         const args = JSON.parse(argumentsJson) as Record<string, unknown>;
@@ -832,6 +833,15 @@ describe("CUA desktop boundary", () => {
         const response = await super.callTool(name, argumentsJson);
         if (name === "list_windows" && this.launched && ++this.listings > 1) {
           const data = JSON.parse(response.structuredJson!);
+          // Another app opens a window at the same time, listed first.
+          if (this.linux)
+            data.windows.push({
+              pid: 99,
+              window_id: 3,
+              title: "Unrelated",
+              app_name: "Other",
+              bounds: { x: 0, y: 0, width: 300, height: 200 },
+            });
           data.windows.push({
             pid: 77,
             window_id: 9,
@@ -857,7 +867,15 @@ describe("CUA desktop boundary", () => {
       const fixture = new LaunchFixture();
       fixture.reportWindows = reportWindows;
       fixture.linux = linux;
-      const backend = await CuaComputerBackend.open(fixture, linux ? "linux" : "macos");
+      // The app (77) runs as a child of the launcher (76); 99 is unrelated.
+      const parents = new Map([
+        [77, 76],
+        [76, 1],
+        [99, 1],
+      ]);
+      const backend = await CuaComputerBackend.open(fixture, linux ? "linux" : "macos", {
+        parentPid: (pid) => parents.get(pid) ?? null,
+      });
       try {
         const target = (await backend.targets())[0]!;
         const observation = await backend.observe(target.id);
