@@ -393,18 +393,12 @@ export class CuaComputerBackend implements ComputerBackend {
     return { pid: target.pid, window_id: target.windowId, session: this.session };
   }
 
-  /** The window a macOS sheet (a Save panel, a Go to Folder prompt) is
-   * attached to. A sheet has a window id of its own, but its controls are in
-   * the accessibility tree of its parent, as an AXSheet with the sheet's
-   * bounds, and macOS centers a sheet horizontally on its parent. Another
-   * window of the same app can contain the sheet too, so the parent is the
-   * one whose reading shows the sheet, else the one the sheet is centered on. */
-  private sheetParent(target: Target): Target | undefined {
+  /** Other windows of the same macOS app that a window lies within: where a
+   * sheet (a Save panel, a Go to Folder prompt) it may be is attached. */
+  private sheetHosts(target: Target): Target[] {
     const inner = target.native.bounds;
-    if (this.identity.platform !== "macos" || !inner) return undefined;
-    const near = (a: number, b: number) => Math.abs(a - b) <= 2;
-    const center = (rect: NonNullable<typeof inner>) => rect.x + rect.width / 2;
-    const candidates = [...this.targetsById.values()].filter((other) => {
+    if (this.identity.platform !== "macos" || !inner) return [];
+    return [...this.targetsById.values()].filter((other) => {
       const outer = other.native.bounds;
       return (
         other !== target &&
@@ -417,10 +411,22 @@ export class CuaComputerBackend implements ComputerBackend {
         inner.width * inner.height < outer.width * outer.height
       );
     });
-    const shown = candidates.find((other) =>
-      (this.recentObservations.get(other.native.id) ?? [])
-        .at(-1)
-        ?.roots.some(
+  }
+
+  /** A sheet has a window id of its own, but CUA reads its controls only
+   * through the window it is attached to, as an AXSheet with the sheet's
+   * bounds. Geometry cannot tell which window that is (or whether this is a
+   * sheet at all), so read the windows it lies within and name a parent only
+   * when exactly one of them shows it now. */
+  private async sheetError(target: Target): Promise<ComputerBackendError> {
+    const inner = target.native.bounds!;
+    const hosts = this.sheetHosts(target).slice(0, 4);
+    const near = (a: number, b: number) => Math.abs(a - b) <= 2;
+    const shown: Target[] = [];
+    for (const host of hosts) {
+      const reading = await this.observeTarget(host.native.id).catch(() => null);
+      if (
+        reading?.roots.some(
           (node) =>
             node.role === "AXSheet" &&
             !!node.bounds &&
@@ -428,22 +434,17 @@ export class CuaComputerBackend implements ComputerBackend {
             near(node.bounds.y, inner.y) &&
             near(node.bounds.width, inner.width) &&
             near(node.bounds.height, inner.height),
-        ),
-    );
-    return (
-      shown ??
-      candidates.sort(
-        (a, b) =>
-          Math.abs(center(a.native.bounds!) - center(inner)) -
-          Math.abs(center(b.native.bounds!) - center(inner)),
-      )[0]
-    );
-  }
-
-  private attachedSheetError(target: Target, parent: Target): ComputerBackendError {
+        )
+      )
+        shown.push(host);
+    }
     return new ComputerBackendError(
       "target_stale",
-      `${target.native.id} is a sheet attached to the window ${parent.native.id}, and its controls are read and used through that window: observe ${parent.native.id} and act on its refs`,
+      shown.length === 1
+        ? `${target.native.id} is a sheet attached to the window ${shown[0]!.native.id}, and its controls are read and used through that window: observe ${shown[0]!.native.id} and act on its refs`
+        : `${target.native.id} cannot be read on its own. If it is a sheet or panel of another window of this app, its controls are in that window's observation: observe the window it belongs to (one of ${hosts
+            .map((host) => host.native.id)
+            .join(", ")}) and act on its refs`,
       false,
       false,
     );
@@ -493,7 +494,7 @@ export class CuaComputerBackend implements ComputerBackend {
       await this.captureTarget(targetId).catch((error: unknown) => {
         // CUA captures nothing for a sheet's own window; its tree read below
         // says whether this is one.
-        if (!this.sheetParent(target)) throw error;
+        if (!this.sheetHosts(target).length) throw error;
       });
     // Viewer polling must never retire a native CUA element-token snapshot.
     // Once native tools own observations, the legacy viewer receives geometry
@@ -530,10 +531,12 @@ export class CuaComputerBackend implements ComputerBackend {
     });
     const state = WindowState.parse(data);
     if (state.pid !== target.pid || state.window_id !== target.windowId || !state.snapshot_id) {
-      const parent = this.sheetParent(target);
-      if (parent && String(data.degraded_reason ?? "").startsWith("ax_window_unresolved")) {
+      if (
+        this.sheetHosts(target).length &&
+        String(data.degraded_reason ?? "").startsWith("ax_window_unresolved")
+      ) {
         this.unreadableSheets.add(targetId);
-        throw this.attachedSheetError(target, parent);
+        throw await this.sheetError(target);
       }
       throw new ComputerBackendError(
         "target_stale",
@@ -814,10 +817,8 @@ export class CuaComputerBackend implements ComputerBackend {
       !command.expectedObservationId ||
       (observed.observationId !== command.expectedObservationId && !refFenced)
     ) {
-      const parent = this.unreadableSheets.has(command.targetId)
-        ? this.sheetParent(target)
-        : undefined;
-      if (parent) throw this.attachedSheetError(target, parent);
+      if (this.unreadableSheets.has(command.targetId) && this.sheetHosts(target).length)
+        throw await this.sheetError(target);
       throw new ComputerBackendError(
         "observation_stale",
         "CUA action requires the current semantic observation",

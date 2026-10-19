@@ -893,6 +893,7 @@ describe("CUA desktop boundary", () => {
     // CUA refuses background keys to either window.
     class SheetFixture extends Fixture {
       sheet = true;
+      showSheet = true;
       other = false;
       // Another window of the app that the sheet also lies within.
       decoy = { x: 90, y: 55, width: 130, height: 70 };
@@ -960,7 +961,16 @@ describe("CUA desktop boundary", () => {
           });
         }
         const response = await super.callTool(name, argumentsJson);
-        if (name === "get_window_state" && this.sheet) {
+        // The other window reads normally, without the sheet.
+        if (name === "get_window_state" && args.window_id === 4) {
+          const state = JSON.parse(response.structuredJson!);
+          response.structuredJson = JSON.stringify({
+            ...state,
+            window_id: 4,
+            window_bounds: this.decoy,
+          });
+        }
+        if (name === "get_window_state" && args.window_id === 1 && this.sheet && this.showSheet) {
           const state = JSON.parse(response.structuredJson!);
           if (state.elements) {
             state.elements.push({
@@ -982,21 +992,27 @@ describe("CUA desktop boundary", () => {
     try {
       await backend.targets();
       // The sheet's own window has no tree: point at the window it belongs to,
-      // the one it is centered on, not the smaller window that also holds it.
-      const sheetMessage =
-        "cua:window:42:2 is a sheet attached to the window cua:window:42:1, and its controls are read and used through that window: observe cua:window:42:1 and act on its refs";
-      await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
-        code: "target_stale",
-        message: sheetMessage,
-      });
-      // Once the parent's reading shows the sheet, that decides it, even when
-      // another window is centered on the sheet as well.
-      await backend.observe("cua:window:42:1");
+      // the one whose reading now shows the sheet, though another window of
+      // the app holds it too and is centered on it exactly.
       fixture.decoy = { x: 76, y: 55, width: 150, height: 70 };
       await backend.targets();
       await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
-        message: sheetMessage,
+        code: "target_stale",
+        message:
+          "cua:window:42:2 is a sheet attached to the window cua:window:42:1, and its controls are read and used through that window: observe cua:window:42:1 and act on its refs",
       });
+      // The other window was read too, and does not show the sheet.
+      expect(
+        (await backend.observe("cua:window:42:4")).roots.some((node) => node.role === "AXSheet"),
+      ).toBe(false);
+      // When no window shows it now, no parent is guessed.
+      fixture.showSheet = false;
+      await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
+        code: "target_stale",
+        message:
+          "cua:window:42:2 cannot be read on its own. If it is a sheet or panel of another window of this app, its controls are in that window's observation: observe the window it belongs to (one of cua:window:42:1, cua:window:42:4) and act on its refs",
+      });
+      fixture.showSheet = true;
       const keys = (value: string, observation: ComputerBackendObservation) =>
         backend.dispatch({
           ...command(observation),
