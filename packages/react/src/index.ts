@@ -716,12 +716,16 @@ export type {
 } from "./components/markdown";
 export {
   OpenGeniLinkProvider,
+  chainLinkRenderers,
   chainLinkResolvers,
   sessionLinkResolver,
+  useOpenGeniLinkRenderer,
   useOpenGeniLinkResolver,
   viewerLinkResolver,
 } from "./components/open-geni-links";
 export type {
+  OpenGeniHostLink,
+  OpenGeniLinkRenderer,
   OpenGeniLinkResolution,
   OpenGeniLinkResolver,
   OpenGeniLinkTarget,
