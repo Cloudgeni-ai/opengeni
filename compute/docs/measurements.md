@@ -1953,3 +1953,152 @@ Checked live on sbx-p4-e (compute 3e0207fb8, backend fde01a4c2):
   (memory from the pager) ended, by the host's clock". The check failed
   for r20a's subset reason only: the idle archive finished at 19:47:40.81,
   before the wake request (`runs/r25-pg/results.md`).
+
+### r26: the final run
+
+r26 (2026-10-19; the chain started at 20:27:04, the suite ran from
+20:43:15 to 21:01:48) is the run of every check, in full order, on the
+heads that go into the pull requests. It supersedes r24 as the final run:
+
+- compute feat/compute-lab 844cbfe73, which merges feat/compute-prod
+  86e97a0df. Since r24 that adds the authority review fixes (e77b159d4),
+  the guest's and the gateway's fixes for envd's access token
+  (e5946eff0, 06eefb868), the control service managing its host group
+  from off Google Cloud (14f588cc4), recoverable host certificates
+  (658107ba0, 86e97a0df), the hosts step after the deploy (5bc1d3e05,
+  536ff108c) and the pager proof's changes (8d26abc54, 536ff108c);
+- the backend feat/compute-backend 9850e5feb: fde01a4c2 with main
+  64e6d6ba9 merged and its migrations renumbered to 0855-0860.
+
+The hosts' bundle, the guest image (with the agent of 9850e5feb) and the
+control service were built from 844cbfe73. API, worker and web were
+deployed from 9850e5feb with `FRESH=1` (new Opengeni and control-service
+databases) at 20:40:18, and the hosts step then replaced the hosts with
+the new template (from 20:40:20). It found sbx-p4-e-host-6rr2, h0vx and
+tq0w live, each with a certificate from the deployed control service, at
+20:43:10. The model was the existing gpt-6.1-sol deployment. The chain
+ran as one launchd job:
+
+```sh
+. p4.env
+export OPENGENI_REF=9850e5feb COMPUTE_REF=844cbfe73
+compute/e2e/env.sh build && compute/e2e/env.sh fleet &&
+  FRESH=1 compute/e2e/env.sh deploy && compute/e2e/env.sh hosts &&
+  RUN=r26 compute/e2e/env.sh suite
+```
+
+A first r26 chain on lab 988fb1c8d was stopped during its build, before
+the host bundle was made, when 86e97a0df arrived
+(`chain-r26-aborted-988fb1c8d.log`); nothing of it was deployed.
+
+26 checks passed, none failed and one was not applicable (run-as:
+Opengeni offers no way to ask for it), with the verifier's agreement.
+
+| check | r26 |
+| --- | --- |
+| create | first turn in 25.1 s |
+| background | read back by id with exit status 3; the stopped one unlisted and its process gone 2.3 s after the stop |
+| checkpoint | the terminal showed all 150 ticks across 2 checkpoints (20:45:15.40, 20:46:27.53); the command returned all 110 in order across 1 (20:45:15.40); longest quiet 1.5 s |
+| ui | file browser, terminal and desktop pass (Playwright) |
+| sleep-paused | paused in 0.3 s, woke in 0.2 s |
+| sleep-saved | saved in 6.6 s, woke in 0.5 s; the pager wrote `learned.json` 2.9 s after the paged restore ended, by the host's clock |
+| sleep-archived | archived in 16.5 s, woke in 0.5 s |
+| sleep-remote | remote in 19.8 s, woke in 8.1 s |
+| link-stream | 83 cycles in 174 s, 332 MiB in and 664 MiB out, every sha256 matching, across 2 checkpoints; saved in 11.2 s, woken by a read in 1.4 s |
+| vm-crash | the next command answered 5.1 s after the kill, generation 1 -> 2 on the same host, both writes kept, the program lost and the `programs_lost` alarm raised |
+| move | tq0w -> 6rr2 in 25.2 s |
+| host-loss | back on tq0w 153.2 s after the stop, booted from files, the in-flight request ended as outcome unknown (HTTP 409) after 141.2 s |
+| delete | the compute sandbox gone 20.4 s after the delete |
+| connected-machine | online 3.1 s after connecting; exec in 0.1 s after 90 s idle |
+| cleanup | nothing left |
+
+(Host names drop the `sbx-p4-e-host-` prefix.)
+
+host-loss began at 20:55:11 and asked for sbx-p4-e-host-6rr2, where the
+sandbox had just moved, to stop at 20:57:11. sbx-p4-e-host-tq0w logged
+"adopted from its files" and the `programs_lost` alarm for the sandbox at
+20:59:29.494, then fetched the copy and booted it at 20:59:30: a new
+guest boot id and agent connection instance, owner epoch 3 -> 5, the
+program and the command in flight gone and not run again, and the
+archived and checkpointed files kept. The late write was lost; either
+outcome was allowed for it, as the stop operation finished 160.8 s after
+the last checkpoint began. No run logged a warning that the guest did
+not write its disks out before a pause.
+
+Nothing woke the sandbox that the run did not ask for. The hosts'
+journals (tq0w's and the lost 6rr2's) hold 14 wake-path steps, four of
+them fetch steps, and ten completed wakes (transitions into running):
+seven by `agent_link`, each the suite's own request (`api.log` has an "a
+request wakes a sleeping sandbox" line just before each; its five other
+such lines came while a wake was under way or while the host was lost),
+and three by the control service: the boot at creation, the move and
+the host-loss adoption. No step was caused by housekeeping.
+
+In full order, sleep-saved's wake was the sandbox's first paged wake, so
+the guest faulted and the pager wrote `learned.json` early. The proof ran
+on the host's clock against the host agent's own restore step, as
+536ff108c made it.
+
+The gap r24 names remains: the recovery of an output release whose
+exchange failed was not exercised live (the same tests cover it). The
+overlay-network option of the GCP module (off by default) was not in
+this run.
+
+After r26, the final lab head adds commits r26 did not run:
+
+- cc7e52d26: the hosts step matches a certificate by its serial, and the
+  pager proof requires the host journal to show a paged restore;
+- 973142f7d: the host's restart marker is written in one rename;
+- 24bcb055a: a compute-host test and its module docs;
+- 0d4a922d2: the control service logs and answers the serial of each
+  host certificate it issues.
+
+The follow-up rerun below verified cc7e52d26 and 0d4a922d2 live.
+
+The figures are the rows of `runs/r26/results.md` (and `results.json`);
+the stop is in its `suite.log`, the adoption and the alarm in
+`host-sbx-p4-e-host-tq0w.log`, the lost host's journal in
+`host-sbx-p4-e-host-6rr2@1925832633833176751.log`, the steps in the
+`compute.step` events of the `host-*.log` journals, the wake lines in
+`api.log`, the hosts step in `hosts.log`, and the UI screenshots in
+`ui-*.png`.
+
+#### r26c: the follow-up rerun
+
+r26c checked the commits that came after r26 against the same stack
+(chain 21:04:09 to 21:16:18, `chain-r26c.log`). The control service was
+rebuilt from compute ecd9b2786 (the lab merge of 0d4a922d2) and
+redeployed with the backend still at 9850e5feb, without FRESH and
+without a fleet apply. The hosts kept r26's template and its 844cbfe73
+bundle.
+
+- Hosts step (`runs/r26c/hosts.log`). At 21:14:17 it found that the
+  current revision of the control service (revision 2, 58c6df897d) had
+  issued no certificate with a serial, so none of the three hosts held a
+  certificate from it. It renewed each one with an instance identity
+  token, from 21:14:19 to 21:14:22. Each renewal was valid for seven
+  days, and the host agent was active afterwards. At 21:14:27 the step
+  matched each host's certificate, by the serial read on the host, to
+  revision 2's "issued a host certificate" line: 6rr2
+  6356CB6B9B05C8C6221204232B20868C, h0vx
+  5D92D48F0D9735322B308819C147864B, tq0w
+  58AF8B143C30F4B701586F64DCD8B039 (`runs/r26c/compute-control.log`
+  has the three lines).
+- Suite (21:14:30 to 21:16:18, `ONLY=background,sleep-saved`): 7 pass,
+  1 fail. Background passed: the finished command was read back by its
+  id with its output and exit status 3, and the stopped one was gone
+  2.4 s after the stop. The pager proof now requires the journal to
+  show a paged restore, and it passed: "learned.json on
+  sbx-p4-e-host-h0vx written 3.2 s after the paged restore from
+  archived ended, by the host's clock". Sleep-saved failed only for
+  r20a's subset reason: the idle archive finished at 21:15:52.84, before
+  the wake request (`runs/r26c/results.md`).
+
+So the serial match, the paged-restore requirement and 0d4a922d2 passed
+live. 973142f7d and 24bcb055a are in the host bundle. r26c did not roll
+the hosts, so they ran under neither r26 nor r26c. Their coverage is the
+certificate script's tests and compute-host's tests.
+
+6c018d4be (a compute-host change to how a stream carried across a
+take-up ends its window) reached feat/compute-prod at 21:08, after r26
+and during r26c. Neither run's host bundle contains it.
