@@ -766,6 +766,52 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("macOS launches apps in the background by bundle id or name; other platforms refuse", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, json) =>
+      name === "launch_app"
+        ? (fixture.calls.push({ name, args: JSON.parse(json) as Record<string, unknown> }),
+          result({ pid: 77, bundle_id: "com.apple.TextEdit", windows: [] }))
+        : await original(name, json);
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      expect((await backend.capabilities()).appLaunch).toBe(true);
+      const target = (await backend.targets())[0]!;
+      for (const applicationId of ["com.apple.TextEdit", "TextEdit.app", "System Settings"]) {
+        const observation = await backend.observe(target.id);
+        const launch = {
+          ...command(observation),
+          action: { type: "launch" as const, applicationId },
+        };
+        await backend.validate(launch);
+        expect(await backend.dispatch(launch)).not.toBeNull();
+      }
+      expect(
+        fixture.calls.filter((call) => call.name === "launch_app").map((call) => call.args),
+      ).toEqual([
+        { bundle_id: "com.apple.TextEdit" },
+        { name: "TextEdit" },
+        { name: "System Settings" },
+      ]);
+    } finally {
+      await backend.close();
+    }
+    const windows = await CuaComputerBackend.open(new WindowsFixture(), "windows");
+    try {
+      expect((await windows.capabilities()).appLaunch).toBe(false);
+      const observation = await windows.observe((await windows.targets())[0]!.id);
+      await expect(
+        windows.validate({
+          ...command(observation),
+          action: { type: "launch", applicationId: "notepad" },
+        }),
+      ).rejects.toMatchObject({ code: "unsupported" });
+    } finally {
+      await windows.close();
+    }
+  });
+
   test("unknown/partial delivery stays unknown; explicit refusal alone is safe", async () => {
     const fixture = new Fixture();
     for (const effect of ["partial", "suspected_noop", undefined]) {

@@ -76,7 +76,8 @@ export class CuaComputerBackend implements ComputerBackend {
     this.initialCapabilities = {
       semanticObservation: permissions.accessibility,
       appDiscovery: true,
-      appLaunch: false,
+      // CUA launches macOS apps in the background without taking focus.
+      appLaunch: platform === "macos",
       windowCapture: permissions.screen_recording,
       screenCapture: false,
       semanticActions: permissions.accessibility,
@@ -183,12 +184,30 @@ export class CuaComputerBackend implements ComputerBackend {
   }
   validate(command: ComputerBackendActionCommand): Promise<void> {
     return this.run(async () => {
+      if (command.action.type === "launch") {
+        if (this.identity.platform !== "macos")
+          throw unsupported("CUA app launch is available only on macOS");
+        await this.target(command.targetId);
+        return;
+      }
       await this.operations(command);
     });
   }
 
   dispatch(command: ComputerBackendActionCommand): Promise<ComputerBackendObservation | null> {
     return this.run(async () => {
+      if (command.action.type === "launch") {
+        await this.target(command.targetId);
+        await this.launch(command.action.applicationId);
+        // The new app's windows become targets; the action's own target is
+        // observed as for any other action.
+        await this.discover();
+        try {
+          return await this.observeTarget(command.targetId);
+        } catch {
+          return null;
+        }
+      }
       // Passive previews never change the native action frame. Human pointer
       // input obtains its own fresh frame under the same serialized queue.
       // CUA then refuses stale native pixel/zoom input until the agent re-reads.
@@ -735,6 +754,26 @@ export class CuaComputerBackend implements ComputerBackend {
     ];
   }
 
+  /** Start an app (or bring up its existing instance) in the background. */
+  private async launch(applicationId: string): Promise<void> {
+    if (this.identity.platform !== "macos")
+      throw unsupported("CUA app launch is available only on macOS");
+    // "TextEdit.app" names the app; a bundle identifier has more than one dot.
+    const id = applicationId.trim().replace(/^([^./]+)\.app$/iu, "$1");
+    const { data } = await callDesktop(
+      this.runtime,
+      "launch_app",
+      BUNDLE_ID.test(id) ? { bundle_id: id } : { name: id },
+    );
+    if (typeof data.pid !== "number")
+      throw new ComputerBackendError(
+        "driver_failed",
+        `CUA did not report a running process for ${id}`,
+        false,
+        false,
+      );
+  }
+
   /** The element a locator names. A ref from an earlier observation of the
    * same window resolves there (its token stays CUA's to accept or reject as
    * stale); a ref seen nowhere says which observation is current. */
@@ -778,6 +817,8 @@ export class CuaComputerBackend implements ComputerBackend {
 }
 
 const RECENT_OBSERVATIONS = 4;
+/** A reverse-DNS bundle identifier such as com.apple.TextEdit; anything else is an app name. */
+const BUNDLE_ID = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u;
 
 const KEY_MODIFIERS: Record<
   "macos" | "windows" | "linux",
