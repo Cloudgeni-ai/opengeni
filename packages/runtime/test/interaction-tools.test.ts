@@ -2652,7 +2652,8 @@ describe("interaction attempt tools", () => {
         },
         getComputerActionReceipt: async (_workspaceId, _computerSessionId, id) => {
           const existing = journal.get(id);
-          if (!existing) throw new Error("operation not found");
+          if (!existing)
+            throw new OpenGeniApiError(404, "operation not found", { code: "resource_not_found" });
           return existing.receipt;
         },
       }),
@@ -2702,15 +2703,119 @@ describe("interaction attempt tools", () => {
       `Batch completed on ${target.id}: 3 actions.\n`,
     );
 
-    // A retried call reads a new fence for its first action, conflicts with
-    // the recorded command and returns the recorded receipts instead of
-    // acting again.
+    // A retried call finds the first action's recorded receipt, and the
+    // later actions, fenced by the recorded observations, repeat their
+    // recorded commands: nothing acts again.
     requests.length = 0;
     const retried = await run();
     expect(observed).toBe(2);
-    expect(requests.map((request) => request.operationId)).toEqual(operationIds);
+    expect(requests.map((request) => request.operationId)).toEqual(operationIds.slice(1));
     expect(journal.size).toBe(3);
     expect(retried.structuredContent).toEqual(result.structuredContent);
+  });
+
+  test("a retried Computer batch reuses actions that ran even when the window can no longer be read", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    const journal = new Map<string, ComputerActionReceipt>();
+    let windowGone = false;
+    let acts = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => {
+          if (windowGone) throw new Error("window closed");
+          return observation;
+        },
+        // Each action completes without an observation.
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          acts += 1;
+          const receipt = { ...computerReceipt(value.operationId, observation), observation: null };
+          journal.set(value.operationId, receipt);
+          return receipt;
+        },
+        getComputerActionReceipt: async (_workspaceId, _computerSessionId, id) => {
+          const existing = journal.get(id);
+          if (!existing)
+            throw new OpenGeniApiError(404, "operation not found", { code: "resource_not_found" });
+          return existing;
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const operationId = randomUUID();
+    const run = async () =>
+      await definitions[0]!.execute(
+        {
+          computerSessionId,
+          targetId: target.id,
+          action: {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "5" },
+              { type: "keyboard", action: "press", value: "6" },
+            ],
+          },
+        },
+        { operationId, caller: { kind: "model", subjectId: "model:test" } },
+      );
+    const first = await run();
+    expect(acts).toBe(2);
+    expect(first.structuredContent).toMatchObject({
+      steps: [{ state: "completed" }, { state: "completed" }],
+    });
+
+    windowGone = true;
+    const retried = await run();
+    expect(acts).toBe(2);
+    expect(retried.structuredContent).toMatchObject({
+      steps: [{ state: "completed" }, { state: "completed" }],
+    });
+
+    // When neither the window nor the recorded result can be read, the
+    // action is not sent and the text says an earlier try may have sent it.
+    let reads = 0;
+    let sent = 0;
+    const unknown = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => {
+          reads += 1;
+          if (reads === 1) return observation;
+          throw new Error("window closed");
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          sent += 1;
+          return { ...computerReceipt(value.operationId, observation), observation: null };
+        },
+        getComputerActionReceipt: async () => {
+          throw new Error("controller unreachable");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const unread = await unknown[0]!.execute(
+      {
+        computerSessionId,
+        targetId: target.id,
+        action: {
+          type: "batch",
+          actions: [
+            { type: "keyboard", action: "press", value: "5" },
+            { type: "keyboard", action: "press", value: "6" },
+          ],
+        },
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(sent).toBe(1);
+    expect((unread.content[0] as { text: string }).text.split("\n")[1]).toBe(
+      "Error resource_unavailable (retryable): the window could not be read before this action, so it was not sent now; whether an earlier try of this batch sent it could not be read either: window closed",
+    );
   });
 
   test("stops a Computer batch at the first action that does not complete and says what ran", async () => {
@@ -2812,6 +2917,9 @@ describe("interaction attempt tools", () => {
         ...computerReceipt(value.operationId, observation),
         observation: null,
       }),
+      getComputerActionReceipt: async () => {
+        throw new OpenGeniApiError(404, "operation not found", { code: "resource_not_found" });
+      },
     });
     expect(unread.result.isError).not.toBe(true);
     expect(unread.text.split("\n").slice(0, 4)).toEqual([

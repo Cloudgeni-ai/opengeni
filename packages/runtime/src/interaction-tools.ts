@@ -2568,6 +2568,8 @@ function derivedOperationId(purpose: string, operationId: string, subject: strin
  * that action left. Stops at the first action that does not complete. A
  * retried call derives the same operation IDs; an action that already ran
  * under its ID returns its recorded receipt, whatever fence it ran with.
+ * Before reading a fresh fence, the step's recorded receipt is read alongside
+ * it, so a retry reuses what already ran even when the window is gone.
  */
 async function actInComputerBatch(
   transport: InteractionTransport,
@@ -2580,15 +2582,17 @@ async function actInComputerBatch(
   type Receipt = z.output<typeof ComputerActionReceipt>;
   const observe = async (): Promise<Observation> =>
     await transport.observeComputerTarget(workspaceId, value.computerSessionId, value.targetId);
-  const recorded = async (stepOperationId: string): Promise<Receipt | null> => {
+  // A recorded receipt, "absent" when nothing ran under the ID, or "unknown"
+  // when the lookup itself failed.
+  const recorded = async (stepOperationId: string): Promise<Receipt | "absent" | "unknown"> => {
     try {
       return await transport.getComputerActionReceipt(
         workspaceId,
         value.computerSessionId,
         stepOperationId,
       );
-    } catch {
-      return null;
+    } catch (error) {
+      return error instanceof OpenGeniApiError && error.status === 404 ? "absent" : "unknown";
     }
   };
   const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -2599,62 +2603,72 @@ async function actInComputerBatch(
   const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
   for (const [index, action] of actions.entries()) {
     const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
+    let receipt: Receipt | null = null;
     if (generation === undefined || observationId == null) {
-      let current: Observation;
-      try {
-        current = await observe();
-      } catch (error) {
+      const [prior, current] = await Promise.all([
+        recorded(stepOperationId),
+        observe().then(
+          (read) => ({ read }),
+          (error: unknown) => ({ error }),
+        ),
+      ]);
+      if (typeof prior === "object") {
+        receipt = prior;
+      } else if ("error" in current) {
         // The first action failing is the call failing. Later, the actions
         // before this one did run and must still be reported.
-        if (index === 0) throw error;
+        if (index === 0) throw current.error;
         steps.push({
           operationId: stepOperationId,
           state: "failed",
           error: {
             code: "resource_unavailable",
-            message:
-              `the window could not be read before this action, so it was not sent: ${reasonOf(error)}`.slice(
-                0,
-                8_192,
-              ),
+            message: (prior === "absent"
+              ? `the window could not be read before this action, so it was not sent: ${reasonOf(current.error)}`
+              : `the window could not be read before this action, so it was not sent now; whether an earlier try of this batch sent it could not be read either: ${reasonOf(current.error)}`
+            ).slice(0, 8_192),
             retryable: true,
           },
         });
         observedAfterLastAction = false;
         break;
+      } else {
+        generation ??= current.read.target.targetGeneration;
+        observationId ??= current.read.observationId;
+        observation = current.read;
       }
-      generation ??= current.target.targetGeneration;
-      observationId ??= current.observationId;
-      observation = current;
     }
-    let receipt: Receipt | null;
-    try {
-      receipt = await transport.actInComputer(workspaceId, value.computerSessionId, {
-        operationId: stepOperationId,
-        targetId: value.targetId,
-        expectedTargetGeneration: generation,
-        expectedObservationId: observationId,
-        expectedFrameId: null,
-        action,
-      });
-    } catch (error) {
-      // A retried batch reaches an action that already ran with the fence of
-      // its first run, or the reply to this request was lost: the recorded
-      // receipt says what happened.
-      receipt = await recorded(stepOperationId);
-      if (!receipt) {
-        if (index === 0) throw error;
-        steps.push({
+    if (!receipt) {
+      try {
+        // Without a recorded receipt, the fences were read above.
+        receipt = await transport.actInComputer(workspaceId, value.computerSessionId, {
           operationId: stepOperationId,
-          state: "outcome_unknown",
-          error: {
-            code: "outcome_unknown",
-            message: `the request for this action failed: ${reasonOf(error)}`.slice(0, 8_192),
-            retryable: false,
-          },
+          targetId: value.targetId,
+          expectedTargetGeneration: generation!,
+          expectedObservationId: observationId!,
+          expectedFrameId: null,
+          action,
         });
-        observedAfterLastAction = false;
-        break;
+      } catch (error) {
+        // A retried batch reaches an action that already ran with the fence
+        // of its first run, or the reply to this request was lost: the
+        // recorded receipt says what happened.
+        const prior = await recorded(stepOperationId);
+        if (typeof prior !== "object") {
+          if (index === 0) throw error;
+          steps.push({
+            operationId: stepOperationId,
+            state: "outcome_unknown",
+            error: {
+              code: "outcome_unknown",
+              message: `the request for this action failed: ${reasonOf(error)}`.slice(0, 8_192),
+              retryable: false,
+            },
+          });
+          observedAfterLastAction = false;
+          break;
+        }
+        receipt = prior;
       }
     }
     steps.push({ operationId: receipt.operationId, state: receipt.state, error: receipt.error });
