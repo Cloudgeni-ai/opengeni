@@ -1378,6 +1378,17 @@ describe("release image workflow contract", () => {
     expect(login).not.toContain("admin-password");
   });
 
+  test("agent publication pins a new release tag to the built source on manual dispatch", async () => {
+    const parsed = Bun.YAML.parse(await workflow("agent-release.yml")) as ParsedWorkflow;
+    const publish = parsed.jobs.publish!.steps!.find((step) =>
+      step.uses?.startsWith("softprops/action-gh-release@"),
+    );
+
+    expect(publish).toBeDefined();
+    expect(publish!.with?.target_commitish).toBe("${{ github.sha }}");
+    expect(publish!.with?.tag_name).toBe("agent-v${{ needs.guard.outputs.version }}");
+  });
+
   test("agent publication creates only immutable-compatible versioned releases", async () => {
     const agentRelease = await workflow("agent-release.yml");
 
