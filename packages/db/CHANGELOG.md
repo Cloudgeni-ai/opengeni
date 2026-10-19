@@ -1,5 +1,18 @@
 # @opengeni/db
 
+## 4.1.4
+
+### Patch Changes
+
+- @opengeni/codemode@4.1.4
+- @opengeni/codex@4.1.4
+- @opengeni/config@4.1.4
+- @opengeni/contracts@4.1.4
+- @opengeni/network@4.1.4
+- @opengeni/observability@4.1.4
+- @opengeni/subscriptions@4.1.4
+- @opengeni/xai-subscription@4.1.4
+
 ## 4.1.3
 
 ### Patch Changes

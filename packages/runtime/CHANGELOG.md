@@ -1,5 +1,25 @@
 # @opengeni/runtime
 
+## 4.1.4
+
+### Patch Changes
+
+- da09a6e: Recover pending Connected Machine requests immediately when the machine's control transport reconnects, preserving exact delivery identity and operation deadlines instead of waiting for a lost reply to time out.
+- dfd0ce5: Release turn cleanup after a refused command when the exact runner confirms a terminal operation with no output frames. Preserve the original command error and retain cleanup custody when the runner's outcome is uncertain.
+  - @opengeni/agent-proto@4.1.4
+  - @opengeni/capabilities@4.1.4
+  - @opengeni/codemode@4.1.4
+  - @opengeni/codex@4.1.4
+  - @opengeni/config@4.1.4
+  - @opengeni/contracts@4.1.4
+  - @opengeni/interaction@4.1.4
+  - @opengeni/network@4.1.4
+  - @opengeni/observability@4.1.4
+  - @opengeni/sdk@4.1.4
+  - @opengeni/tool-gateway@4.1.4
+  - @opengeni/vaults@4.1.4
+  - @opengeni/xai-subscription@4.1.4
+
 ## 4.1.3
 
 ### Patch Changes
