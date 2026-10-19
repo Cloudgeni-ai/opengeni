@@ -595,7 +595,33 @@ const BrowserUploadPathsAction = z
       .max(INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND),
   })
   .strict();
-const AgentBrowserAction = z.union([...BrowserAction.options, BrowserUploadPathsAction]);
+/** navigate may name a load state to wait for; the tool dispatches it as the
+ * navigation followed by an ordinary wait action. */
+const AgentBrowserNavigateAction = z
+  .object({
+    type: z.literal("navigate"),
+    url: z.string().min(1).max(8_192),
+    waitUntil: z.enum(["load", "network_idle"]).optional(),
+  })
+  .strict();
+/** viewport defaults to desktop layout without touch emulation. */
+const AgentBrowserViewportAction = z
+  .object({
+    type: z.literal("viewport"),
+    width: z.number().int().min(240).max(4_096),
+    height: z.number().int().min(240).max(4_096),
+    mobile: z.boolean().optional(),
+    deviceScaleFactor: z.number().min(0.5).max(4).optional(),
+  })
+  .strict();
+const AgentBrowserAction = z.union([
+  AgentBrowserNavigateAction,
+  AgentBrowserViewportAction,
+  ...BrowserAction.options.filter(
+    (option) => option.shape.type.value !== "navigate" && option.shape.type.value !== "viewport",
+  ),
+  BrowserUploadPathsAction,
+]);
 type AgentBrowserAction = z.infer<typeof AgentBrowserAction>;
 const AgentBrowserActionBatch = z
   .object({
@@ -606,20 +632,41 @@ const AgentBrowserActionBatch = z
   .strict();
 type AgentBrowserActionBatch = z.infer<typeof AgentBrowserActionBatch>;
 
-/** Publish every upload path once and return the action with File IDs only. */
-async function withPublishedUploadPaths(
+/** Return the dispatched action: upload paths published once as File IDs, a
+ * viewport's omitted `mobile` as desktop, and a navigate's `waitUntil` as the
+ * navigation followed by a wait for that load state. */
+async function toDispatchedBrowserAction(
   action: AgentBrowserAction | AgentBrowserActionBatch,
   publish: (path: string) => Promise<string>,
 ): Promise<BrowserAction | BrowserActionBatch> {
-  const resolve = async (item: AgentBrowserAction): Promise<BrowserAction> => {
-    if (item.type !== "upload" || !("paths" in item)) return item as BrowserAction;
+  const resolve = async (item: AgentBrowserAction): Promise<BrowserAction[]> => {
+    if (item.type === "navigate") {
+      const navigate = BrowserAction.parse({ type: "navigate", url: item.url });
+      const waitUntil = "waitUntil" in item ? item.waitUntil : undefined;
+      if (!waitUntil) return [navigate];
+      return [navigate, { type: "wait", condition: waitUntil }];
+    }
+    if (item.type === "viewport") {
+      return [BrowserAction.parse({ ...item, mobile: item.mobile ?? false })];
+    }
+    if (item.type !== "upload" || !("paths" in item)) return [item as BrowserAction];
     const workspaceFileIds: string[] = [];
     for (const path of item.paths) workspaceFileIds.push(await publish(path));
-    return { type: "upload", locator: item.locator, workspaceFileIds };
+    return [{ type: "upload", locator: item.locator, workspaceFileIds }];
   };
-  if (action.type !== "batch") return await resolve(action);
+  if (action.type !== "batch") {
+    const resolved = await resolve(action);
+    return resolved.length === 1
+      ? resolved[0]!
+      : BrowserActionBatch.parse({ type: "batch", actions: resolved });
+  }
   const actions: BrowserAction[] = [];
-  for (const item of action.actions) actions.push(await resolve(item));
+  for (const item of action.actions) actions.push(...(await resolve(item)));
+  if (actions.length > INTERACTION_MAX_ACTIONS_PER_BATCH) {
+    throw new Error(
+      `a batch runs at most ${INTERACTION_MAX_ACTIONS_PER_BATCH} actions, and each navigate with waitUntil counts as two; split the batch`,
+    );
+  }
   return BrowserActionBatch.parse({ ...action, actions });
 }
 
@@ -1290,7 +1337,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns. For repetitive or bulk work, such as screenshots of many pages or widths, script these same browsers with Code Mode instead of installing another browser automation library: openGeni.browsers.open({initialUrl}), tab.navigate(url, {waitUntil:'network_idle'}), tab.act({type:'viewport',width,height}) and tab.screenshot({saveTo}), or from the shell client, call interaction.browser.screenshot with --save-image <path>. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -1529,7 +1576,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "screenshot"],
     title: "Capture browser screenshot",
     description:
-      "Capture a current browser tab screenshot without reading its accessibility tree. The image is returned as tool image content, with small structured frame metadata. Set fullPage=true to capture the whole scrollable page when supported; large pages may take longer or exceed capture bounds. Set quality lower to reduce JPEG bytes if a large capture exceeds the Code Mode image limit.",
+      "Capture a current browser tab screenshot without reading its accessibility tree. The image is returned as tool image content, with small structured frame metadata. Set fullPage=true to capture the whole scrollable page when supported; large pages may take longer or exceed capture bounds. Set quality lower to reduce JPEG bytes if a large capture exceeds the Code Mode image limit. In Code Mode, tab.screenshot({saveTo}) or the shell client's --save-image <path> writes the image to a file, and Code Mode output names image files instead of carrying their pixels.",
     input: BrowserScreenshotInput,
     output: BrowserScreenshotOutput,
     readOnly: true,
@@ -1573,7 +1620,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; set view=full for every element, or view=none when no post-action outline is needed. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; set view=full for every element, or view=none when no post-action outline is needed. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
     modelInputSchema: browserActModelInputSchema,
     output: BrowserAgentActionReceipt,
@@ -1583,7 +1630,7 @@ export function createInteractionAttemptToolDefinitions(
     // An action never runs on a page that reloaded since the agent saw it.
     execute: async (value, context) =>
       await onTab(value, context, "report", async ({ browserSessionId, targetId }) => {
-        const action = await withPublishedUploadPaths(value.action, (path) =>
+        const action = await toDispatchedBrowserAction(value.action, (path) =>
           publishUploadPath(context.operationId, path),
         );
         // Omitted fences are resolved by the API from the live target in the same

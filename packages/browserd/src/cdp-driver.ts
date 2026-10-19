@@ -5542,7 +5542,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (action.condition === "load") {
-        if (await this.documentReady(state)) return;
+        // An explicit load wait means the load event: images and other
+        // subresources finished, unlike navigation's own interactive wait.
+        if ((await this.evaluate(state, "document.readyState")) === "complete") return;
       } else if (action.condition === "network_idle") {
         if (state.networkTrackingOverflow) {
           throw new InteractionDefiniteDriverError(

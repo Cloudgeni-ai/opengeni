@@ -71,6 +71,13 @@ await tab.getByRole("button", { name: "Save" }).click();
 const still = await tab.screenshot({ quality: 40 });
 console.log(still.path); // Open this local PNG/JPEG/WebP with view_image.
 
+// Bulk captures: wait for client-rendered data, then keep each still as a file.
+for (const width of [1440, 390]) {
+  await tab.act({ type: "viewport", width, height: 900 }); // Desktop unless mobile: true.
+  await tab.navigate("http://127.0.0.1:3000/reports", { waitUntil: "network_idle" });
+  await tab.screenshot({ saveTo: `shots/reports-${width}.jpg` });
+}
+
 const { downloads } = await browser.downloads.list();
 const completed = downloads.find((download) => download.status === "completed");
 if (completed) {
