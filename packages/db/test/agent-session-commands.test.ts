@@ -1015,7 +1015,7 @@ describe("attempt-fenced Agent session commands", () => {
     // MCP lineage remains valid, but it has no machine-tree creation witness.
     // Real agent requests (including the owner's service-initiated turns)
     // carry the attempt's initiating human and take the atomic seam; see the
-    // service-turn witness test below.
+    // service-turn witness test above.
     const [machineWitness] = await shared.admin`select agent_creation_attempt_id
       from sessions where id=${child.id}`;
     expect(machineWitness!.agent_creation_attempt_id).toBeNull();

@@ -29757,6 +29757,9 @@ function agentChildCreationRequestHuman(subjectId: string | null | undefined): s
  * seam receives JSON for jsonb_populate_record, so custom column encodings
  * (lossless text) must be applied here or NUL, lone surrogates and text that
  * resembles the codec escape would be rejected or decoded differently.
+ * Plain text parameters reach the ordinary INSERT UTF-8 encoded, which turns
+ * a lone surrogate into U+FFFD; JSON would carry it as an escape PostgreSQL
+ * rejects, so non-JSON strings are made well-formed the same way.
  */
 function agentChildCreationColumnValue(
   column: {
@@ -29767,16 +29770,29 @@ function agentChildCreationColumnValue(
   },
   value: unknown,
 ): unknown {
-  if (value === null || column.columnType !== "PgCustomColumn") return value;
-  const encoded = column.mapToDriverValue(value);
+  if (value === null) return value;
   const sqlType = column.getSQLType();
+  if (column.columnType !== "PgCustomColumn") {
+    return sqlType === "json" || sqlType === "jsonb" ? value : wellFormedDriverText(value);
+  }
+  const encoded = column.mapToDriverValue(value);
   if (sqlType === "json" || sqlType === "jsonb") {
     return typeof encoded === "string" ? JSON.parse(encoded) : encoded;
   }
-  if (typeof encoded === "string" || typeof encoded === "number" || typeof encoded === "boolean") {
-    return encoded;
-  }
+  if (typeof encoded === "string") return wellFormedText(encoded);
+  if (typeof encoded === "number" || typeof encoded === "boolean") return encoded;
   throw new Error(`Agent child creation cannot encode sessions.${column.name}`);
+}
+
+// String.prototype.toWellFormed: each lone surrogate code unit becomes U+FFFD.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+function wellFormedText(value: string): string {
+  return value.replace(LONE_SURROGATE, "\ufffd");
+}
+
+function wellFormedDriverText(value: unknown): unknown {
+  if (typeof value === "string") return wellFormedText(value);
+  return Array.isArray(value) ? value.map(wellFormedDriverText) : value;
 }
 
 async function createSessionInTransaction(

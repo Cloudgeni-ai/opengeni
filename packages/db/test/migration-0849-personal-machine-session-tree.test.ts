@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
 import {
+  acquireOwnerMigratedTestDatabase,
   acquireRestrictedRuntimeTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
@@ -21,7 +22,13 @@ import {
   withSessionRlsActorContext,
 } from "../src";
 import { withWorkspaceSubjectSessionActivityRls } from "../src/database";
+import { migrate } from "../src/migrate";
 import { nestedPostgresSqlState } from "../src/persistence-errors";
+import { provisionRoles } from "../src/provision-roles";
+import {
+  evaluateRuntimeDatabasePosture,
+  inspectRuntimeDatabasePosture,
+} from "../src/runtime-posture";
 
 const migration = "0849_personal_machine_session_tree.sql";
 let shared: SharedTestDatabase;
@@ -90,6 +97,8 @@ async function fixture(
       subject?: string;
       firstPromptSubject?: string;
       message?: string;
+      instructions?: string;
+      modelContext?: string;
       // Production shape: an agent attempt's bearer subject is the worker
       // principal; the API sets the attempt's verified initiating human.
       worker?: { initiatingHuman: string };
@@ -101,6 +110,8 @@ async function fixture(
       accountId,
       workspaceId,
       initialMessage: options.message ?? (options.firstPromptSubject ? "" : "Synthetic claim only"),
+      ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
+      ...(options.modelContext !== undefined ? { initialModelContext: options.modelContext } : {}),
       resources: [],
       metadata: {},
       ...(worker
@@ -585,6 +596,33 @@ test("initial messages round-trip losslessly through ordinary and agent-child cr
   }
 }, 180_000);
 
+test("plain text columns store lone surrogates as U+FFFD on both creation paths", async () => {
+  const f = await fixture();
+  try {
+    const instructions = "persona lone:\udc00 high:\ud800 pair:\ud83d\ude00";
+    const modelContext = "context lone:\udfff end";
+    const replaced = (value: string) => value.replace(/\udc00|\ud800|\udfff/g, "\ufffd");
+    const text = { instructions, modelContext };
+    const ordinary = await f.create({ mode: "session", ...text });
+    const root = await f.claim(ordinary.id);
+    const children = [
+      await f.create({ parent: root, ...text }),
+      await f.create({ parent: root, ...text, worker: { initiatingHuman: f.subjectId } }),
+    ];
+    for (const session of [ordinary, ...children]) {
+      const [stored] = await f.admin`select agent_creation_attempt_id, instructions,
+        initial_model_context from sessions where id=${session.id}`;
+      expect(stored).toEqual({
+        agent_creation_attempt_id: session.id === ordinary.id ? null : root.attemptId,
+        instructions: replaced(instructions),
+        initial_model_context: replaced(modelContext),
+      });
+    }
+  } finally {
+    await f.client.close();
+  }
+}, 180_000);
+
 for (const invalidation of ["grant_generation", "ancestor_snapshot_epoch"] as const) {
   test(`move receipt cannot bypass ${invalidation} for dispatch or new claims`, async () => {
     const f = await fixture();
@@ -768,6 +806,52 @@ test("runtime attach admission derives the same ancestor grant and remains revoc
     await f.client.close();
   }
 }, 180_000);
+
+test("a runtime role provisioned after migration can call the creation seam and passes posture", async () => {
+  const owned = await acquireOwnerMigratedTestDatabase("machine-tree-fresh-provision");
+  if (!owned) throw new Error("Real PostgreSQL required");
+  // Roles are cluster-wide; a unique runtime role guarantees it did not exist
+  // while the migration ran, as on a fresh database before provisioning.
+  const appRole = `og_tree_app_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  let appClient: ReturnType<typeof createDb> | undefined;
+  try {
+    // Fresh-database order (dev stack and manual setup): migrate as owner
+    // before the runtime role exists, then provision roles.
+    await migrate(owned.ownerUrl);
+    const [missing] = await owned.admin<Array<{ exists: boolean }>>`
+      select exists(select 1 from pg_roles where rolname = ${appRole}) as exists`;
+    expect(missing!.exists).toBe(false);
+    await provisionRoles(owned.adminUrl, {
+      appRole,
+      appPassword: owned.appPassword,
+      rlsStrategy: "force",
+    });
+    const seam = "public.create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb)";
+    const [privilege] = await owned.admin<Array<{ executable: boolean }>>`
+      select has_function_privilege(${appRole}, ${seam}::text, 'EXECUTE') as executable`;
+    expect(privilege!.executable).toBe(true);
+    const appUrl = new URL(owned.ownerUrl);
+    appUrl.username = appRole;
+    appUrl.password = owned.appPassword;
+    appClient = createDb(appUrl.toString(), { max: 1, rlsStrategy: "force" });
+    const options = {
+      expectedRole: appRole,
+      targetSchema: "public",
+      rlsStrategy: "force" as const,
+    };
+    expect(
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(appClient.db, options),
+        options,
+      ),
+    ).toEqual([]);
+  } finally {
+    await appClient?.close();
+    await owned.admin.unsafe(`DROP OWNED BY "${appRole}"`).catch(() => undefined);
+    await owned.release();
+    await shared.admin.unsafe(`DROP ROLE IF EXISTS "${appRole}"`).catch(() => undefined);
+  }
+}, 900_000);
 
 test("the new helper is owner-only and preserves grants for unrelated resource kinds", async () => {
   const [row] = await shared.admin`select has_function_privilege('opengeni_app',

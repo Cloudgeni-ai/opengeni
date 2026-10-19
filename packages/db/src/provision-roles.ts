@@ -1833,6 +1833,23 @@ BEGIN
         ${literal(schema)}, ${literal(role)}
       );
     END IF;
+    -- 0849's migration grants the atomic agent-child creation seam only to
+    -- roles that existed then; a role provisioned later needs it here too.
+    IF to_regprocedure(
+      format(
+        '%I.create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
     FOREACH routine_signature IN ARRAY ARRAY[${SUBSCRIPTION_SNAPSHOT_VALIDATOR_ROUTINES.map(literal).join(", ")}] LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
         EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);
