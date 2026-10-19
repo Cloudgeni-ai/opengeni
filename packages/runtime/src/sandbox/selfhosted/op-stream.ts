@@ -281,6 +281,10 @@ export class OpStreamExecClient {
   private readonly settled: SettledOp[] = [];
   private readonly inFlight = new Set<string>();
   private readonly readCheckpoints = new Map<string, OpReadCheckpoint>();
+  /** Ops an agent has acknowledged through this client: it accepted the
+   *  start, or reported the op's status. Carried into recovery reads so a
+   *  replacement during one says what is known about the start. */
+  private readonly acknowledgedOps = new Set<string>();
   private finalization: Promise<void> = Promise.resolve();
   private lastReadGeneration = 0n;
 
@@ -290,6 +294,13 @@ export class OpStreamExecClient {
 
   private generation(): string {
     return this.deps.journal?.attachGeneration() ?? "1";
+  }
+
+  private acknowledgement(opId: string): OpAcknowledgement {
+    return {
+      known: this.acknowledgedOps.has(opId),
+      record: () => this.acknowledgedOps.add(opId),
+    };
   }
 
   /** Adopted-command reads are new consumers, not recovery of the launching
@@ -384,10 +395,17 @@ export class OpStreamExecClient {
     this.inFlight.add(opId);
     const toolCallId = currentOpToolCallId();
     try {
-      const consumer = new OpConsumer(this.deps, opId, this.generation());
+      const consumer = new OpConsumer(
+        this.deps,
+        opId,
+        this.generation(),
+        undefined,
+        this.acknowledgement(opId),
+      );
       try {
         const result = await consumer.run(exec, deadlineMs, wallMs, yieldOptions);
         if (result.status === "completed") {
+          this.acknowledgedOps.delete(opId);
           this.settled.push({
             opId,
             exitSeq: result.exitSeq,
@@ -422,6 +440,7 @@ export class OpStreamExecClient {
       opId,
       this.readGeneration(),
       this.readCheckpoints.get(opId),
+      this.acknowledgement(opId),
     );
     this.inFlight.add(opId);
     this.readCheckpoints.delete(opId);
@@ -586,6 +605,10 @@ export class OpStreamExecClient {
 }
 
 /** In-memory only: never licenses runner GC or substitutes for durable output. */
+/** What a client knows of an op an agent has acknowledged, and how a
+ *  consumer records a new acknowledgement. */
+type OpAcknowledgement = { known: boolean; record: () => void };
+
 type OpReadCheckpoint = {
   lastApplied: bigint;
   hashes: { stdout: ReturnType<typeof blake3.create>; stderr: ReturnType<typeof blake3.create> };
@@ -628,16 +651,29 @@ class OpConsumer {
   private torn = false;
   /** The command's wall passed before its start was answered: send no more. */
   private startAbandoned = false;
+  /** An OpStart is awaiting its answer. */
+  private startInFlight = false;
+  /** An OpStart may have reached an agent (an attempt was answered, or failed
+   *  in a way that does not prove it undelivered), or the op is already
+   *  known. Until then, every failure proves no OpStart reached any agent. */
+  private startMaybeDelivered = false;
+  /** An agent acknowledged this op: it accepted the start or reported the
+   *  op's status, through this consumer or an earlier one of its client. */
+  private startConfirmed: boolean;
+  private readonly acknowledgement: OpAcknowledgement | undefined;
 
   constructor(
     deps: OpStreamExecClientDeps,
     opId: string,
     generation: string,
     checkpoint?: OpReadCheckpoint,
+    acknowledgement?: OpAcknowledgement,
   ) {
     this.deps = deps;
     this.opId = opId;
     this.generation = generation;
+    this.acknowledgement = acknowledgement;
+    this.startConfirmed = acknowledgement?.known ?? false;
     this.windowBytes = deps.windowBytes ?? OP_STREAM_DEFAULT_WINDOW_BYTES;
     this.lastFrameAt = Date.now();
     if (checkpoint) {
@@ -646,6 +682,26 @@ class OpConsumer {
       this.totals = checkpoint.totals;
       this.outputDecoders = checkpoint.decoders;
     }
+  }
+
+  private markAcknowledged(): void {
+    this.startConfirmed = true;
+    this.acknowledgement?.record();
+  }
+
+  /** The timeout for a start the wall or the deadline ended. It is never-sent
+   *  when no OpStart can have reached an agent, so nothing needs custody. */
+  private startTimeoutError(): SelfhostedControlError {
+    const timeout = agentErrorToControlError(timeoutAgentError());
+    if (this.startInFlight || this.startMaybeDelivered) return timeout;
+    return new SelfhostedControlError({
+      message: timeout.message,
+      code: timeout.code,
+      reason: timeout.reason,
+      retryable: timeout.retryable,
+      neverSent: true,
+      detail: { ...timeout.detail, [NEVER_SENT_DETAIL_KEY]: "1" },
+    });
   }
 
   readCheckpoint(): OpReadCheckpoint {
@@ -691,6 +747,8 @@ class OpConsumer {
     | Extract<OpStreamExecResult, { status: "running" }>
   > {
     this.captureOnly = exec === null;
+    // Reading a known op: it may exist, so no failure proves it never started.
+    if (exec === null) this.startMaybeDelivered = true;
     // Arm the settle promise FIRST: frames can start applying the moment the
     // attach below returns (replay is asynchronous), and a completion that
     // fires before the resolver exists would strand the op on its wall.
@@ -735,7 +793,7 @@ class OpConsumer {
       // flow); for a KNOWN op (re-dispatch) it replays everything we do not hold.
       // The op exists from here on, so no failure may say it did not run.
       await startWall.race(this.attach(this.windowBytes)).catch((error: unknown) => {
-        throw startedOpError(error);
+        throw startedOpError(error, this.startConfirmed);
       });
     } finally {
       startWall.clear();
@@ -873,7 +931,7 @@ class OpConsumer {
         // Another agent process holds the connection: this client stops
         // waiting, and the op's outcome is unknown.
         if (error instanceof SelfhostedControlError && error.connectionReplaced) {
-          throw agentReplacedOutcomeUnknownError(true);
+          throw agentReplacedOutcomeUnknownError(this.startConfirmed);
         }
         if (
           error instanceof SelfhostedControlError &&
@@ -929,17 +987,16 @@ class OpConsumer {
     // A start is never sent once the op's wall has ended the call or its
     // deadline has passed.
     const refused = () => this.startAbandoned || (deadlineAt > 0 && Date.now() >= deadlineAt);
-    // Whether an earlier attempt may have reached the runner.
-    let maybeDelivered = false;
     for (;;) {
-      if (refused()) throw agentErrorToControlError(timeoutAgentError());
+      if (refused()) throw this.startTimeoutError();
       // Subscription setup can yield after the caller's initial admission.
       // Close that window, and the equivalent proven-unstarted retry windows,
       // at the last boundary before bytes can reach the provider.
       await this.deps.revalidateBeforeStartRetry?.();
       // The wall or the deadline may have ended the call meanwhile: a caller
       // told that it timed out never has its command started afterwards.
-      if (refused()) throw agentErrorToControlError(timeoutAgentError());
+      if (refused()) throw this.startTimeoutError();
+      this.startInFlight = true;
       try {
         const result = await this.controlOp(
           {
@@ -955,6 +1012,8 @@ class OpConsumer {
           },
           this.opId,
         );
+        this.startInFlight = false;
+        this.startMaybeDelivered = true;
         if (result.$case !== "opStart") {
           throw protocolError(`op-stream start: unexpected result ${result.$case}`);
         }
@@ -965,8 +1024,17 @@ class OpConsumer {
         if (status?.state === OpState.OP_STATE_LOST) {
           throw lostToControlError(status);
         }
+        this.markAcknowledged();
         return drainingRetries + blipRetries;
       } catch (error) {
+        // Whether any earlier attempt may have reached an agent.
+        const earlierMaybeDelivered = this.startMaybeDelivered;
+        if (this.startInFlight) {
+          this.startInFlight = false;
+          if (!(error instanceof SelfhostedControlError && error.neverSent)) {
+            this.startMaybeDelivered = true;
+          }
+        }
         if (!(error instanceof SelfhostedControlError)) {
           throw error;
         }
@@ -987,11 +1055,10 @@ class OpConsumer {
         // delivered did not run; one any attempt may have delivered has an
         // unknown outcome.
         if (error.connectionReplaced) {
-          throw error.neverSent && !maybeDelivered
+          throw error.neverSent && !earlierMaybeDelivered
             ? error
-            : agentReplacedOutcomeUnknownError(false);
+            : agentReplacedOutcomeUnknownError(this.startConfirmed);
         }
-        if (!error.neverSent) maybeDelivered = true;
         const blip = error.reason === "agent_reconnecting" || error.neverSent;
         if (error.draining && drainingRetries < OP_START_DRAINING_MAX_RETRIES) {
           await this.deps.retryClock.sleep(
@@ -1007,7 +1074,9 @@ class OpConsumer {
           blipRetries += 1;
           continue;
         }
-        throw error;
+        // A never-sent failure of this attempt proves nothing once an earlier
+        // one may have reached an agent.
+        throw this.startMaybeDelivered ? withoutNeverSent(error) : error;
       }
     }
   }
@@ -1083,6 +1152,7 @@ class OpConsumer {
     if (result.opStatus.state === OpState.OP_STATE_LOST) {
       throw lostToControlError(result.opStatus);
     }
+    this.markAcknowledged();
     return result.opStatus;
   }
 
@@ -1100,7 +1170,7 @@ class OpConsumer {
       })
       .catch((error) => {
         if (error instanceof SelfhostedControlError && error.connectionReplaced) {
-          this.settleReject?.(agentReplacedOutcomeUnknownError(true));
+          this.settleReject?.(agentReplacedOutcomeUnknownError(this.startConfirmed));
         } else if (
           error instanceof SelfhostedControlError &&
           !error.retryable &&
@@ -1312,7 +1382,7 @@ class OpConsumer {
     const wall = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         this.startAbandoned = true;
-        reject(agentErrorToControlError(timeoutAgentError()));
+        reject(this.startTimeoutError());
       }, wallMs);
     });
     void wall.catch(() => {});
@@ -1336,6 +1406,7 @@ class OpConsumer {
         reject(lostToControlError(status));
         return;
       }
+      this.markAcknowledged();
       // Alive on the runner. If it is ahead of our frontier, frames were lost
       // in flight — re-attach to replay them (this also restores live flow
       // after a reconnect). A quiet-but-current op just keeps holding.
@@ -1349,7 +1420,7 @@ class OpConsumer {
       // Another agent process holds the connection: stop waiting here; the
       // op's outcome is unknown and its stop is handed over.
       if (error.connectionReplaced) {
-        reject(agentReplacedOutcomeUnknownError(true));
+        reject(agentReplacedOutcomeUnknownError(this.startConfirmed));
         return;
       }
       const transient =
@@ -1469,9 +1540,14 @@ function agentReplacedOutcomeUnknownError(startConfirmed: boolean): SelfhostedCo
  *  was already known) never says it did not run: after a replaced connection
  *  its outcome is unknown, and any other never-sent failure proves only that this one request was
  *  not delivered. */
-function startedOpError(error: unknown): unknown {
+function startedOpError(error: unknown, startConfirmed: boolean): unknown {
   if (!(error instanceof SelfhostedControlError)) return error;
-  if (error.connectionReplaced) return agentReplacedOutcomeUnknownError(true);
+  if (error.connectionReplaced) return agentReplacedOutcomeUnknownError(startConfirmed);
+  return withoutNeverSent(error);
+}
+
+/** The same error without its never-sent mark. */
+function withoutNeverSent(error: SelfhostedControlError): SelfhostedControlError {
   if (!error.neverSent) return error;
   return new SelfhostedControlError({
     message: error.message,

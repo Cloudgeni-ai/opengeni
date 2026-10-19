@@ -5,7 +5,11 @@
 
 import { describe, expect, test } from "bun:test";
 import { ControlRequest, ControlResponse, ExecRequest } from "@opengeni/agent-proto";
-import { NatsControlRpc } from "../src/sandbox/selfhosted/control-rpc";
+import {
+  NatsControlRpc,
+  SelfhostedControlError,
+  timeoutAgentError,
+} from "../src/sandbox/selfhosted/control-rpc";
 import {
   FakeOpRunner,
   InMemoryOpStreamTransport,
@@ -151,7 +155,24 @@ function rig(
       : { adoptBackgroundCommand: record }),
     opStream: { transport, ackIntervalMs: 20, silenceTimeoutMs: 120, reconnectHoldMs: 600 },
   });
-  return { session, runners, restart, returnOld, requests, adoptions, transport };
+  /** A client on the old connection, as the session's recovery reads use. */
+  const oldClient = () =>
+    new OpStreamExecClient({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: OLD,
+      epoch: 0,
+      rpcSubject: `agent.${WORKSPACE}.${AGENT}.connection.${OLD}.rpc`,
+      controlRpc,
+      transport,
+      controlTimeoutMs: options.controlTimeoutMs ?? 2_000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      ackIntervalMs: 20,
+      silenceTimeoutMs: 120,
+      reconnectHoldMs: 600,
+      connectionCurrent: async () => state.live === OLD,
+    });
+  return { session, runners, restart, returnOld, requests, adoptions, transport, oldClient };
 }
 
 async function until(condition: () => boolean): Promise<void> {
@@ -425,6 +446,69 @@ describe("an exec whose agent restarts", () => {
     expect(requests.filter((r) => r.request.op?.$case === "opStart")).toEqual([]);
   });
 
+  test("a deadline spent before any start leaves nothing to stop or wait for", async () => {
+    const context = rig({
+      execTimeoutMs: 150,
+      ledger: "failing",
+      // The revalidation just before the first start outlasts the exec.
+      admissionDelayMs: (call) => (call === 1 ? 200 : 0),
+    });
+    const { session, requests, restart } = context;
+    const controller = createTurnToolCancellationController(new AbortController().signal);
+    const error = await controller.runSandboxCommandStructured(session, { cmd: "touch once" }).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(error instanceof SelfhostedControlError && error.neverSent).toBe(true);
+    // Its agent is gone: nothing may wait on it for an op that never existed.
+    restart();
+    controller.cancel(error);
+    const quiescent = await Promise.race([
+      controller.waitForQuiescence().then(() => true),
+      Bun.sleep(1_500).then(() => false),
+    ]);
+    expect(quiescent).toBe(true);
+    expect(
+      requests.filter((r) =>
+        ["opStart", "opAttach", "opCancel", "opQuery"].includes(r.request.op?.$case ?? ""),
+      ),
+    ).toEqual([]);
+  });
+
+  test("a recovery read replaced before any agent acknowledged the op does not say it ran", async () => {
+    const { restart, oldClient } = rig();
+    const client = oldClient();
+    restart();
+    const error = await client
+      .readExisting("unacknowledged:0", 50, async () => {})
+      .then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+    expectOutcomeUnknown(error, { startConfirmed: false, stopRequested: false });
+  });
+
+  test("a recovery read keeps the start acknowledgement its client saw", async () => {
+    const { runners, restart, oldClient } = rig();
+    const client = oldClient();
+    const opId = "acknowledged:0";
+    runners.get(OLD)!.script(opId, { frames: [], live: true, holdUntilCancel: true });
+    const exec = ExecRequest.fromPartial({ command: ["sleep 600"], shell: true });
+    const running = await client.execWithYield(opId, exec, 60_000, 0, {
+      yieldMs: 50,
+      onYield: () => {},
+    });
+    expect(running.status).toBe("running");
+    restart();
+    const error = await client
+      .readExisting(opId, 50, async () => {})
+      .then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+    expectOutcomeUnknown(error, { startConfirmed: true, stopRequested: false });
+  });
+
   test("a start that never reached the old agent runs once on the new one", async () => {
     let restarted = false;
     const context = rig({
@@ -458,7 +542,12 @@ describe("an exec whose agent restarts", () => {
 });
 
 describe("an exec whose start outlives its wall", () => {
-  function directClient(revalidate: () => Promise<void>, subscribeDelayMs = 0) {
+  function directClient(
+    revalidate: () => Promise<void>,
+    subscribeDelayMs = 0,
+    /** Answers an OpStart attempt (0-based) instead of the runner. */
+    answerStart?: (attempt: number) => Promise<ControlResponse | undefined>,
+  ) {
     const frames = new InMemoryOpStreamTransport();
     // Subscription setup that takes `subscribeDelayMs`, as a slow bus does.
     const transport: OpStreamTransport = {
@@ -483,7 +572,11 @@ describe("an exec whose start outlives its wall", () => {
       rpcSubject: `agent.${WORKSPACE}.${AGENT}.connection.${OLD}.rpc`,
       controlRpc: {
         request: async (subject, request, opts) => {
-          if (request.op?.$case === "opStart") starts.push(request);
+          if (request.op?.$case === "opStart") {
+            starts.push(request);
+            const answer = await answerStart?.(starts.length - 1);
+            if (answer) return answer;
+          }
           return await runner.request(subject, request, opts);
         },
       },
@@ -503,6 +596,8 @@ describe("an exec whose start outlives its wall", () => {
       (caught: unknown) => caught,
     );
     expect(String(error)).toMatch(/did not respond in time/);
+    // No OpStart was ever sent: provably not run, so nothing keeps custody.
+    expect(error instanceof SelfhostedControlError && error.neverSent).toBe(true);
     await Bun.sleep(200);
     expect(starts).toEqual([]);
     expect(runner.runs.has("wall_start:0")).toBe(false);
@@ -517,9 +612,32 @@ describe("an exec whose start outlives its wall", () => {
       (caught: unknown) => caught,
     );
     expect(String(error)).toMatch(/did not respond in time/);
+    expect(error instanceof SelfhostedControlError && error.neverSent).toBe(true);
     await Bun.sleep(100);
     expect(starts).toEqual([]);
     expect(runner.runs.has("slow_subscribe:0")).toBe(false);
+  });
+
+  test("a deadline after a start that may have arrived keeps the outcome uncertain", async () => {
+    // The first start times out unanswered (it may have reached the agent);
+    // the deadline passes before the retry.
+    const { client, starts } = directClient(
+      async () => {},
+      0,
+      async (attempt) => {
+        if (attempt > 0) return undefined;
+        await Bun.sleep(100);
+        return ControlResponse.fromPartial({ error: timeoutAgentError() });
+      },
+    );
+    const exec = ExecRequest.fromPartial({ command: ["touch once"], shell: true });
+    const error = await client.exec("maybe_sent:0", exec, 50, 5_000).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(String(error)).toMatch(/did not respond in time/);
+    expect(error instanceof SelfhostedControlError && error.neverSent).toBe(false);
+    expect(starts).toHaveLength(1);
   });
 
   test("subscription setup does not extend the start's absolute deadline", async () => {

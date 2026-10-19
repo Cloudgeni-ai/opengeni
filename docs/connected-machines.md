@@ -93,26 +93,28 @@ streaming exec that was started, or may have been, is not settled by the
 requester. It is handed to the session's command ledger with a stop request
 bound to its exact enrollment, connection instance and operation (the same
 adoption used when a machine stops answering), and the exec ends with
-`agent_offline`. Once the agent had accepted the start, the text is "The
-machine's agent was replaced while this command was running, so its outcome is
-unknown: it may still be running, or it may have finished." If no agent
-confirmed the start, it is "The machine's agent was replaced before this
+`agent_offline`. Once an agent had acknowledged the command (accepted its
+start, or reported its status, also to an earlier read through the same
+connection), the text is "The machine's agent was replaced while this command
+was running, so its outcome is unknown: it may still be running, or it may have
+finished." Otherwise it is "The machine's agent was replaced before this
 command's outcome was known: it may not have started, may still be running, or
 may have finished." Either ends with " A stop has been requested for it." only
 once the ledger has recorded that stop. A turn records it through its own
 adoption; a direct terminal or file request records it in the same ledger
 without a turn. If recording fails, the caller keeps custody and goes on
 stopping it, as for a machine that stopped answering, and the text claims no
-stop. The reconciler alone decides the outcome: it
-delivers the stop if the old runner answers again, and settles the command as
-lost once the enrollment retires that runner (revoked, a different connection
-instance, or a stopped connection). The exec's own timeout also covers its
+stop. The reconciler alone decides the outcome: it delivers the stop if the old
+runner answers again, and settles the command as lost once the enrollment
+retires that runner (revoked, a different connection instance, or a stopped
+connection). The exec's own timeout also covers its
 start and first attach, so an exec whose agent never answers ends at that
 timeout; a start that timeout abandoned is never sent afterwards, every retry
 of a start keeps the one absolute deadline fixed when the exec began (neither
 subscription setup nor a retry extends it, and no start is sent once it has
 passed), and a start re-admitted to a new connection is sent only the time
-left.
+left. A start that timeout or deadline ended before any OpStart was sent fails
+as never sent, so nothing keeps custody of it or waits on its agent.
 
 ### Enrollment maintenance boundary
 

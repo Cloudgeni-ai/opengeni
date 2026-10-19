@@ -1392,6 +1392,10 @@ export class SelfhostedSession {
             notRun = error;
             continue;
           }
+        }
+        // No OpStart reached any agent (a replaced connection, or a deadline
+        // spent before the start was sent): there is nothing to stop or await.
+        if (error instanceof SelfhostedControlError && error.neverSent) {
           notifyRemoteOperationNotDispatched(opId);
         }
         throw error;
@@ -1692,9 +1696,9 @@ export class SelfhostedSession {
         machineId: this.agentId,
         faultClass: selfhostedFaultClass(controlError),
       });
-      // Nothing of a start that never ran needs custody; the caller may admit
-      // it again.
-      if (startReachedNoReplacedAgent(controlError)) notDispatched = true;
+      // The op stream marks a failure never-sent only when no OpStart
+      // reached any agent: nothing of it ran, so nothing needs custody.
+      if (controlError.neverSent) notDispatched = true;
       throw controlError;
     } finally {
       // An observer failure does not prove that the exact provider operation
