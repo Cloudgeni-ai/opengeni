@@ -211,7 +211,7 @@ jobs:
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
           bun packages/browserd/scripts/stage-cua-runtime.ts x64
           bun packages/browserd/scripts/stage-cua-runtime.ts arm64
-          bun test --timeout 120000 packages/browserd/test/cua-runtime-packaging.e2e.test.ts
+          bun test --timeout 120000 packages/browserd/test/cua-native-asset-thinning.test.ts packages/browserd/test/cua-runtime-packaging.e2e.test.ts
 
       - name: Install the native transport test broker
         uses: ./.github/actions/setup-agent-test-nats

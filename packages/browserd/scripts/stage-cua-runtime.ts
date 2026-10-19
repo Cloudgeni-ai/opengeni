@@ -79,6 +79,7 @@ export async function stageCuaRuntime(architecture: string): Promise<string> {
     const path = join(nativeDirectory, file);
     await copyFile(join(dirname(nativePackagePath), file), path);
     if (file.endsWith(".dylib") || file.endsWith(".node")) {
+      if (process.platform === "darwin") await thinMacNativeAsset(path, architecture);
       await signMacAsset(path);
     }
     assets.push(`node_modules/${nativeName}/${file}`);
@@ -90,6 +91,31 @@ export async function stageCuaRuntime(architecture: string): Promise<string> {
     `[\n${assets.map((name) => `    (${JSON.stringify(name)}, include_bytes!(${JSON.stringify(join(output, name))}) as &[u8]),`).join("\n")}\n]\n`,
   );
   return manifest;
+}
+
+/** Upstream architecture-named packages can contain universal binaries. Each
+ * agent slice embeds only its matching native slice, then signs the result. */
+export async function thinMacNativeAsset(path: string, architecture: string): Promise<void> {
+  const target = architecture === "x64" ? "x86_64" : architecture === "arm64" ? "arm64" : null;
+  if (!target) throw new Error(`Unsupported macOS CUA architecture: ${architecture}`);
+  const lipo = async (...args: string[]): Promise<string> => {
+    const child = Bun.spawn(["lipo", ...args], { stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    if (exitCode !== 0) throw new Error(`CUA native asset thinning failed: ${stderr.trim()}`);
+    return stdout.trim();
+  };
+  const architectures = (await lipo("-archs", path)).split(/\s+/);
+  if (!architectures.includes(target)) {
+    throw new Error(`CUA native asset does not contain required architecture ${target}`);
+  }
+  if (architectures.length > 1) await lipo(path, "-thin", target, "-output", path);
+  if ((await lipo("-archs", path)) !== target) {
+    throw new Error(`CUA native asset must contain only ${target}`);
+  }
 }
 
 async function signMacAsset(path: string): Promise<void> {
