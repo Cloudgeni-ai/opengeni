@@ -104,21 +104,23 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
       await Bun.sleep(100);
       expect((await actual()).clicks).toBe(1); // Durable replay must not click twice.
       // CUA honours only the tokens of its latest reading of a window. A ref
-      // read before the window was read again still acts on its element.
-      const earlier = await supervisor.observe(reference, target.id);
-      if (earlier.semantic?.kind !== "snapshot") throw new Error("Fixture needs a full snapshot");
-      const earlierIncrement = earlier.semantic.roots.find((node) => node.name === "Increment")!;
-      observed = await supervisor.observe(reference, target.id);
-      for (const source of [observed, earlier])
+      // read before the window was read again still acts on its element while
+      // the window is unchanged, fenced on either reading.
+      for (const fence of ["latest", "earlier"] as const) {
+        const earlier = await supervisor.observe(reference, target.id);
+        if (earlier.semantic?.kind !== "snapshot") throw new Error("Fixture needs a full snapshot");
+        const earlierIncrement = earlier.semantic.roots.find((node) => node.name === "Increment")!;
+        observed = await supervisor.observe(reference, target.id);
         expect(
           await supervisor.action(
-            makeCommand(source, {
+            makeCommand(fence === "latest" ? observed : earlier, {
               type: "semantic",
               locator: { kind: "ref", ref: earlierIncrement.ref },
               action: "invoke",
             }),
           ),
         ).toMatchObject({ state: "completed" });
+      }
       await Bun.sleep(100);
       expect((await actual()).clicks).toBe(3);
       const stream = await supervisor.subscribeFrames(reference, target.id, {
