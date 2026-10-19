@@ -4401,7 +4401,7 @@ function registerFleetTools(
           message: `${
             setup.status === "ready"
               ? `${setup.detail} The Connected Machine card lists them, so the person can choose one for this chat or connect another.`
-              : "The Connected Machine card was posted. The person sets up their machine from it and chooses it for this chat; nothing is connected yet."
+              : "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet."
           } Check sandboxes_list after they confirm. Chrome needs the browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on the connected machine.`,
         });
       }
@@ -6749,7 +6749,7 @@ function registerCapabilityDiscoveryTools(
         eventId,
         message:
           item.id === CONNECTED_MACHINE_CAPABILITY_ID
-            ? "The Connected Machine card was posted. The person sets up their machine from it and chooses it for this chat; nothing is connected yet. Do not paste an enroll token into the chat."
+            ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
