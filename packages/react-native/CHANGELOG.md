@@ -1,5 +1,14 @@
 # @opengeni/react-native
 
+## 4.1.4
+
+### Patch Changes
+
+- Updated dependencies [44dc72a]
+  - @opengeni/react@4.1.4
+  - @opengeni/contracts@4.1.4
+  - @opengeni/sdk@4.1.4
+
 ## 4.1.3
 
 ### Patch Changes

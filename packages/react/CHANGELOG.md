@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 4.1.4
+
+### Patch Changes
+
+- 44dc72a: The chat no longer blanks a published Site. The model picker accepts catalog rows without readiness or availability details, and SessionConversation and NewConversation now contain render errors with a "This chat couldn't be displayed" message and a Try again button instead of unmounting the host page.
+  - @opengeni/connect@4.1.4
+  - @opengeni/sdk@4.1.4
+
 ## 4.1.3
 
 ### Patch Changes

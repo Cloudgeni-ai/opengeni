@@ -1,5 +1,33 @@
 # @opengeni/api-router
 
+## 4.1.4
+
+### Patch Changes
+
+- @opengeni/agent-proto@4.1.4
+- @opengeni/artifact-tool@4.1.4
+- @opengeni/capabilities@4.1.4
+- @opengeni/codemode@4.1.4
+- @opengeni/codex@4.1.4
+- @opengeni/config@4.1.4
+- @opengeni/contracts@4.1.4
+- @opengeni/core@4.1.4
+- @opengeni/db@4.1.4
+- @opengeni/documents@4.1.4
+- @opengeni/events@4.1.4
+- @opengeni/github@4.1.4
+- @opengeni/interaction@4.1.4
+- @opengeni/network@4.1.4
+- @opengeni/observability@4.1.4
+- @opengeni/runtime@4.1.4
+- @opengeni/storage@4.1.4
+- @opengeni/tool-gateway@4.1.4
+- @opengeni/vaults@4.1.4
+- @opengeni/vaults-keeper@4.1.4
+- @opengeni/vaults-onepassword@4.1.4
+- @opengeni/vaults-protonpass@4.1.4
+- @opengeni/xai-subscription@4.1.4
+
 ## 4.1.3
 
 ### Patch Changes

@@ -1,5 +1,13 @@
 # @opengeni/codemode
 
+## 4.1.4
+
+### Patch Changes
+
+- @opengeni/contracts@4.1.4
+- @opengeni/sdk@4.1.4
+- @opengeni/tool-gateway@4.1.4
+
 ## 4.1.3
 
 ### Patch Changes

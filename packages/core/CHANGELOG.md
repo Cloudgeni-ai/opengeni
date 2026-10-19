@@ -1,5 +1,22 @@
 # @opengeni/core
 
+## 4.1.4
+
+### Patch Changes
+
+- @opengeni/capabilities@4.1.4
+- @opengeni/codex@4.1.4
+- @opengeni/config@4.1.4
+- @opengeni/contracts@4.1.4
+- @opengeni/db@4.1.4
+- @opengeni/documents@4.1.4
+- @opengeni/events@4.1.4
+- @opengeni/network@4.1.4
+- @opengeni/observability@4.1.4
+- @opengeni/runtime@4.1.4
+- @opengeni/storage@4.1.4
+- @opengeni/vaults@4.1.4
+
 ## 4.1.3
 
 ### Patch Changes
