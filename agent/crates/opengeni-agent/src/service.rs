@@ -596,7 +596,11 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
     let spec = spec_for(install_scope)?;
 
     if args.print {
-        let definition = service::render_for_host(&spec).map_err(|e| e.to_string())?;
+        let definition = if ServiceSpec::backend() == ServiceBackend::Launchd {
+            launchd_definition(&spec, &home()?)?
+        } else {
+            service::render_for_host(&spec).map_err(|e| e.to_string())?
+        };
         println!("{definition}");
         return Ok(());
     }
@@ -668,10 +672,7 @@ fn install_systemd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
 fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let user_home = home()?;
     let plist_path = service::launchd_plist_path(&user_home);
-    let existing_environment = launchd_environment(&plist_path)?;
-    let body =
-        service::render_launchd_plist_with_environment(spec, &user_home, &existing_environment)
-            .map_err(|e| e.to_string())?;
+    let body = launchd_definition(spec, &user_home)?;
     let definition_changed =
         std::fs::read(&plist_path).map_or(true, |existing| existing != body.as_bytes());
     if let Some(parent) = plist_path.parent() {
@@ -741,6 +742,12 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
         plist_path.display()
     );
     Ok(())
+}
+
+fn launchd_definition(spec: &ServiceSpec, user_home: &Path) -> Result<String, String> {
+    let existing_environment = launchd_environment(&service::launchd_plist_path(user_home))?;
+    service::render_launchd_plist_with_environment(spec, user_home, &existing_environment)
+        .map_err(|e| e.to_string())
 }
 
 fn launchd_environment(path: &Path) -> Result<std::collections::BTreeMap<String, String>, String> {
@@ -1158,7 +1165,8 @@ mod tests {
     #[test]
     fn launchd_environment_reads_xml_and_binary_plists() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agent.plist");
+        let path = service::launchd_plist_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let environment = std::collections::BTreeMap::from([
             ("PATH".to_string(), "/opt/tools/bin:/usr/bin".to_string()),
             ("LANG".to_string(), "en_US.UTF-8".to_string()),
@@ -1189,6 +1197,9 @@ mod tests {
             for (key, value) in &environment {
                 assert_eq!(parsed.get(key), Some(value));
             }
+            let rendered = launchd_definition(&spec, dir.path()).unwrap();
+            assert!(rendered.contains("/opt/tools/bin:/usr/bin"));
+            assert!(rendered.contains("en_US.UTF-8"));
         }
     }
 
