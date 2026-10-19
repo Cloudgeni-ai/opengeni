@@ -142,7 +142,16 @@ enabling it changes no session's backend.
    fences. Both use the pod's cloud identity: on GKE, bind
    `computeControl.serviceAccount` to the `control_service_account` output
    with Workload Identity (`iam.gke.io/gcp-service-account` annotation and
-   `control_workload_identity` in Terraform).
+   `control_workload_identity` in Terraform). A service that runs off
+   Google Cloud uses a key of that account instead (`gcloud iam
+   service-accounts keys create key.json --iam-account <the output>`,
+   where the organisation's policy allows keys): keep it in a Secret,
+   mount it through `computeControl.extraVolumes` and
+   `extraVolumeMounts`, and name it in `GOOGLE_APPLICATION_CREDENTIALS`
+   through `computeControl.extraEnv`. Both the archive and the group take
+   it from there; only service account key files are supported. Rotate
+   the key as any long-lived credential, and delete it when the service
+   moves onto Google Cloud.
 8. **Images.** Sandboxes start from stored images
    (`computeControl.storedImages`, `name: <image id>`). Build each with
    `compute-host build-image <oci-ref> --guest <bundle>/guest --output

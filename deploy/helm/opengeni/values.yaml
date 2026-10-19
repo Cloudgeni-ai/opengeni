@@ -1432,7 +1432,10 @@ computeControl:
   # Where hosts archive sandboxes (gs://bucket/prefix, az://, s3://). The
   # service reads stored copies' pointers there; credentials come from the
   # pod's identity (serviceAccount.annotations, such as GKE Workload
-  # Identity) or the environment.
+  # Identity) or the environment. Off Google Cloud, mount a service account
+  # key through extraVolumes and extraVolumeMounts and name it in
+  # GOOGLE_APPLICATION_CREDENTIALS through extraEnv: the archive, gcpGroup
+  # and the sweep all use it.
   archive: ""
   # The image creates start from when they name none, and the stored images
   # creates may name (name: image id, as `compute-host build-image` prints).

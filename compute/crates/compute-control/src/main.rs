@@ -13,7 +13,7 @@ use clap::{Args, Parser, Subcommand};
 use compute_control::api::key_digest;
 use compute_control::authority::{self, Authority};
 use compute_control::e2b;
-use compute_control::group::{COMPUTE_API, GcpGroup, METADATA};
+use compute_control::group::{COMPUTE_API, Credentials, GcpGroup, METADATA, ServiceAccountKey};
 use compute_control::hostapi::Certificates;
 use compute_control::identity::{Expected, GOOGLE_KEYS, GceIdentity, GoogleKeys};
 use compute_control::leader::Scaling;
@@ -184,6 +184,11 @@ struct Serve {
     gcp_api: String,
     #[arg(long, default_value = METADATA, hide = true)]
     gcp_metadata: String,
+    /// A service account key file whose account manages the group, for a
+    /// service that runs off Google Cloud. Without one, its tokens come from
+    /// the metadata server (the instance's or the GKE workload's account).
+    #[arg(long, env = "GOOGLE_APPLICATION_CREDENTIALS")]
+    gcp_credentials: Option<PathBuf>,
     /// Fewest hosts the group keeps.
     #[arg(long, default_value_t = 1)]
     scale_min: u32,
@@ -378,7 +383,11 @@ impl Serve {
             "--scale-host-memory-mib is needed to grow a group"
         );
         Ok(Some(Scaling {
-            group: std::sync::Arc::new(GcpGroup::new(path, &self.gcp_api, &self.gcp_metadata)?),
+            group: std::sync::Arc::new(GcpGroup::new(
+                path,
+                &self.gcp_api,
+                self.gcp_credentials()?,
+            )?),
             policy: ScalePolicy {
                 spare_per_mille: self.scale_spare_per_mille,
                 spare_largest: self.scale_spare_largest,
@@ -390,6 +399,17 @@ impl Serve {
             every: Duration::from_secs(self.scale_every_s),
             boot_within: Duration::from_secs(self.scale_boot_within_s),
         }))
+    }
+
+    /// Where the group's tokens come from: the key file, if one is named.
+    fn gcp_credentials(&self) -> anyhow::Result<Credentials> {
+        let Some(file) = &self.gcp_credentials else {
+            return Ok(Credentials::Metadata(self.gcp_metadata.clone()));
+        };
+        let json = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+        let key = ServiceAccountKey::from_json(&json)
+            .with_context(|| format!("the key file {}", file.display()))?;
+        Ok(Credentials::Key(Box::new(key)))
     }
 }
 
