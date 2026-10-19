@@ -221,10 +221,10 @@ An authentication handshake timeout is a transient connection failure, not proof
 that the enrollment bearer was rejected. The agent retries the connection without
 recommending re-enrollment for that timeout.
 
-## In an Opengeni compute sandbox (`run --fabric`)
+## In an Opengeni compute sandbox (`run --compute`)
 
-The same agent runs inside each sandbox of Opengeni's own compute fabric. The
-sandbox's guest init starts it as `opengeni-agent run --fabric <link file>`; the
+The same agent runs inside each sandbox of Opengeni compute. The
+sandbox's guest init starts it as `opengeni-agent run --compute <link file>`; the
 contract is `compute/docs/agent-link.md`.
 
 - The link file names the enrollment (`workspace_id`, `agent_id`), the
@@ -240,7 +240,7 @@ contract is `compute/docs/agent-link.md`.
   agent), the guest sends `SIGUSR1`: the agent drops its connection and dials
   again at once, without the outage back-off.
 - The agent writes what it has in use to `/run/compute/activity/agent.<pid>`,
-  so the fabric sleeps the sandbox only when the agent is idle too: running or
+  so compute sleeps the sandbox only when the agent is idle too: running or
   waiting host operations, plus open streams that carried traffic within the
   stream silence limit (ten minutes unless the link file says otherwise).
   Anything a viewer sends counts on every stream; what the agent sends counts

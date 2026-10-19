@@ -1,11 +1,11 @@
-//! Fabric mode: this agent inside an Opengeni compute sandbox.
+//! Compute mode: this agent inside an Opengeni compute sandbox.
 //!
-//! The sandbox's guest init starts `opengeni-agent run --fabric <link file>`.
+//! The sandbox's guest init starts `opengeni-agent run --compute <link file>`.
 //! The agent then holds no credential: it dials NATS on a loopback port that
 //! the guest forwards to its host, and the host speaks for it to Opengeni
 //! (the contract is `compute/docs/agent-link.md`, section 2). Everything a
 //! Connected Machine does to stay enrolled (enrollment, credential renewal,
-//! self-update, service installation) is the fabric's job instead; the rest
+//! self-update, service installation) is Opengeni compute's job instead; the rest
 //! of the agent is the same code.
 //!
 //! This module holds the parts of that mode with no runtime around them: the
@@ -29,7 +29,7 @@ pub const RELAY_SUBJECT: &str = "_compute.relay";
 pub const DEFAULT_ACTIVITY_DIR: &str = "/run/compute/activity";
 
 /// How long a stream may carry nothing before it stops keeping its sandbox
-/// awake (the fabric's stream silence limit), unless the link file says.
+/// awake (compute's stream silence limit), unless the link file says.
 pub const DEFAULT_STREAM_SILENCE: Duration = Duration::from_secs(600);
 
 /// How often the activity file is brought up to date.
@@ -37,9 +37,9 @@ pub const ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Why a link file or a relay credential was refused.
 #[derive(Debug, thiserror::Error)]
-pub enum FabricError {
+pub enum ComputeError {
     /// The link file could not be read.
-    #[error("cannot read the fabric link file {path}: {source}")]
+    #[error("cannot read the compute link file {path}: {source}")]
     Read {
         /// The file.
         path: PathBuf,
@@ -71,7 +71,7 @@ struct LinkFile {
 
 /// What the guest's link file tells the agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FabricConfig {
+pub struct ComputeConfig {
     /// The enrollment's workspace.
     pub workspace_id: String,
     /// The enrollment's agent id.
@@ -86,24 +86,24 @@ pub struct FabricConfig {
     pub stream_silence: Duration,
 }
 
-impl FabricConfig {
+impl ComputeConfig {
     /// Reads and checks the link file at `path`.
     ///
     /// # Errors
     ///
-    /// [`FabricError::Read`] when it cannot be read, [`FabricError::Invalid`]
+    /// [`ComputeError::Read`] when it cannot be read, [`ComputeError::Invalid`]
     /// when it is not a link file.
-    pub fn load(path: &Path) -> Result<Self, FabricError> {
-        let text = std::fs::read_to_string(path).map_err(|source| FabricError::Read {
+    pub fn load(path: &Path) -> Result<Self, ComputeError> {
+        let text = std::fs::read_to_string(path).map_err(|source| ComputeError::Read {
             path: path.to_path_buf(),
             source,
         })?;
         Self::parse(&text)
     }
 
-    fn parse(text: &str) -> Result<Self, FabricError> {
-        let invalid = |reason: String| FabricError::Invalid {
-            what: "fabric link file",
+    fn parse(text: &str) -> Result<Self, ComputeError> {
+        let invalid = |reason: String| ComputeError::Invalid {
+            what: "compute link file",
             reason,
         };
         let file: LinkFile =
@@ -146,7 +146,7 @@ impl FabricConfig {
     /// The local name of the agent's one connection.
     #[must_use]
     pub fn connection_id(&self) -> String {
-        format!("fabric-{}", self.agent_id)
+        format!("compute-{}", self.agent_id)
     }
 
     /// The credentials the supervisor serves the connection with. They hold
@@ -192,10 +192,10 @@ struct RelayMessage {
 ///
 /// # Errors
 ///
-/// [`FabricError::Invalid`] for anything else. The message never contains the
+/// [`ComputeError::Invalid`] for anything else. The message never contains the
 /// token.
-pub fn parse_relay_credential(payload: &[u8]) -> Result<RelayEndpoint, FabricError> {
-    let invalid = |reason: &str| FabricError::Invalid {
+pub fn parse_relay_credential(payload: &[u8]) -> Result<RelayEndpoint, ComputeError> {
+    let invalid = |reason: &str| ComputeError::Invalid {
         what: "relay credential",
         reason: reason.to_string(),
     };
@@ -300,10 +300,10 @@ mod tests {
 
     #[test]
     fn the_link_file_the_guest_writes_is_read() {
-        let config = FabricConfig::parse(LINK).expect("link file");
+        let config = ComputeConfig::parse(LINK).expect("link file");
         assert_eq!(
             config,
-            FabricConfig {
+            ComputeConfig {
                 workspace_id: "w-1".to_string(),
                 agent_id: "a_1".to_string(),
                 workspace_root: PathBuf::from("/workspace"),
@@ -312,7 +312,7 @@ mod tests {
                 stream_silence: DEFAULT_STREAM_SILENCE,
             }
         );
-        assert_eq!(config.connection_id(), "fabric-a_1");
+        assert_eq!(config.connection_id(), "compute-a_1");
         let credentials = config.credentials();
         assert_eq!(credentials.nats_bearer, "");
         assert_eq!(credentials.relay_token, "");
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn optional_settings_are_read() {
-        let config = FabricConfig::parse(
+        let config = ComputeConfig::parse(
             r#"{"workspace_id": "w", "agent_id": "a", "workspace_root": "/w", "nats_url": "nats://127.0.0.1:1",
                 "activity_dir": "/tmp/activity", "stream_silence_secs": 30}"#,
         )
@@ -351,7 +351,7 @@ mod tests {
             with("bearer", r#""x""#),
         ] {
             assert!(
-                matches!(FabricConfig::parse(&bad), Err(FabricError::Invalid { .. })),
+                matches!(ComputeConfig::parse(&bad), Err(ComputeError::Invalid { .. })),
                 "{bad}"
             );
         }

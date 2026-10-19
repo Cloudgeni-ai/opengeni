@@ -621,13 +621,13 @@ export type { SelfhostedConnectionBinding } from "./routing/backend-resolver";
 // Opengeni compute: managed microVM sandboxes whose provider session is the
 // Connected Machine agent inside the box (docs/compute-backend.md).
 export {
-  ComputeFabricClient,
-  ComputeFabricError,
-  isComputeFabricNotFound,
+  ComputeControlClient,
+  ComputeControlError,
+  isComputeSandboxNotFound,
   type ComputeCreateRequest,
   type ComputeSandboxView,
   type ComputeWokenView,
-} from "./compute/fabric";
+} from "./compute/control";
 export {
   getComputeAgentPlane,
   setComputeAgentPlane,

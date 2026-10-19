@@ -119,7 +119,7 @@ describe("link token verification", () => {
       now,
       fetchKeys: async () => {
         reads += 1;
-        if (failing) throw new Error("fabric down");
+        if (failing) throw new Error("control service down");
         return keySet;
       },
     });
@@ -882,7 +882,7 @@ describe("gateway boot", () => {
         ...base,
         observability,
         settings: testSettings({
-          computeApiUrl: "https://fabric.test",
+          computeApiUrl: "https://control.test",
           computeApiKey: "k",
           computeLinkUrl: "http://not-a-websocket.test/link",
         }),

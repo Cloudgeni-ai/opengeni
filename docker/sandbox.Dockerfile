@@ -580,7 +580,7 @@ COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni
 COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
 COPY --from=browserd-build /out/opengeni-terminal-ready.so /usr/local/lib/opengeni/opengeni-terminal-ready.so
 # The machine agent an Opengeni compute sandbox runs as its guest agent
-# (`opengeni-agent run --fabric`). It sits beside opengeni-browserd so its
+# (`opengeni-agent run --compute`). It sits beside opengeni-browserd so its
 # browser controller finds the sidecar, and the image pins its version.
 COPY --from=browserd-build /out/opengeni-agent /usr/local/bin/opengeni-agent
 COPY docker/desktop/opengeni-terminal-ready.sh /etc/profile.d/00-opengeni-terminal-ready.sh

@@ -1,7 +1,7 @@
 -- deployment-mode: rolling
 -- A compute sandbox is never drained for being idle.
 --
--- Opengeni compute's fabric sleeps an idle sandbox itself and keeps its memory
+-- Opengeni compute sleeps an idle sandbox itself and keeps its memory
 -- and disk, so its lease stays warm with no holders: draining it would capture
 -- and delete a sandbox that costs nothing to keep and resumes exactly. The
 -- global reaper's idle transition (warm with no holders -> draining) now skips

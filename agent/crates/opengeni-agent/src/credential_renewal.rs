@@ -20,8 +20,8 @@ pub(crate) enum RenewNowError {
     LocalState,
     /// The control plane refused or could not be reached; retrying may help.
     Renewal,
-    /// This agent has no enrollment of its own to renew: a fabric sandbox's
-    /// agent, whose enrollment the fabric keeps.
+    /// This agent has no enrollment of its own to renew: a compute sandbox's
+    /// agent, whose enrollment Opengeni compute keeps.
     Unsupported,
 }
 

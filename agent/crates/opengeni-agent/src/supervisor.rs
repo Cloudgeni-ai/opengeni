@@ -83,8 +83,8 @@ const BULK_CHANNEL_DEPTH: usize = 1024;
 /// pairs toward the bulk publisher task. `None` between generations.
 type BulkLane = Arc<std::sync::RwLock<Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>>>;
 
-/// Keeps a fabric link's relay credential current with what its host sends
-/// on [`crate::fabric::RELAY_SUBJECT`], for as long as the generation lasts.
+/// Keeps a compute link's relay credential current with what its host sends
+/// on [`crate::compute::RELAY_SUBJECT`], for as long as the generation lasts.
 /// The host sends the latest credential on each subscription, so a new
 /// generation starts with one.
 async fn follow_relay_credential(
@@ -92,7 +92,7 @@ async fn follow_relay_credential(
     credential: RelayCredential,
 ) {
     while let Some(message) = subscription.next().await {
-        match crate::fabric::parse_relay_credential(&message.payload) {
+        match crate::compute::parse_relay_credential(&message.payload) {
             Ok(endpoint) => {
                 debug!(expires_at_ms = ?endpoint.expires_at_ms, "relay credential from the host");
                 credential.set(endpoint);
@@ -102,24 +102,24 @@ async fn follow_relay_credential(
     }
 }
 
-/// A fabric agent's relay credential comes from its host, on a subject only
+/// A compute agent's relay credential comes from its host, on a subject only
 /// the host answers: follow it for the generation on `client`.
-async fn follow_fabric_relay(
-    fabric: Option<&FabricLink>,
+async fn follow_compute_relay(
+    compute: Option<&ComputeLink>,
     client: &async_nats::Client,
 ) -> Result<Option<AbortOnDrop>, ConnectionOutcome> {
-    let Some(fabric) = fabric else {
+    let Some(compute) = compute else {
         return Ok(None);
     };
     let subscription = client
-        .subscribe(crate::fabric::RELAY_SUBJECT)
+        .subscribe(crate::compute::RELAY_SUBJECT)
         .await
         .map_err(|e| {
             ConnectionOutcome::Disconnected(format!("relay credential subscribe failed: {e}"))
         })?;
     Ok(Some(AbortOnDrop(tokio::spawn(follow_relay_credential(
         subscription,
-        fabric.relay.clone(),
+        compute.relay.clone(),
     )))))
 }
 
@@ -476,7 +476,7 @@ enum TransportLossKind {
 }
 
 /// Asks every link to drop its connection and dial again at once, without
-/// the back-off it uses for an outage. An agent in a fabric sandbox gets this
+/// the back-off it uses for an outage. An agent in a compute sandbox gets this
 /// when its host has no stream for its connections, after a move, a recovery
 /// on another host or a restart of the host agent: its connections went with
 /// the host that carried them, and the host answers at once. A request that
@@ -508,11 +508,11 @@ impl ReconnectSignal {
     }
 }
 
-/// What a link needs when the agent runs in a fabric sandbox (see
-/// [`crate::fabric`]): it dials its host with no credential, and the relay
-/// credential arrives from the host on [`crate::fabric::RELAY_SUBJECT`].
+/// What a link needs when the agent runs in a compute sandbox (see
+/// [`crate::compute`]): it dials its host with no credential, and the relay
+/// credential arrives from the host on [`crate::compute::RELAY_SUBJECT`].
 #[derive(Clone, Debug)]
-pub struct FabricLink {
+pub struct ComputeLink {
     /// The credential the link's relay hub presents, kept current from the
     /// host's messages.
     pub relay: RelayCredential,
@@ -627,8 +627,8 @@ pub struct SupervisorLink<P: Platform> {
     /// Random for this daemon process and stable across control/bulk reconnects.
     /// Auth-callout leases this exact value and operational subjects include it.
     pub connection_instance_id: String,
-    /// Set when the agent runs in a fabric sandbox behind its host.
-    pub fabric: Option<FabricLink>,
+    /// Set when the agent runs in a compute sandbox behind its host.
+    pub compute: Option<ComputeLink>,
 }
 
 impl<P: Platform> Clone for SupervisorLink<P> {
@@ -640,7 +640,7 @@ impl<P: Platform> Clone for SupervisorLink<P> {
             api_url: self.api_url.clone(),
             authentication_state: self.authentication_state,
             connection_instance_id: self.connection_instance_id.clone(),
-            fabric: self.fabric.clone(),
+            compute: self.compute.clone(),
         }
     }
 }
@@ -660,14 +660,14 @@ impl<P: Platform> SupervisorLink<P> {
             api_url: None,
             authentication_state: None,
             connection_instance_id: uuid::Uuid::new_v4().to_string(),
-            fabric: None,
+            compute: None,
         }
     }
 
-    /// Serve this link as an agent in a fabric sandbox.
+    /// Serve this link as an agent in a compute sandbox.
     #[must_use]
-    pub fn with_fabric(mut self, fabric: FabricLink) -> Self {
-        self.fabric = Some(fabric);
+    pub fn with_compute(mut self, compute: ComputeLink) -> Self {
+        self.compute = Some(compute);
         self
     }
 
@@ -706,7 +706,7 @@ struct WorkspaceLink<P: Platform> {
     api_url: Option<String>,
     authentication_state: Option<crate::config::AuthenticationState>,
     connection_instance_id: String,
-    fabric: Option<FabricLink>,
+    compute: Option<ComputeLink>,
     epoch: Arc<EpochCell>,
     shutdown: ShutdownSignal,
     /// The CURRENT generation's bulk frame channel (op-frame publishes ride a
@@ -732,7 +732,7 @@ impl<P: Platform> WorkspaceLink<P> {
             api_url: definition.api_url,
             authentication_state: definition.authentication_state,
             connection_instance_id: definition.connection_instance_id,
-            fabric: definition.fabric,
+            compute: definition.compute,
             epoch: Arc::new(EpochCell::default()),
             shutdown: ShutdownSignal::default(),
             bulk_tx: Arc::new(std::sync::RwLock::new(None)),
@@ -821,7 +821,7 @@ pub struct Supervisor<P: Platform> {
     browser_bridge: Option<BrowserBridgeInventory>,
     /// Latched once a clean shutdown (SIGINT/SIGTERM) is requested.
     shutdown: ShutdownSignal,
-    /// Asks every link to reconnect at once (a fabric sandbox whose host lost
+    /// Asks every link to reconnect at once (a compute sandbox whose host lost
     /// its connections).
     reconnect: ReconnectSignal,
     /// Process-global update admission fence + idempotency key. One binary backs
@@ -1024,14 +1024,14 @@ impl<P: Platform + 'static> Supervisor<P> {
     }
 
     /// A handle that asks every link to drop its connection and dial again at
-    /// once. Wired to `SIGUSR1` in fabric mode.
+    /// once. Wired to `SIGUSR1` in compute mode.
     #[must_use]
     pub fn reconnect_handle(&self) -> ReconnectSignal {
         self.reconnect.clone()
     }
 
     /// How much host work is running or waiting to run: what the agent reports
-    /// as in use in a fabric sandbox. That is admitted engine work, every
+    /// as in use in a compute sandbox. That is admitted engine work, every
     /// upload request being served, and accepted upload transactions while
     /// their clients keep sending within `silence` (a sleep between chunks
     /// would reconnect the agent and fence the transaction).
@@ -1396,7 +1396,7 @@ impl<P: Platform + 'static> Supervisor<P> {
 
         // Following the relay credential before the hello means the first
         // stream Opengeni asks for finds it.
-        let _relay_follower = match follow_fabric_relay(link.fabric.as_ref(), &client).await {
+        let _relay_follower = match follow_compute_relay(link.compute.as_ref(), &client).await {
             Ok(follower) => follower,
             Err(outcome) => return outcome,
         };
@@ -1831,11 +1831,11 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // Bounded by the renewal HTTP timeout. Detached so adopting the
                 // renewed file (which restarts this link) cannot cut the reply.
                 let connection_id = link.connection_id.clone();
-                let fabric = link.fabric.is_some();
+                let compute = link.compute.is_some();
                 let client = client.clone();
                 let receipt = crate::rpc_replay::current();
                 tokio::spawn(crate::rpc_replay::scope(receipt, async move {
-                    let renewed = if fabric {
+                    let renewed = if compute {
                         Err(RenewNowError::Unsupported)
                     } else {
                         renew_now(&connection_id).await
@@ -1902,7 +1902,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     ) {
         let max_payload = client.server_info().max_payload;
         let request_id = request.request_id.clone();
-        if link.fabric.is_some() {
+        if link.compute.is_some() {
             // A sandbox's image pins its agent; a new agent comes with a new
             // image, never by replacing the running one.
             publish_response(
@@ -2435,9 +2435,9 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// link stays paused until renewal or explicit reconnect supplies credentials;
     /// transport failures alone use the reconnect backoff.
     async fn connect(&self, link: &WorkspaceLink<P>) -> Result<ConnectedNats, SupervisorError> {
-        // A fabric agent dials its own host, which authenticates the sandbox
+        // A compute agent dials its own host, which authenticates the sandbox
         // on its link; it presents no credential.
-        if link.fabric.is_none() && link.creds.nats_bearer.is_empty() {
+        if link.compute.is_none() && link.creds.nats_bearer.is_empty() {
             // No bearer means the control plane never minted one (an enrollment from
             // before the credential plane was configured). Surface a clear, typed
             // disconnect rather than dial with an empty token the callout will deny.
@@ -2448,7 +2448,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let connection_id = link.connection_id.clone();
         let transport_lost = TransportLossSignal::default();
         let event_transport_lost = transport_lost.clone();
-        let opts = if link.fabric.is_some() {
+        let opts = if link.compute.is_some() {
             async_nats::ConnectOptions::new()
         } else {
             async_nats::ConnectOptions::new().token(link.creds.nats_bearer.clone())
@@ -2491,12 +2491,12 @@ impl<P: Platform + 'static> Supervisor<P> {
         let client = async_nats::connect_with_options(link.creds.nats_urls.clone(), opts)
             .await
             .map_err(|e| {
-                // A fabric host refuses a link it does not serve yet (a stale
+                // A compute host refuses a link it does not serve yet (a stale
                 // epoch, an invalid ticket, a sandbox it no longer holds) with
-                // the same authorization error. A fabric link has no credential
+                // the same authorization error. A compute link has no credential
                 // to renew, so that refusal is a disconnect: the link backs off
                 // and dials again at once when its host asks it to reconnect.
-                if link.fabric.is_none() && is_authentication_error(&e) {
+                if link.compute.is_none() && is_authentication_error(&e) {
                     SupervisorError::Authentication(e.to_string())
                 } else {
                     SupervisorError::Connect(e.to_string())
@@ -2613,9 +2613,9 @@ impl<P: Platform + 'static> Supervisor<P> {
             operation_cpu_quota: link.platform.operation_cpu_quota_supported(),
             transactional_fs_write: link.platform.transactional_fs_write_supported(),
             transactional_fs_write_machine: link.platform.transactional_fs_write_supported(),
-            // The fabric keeps a sandbox's enrollment; its agent has nothing
+            // Opengeni compute keeps a sandbox's enrollment; its agent has nothing
             // to renew.
-            credential_renew: link.fabric.is_none(),
+            credential_renew: link.compute.is_none(),
             mac_permissions,
             browser_control_http: link.platform.browser_control_http_supported(),
             // Linux agents running as root switch user per request.
@@ -5536,18 +5536,18 @@ mod tests {
             .expect("clean supervisor result");
     }
 
-    /// Fabric mode over a real nats-server playing the sandbox's host: the
+    /// Compute mode over a real nats-server playing the sandbox's host: the
     /// link dials with no credential, advertises nothing to renew, follows the
     /// relay credential the host sends, refuses renewal and self-update, and
     /// reconnects at once when asked (its host lost its connections).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::too_many_lines)] // one linear wire scenario
-    async fn a_fabric_link_serves_through_its_host_without_a_credential() {
+    async fn a_compute_link_serves_through_its_host_without_a_credential() {
         use opengeni_agent_platform::NativePlatform;
 
         let Some(nats_bin) = it::find_nats_server() else {
             eprintln!(
-                "SKIP a_fabric_link_serves_through_its_host_without_a_credential: no nats-server"
+                "SKIP a_compute_link_serves_through_its_host_without_a_credential: no nats-server"
             );
             return;
         };
@@ -5560,12 +5560,12 @@ mod tests {
         credentials.nats_bearer = String::new();
         let relay = RelayCredential::pending();
         let definition = SupervisorLink::new(
-            "fabric-test",
+            "compute-test",
             Arc::new(NativePlatform::with_root(std::env::temp_dir())),
             credentials,
         )
         .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
-        .with_fabric(FabricLink {
+        .with_compute(ComputeLink {
             relay: relay.clone(),
         });
         let link = WorkspaceLink::from_definition(definition.clone());
@@ -5585,7 +5585,7 @@ mod tests {
 
         // The host sends the relay credential; the link's streams then use it.
         host.publish(
-            crate::fabric::RELAY_SUBJECT,
+            crate::compute::RELAY_SUBJECT,
             br#"{"url": "wss://relay.example/stream", "token": "ogr_from_host", "expires_at_ms": 18446744073709551615}"#
                 .as_slice()
                 .into(),
@@ -5669,7 +5669,7 @@ mod tests {
         shutdown.request();
         tokio::time::timeout(Duration::from_secs(5), run)
             .await
-            .expect("fabric supervisor stops")
+            .expect("compute supervisor stops")
             .expect("run task")
             .expect("clean supervisor result");
     }
@@ -5689,12 +5689,12 @@ mod tests {
         let mut credentials = it::test_credentials(&url);
         credentials.nats_bearer = String::new();
         let definition = SupervisorLink::new(
-            "fabric-backoff-test",
+            "compute-backoff-test",
             Arc::new(NativePlatform::with_root(std::env::temp_dir())),
             credentials,
         )
         .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
-        .with_fabric(FabricLink {
+        .with_compute(ComputeLink {
             relay: RelayCredential::pending(),
         });
         let link = WorkspaceLink::from_definition(definition.clone());
@@ -5754,12 +5754,12 @@ mod tests {
         let mut credentials = it::test_credentials(&format!("nats://{}", gate.addr));
         credentials.nats_bearer = String::new();
         let definition = SupervisorLink::new(
-            "fabric-stalled-dial-test",
+            "compute-stalled-dial-test",
             Arc::new(NativePlatform::with_root(std::env::temp_dir())),
             credentials,
         )
         .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
-        .with_fabric(FabricLink {
+        .with_compute(ComputeLink {
             relay: RelayCredential::pending(),
         });
         let link = WorkspaceLink::from_definition(definition.clone());
@@ -5844,18 +5844,18 @@ mod tests {
             .expect("clean supervisor result");
     }
 
-    /// A fabric host refuses a link it does not serve yet (a stale epoch, an
+    /// A compute host refuses a link it does not serve yet (a stale epoch, an
     /// invalid ticket) with the authorization error a control plane gives a
-    /// rejected credential. A fabric link has no credential to renew, so the
+    /// rejected credential. A compute link has no credential to renew, so the
     /// refusal must not park it: it reconnects as soon as its host asks, for
     /// the control and the bulk connection alike.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_fabric_link_refused_by_its_host_reconnects_when_asked() {
+    async fn a_compute_link_refused_by_its_host_reconnects_when_asked() {
         use opengeni_agent_platform::NativePlatform;
 
         let Some(nats_bin) = it::find_nats_server() else {
             eprintln!(
-                "SKIP a_fabric_link_refused_by_its_host_reconnects_when_asked: no nats-server"
+                "SKIP a_compute_link_refused_by_its_host_reconnects_when_asked: no nats-server"
             );
             return;
         };
@@ -5869,12 +5869,12 @@ mod tests {
         let mut credentials = it::test_credentials(&format!("nats://{}", gate.addr));
         credentials.nats_bearer = String::new();
         let definition = SupervisorLink::new(
-            "fabric-refused-test",
+            "compute-refused-test",
             Arc::new(NativePlatform::with_root(std::env::temp_dir())),
             credentials,
         )
         .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
-        .with_fabric(FabricLink {
+        .with_compute(ComputeLink {
             relay: RelayCredential::pending(),
         });
         let link = WorkspaceLink::from_definition(definition.clone());
@@ -5948,12 +5948,12 @@ mod tests {
             let mut credentials = it::test_credentials(&format!("nats://{}", gate.addr));
             credentials.nats_bearer = String::new();
             let definition = SupervisorLink::new(
-                "fabric-stop-before-dial-test",
+                "compute-stop-before-dial-test",
                 Arc::new(NativePlatform::with_root(std::env::temp_dir())),
                 credentials,
             )
             .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID)
-            .with_fabric(FabricLink {
+            .with_compute(ComputeLink {
                 relay: RelayCredential::pending(),
             });
             let link = WorkspaceLink::from_definition(definition.clone());

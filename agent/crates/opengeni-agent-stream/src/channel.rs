@@ -669,7 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_reconnect_presents_the_credential_current_then() {
-        // A fabric agent's producer token is replaced before it expires; a
+        // A compute agent's producer token is replaced before it expires; a
         // stream registered with the old one must present the new one when it
         // reconnects.
         let credential = RelayCredential::fixed("wss://relay.example/stream", "ogr_first");

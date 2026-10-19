@@ -1,6 +1,6 @@
 // The compute AGENT GATEWAY over real wires: a real nats-server, the shared
 // Postgres (sandbox enrollments, claims and epoch fences under RLS), a fake
-// fabric serving the link keys, the gateway booted exactly as the API boots
+// control service serving the link keys, the gateway booted exactly as the API boots
 // it, and a TypeScript host that speaks the host side of the agent link
 // (compute/docs/agent-link.md). It proves that a worker's request over NATS
 // reaches the sandbox's agent through its host's link and the answer comes
@@ -73,7 +73,7 @@ import {
 } from "./helpers/compute-link-host";
 
 const TEAM = "team-opengeni";
-const API_KEY = "fabric-test-key";
+const API_KEY = "control-test-key";
 const RELAY_SECRET = "compute-gateway-relay-secret";
 const MAX_WS_MESSAGE = 8 * 1024 * 1024 + 64 * 1024;
 
@@ -140,7 +140,7 @@ let db: Database;
 let nats: RunningNats;
 let controlPlane: NatsConnection;
 let key: TestLinkKey;
-let fabric: ReturnType<typeof Bun.serve>;
+let control: ReturnType<typeof Bun.serve>;
 let api: ReturnType<typeof Bun.serve<ApiWebSocketConnection>>;
 let handle: ComputeGatewayHandle;
 let linkUrl: string;
@@ -159,7 +159,7 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 }
 
 /** A compute sandbox's enrollment, as the provider creates it before the
- * fabric create. */
+ * control service create. */
 async function sandboxAgent() {
   const workspace = await freshWorkspace();
   const agentId = crypto.randomUUID();
@@ -248,7 +248,7 @@ beforeAll(async () => {
   nats = await startPlainNats();
   controlPlane = await connect({ servers: nats.url, name: "test-control-plane" });
   key = await generateTestLinkKey("k1");
-  fabric = Bun.serve({
+  control = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     fetch: (request) => {
@@ -266,7 +266,7 @@ beforeAll(async () => {
   linkUrl = `ws://127.0.0.1:${apiPort}/v1/compute/agent-link`;
   const settings = testSettings({
     natsUrl: nats.url,
-    computeApiUrl: `http://127.0.0.1:${fabric.port}`,
+    computeApiUrl: `http://127.0.0.1:${control.port}`,
     computeApiKey: API_KEY,
     computeLinkUrl: linkUrl,
     selfhostedRelayUrl: "wss://relay.test/stream",
@@ -288,7 +288,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await handle?.close().catch(() => undefined);
   api?.stop(true);
-  fabric?.stop(true);
+  control?.stop(true);
   await controlPlane?.close().catch(() => undefined);
   await nats?.stop().catch(() => undefined);
   await client?.close().catch(() => undefined);

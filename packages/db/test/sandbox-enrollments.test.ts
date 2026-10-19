@@ -23,7 +23,7 @@ import {
 // 0844: Opengeni creates the enrollment of the agent inside each compute
 // sandbox itself. It is kind 'sandbox', bound to the sandbox's group, has no
 // key or bearer, is never a machine (no sandboxes row, not listed, not
-// counted), is fenced by the fabric owner epoch at the agent gateway and is
+// counted), is fenced by the control service's owner epoch at the agent gateway and is
 // revoked when the sandbox is deleted. Runs as opengeni_app so FORCE RLS applies.
 
 let available = true;

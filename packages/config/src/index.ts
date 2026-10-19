@@ -1356,14 +1356,14 @@ const SettingsSchema = z.object({
     .max(63)
     .regex(/^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/)
     .optional(),
-  // --- Opengeni compute (optional; Opengeni's own microVM sandbox fabric) ---
+  // --- Opengeni compute (optional; Opengeni's own microVM sandboxes) ---
   // Every compute sandbox runs the Connected Machine agent, reached through
   // its host's link to this API's agent gateway, so this backend also needs
   // the relay and the agent op-stream. Nothing here is read unless a session
   // or the deployment selects `compute`, or the gateway URL is set.
   computeApiUrl: z.string().url().optional(),
   computeApiKey: z.string().min(1).max(8192).optional(),
-  // Fabric image refs. Omitted, the fleet's default image. The desktop image is
+  // Compute image refs. Omitted, the control service's default image. The desktop image is
   // used when OPENGENI_SANDBOX_DESKTOP_ENABLED=true and carries the display stack.
   computeImage: z.string().min(1).max(2048).optional(),
   computeDesktopImage: z.string().min(1).max(2048).optional(),
@@ -1372,9 +1372,9 @@ const SettingsSchema = z.object({
   // Guaranteed shares below the ceilings above; omitted, the whole ceiling.
   computeMemoryRequestMib: z.coerce.number().int().min(128).max(262_144).optional(),
   computeCpuRequestMillis: z.coerce.number().int().min(10).max(64_000).optional(),
-  // The agent gateway's public WebSocket URL (wss://). Fabric hosts dial it,
+  // The agent gateway's public WebSocket URL (wss://). Compute hosts dial it,
   // and it is the exact audience of their host tokens and sandbox tickets, so
-  // it must equal the URL the fleet is configured with for Opengeni's team.
+  // it must equal the URL the control service is configured with for Opengeni's team.
   // This API serves the gateway at its path.
   computeLinkUrl: z.string().url().optional(),
   // How long a create waits for the sandbox's agent to connect, and how long
@@ -11087,7 +11087,7 @@ export function streamTokenDegraded(settings: Settings): boolean {
   return settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined;
 }
 
-/** Whether this deployment serves the compute agent gateway: the fabric API
+/** Whether this deployment serves the compute agent gateway: the control service API
  * it reads link keys from and the gateway's own URL are both configured. */
 export function computeGatewayConfigured(settings: Settings): boolean {
   return Boolean(settings.computeApiUrl && settings.computeApiKey && settings.computeLinkUrl);

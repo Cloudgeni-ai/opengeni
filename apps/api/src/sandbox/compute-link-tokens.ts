@@ -1,9 +1,9 @@
 /**
- * Verify the compute fleet's agent-link tokens (compute/docs/agent-link.md
+ * Verify the compute control service's agent-link tokens (compute/docs/agent-link.md
  * section 4): the host token a host presents when it dials the gateway, and
  * the ticket each sandbox's session opens with. Both are EdDSA (Ed25519) JWTs
- * signed by the fleet; its public keys and Opengeni's own team come from the
- * fabric's `GET /v1/link/keys`, cached five minutes and read again for an
+ * signed by the control service; its public keys and Opengeni's own team come
+ * from its `GET /v1/link/keys`, cached five minutes and read again for an
  * unknown key id.
  */
 
@@ -32,7 +32,7 @@ export class ComputeLinkTokenError extends Error {
 
 const KEYS_TTL_MS = 5 * 60_000;
 /** An unknown key id reads the keys again at most this often, so forged ids
- * cannot make the gateway hammer the fabric. */
+ * cannot make the gateway hammer the control service. */
 const UNKNOWN_KID_REFETCH_MS = 10_000;
 const SKEW_MS = 60_000;
 
@@ -73,7 +73,7 @@ export class ComputeLinkVerifier {
 
   constructor(
     private readonly options: {
-      /** Reads `GET /v1/link/keys` from the fabric. */
+      /** Reads `GET /v1/link/keys` from the control service. */
       fetchKeys: () => Promise<ComputeLinkKeySet>;
       /** The gateway's own URL: every token's `aud`. */
       audience: string;
@@ -198,7 +198,7 @@ export class ComputeLinkVerifier {
         .fetchKeys()
         .then((keySet) => {
           if (!nonEmptyString(keySet?.team) || !Array.isArray(keySet.keys)) {
-            throw new Error("the fabric answered an invalid link key set");
+            throw new Error("the control service answered an invalid link key set");
           }
           this.keySet = keySet;
           this.fetchedAtMs = this.now();
@@ -221,7 +221,7 @@ export class ComputeLinkVerifier {
   }
 }
 
-/** The fabric's link keys could not be read and none are cached: the gateway
+/** The control service's link keys could not be read and none are cached: the gateway
  * cannot judge a token now (try again later), which is not a bad token. */
 export class ComputeLinkKeysUnavailableError extends Error {
   constructor(cause: unknown) {

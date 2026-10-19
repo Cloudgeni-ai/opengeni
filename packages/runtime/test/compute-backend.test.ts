@@ -8,8 +8,8 @@ import {
   type OpStatus,
 } from "@opengeni/agent-proto";
 import {
-  ComputeFabricClient,
-  ComputeFabricError,
+  ComputeControlClient,
+  ComputeControlError,
   ComputeSandboxClient,
   ComputeSandboxSession,
   ComputeWakeGate,
@@ -47,15 +47,15 @@ const GROUP = "33333333-3333-4333-8333-333333333333";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 const GATEWAY = "wss://gateway.test/v1/compute/agent-link";
 
-type FabricBox = {
+type FakeSandbox = {
   id: string;
   body: Record<string, unknown>;
   createdMs?: number;
 };
 
-/** An in-process fake of the fabric HTTP API (the subset Opengeni uses). */
-class FakeFabric {
-  readonly boxes = new Map<string, FabricBox>();
+/** An in-process fake of the control service HTTP API (the subset Opengeni uses). */
+class FakeControlService {
+  readonly boxes = new Map<string, FakeSandbox>();
   /** request_id -> sandbox id, kept after a delete (410 request_gone). */
   readonly requestIds = new Map<string, string>();
   readonly requests: Array<{ method: string; path: string; body: unknown; apiKey: string | null }> =
@@ -65,7 +65,7 @@ class FakeFabric {
   failCreates: number[] = [];
   /** Make the sandbox but never answer a create (every attempt is a 504). */
   loseCreateAnswers = false;
-  /** Fail request lookups and deletes (the fabric is unreachable for cleanup). */
+  /** Fail request lookups and deletes (the control service is unreachable for cleanup). */
   failCleanup = false;
   /** Sandboxes whose delete never answers until the client gives up. */
   readonly stallDeletes = new Set<string>();
@@ -73,9 +73,9 @@ class FakeFabric {
   readonly failDeletes = new Set<string>();
   private readonly stalls = new Set<() => void>();
   private readonly server: ReturnType<typeof Bun.serve>;
-  /** Called when the fabric wakes a sandbox. */
-  onWake: (box: FabricBox) => void = () => {};
-  onCreate: (box: FabricBox) => void = () => {};
+  /** Called when the control service wakes a sandbox. */
+  onWake: (box: FakeSandbox) => void = () => {};
+  onCreate: (box: FakeSandbox) => void = () => {};
 
   constructor() {
     this.server = Bun.serve({
@@ -91,7 +91,7 @@ class FakeFabric {
           body,
           apiKey: request.headers.get("x-api-key"),
         });
-        if (request.headers.get("x-api-key") !== "fabric-key") {
+        if (request.headers.get("x-api-key") !== "control-key") {
           return Response.json({ code: "unauthorized", message: "bad key" }, { status: 401 });
         }
         const parts = url.pathname.split("/").filter(Boolean);
@@ -178,7 +178,7 @@ class FakeFabric {
     return `http://127.0.0.1:${this.server.port}`;
   }
 
-  view(box: FabricBox) {
+  view(box: FakeSandbox) {
     const agent = (box.body.init as { agent: { workspace_id: string; agent_id: string } }).agent;
     return {
       id: box.id,
@@ -192,9 +192,9 @@ class FakeFabric {
     };
   }
 
-  /** Put an orphan of this deployment on the fabric, created long ago. */
-  addOrphan(id: string, enrollmentId: string = crypto.randomUUID()): FabricBox {
-    const box: FabricBox = {
+  /** Put an orphan of this deployment on the control service, created long ago. */
+  addOrphan(id: string, enrollmentId: string = crypto.randomUUID()): FakeSandbox {
+    const box: FakeSandbox = {
       id,
       createdMs: 1,
       body: {
@@ -457,9 +457,9 @@ class FakeAgentPlane implements ComputeAgentPlane {
   }
 }
 
-const fabrics: FakeFabric[] = [];
+const controls: FakeControlService[] = [];
 afterEach(() => {
-  for (const fabric of fabrics.splice(0)) fabric.stop();
+  for (const control of controls.splice(0)) control.stop();
 });
 
 function fenced(requestId: string, message: string): ControlResponse {
@@ -470,7 +470,7 @@ function fenced(requestId: string, message: string): ControlResponse {
   };
 }
 
-function agentIdOf(box: FabricBox): string {
+function agentIdOf(box: FakeSandbox): string {
   return (box.body.init as { agent: { agent_id: string } }).agent.agent_id;
 }
 
@@ -483,17 +483,17 @@ function setup(
     execTimeoutMs?: number;
   } = {},
 ) {
-  const fabric = new FakeFabric();
-  fabrics.push(fabric);
+  const control = new FakeControlService();
+  controls.push(control);
   const plane = new FakeAgentPlane();
   // The guest started the agent and its host opened the agent's session.
-  fabric.onCreate = (box) => {
+  control.onCreate = (box) => {
     if (options.connectOnCreate !== false) plane.open(agentIdOf(box));
   };
   const client = new ComputeSandboxClient({
-    fabric: new ComputeFabricClient({
-      baseUrl: fabric.url,
-      apiKey: "fabric-key",
+    control: new ComputeControlClient({
+      baseUrl: control.url,
+      apiKey: "control-key",
       sleep: async () => {},
     }),
     plane: () => plane,
@@ -510,14 +510,14 @@ function setup(
     ...(options.execTimeoutMs !== undefined ? { execTimeoutMs: options.execTimeoutMs } : {}),
     environment: { FOO: "bar" },
   });
-  return { fabric, plane, client };
+  return { control, plane, client };
 }
 
 const identity = { accountId: ACCOUNT, workspaceId: WORKSPACE, sandboxGroupId: GROUP };
 
 describe("compute sandbox client", () => {
   test("create makes the enrollment, names the agent in the init and waits for it", async () => {
-    const { fabric, plane, client } = setup({ desktop: true });
+    const { control, plane, client } = setup({ desktop: true });
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
     expect(session).toBeInstanceOf(ComputeSandboxSession);
     expect(session.backendId).toBe("compute");
@@ -534,9 +534,9 @@ describe("compute sandbox client", () => {
       },
     ]);
 
-    const create = fabric.requests.find((r) => r.method === "POST" && r.path === "/v1/sandboxes");
+    const create = control.requests.find((r) => r.method === "POST" && r.path === "/v1/sandboxes");
     const body = create!.body as Record<string, any>;
-    expect(create!.apiKey).toBe("fabric-key");
+    expect(create!.apiKey).toBe("control-key");
     expect(body).toEqual({
       request_id: session.state.requestId,
       image: "registry.test/compute:1",
@@ -563,7 +563,7 @@ describe("compute sandbox client", () => {
     });
     // The agent answered a probe before create returned, with no wake.
     expect(plane.sent.some((s) => s.req.op?.$case === "ping")).toBe(true);
-    expect(fabric.wakes).toBe(0);
+    expect(control.wakes).toBe(0);
 
     await session.writeFile({ path: "/workspace/a.txt", content: "hello" });
     expect(new TextDecoder().decode(await session.readFile({ path: "/workspace/a.txt" }))).toBe(
@@ -571,46 +571,46 @@ describe("compute sandbox client", () => {
     );
   });
 
-  test("create retries an uncertain fabric answer with the same request id and body", async () => {
-    const { fabric, client } = setup();
-    fabric.failCreates = [503, 504];
+  test("create retries an uncertain control service answer with the same request id and body", async () => {
+    const { control, client } = setup();
+    control.failCreates = [503, 504];
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
-    const creates = fabric.requests.filter(
+    const creates = control.requests.filter(
       (r) => r.method === "POST" && r.path === "/v1/sandboxes",
     );
     expect(creates).toHaveLength(3);
     expect(new Set(creates.map((r) => JSON.stringify(r.body))).size).toBe(1);
     expect((creates[0]!.body as { request_id: string }).request_id).toBe(session.state.requestId);
-    expect(fabric.boxes.size).toBe(1);
+    expect(control.boxes.size).toBe(1);
   });
 
-  test("create without a lease identity fails before calling the fabric", async () => {
-    const { fabric, plane, client } = setup();
+  test("create without a lease identity fails before calling the control service", async () => {
+    const { control, plane, client } = setup();
     await expect(client.create(undefined, {})).rejects.toBeInstanceOf(SandboxConfigError);
-    expect(fabric.requests).toHaveLength(0);
+    expect(control.requests).toHaveLength(0);
     expect(plane.created).toHaveLength(0);
   });
 
   test("a sandbox whose agent never connects is deleted and its enrollment revoked", async () => {
-    const { fabric, plane, client } = setup({ connectOnCreate: false, readyTimeoutMs: 300 });
+    const { control, plane, client } = setup({ connectOnCreate: false, readyTimeoutMs: 300 });
     await expect(
       client.create(undefined, { opengeniCreateIdentity: identity }),
     ).rejects.toMatchObject({ code: expect.anything() });
-    expect(fabric.boxes.size).toBe(0);
-    expect(fabric.requests.some((r) => r.method === "DELETE")).toBe(true);
+    expect(control.boxes.size).toBe(0);
+    expect(control.requests.some((r) => r.method === "DELETE")).toBe(true);
     expect(plane.revoked).toEqual([plane.created[0]!.enrollmentId as string]);
   });
 
   test("a create whose answer never arrives finds its sandbox by request id and deletes it", async () => {
-    const { fabric, plane, client } = setup();
-    fabric.loseCreateAnswers = true;
+    const { control, plane, client } = setup();
+    control.loseCreateAnswers = true;
     await expect(
       client.create(undefined, { opengeniCreateIdentity: identity }),
-    ).rejects.toBeInstanceOf(ComputeFabricError);
+    ).rejects.toBeInstanceOf(ComputeControlError);
     expect(
-      fabric.requests.some((r) => r.method === "GET" && r.path.startsWith("/v1/requests/")),
+      control.requests.some((r) => r.method === "GET" && r.path.startsWith("/v1/requests/")),
     ).toBe(true);
-    expect(fabric.boxes.size).toBe(0);
+    expect(control.boxes.size).toBe(0);
     expect(plane.revoked).toEqual([plane.created[0]!.enrollmentId as string]);
   });
 
@@ -621,17 +621,17 @@ describe("compute sandbox client", () => {
   });
 
   test("a lost create whose cleanup fails is left to the orphan sweep, which removes it", async () => {
-    const { fabric, plane, client } = setup();
-    fabric.loseCreateAnswers = true;
-    fabric.failCleanup = true;
+    const { control, plane, client } = setup();
+    control.loseCreateAnswers = true;
+    control.failCleanup = true;
     await expect(
       client.create(undefined, { opengeniCreateIdentity: identity }),
-    ).rejects.toBeInstanceOf(ComputeFabricError);
-    // The fabric holds a sandbox nothing names, and its enrollment is active.
+    ).rejects.toBeInstanceOf(ComputeControlError);
+    // The control service holds a sandbox nothing names, and its enrollment is active.
     const orphan = plane.created[0]!.enrollmentId as string;
-    expect(fabric.boxes.size).toBe(1);
+    expect(control.boxes.size).toBe(1);
     expect(plane.active()).toEqual([orphan]);
-    const [box] = fabric.boxes.values();
+    const [box] = control.boxes.values();
     expect(box!.body.metadata).toEqual({
       opengeni_gateway: GATEWAY,
       opengeni_workspace_id: WORKSPACE,
@@ -639,11 +639,11 @@ describe("compute sandbox client", () => {
       opengeni_enrollment_id: orphan,
     });
 
-    fabric.loseCreateAnswers = false;
-    fabric.failCleanup = false;
+    control.loseCreateAnswers = false;
+    control.failCleanup = false;
     const sweep = (nowMs: number) =>
       sweepComputeOrphans({
-        fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+        control: new ComputeControlClient({ baseUrl: control.url, apiKey: "control-key" }),
         gateway: GATEWAY,
         named: async () => false,
         revokeEnrollment: (input) => plane.revokeEnrollment(input),
@@ -651,7 +651,7 @@ describe("compute sandbox client", () => {
       });
     // Too young: its create may still be committing.
     expect((await sweep(Date.now())).deleted).toEqual([]);
-    expect(fabric.boxes.size).toBe(1);
+    expect(control.boxes.size).toBe(1);
     const swept = await sweep(Date.now() + 11 * 60_000);
     expect(swept.deleted).toEqual([
       {
@@ -661,15 +661,15 @@ describe("compute sandbox client", () => {
         enrollmentId: orphan,
       },
     ]);
-    expect(fabric.boxes.size).toBe(0);
+    expect(control.boxes.size).toBe(0);
     expect(plane.revoked).toEqual([orphan]);
   });
 
   test("the orphan sweep keeps named sandboxes and never touches another deployment's", async () => {
-    const { fabric, plane, client } = setup();
+    const { control, plane, client } = setup();
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
     const other = crypto.randomUUID();
-    fabric.boxes.set("sbx-other", {
+    control.boxes.set("sbx-other", {
       id: "sbx-other",
       body: {
         metadata: {
@@ -685,7 +685,7 @@ describe("compute sandbox client", () => {
     setSelfhostedApplyDiff(applyDiff);
     const sentBefore = plane.sent.length;
     const result = await sweepComputeOrphans({
-      fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+      control: new ComputeControlClient({ baseUrl: control.url, apiKey: "control-key" }),
       gateway: GATEWAY,
       named: async (sandbox) => {
         asked.push(sandbox.sandboxId);
@@ -696,20 +696,20 @@ describe("compute sandbox client", () => {
     });
     expect(asked).toEqual([session.state.sandboxId]);
     expect(result).toEqual({ examined: 1, deleted: [], failed: 0 });
-    expect([...fabric.boxes.keys()].sort()).toEqual(["sbx-other", session.state.sandboxId].sort());
+    expect([...control.boxes.keys()].sort()).toEqual(["sbx-other", session.state.sandboxId].sort());
     // The sweep never messages an agent.
     expect(plane.sent).toHaveLength(sentBefore);
   });
 
   test("an orphan whose delete fails is revoked, counted and kept for the next sweep", async () => {
-    const { fabric, plane, client } = setup();
+    const { control, plane, client } = setup();
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
-    fabric.failCleanup = true;
+    control.failCleanup = true;
     const sweep = () =>
       sweepComputeOrphans({
-        fabric: new ComputeFabricClient({
-          baseUrl: fabric.url,
-          apiKey: "fabric-key",
+        control: new ComputeControlClient({
+          baseUrl: control.url,
+          apiKey: "control-key",
           sleep: async () => {},
         }),
         gateway: GATEWAY,
@@ -720,11 +720,11 @@ describe("compute sandbox client", () => {
     expect(await sweep()).toMatchObject({ examined: 1, deleted: [], failed: 1 });
     // Revoked first: the sandbox is still listed, so the next sweep owns it.
     expect(plane.revoked).toEqual([session.state.enrollmentId]);
-    expect(fabric.boxes.size).toBe(1);
+    expect(control.boxes.size).toBe(1);
     // A pass deletes at most its limit; the next pass continues.
-    fabric.failCleanup = false;
+    control.failCleanup = false;
     const capped = await sweepComputeOrphans({
-      fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+      control: new ComputeControlClient({ baseUrl: control.url, apiKey: "control-key" }),
       gateway: GATEWAY,
       named: async () => false,
       revokeEnrollment: (input) => plane.revokeEnrollment(input),
@@ -732,21 +732,21 @@ describe("compute sandbox client", () => {
       maxDeletions: 0,
     });
     expect(capped.deleted).toEqual([]);
-    expect(fabric.boxes.size).toBe(1);
-    fabric.failCleanup = false;
+    expect(control.boxes.size).toBe(1);
+    control.failCleanup = false;
     expect((await sweep()).deleted).toHaveLength(1);
-    expect(fabric.boxes.size).toBe(0);
+    expect(control.boxes.size).toBe(0);
   });
 
   test("an orphan whose revoke fails is not deleted, so the next sweep still owns it", async () => {
-    const { fabric } = setup();
+    const { control } = setup();
     const enrollmentId = crypto.randomUUID();
-    fabric.addOrphan("sbx-orphan", enrollmentId);
+    control.addOrphan("sbx-orphan", enrollmentId);
     const revoked: string[] = [];
     let revokeFails = true;
     const sweep = () =>
       sweepComputeOrphans({
-        fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+        control: new ComputeControlClient({ baseUrl: control.url, apiKey: "control-key" }),
         gateway: GATEWAY,
         named: async () => false,
         revokeEnrollment: async (input) => {
@@ -755,28 +755,28 @@ describe("compute sandbox client", () => {
         },
       });
     expect(await sweep()).toMatchObject({ examined: 1, deleted: [], failed: 1 });
-    expect(fabric.boxes.has("sbx-orphan")).toBe(true);
-    expect(fabric.requests.some((r) => r.method === "DELETE")).toBe(false);
+    expect(control.boxes.has("sbx-orphan")).toBe(true);
+    expect(control.requests.some((r) => r.method === "DELETE")).toBe(false);
     revokeFails = false;
     expect((await sweep()).deleted).toHaveLength(1);
     expect(revoked).toEqual([enrollmentId]);
-    expect(fabric.boxes.size).toBe(0);
+    expect(control.boxes.size).toBe(0);
   });
 
   test("one stalled delete never holds up the other orphans, and the sweep ends with its signal", async () => {
-    const { fabric } = setup();
-    for (const id of ["sbx-a", "sbx-stuck", "sbx-b", "sbx-c"]) fabric.addOrphan(id);
-    fabric.stallDeletes.add("sbx-stuck");
+    const { control } = setup();
+    for (const id of ["sbx-a", "sbx-stuck", "sbx-b", "sbx-c"]) control.addOrphan(id);
+    control.stallDeletes.add("sbx-stuck");
     const budget = new AbortController();
-    const fabricClient = new ComputeFabricClient({
-      baseUrl: fabric.url,
-      apiKey: "fabric-key",
+    const controlClient = new ComputeControlClient({
+      baseUrl: control.url,
+      apiKey: "control-key",
       requestTimeoutMs: 60_000,
       signal: budget.signal,
     });
     const started = Date.now();
     const sweeping = sweepComputeOrphans({
-      fabric: fabricClient,
+      control: controlClient,
       gateway: GATEWAY,
       named: async () => false,
       revokeEnrollment: async () => {},
@@ -784,8 +784,8 @@ describe("compute sandbox client", () => {
       signal: budget.signal,
     });
     // The healthy siblings are deleted while the stuck delete hangs.
-    for (let i = 0; i < 100 && fabric.boxes.size > 1; i += 1) await Bun.sleep(10);
-    expect([...fabric.boxes.keys()]).toEqual(["sbx-stuck"]);
+    for (let i = 0; i < 100 && control.boxes.size > 1; i += 1) await Bun.sleep(10);
+    expect([...control.boxes.keys()]).toEqual(["sbx-stuck"]);
     budget.abort();
     const result = await sweeping;
     expect(Date.now() - started).toBeLessThan(5_000);
@@ -793,31 +793,31 @@ describe("compute sandbox client", () => {
     // The stop abandoned the stuck delete; it is not a failure to defer.
     expect(result.failed).toBe(0);
     // An aborted signal starts nothing new.
-    fabric.stallDeletes.clear();
+    control.stallDeletes.clear();
     const after = await sweepComputeOrphans({
-      fabric: fabricClient,
+      control: controlClient,
       gateway: GATEWAY,
       named: async () => false,
       revokeEnrollment: async () => {},
       signal: budget.signal,
     });
     expect(after).toEqual({ examined: 0, deleted: [], failed: 0 });
-    expect(fabric.boxes.has("sbx-stuck")).toBe(true);
+    expect(control.boxes.has("sbx-stuck")).toBe(true);
   });
 
   test("a prefix of failing orphans never starves the healthy ones behind it", async () => {
-    const { fabric } = setup();
+    const { control } = setup();
     const ids = Array.from({ length: 57 }, (_, i) => `sbx-${String(i).padStart(3, "0")}`);
-    for (const id of ids) fabric.addOrphan(id);
+    for (const id of ids) control.addOrphan(id);
     // With the production limit, 56 failing deletes ahead of one healthy one.
-    for (const id of ids.slice(0, 56)) fabric.failDeletes.add(id);
+    for (const id of ids.slice(0, 56)) control.failDeletes.add(id);
     const progress = createComputeOrphanSweepProgress();
     const startedAt = Date.now();
     const sweep = (nowMs: number) =>
       sweepComputeOrphans({
-        fabric: new ComputeFabricClient({
-          baseUrl: fabric.url,
-          apiKey: "fabric-key",
+        control: new ComputeControlClient({
+          baseUrl: control.url,
+          apiKey: "control-key",
           maxAttempts: 1,
         }),
         gateway: GATEWAY,
@@ -834,23 +834,23 @@ describe("compute sandbox client", () => {
     expect(second.deleted.map((d) => d.sandboxId)).toEqual(["sbx-056"]);
     expect(second.failed).toBe(6);
     // Failed candidates come back once their retry time has passed.
-    fabric.failDeletes.clear();
+    control.failDeletes.clear();
     expect((await sweep(startedAt + 5 * 60_000 + 1)).deleted).toEqual([]);
     const later = await sweep(startedAt + 30 * 60_000);
     expect(later.deleted).toHaveLength(COMPUTE_ORPHAN_SWEEP_LIMIT);
-    expect(fabric.boxes.size).toBe(6);
+    expect(control.boxes.size).toBe(6);
     // Only the six not reached yet still carry their earlier failure.
     expect(progress.failures.size).toBe(6);
   });
 
   test("each pass resumes after the last orphan the previous one reached", async () => {
-    const { fabric } = setup();
-    for (const id of ["sbx-a", "sbx-b", "sbx-c"]) fabric.addOrphan(id);
+    const { control } = setup();
+    for (const id of ["sbx-a", "sbx-b", "sbx-c"]) control.addOrphan(id);
     const progress = createComputeOrphanSweepProgress();
     const reached: string[] = [];
     const sweep = () =>
       sweepComputeOrphans({
-        fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+        control: new ComputeControlClient({ baseUrl: control.url, apiKey: "control-key" }),
         gateway: GATEWAY,
         named: async (orphan) => {
           reached.push(orphan.sandboxId);
@@ -864,7 +864,7 @@ describe("compute sandbox client", () => {
     const stop = new AbortController();
     // A pass stopped after its first check leaves the rest to the next one.
     await sweepComputeOrphans({
-      fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+      control: new ComputeControlClient({ baseUrl: control.url, apiKey: "control-key" }),
       gateway: GATEWAY,
       named: async (orphan) => {
         reached.push(orphan.sandboxId);
@@ -884,12 +884,12 @@ describe("compute sandbox client", () => {
   });
 
   test("a stopped sweep abandons a database check that waits", async () => {
-    const { fabric } = setup();
-    fabric.addOrphan("sbx-waiting");
+    const { control } = setup();
+    control.addOrphan("sbx-waiting");
     const stop = new AbortController();
     const started = Date.now();
     const sweeping = sweepComputeOrphans({
-      fabric: new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" }),
+      control: new ComputeControlClient({ baseUrl: control.url, apiKey: "control-key" }),
       gateway: GATEWAY,
       named: () => new Promise<boolean>(() => {}),
       revokeEnrollment: async () => {},
@@ -898,7 +898,7 @@ describe("compute sandbox client", () => {
     setTimeout(() => stop.abort(), 50);
     expect(await sweeping).toEqual({ examined: 1, deleted: [], failed: 0 });
     expect(Date.now() - started).toBeLessThan(3_000);
-    expect(fabric.boxes.has("sbx-waiting")).toBe(true);
+    expect(control.boxes.has("sbx-waiting")).toBe(true);
   });
 
   test("one stale enrollment stuck on a lock never keeps the others waiting, pass after pass", async () => {
@@ -994,36 +994,36 @@ describe("compute sandbox client", () => {
     expect(attempts).toEqual([]);
   });
 
-  test("deleting a sandbox revokes its enrollment only after the fabric delete", async () => {
-    const { fabric, plane, client } = setup();
+  test("deleting a sandbox revokes its enrollment only after the control service delete", async () => {
+    const { control, plane, client } = setup();
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
-    fabric.failCleanup = true;
-    await expect(client.delete(session.state)).rejects.toBeInstanceOf(ComputeFabricError);
+    control.failCleanup = true;
+    await expect(client.delete(session.state)).rejects.toBeInstanceOf(ComputeControlError);
     // Still on record: the drain's retry (or the orphan sweep) finishes it.
     expect(plane.active()).toEqual([session.state.enrollmentId]);
-    fabric.failCleanup = false;
+    control.failCleanup = false;
     await client.delete(session.state);
     expect(plane.revoked).toEqual([session.state.enrollmentId]);
-    expect(fabric.boxes.size).toBe(0);
+    expect(control.boxes.size).toBe(0);
     // A retry after success is still success.
     await client.delete(session.state);
   });
 
-  test("a sleeping sandbox is reached through its open session without a fabric wake", async () => {
-    const { fabric, client } = setup();
+  test("a sleeping sandbox is reached through its open session without a wake from the control service", async () => {
+    const { control, client } = setup();
     const created = await client.create(undefined, { opengeniCreateIdentity: identity });
     const state = await client.deserializeSessionState(
       await client.serializeSessionState(created.state),
     );
-    // Asleep on the fabric: the host keeps its session open and wakes it on
+    // Asleep on the control service: the host keeps its session open and wakes it on
     // the message itself. Resume does nothing but check the sandbox exists.
     const resumed = await client.resumeExact(state);
     await resumed.writeFile({ path: "/workspace/b.txt", content: "x" });
-    expect(fabric.wakes).toBe(0);
+    expect(control.wakes).toBe(0);
   });
 
-  test("a sandbox no host serves is woken through the fabric and the request resent", async () => {
-    const { fabric, plane, client } = setup();
+  test("a sandbox no host serves is woken through the control service and the request resent", async () => {
+    const { control, plane, client } = setup();
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
     await session.writeFile({ path: "/workspace/c.txt", content: "c" });
     const instance = plane.sessions.get(session.state.enrollmentId)!;
@@ -1036,13 +1036,13 @@ describe("compute sandbox client", () => {
       return connection ? { ...connection, connectionInstanceId: instance } : null;
     };
     // The wake places and adopts it; the new host reopens the same instance.
-    fabric.onWake = () => plane.open(session.state.enrollmentId, instance);
+    control.onWake = () => plane.open(session.state.enrollmentId, instance);
     setSelfhostedApplyDiff(applyDiff);
     const sentBefore = plane.sent.length;
 
     const bytes = await session.readFile({ path: "/workspace/c.txt" });
     expect(new TextDecoder().decode(bytes)).toBe("c");
-    expect(fabric.wakes).toBe(1);
+    expect(control.wakes).toBe(1);
     const reads = plane.sent.slice(sentBefore).filter((s) => s.req.op?.$case === "fsRead");
     // The first read reached no responder; the resend carries the same request id.
     expect(reads.length).toBe(2);
@@ -1050,7 +1050,7 @@ describe("compute sandbox client", () => {
   });
 
   test("no responders on the real replay transport wakes the sandbox at once", async () => {
-    const { fabric, plane, client } = setup();
+    const { control, plane, client } = setup();
     plane.natsTransport = true;
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
     await session.writeFile({ path: "/workspace/e.txt", content: "e" });
@@ -1063,13 +1063,13 @@ describe("compute sandbox client", () => {
       const connection = await lostResolve(input);
       return connection ? { ...connection, connectionInstanceId: instance } : null;
     };
-    fabric.onWake = () => plane.open(session.state.enrollmentId, instance);
+    control.onWake = () => plane.open(session.state.enrollmentId, instance);
     const before = plane.natsSubjects.length;
     const started = Date.now();
 
     const bytes = await session.readFile({ path: "/workspace/e.txt" });
     expect(new TextDecoder().decode(bytes)).toBe("e");
-    expect(fabric.wakes).toBe(1);
+    expect(control.wakes).toBe(1);
     // Woken on the first "no responders", not after the transport's recovery
     // allowance (minutes).
     expect(Date.now() - started).toBeLessThan(3_000);
@@ -1081,7 +1081,7 @@ describe("compute sandbox client", () => {
   });
 
   test("no responders stops retrying at once when the agent is back on another connection", async () => {
-    const { fabric, plane, client } = setup();
+    const { control, plane, client } = setup();
     plane.natsTransport = true;
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
     await session.writeFile({ path: "/workspace/f.txt", content: "f" });
@@ -1094,7 +1094,7 @@ describe("compute sandbox client", () => {
       return connection && !restarted ? { ...connection, connectionInstanceId: old } : connection;
     };
     // The wake cold-boots it: the agent restarted with a new instance.
-    fabric.onWake = () => {
+    control.onWake = () => {
       restarted = true;
       plane.open(session.state.enrollmentId);
     };
@@ -1102,18 +1102,18 @@ describe("compute sandbox client", () => {
     expect(new TextDecoder().decode(await session.readFile({ path: "/workspace/f.txt" }))).toBe(
       "f",
     );
-    expect(fabric.wakes).toBe(1);
+    expect(control.wakes).toBe(1);
     expect(Date.now() - started).toBeLessThan(3_000);
   });
 
   test("a sandbox with no open session is woken before the operation is sent", async () => {
-    const { fabric, plane, client } = setup();
+    const { control, plane, client } = setup();
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
     plane.sessions.delete(session.state.enrollmentId);
     // Adopted elsewhere after the wake: the agent restarted with a new instance.
-    fabric.onWake = () => plane.open(session.state.enrollmentId);
+    control.onWake = () => plane.open(session.state.enrollmentId);
     await session.writeFile({ path: "/workspace/d.txt", content: "d" });
-    expect(fabric.wakes).toBe(1);
+    expect(control.wakes).toBe(1);
     expect(new TextDecoder().decode(await session.readFile({ path: "/workspace/d.txt" }))).toBe(
       "d",
     );
@@ -1220,7 +1220,7 @@ describe("compute sandbox client", () => {
     expect(plane.sent.slice(before).some((s) => s.req.op?.$case === "opStart")).toBe(false);
   });
 
-  test("resumeExact of a sandbox the fabric no longer has is an unavailable instance", async () => {
+  test("resumeExact of a sandbox the control service no longer has is an unavailable instance", async () => {
     const { client } = setup();
     const created = await client.create(undefined, { opengeniCreateIdentity: identity });
     const state = await client.deserializeSessionState(
@@ -1233,11 +1233,11 @@ describe("compute sandbox client", () => {
   });
 
   test("delete removes the sandbox and revokes its enrollment, and is idempotent", async () => {
-    const { fabric, plane, client } = setup();
+    const { control, plane, client } = setup();
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
     await session.delete();
     await session.delete();
-    expect(fabric.boxes.size).toBe(0);
+    expect(control.boxes.size).toBe(0);
     expect(plane.revoked).toEqual([session.state.enrollmentId, session.state.enrollmentId]);
   });
 
@@ -1348,24 +1348,24 @@ describe("compute sandbox client", () => {
   });
 });
 
-describe("compute fabric client", () => {
+describe("compute control service client", () => {
   test("maps error codes to typed kinds and only retries retryable ones", async () => {
-    const fabric = new FakeFabric();
-    fabrics.push(fabric);
-    const wrongKey = new ComputeFabricClient({
-      baseUrl: fabric.url,
+    const control = new FakeControlService();
+    controls.push(control);
+    const wrongKey = new ComputeControlClient({
+      baseUrl: control.url,
       apiKey: "wrong",
       sleep: async () => {},
     });
     const error = await wrongKey.get("nope").catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(ComputeFabricError);
-    expect((error as ComputeFabricError).kind).toBe("unauthorized");
-    expect((error as ComputeFabricError).retryable).toBe(false);
-    expect(fabric.requests).toHaveLength(1);
+    expect(error).toBeInstanceOf(ComputeControlError);
+    expect((error as ComputeControlError).kind).toBe("unauthorized");
+    expect((error as ComputeControlError).retryable).toBe(false);
+    expect(control.requests).toHaveLength(1);
 
-    const client = new ComputeFabricClient({
-      baseUrl: fabric.url,
-      apiKey: "fabric-key",
+    const client = new ComputeControlClient({
+      baseUrl: control.url,
+      apiKey: "control-key",
       sleep: async () => {},
     });
     const body = {
@@ -1385,11 +1385,11 @@ describe("compute fabric client", () => {
     };
     const view = await client.create(body);
     const mismatch = await client.create({ ...body, vcpus: 2 }).catch((e: unknown) => e);
-    expect((mismatch as ComputeFabricError).kind).toBe("request_mismatch");
-    expect((mismatch as ComputeFabricError).retryable).toBe(false);
+    expect((mismatch as ComputeControlError).kind).toBe("request_mismatch");
+    expect((mismatch as ComputeControlError).retryable).toBe(false);
     await client.delete(view.id);
     const gone = await client.create(body).catch((e: unknown) => e);
-    expect((gone as ComputeFabricError).kind).toBe("request_gone");
+    expect((gone as ComputeControlError).kind).toBe("request_gone");
   });
 
   test("a body that stalls after the headers ends with the timeout or the caller's signal", async () => {
@@ -1410,44 +1410,44 @@ describe("compute fabric client", () => {
     try {
       const baseUrl = `http://127.0.0.1:${server.port}`;
       let started = Date.now();
-      const timedOut = await new ComputeFabricClient({
+      const timedOut = await new ComputeControlClient({
         baseUrl,
-        apiKey: "fabric-key",
+        apiKey: "control-key",
         requestTimeoutMs: 200,
         maxAttempts: 1,
       })
         .list({})
         .catch((e: unknown) => e);
-      expect(timedOut).toBeInstanceOf(ComputeFabricError);
-      expect((timedOut as ComputeFabricError).kind).toBe("transport");
+      expect(timedOut).toBeInstanceOf(ComputeControlError);
+      expect((timedOut as ComputeControlError).kind).toBe("transport");
       expect(Date.now() - started).toBeLessThan(3_000);
 
       const stop = new AbortController();
       setTimeout(() => stop.abort(), 100);
       started = Date.now();
-      const stopped = await new ComputeFabricClient({
+      const stopped = await new ComputeControlClient({
         baseUrl,
-        apiKey: "fabric-key",
+        apiKey: "control-key",
         requestTimeoutMs: 60_000,
         signal: stop.signal,
       })
         .list({})
         .catch((e: unknown) => e);
-      expect(stopped).toBeInstanceOf(ComputeFabricError);
+      expect(stopped).toBeInstanceOf(ComputeControlError);
       expect(Date.now() - started).toBeLessThan(3_000);
 
       // An error answer whose body stalls still ends, with its status.
       status = 503;
       started = Date.now();
-      const failed = await new ComputeFabricClient({
+      const failed = await new ComputeControlClient({
         baseUrl,
-        apiKey: "fabric-key",
+        apiKey: "control-key",
         requestTimeoutMs: 200,
         maxAttempts: 1,
       })
         .delete("sbx")
         .catch((e: unknown) => e);
-      expect((failed as ComputeFabricError).status).toBe(503);
+      expect((failed as ComputeControlError).status).toBe(503);
       expect(Date.now() - started).toBeLessThan(3_000);
     } finally {
       await server.stop(true);
@@ -1455,9 +1455,9 @@ describe("compute fabric client", () => {
   });
 
   test("delete of an absent sandbox succeeds; request lookups and link keys", async () => {
-    const fabric = new FakeFabric();
-    fabrics.push(fabric);
-    const client = new ComputeFabricClient({ baseUrl: fabric.url, apiKey: "fabric-key" });
+    const control = new FakeControlService();
+    controls.push(control);
+    const client = new ComputeControlClient({ baseUrl: control.url, apiKey: "control-key" });
     await client.delete("gone");
     expect(await client.lookupRequest("never")).toEqual({ state: "none" });
     const view = await client.create({
@@ -1493,7 +1493,7 @@ describe("compute at the transport points", () => {
     expect(usesAgentTransport(null)).toBe(false);
   });
 
-  test("only the fabric's proof that the sandbox is gone counts as provider loss", () => {
+  test("only the control service's proof that the sandbox is gone counts as provider loss", () => {
     const gone = new SandboxExactResumeInstanceUnavailableError("compute", "sbx-1");
     expect(classifyProviderSandboxFailure("compute", gone).kind).toBe("not_found");
     expect(isProviderSandboxGoneDuringRoutedOperation("compute", gone)).toBe(true);
@@ -1547,7 +1547,7 @@ describe("waking a compute sandbox for an exact-locator request", () => {
     const wakes: string[] = [];
     const lookups: Array<{ workspaceId: string; enrollmentId: string }> = [];
     const onNoResponders = wakeComputeSandboxOnNoResponders({
-      fabric: {
+      control: {
         wake: async (sandboxId) => {
           wakes.push(sandboxId);
           return {} as never;
@@ -1572,7 +1572,7 @@ describe("waking a compute sandbox for an exact-locator request", () => {
   test("a Connected Machine is never woken; a deleted sandbox stops the retries", async () => {
     const wakes: string[] = [];
     const machine = wakeComputeSandboxOnNoResponders({
-      fabric: {
+      control: {
         wake: async (sandboxId) => {
           wakes.push(sandboxId);
           return {} as never;
@@ -1585,9 +1585,9 @@ describe("waking a compute sandbox for an exact-locator request", () => {
     expect(await machine("not.an.agent.subject")).toBe(true);
     expect(wakes).toEqual([]);
     const gone = wakeComputeSandboxOnNoResponders({
-      fabric: {
+      control: {
         wake: async () => {
-          throw new ComputeFabricError({ kind: "not_found", status: 404, message: "gone" });
+          throw new ComputeControlError({ kind: "not_found", status: 404, message: "gone" });
         },
       },
       sandboxOf: async () => "box-1",
@@ -1601,7 +1601,7 @@ describe("waking a compute sandbox for an exact-locator request", () => {
     const lookups: unknown[] = [];
     const checked: string[] = [];
     const onNoResponders = wakeComputeSandboxOnNoResponders({
-      fabric: {
+      control: {
         wake: async (sandboxId) => {
           wakes.push(sandboxId);
           return {} as never;
@@ -1626,9 +1626,9 @@ describe("waking a compute sandbox for an exact-locator request", () => {
     let lookups = 0;
     let nowMs = 0;
     const onNoResponders = wakeComputeSandboxOnNoResponders({
-      fabric: {
+      control: {
         wake: async () => {
-          throw new ComputeFabricError({ kind: "unavailable", status: 503, message: "busy" });
+          throw new ComputeControlError({ kind: "unavailable", status: 503, message: "busy" });
         },
       },
       sandboxOf: async () => {
@@ -1658,7 +1658,7 @@ describe("an operation whose agent restarts", () => {
   }
 
   test("an exec in flight ends as lost once the new agent is live, and the next one runs", async () => {
-    const { plane, client, fabric } = setup({ controlTimeoutMs: 500, execTimeoutMs: 30_000 });
+    const { plane, client, control } = setup({ controlTimeoutMs: 500, execTimeoutMs: 30_000 });
     plane.natsTransport = true;
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
     expect((await session.exec({ cmd: "echo hi" })).exitCode).toBe(0);
@@ -1671,14 +1671,14 @@ describe("an operation whose agent restarts", () => {
     expect(String(error)).toMatch(/was replaced/);
     // Well inside the exec's own 30 s timeout and the 120 s recovery allowance.
     expect(Date.now() - startedAt).toBeLessThan(3_000);
-    expect(fabric.wakes).toBe(0);
+    expect(control.wakes).toBe(0);
     const next = await session.exec({ cmd: "echo after" });
     expect(next.exitCode).toBe(0);
     expect(plane.sent.at(-1)?.subject.split(".")[4]).not.toBe(old);
   }, 20_000);
 
   test("a read in flight across the restart is read again from the new agent", async () => {
-    const { plane, client, fabric } = setup({ controlTimeoutMs: 500 });
+    const { plane, client, control } = setup({ controlTimeoutMs: 500 });
     plane.natsTransport = true;
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
     await session.writeFile({ path: "/workspace/r.txt", content: "kept" });
@@ -1687,13 +1687,13 @@ describe("an operation whose agent restarts", () => {
     const bytes = await session.readFile({ path: "/workspace/r.txt" });
     expect(new TextDecoder().decode(bytes)).toBe("kept");
     expect(Date.now() - startedAt).toBeLessThan(3_000);
-    expect(fabric.wakes).toBe(0);
+    expect(control.wakes).toBe(0);
     const reads = plane.sent.filter((s) => s.req.op?.$case === "fsRead");
     expect(reads.at(-1)?.subject.split(".")[4]).not.toBe(old);
   }, 20_000);
 
   test("a request bound to the old connection never wakes the sandbox; one to the live connection does", async () => {
-    const { plane, client, fabric } = setup();
+    const { plane, client, control } = setup();
     plane.natsTransport = true;
     const session = await client.create(undefined, { opengeniCreateIdentity: identity });
     expect((await session.exec({ cmd: "echo hi" })).exitCode).toBe(0);
@@ -1705,14 +1705,14 @@ describe("an operation whose agent restarts", () => {
     const fresh = plane.open(agentId);
     const transportHandler = plane.onNoResponders!;
     expect(await transportHandler(oldSubject)).toBe(false);
-    expect(fabric.wakes).toBe(0);
+    expect(control.wakes).toBe(0);
     // The session-level resend after a no-responder answer stops too.
     const waking = new ComputeWakingControlRpc(
       { request: async (_subject, req) => offlineControlResponse(req.requestId, true) },
       new ComputeWakeGate({
-        fabric: {
+        control: {
           wake: async () => {
-            fabric.wakes += 1;
+            control.wakes += 1;
             return {} as never;
           },
         },
@@ -1727,13 +1727,13 @@ describe("an operation whose agent restarts", () => {
     );
     const answer = await waking.request(oldSubject, pingRequestFor(), { timeoutMs: 100 });
     expect(answer.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
-    expect(fabric.wakes).toBe(0);
+    expect(control.wakes).toBe(0);
     // No host serves the sandbox at all (it sleeps unplaced): the live
     // connection's request wakes it.
     plane.sessions.delete(agentId);
     const liveSubject = `agent.${WORKSPACE}.${agentId}.connection.${fresh}.rpc`;
     expect(await transportHandler(liveSubject)).toBe(true);
-    expect(fabric.wakes).toBe(1);
+    expect(control.wakes).toBe(1);
   }, 20_000);
 
   test("an exec whose agent never answers ends at its own timeout, start included", async () => {

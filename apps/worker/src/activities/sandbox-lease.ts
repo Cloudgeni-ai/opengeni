@@ -171,7 +171,7 @@ import {
   SUPERVISED_STOP_KILL_AFTER_SECONDS,
   modalAppHasRunningSandboxes,
   sweepModalOrphanSandboxes,
-  ComputeFabricClient,
+  ComputeControlClient,
   wakeComputeSandboxOnNoResponders,
   isOpTombstone,
   createComputeOrphanSweepProgress,
@@ -360,7 +360,7 @@ export type SandboxLeaseActivityOptions = {
   /** Override the provider-side Modal orphan sweep (tests spy this; defaults to
    *  Modal list+tag comparison when Modal is configured). */
   sweepModalOrphans?: SweepModalOrphansFn;
-  /** Override the compute orphan sweep (defaults to the fabric inventory
+  /** Override the compute orphan sweep (defaults to the control service's inventory
    *  against Opengeni's records when compute is configured). */
   sweepComputeOrphans?: SweepComputeOrphansFn;
   /** Only provider discovery is injected; durable recovery remains real. */
@@ -1628,7 +1628,7 @@ function connectedCommandControlOptions(
     connectionCurrent,
     onNoResponders: wakeComputeSandboxOnNoResponders({
       connectionCurrent,
-      fabric: new ComputeFabricClient({
+      control: new ComputeControlClient({
         baseUrl: settings.computeApiUrl,
         apiKey: settings.computeApiKey,
         requestTimeoutMs: 10_000,
@@ -3818,23 +3818,23 @@ export function modalOrphanCandidateStillUnowned(
   );
 }
 
-/** How often one worker lists the compute fabric for orphans. Orphans are
+/** How often one worker lists Opengeni compute for orphans. Orphans are
  * rare (a lost create answer, a failed cleanup, a crash), so a few minutes'
- * delay costs little and keeps the fabric list off every 30 s maintenance tick. */
+ * delay costs little and keeps the control service's listing off every 30 s maintenance tick. */
 export const COMPUTE_ORPHAN_SWEEP_INTERVAL_MS = 5 * 60_000;
 let lastComputeOrphanSweepAtMs = Number.NEGATIVE_INFINITY;
-/** This worker's traversal of the fabric inventory, carried between passes. */
+/** This worker's traversal of the control service's inventory, carried between passes. */
 const computeOrphanSweepProgress = createComputeOrphanSweepProgress();
 /** This worker's traversal of the stale-enrollment inventory, likewise. */
 const staleComputeEnrollmentProgress = createComputeOrphanSweepProgress();
 
 /** The most one compute orphan sweep may take: the stale-enrollment reconcile,
- * the fabric listing, every database check and revoke (lock waits included)
+ * the control service's listing, every database check and revoke (lock waits included)
  * and every delete. It shares a five-minute maintenance activity with the
  * other sweeps; what it does not reach is the next sweep's. */
 export const COMPUTE_ORPHAN_SWEEP_BUDGET_MS = 60_000;
 /** The part of that budget the stale-enrollment reconcile may use, so the
- * fabric sweep always keeps the rest. */
+ * listing sweep always keeps the rest. */
 export const COMPUTE_STALE_ENROLLMENT_BUDGET_MS = 15_000;
 /** The most one candidate's database work may take (lock waits included), so
  * a stuck one fails and sits out instead of holding a slot for the pass. */
@@ -3866,9 +3866,9 @@ async function sweepComputeOrphansForConfiguredBackend(
     deadlineAtMs: Math.min(outer.deadlineAtMs, Date.now() + COMPUTE_SWEEP_ITEM_DB_BUDGET_MS),
     signal: outer.signal,
   });
-  // Enrollments whose sandbox is already gone are not in any fabric listing:
+  // Enrollments whose sandbox is already gone are not in any listing from the control service:
   // revoke them from Opengeni's own records, whether or not compute is still
-  // configured. This uses only part of the budget, so the fabric sweep runs too.
+  // configured. This uses only part of the budget, so the listing sweep runs too.
   const staleSignal = AbortSignal.any([
     signal,
     AbortSignal.timeout(COMPUTE_STALE_ENROLLMENT_BUDGET_MS),
@@ -3904,9 +3904,9 @@ async function sweepComputeOrphansForConfiguredBackend(
   if (!settings.computeApiUrl || !settings.computeApiKey || !settings.computeLinkUrl) return 0;
   if (signal.aborted) return 0;
   const result = await sweepComputeOrphans({
-    // Short requests that all end with the budget: an unreachable fabric or a
+    // Short requests that all end with the budget: an unreachable control service or a
     // stalled delete must not hold up the rest of the maintenance pass.
-    fabric: new ComputeFabricClient({
+    control: new ComputeControlClient({
       baseUrl: settings.computeApiUrl,
       apiKey: settings.computeApiKey,
       requestTimeoutMs: 20_000,
@@ -4378,7 +4378,7 @@ async function terminateDrainableBox(
   }
 
   // A compute sandbox whose group ended (its chat or workspace was deleted) is
-  // deleted without a capture: nothing will restore it, and the fabric's own
+  // deleted without a capture: nothing will restore it, and compute's own
   // memory and disk were its persistence. The capture claim above still fences
   // new holders until the cold commit. A rotation always captures. The choice
   // reads the lease the claim itself returned under its row lock (a rotation

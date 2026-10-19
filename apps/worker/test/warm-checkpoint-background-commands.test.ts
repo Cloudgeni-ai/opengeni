@@ -253,7 +253,7 @@ function captureScope(fixture: Fixture) {
 }
 
 describe("warm checkpoints while background commands run", () => {
-  test("a compute sandbox gets no periodic warm checkpoint: the fabric persists it", async () => {
+  test("a compute sandbox gets no periodic warm checkpoint: compute persists it", async () => {
     const fixture = await runningTurnWithBackgroundCommand();
     await admin`update sandbox_leases set backend = 'compute', resume_backend_id = 'compute'
       where id = ${fixture.leaseId}`;

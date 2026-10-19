@@ -670,8 +670,8 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
       settings: testSettings({
         ...settings,
         sandboxBackend: "compute",
-        computeApiUrl: "http://fabric.test",
-        computeApiKey: "fabric-key",
+        computeApiUrl: "http://control.test",
+        computeApiKey: "control-key",
         computeLinkUrl: "wss://link.test",
       }),
     });

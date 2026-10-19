@@ -779,8 +779,8 @@ Opengeni compute (`compute`) is a managed sandbox whose provider session is the
 machine agent: leases, groups, setup and usage follow the managed path, while
 transport (op-stream, relay PTY/desktop, agent error grammar) follows the
 Connected Machine path via `usesAgentTransport`. Its agent is reached through
-the API's agent gateway over its fabric host's link, never by dialing Opengeni.
-The fabric sleeps idle sandboxes, so compute leases never idle-drain; group end
+the API's agent gateway over its host's link, never by dialing Opengeni.
+Compute sleeps idle sandboxes, so compute leases never idle-drain; group end
 (chat/workspace deletion) drains them and the reaper deletes the sandbox and
 revokes its `sandbox` enrollment. See [compute backend](compute-backend.md).
 

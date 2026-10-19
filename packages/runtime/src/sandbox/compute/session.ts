@@ -1,4 +1,4 @@
-// A compute sandbox: a managed microVM from Opengeni's own sandbox fabric whose
+// A compute sandbox: a managed microVM run by Opengeni compute whose
 // provider session is the Connected Machine agent running inside it.
 //
 // Lifecycle is a managed sandbox's (lease, group, workspace setup, persistence
@@ -8,7 +8,7 @@
 // the agent's NATS traffic, so a request to a sleeping sandbox reaches its host,
 // which wakes it. Only when no host serves the sandbox (its host was lost, or
 // it moved and is not yet adopted) does a request find no responder; the
-// session then asks the fabric to wake the sandbox, which places and adopts
+// session then asks the control service to wake the sandbox, which places and adopts
 // it, and resends the request under its replay identity until the agent
 // answers. Opengeni never tears a compute sandbox down for idleness; it is
 // deleted (and its enrollment revoked) only when its group ends.
@@ -61,14 +61,14 @@ import {
   type SelfhostedRelayConfig,
   type SelfhostedSessionDeps,
 } from "../selfhosted/session";
-import { ComputeFabricClient, isComputeFabricGone, type ComputeCreateRequest } from "./fabric";
+import { ComputeControlClient, isComputeSandboxGone, type ComputeCreateRequest } from "./control";
 import { COMPUTE_METADATA, UNSEEN_CREATE_SETTLE_MS } from "./orphans";
 import type { ComputeAgentConnection, ComputeAgentPlane } from "./plane";
 
 export const COMPUTE_WORKSPACE_ROOT = "/workspace";
 export const COMPUTE_STATE_VERSION = 1;
 const COMPUTE_PRIVATE_ROOT = "/tmp/opengeni-private";
-/** The least time between two fabric wakes of one sandbox while a request
+/** The least time between two control service wakes of one sandbox while a request
  * keeps finding no responder. */
 const WAKE_INTERVAL_MS = 5_000;
 
@@ -89,7 +89,7 @@ export interface ComputeSessionState {
   workspaceId: string;
   accountId: string;
   sandboxGroupId: string;
-  /** The fabric create request id (idempotency key and orphan GC tag). */
+  /** The control service create request id (idempotency key and orphan GC tag). */
   requestId: string;
   image: string | null;
   manifest: Manifest;
@@ -99,7 +99,7 @@ export interface ComputeSessionState {
 }
 
 /** The live `state` a compute session exposes: the agent session's slice
- * (agentId = enrollment id, instanceId = fabric sandbox id) plus the persisted
+ * (agentId = enrollment id, instanceId = compute sandbox id) plus the persisted
  * provider state the lease serializes. */
 export type ComputeLiveState = ComputeSessionState & {
   agentId: string;
@@ -142,7 +142,7 @@ function isNoResponder(response: ControlResponse): boolean {
 }
 
 export interface ComputeWakeGateDeps {
-  fabric: Pick<ComputeFabricClient, "wake">;
+  control: Pick<ComputeControlClient, "wake">;
   sandboxId: string;
   enrollmentId: string;
   resolveConnection: () => Promise<ComputeAgentConnection | null>;
@@ -156,7 +156,7 @@ export interface ComputeWakeGateDeps {
 /**
  * Reaches a compute sandbox's agent. Normally the gateway holds the agent's
  * session, asleep or not, and the agent's connection resolves at once. When it
- * does not (no host serves the sandbox), the gate asks the fabric to wake the
+ * does not (no host serves the sandbox), the gate asks the control service to wake the
  * sandbox, which places and adopts it, and waits until the new host's session
  * opens and the agent answers. Single flight: concurrent operations share one
  * recovery.
@@ -188,7 +188,7 @@ export class ComputeWakeGate {
     return await this.recover();
   }
 
-  /** Wake the sandbox through the fabric and wait until its agent answers. */
+  /** Wake the sandbox through the control service and wait until its agent answers. */
   async recover(): Promise<ComputeAgentConnection> {
     this.inflight ??= this.wakeAndWait().finally(() => {
       this.inflight = null;
@@ -196,14 +196,14 @@ export class ComputeWakeGate {
     return await this.inflight;
   }
 
-  /** Ask the fabric to wake the sandbox, at most once per interval. */
+  /** Ask the control service to wake the sandbox, at most once per interval. */
   async wake(): Promise<void> {
     if (this.now() - this.lastWakeAtMs < WAKE_INTERVAL_MS) return;
     this.lastWakeAtMs = this.now();
     try {
-      await this.deps.fabric.wake(this.deps.sandboxId);
+      await this.deps.control.wake(this.deps.sandboxId);
     } catch (error) {
-      if (isComputeFabricGone(error)) {
+      if (isComputeSandboxGone(error)) {
         throw new SandboxExactResumeInstanceUnavailableError("compute", this.deps.sandboxId);
       }
       throw error;
@@ -238,7 +238,7 @@ export class ComputeWakeGate {
 
 /**
  * The control transport of one compute sandbox. A request nobody received
- * means no host serves the sandbox; it wakes the sandbox through the fabric
+ * means no host serves the sandbox; it wakes the sandbox through the control service
  * and resends the identical request, under the same request id (its replay
  * identity), until the agent answers or the ready deadline passes. When the
  * agent comes back on another connection the original no-responder answer is
@@ -299,7 +299,7 @@ const AGENT_RPC_SUBJECT = /^agent\.([^.]+)\.([^.]+)\.connection\.[^.]+\.rpc$/u;
  * The no-responders handler of a transport that addresses an adopted
  * operation at its exact locator (its stop, its query), which may be in a
  * compute sandbox. A request no host received means no host serves the
- * sandbox: ask the fabric to wake it (at most once per interval) and let the
+ * sandbox: ask the control service to wake it (at most once per interval) and let the
  * transport retry the same delivery at the same subject, never at a successor
  * connection. An enrollment that is not a sandbox's (a Connected Machine)
  * keeps its ordinary offline retry. A deleted sandbox ends the retries. A
@@ -308,7 +308,7 @@ const AGENT_RPC_SUBJECT = /^agent\.([^.]+)\.([^.]+)\.connection\.[^.]+\.rpc$/u;
  * commands are settled by runner retirement instead.
  */
 export function wakeComputeSandboxOnNoResponders(input: {
-  fabric: Pick<ComputeFabricClient, "wake">;
+  control: Pick<ComputeControlClient, "wake">;
   /** The sandbox an enrollment runs in, or null for any other enrollment. */
   sandboxOf: (agent: { workspaceId: string; enrollmentId: string }) => Promise<string | null>;
   /** Whether the connection a subject names is still its enrollment's live
@@ -344,10 +344,10 @@ export function wakeComputeSandboxOnNoResponders(input: {
     }
     lastWakeAtMs.set(sandboxId, atMs);
     try {
-      await input.fabric.wake(sandboxId);
+      await input.control.wake(sandboxId);
     } catch (error) {
       // Its operations went with it; anything else is retried until the deadline.
-      if (isComputeFabricGone(error)) return false;
+      if (isComputeSandboxGone(error)) return false;
     }
     return true;
   };
@@ -355,7 +355,7 @@ export function wakeComputeSandboxOnNoResponders(input: {
 
 export interface ComputeSessionDeps {
   state: ComputeLiveState;
-  fabric: ComputeFabricClient;
+  control: ComputeControlClient;
   plane: ComputeAgentPlane;
   relay: SelfhostedRelayConfig;
   readyTimeoutMs: number;
@@ -412,12 +412,12 @@ export class ComputeSandboxSession extends SelfhostedSession {
   private readonly archiveLimits: SandboxArchiveLimits | null | undefined;
 
   constructor(deps: ComputeSessionDeps) {
-    const { state, plane, fabric } = deps;
+    const { state, plane, control } = deps;
     const resolveConnection = () =>
       plane.resolveConnection({ workspaceId: state.workspaceId, enrollmentId: state.enrollmentId });
     const rawRpc = plane.controlRpc({
       // Nobody received the request: no host serves the sandbox. Wake it at
-      // once (the gate throttles the fabric calls) and let the transport retry
+      // once (the gate throttles the control service calls) and let the transport retry
       // the same delivery, keeping its replay identity, until the agent is
       // back. A request bound to a connection that is no longer the live one
       // stops without waking anything: its agent is gone, and the operation is
@@ -441,7 +441,7 @@ export class ComputeSandboxSession extends SelfhostedSession {
     const gate =
       deps.gate ??
       new ComputeWakeGate({
-        fabric,
+        control,
         sandboxId: state.sandboxId,
         enrollmentId: state.enrollmentId,
         resolveConnection,
@@ -543,7 +543,7 @@ export class ComputeSandboxSession extends SelfhostedSession {
   }
 
   /** Wait until the sandbox's agent answers, waking the sandbox through the
-   * fabric only if no host serves it. */
+   * control service only if no host serves it. */
   async waitForAgent(): Promise<void> {
     await this.gate.admit();
   }
@@ -553,10 +553,10 @@ export class ComputeSandboxSession extends SelfhostedSession {
 
   async running(): Promise<boolean> {
     try {
-      await this.computeDeps.fabric.get(this.state.sandboxId);
+      await this.computeDeps.control.get(this.state.sandboxId);
       return true;
     } catch (error) {
-      if (isComputeFabricGone(error)) return false;
+      if (isComputeSandboxGone(error)) return false;
       throw error;
     }
   }
@@ -564,7 +564,7 @@ export class ComputeSandboxSession extends SelfhostedSession {
   /** Delete the box and revoke its enrollment. Only the end of the box's group
    * calls this; idleness never does. */
   async delete(): Promise<void> {
-    await deleteComputeBox(this.computeDeps.fabric, this.computeDeps.plane, this.state);
+    await deleteComputeBox(this.computeDeps.control, this.computeDeps.plane, this.state);
   }
 
   /** The box keeps running (and sleeping) after a session is dropped. */
@@ -703,7 +703,7 @@ export class ComputeSandboxSession extends SelfhostedSession {
     );
   }
 
-  /** A portable tar of /workspace. The fabric persists the box itself; this
+  /** A portable tar of /workspace. Compute persists the box itself; this
    * exists only to move a workspace to another backend. */
   async persistWorkspaceTar(): Promise<Uint8Array> {
     const archivePath = `${COMPUTE_PRIVATE_ROOT}/capture-${randomUUID()}.tar`;
@@ -807,11 +807,11 @@ tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --nume
 }
 
 export async function deleteComputeBox(
-  fabric: Pick<ComputeFabricClient, "delete">,
+  control: Pick<ComputeControlClient, "delete">,
   plane: Pick<ComputeAgentPlane, "revokeEnrollment">,
   state: Pick<ComputeSessionState, "sandboxId" | "workspaceId" | "enrollmentId">,
 ): Promise<void> {
-  await fabric.delete(state.sandboxId);
+  await control.delete(state.sandboxId);
   await plane.revokeEnrollment({
     workspaceId: state.workspaceId,
     enrollmentId: state.enrollmentId,
@@ -822,22 +822,22 @@ export async function deleteComputeBox(
  * Undo a create whose sandbox nothing durable names: delete the sandbox its
  * request made, if any, then revoke the enrollment it would run under.
  *
- * The fabric request id of a compute create is its enrollment id, and the
+ * The control service request id of a compute create is its enrollment id, and the
  * enrollment is written before the create is sent. It is revoked only once
- * the fabric proves no sandbox exists or can still appear for that request.
+ * the control service proves no sandbox exists or can still appear for that request.
  * Returns whether the enrollment was revoked; false (or a thrown error) leaves
  * the sandbox, if one appears, to the orphan sweep (./orphans.ts), and an
  * enrollment that never gets a sandbox to the worker's stale-enrollment revoke.
  */
 export async function discardComputeCreate(
-  fabric: Pick<ComputeFabricClient, "lookupRequest" | "delete">,
+  control: Pick<ComputeControlClient, "lookupRequest" | "delete">,
   plane: Pick<ComputeAgentPlane, "revokeEnrollment">,
   input: { workspaceId: string; enrollmentId: string; createdAtMs: number },
   nowMs: number = Date.now(),
 ): Promise<boolean> {
-  const found = await fabric.lookupRequest(input.enrollmentId);
+  const found = await control.lookupRequest(input.enrollmentId);
   if (found.state === "live") {
-    await fabric.delete(found.sandbox.id);
+    await control.delete(found.sandbox.id);
   } else if (found.state === "none" && nowMs - input.createdAtMs < UNSEEN_CREATE_SETTLE_MS) {
     return false;
   }
@@ -849,7 +849,7 @@ export async function discardComputeCreate(
 }
 
 export interface ComputeSandboxClientOptions {
-  fabric: ComputeFabricClient;
+  control: ComputeControlClient;
   /** Resolved lazily: the registry builds clients before the host installs it. */
   plane: () => ComputeAgentPlane;
   relay: SelfhostedRelayConfig;
@@ -888,7 +888,7 @@ export class ComputeSandboxClient {
   private session(state: ComputeLiveState, archiveLimits?: SandboxArchiveLimits | null) {
     return new ComputeSandboxSession({
       state,
-      fabric: this.options.fabric,
+      control: this.options.control,
       plane: this.options.plane(),
       relay: this.options.relay,
       readyTimeoutMs: this.options.readyTimeoutMs,
@@ -903,7 +903,7 @@ export class ComputeSandboxClient {
   }
 
   /**
-   * Create one sandbox: make its agent's enrollment, ask the fabric for the
+   * Create one sandbox: make its agent's enrollment, ask the control service for the
    * sandbox with an init naming that agent (idempotent by request id, retried
    * with the same id and body), then wait until the host has opened the
    * agent's session at the gateway and the agent answers. The lease identity
@@ -912,7 +912,7 @@ export class ComputeSandboxClient {
    * The request id is the enrollment id, and the enrollment is written before
    * the create is sent. The sandbox carries its deployment, workspace, group
    * and enrollment in its metadata, so one whose cleanup never finished is
-   * found and removed by the orphan sweep from the fabric's own inventory.
+   * found and removed by the orphan sweep from the control service's own inventory.
    */
   async create(
     args?: SandboxClientCreateArgs,
@@ -980,12 +980,12 @@ export class ComputeSandboxClient {
     };
     let view;
     try {
-      view = await this.options.fabric.create(body);
+      view = await this.options.control.create(body);
     } catch (error) {
       // The create may have taken effect without its answer reaching us. If
-      // the fabric cannot yet prove there is no sandbox, the orphan sweep
+      // the control service cannot yet prove there is no sandbox, the orphan sweep
       // finishes the cleanup.
-      await discardComputeCreate(this.options.fabric, plane, {
+      await discardComputeCreate(this.options.control, plane, {
         workspaceId: identity.workspaceId,
         enrollmentId,
         createdAtMs: Date.now(),
@@ -1019,7 +1019,7 @@ export class ComputeSandboxClient {
     } catch (error) {
       // Nothing durable names this sandbox yet: do not leave it behind. A
       // failed delete leaves it to the orphan sweep.
-      await deleteComputeBox(this.options.fabric, plane, state).catch(() => undefined);
+      await deleteComputeBox(this.options.control, plane, state).catch(() => undefined);
       throw error;
     }
     return session;
@@ -1038,9 +1038,9 @@ export class ComputeSandboxClient {
     options: SandboxClientResumeOptions = {},
   ): Promise<ComputeSandboxSession> {
     try {
-      await this.options.fabric.get(state.sandboxId);
+      await this.options.control.get(state.sandboxId);
     } catch (error) {
-      if (isComputeFabricGone(error)) {
+      if (isComputeSandboxGone(error)) {
         throw new SandboxExactResumeInstanceUnavailableError("compute", state.sandboxId);
       }
       throw error;
@@ -1057,7 +1057,7 @@ export class ComputeSandboxClient {
    * the enrollment still active, so the caller's retry (or the orphan sweep)
    * finishes it. Any other sandbox of the group is the orphan sweep's. */
   async delete(state: ComputeSessionState): Promise<void> {
-    await deleteComputeBox(this.options.fabric, this.options.plane(), state);
+    await deleteComputeBox(this.options.control, this.options.plane(), state);
   }
 
   async canPersistOwnedSessionState(): Promise<boolean> {

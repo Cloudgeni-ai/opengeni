@@ -2,10 +2,10 @@
 -- The worker's stale compute enrollment inventory.
 --
 -- A compute sandbox's enrollment must not stay active once nothing can use
--- it. The orphan sweep revokes the enrollment of every sandbox the fabric
+-- it. The orphan sweep revokes the enrollment of every sandbox the control service
 -- still lists, but an enrollment whose sandbox is already gone (a delete that
 -- succeeded before its revoke failed, a create that never made a sandbox) is
--- no longer in any fabric listing. This inventory finds those from Opengeni's
+-- no longer in any listing from the control service. This inventory finds those from Opengeni's
 -- own records, across workspaces: active sandbox enrollments created more
 -- than 10 minutes ago (the create settle window) whose group's lease neither
 -- names them in its envelope (sessionState.providerState.enrollmentId), nor

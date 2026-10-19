@@ -7,7 +7,7 @@
 -- captures first.
 --
 -- compute_asleep_since: the agent gateway reported the lease's current
--- compute sandbox asleep at this time (the fabric keeps its memory and disk
+-- compute sandbox asleep at this time (compute keeps its memory and disk
 -- and runs no VM). Warm time accrues only while the sandbox is awake: no tick
 -- accrues past this moment, and on waking the meter cursor moves forward by
 -- exactly the time asleep.

@@ -1,6 +1,6 @@
 // The one owner of compute sandboxes nothing durable names any more.
 //
-// The fabric is the inventory: every sandbox Opengeni creates carries its
+// The control service is the inventory: every sandbox Opengeni creates carries its
 // deployment's gateway, workspace, sandbox group and enrollment in its metadata.
 // A sandbox whose enrollment is no longer the live box of its group (a create
 // whose answer was lost, a cleanup that failed, a worker that crashed between
@@ -8,10 +8,10 @@
 // enrollment revoked and is deleted here. Nothing on this path messages its agent,
 // so the sweep never wakes or keeps awake a sleeping sandbox.
 
-import type { ComputeFabricClient, ComputeSandboxView } from "./fabric";
+import type { ComputeControlClient, ComputeSandboxView } from "./control";
 
 /**
- * How long a create the fabric has never seen may still arrive there, and how
+ * How long a create the control service has never seen may still arrive there, and how
  * long a new sandbox may wait for its create to commit. Nothing younger is
  * treated as abandoned.
  */
@@ -25,7 +25,7 @@ export const COMPUTE_METADATA = {
   enrollmentId: "opengeni_enrollment_id",
 } as const;
 
-/** The Opengeni identity of one fabric sandbox, from its create's metadata. */
+/** The Opengeni identity of one compute sandbox, from its create's metadata. */
 export type ComputeSandboxIdentity = {
   sandboxId: string;
   workspaceId: string;
@@ -124,7 +124,7 @@ async function untilStopped<T>(work: Promise<T>, signal: AbortSignal | undefined
 
 /**
  * Delete every sandbox of this deployment that nothing durable names. Its
- * enrollment is revoked first and the sandbox deleted after, so the fabric's
+ * enrollment is revoked first and the sandbox deleted after, so the control service's
  * listing keeps the cleanup owned until both are done: a failed revoke leaves
  * everything for the next sweep, and a failed delete leaves a listed sandbox
  * whose revoked enrollment no longer names it. Enrollments whose sandbox is
@@ -141,7 +141,7 @@ async function untilStopped<T>(work: Promise<T>, signal: AbortSignal | undefined
  * reached.
  */
 export async function sweepComputeOrphans(input: {
-  fabric: Pick<ComputeFabricClient, "list" | "delete">;
+  control: Pick<ComputeControlClient, "list" | "delete">;
   /** This deployment's gateway URL, stamped on every sandbox it creates. */
   gateway: string;
   named(identity: ComputeSandboxIdentity): Promise<boolean>;
@@ -150,7 +150,7 @@ export async function sweepComputeOrphans(input: {
   maxDeletions?: number;
   concurrency?: number;
   /** Stops the sweep: no new orphan starts after it aborts. Pass the same
-   * signal to the fabric client so the requests in flight end too. */
+   * signal to the control service client so the requests in flight end too. */
   signal?: AbortSignal;
   /** Carried between passes by one sweeper (see ComputeOrphanSweepProgress). */
   progress?: ComputeOrphanSweepProgress;
@@ -163,7 +163,7 @@ export async function sweepComputeOrphans(input: {
   const result: ComputeOrphanSweepResult = { examined: 0, deleted: [], failed: 0 };
   if (signal?.aborted) return result;
   const views = await untilStopped(
-    input.fabric.list({ [COMPUTE_METADATA.gateway]: input.gateway }),
+    input.control.list({ [COMPUTE_METADATA.gateway]: input.gateway }),
     signal,
   );
   const ordered: { key: string; identity: ComputeSandboxIdentity }[] = [];
@@ -179,7 +179,7 @@ export async function sweepComputeOrphans(input: {
     ordered.push({ key: traversalKey(view), identity });
   }
   if (progress) {
-    // A sandbox the fabric no longer lists needs nothing more.
+    // A sandbox the control service no longer lists needs nothing more.
     for (const sandboxId of progress.failures.keys()) {
       if (!listed.has(sandboxId)) progress.failures.delete(sandboxId);
     }
@@ -212,7 +212,7 @@ export async function sweepComputeOrphans(input: {
           }),
           signal,
         );
-        await input.fabric.delete(identity.sandboxId);
+        await input.control.delete(identity.sandboxId);
         result.deleted.push(identity);
         progress?.failures.delete(identity.sandboxId);
       } catch {
@@ -237,7 +237,7 @@ export type StaleComputeEnrollmentPage = {
 
 /**
  * Revoke the compute sandbox enrollments Opengeni's own records show are stale
- * (their sandbox is already gone, so no fabric listing names them; see the
+ * (their sandbox is already gone, so no listing from the control service names them; see the
  * database's stale inventory). The inventory is read a page at a time in
  * enrollment-id order. With `progress` (its own, keyed by enrollment) each
  * pass reads the page after the last enrollment the previous one reached, and

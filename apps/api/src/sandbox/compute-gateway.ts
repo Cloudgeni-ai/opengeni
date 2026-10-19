@@ -4,7 +4,7 @@
  * sandbox holds no credential and never dials Opengeni: it speaks NATS to its
  * host, and each host keeps ONE WebSocket link to this gateway carrying one
  * session per sandbox. The gateway checks the fleet-signed host token on the
- * upgrade and each session's ticket, fences sessions by the fabric's owner
+ * upgrade and each session's ticket, fences sessions by the control service's owner
  * epoch, claims the agent's connection instance as the NATS auth callout does
  * for a Connected Machine, and bridges the session's subscriptions and
  * publishes through Opengeni's own NATS connection with exactly the subject

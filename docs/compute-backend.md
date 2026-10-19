@@ -1,6 +1,6 @@
 # Opengeni compute (`compute` sandbox backend)
 
-`compute` runs managed sandboxes on Opengeni's own Firecracker sandbox fabric
+`compute` runs managed sandboxes as Firecracker microVMs on Opengeni compute
 (`compute/`). It is opt-in: `OPENGENI_SANDBOX_BACKEND` keeps its default, and a
 session uses compute only when compute is selected for it.
 
@@ -15,14 +15,14 @@ managed.
 ## How the agent is reached
 
 The agent inside the sandbox holds no credential and never dials Opengeni. It
-talks to its host over vsock; the fabric host keeps one WebSocket link to the
+talks to its host over vsock; the compute host keeps one WebSocket link to the
 **agent gateway** in the API (`OPENGENI_COMPUTE_LINK_URL`, subprotocol
 `opengeni.agent-link.v1`) carrying one session per sandbox. The wire contract
 is `compute/docs/agent-link.md`; the design is ADR 21 in `compute/docs/adr/`.
 
 The gateway (`apps/api/src/sandbox/compute-gateway.ts`) verifies the host token
-and each sandbox ticket (EdDSA, keys from the fabric's `/v1/link/keys`),
-fences sessions by the fabric owner epoch, claims the agent's connection
+and each sandbox ticket (EdDSA, keys from the control service's `/v1/link/keys`),
+fences sessions by the control service's owner epoch, claims the agent's connection
 instance as the NATS auth callout does, bridges `sub`/`pub`/`msg` with exactly
 the agent's NATS permissions, mints relay producer tokens, and renews the claim
 every 5 s while the session is open, asleep or not. A sleeping sandbox stays
@@ -98,11 +98,11 @@ skips sandbox enrollments, and machine routes list machines only.
   workspace, sandbox group and enrollment in its metadata. A failed create
   cleans up at once when it can: `GET /v1/requests/{id}` finds the sandbox its
   request made, which is deleted before the enrollment is revoked (a request
-  the fabric has never seen counts as proof of no sandbox only once the
+  the control service has never seen counts as proof of no sandbox only once the
   enrollment is ten minutes old). Whatever is left (a lost answer, a failed
   delete, a worker that crashed between create and commit, a workspace deleted
   with everything in it) is the orphan sweep's: every five minutes the worker's
-  reaper maintenance lists this deployment's sandboxes on the fabric
+  reaper maintenance lists this deployment's sandboxes on the control service
   (`sweepComputeOrphans`, filtered by its gateway URL) and, for each one
   older than ten minutes that Opengeni's records no longer name, revokes its
   enrollment and then deletes it. A sandbox is named while its enrollment is
@@ -110,12 +110,12 @@ skips sandbox enrollments, and machine routes list machines only.
   enrollment id in the lease envelope's `sessionState.providerState`, where
   the worker writes the provider state) or is warming, since a creator may be
   about to commit it (`computeSandboxNamed`).
-  The fabric's own inventory is the record, so nothing is lost when Opengeni's
+  The control service's own inventory is the record, so nothing is lost when Opengeni's
   rows go: a failed revoke deletes nothing, and a failed delete leaves a listed
   sandbox for the next pass. The sweep handles eight orphans at a time and
   ends within one minute or when the activity is cancelled. That budget
   starts before the stale-enrollment reconcile below and covers everything:
-  each fabric request until its body is read, and each database check and
+  each control service request until its body is read, and each database check and
   revoke. PostgreSQL itself enforces the database deadline: the work sets
   the statement timeout to the time left before the workspace lock wait and
   again before its main statement, so a lock wait or slow statement ends on
@@ -137,11 +137,11 @@ skips sandbox enrollments, and machine routes list machines only.
   the front of the list never starve the sandboxes behind them. This progress
   lives in the worker's memory; a restarted worker starts again at the oldest
   sandbox. It never
-  messages an agent, so it wakes nothing. One fabric team serves one Opengeni
+  messages an agent, so it wakes nothing. One control service team serves one Opengeni
   deployment's gateway; the gateway tag keeps a misconfigured second
   deployment's sandboxes out of the sweep.
 - **Stale enrollments**: an enrollment whose sandbox is already gone (a delete
-  whose revoke failed, a create that never made a sandbox) is in no fabric
+  whose revoke failed, a create that never made a sandbox) is in no listing from the control service
   listing, so the same maintenance also revokes, from Opengeni's own records,
   every active sandbox enrollment older than ten minutes whose group's lease
   neither names it (`sessionState.providerState.enrollmentId`) nor is warming
@@ -151,7 +151,7 @@ skips sandbox enrollments, and machine routes list machines only.
   of ids under the owner-only read capability, then one revoke per enrollment
   under its workspace's RLS that re-checks the condition). An enrollment
   therefore never stays active for a sandbox that is gone. This reconcile
-  gets its own fifteen seconds of the pass, so the fabric sweep always keeps
+  gets its own fifteen seconds of the pass, so the listing sweep always keeps
   the rest; it revokes eight enrollments at a time, each within five
   seconds, and sets a failed one aside like a failed sandbox. It reads the
   inventory a page of 100 at a time in enrollment-id order, each pass after
@@ -161,7 +161,7 @@ skips sandbox enrollments, and machine routes list machines only.
   workspace lock therefore delays neither the others nor the sweep.
 - **Resume**: re-address the same sandbox by id; no wake is needed. If a request
   finds no responder (no host serves the sandbox, for example mid-move),
-  `ComputeWakingControlRpc` asks the fabric to wake it and resends under the
+  `ComputeWakingControlRpc` asks the control service to wake it and resends under the
   same request id until the agent answers. Every operation re-resolves the
   agent's connection instance. A request bound to a connection instance
   that is no longer the enrollment's live one never wakes the sandbox,
@@ -181,14 +181,14 @@ skips sandbox enrollments, and machine routes list machines only.
   with an unknown outcome, a read is read again from the new agent, and the
   request is never moved to the new connection. The reconciler settles the
   handed-over command as lost once the enrollment shows the new connection
-  instance; the fabric runs at most one VM per sandbox (ADR 18), so the old
+  instance; compute runs at most one VM per sandbox (ADR 18), so the old
   agent is gone. Abandoned work therefore neither keeps the lease warm nor
   holds up deleting the chat: a command already asked to stop on the chat's
   own sandbox does not hold the deletion, because ending the group deletes
   the sandbox and the deletion waits for that. A terminal exec whose own
   deadline passes meanwhile gives that same unknown outcome: it reports exit
   124 only when its deadline provably ended the command.
-- **Host loss**: the fabric never brings an agent back rewound. After a host
+- **Host loss**: compute never brings an agent back rewound. After a host
   loss the sandbox boots fresh on another host from its newest stored copy's
   files (programs end; the guest flushes its disk before each capture, so the
   files are as the guest last wrote them before that copy), and its agent is a
@@ -235,14 +235,14 @@ skips sandbox enrollments, and machine routes list machines only.
   transactional write stays pinned to its exact connection and epoch. Writes
   above 256 KiB need the agent's `transactional_fs_write_machine` capability.
 - **Idle**: when the last holder releases a compute lease, nothing is
-  captured or deleted. The fabric sleeps the sandbox by its own rules and
+  captured or deleted. Compute sleeps the sandbox by its own rules and
   keeps memory and disk; Opengeni never drains a compute lease for being idle
   (migration 0845 and the drain points in `packages/db/src/index.ts`). The
   next turn finds the same sandbox and its first request wakes it.
 - **Group end**: deleting the chat or workspace marks the lease
   (`group_end_requested_at`, migration 0847) and drains it at once. The reaper
-  then deletes the sandbox on the fabric without a tar capture and revokes its
-  enrollment (after the fabric delete, so a failure leaves it on record for
+  then deletes the sandbox through the control service without a tar capture and revokes its
+  enrollment (after the delete, so a failure leaves it on record for
   the retry). Whether to delete without a capture is read from the lease the
   capture claim returns and checked again under the lease's row lock just
   before the delete (`persistDrainSnapshot` with `groupEndDiscard`): a
@@ -260,7 +260,7 @@ skips sandbox enrollments, and machine routes list machines only.
   suspend, resume or end while the deletion waits keeps the group.
 - **Capture**: a portable tar only, to move a workspace to another backend
   (rotation and archive capture still drain with a capture). There are no
-  warm checkpoints: the fabric persists the sandbox itself, so the turn-end
+  warm checkpoints: compute persists the sandbox itself, so the turn-end
   and interval checkpoints other tar backends take are skipped
   (`warmCheckpoints: "forced_only"` in the capture policy; only a forced
   rotation checkpoint runs), and a turn neither reads the workspace nor keeps
@@ -306,15 +306,15 @@ terminal, desktop and in-sandbox browser reach the agent through relay
 streams, so no sandbox port is exposed. Opening one wakes the sandbox, and
 its traffic keeps it awake (the agent counts streams with recent traffic as
 in use). A future preview-port feature would add a gateway route, not a
-fabric change.
+change to compute.
 
 ## Configuration
 
 | Setting | Meaning |
 | --- | --- |
-| `OPENGENI_COMPUTE_API_URL`, `OPENGENI_COMPUTE_API_KEY` | Fabric API (HTTPS outside local/test) and its key |
+| `OPENGENI_COMPUTE_API_URL`, `OPENGENI_COMPUTE_API_KEY` | Control service API (HTTPS outside local/test) and its key |
 | `OPENGENI_COMPUTE_LINK_URL` | The gateway's public `wss://` URL, also the JWT audience |
-| `OPENGENI_COMPUTE_IMAGE`, `OPENGENI_COMPUTE_DESKTOP_IMAGE` | Headless and desktop image refs (fabric default when unset) |
+| `OPENGENI_COMPUTE_IMAGE`, `OPENGENI_COMPUTE_DESKTOP_IMAGE` | Headless and desktop image refs (control service default when unset) |
 | `OPENGENI_COMPUTE_VCPUS`, `OPENGENI_COMPUTE_MEMORY_MIB` | Shape; optional `..._MEMORY_REQUEST_MIB`, `..._CPU_REQUEST_MILLIS` |
 | `OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS` | How long create and wake wait for the agent |
 

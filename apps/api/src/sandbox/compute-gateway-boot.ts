@@ -1,6 +1,6 @@
 /**
  * Start the compute agent gateway (./compute-gateway.ts) when this deployment
- * serves compute sandboxes: the fabric API, its key and the gateway's own URL
+ * serves compute sandboxes: the control service API, its key and the gateway's own URL
  * are configured, and every other compute setting checks out. Otherwise it
  * stays off and the API serves no link route.
  */
@@ -22,7 +22,7 @@ import {
 } from "@opengeni/db";
 import { createAgentLinkNatsConnection, type AgentLinkNats } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
-import { ComputeFabricClient } from "@opengeni/runtime/sandbox";
+import { ComputeControlClient } from "@opengeni/runtime/sandbox";
 import { observabilityEventBusOptions } from "../observability";
 import { ComputeAgentGateway, type ComputeAgentLinkStore } from "./compute-gateway";
 import { ComputeLinkVerifier } from "./compute-link-tokens";
@@ -80,7 +80,7 @@ export async function startComputeAgentGateway(input: {
     return undefined;
   }
   const relaySecret = resolveRelayTokenSecret(settings)!;
-  const fabric = new ComputeFabricClient({
+  const control = new ComputeControlClient({
     baseUrl: settings.computeApiUrl!,
     apiKey: settings.computeApiKey!,
     requestTimeoutMs: 10_000,
@@ -96,7 +96,7 @@ export async function startComputeAgentGateway(input: {
   const gateway = new ComputeAgentGateway({
     linkUrl: settings.computeLinkUrl!,
     verifier: new ComputeLinkVerifier({
-      fetchKeys: () => fabric.linkKeys(),
+      fetchKeys: () => control.linkKeys(),
       audience: settings.computeLinkUrl!,
     }),
     nats,

@@ -11662,7 +11662,7 @@ export const enrollments = pgTable(
     // listed, offered, attached or granted as a machine.
     kind: text("kind", { enum: enrollmentKindValues }).notNull().default("machine"),
     sandboxGroupId: uuid("sandbox_group_id"),
-    // The highest fabric owner epoch the agent gateway accepted for a sandbox
+    // The highest owner epoch the agent gateway accepted for a sandbox
     // enrollment; null for machines.
     linkEpoch: bigint("link_epoch", { mode: "number" }),
     // The agent's ed25519 public key (the machine identity). Null exactly for

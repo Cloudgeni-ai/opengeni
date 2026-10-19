@@ -150,7 +150,7 @@ describe("the immediate stop's budget", () => {
         connect: async () => agent.connection,
         budgetMs: 3_000,
         compute: {
-          fabric: {
+          control: {
             wake: async (sandboxId) => {
               wakes.push(sandboxId);
               woken = true;
@@ -188,7 +188,7 @@ describe("the immediate stop's budget", () => {
         connect: async () => agent.connection,
         budgetMs: 3_000,
         compute: {
-          fabric: {
+          control: {
             wake: async (sandboxId) => {
               wakes.push(sandboxId);
               return {} as never;
@@ -224,7 +224,7 @@ describe("the immediate stop's budget", () => {
         connect: async () => agent.connection,
         budgetMs: 300,
         compute: {
-          fabric: {
+          control: {
             wake: async (sandboxId) => {
               wakes.push(sandboxId);
               return {} as never;

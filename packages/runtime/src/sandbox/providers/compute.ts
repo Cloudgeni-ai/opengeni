@@ -1,9 +1,9 @@
-// Opengeni compute: managed microVMs from Opengeni's own sandbox fabric, each
+// Opengeni compute: managed microVMs run by Opengeni itself, each
 // running the Connected Machine agent. See docs/compute-backend.md.
 
 import { computeSettingsIssues } from "@opengeni/config";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
-import { ComputeFabricClient } from "../compute/fabric";
+import { ComputeControlClient } from "../compute/control";
 import { getComputeAgentPlane } from "../compute/plane";
 import { ComputeSandboxClient } from "../compute/session";
 import { SandboxConfigError } from "../errors";
@@ -18,7 +18,7 @@ export const computeProvider: ProviderRegistration = {
   backend: "compute",
   exactResumeMode: "custom",
   instanceIdFields: ["sandboxId"],
-  // The fabric persists the sandbox itself. A portable tar is only the read-only
+  // Compute persists the sandbox itself. A portable tar is only the read-only
   // capture that rotates, archives or moves a workspace; no warm checkpoints.
   workspaceCapturePolicy: () => ROTATION_ONLY_PORTABLE_TAR_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.compute,
@@ -31,7 +31,7 @@ export const computeProvider: ProviderRegistration = {
     // desktop image when one is configured.
     const desktop = settings.sandboxDesktopEnabled === true;
     return new ComputeSandboxClient({
-      fabric: new ComputeFabricClient({
+      control: new ComputeControlClient({
         baseUrl: settings.computeApiUrl!,
         apiKey: settings.computeApiKey!,
       }),

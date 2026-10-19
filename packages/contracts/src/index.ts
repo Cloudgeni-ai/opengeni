@@ -291,7 +291,7 @@ export {
 // backends, then `selfhosted` (bring-your-own-compute — a user's own machine
 // enrolled as a first-class sandbox), then `opensandbox` (an optional
 // Kubernetes-native provisioned sandbox provider), then `compute` (Opengeni's
-// own microVM sandbox fabric; every box runs the Connected Machine agent).
+// own microVM sandboxes; every box runs the Connected Machine agent).
 export const SandboxBackend = /* @__PURE__ */ defineSchema(() =>
   z.enum([
     "docker",
@@ -771,11 +771,11 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     persistable: true,
     supportsRunAs: false,
   },
-  // Opengeni compute: a managed microVM from Opengeni's own sandbox fabric.
+  // Opengeni compute: a managed microVM sandbox run by Opengeni itself.
   // Every sandbox runs the Connected Machine agent, reached through its host's
   // link to Opengeni's agent gateway, so the transport is the agent's (PTY,
   // desktop frames, browser control and on-demand ports over the relay). The
-  // lifetime is a managed sandbox's: the fabric sleeps an idle sandbox itself
+  // lifetime is a managed sandbox's: compute sleeps an idle sandbox itself
   // and keeps its memory and disk across sleep, moves and host loss, so there
   // is no hard lifetime and no idle killer, and a message to a sleeping
   // sandbox wakes it. A portable tar is only the fallback that moves a

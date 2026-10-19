@@ -1,4 +1,4 @@
-// A compute sandbox's fabric keeps its memory and disk, so its workspace is
+// Opengeni compute keeps a sandbox's memory and disk, so its workspace is
 // never captured to keep it. When its group ends (the chat or workspace was
 // deleted) the drain deletes the sandbox without a capture, still under the
 // exact capture fence; a rotation of the same lease still captures first.

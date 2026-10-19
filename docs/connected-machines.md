@@ -202,7 +202,7 @@ An Opengeni compute sandbox (`compute`) is a managed sandbox that runs this same
 agent. Its enrollment has kind `sandbox`: Opengeni creates it, it has no key or
 bearer, and it is never listed, offered, attached or granted as a machine; its
 lease authorizes its use, and it is revoked when the sandbox is deleted. The
-agent reaches NATS through its fabric host's link to the API's agent gateway.
+agent reaches NATS through its host's link to the API's agent gateway.
 See [compute backend](compute-backend.md).
 
 The model that follows from this: a machine-bound session has **no phantom Modal

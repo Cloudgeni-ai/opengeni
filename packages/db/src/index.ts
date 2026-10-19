@@ -50132,7 +50132,7 @@ export async function failWarmingToCold(
   );
 }
 
-// Opengeni compute's fabric sleeps an idle sandbox itself and keeps its memory
+// Opengeni compute sleeps an idle sandbox itself and keeps its memory
 // and disk, so a compute lease is never drained for being idle (0845): it stays
 // warm without holders until its group ends or it rotates. A rotation or an
 // archive capture still drains it.
@@ -62878,7 +62878,7 @@ export async function finalizeEnrollmentByToken(
 }
 
 // CREATE a compute sandbox's enrollment. Opengeni makes it itself, before the
-// fabric create, under the id the sandbox's init names as its agent id. It is
+// control service create, under the id the sandbox's init names as its agent id. It is
 // active at once, kind 'sandbox', bound to the sandbox group, with no public
 // key and no bearer: the agent inside holds no credential and is reached only
 // through its host's link to the agent gateway. It gets no sandboxes row and
@@ -62953,7 +62953,7 @@ export type SandboxAgentLinkEnd = "revoked" | "superseded" | "lost";
 type SandboxAgentLinkInput = {
   workspaceId: string;
   agentId: string;
-  /** The fabric owner epoch from the sandbox's ticket. */
+  /** The owner epoch from the sandbox's ticket. */
   epoch: number;
   connectionInstanceId: string;
 };
@@ -62981,10 +62981,10 @@ async function lockSandboxEnrollment(scopedDb: Database, workspaceId: string, ag
 }
 
 /**
- * OPEN a sandbox's link session at the agent gateway: fence it by the fabric
+ * OPEN a sandbox's link session at the agent gateway: fence it by the control service's
  * owner epoch, then claim the agent's connection instance. Under the row lock:
  * an epoch below the highest recorded is refused (`stale_epoch`); a higher one
- * is recorded and takes the claim from any other instance, since the fabric
+ * is recorded and takes the claim from any other instance, since the control service
  * has fenced the sandbox's previous owner; an equal one claims exactly as the
  * NATS callout does for a Connected Machine (`duplicate` while another
  * instance's lease is live). The claim's lease is the database clock's.
@@ -63508,7 +63508,7 @@ export const STALE_COMPUTE_ENROLLMENT_PAGE_SIZE = 100;
  * nor is warming a new box, nor holds a live compute box whose envelope does
  * not say which enrollment it runs. These are enrollments whose
  * sandbox is already gone (a delete whose revoke failed, a create that never
- * made one), which no fabric listing shows the orphan sweep. The
+ * made one), which no listing from the control service shows the orphan sweep. The
  * cross-workspace inventory (migration 0848) returns ids only, one page in
  * enrollment-id order after `after` (from the start without it), with `more`
  * when the inventory may go on past the page; revoke each with

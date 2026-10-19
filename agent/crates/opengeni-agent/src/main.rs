@@ -48,7 +48,7 @@ mod dispatch;
 mod embedded_runtime;
 mod engine;
 mod enrollment;
-mod fabric;
+mod compute;
 #[cfg(unix)]
 mod handover;
 mod instance_lock;
@@ -407,8 +407,8 @@ fn disconnect(args: &DisconnectArgs, api_url: &str) -> anyhow_lite::Result {
 /// clean SIGINT/SIGTERM stops it.
 #[allow(clippy::too_many_lines)]
 async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
-    if let Some(link_file) = args.fabric.clone() {
-        return run_fabric(&args, &link_file).await;
+    if let Some(link_file) = args.compute.clone() {
+        return run_compute(&args, &link_file).await;
     }
     // Capture before any managed update replaces the running executable inode.
     update::installed_executable().map_err(string_err)?;
@@ -678,18 +678,18 @@ fn operation_cgroups(
     Ok(cgroups)
 }
 
-/// `run --fabric`: the agent in an Opengeni compute sandbox, started by the
+/// `run --compute`: the agent in an Opengeni compute sandbox, started by the
 /// sandbox's guest init (`compute/docs/agent-link.md`, section 2). It serves
 /// one link, dialed through the sandbox's host with no credential, and keeps
 /// the relay credential the host sends in memory. It reports what it has in
 /// use as the guest's activity file, reconnects at once on `SIGUSR1` (sent
 /// when its host has lost its connections), and never enrolls, renews,
 /// updates itself or installs
-/// a service: the fabric owns the sandbox's enrollment and image.
-async fn run_fabric(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
-    let fabric = fabric::FabricConfig::load(link_file).map_err(to_boxed)?;
-    std::fs::create_dir_all(&fabric.workspace_root).map_err(to_boxed)?;
-    std::env::set_current_dir(&fabric.workspace_root).map_err(to_boxed)?;
+/// a service: Opengeni compute owns the sandbox's enrollment and image.
+async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
+    let link_config = compute::ComputeConfig::load(link_file).map_err(to_boxed)?;
+    std::fs::create_dir_all(&link_config.workspace_root).map_err(to_boxed)?;
+    std::env::set_current_dir(&link_config.workspace_root).map_err(to_boxed)?;
 
     // One agent serves a sandbox: a second would be a duplicate responder for
     // the same subjects (see `run`).
@@ -711,7 +711,7 @@ async fn run_fabric(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     let _virtual_desktop = maybe_spawn_virtual_desktop(args);
     // The link file names the root explicitly, `/` included: no fallback to
     // the home directory as for a working directory a user started in.
-    let mut platform = NativePlatform::with_root(&fabric.workspace_root);
+    let mut platform = NativePlatform::with_root(&link_config.workspace_root);
     if let Some(cgroups) = op_cgroups {
         platform = platform.with_oom_isolation(cgroups);
     }
@@ -720,7 +720,7 @@ async fn run_fabric(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     let (platform, browser_sidecars) =
         attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone());
 
-    let credentials = fabric.credentials();
+    let credentials = link_config.credentials();
     let relay = RelayCredential::pending();
     let hub = RelayHub::new(RelayHubConfig {
         workspace_id: credentials.workspace_id.clone(),
@@ -730,9 +730,9 @@ async fn run_fabric(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     });
     let streams = hub.activity().clone();
     let link_platform = Arc::new(platform.with_stream_registry(Arc::new(hub)));
-    let link = SupervisorLink::new(fabric.connection_id(), link_platform, credentials)
+    let link = SupervisorLink::new(link_config.connection_id(), link_platform, credentials)
         .with_connection_instance_id(uuid::Uuid::new_v4().to_string())
-        .with_fabric(supervisor::FabricLink { relay });
+        .with_compute(supervisor::ComputeLink { relay });
     let links = vec![link];
     let (_keep_links, updates_rx) = tokio::sync::watch::channel(links.clone());
 
@@ -745,16 +745,16 @@ async fn run_fabric(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     spawn_signal_handler(supervisor.shutdown_handle());
     spawn_reconnect_handler(supervisor.reconnect_handle());
 
-    let silence = fabric.stream_silence;
+    let silence = link_config.stream_silence;
     let work = supervisor.work_in_progress(silence);
-    let activity = tokio::spawn(fabric::report_activity(
-        fabric::ActivityFile::new(&fabric.activity_dir, std::process::id()),
+    let activity = tokio::spawn(compute::report_activity(
+        compute::ActivityFile::new(&link_config.activity_dir, std::process::id()),
         move || work() + streams.moving(silence),
     ));
 
     info!(
-        workspace_root = %fabric.workspace_root.display(),
-        "agent online in a fabric sandbox"
+        workspace_root = %link_config.workspace_root.display(),
+        "agent online in a compute sandbox"
     );
     let supervisor_result = supervisor.run_with_updates(updates_rx).await;
     activity.abort();

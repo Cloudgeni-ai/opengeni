@@ -1,15 +1,15 @@
-// The HTTP client for Opengeni compute, the sandbox fabric (compute/ in this
-// repository; its contract is compute/docs/agent-link.md section 1). The fabric
-// owns placement, sleep and persistence; Opengeni creates a sandbox, wakes one
-// no host serves, reads it, finds the sandbox a create request made, deletes
-// it, and reads the keys the fleet signs agent-link tokens with. Every request
-// carries the team API key. Errors are `{code, message}` bodies.
+// The HTTP client for the control service of Opengeni compute (compute-control;
+// compute/ in this repository, its contract compute/docs/agent-link.md section
+// 1). Compute owns placement, sleep and persistence; Opengeni creates a
+// sandbox, wakes one no host serves, reads it, finds the sandbox a create
+// request made, deletes it, and reads the keys the control service signs
+// agent-link tokens with. Every request carries the team API key. Errors are `{code, message}` bodies.
 //
 // `create` is idempotent by `request_id`: the same id with the same body
 // answers the same sandbox, so an uncertain create is retried with the SAME id
 // and body, never a new one.
 
-export type ComputeFabricErrorKind =
+export type ComputeControlErrorKind =
   | "not_found"
   | "invalid"
   | "unauthorized"
@@ -24,7 +24,7 @@ export type ComputeFabricErrorKind =
   | "internal"
   | "transport";
 
-const RETRYABLE_KINDS: ReadonlySet<ComputeFabricErrorKind> = new Set([
+const RETRYABLE_KINDS: ReadonlySet<ComputeControlErrorKind> = new Set([
   "busy",
   "host",
   "init_failed",
@@ -35,15 +35,15 @@ const RETRYABLE_KINDS: ReadonlySet<ComputeFabricErrorKind> = new Set([
   "transport",
 ]);
 
-export class ComputeFabricError extends Error {
-  readonly name = "ComputeFabricError";
-  readonly kind: ComputeFabricErrorKind;
+export class ComputeControlError extends Error {
+  readonly name = "ComputeControlError";
+  readonly kind: ComputeControlErrorKind;
   readonly status: number | null;
   /** Safe to repeat the same request (the same request_id for a create). */
   readonly retryable: boolean;
 
   constructor(input: {
-    kind: ComputeFabricErrorKind;
+    kind: ComputeControlErrorKind;
     status: number | null;
     message: string;
     cause?: unknown;
@@ -55,15 +55,15 @@ export class ComputeFabricError extends Error {
   }
 }
 
-export function isComputeFabricNotFound(error: unknown): boolean {
-  return error instanceof ComputeFabricError && error.kind === "not_found";
+export function isComputeSandboxNotFound(error: unknown): boolean {
+  return error instanceof ComputeControlError && error.kind === "not_found";
 }
 
 /** The sandbox is gone for good: never existed, deleted, or its request's
  * sandbox was deleted. */
-export function isComputeFabricGone(error: unknown): boolean {
+export function isComputeSandboxGone(error: unknown): boolean {
   return (
-    error instanceof ComputeFabricError &&
+    error instanceof ComputeControlError &&
     (error.kind === "not_found" || error.kind === "request_gone")
   );
 }
@@ -112,10 +112,10 @@ export type ComputeCreateRequest = {
   };
 };
 
-/** One public key the fleet signs agent-link tokens with (a JWK). */
+/** One public key the control service signs agent-link tokens with (a JWK). */
 export type ComputeLinkKey = { kty: string; crv: string; kid: string; x: string };
 
-/** `GET /v1/link/keys`: Opengeni's own team and the fleet's link keys. */
+/** `GET /v1/link/keys`: Opengeni's own team and the control service's link keys. */
 export type ComputeLinkKeys = { team: string; keys: ComputeLinkKey[] };
 
 /** What `GET /v1/requests/{request_id}` found for a create request. */
@@ -124,13 +124,13 @@ export type ComputeRequestLookup =
   | { state: "none" }
   | { state: "gone" };
 
-export type ComputeFabricClientOptions = {
+export type ComputeControlClientOptions = {
   baseUrl: string;
   apiKey: string;
   /** Injected for tests; defaults to the global fetch. */
   fetch?: typeof fetch;
   /** Per-attempt request deadline. Create and wake can take a while: the
-   * fabric answers a create once the guest kept its init, and a wake once the
+   * control service answers a create once the guest kept its init, and a wake once the
    * sandbox runs (a restore from a remote archive takes seconds). */
   requestTimeoutMs?: number;
   /** Bounded attempts for retryable failures (same body, same request_id). */
@@ -159,9 +159,9 @@ const KNOWN_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /** The body's `code` names the failure; the status is the fallback. */
-function kindFor(status: number, code: string | undefined): ComputeFabricErrorKind {
+function kindFor(status: number, code: string | undefined): ComputeControlErrorKind {
   if (status === 401 || status === 403) return "unauthorized";
-  if (code && KNOWN_CODES.has(code)) return code as ComputeFabricErrorKind;
+  if (code && KNOWN_CODES.has(code)) return code as ComputeControlErrorKind;
   if (status === 404) return "not_found";
   if (status === 400 || status === 422) return "invalid";
   if (status === 409) return "busy";
@@ -195,7 +195,7 @@ async function errorBody(
   }
 }
 
-export class ComputeFabricClient {
+export class ComputeControlClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly fetchImpl: typeof fetch;
@@ -204,7 +204,7 @@ export class ComputeFabricClient {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly signal: AbortSignal | undefined;
 
-  constructor(options: ComputeFabricClientOptions) {
+  constructor(options: ComputeControlClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/u, "");
     this.apiKey = options.apiKey;
     this.fetchImpl = options.fetch ?? fetch;
@@ -257,10 +257,10 @@ export class ComputeFabricClient {
       );
       return { state: "live", sandbox };
     } catch (error) {
-      if (error instanceof ComputeFabricError && error.kind === "not_found") {
+      if (error instanceof ComputeControlError && error.kind === "not_found") {
         return { state: "none" };
       }
-      if (error instanceof ComputeFabricError && error.kind === "request_gone") {
+      if (error instanceof ComputeControlError && error.kind === "request_gone") {
         return { state: "gone" };
       }
       throw error;
@@ -272,35 +272,35 @@ export class ComputeFabricClient {
     try {
       await this.request<unknown>("DELETE", `/v1/sandboxes/${encodeURIComponent(sandboxId)}`);
     } catch (error) {
-      if (isComputeFabricGone(error)) return;
+      if (isComputeSandboxGone(error)) return;
       throw error;
     }
   }
 
-  /** Opengeni's team and the keys the fleet signs host tokens and sandbox
+  /** Opengeni's team and the keys the control service signs host tokens and sandbox
    * tickets with, the current one first. */
   async linkKeys(): Promise<ComputeLinkKeys> {
     return await this.request<ComputeLinkKeys>("GET", "/v1/link/keys");
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    let lastError: ComputeFabricError | undefined;
+    let lastError: ComputeControlError | undefined;
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
       if (attempt > 0) await this.backoff(Math.min(8_000, 250 * 2 ** attempt));
       if (this.signal?.aborted) break;
       try {
         return await this.attempt<T>(method, path, body);
       } catch (error) {
-        if (!(error instanceof ComputeFabricError) || !error.retryable) throw error;
+        if (!(error instanceof ComputeControlError) || !error.retryable) throw error;
         lastError = error;
       }
     }
     throw (
       lastError ??
-      new ComputeFabricError({
+      new ComputeControlError({
         kind: "transport",
         status: null,
-        message: `compute fabric ${method} ${path.split("?")[0]} was abandoned`,
+        message: `compute control service ${method} ${path.split("?")[0]} was abandoned`,
       })
     );
   }
@@ -332,11 +332,11 @@ export class ComputeFabricClient {
     // The timeout and the caller's signal bound the whole exchange, body
     // included: a peer that sends headers and then stalls must not outlive
     // either deadline.
-    const unanswered = (cause?: unknown): ComputeFabricError =>
-      new ComputeFabricError({
+    const unanswered = (cause?: unknown): ComputeControlError =>
+      new ComputeControlError({
         kind: "transport",
         status: null,
-        message: `compute fabric ${method} ${route} did not answer`,
+        message: `compute control service ${method} ${route} did not answer`,
         ...(cause === undefined ? {} : { cause }),
       });
     const ended = new Promise<never>((_, reject) => {
@@ -366,30 +366,30 @@ export class ComputeFabricClient {
       } catch (error) {
         // No answer: the request may or may not have taken effect. Callers only
         // repeat idempotent requests (a create carries its request_id).
-        throw error instanceof ComputeFabricError ? error : unanswered(error);
+        throw error instanceof ComputeControlError ? error : unanswered(error);
       }
       if (!response.ok) {
         const { code, message } = await errorBody(response, readText);
-        throw new ComputeFabricError({
+        throw new ComputeControlError({
           kind: kindFor(response.status, code),
           status: response.status,
-          message: `compute fabric ${method} ${route}: ${message}`,
+          message: `compute control service ${method} ${route}: ${message}`,
         });
       }
       let text: string;
       try {
         text = await readText(response);
       } catch (error) {
-        throw error instanceof ComputeFabricError ? error : unanswered(error);
+        throw error instanceof ComputeControlError ? error : unanswered(error);
       }
       if (!text) return undefined as T;
       try {
         return JSON.parse(text) as T;
       } catch (error) {
-        throw new ComputeFabricError({
+        throw new ComputeControlError({
           kind: "internal",
           status: response.status,
-          message: `compute fabric ${method} ${route} returned a non-JSON body`,
+          message: `compute control service ${method} ${route} returned a non-JSON body`,
           cause: error,
         });
       }

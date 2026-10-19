@@ -17,7 +17,7 @@ import { createConnectedCommandOutputCapture } from "@opengeni/db/session-comman
 import type { EventBus } from "@opengeni/events";
 import {
   cancelSelfhostedOp,
-  ComputeFabricClient,
+  ComputeControlClient,
   type ControlRpc,
   NatsControlRpc,
   type NatsRequestConnection,
@@ -43,9 +43,9 @@ export function connectedCommandStopRpc(input: {
   settings: Pick<Settings, "computeApiUrl" | "computeApiKey">;
   connect: () => Promise<NatsRequestConnection | null>;
   budgetMs: number;
-  /** Injected for tests: the fabric, and the sandbox an enrollment runs in. */
+  /** Injected for tests: the control service, and the sandbox an enrollment runs in. */
   compute?: {
-    fabric: Pick<ComputeFabricClient, "wake">;
+    control: Pick<ComputeControlClient, "wake">;
     sandboxOf: (agent: { workspaceId: string; enrollmentId: string }) => Promise<string | null>;
   };
   /** Injected for tests: whether a subject's connection is still live. */
@@ -58,7 +58,7 @@ export function connectedCommandStopRpc(input: {
     input.compute ??
     (computeApiUrl && computeApiKey
       ? {
-          fabric: new ComputeFabricClient({
+          control: new ComputeControlClient({
             baseUrl: computeApiUrl,
             apiKey: computeApiKey,
             requestTimeoutMs: input.budgetMs,

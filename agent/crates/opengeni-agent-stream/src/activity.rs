@@ -1,6 +1,6 @@
 //! When each open stream last carried traffic.
 //!
-//! A fabric sandbox sleeps when nothing in it is in use. The agent reports
+//! A compute sandbox sleeps when nothing in it is in use. The agent reports
 //! its open streams that moved bytes within a silence limit as part of what
 //! is in use, so an open terminal or a view someone is using keeps its
 //! sandbox awake while one left open and silent does not.

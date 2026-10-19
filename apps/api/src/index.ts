@@ -481,7 +481,7 @@ export async function startApi(
   const localBrowserBoundary = createLocalBrowserBoundary(settings, {
     warn: (message, attributes) => observability.warn(message, attributes),
   });
-  // The compute agent gateway: hosts of the compute fabric link here to carry
+  // The compute agent gateway: hosts of Opengeni compute link here to carry
   // their sandboxes' agents (sandbox/compute-gateway.ts). Off unless configured.
   let computeGateway: ComputeGatewayHandle | undefined;
   try {

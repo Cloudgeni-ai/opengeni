@@ -2,7 +2,7 @@
 //!
 //! A Connected Machine's credential comes from its enrollment and is fixed
 //! for the life of its connection file ([`RelayCredential::fixed`]). An agent
-//! in a fabric sandbox has none at start: its host hands it a relay address
+//! in a compute sandbox has none at start: its host hands it a relay address
 //! and a short-lived producer token, and a fresh one before that expires
 //! ([`RelayCredential::pending`] then [`RelayCredential::set`]). Every
 //! registration, the first and each reconnect, takes one snapshot of the

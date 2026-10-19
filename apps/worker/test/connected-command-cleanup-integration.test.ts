@@ -1108,7 +1108,7 @@ test("a request to a replaced connection ends without a wake when another proces
     const rpc = new NatsControlRpc(async () => connection, {
       connectionCurrent,
       onNoResponders: wakeComputeSandboxOnNoResponders({
-        fabric: {
+        control: {
           wake: async (sandboxId) => {
             wakes.push(sandboxId);
             return {} as never;

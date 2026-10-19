@@ -2,7 +2,7 @@
 -- Sandbox enrollments: the machine agent inside an Opengeni compute sandbox.
 --
 -- A compute sandbox runs the same agent as a Connected Machine, but it holds
--- no credential: it is reached through its fabric host's link to Opengeni's
+-- no credential: it is reached through its host's link to Opengeni's
 -- agent gateway. Opengeni creates its enrollment itself, active at once, with
 -- kind 'sandbox', no public key and no bearer, bound to the sandbox group
 -- (lease) the sandbox belongs to. It is not a machine: it never gets a
@@ -10,7 +10,7 @@
 -- is authorized by its lease. It is revoked when the sandbox is deleted at
 -- the end of its group.
 --
--- link_epoch is the highest fabric owner epoch the gateway has accepted for
+-- link_epoch is the highest owner epoch the gateway has accepted for
 -- the sandbox's agent. A session from an older epoch is refused, and a newer
 -- one ends every other session for the agent, on any API replica.
 --

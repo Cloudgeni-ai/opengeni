@@ -2,8 +2,8 @@
  * A TypeScript stand-in for a compute host's side of the agent link
  * (compute/docs/agent-link.md section 4): it dials the gateway with a host
  * token, opens sessions with sandbox tickets, subscribes, publishes and
- * receives messages, so the gateway is tested without the fabric's host.
- * Also signs the fleet's tokens with a test Ed25519 key.
+ * receives messages, so the gateway is tested without a real compute host.
+ * Also signs the control service's tokens with a test Ed25519 key.
  */
 
 import {
@@ -33,7 +33,7 @@ export async function generateTestLinkKey(kid: string): Promise<TestLinkKey> {
   };
 }
 
-/** Sign a link token as the fleet does: an EdDSA JWT naming its key. */
+/** Sign a link token as the control service does: an EdDSA JWT naming its key. */
 export async function signTestLinkToken(
   key: TestLinkKey,
   claims: Record<string, unknown>,

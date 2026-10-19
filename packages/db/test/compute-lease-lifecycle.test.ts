@@ -25,7 +25,7 @@ import {
   type DbClient,
 } from "../src/index";
 
-// 0845: Opengeni compute's fabric sleeps an idle sandbox itself and keeps its
+// 0845: Opengeni compute sleeps an idle sandbox itself and keeps its
 // memory and disk, so a compute lease is never drained for being idle. It
 // stays warm without holders until its group ends (session or workspace
 // deletion asks for the teardown) or it rotates. Other backends drain exactly

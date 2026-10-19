@@ -76,7 +76,7 @@ pub struct RelayHubConfig {
     pub agent_id: String,
     /// The relay address and the agent's producer token, presented on each
     /// producer registration: fixed by a Connected Machine's enrollment, or
-    /// handed to a fabric sandbox's agent by its host and replaced before it
+    /// handed to a compute sandbox's agent by its host and replaced before it
     /// expires. Never logged. The viewer's `ogs_` token is a SEPARATE
     /// control-plane mint (see the module + crate docs).
     pub credential: RelayCredential,

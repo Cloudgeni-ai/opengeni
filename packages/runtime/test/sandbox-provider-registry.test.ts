@@ -55,7 +55,7 @@ const CREDS: Record<SandboxBackendType, Record<string, unknown>> = {
     openSandboxImage:
       "registry.example.com/opengeni@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   },
-  // compute needs the fabric, its agent gateway and the relay its agents use.
+  // compute needs the control service, its agent gateway and the relay its agents use.
   compute: {
     computeApiUrl: "https://compute.example.test",
     computeApiKey: "k",

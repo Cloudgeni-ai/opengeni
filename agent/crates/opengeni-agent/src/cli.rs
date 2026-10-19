@@ -120,7 +120,7 @@ pub struct RunArgs {
     /// the sandbox's host. No enrollment, renewal, update or service
     /// installation happens in this mode.
     #[arg(long, value_name = "LINK_FILE")]
-    pub fabric: Option<std::path::PathBuf>,
+    pub compute: Option<std::path::PathBuf>,
 }
 
 /// Arguments for the `enroll` subcommand.
