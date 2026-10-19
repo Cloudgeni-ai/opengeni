@@ -2708,7 +2708,7 @@ describe("interaction attempt tools", () => {
     // recorded commands: nothing acts again.
     requests.length = 0;
     const retried = await run();
-    expect(observed).toBe(2);
+    expect(observed).toBe(1);
     expect(requests.map((request) => request.operationId)).toEqual(operationIds.slice(1));
     expect(journal.size).toBe(3);
     expect(retried.structuredContent).toEqual(result.structuredContent);
@@ -2813,9 +2813,82 @@ describe("interaction attempt tools", () => {
       { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
     );
     expect(sent).toBe(1);
+    expect(unread.structuredContent).toMatchObject({
+      steps: [{ state: "completed" }, { state: "outcome_unknown" }],
+    });
     expect((unread.content[0] as { text: string }).text.split("\n")[1]).toBe(
-      "Error resource_unavailable (retryable): the window could not be read before this action, so it was not sent now; whether an earlier try of this batch sent it could not be read either: window closed",
+      "Error outcome_unknown: this call did not send this action because the window could not be read, and whether an earlier try of this batch sent it could not be read either: window closed",
     );
+  });
+
+  test("a retried Computer batch continues from a recovered action's own observation", async () => {
+    const target = computerTarget();
+    // Like CUA, only the latest observation is a valid fence, and every read
+    // replaces it.
+    let latest = 0;
+    const read = () => ({ ...computerObservation(target), observationId: `obs-${++latest}` });
+    const journal = new Map<string, ComputerActionReceipt>();
+    let reachable = true;
+    let secondFails = true;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => {
+          if (!reachable) throw new Error("controller unavailable");
+          return read();
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          const existing = journal.get(value.operationId);
+          if (existing) return existing;
+          if (journal.size === 1 && secondFails) {
+            reachable = false;
+            throw new Error("socket hang up");
+          }
+          if (value.expectedObservationId !== `obs-${latest}`)
+            throw new OpenGeniApiError(409, "observation_stale", { code: "observation_stale" });
+          const receipt = computerReceipt(value.operationId, read());
+          journal.set(value.operationId, receipt);
+          return receipt;
+        },
+        getComputerActionReceipt: async (_workspaceId, _computerSessionId, id) => {
+          const existing = journal.get(id);
+          if (!existing)
+            throw new OpenGeniApiError(404, "operation not found", { code: "resource_not_found" });
+          return existing;
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const operationId = randomUUID();
+    const run = async () =>
+      await definitions[0]!.execute(
+        {
+          computerSessionId,
+          targetId: target.id,
+          action: {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "5" },
+              { type: "keyboard", action: "press", value: "6" },
+            ],
+          },
+        },
+        { operationId, caller: { kind: "model", subjectId: "model:test" } },
+      );
+    const first = await run();
+    expect(first.structuredContent).toMatchObject({
+      steps: [{ state: "completed" }, { state: "outcome_unknown" }],
+    });
+
+    reachable = true;
+    secondFails = false;
+    const retried = await run();
+    expect(retried.structuredContent).toMatchObject({
+      steps: [{ state: "completed" }, { state: "completed" }],
+    });
+    expect(journal.size).toBe(2);
   });
 
   test("stops a Computer batch at the first action that does not complete and says what ran", async () => {

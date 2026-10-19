@@ -2605,37 +2605,54 @@ async function actInComputerBatch(
     const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
     let receipt: Receipt | null = null;
     if (generation === undefined || observationId == null) {
-      const [prior, current] = await Promise.all([
-        recorded(stepOperationId),
-        observe().then(
-          (read) => ({ read }),
-          (error: unknown) => ({ error }),
-        ),
-      ]);
+      // Read the recorded receipt first: a fresh read replaces the latest
+      // observation, which would make a recovered receipt's fence stale.
+      const prior = await recorded(stepOperationId);
       if (typeof prior === "object") {
         receipt = prior;
-      } else if ("error" in current) {
-        // The first action failing is the call failing. Later, the actions
-        // before this one did run and must still be reported.
-        if (index === 0) throw current.error;
-        steps.push({
-          operationId: stepOperationId,
-          state: "failed",
-          error: {
-            code: "resource_unavailable",
-            message: (prior === "absent"
-              ? `the window could not be read before this action, so it was not sent: ${reasonOf(current.error)}`
-              : `the window could not be read before this action, so it was not sent now; whether an earlier try of this batch sent it could not be read either: ${reasonOf(current.error)}`
-            ).slice(0, 8_192),
-            retryable: true,
-          },
-        });
-        observedAfterLastAction = false;
-        break;
       } else {
-        generation ??= current.read.target.targetGeneration;
-        observationId ??= current.read.observationId;
-        observation = current.read;
+        let current: Observation;
+        try {
+          current = await observe();
+        } catch (error) {
+          // The first action failing is the call failing. Later, the actions
+          // before this one did run and must still be reported.
+          if (index === 0) throw error;
+          steps.push(
+            prior === "absent"
+              ? {
+                  operationId: stepOperationId,
+                  state: "failed",
+                  error: {
+                    code: "resource_unavailable",
+                    message:
+                      `the window could not be read before this action, so it was not sent: ${reasonOf(error)}`.slice(
+                        0,
+                        8_192,
+                      ),
+                    retryable: true,
+                  },
+                }
+              : {
+                  operationId: stepOperationId,
+                  state: "outcome_unknown",
+                  error: {
+                    code: "outcome_unknown",
+                    message:
+                      `this call did not send this action because the window could not be read, and whether an earlier try of this batch sent it could not be read either: ${reasonOf(error)}`.slice(
+                        0,
+                        8_192,
+                      ),
+                    retryable: false,
+                  },
+                },
+          );
+          observedAfterLastAction = false;
+          break;
+        }
+        generation ??= current.target.targetGeneration;
+        observationId ??= current.observationId;
+        observation = current;
       }
     }
     if (!receipt) {
