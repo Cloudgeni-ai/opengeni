@@ -25,7 +25,17 @@ export type CheckpointProof = {
   min?: number;
 };
 
-export type Proof = LevelProof | CheckpointProof;
+/** That the suite kept `host`'s journal before stopping it, read on the
+ * machine itself: instance `instance` (its metadata server's id) in boot
+ * `boot`. The verifier wants `host-<host>@<instance>.log` with that header. */
+export type JournalProof = {
+  kind: "journal";
+  host: string;
+  instance: string;
+  boot: string;
+};
+
+export type Proof = LevelProof | CheckpointProof | JournalProof;
 
 export type Result = {
   id: string;

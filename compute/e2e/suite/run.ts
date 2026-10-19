@@ -2103,33 +2103,84 @@ check(
     };
     const lostInstance = instanceId(lost);
     // Its journal goes with it when the instance group replaces it: keep
-    // it, from the run's start, for the verifier (as host-<name>@<instance>).
+    // it, from the run's start, for the verifier (as host-<name>@<instance>),
+    // read on the machine looked up: its metadata server names the
+    // instance, and the journal is of its current boot, both in the header.
+    let lostBoot = "";
     try {
       const since = Math.floor(Date.parse(STARTED) / 1000) - 60;
-      writeFileSync(
-        `${OUT}/host-${lost}@${lostInstance}.log`,
-        onHost(
-          lost,
-          `sudo journalctl --no-pager -o short-iso-precise --since @${since} -u 'compute-*'`,
-          300_000,
-        ),
+      const journalText = onHost(
+        lost,
+        `iid=$(curl -fsS -m 10 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/id) || { echo "the metadata server gave no instance id" >&2; exit 8; }; ` +
+          `[ "$iid" = "${lostInstance}" ] || { echo "this machine is instance $iid, not ${lostInstance}" >&2; exit 9; }; ` +
+          `boot=$(cat /proc/sys/kernel/random/boot_id) || exit 10; ` +
+          `echo "# instance=$iid boot=$boot"; ` +
+          `sudo journalctl --no-pager -o short-iso-precise -b "$(printf %s "$boot" | tr -d -)" --since @${since} -u 'compute-*'`,
+        300_000,
       );
+      const header = /^# instance=([0-9]+) boot=([0-9a-f-]{36})\n/.exec(journalText);
+      if (!header || header[1] !== lostInstance) {
+        throw new Error(
+          `the kept journal's header is ${JSON.stringify(journalText.split("\n")[0])}`,
+        );
+      }
+      lostBoot = header[2]!;
+      writeFileSync(`${OUT}/host-${lost}@${lostInstance}.log`, journalText);
     } catch (error) {
-      throw new Error(`could not keep ${lost}'s journal before stopping it: ${error}`);
+      throw new Error(`could not keep ${lost}'s journal before stopping it: ${error}`, {
+        cause: error,
+      });
     }
+    proofs.push({ kind: "journal", host: lost, instance: lostInstance, boot: lostBoot });
     // Stopped, the machine is plainly gone: its lease lapses, the service
     // fences it (finds it stopped) and the sandbox wakes elsewhere.
     log(`stopping ${lost} (instance ${lostInstance})`);
     const start = Date.now();
-    const stop = spawnSync(
-      "gcloud",
-      ["compute", "instances", "stop", lost, "--zone", ZONE, "--project", PROJECT, "--quiet"],
-      {
-        encoding: "utf8",
-        timeout: 300_000,
-      },
-    );
-    if (stop.status !== 0) throw new Error(`stop: ${stop.error ?? ""} ${stop.stderr}`);
+    // Stopped by name, so the operation says which machine it stopped: the
+    // one whose journal was kept, or the check fails.
+    const started = JSON.parse(
+      gcloud([
+        "compute",
+        "instances",
+        "stop",
+        lost,
+        "--zone",
+        ZONE,
+        "--project",
+        PROJECT,
+        "--async",
+        "--format",
+        "json",
+      ]),
+    ) as { name?: string; targetId?: string } | { name?: string; targetId?: string }[];
+    const operation = Array.isArray(started) ? started[0] : started;
+    if (!operation?.name) throw new Error(`stop: no operation in ${JSON.stringify(started)}`);
+    let stopped: { status?: string; targetId?: string; error?: unknown } = {};
+    for (;;) {
+      stopped = JSON.parse(
+        gcloud([
+          "compute",
+          "operations",
+          "describe",
+          operation.name,
+          "--zone",
+          ZONE,
+          "--project",
+          PROJECT,
+          "--format",
+          "json",
+        ]),
+      ) as typeof stopped;
+      if (stopped.status === "DONE") break;
+      if (Date.now() - start > 300_000) throw new Error(`stop ${operation.name} not done in 300 s`);
+      await sleep(5_000);
+    }
+    if (stopped.error) throw new Error(`stop ${operation.name}: ${JSON.stringify(stopped.error)}`);
+    if (String(stopped.targetId ?? operation.targetId ?? "") !== lostInstance) {
+      throw new Error(
+        `the stop of ${lost} stopped instance ${stopped.targetId ?? "unknown"}, not ${lostInstance} whose journal was kept`,
+      );
+    }
     hostAddresses.delete(lost);
     let out = "";
     for (;;) {
@@ -2169,6 +2220,7 @@ check(
       } catch (error) {
         throw new Error(
           `answered on ${lost} again, and its instance id could not be read: ${error}`,
+          { cause: error },
         );
       }
     }

@@ -20,6 +20,7 @@ import {
   counts,
   render,
   type CheckpointProof,
+  type JournalProof,
   type LevelProof,
   type Meta,
   type Proof,
@@ -52,8 +53,23 @@ const steps: Step[] = [];
 // host-<name>@<instance>.log one the suite kept before stopping that
 // machine (host-loss), whose journal its replacement does not have. A
 // machine that came back keeps its journal, so an event can be in both:
-// it counts once.
-const journals = readdirSync(dir).filter((name) => /^host-.*\.log$/.test(name));
+// it counts once. A kept journal counts only if its header, read on the
+// machine, names the instance its file does.
+const kept = new Map<string, { instance: string; boot: string }>();
+const journals = readdirSync(dir).filter((name) => {
+  if (!/^host-.*\.log$/.test(name)) return false;
+  const named = /@([0-9]+)\.log$/.exec(name);
+  if (!named) return true;
+  const header = /^# instance=([0-9]+) boot=([0-9a-f-]{36})\n/.exec(
+    readFileSync(`${dir}/${name}`, "utf8"),
+  );
+  if (!header || header[1] !== named[1]) {
+    console.error(`${name}: its header does not name instance ${named[1]}; not used`);
+    return false;
+  }
+  kept.set(name, { instance: header[1]!, boot: header[2]! });
+  return true;
+});
 const seen = new Set<string>();
 for (const name of journals) {
   for (const line of readFileSync(`${dir}/${name}`, "utf8").split("\n")) {
@@ -92,7 +108,22 @@ const wake = (s: Step) => `${s.step} (${s.cause}${s.by ? `, by ${s.by}` : ""}) a
 
 /** Why the journals do not show `proof`, or how they do. */
 function check(proof: Proof): { ok: boolean; how: string } {
+  if (proof.kind === "journal") return keptJournal(proof);
   return proof.kind === "checkpoint" ? checkpointed(proof) : leveled(proof);
+}
+
+function keptJournal(proof: JournalProof): { ok: boolean; how: string } {
+  const name = `host-${proof.host}@${proof.instance}.log`;
+  const found = kept.get(name);
+  if (!found)
+    return { ok: false, how: `no kept journal ${name} naming instance ${proof.instance}` };
+  if (found.boot !== proof.boot) {
+    return { ok: false, how: `${name} is of boot ${found.boot}, not ${proof.boot}` };
+  }
+  return {
+    ok: true,
+    how: `kept journal of ${proof.host}: instance ${proof.instance}, boot ${proof.boot}`,
+  };
 }
 
 function leveled(proof: LevelProof): { ok: boolean; how: string } {
@@ -185,7 +216,7 @@ function checkpointed(proof: CheckpointProof): { ok: boolean; how: string } {
 
 // The checks whose pass rests on the journals: a pass with no proof to
 // verify is not one.
-const NEEDS_PROOF = /^(sleep-.*|checkpoint|link-stream|vm-crash)$/;
+const NEEDS_PROOF = /^(sleep-.*|checkpoint|link-stream|vm-crash|host-loss)$/;
 for (const result of saved.results) {
   if (result.status === "pass" && !result.proofs?.length && NEEDS_PROOF.test(result.id)) {
     result.status = "fail";
