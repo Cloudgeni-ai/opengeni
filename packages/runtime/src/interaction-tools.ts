@@ -1416,6 +1416,13 @@ export function createInteractionAttemptToolDefinitions(
           ),
         ]);
         if (observed.status === "rejected") throw observed.reason;
+        // A tab cannot be captured while a JavaScript dialog is open; the
+        // observation names the dialog.
+        if (captured.status === "rejected" && observed.value.dialog)
+          return new InteractionExecutionResult(
+            projectBrowserObservation(observed.value, value.view ?? "compact"),
+            [{ type: "text" as const, text: BROWSER_DIALOG_NO_SCREENSHOT }],
+          );
         if (captured.status === "rejected") throw captured.reason;
         let observation = observed.value;
         const frame = captured.value;
@@ -1598,6 +1605,12 @@ export function createInteractionAttemptToolDefinitions(
         });
         const projected = value.view === "full" ? receipt : compactActionReceipt(receipt);
         if (!value.includeScreenshot) return projected;
+        // A tab cannot be captured while a JavaScript dialog is open; the
+        // receipt already names the dialog.
+        if (receipt.observation?.dialog)
+          return new InteractionExecutionResult(projected, [
+            { type: "text" as const, text: BROWSER_DIALOG_NO_SCREENSHOT },
+          ]);
         // The action has already run. A failed capture must not turn its
         // receipt into an error the model could answer by replaying the action.
         try {
@@ -3556,6 +3569,9 @@ function screenshotFailureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/\s+/gu, " ").trim().slice(0, 300) || "unknown error";
 }
+
+const BROWSER_DIALOG_NO_SCREENSHOT =
+  "No screenshot: a JavaScript dialog is open in this tab. Handle it first with browser_act action {type:'handle_dialog'}.";
 
 function browserToolImageContent(
   data: Uint8Array,

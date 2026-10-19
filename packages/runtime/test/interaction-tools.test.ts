@@ -2246,6 +2246,66 @@ describe("interaction attempt tools", () => {
     );
   });
 
+  test("an open JavaScript dialog replaces a requested screenshot with what to do next", async () => {
+    const target = browserTarget();
+    const dialog = {
+      type: "confirm" as const,
+      message: "Delete this revision?",
+      defaultPrompt: "",
+      openedAt: now,
+    };
+    const observation = { ...browserObservation(target), dialog };
+    let captures = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, value) =>
+          browserReceipt(value.operationId, observation),
+        observeBrowserTarget: async () => observation,
+        captureBrowserTarget: async () => {
+          captures += 1;
+          throw new Error("a dialog blocks capture");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act", "browser_observe"],
+      permissions: ["sessions:control", "sessions:read"],
+    });
+    const context = {
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    };
+    const note =
+      "No screenshot: a JavaScript dialog is open in this tab. Handle it first with browser_act action {type:'handle_dialog'}.";
+    const acted = await definitions
+      .find((definition) => definition.modelName === "interaction__browser_act")!
+      .execute(
+        {
+          browserSessionId,
+          targetId: target.id,
+          action: { type: "click", locator: { kind: "ref", ref: "e1" } },
+          view: "none",
+          includeScreenshot: true,
+        },
+        context,
+      );
+    expect(acted.isError).toBeFalsy();
+    expect(acted.structuredContent).toMatchObject({ observation: { dialog } });
+    expect(acted.content.at(-1)).toEqual({ type: "text", text: note });
+    // The action path never asks a blocked tab for pixels.
+    expect(captures).toBe(0);
+
+    const observed = await definitions
+      .find((definition) => definition.modelName === "interaction__browser_observe")!
+      .execute(
+        { browserSessionId, targetId: target.id, includeScreenshot: true },
+        { ...context, operationId: randomUUID() },
+      );
+    expect(observed.isError).toBeFalsy();
+    expect(observed.structuredContent).toMatchObject({ dialog });
+    expect(observed.content.at(-1)).toEqual({ type: "text", text: note });
+  });
+
   test("an upload by workspace path publishes each file once per operation and dispatches File IDs", async () => {
     const target = browserTarget();
     const observation = browserObservation(target);
