@@ -1,4 +1,5 @@
 import { getScheduledTaskClaudeProviderAccountAuthoritySnapshot } from "@opengeni/db";
+import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
   isRetiredNativeAtlassianTask,
@@ -318,7 +319,7 @@ export async function stampScheduledSessionTitle(
 }
 
 export function createScheduledTaskActivities(services: () => Promise<ControlActivityServices>) {
-  return {
+  const activities = {
     dispatchScheduledTaskRun: async (
       input: DispatchScheduledTaskRunInput,
     ): Promise<DispatchScheduledTaskRunResult> => {
@@ -2214,6 +2215,10 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       }
       return result;
     },
+  };
+  return {
+    dispatchScheduledTaskRun: (input: DispatchScheduledTaskRunInput) =>
+      retryScheduledTaskAdmission(() => activities.dispatchScheduledTaskRun(input)),
   };
 }
 
