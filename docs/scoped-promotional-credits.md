@@ -1,11 +1,14 @@
 # Promotional credit coverage
 
-Signup and coupon credits share a model list. Offers can override it. Coverage
+Legacy signup and coupon credits share a model list. Offers can override it. Coverage
 for new Free monthly plan grants also follows the signup list (including its
 optional override); paid plan credit remains general. Monthly credit is spent
 first on covered models and expires without removing signup or purchased credit.
 See [subscription accounting and rollout](subscription-plans.md) for migration
 0844, unchanged existing grants, and required policy configuration.
+Migration 0845 stops new signup bonus money. Its zero-value eligibility receipt
+is not a promotional balance; monthly Free funding replaces the bonus. Existing
+signup credit stays spendable under its original scoped/general terms.
 Coverage
 can change for existing and new promotional balances; issued amounts and spent
 credits stay unchanged. Legacy unrestricted grants remain unrestricted.
@@ -54,8 +57,9 @@ if available, or pauses for credits.
 
 Deploy migration 0613 and all API/worker readers and debit writers **before**
 enabling scoped credits. Provision database roles as usual. Apply the runtime
-policy using the command above. Keep the signup grant's existing enablement
-switches. Do not roll back readers/writers while scoped balances remain.
+policy using the command above. Before 0845, signup money also requires its
+enablement switches; after 0845, signup records non-monetary eligibility regardless
+of those retired switches. Do not roll back readers/writers while scoped balances remain.
 
 `OPENGENI_CREDIT_PROMOTION_POLICY_JSON` is an optional bootstrap fallback until
 an operator writes the first runtime revision. Runtime policy then supersedes

@@ -18,7 +18,9 @@ behind `OPENGENI_SUBSCRIPTION_PLANS_ENABLED`; prepaid credit billing is independ
 New Free monthly grants share signup credit's live model coverage and use explicit
 grant allocations, ahead of other promotions. Pro/Max and existing unrestricted
 periods remain general credit. Expiry removes only the monthly grant's own unused
-funding; signup eligibility and the separate signup issuer are unchanged.
+funding. Migration 0845 retains the canonical signup issuer and one-human/one-org
+receipt but issues zero money; monthly Free funding replaces new signup bonuses.
+Legacy positive receipts remain eligible and retain their balances; no backfill.
 
 ## 1. Startup
 

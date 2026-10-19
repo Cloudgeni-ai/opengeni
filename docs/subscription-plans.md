@@ -7,7 +7,7 @@ top-ups remain enabled independently. Migrations enroll nobody, change no
 machine-time pricing and configure no Stripe prices. Organizations with no
 plan row retain uncapped seats and their existing credit behavior. Activation
 enrolls all organizations in Free, including embedded organizations; only actual
-verified-signup-trial recipients receive monthly Free credit. Enterprise is
+verified-signup eligibility-receipt holders receive monthly Free credit. Enterprise is
 operator-assigned only.
 
 Migration 0797 is **maintenance**, despite adding only new structures: the
@@ -160,7 +160,7 @@ New ledger types are `plan_credit_grant` and `plan_credit_expiry`. Both have
 `eligible_model_ids = NULL` and remain general credit. Starting with migration
 0844, new positive Free monthly grants carry the signup/free-credit model scope.
 Expiries therefore do not increment workspace allowance
-debit counters. The signup receipt trigger remains the only signup-trial issuer.
+debit counters. Since 0845, the signup receipt trigger records eligibility without money.
 Recurring plan funding deliberately does not fire the signup/coupon/manual
 `credits.granted` acquisition/lifecycle triggers of migration 0566.
 
@@ -193,7 +193,8 @@ This is a maintenance migration: drain old API and workers, migrate, then start
 the matching readers/writers. **Do not rewrite existing in-period grants**. Their
 NULL scope and accounting remain unchanged until their normal expiry/replacement;
 the next new Free monthly grant gets scoped. No production backfill, policy edit,
-signup-trial removal or Free-eligibility change is part of this migration.
+signup-trial removal or Free-eligibility change is part of 0844; the following
+0845 migration replaces new signup bonuses with zero-value eligibility receipts.
 
 ### General periods (paid and legacy unrestricted Free)
 
@@ -246,15 +247,34 @@ credit; new top-ups repay debt first.
 
 ## Free eligibility and seats
 
-`freePlanCreditEligible` requires the organization's actual verified-signup
-trial grant (`source_type = verified_signup_trial`, canonical human idempotency
-key). Merely verifying an email or creating additional organizations is not
-enough. No historical eligibility backfill is executed by this migration.
-Any production backfill requires a separately authorized, one-human/one-org
-eligibility decision; the maintenance caller must not infer eligibility.
-Disabling the separate signup-trial issuer at activation would make new users
-ineligible under this receipt-based rule; changing that eligibility source needs
-an explicit follow-up design. This PR does not disable the issuer.
+`freePlanCreditEligible` requires the organization's actual canonical signup
+receipt: `type = grant`, `source_type = verified_signup_trial`, and idempotency
+key `verified-signup-trial:v1:<canonical human id>`. Migration 0845 changes new
+receipts to **zero micros**, retaining the original issuer path and identity key
+without a separate signup bonus. Legacy positive trial receipts remain eligible;
+already-issued trial balances are neither changed nor expired by this migration.
+The historical source type is retained for compatibility, not a promise of money.
+
+The existing self-service setup receipt is one per verified human, under its
+canonical lock. Setup retries cannot issue another witness; additional organizations,
+invited users and unverified people cannot obtain one. There is **no backfill**:
+old completed setups with no trial receipt remain ineligible, even on replay.
+
+The old `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` environment flag and
+`set_verified_signup_trial_credits_enabled` runtime switch no longer gate this
+non-monetary witness and cannot restore a bonus. No production config edit is
+required to stop signup money after 0845. Keep subscription plans enabled and
+configure the free-credit model policy for monthly funding; disabling the legacy
+bonus flag is optional and does not disable eligibility. Old switch readings are
+historical compatibility telemetry, not the state of monthly funding.
+
+0845 is rolling and changes no historical rows. The preceding scoped-credit
+0844 migration still requires its documented maintenance rollout. The enabled
+subscription maintenance worker issues the first monthly grant on its next pass
+(normally within 60 seconds), and renews at the existing UTC anniversary. The
+welcome describes monthly funding only after the billing snapshot confirms it;
+it never invents a signup bonus while waiting. Future configured credit amounts
+come from the plan catalog rather than hardcoded welcome copy.
 
 Seats count active/provisioning `user:` subjects plus pending, unexpired
 invitations. A bound invitation reserves the same seat as its matching member,

@@ -244,6 +244,8 @@ disabled tools or grant execution outside the current catalog.
   settlement time after locking; plan expiry must not remove unrelated promotional
   funding. New Free monthly grants use the signup model policy and explicit scoped
   allocations; Pro/Max and legacy unrestricted periods keep general accounting.
+  Signup receipts after 0845 carry zero money but retain Free eligibility;
+  legacy bonus switches must not disable this witness or re-enable money grants.
   Seat checks reuse the organization membership fence. Runtime catalog
   writes are migration-owner-only. See `docs/subscription-plans.md` for worker seams.
 - Organization-key policy authority is defined in `packages/contracts/src/organization-access.ts`. Migration `0600_organization_api_key_access_policy.sql` is a drained maintenance cutover: stop all API/workers, migrate with the complete runtime-login list, provision roles, and start only policy-aware binaries. Legacy keys retain their stored permissions and wildcard; explicit policies use literal permissions and live all/selected shared-workspace scope. Personal workspaces remain excluded from organization service authority.

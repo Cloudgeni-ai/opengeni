@@ -75,6 +75,16 @@ Once no API image older than 0527 can run, a later rolling migration drops
 
 ## Verified signup trial runtime switch (0521)
 
+**Current behavior after 0845:** new verified signup receipts carry zero money
+and establish one-human/one-org eligibility for monthly Free credit. Existing
+positive trial balances remain untouched. Neither of the legacy money switches
+below disables eligibility or re-enables a signup bonus. No production config
+edit is needed to stop bonus money; monthly funding still requires enabled
+subscription plans and the configured free-credit model policy. There is no
+eligibility backfill. See [subscription plans](subscription-plans.md).
+
+The remainder of this section documents the historical, pre-0845 money switch.
+
 `0521_verified_signup_trial_runtime_switch.sql` is a rolling migration. It needs
 no drain and no `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`; migrate, then
 run the normal `db:provision-roles`. Its seed revision allows grants, so this
@@ -2860,7 +2870,7 @@ The runtime secret must provide values such as:
   Disabled subscription deliveries are retained but not marked processed, so they
   can be replayed after activation. Stripe readiness/products/webhook configuration
   are separate operator activation work, not performed by this flag.
-- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. It is the master opt-in; the database runtime switch from migration 0521 can pause and resume grants without a deploy or restart (see "Verified signup trial runtime switch (0521)" above). The grant is account-wide. Operators can restrict and update eligible models with `bun run credits:policy`; `OPENGENI_CREDIT_PROMOTION_POLICY_JSON` is a bootstrap fallback until the first runtime policy revision. With neither configured, new grants remain unrestricted. See [scoped promotional credits](scoped-promotional-credits.md) for activation and existing-balance behavior. No payment card is required. A completed in-flight resource can leave a negative general balance, and future top-ups clear that balance first; no card is automatically charged. New work that names no model chooses a funded credits-billed model unless a saved workspace default or connected subscription wins; with no funded candidate it falls back to the deployment default. The signup welcome shows the amount, and the picker shows each model's current payment source. See "Default model for new work" in [`model-providers.md`](model-providers.md).
+- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` is a legacy compatibility flag after migration 0845: new verified first self-service signups always receive a zero-value Free eligibility receipt, never a separate bonus. The flag and historical runtime money switch cannot disable eligibility or restore bonus money. Existing positive trial grants remain untouched; no old user is backfilled. Enabled subscription maintenance issues monthly Free funding under the current plan catalog and free-credit model policy. `OPENGENI_CREDIT_PROMOTION_POLICY_JSON` provides the signup receipt's bootstrap scope until a runtime policy exists; a positive Free grant never silently becomes unrestricted when scope is missing. See [subscription plans](subscription-plans.md) and [scoped promotional credits](scoped-promotional-credits.md). No payment card is required. Completed in-flight usage can create general debt, and future top-ups repay it first; cards are not automatically charged. New work without an explicit model uses the existing funded-model resolution described in [`model-providers.md`](model-providers.md).
 - `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only|shadow|credits` and `OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only|shadow|credits` are independent of Stripe and default to `usage_only`. `shadow` is operator-only comparison, never a customer debit. Paid sandbox mode additionally needs a reviewed backend warm rate in `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON`; paid deployment-funded embeddings need `OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES` (integer USD micros per million input UTF-8 bytes) and `OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT` (ISO UTC timestamp; earlier queued jobs stay unpriced). This PR leaves commercial rates and production activation unset.
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`

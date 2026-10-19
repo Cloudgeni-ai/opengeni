@@ -7,7 +7,7 @@ import {
   applyCreditDebitAfterUse,
   applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
-  completeSelfServiceOrganizationSetup,
+  ensureManagedAccessForUser,
   createDb,
   expirePlanCreditPeriod,
   getBillingBalance,
@@ -37,20 +37,27 @@ afterAll(async () => {
 }, 180_000);
 
 async function owner(scoped = true) {
+  // This suite exercises preserved legacy trial balances alongside new monthly
+  // grants. New signups now have only a zero-value eligibility receipt (0845).
   const user = crypto.randomUUID();
   await shared!
     .admin`insert into auth_users(id,name,email,email_verified) values (${user},'Free owner',${`${user}@example.test`},true)`;
-  return (
-    await completeSelfServiceOrganizationSetup(client!.db, {
-      authUserId: user,
-      actorSubjectId: `user:${user}`,
-      organizationName: "Free scope test",
-      operationId: crypto.randomUUID(),
-      requestFingerprint: "a".repeat(64),
-      trialCreditsEnabled: true,
-      ...(scoped ? { trialCreditModelIds: ["model-a"] } : {}),
-    })
-  ).organizationId;
+  const access = await ensureManagedAccessForUser(client!.db, {
+    userId: user,
+    email: `${user}@example.test`,
+    name: "Legacy trial owner",
+  });
+  const accountId = access.defaultAccountId!;
+  await applyCreditLedgerEntry(client!.db, {
+    accountId,
+    type: "grant",
+    amountMicros: 10 * M,
+    sourceType: "verified_signup_trial",
+    sourceId: user,
+    idempotencyKey: `verified-signup-trial:v1:${user}`,
+    ...(scoped ? { eligibleModelIds: ["model-a"] } : {}),
+  });
+  return accountId;
 }
 async function state(
   accountId: string,

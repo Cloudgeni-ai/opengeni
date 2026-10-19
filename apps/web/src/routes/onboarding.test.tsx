@@ -1185,6 +1185,53 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("monthly Free credit explains recurring covered funding without calling top-ups a bonus", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={{} as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            billingMode="stripe"
+            startingCredits={{
+              balance: {
+                balanceMicros: 32_000_000,
+                currency: "usd",
+                plan: {
+                  key: "free",
+                  label: "Free",
+                  status: "active",
+                  creditGrantedMicros: 10_000_000,
+                  creditRemainingMicros: 7_000_000,
+                  creditScoped: true,
+                  periodResetAt: "2026-11-19T00:00:00Z",
+                  seatLimit: 5,
+                  seatsUsed: 1,
+                  cancelAtPeriodEnd: false,
+                },
+              },
+              model: { id: "gpt-6-luna", label: "GPT-6 Luna", reasoningEffort: "none" },
+            }}
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      expect(container.querySelector("h1")!.textContent).toBe("$10 in free credits every month");
+      expect(container.textContent).toContain("For the free-credit models");
+      expect(container.textContent).toContain("Unused credit doesn't roll over");
+      expect(container.textContent).toContain("Monthly Free credit");
+      expect(container.querySelector("[data-slot=credits-prize]")?.textContent).not.toContain("32");
+      expect(container.textContent).not.toContain("You got");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("an unreadable balance confirms credits without promising a model or amount", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
