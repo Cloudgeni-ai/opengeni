@@ -201,6 +201,8 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "sync_usage_maintenance_due()",
+  "arm_usage_allowances_for_membership()",
   "guard_session_title_operation()",
   "subscription_plan_definition(text)",
   "plan_period_usage(plan_credit_periods, timestamp with time zone)",
@@ -3098,15 +3100,15 @@ export async function inspectRuntimeDatabasePosture(
             -- Column-only grants on capability tables are also unsafe; a pin
             -- table must remain EXECUTE-only even after column ACL drift.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','usage_maintenance_due','usage_allowance_membership_changes','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','usage_maintenance_due','usage_allowance_membership_changes','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','usage_maintenance_due','usage_allowance_membership_changes','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
@@ -3142,6 +3144,8 @@ export async function inspectRuntimeDatabasePosture(
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
               'usage_allowance_capabilities',
+              'usage_maintenance_due',
+              'usage_allowance_membership_changes',
               'workspace_usage_allowances',
               'workspace_member_allowances',
               'workspace_allowance_grants',
@@ -5408,6 +5412,24 @@ export function evaluateRuntimeDatabasePosture(
   const usageAllowanceCapability = posture.privateTables.find(
     (table) => table.name === "usage_allowance_capabilities",
   );
+  for (const indexName of ["usage_maintenance_due", "usage_allowance_membership_changes"]) {
+    const usageMaintenanceIndex = posture.privateTables.find((table) => table.name === indexName);
+    if (
+      usageMaintenanceIndex &&
+      (usageMaintenanceIndex.owner === expectedRole ||
+        usageMaintenanceIndex.owner !== tableByName.get("workspaces")?.owner ||
+        usageMaintenanceIndex.select ||
+        usageMaintenanceIndex.insert ||
+        usageMaintenanceIndex.update ||
+        usageMaintenanceIndex.delete ||
+        usageMaintenanceIndex.truncate ||
+        usageMaintenanceIndex.references ||
+        usageMaintenanceIndex.trigger)
+    )
+      violations.push(
+        `usage maintenance index ${indexName} has unsafe owner or direct runtime privileges`,
+      );
+  }
   if (!options.protectedTables || usageAllowanceCapability) {
     const authorityOwner = tableByName.get("workspaces")?.owner;
     for (const name of RUNTIME_ALLOWANCE_PRIVATE_TABLES) {
@@ -5802,6 +5824,23 @@ export function evaluateRuntimeDatabasePosture(
       }
     }
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    if (
+      ["sync_usage_maintenance_due()", "arm_usage_allowances_for_membership()"].includes(
+        routine.name,
+      ) &&
+      (routine.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        routine.owner !== tableByName.get("workspaces")?.owner ||
+        !routine.configuration?.some((value) =>
+          [
+            "search_path=pg_catalog, pg_temp",
+            `search_path=pg_catalog, ${targetSchema}, pg_temp`,
+            `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
+          ].includes(value),
+        ))
+    )
+      violations.push(`usage maintenance helper ${routine.name} has unsafe posture`);
     if (
       ["validate_mcp_account_bindings(jsonb, jsonb)", "fence_mcp_account_bindings()"].includes(
         routine.name,

@@ -960,6 +960,12 @@ overshoot, not reservations; shares may oversubscribe. Default-off
 `OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until consumers enforce.
 Canonical: [`usage-allowances.md`](usage-allowances.md).
 
+Read-only authorization and counter projections do not mint write capabilities:
+see [`read-only database paths`](design/read-only-database-paths.md). Private
+counter SELECT policies remain owner-only and tenant/schema bounded; mutation
+capabilities and live authorization checks are unchanged. API-key last use is
+coalesced telemetry, never an authorization cache.
+
 ### 3.13 Task usage limits stop admission, not running work
 
 One optional USD-micro limit per root session counts the pre-margin
