@@ -2119,8 +2119,11 @@ const OUTCOME_UNKNOWN = [
   "The machine's agent was replaced while this command was running, so its outcome is unknown: it may still be running, or it may have finished.",
   "The machine's agent was replaced before this command's outcome was known: it may not have started, may still be running, or may have finished.",
 ].flatMap((outcome) => [outcome, `${outcome} A stop has been requested for it.`]);
-/** The outcome-unknown answer in an API error body (a JSON string in it
- * that is, or ends with, one of those answers whole), or undefined. */
+/** The outcome-unknown answer in an API error body, or undefined. The API
+ * answers such a command with a 409 whose public `error.message` is the
+ * agent's answer as it is (the HTTP error keeps the control error's
+ * message), so only that field counts, only whole, and an `outcomeUnknown`
+ * of anything but true or absent contradicts it. */
 function outcomeUnknown(body: string): string | undefined {
   let parsed: unknown;
   try {
@@ -2128,20 +2131,12 @@ function outcomeUnknown(body: string): string | undefined {
   } catch {
     return undefined;
   }
-  const strings: string[] = [];
-  const walk = (value: unknown) => {
-    if (typeof value === "string") strings.push(value);
-    else if (Array.isArray(value)) value.forEach(walk);
-    else if (value && typeof value === "object") Object.values(value).forEach(walk);
-  };
-  walk(parsed);
-  for (const text of strings) {
-    const found = OUTCOME_UNKNOWN.find(
-      (answer) => text === answer || text.endsWith(` ${answer}`) || text.endsWith(`: ${answer}`),
-    );
-    if (found) return found;
-  }
-  return undefined;
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const error = (parsed as { error?: unknown }).error;
+  if (!error || typeof error !== "object") return undefined;
+  const { status, message, outcomeUnknown: flag } = error as Record<string, unknown>;
+  if (status !== 409 || (flag !== undefined && flag !== true)) return undefined;
+  return OUTCOME_UNKNOWN.find((answer) => message === answer);
 }
 
 /** A copy of a sandbox a host made, by its journal: a completed
@@ -2183,7 +2178,10 @@ function copiesIn(journal: string, boxId: string): Copy[] {
  * steps in order, its VMM launches, and how many times it was adopted from
  * its files (its memory image left out); and its guest console's agent
  * connections, counted over the whole file (with one launch since, that
- * launch's). */
+ * launch's). The journal and the console are one snapshot: the sandbox's
+ * running VMM (its pid, that process's start time and the console's inode)
+ * is read before both and after both and must be the same, so no launch
+ * came between them. */
 type Adoption = {
   instance: string;
   boot: string;
@@ -2198,18 +2196,23 @@ type Adoption = {
   bytes: number;
 };
 function adoptionOn(host: string, sinceMs: number, boxId: string): Adoption {
-  const consoleFile = `${vmDir(boxId)}/console.log`;
+  const dir = vmDir(boxId);
+  const consoleFile = `${dir}/console.log`;
   const out = asRoot(
     host,
     [
       `iid=$(curl -fsS -m 10 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/id) || { echo "the metadata server gave no instance id" >&2; exit 8; }`,
       `boot=$(cat /proc/sys/kernel/random/boot_id) || exit 10`,
       `echo "# instance=$iid boot=$boot"`,
+      `vmm() { p=$(cat ${dir}/root/firecracker.pid 2>/dev/null) && [ -n "$p" ] && [ "$(cat /proc/$p/comm 2>/dev/null)" = firecracker ] && t=$(awk '{print $22}' /proc/$p/stat) && i=$(stat -L -c %i ${consoleFile}) && echo "$p:$t:$i"; }`,
+      `before=$(vmm) || { echo "the sandbox has no running VMM" >&2; exit 12; }`,
       `j=$(journalctl --no-pager -o cat -b -u 'compute-*' --since @${Math.floor(sinceMs / 1000)}) || { echo "the host journal could not be read" >&2; exit 7; }`,
       `printf '%s\\n' "$j" | sed 's/\\x1b\\[[0-9;]*m//g' | grep -F '${boxId}' | base64 -w0; echo`,
       `s=$(stat -L -c %s ${consoleFile}) || { echo "no guest console" >&2; exit 11; }; echo $s`,
       `d=$(tr -d '\\000' < ${consoleFile})`,
       `for p in 'connected to control plane' 'reconnecting at once' "lost this sandbox's connections"; do printf '%s\\n' "$d" | grep -c "$p" || true; done`,
+      `after=$(vmm) || { echo "the sandbox's VMM ended during the read" >&2; exit 13; }`,
+      `[ "$before" = "$after" ] || { echo "the sandbox's VMM changed during the read ($before, then $after)" >&2; exit 14; }`,
     ].join("\n"),
   )
     .trim()
