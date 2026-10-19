@@ -2175,7 +2175,7 @@ function adoptedSince(
 
 check(
   "host-loss",
-  "a lost host's sandbox boots elsewhere from its last copy's files: those files kept, later writes and programs lost, a new agent connection, the command in flight ends with an error and is not run again",
+  "a lost host's sandbox boots elsewhere from its last copy's files: those files kept, later writes and programs lost, a new agent connection, the command in flight ends as an outcome unknown and is not run again",
   ["files", "hosts"],
   async () => {
     const id = state.sandbox!;
@@ -2516,11 +2516,10 @@ check(
       }
       if (settledInflight.result) {
         const { exitCode, stdout, stderr } = settledInflight.result;
-        if (exitCode === 0 || stdout.includes("finished")) {
-          failures.push(
-            `the command in flight at the loss came back exit ${exitCode} ${JSON.stringify(stdout.trim().slice(0, 100))} after ${took} s, as if it had run to the end`,
-          );
-        }
+        // Any exit status is an outcome the loss leaves unknown.
+        failures.push(
+          `the command in flight at the loss came back exit ${exitCode} ${JSON.stringify(stdout.trim().slice(0, 100))} after ${took} s, not as an outcome unknown`,
+        );
         inflightHow = `exit ${exitCode} ${JSON.stringify(`${stdout}${stderr}`.trim().slice(0, 160))} after ${took} s`;
       } else {
         const error = settledInflight.error;
@@ -2528,8 +2527,22 @@ check(
           failures.push(
             `the command in flight at the loss was cut off by the suite's 600 s request limit after ${took} s: it hangs`,
           );
+        } else if (
+          !(error instanceof HttpError) ||
+          !/agent was replaced/.test(error.body) ||
+          !/outcome (is unknown|was known)/.test(error.body)
+        ) {
+          // Its connection was replaced, so it is answered as an outcome
+          // unknown, in the words the model's tool result gets too.
+          failures.push(
+            `the command in flight at the loss ended with ${String(error).slice(0, 300)} after ${took} s, not as an outcome unknown after its agent was replaced`,
+          );
         }
-        inflightHow = `${String(error).slice(0, 200)} after ${took} s`;
+        const said =
+          error instanceof HttpError
+            ? (/The machine's agent was replaced[^"]*/.exec(error.body)?.[0] ?? error.body)
+            : String(error);
+        inflightHow = `${error instanceof HttpError ? `HTTP ${error.status}: ` : ""}${said.slice(0, 240)} after ${took} s`;
       }
       if (settledInflight.settled > inflightBound) {
         failures.push(`the command in flight ended ${took} s after it was sent, past its bound`);
