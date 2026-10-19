@@ -1326,7 +1326,7 @@ mod tests {
 
         // --save-image: the exact path, parents created, never overwritten.
         let directory = tempfile::tempdir().expect("tempdir");
-        let target = directory.path().join("shots/home.png");
+        let target = directory.path().join("shots").join("home.png");
         let saved = materialize_images(screenshot.clone(), Some(&target), true).expect("saved");
         assert_eq!(std::fs::read(&target).expect("saved file"), png);
         assert_eq!(

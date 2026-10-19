@@ -784,7 +784,7 @@ fn release_hosted_native_host() {
     ) else {
         return;
     };
-    match browser_bridge::remove_native_host_manifests_for(&binary, &home) {
+    match browser_bridge::remove_native_host_manifests_for(binary, &home) {
         Ok(removed) => {
             for manifest in removed {
                 info!(path = %manifest.display(), "removed this agent's Chrome Native Messaging host");
