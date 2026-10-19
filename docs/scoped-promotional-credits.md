@@ -1,6 +1,12 @@
 # Promotional credit coverage
 
 Signup and coupon credits share a model list. Offers can override it. Coverage
+for new Free monthly plan grants also follows the signup list (including its
+optional override); paid plan credit remains general. Monthly credit is spent
+first on covered models and expires without removing signup or purchased credit.
+See [subscription accounting and rollout](subscription-plans.md) for migration
+0844, unchanged existing grants, and required policy configuration.
+Coverage
 can change for existing and new promotional balances; issued amounts and spent
 credits stay unchanged. Legacy unrestricted grants remain unrestricted.
 
@@ -66,7 +72,8 @@ model. With general credits only, credit-funded models show **Uses credits**.
 With no usable balance for a model, it shows **Needs credits**. Subscriptions,
 customer provider connections and unmetered models keep their ordinary labels.
 Billing shows each remaining balance; **View models** reveals current coverage.
-Eligible model usage spends free credits first, then general credits. General
+Eligible model usage spends monthly plan credit first, then eligible promotions,
+then other general credits. General
 credits include purchases and unrestricted legacy grants.
 
 A scoped coupon redeems its fixed amount through a $0 Stripe checkout. It cannot

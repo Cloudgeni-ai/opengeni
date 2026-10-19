@@ -156,11 +156,46 @@ Wrappers also export `PlanCreditPeriod`, `PlanCreditPeriodInput`, and
 ## Credit accounting
 
 New ledger types are `plan_credit_grant` and `plan_credit_expiry`. Both have
-`workspace_id = NULL` and `eligible_model_ids = NULL`; grants are general credit,
-not scoped promotions. Expiries therefore do not increment workspace allowance
+`workspace_id = NULL`. Pro/Max grants and legacy Free grants have
+`eligible_model_ids = NULL` and remain general credit. Starting with migration
+0844, new positive Free monthly grants carry the signup/free-credit model scope.
+Expiries therefore do not increment workspace allowance
 debit counters. The signup receipt trigger remains the only signup-trial issuer.
 Recurring plan funding deliberately does not fire the signup/coupon/manual
 `credits.granted` acquisition/lifecycle triggers of migration 0566.
+
+### Scoped Free periods (0844 onward)
+
+Free uses the same **live policy** as signup: `signupModelIds`, falling back to
+`defaultModelIds`. The grant stores the issuance list as a fallback; policy changes
+affect existing scoped balances on their next read/admission, and admitted calls
+can settle under their original policy revision. With no runtime policy, the
+actual signup receipt's stored scope supplies the bootstrap list. If neither
+exists, new Free funding fails with `55000` until the operator configures the
+free-credit policy; it never silently grants general credit. Zero-value grants
+have no funding to scope. Pro, Max and Enterprise behavior is unchanged.
+
+Free monthly funding is allocated explicitly through `credit_debit_allocations`
+**before** other eligible promotions, then general credit/top-ups. Uncovered model
+usage (including Claude when absent from the policy), non-model resources and
+voice do not consume this allowance or count it as spendable. The separate signup
+voice benefit is unchanged. General debt, top-up reversals and disputes never
+consume scoped allowance; top-ups still repay general debt first.
+
+Remaining Free allowance is the grant minus its usage allocations. Expiry removes
+that exact remainder and allocates the expiry debit to that grant. Lock-free
+balance reads exclude pending-expiry Free grants from promotional/spendable totals
+before maintenance writes the receipt. Early replacement on Free→Pro/Max expires
+the Free remainder, never the signup promotion; replay cannot refill it. Video
+refunds remain general funds because scoped Free funding never paid for video.
+
+This is a maintenance migration: drain old API and workers, migrate, then start
+the matching readers/writers. **Do not rewrite existing in-period grants**. Their
+NULL scope and accounting remain unchanged until their normal expiry/replacement;
+the next new Free monthly grant gets scoped. No production backfill, policy edit,
+signup-trial removal or Free-eligibility change is part of this migration.
+
+### General periods (paid and legacy unrestricted Free)
 
 Remaining allowance is granted minus opening general-credit debt absorbed by
 the grant and net settled usage, floored at zero. `opening_debt_micros` records
@@ -245,7 +280,14 @@ when the verified plan's seat usage is at its limit.
 `BillingBalance.plan` is optional/nullable. It is null for unenrolled accounts;
 otherwise it contains `key`, `label`, `status`, `creditGrantedMicros`,
 `creditRemainingMicros`, `creditPendingExpiryMicros`, nullable `periodResetAt`, nullable `seatLimit`,
-`seatsUsed`, `cancelAtPeriodEnd`. Existing balance/general/promotional fields
+`seatsUsed`, `cancelAtPeriodEnd`, optional `creditScoped`. This last field describes
+the granted period, not just current plan state (which can advance before invoice
+payment). Scoped monthly balances also appear in `promotionalCredits` with
+`planCredit: true`, the current covered models, and no voice benefit. This supplies
+catalog `creditFunding: "promotional"`, the picker’s **Free credits** hint and the
+uncovered-model free-credit-gap message without separate client eligibility logic.
+Billing displays the monthly amount once and does not subtract scoped allowance
+from general credit. Existing balance/general/promotional fields
 exclude an ended, unavailable allowance even before its physical expiry row
 is written; `creditPendingExpiryMicros` shows that ledger/projection difference.
 Reads remain lock-free. The next ledger writer settles it under the account

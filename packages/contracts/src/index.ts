@@ -5883,6 +5883,8 @@ export const PromotionalCreditBalance = /* @__PURE__ */ defineSchema(() =>
     remainingMicros: z.number().int().nonnegative(),
     /** Also pays for dictation and live voice, like general credits (signup credits). */
     coversVoice: z.boolean().optional(),
+    /** Monthly scoped allowance; allocated before other promotions. */
+    planCredit: z.boolean().optional(),
   }),
 );
 export type PromotionalCreditBalance = z.infer<typeof PromotionalCreditBalance>;

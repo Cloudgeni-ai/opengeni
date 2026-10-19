@@ -33,7 +33,7 @@ export async function getBillingBalance(
       )
       select
         coalesce((select revision from current_policy), 0)::int as revision,
-        read_organization_plan_balance(${accountId}::uuid, ${settlementAt ?? null}::timestamptz) as plan,
+        read_organization_plan_balance(${accountId}::uuid, coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp())) as plan,
         (select coalesce(sum(amount_micros), 0)::text
           from ${schema.creditLedgerEntries} where account_id = ${accountId}) as balance,
         coalesce((select jsonb_agg(jsonb_build_object(
@@ -41,14 +41,16 @@ export async function getBillingBalance(
           'label', coalesce(g.metadata->>'creditOfferLabel', 'Promotional credits'),
           'eligibleModelIds', coalesce(
             (select coalesce(
-              case when g.source_type = 'verified_signup_trial' then policy->'signupModelIds'
+              case when g.source_type = 'verified_signup_trial' or g.type = 'plan_credit_grant' then policy->'signupModelIds'
                 else policy->'offers'->(g.metadata->>'creditOfferId')->'eligibleModelIds' end,
               policy->'defaultModelIds'
             ) from current_policy), to_jsonb(g.eligible_model_ids)),
           'remainingMicros', g.amount_micros - coalesce(used.amount, 0),
-          'coversVoice', g.source_type = 'verified_signup_trial'
+          'coversVoice', g.source_type = 'verified_signup_trial',
+          'planCredit', g.type = 'plan_credit_grant'
         ) order by g.created_at, g.id)
           from ${schema.creditLedgerEntries} g
+          left join plan_credit_periods period on period.grant_entry_id = g.id
           left join (
             select grant_entry_id, sum(amount_micros) as amount
             from ${schema.creditDebitAllocations} where account_id = ${accountId}
@@ -56,6 +58,8 @@ export async function getBillingBalance(
           ) used on used.grant_entry_id = g.id
           where g.account_id = ${accountId} and g.eligible_model_ids is not null
             and g.amount_micros > coalesce(used.amount, 0)
+            and (g.type <> 'plan_credit_grant' or (period.expired_at is null
+              and period.period_end > coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp())))
         ), '[]'::jsonb) as grants
     `,
     );
@@ -124,7 +128,12 @@ function allocateToCoveringGrants(
 ) {
   let remaining = Math.max(0, amountMicros - Math.max(0, planBudgetMicros));
   const allocations: { grantEntryId: string; amountMicros: number }[] = [];
-  for (const grant of balance.promotionalCredits ?? []) {
+  // Sort a copy: the API/UI's chronological display remains stable. Scoped plan
+  // funding requires explicit allocations, unlike legacy/general allowances.
+  const grants = [...(balance.promotionalCredits ?? [])].sort(
+    (a, b) => Number(b.planCredit ?? false) - Number(a.planCredit ?? false),
+  );
+  for (const grant of grants) {
     if (!remaining || !grantCovers(grant, usage) || grant.remainingMicros <= 0) continue;
     const allocated = Math.min(remaining, grant.remainingMicros);
     allocations.push({ grantEntryId: grant.grantId, amountMicros: allocated });
@@ -146,7 +155,7 @@ export function planCreditDebit(
   // the derived allowance. Prepaid admission must never mint spendable credit
   // by repeatedly preserving promotional grants while overdrawing general.
   const planBudget = Math.min(
-    balance.plan?.creditRemainingMicros ?? 0,
+    balance.plan?.creditScoped ? 0 : (balance.plan?.creditRemainingMicros ?? 0),
     Math.max(0, balance.generalBalanceMicros ?? balance.balanceMicros),
   );
   return {
@@ -172,7 +181,7 @@ export function planPostUseCreditAllocations(
   // derived period usage. Do not preserve covering promotions by charging an
   // allowance that is no longer backed by a positive general balance.
   const planBudget = Math.min(
-    balance.plan?.creditRemainingMicros ?? 0,
+    balance.plan?.creditScoped ? 0 : (balance.plan?.creditRemainingMicros ?? 0),
     Math.max(0, balance.generalBalanceMicros ?? balance.balanceMicros),
   );
   return allocateToCoveringGrants(balance, amountMicros, usage, planBudget);
