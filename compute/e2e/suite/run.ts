@@ -1419,6 +1419,7 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
       const out = await step("first command after sleeping", () =>
         execOk(`cat e2e/${level}.txt e2e/hello.txt`, 120_000),
       );
+      const answered = Date.now();
       const woke = seconds(start);
       if (!out.includes(marker) || !out.includes(state.marker!))
         throw new Error(`after wake: ${out}`);
@@ -1437,11 +1438,13 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
         );
       }
       // A saved sleep's wake is a paged restore: this restore's pager, on
-      // the host that restored it, must leave learned.json (written at or
-      // after the suite's request) and not keep failing in pager.log.
+      // the host that restored it, must write the order it learned as its
+      // VM's user and not keep failing in pager.log.
       const pager =
         level === "saved"
-          ? await step("the restore's pager", () => pagerAfter(awake.host!, Date.parse(to)))
+          ? await step("the restore's pager", () =>
+              pagerAfter(awake.host!, Date.parse(to), answered),
+            )
           : "";
       proofs.push({ kind: "level", sandbox: state.sandbox!, level, from, to, by: "agent_link" });
       const moved = await sandbox();
@@ -1454,30 +1457,50 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
   );
 }
 
-/** Waits up to 60 s for the sandbox's pager on `host` to write learned.json
- * at or after `since` (ms), and fails if pager.log says "Permission
- * denied" more than once. */
-async function pagerAfter(host: string, since: number): Promise<string> {
+/** How long a restore's pager has to write what it learned: the hosts'
+ * recording window (compute-host --pager-record-ms, 120 s by default) and
+ * a margin. */
+const PAGER_PROOF_MS = 150_000;
+
+/** Waits up to PAGER_PROOF_MS for the sandbox's pager on `host`, started by
+ * the wake the suite asked for at `since` (ms) and that answered at
+ * `answered` (ms), to write the order it learned, and fails if pager.log
+ * says "Permission denied" more than once.
+ *
+ * A pager writes pager/learned.json early only once the guest faulted on
+ * pages its prefetch did not bring in; a wake whose profile covered every
+ * page it touched writes it when the recording window closes or the VM
+ * stops. An archive, or the next wake, may then take it into
+ * wake-profile.json before this looks. So either counts: learned.json
+ * written at or after the request (the wake's restore removed any older
+ * one before its pager started), or wake-profile.json rewritten after the
+ * wake answered (the restore's own take of an older learned.json comes
+ * before the VM resumes). */
+async function pagerAfter(host: string, since: number, answered: number): Promise<string> {
   const dir = vmDir(state.sandbox!);
   const start = Date.now();
   for (;;) {
-    const [learned = "", denied = ""] = onHost(
+    const [learned = "", kept = "", denied = ""] = onHost(
       host,
-      `sudo stat -c %Y ${dir}/pager/learned.json 2>/dev/null || echo none; ` +
+      `sudo date -r ${dir}/pager/learned.json +%s.%N 2>/dev/null || echo none; ` +
+        `sudo date -r ${dir}/wake-profile.json +%s.%N 2>/dev/null || echo none; ` +
         `sudo cat ${dir}/pager.log ${dir}/pager/pager.log 2>/dev/null | grep -c 'Permission denied' || true`,
     )
       .trim()
       .split("\n");
     if (Number(denied) > 1)
       throw new Error(`pager.log on ${host} says "Permission denied" ${denied} times`);
-    // stat gives whole seconds.
-    if (learned !== "none" && Number(learned) >= Math.floor(since / 1000)) {
-      return `pager: learned.json on ${host} written ${(Number(learned) - since / 1000).toFixed(0)} s after the request, "Permission denied" ${denied} times`;
+    const after = (at: string, from: number) => (Number(at) * 1000 - from) / 1000;
+    if (learned !== "none" && Number(learned) * 1000 >= since) {
+      return `pager: learned.json on ${host} written ${after(learned, since).toFixed(1)} s after the request, "Permission denied" ${denied} times`;
     }
-    if (Date.now() - start > 60_000) {
+    if (kept !== "none" && Number(kept) * 1000 > answered) {
+      return `pager: what it learned taken into wake-profile.json on ${host} ${after(kept, since).toFixed(1)} s after the request, "Permission denied" ${denied} times`;
+    }
+    if (Date.now() - start > PAGER_PROOF_MS) {
       throw new Error(
         learned === "none"
-          ? `no learned.json in the sandbox's pager directory on ${host} within 60 s of the wake`
+          ? `the restore's pager on ${host} wrote neither learned.json nor a new wake-profile.json within ${PAGER_PROOF_MS / 1000} s of the wake`
           : `learned.json on ${host} is from before this wake (${new Date(Number(learned) * 1000).toISOString()})`,
       );
     }
