@@ -155,7 +155,10 @@ rebuilds transport, not execution: immutable delivery identities join accepted
 work or replay its reply. Expired deliveries cannot execute after receipt GC;
 unknown outcomes never become never-sent merely because a later retry has no
 responder. `packages/runtime/src/sandbox/selfhosted/control-replay.ts` owns negotiation and
-bounded recovery; legacy agents keep one-shot mutation semantics. See the
+bounded recovery. The requester listens for the exact process's hello before
+sending and recovers pending journaled deliveries immediately on reconnect,
+without resetting deadlines. The native hello follows subscription readiness;
+legacy agents keep one-shot mutation semantics. See the
 [recovery contract](connected-machines.md#control-transport-recovery).
 
 Transactional file transfers keep the exact connection, operation ID and epoch.

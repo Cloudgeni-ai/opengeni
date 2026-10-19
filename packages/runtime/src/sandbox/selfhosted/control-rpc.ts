@@ -410,7 +410,8 @@ export interface NatsRequestConnection {
   request(
     subject: string,
     payload: Uint8Array,
-    opts: { timeout: number },
+    /** Only safe probes or immutable journaled deliveries may opt into resend. */
+    opts: { timeout: number; resendOn?: string },
   ): Promise<{ data: Uint8Array; headers?: { get(name: string): string } }>;
 }
 
