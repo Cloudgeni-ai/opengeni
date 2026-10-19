@@ -12551,7 +12551,10 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // (set -eu would exit before any cleanup). Fetch diagnostics are held back so
   // an empty remote (below) does not print a misleading "couldn't find remote
   // ref"; every other outcome replays them unchanged.
-  '  if ! { repository_git -c init.defaultBranch=main init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && fetch_output="$(repository_git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref" 2>&1)"; }; then',
+  // A plain depth-1 fetch, not a blob-less partial clone: the checkout below
+  // needs every blob of that one commit anyway, and fetching them lazily in a
+  // second promisor round made a 10k-file repository take ~16 s instead of ~5 s.
+  '  if ! { repository_git -c init.defaultBranch=main init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && fetch_output="$(repository_git -C "$tmp" fetch --depth 1 --no-tags origin "$ref" 2>&1)"; }; then',
   // A freshly created repository has no refs at all, so no ref can be fetched.
   // `ls-remote` succeeding with no output (it fails on auth or access errors)
   // proves that. Attaching such a repository is valid: leave an initialized
@@ -12695,7 +12698,11 @@ export function repositoryCloneCommand(
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
   options: { optionalCloneTimeoutSeconds?: number } = {},
 ): string {
-  const cloneConcurrency = 4;
+  // Shallow clones are network- and filesystem-bound, not CPU-bound: nine
+  // repositories in one sandbox finished in ~11 s all at once versus ~28 s in
+  // batches of four (each batch waits for its slowest clone). Keep a bound for
+  // unusually large resource lists.
+  const cloneConcurrency = 16;
   assertUniqueResourceMountPaths(resources);
   const optionalCloneTimeoutSeconds = Math.max(
     1,
@@ -12916,6 +12923,55 @@ const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 4 * 1024;
 const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 2 * 1024;
 const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
 const RIG_SETUP_GZIP_SENTINEL = "__OPENGENI_SETUP_GZIP__";
+// Content-addressed repository setup programs live in the persisted workspace
+// state directory (excluded from workspace capture), one directory per run-as
+// identity so a program staged by one user is never executed by another.
+const REPOSITORY_SETUP_PROGRAM_ROOT = "/workspace/.opengeni/setup-programs";
+const REPOSITORY_SETUP_PROGRAM_MISSING_SENTINEL = "__OPENGENI_SETUP_PROGRAM_MISSING__";
+const REPOSITORY_SETUP_PROGRAM_MISSING_EXIT_CODE = 86;
+
+function repositorySetupProgramPath(program: string, runAs: string | undefined): string {
+  const digest = createHash("sha256").update(program, "utf8").digest("hex");
+  const owner = createHash("sha256")
+    .update(runAs ?? "", "utf8")
+    .digest("hex")
+    .slice(0, 16);
+  return `${REPOSITORY_SETUP_PROGRAM_ROOT}-${owner}/${digest}.sh`;
+}
+
+/** One command: export this turn's seeds, then run the staged program only if
+ * it is present and (where sha256sum exists) matches its content hash. A
+ * missing or mismatched program reports the sentinel instead of running. */
+function repositorySetupProgramLauncher(
+  program: string,
+  programPath: string,
+  seedPrefix: string,
+): string {
+  const digest = createHash("sha256").update(program, "utf8").digest("hex");
+  return [
+    "set +x",
+    ...(seedPrefix ? [seedPrefix] : []),
+    `opengeni_setup_program=${shellQuote(programPath)}`,
+    // Programs for older repository sets or runtime versions, and transfers a
+    // crashed turn abandoned, are pruned in-box once they are a day old.
+    `find ${shellQuote(posixPath.dirname(programPath))} -maxdepth 1 -type f \\( -name '*.sh' ! -name ${shellQuote(`${digest}.sh`)} -o -name '*.b64' -o -name '*.tmp' \\) -mtime +0 -exec rm -f {} + 2>/dev/null || true`,
+    'if [ -f "$opengeni_setup_program" ]; then',
+    "  if ! command -v sha256sum >/dev/null 2>&1 || printf '%s  %s\\n' " +
+      `${shellQuote(digest)} "$opengeni_setup_program" | sha256sum -c >/dev/null 2>&1; then`,
+    '    exec /bin/sh "$opengeni_setup_program"',
+    "  fi",
+    "fi",
+    `echo ${shellQuote(REPOSITORY_SETUP_PROGRAM_MISSING_SENTINEL)}`,
+    `exit ${REPOSITORY_SETUP_PROGRAM_MISSING_EXIT_CODE}`,
+  ].join("\n");
+}
+
+function repositorySetupProgramMissing(result: unknown): boolean {
+  return (
+    sandboxCommandExitCode(result) === REPOSITORY_SETUP_PROGRAM_MISSING_EXIT_CODE &&
+    sandboxCommandOutput(result).includes(REPOSITORY_SETUP_PROGRAM_MISSING_SENTINEL)
+  );
+}
 
 export type RigSetupScriptCommandOptions = {
   timeoutMs?: number;
@@ -13052,11 +13108,22 @@ async function stageRigSetupScript(
   session: SandboxSessionLike,
   script: string,
   context: SandboxLifecycleHookContext,
-  options: { payloadRoot?: string; label?: string } = {},
+  options: {
+    payloadRoot?: string;
+    label?: string;
+    /** Install at this exact path (atomic rename) instead of a random name.
+     * Used for content-addressed programs that are reused across turns. */
+    payloadPath?: string;
+  } = {},
 ): Promise<string> {
-  const payloadRoot = options.payloadRoot ?? RIG_SETUP_PAYLOAD_ROOT;
-  const payloadPath = `${payloadRoot}/${randomUUID()}.sh`;
-  const encodedPath = `${payloadPath}.b64`;
+  const payloadPath =
+    options.payloadPath ?? `${options.payloadRoot ?? RIG_SETUP_PAYLOAD_ROOT}/${randomUUID()}.sh`;
+  const payloadRoot = posixPath.dirname(payloadPath);
+  // Unique transfer names: concurrent holders may stage the same
+  // content-addressed program; each decodes privately, then renames atomically.
+  const transferId = randomUUID();
+  const encodedPath = `${payloadPath}.${transferId}.b64`;
+  const decodedPath = `${payloadPath}.${transferId}.tmp`;
   const bytes = Buffer.from(script, "utf8");
   const compressed = gzipSync(bytes);
   const compressionUseful = compressed.length < bytes.length;
@@ -13099,7 +13166,7 @@ async function stageRigSetupScript(
       );
     }
     commands.push(
-      `set -eu\nbase64 -d < ${shellQuote(encodedPath)}${useCompression ? " | gzip -dc" : ""} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
+      `set -eu\nbase64 -d < ${shellQuote(encodedPath)}${useCompression ? " | gzip -dc" : ""} > ${shellQuote(decodedPath)}\nchmod 0700 ${shellQuote(decodedPath)}\nmv -f ${shellQuote(decodedPath)} ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
     );
     for (const command of commands) {
       const result = await runSandboxLifecycleCommand(
@@ -13123,7 +13190,7 @@ async function stageRigSetupScript(
     await runSandboxLifecycleCommand(
       session,
       {
-        cmd: `rm -f ${shellQuote(payloadPath)} ${shellQuote(encodedPath)}`,
+        cmd: `rm -f ${shellQuote(decodedPath)} ${shellQuote(encodedPath)}${options.payloadPath ? "" : ` ${shellQuote(payloadPath)}`}`,
         workdir: "/workspace",
         ...(context.runAs ? { runAs: context.runAs } : {}),
         yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
@@ -13377,30 +13444,69 @@ export async function runRepositoryCloneHook(
       stagedBrokerSeeds.staged,
       options,
     );
-    let command = sandboxGitProvisioningCommand(
+    const runClone = (cmd: string) =>
+      runSandboxLifecycleCommand(
+        session,
+        {
+          cmd,
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 20_000,
+        },
+        context.commandRunner,
+      );
+    const inlineCommand = sandboxGitProvisioningCommand(
       seedPrefix ? `${seedPrefix}\n${cloneCommand}` : cloneCommand,
     );
-    // SDK setup also wraps run-as commands and cancellation can expand them.
-    // Reuse the bounded script transport instead of sending the whole clone
-    // program through those nested shell arguments.
-    if (Buffer.byteLength(command, "utf8") > RIG_SETUP_INLINE_COMMAND_MAX_BYTES) {
-      stagedCloneScript = await stageRigSetupScript(session, command, context, {
-        payloadRoot: "/tmp/opengeni/repository-setup-payloads",
-        label: "Repository setup payload staging",
-      });
-      command = `exec /bin/sh ${shellQuote(stagedCloneScript)}`;
+    let result: unknown;
+    if (Buffer.byteLength(inlineCommand, "utf8") <= RIG_SETUP_INLINE_COMMAND_MAX_BYTES) {
+      result = await runClone(inlineCommand);
+    } else {
+      // SDK setup wraps run-as commands and cancellation expands them, so a
+      // large clone program cannot ride inline. Stage the token-free program
+      // once per box under its content hash (inside the persisted workspace
+      // state, so restored boxes keep it) and pass only this turn's seeds
+      // inline. A box that already has the verified program clones (or skips
+      // present repositories) in ONE command instead of re-staging the whole
+      // program through several round trips on every turn.
+      const program = sandboxGitProvisioningCommand(cloneCommand);
+      const programPath = repositorySetupProgramPath(program, context.runAs);
+      const launcher = repositorySetupProgramLauncher(program, programPath, seedPrefix);
+      // Per-turn staging of the complete (seeded) program remains the fallback
+      // when the seeds alone are too large to ride inline, or when the
+      // persisted program cannot be installed and verified on this box.
+      const stageForThisTurn = async () => {
+        stagedCloneScript = await stageRigSetupScript(session, inlineCommand, context, {
+          payloadRoot: "/tmp/opengeni/repository-setup-payloads",
+          label: "Repository setup payload staging",
+        });
+        return await runClone(`exec /bin/sh ${shellQuote(stagedCloneScript)}`);
+      };
+      // A program that names this turn's random broker seed files is unique to
+      // the turn and would never be reused, so it is not persisted.
+      if (
+        stagedBrokerSeeds.staged.length > 0 ||
+        Buffer.byteLength(launcher, "utf8") > RIG_SETUP_INLINE_COMMAND_MAX_BYTES
+      ) {
+        result = await stageForThisTurn();
+      } else {
+        result = await runClone(launcher);
+        if (repositorySetupProgramMissing(result)) {
+          const installed = await stageRigSetupScript(session, program, context, {
+            payloadPath: programPath,
+            label: "Repository setup payload staging",
+          }).then(
+            () => true,
+            () => false,
+          );
+          result = installed ? await runClone(launcher) : null;
+          if (!installed || repositorySetupProgramMissing(result)) {
+            result = await stageForThisTurn();
+          }
+        }
+      }
     }
-    const result = await runSandboxLifecycleCommand(
-      session,
-      {
-        cmd: command,
-        workdir: "/workspace",
-        ...(context.runAs ? { runAs: context.runAs } : {}),
-        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-        maxOutputTokens: 20_000,
-      },
-      context.commandRunner,
-    );
     assertSandboxCommandSucceeded(result, "Repository clone hook");
     const skippedOptionalRepositories = skippedOptionalRepositoryPaths(
       sandboxCommandOutput(result),

@@ -172,6 +172,18 @@ export function hostShellSession(home: string, options: HostShellSessionOptions 
           cmd = cmd.replaceAll("exec /bin/sh ", "exec bash --noprofile --norc ");
         }
       }
+      // Content-addressed setup programs are verified by hash before they run,
+      // so never rewrite them in place: the launcher checks the original and
+      // then executes a host-mapped copy.
+      const setupProgram = cmd.match(/opengeni_setup_program='([^']+)'/u);
+      if (setupProgram && options.rewriteCommand && existsSync(setupProgram[1]!)) {
+        const mapped = `${setupProgram[1]!}.host-mapped`;
+        writeFileSync(mapped, options.rewriteCommand(readFileSync(setupProgram[1]!, "utf8")));
+        cmd = cmd.replace(
+          'exec /bin/sh "$opengeni_setup_program"',
+          `exec ${options.shell === "bash" ? "bash --noprofile --norc" : "/bin/sh"} '${mapped}'`,
+        );
+      }
       const child = Bun.spawn(
         [
           options.shell ?? "sh",
