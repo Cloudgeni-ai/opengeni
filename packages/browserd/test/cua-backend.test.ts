@@ -28,6 +28,7 @@ class Fixture implements CuaDesktopRuntime {
   captures = 0;
   live = true;
   stopped = false;
+  applyLabel = "Apply";
   mutation = result({ effect: "confirmed", route: "accessibility" });
   async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
     const args = JSON.parse(argumentsJson) as Record<string, unknown>;
@@ -68,8 +69,9 @@ class Fixture implements CuaDesktopRuntime {
               element_index: 0,
               element_token: `s${snapshot}:0`,
               role: "AXButton",
-              label: "Apply",
+              label: this.applyLabel,
               actions: ["AXPress"],
+              frame: { x: 60, y: 60, w: 40, h: 20 },
             },
             {
               element_index: 1,
@@ -610,18 +612,20 @@ describe("CUA desktop boundary", () => {
       const target = (await backend.targets())[0]!;
       const first = await backend.observe(target.id);
       expect(JSON.stringify(first)).not.toContain("must-not-leak");
-      await backend.observe(target.id);
-      await expect(backend.dispatch(command(first))).rejects.toMatchObject({
-        code: "observation_stale",
-        dispatched: false,
+      const second = await backend.observe(target.id);
+      // CUA honours only its latest tokens: the ref is sent as the same
+      // element's token from the latest observation.
+      await backend.dispatch(command(first));
+      expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).toMatchObject({
+        element_token: second.roots[0]!.ref,
       });
       const fresh = await backend.observe(target.id);
       await backend.validate(command(fresh));
       await backend.dispatch(command(fresh));
-      await expect(backend.dispatch(command(fresh))).rejects.toMatchObject({
-        code: "observation_stale",
-      });
-      expect(fixture.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      // The same ref acts again while its element is unchanged, as a page ref
+      // does in a browser.
+      await backend.dispatch(command(fresh));
+      expect(fixture.calls.filter((call) => call.name === "click")).toHaveLength(3);
       expect(
         fixture.calls.every((call) => !call.name.startsWith("browser_") && call.name !== "page"),
       ).toBe(true);
@@ -724,14 +728,15 @@ describe("CUA desktop boundary", () => {
     }
   });
 
-  test("a ref from an earlier observation of the window still resolves; an unknown one says what is current", async () => {
+  test("a ref from an earlier observation names the same element in the latest one; an unknown one says what is current", async () => {
     const fixture = new Fixture();
     const backend = await CuaComputerBackend.open(fixture);
     try {
       const target = (await backend.targets())[0]!;
       const seen = await backend.observe(target.id);
       // An action without fences is checked against a fresh observation,
-      // which mints new refs; the ref the model read still names its element.
+      // which mints new refs and retires the old ones in CUA; the ref the
+      // model read is rebased to the same element in the fresh observation.
       const fresh = await backend.observe(target.id);
       expect(fresh.roots[0]!.ref).not.toBe(seen.roots[0]!.ref);
       await backend.dispatch({
@@ -745,8 +750,60 @@ describe("CUA desktop boundary", () => {
       expect(
         [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
       ).toMatchObject({
-        element_token: seen.roots[0]!.ref,
+        element_token: fresh.roots[0]!.ref,
       });
+      // A ref action may name the observation its ref came from, even after
+      // the window was read again.
+      const again = await backend.observe(target.id);
+      await backend.dispatch({ ...command(seen), targetId: again.target.id });
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
+      ).toMatchObject({ element_token: again.roots[0]!.ref });
+      // Other actions still need the latest observation.
+      await expect(
+        backend.dispatch({
+          ...command(seen),
+          action: { type: "semantic", locator: { kind: "role", role: "button" }, action: "invoke" },
+        }),
+      ).rejects.toMatchObject({ code: "observation_stale", dispatched: false });
+      // A ref whose element changed since is refused before any input.
+      fixture.applyLabel = "Apply all";
+      const changed = await backend.observe(target.id);
+      const clicks = fixture.calls.filter((call) => call.name === "click").length;
+      await expect(
+        backend.dispatch({
+          ...command(changed),
+          action: {
+            type: "semantic",
+            locator: { kind: "ref", ref: again.roots[0]!.ref },
+            action: "invoke",
+          },
+        }),
+      ).rejects.toMatchObject({
+        code: "observation_stale",
+        dispatched: false,
+        message: `CUA ref ${again.roots[0]!.ref} (button "Apply") is from an earlier observation, and that element has changed or moved since; use a ref from the latest observation (${changed.observationId.split(":").pop()})`,
+      });
+      expect(fixture.calls.filter((call) => call.name === "click").length).toBe(clicks);
+      // CUA's own stale refusal says what the caller does, not CUA's tool names.
+      fixture.mutation = result(
+        {
+          effect: "refused",
+          refusal: {
+            code: "stale_element_token",
+            message: "element_token is stale; call get_window_state again to refresh",
+          },
+        },
+        true,
+      );
+      await expect(backend.dispatch(command(changed))).rejects.toMatchObject({
+        code: "observation_stale",
+        dispatched: false,
+        message:
+          "CUA refused the element reference because the window was read again since; observe it again and act on a ref from that observation",
+      });
+      fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
+      fixture.applyLabel = "Apply";
       const latest = await backend.observe(target.id);
       await expect(
         backend.dispatch({

@@ -103,6 +103,24 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
       expect(await supervisor.action(invoke)).toMatchObject({ state: "completed" });
       await Bun.sleep(100);
       expect((await actual()).clicks).toBe(1); // Durable replay must not click twice.
+      // CUA honours only the tokens of its latest reading of a window. A ref
+      // read before the window was read again still acts on its element.
+      const earlier = await supervisor.observe(reference, target.id);
+      if (earlier.semantic?.kind !== "snapshot") throw new Error("Fixture needs a full snapshot");
+      const earlierIncrement = earlier.semantic.roots.find((node) => node.name === "Increment")!;
+      observed = await supervisor.observe(reference, target.id);
+      for (const source of [observed, earlier])
+        expect(
+          await supervisor.action(
+            makeCommand(source, {
+              type: "semantic",
+              locator: { kind: "ref", ref: earlierIncrement.ref },
+              action: "invoke",
+            }),
+          ),
+        ).toMatchObject({ state: "completed" });
+      await Bun.sleep(100);
+      expect((await actual()).clicks).toBe(3);
       const stream = await supervisor.subscribeFrames(reference, target.id, {
         maxWidth: 480,
         maxHeight: 300,
@@ -144,7 +162,7 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         click.expectedFrameId = frame.frameId;
         expect(await supervisor.action(click)).toMatchObject({ state: "completed" });
         await Bun.sleep(100);
-        expect((await actual()).clicks).toBe(2);
+        expect((await actual()).clicks).toBe(4);
         const gesture = (action: ComputerAction): ComputerActionCommand => ({
           ...makeCommand(observed, action),
           expectedFrameId: frame.frameId,
@@ -225,7 +243,7 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         const batchedReceipt = await supervisor.nativeCall(batched);
         expect(batchedReceipt.state).toBe("completed");
         expect(await supervisor.nativeCall(batched)).toEqual(batchedReceipt);
-        expect((await actual()).clicks).toBe(3);
+        expect((await actual()).clicks).toBe(5);
         // Native pixel coordinates use a different image size from the viewer.
         // A passive preview must not change their scale or retire zoom state.
         const pixelRead = await supervisor.nativeCall(
@@ -250,7 +268,7 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
           ),
         ).toMatchObject({ state: "completed" });
         await Bun.sleep(100);
-        expect((await actual()).clicks).toBe(4);
+        expect((await actual()).clicks).toBe(6);
         const zoom = await supervisor.nativeCall(
           nativeCall("zoom", {
             x1: pixelX - 20,
@@ -280,7 +298,7 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
           ),
         ).toMatchObject({ state: "completed" });
         await Bun.sleep(100);
-        expect((await actual()).clicks).toBe(5);
+        expect((await actual()).clicks).toBe(7);
         // Actual viewer input replaces the coordinate basis. Old native pixels
         // must fail closed; a normal native read restores the action basis.
         const takeoverFrame = await supervisor.capture(reference, target.id, {
@@ -304,7 +322,7 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
         );
         expect(staleNative.state).not.toBe("completed");
         await Bun.sleep(100);
-        expect((await actual()).clicks).toBe(6);
+        expect((await actual()).clicks).toBe(8);
         expect(
           await supervisor.nativeCall(nativeCall("get_window_state", { include_screenshot: true })),
         ).toMatchObject({ state: "completed" });

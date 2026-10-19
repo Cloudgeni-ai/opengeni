@@ -2230,21 +2230,25 @@ export function createInteractionAttemptToolDefinitions(
           context.operationId,
         );
       }
-      // A launch acts on no window's contents: it needs only the target's
-      // generation, which the target list gives without reading a window. A
-      // target missing from the list is read below, which explains why.
-      const launchGeneration =
-        action.type !== "launch"
+      // A launch acts on no window's contents, and an action that names the
+      // observation it was read from has its content fence already: both need
+      // only the target's generation, which the target list gives without
+      // reading the window again (a fresh read would retire the refs the
+      // caller holds). A target missing from the list is read below, which
+      // explains why.
+      const listedGeneration =
+        action.type !== "launch" &&
+        (action.type === "pointer" || value.expectedObservationId == null)
           ? undefined
           : (value.expectedTargetGeneration ??
             (
               await input.transport.listComputerTargets(input.workspaceId, value.computerSessionId)
             ).targets.find((target) => target.id === value.targetId)?.targetGeneration);
-      if (action.type === "launch" && launchGeneration !== undefined) {
+      if (listedGeneration !== undefined) {
         return await input.transport.actInComputer(input.workspaceId, value.computerSessionId, {
           operationId: context.operationId,
           targetId: value.targetId,
-          expectedTargetGeneration: launchGeneration,
+          expectedTargetGeneration: listedGeneration,
           expectedObservationId: value.expectedObservationId ?? null,
           expectedFrameId: null,
           action,
