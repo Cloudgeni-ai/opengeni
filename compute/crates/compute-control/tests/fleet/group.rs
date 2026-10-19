@@ -21,7 +21,7 @@ use compute_fleet::{HostId, ScalePolicy};
 use compute_protocol::fleet::Capacity;
 use serde_json::{Value, json};
 
-use super::support::{FakeHost, Fleet, roomy, until};
+use super::support::{FakeHost, Fleet, OPERATOR_KEY, roomy, until};
 
 const GROUP: &str = "projects/p/zones/z/instanceGroupManagers/hosts";
 /// How long a member without a host counts as booting.
@@ -525,6 +525,73 @@ async fn a_member_that_never_registers_stops_counting_as_coming() {
             .iter()
             .any(|asked| asked.contains("hosts-c3d4")),
         "left to the group: {:?}",
+        compute.asked()
+    );
+}
+
+/// A registered host the group's listing does not name yet takes the
+/// place asked for: it is not counted again as coming, so the group grows
+/// when that host runs short.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_the_listing_does_not_name_yet_counts_once() {
+    let (fleet, compute) = fleet_with(&[], |compute| {
+        compute.target_size.store(1, Ordering::SeqCst);
+    })
+    .await;
+    let host = fleet.host("hosts-a1b2").await;
+    host.set_capacity(Capacity {
+        memory_free_mib: 1024,
+        ..roomy()
+    });
+    until(Duration::from_secs(5), "the group grows", async || {
+        compute.asked().contains(&"resize 2".to_owned())
+    })
+    .await;
+}
+
+/// A draining host and a stalled member each keep their place in the
+/// group: growth asks for the usable host it is short on top of both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn growth_counts_the_places_draining_and_stalled_hosts_hold() {
+    let (fleet, compute) = fleet_with(
+        &[
+            ("hosts-a1b2", "RUNNING"),
+            ("hosts-c3d4", "RUNNING"),
+            ("hosts-e5f6", "PROVISIONING"),
+        ],
+        |compute| {
+            compute
+                .actions
+                .lock()
+                .unwrap()
+                .insert("hosts-e5f6".into(), "CREATING".into());
+        },
+    )
+    .await;
+    let host = fleet.host("hosts-a1b2").await;
+    let _draining = fleet.host("hosts-c3d4").await;
+    let (status, drained) = fleet
+        .call(
+            reqwest::Method::POST,
+            "/v1/hosts/hosts-c3d4/drain",
+            Some(OPERATOR_KEY),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{drained}");
+    host.set_capacity(Capacity {
+        memory_free_mib: 1024,
+        ..roomy()
+    });
+    until(
+        BOOT_WITHIN + Duration::from_secs(5),
+        "the group grows past both",
+        async || compute.asked().contains(&"resize 4".to_owned()),
+    )
+    .await;
+    assert!(
+        !compute.asked().contains(&"resize 3".to_owned()),
+        "{:?}",
         compute.asked()
     );
 }

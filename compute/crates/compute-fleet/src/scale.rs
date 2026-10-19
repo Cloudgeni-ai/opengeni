@@ -34,6 +34,10 @@ pub struct GroupView {
     pub booting: u32,
     /// Hosts draining ahead of removal.
     pub draining: u32,
+    /// Places in the group held by hosts that have not registered in
+    /// time: they bring nothing, and the group is not settled while one
+    /// stands.
+    pub stalled: u32,
     /// Memory in MiB the live hosts have for sandboxes.
     pub memory_mib: u64,
     /// Memory in MiB the live hosts can still promise.
@@ -45,10 +49,11 @@ pub struct GroupView {
 pub enum ScaleDecision {
     /// Leave it as it is.
     Hold,
-    /// Ask the cloud for this many hosts in all, counting live and booting
-    /// ones.
+    /// Have this many usable hosts in all, counting live and booting ones.
+    /// The group's size is larger by the places draining and stalled
+    /// hosts hold.
     Grow {
-        /// The group's new size.
+        /// How many usable hosts.
         to: u32,
     },
     /// Drain the emptiest live host, then remove it.
@@ -79,7 +84,7 @@ impl ScalePolicy {
         if wanted > size {
             return ScaleDecision::Grow { to: wanted };
         }
-        let settled = view.booting == 0 && view.draining == 0;
+        let settled = view.booting == 0 && view.draining == 0 && view.stalled == 0;
         let plenty = view.free_memory_mib >= target + 2 * self.host_memory_mib;
         if settled && plenty && view.hosts > self.min_hosts {
             return ScaleDecision::Shrink;
@@ -106,6 +111,7 @@ mod tests {
             hosts,
             booting: 0,
             draining: 0,
+            stalled: 0,
             memory_mib: u64::from(hosts) * 100 * 1024,
             free_memory_mib: free_gib * 1024,
         }
@@ -144,6 +150,9 @@ mod tests {
         let mut draining = view(10, 500);
         draining.draining = 1;
         assert_eq!(POLICY.decide(&draining), ScaleDecision::Hold);
+        let mut stalled = view(10, 500);
+        stalled.stalled = 1;
+        assert_eq!(POLICY.decide(&stalled), ScaleDecision::Hold);
         assert_eq!(POLICY.decide(&view(2, 200)), ScaleDecision::Hold);
     }
 

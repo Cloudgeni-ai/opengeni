@@ -120,6 +120,10 @@ pub struct Member {
     /// recreating, deleting or starting is left to it: starting it
     /// meanwhile races the group, and fails once the group has deleted it.
     pub idle: bool,
+    /// Whether the group is removing it (deleting or abandoning it): it
+    /// holds no place in the group's size, and what its host has counts
+    /// for nothing.
+    pub leaving: bool,
 }
 
 /// How often a fence looks again at an instance or operation.
@@ -369,13 +373,12 @@ impl GcpGroup {
             let managed: Managed = request.send().await?.error_for_status()?.json().await?;
             members.extend(managed.managed_instances.into_iter().filter_map(|managed| {
                 let name = managed.instance.rsplit('/').next()?.to_owned();
+                let action = managed.current_action.as_deref();
                 Some(Member {
                     name,
                     stopped: managed.instance_status.as_deref() == Some("TERMINATED"),
-                    idle: managed
-                        .current_action
-                        .as_deref()
-                        .is_none_or(|action| action == "NONE"),
+                    idle: action.is_none_or(|action| action == "NONE"),
+                    leaving: matches!(action, Some("DELETING" | "ABANDONING")),
                 })
             }));
             match managed.next_page_token {

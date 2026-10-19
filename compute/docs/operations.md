@@ -304,7 +304,10 @@ authority alone for agent links.
   registered in time" and grows the group around it. Look at that
   instance in the cloud console (quota, a stockout, a boot that fails);
   the service never deletes it, and counts it again once its host
-  registers. List hosts with the operator key:
+  registers. A stalled member and a draining host each keep their place
+  in the group's size, so a growth asks for the hosts it is short on top
+  of them, and the service does not suggest shrinking while a member is
+  stalled. List hosts with the operator key:
 
   ```sh
   curl -s -H "X-API-Key: $operator_key" "$COMPUTE_API/v1/hosts" | jq

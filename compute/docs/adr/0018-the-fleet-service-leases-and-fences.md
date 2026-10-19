@@ -123,7 +123,13 @@ can be built and tested.
   of the step. A member without a registered host counts as booting for
   a boot allowance (ten minutes by default); one past it keeps its place
   but no longer stands in for capacity, so the group grows around a
-  member the cloud never gets running. Only zonal groups are supported,
+  member the cloud never gets running. Each place in the group's size
+  counts once, from one look at the group and one read of the hosts: a
+  member brings its host, live or draining; a host the listing does not
+  name yet takes one of the places asked for; a member the group is
+  removing holds none; growth adds the usable hosts it is short on top
+  of the places draining and stalled hosts hold; and no shrink is
+  suggested while a member is stalled. Only zonal groups are supported,
   since a fence must name the instance's zone. Hosts outside a group rely
   on their deadline, guard and watchdog alone.
 - **A host that comes back is fenced until it has caught up.** It
