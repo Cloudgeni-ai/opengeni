@@ -62,6 +62,9 @@ export type StartVideoGenerationWorkflow = (input: {
   operationId: string;
 }) => Promise<"started" | "already_running">;
 
+/** A separately owned display-metadata operation, never a conversation turn. */
+export type StartSessionTitleWorkflow = StartVideoGenerationWorkflow;
+
 /** Exact activity-owned proof that the hard sandbox/tool fence physically
  * drained. This is delivery evidence only: the workflow still validates the
  * persisted attempt dispatch and commits the authoritative Postgres receipt. */
@@ -109,6 +112,7 @@ export type SharedActivityServices = {
    * deliberately retains the composite implementation for embedded/test hosts. */
   startSandboxReaperWorkflow?: StartSandboxReaperWorkflow | null;
   startVideoGenerationWorkflow?: StartVideoGenerationWorkflow | null;
+  startSessionTitleWorkflow?: StartSessionTitleWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
   // AND the mid-stream budget valve) delegates the funding decision to

@@ -852,6 +852,7 @@ function turnLeaseWhere(input: SubscriptionTurnLeaseIdentity) {
 }
 
 export type SubscriptionOperationKind =
+  | "session_title"
   | "image"
   | "video"
   | "realtime"

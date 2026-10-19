@@ -118,6 +118,7 @@ const withheldMigrations = [
   "0836_cheaper_session_write_fences.sql",
   // Patches the receipt/context fences and compatibility readers withheld above.
   "0843_indexed_inbox_lineage.sql",
+  "0846_independent_session_titles.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

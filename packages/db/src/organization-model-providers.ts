@@ -407,6 +407,27 @@ export async function loadOrganizationModelProviderApiKey(
   });
 }
 
+/** Execution metadata only, under the same tenant scope as the credential loader. */
+export async function getOrganizationModelProviderExecutionConnectionId(
+  db: Database,
+  input: { accountId: string; workspaceId: string; providerKind: OrganizationModelProviderKind },
+): Promise<string | null> {
+  return withRlsContext(db, input, async (tx) => {
+    const [row] = await tx
+      .select({ id: schema.organizationModelProviderConnections.id })
+      .from(schema.organizationModelProviderConnections)
+      .where(
+        and(
+          eq(schema.organizationModelProviderConnections.accountId, input.accountId),
+          eq(schema.organizationModelProviderConnections.providerKind, input.providerKind),
+          eq(schema.organizationModelProviderConnections.status, "active"),
+        ),
+      )
+      .limit(1);
+    return row?.id ?? null;
+  });
+}
+
 export async function listOrganizationModelProviderCustomModelsForWorkspace(
   db: Database,
   input: {

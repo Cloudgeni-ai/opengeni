@@ -320,4 +320,5 @@ export const embeddingMigrationTail = [
   "0842_site_session_access.sql",
   // Patches the withheld provenance fences and subscription compatibility readers.
   "0843_indexed_inbox_lineage.sql",
+  "0846_independent_session_titles.sql",
 ];

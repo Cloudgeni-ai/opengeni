@@ -4,6 +4,7 @@ import {
   completeDueTranscriptionRecordingObjectCleanup,
   completeExpiredFileUploadCleanup,
   claimVideoGenerationOperations,
+  claimSessionTitleWorkflows,
   purgeExpiredTranscriptionRecordings,
 } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
@@ -207,5 +208,30 @@ export function createFileUploadReaperActivities(
     return { claimed: claims.length, started, failed };
   }
 
-  return { reapExpiredFileUploads, recoverVideoGenerationWorkflows };
+  async function recoverSessionTitleWorkflows(): Promise<{
+    claimed: number;
+    started: number;
+    failed: number;
+  }> {
+    const { db, startSessionTitleWorkflow, observability } = await services();
+    if (!startSessionTitleWorkflow) return { claimed: 0, started: 0, failed: 0 };
+    const claims = await claimSessionTitleWorkflows(db);
+    let started = 0;
+    let failed = 0;
+    for (const claim of claims) {
+      try {
+        await startSessionTitleWorkflow(claim);
+        started++;
+      } catch (error) {
+        failed++;
+        observability.warn("Session title workflow recovery start failed", {
+          operationId: claim.operationId,
+          errorClass: error instanceof Error ? error.name : "UnknownError",
+        });
+      }
+    }
+    return { claimed: claims.length, started, failed };
+  }
+
+  return { reapExpiredFileUploads, recoverVideoGenerationWorkflows, recoverSessionTitleWorkflows };
 }

@@ -421,6 +421,7 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${COMPAT}), (${FENCES}), (${INDEXED_LINEAGE}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${SUBSCRIPTION_RETIREMENT_MIGRATION}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql')`;
+    await owner`insert into schema_migrations(name) values ('0846_independent_session_titles.sql')`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
@@ -443,6 +444,7 @@ beforeAll(async () => {
   const ownerAgain = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await ownerAgain`delete from schema_migrations where name in (${COMPAT}, ${FENCES}, ${INDEXED_LINEAGE})`;
+    await ownerAgain`delete from schema_migrations where name = '0846_independent_session_titles.sql'`;
     await database.admin.unsafe(
       `CREATE ROLE "${customApplicationRole}" NOLOGIN NOSUPERUSER NOBYPASSRLS`,
     );

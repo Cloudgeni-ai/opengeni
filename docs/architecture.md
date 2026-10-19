@@ -1494,6 +1494,15 @@ one conversation lifecycle, continuation fingerprints and transport diagnostics 
 Codex, OpenAI API and Azure. Providers supply endpoint/authentication and framing;
 only explicit main-conversation scopes own pooled sockets. Title side requests
 leave that scope and retain HTTP, without changing their content or custody.
+Automatic session titles have separately admitted metadata ownership:
+`apps/worker/src/activities/independent-session-title.ts` and
+`packages/db/src/session-title-operations.ts` own the durable title job;
+`sessionTitleWorkflow` executes it independently of conversation handover.
+The source attempt joins admission only. The job pins its source authority and
+route, holds an independent operation lease, and settles retained usage and the
+title compare-and-set atomically. Steer and cancellation do not cancel a naming
+request already admitted to that job. See
+[`independent-session-title.md`](design/independent-session-title.md).
 Providers without socket support retain HTTP keep-alive. The durable worker owns
 the step retry budget, with its last retry reserved for HTTP. Turn-only HTTP
 selection survives recovery in turn metadata and never carries into a new turn.

@@ -62,6 +62,7 @@ import {
   type CodemodeTokenWriterSession,
 } from "@opengeni/runtime";
 import {
+  environmentsEncryptionKeyBytes,
   retainedImageWorkspaceQuotaBytes,
   serviceTierForLatencyMode,
   type Settings,
@@ -209,6 +210,7 @@ import type {
 } from "./turn-context";
 import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
+import { admitIndependentSessionTitle } from "../independent-session-title";
 
 export type TurnStreamAttemptDeps = {
   input: RunAgentTurnInput;
@@ -220,6 +222,8 @@ export type TurnStreamAttemptDeps = {
   observability: ActivityServices["observability"];
   entitlements: ActivityServices["entitlements"];
   startVideoGenerationWorkflow: ActivityServices["startVideoGenerationWorkflow"];
+  startSessionTitleWorkflow?: ActivityServices["startSessionTitleWorkflow"];
+  sessionTitleExpectedCurrent?: { title: string | null; source: "user" | "agent" | null };
   cancellationSignal: AbortSignal | undefined;
   runtimeCancellationSignal: AbortSignal;
   activityContext: ReturnType<typeof currentActivityContext>;
@@ -348,6 +352,7 @@ export async function runTurnStreamAttempt(
     observability,
     entitlements,
     startVideoGenerationWorkflow,
+    startSessionTitleWorkflow,
     cancellationSignal,
     runtimeCancellationSignal,
     activityContext,
@@ -430,6 +435,13 @@ export async function runTurnStreamAttempt(
     claimedModelUsageSourceKeys,
   );
   let parallelSessionTitle: ReturnType<typeof startParallelSessionTitleGeneration> | null = null;
+  let independentTitleAdmission: Promise<void> | null = null;
+  let beginIndependentTitleAdmission: (() => Promise<void>) | null = null;
+  const startIndependentTitleAdmission = () => {
+    if (!independentTitleAdmission && beginIndependentTitleAdmission) {
+      independentTitleAdmission = beginIndependentTitleAdmission();
+    }
+  };
   let parallelSessionTitleFinished = false;
   let creditPolicyRevision: number | undefined;
   let titleCreditPolicyRevision: number | undefined;
@@ -501,11 +513,13 @@ export async function runTurnStreamAttempt(
     }
   };
   const finishParallelSessionTitle = async (): Promise<void> => {
+    await independentTitleAdmission;
     if (parallelSessionTitleFinished) return;
     parallelSessionTitleFinished = true;
     await parallelSessionTitle?.finish();
   };
   const cancelParallelSessionTitle = async (): Promise<void> => {
+    await independentTitleAdmission;
     if (parallelSessionTitleFinished) return;
     parallelSessionTitleFinished = true;
     await parallelSessionTitle?.cancel();
@@ -814,7 +828,10 @@ export async function runTurnStreamAttempt(
     });
     // Native Codex/SuperGrok transports report their literal dispatch through
     // the shared turn context; generic transports use the wire-dispatch clock.
-    eventing.providerDispatchObserver = () => streamTiming.onProviderDispatch();
+    eventing.providerDispatchObserver = () => {
+      streamTiming.onProviderDispatch();
+      startIndependentTitleAdmission();
+    };
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
@@ -1130,6 +1147,7 @@ export async function runTurnStreamAttempt(
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,
                 onModelTransportDispatched: (clock) => {
+                  startIndependentTitleAdmission();
                   eventing.preparedTools?.startDeferredPreparation?.();
                   streamTiming.onProviderDispatch();
                   eventing.initialModelWireDispatch.record(
@@ -2445,31 +2463,75 @@ export async function runTurnStreamAttempt(
       resolveTurnModel: (modelId) => runtime.resolveTurnModel(runSettings, modelId),
     });
     titleUsageModelId = titleRoute.usageModelId;
-    parallelSessionTitle = startParallelSessionTitleGeneration({
-      signal: runtimeCancellationSignal,
-      onFinish: persistParallelSessionTitle,
-      generate: async (signal) =>
-        await withSessionTitleProviderRequestContext(() =>
-          runtime.generateSessionTitle!(
-            runSettings,
-            sessionTitlePrompt,
-            sessionTitleGenerationOptions({
-              resolvedModel: titleRoute.resolvedModel,
-              modelName: titleRoute.modelName,
-              serviceTier,
-              signal,
-            }),
-          ),
-        ),
-      onError: (error) => {
-        observability.warn("parallel session title generation failed", {
-          ...safeErrorDiagnostic(error),
-          errorClass: "ParallelSessionTitleGenerationError",
-          errorCode: "parallel_session_title_generation_failed",
-          origin: "worker",
+    if (
+      startSessionTitleWorkflow &&
+      titleRoute.resolvedModel &&
+      environmentsEncryptionKeyBytes(runSettings)
+    ) {
+      beginIndependentTitleAdmission = () =>
+        (async () => {
+          const subscription = subscriptionCoreTurnOf(providerTurn);
+          await admitIndependentSessionTitle({
+            db,
+            settings: runSettings,
+            start: startSessionTitleWorkflow,
+            observability,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            attemptId: input.attemptId,
+            executionGeneration: attempt.executionGeneration!,
+            route: titleRoute,
+            policy: turnExecutionPolicy,
+            prompt: sessionTitlePrompt,
+            subscriptionConnectionId: subscription?.connectionId ?? null,
+            subscriptionProvider: providerTurn.codexSubscriptionCore
+              ? "codex"
+              : providerTurn.xaiSubscriptionCore
+                ? "xai"
+                : providerTurn.claudeSubscriptionCore
+                  ? "claude"
+                  : null,
+            expectedTitle: deps.sessionTitleExpectedCurrent ?? { title: null, source: null },
+            creditPolicyRevision: titleCreditPolicyRevision,
+            externallyBilled: billingState.isExternallyBilledTurn,
+            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+            countsTowardTokenCap: billingState.countsTowardTokenCap,
+            ...(serviceTier ? { serviceTier } : {}),
+          });
+        })().catch((error) => {
+          observability.warn("Independent session title admission failed", {
+            errorClass: error instanceof Error ? error.name : "UnknownError",
+          });
         });
-      },
-    });
+    } else {
+      parallelSessionTitle = startParallelSessionTitleGeneration({
+        signal: runtimeCancellationSignal,
+        onFinish: persistParallelSessionTitle,
+        generate: async (signal) =>
+          await withSessionTitleProviderRequestContext(() =>
+            runtime.generateSessionTitle!(
+              runSettings,
+              sessionTitlePrompt,
+              sessionTitleGenerationOptions({
+                resolvedModel: titleRoute.resolvedModel,
+                modelName: titleRoute.modelName,
+                serviceTier,
+                signal,
+              }),
+            ),
+          ),
+        onError: (error) => {
+          observability.warn("parallel session title generation failed", {
+            ...safeErrorDiagnostic(error),
+            errorClass: "ParallelSessionTitleGenerationError",
+            errorCode: "parallel_session_title_generation_failed",
+            origin: "worker",
+          });
+        },
+      });
+    }
   }
   try {
     if (yieldsToSteer) {

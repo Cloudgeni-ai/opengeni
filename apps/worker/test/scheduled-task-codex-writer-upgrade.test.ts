@@ -74,6 +74,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
       (${cutover}), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral}), (${completion}), (${precursor}),
       (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}),
       (${acceptanceReads}), (${personalConnectionVersions}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), (${pendingUpdateTenancy}), (${workspaceAdminConnections}), (${indexedLineage})`;
+    await database.admin`insert into schema_migrations(name) values ('0846_independent_session_titles.sql')`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     const appUrl = new URL(database.ownerUrl);
@@ -128,6 +129,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     await client.close();
     client = undefined;
     await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences}, ${acceptanceReads}, ${personalConnectionVersions}, ${pendingUpdateTenancy}, ${workspaceAdminConnections}, ${indexedLineage})`;
+    await database.admin`delete from schema_migrations where name = '0846_independent_session_titles.sql'`;
     await migrate(database.adminUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
     client = createDb(appUrl.toString());

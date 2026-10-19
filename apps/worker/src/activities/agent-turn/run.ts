@@ -287,6 +287,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       connectionCredentials,
       personalGitHubCredentials,
       startVideoGenerationWorkflow,
+      startSessionTitleWorkflow,
     } = resolvedServices;
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
@@ -1715,6 +1716,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             },
           });
           const toolRuntime = await prepareTurnToolRuntime({
+            independentSessionTitles: !!startSessionTitleWorkflow,
             vaultAccess,
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
@@ -2093,6 +2095,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             observability,
             entitlements,
             startVideoGenerationWorkflow,
+            startSessionTitleWorkflow,
+            sessionTitleExpectedCurrent: { title: session.title, source: session.titleSource },
             cancellationSignal,
             runtimeCancellationSignal,
             activityContext,
