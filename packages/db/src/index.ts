@@ -30028,102 +30028,129 @@ async function createSessionInTransaction(
     parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
   );
   try {
-    insertedRows = await tx
-      .insert(schema.sessions)
-      .values(
-        withLosslessContentWriteVersion(
-          {
-            id,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            initialMessage: input.initialMessage,
-            initialModelContext: input.initialModelContext ?? null,
-            title: AUTOMATIC_SESSION_TITLE_FALLBACK,
-            titleSource: "agent",
-            resources: input.resources,
-            skills: input.skills ?? [],
-            tools: input.tools ?? [],
-            toolPolicy: input.toolPolicy ?? {
-              mode: "explicit",
-              inheritedFromSessionId: input.parentSessionId ?? null,
-            },
-            metadata: sessionMetadata,
-            mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
-            ...creatorColumns(frozenCreator),
-            ...(privateCreateOwnerMembershipId
-              ? {
-                  ownerOrganizationMembershipId: privateCreateOwnerMembershipId,
-                  ownerSubjectId: privateCreateOwnerSubjectId,
-                }
-              : {}),
-            model: input.model,
-            reasoningEffort: input.reasoningEffort,
-            latencyMode: input.latencyMode,
-            sandboxBackend: input.sandboxBackend,
-            sandboxOs: input.sandboxOs ?? "linux",
-            sandboxGroupId: input.sandboxGroupId ?? id,
-            variableSetIds,
-            variableSetId,
-            rigId: input.rigId ?? null,
-            rigVersionId: input.rigVersionId ?? null,
-            channelId: input.channelId ?? null,
-            firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-            firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
-            initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
-            initialMcpAccountBindings: acceptedMcpAccountBindings,
-            initialConnectionAccountIntent: parseConnectionAccountIntent(
-              input.connectionAccountIntent,
-            ),
-            initialPersonalResourceAttachmentIntent:
-              input.initialPersonalResourceAttachmentIntent ?? null,
-            visibility: createRequestedVisibility,
-            createRequestedVisibility,
-            initialXaiProviderAccountAuthoritySnapshot,
-            initialClaudeProviderAccountAuthoritySnapshot,
-            instructions: input.instructions ?? null,
-            ...(input.vaultPolicy !== undefined ? { vaultPolicy: input.vaultPolicy } : {}),
-            policyRole: input.policyRole ?? null,
-            agentAccess: input.agentAccess ?? "workspace",
-            scopeSubjectId:
-              input.scopeSubjectId !== undefined
-                ? input.scopeSubjectId
-                : frozenCreator.initiator.kind === "subject" &&
-                    /^(?:user:|external_user:)/u.test(frozenCreator.initiator.subjectId)
-                  ? frozenCreator.initiator.subjectId
-                  : null,
-            // Retained columns are historical only. Canonical scope is derived
-            // from the creator resolved under the admission locks above.
-            endUserSource: null,
-            endUserId: null,
-            memoryScope: input.memoryScope ?? "workspace",
-            parentSessionId: input.parentSessionId ?? null,
-            parentTurnId,
-            createIdempotencyKey,
-            rootSessionId: decision.rootSessionId,
-            nestedAgentDepth: decision.nestedAgentDepth,
-            maxNestedAgentDepthOverride: decision.maxNestedAgentDepthOverride,
-            effectiveMaxNestedAgentDepth: decision.effectiveMaxNestedAgentDepth,
-            nestedAgentDepthPolicySource: decision.nestedAgentDepthPolicySource,
-            nestedAgentDepthPolicySessionId: decision.nestedAgentDepthPolicySessionId,
-            // Freeze once at create from the effective create model + workspace
-            // default. Later workspace setting changes never move existing sessions.
-            codexCompactionMode:
-              input.frozenCodexCompactionMode ??
-              (isCodexBilledModel(input.model)
-                ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
-                : "portable"),
-            codeSearchEnabled,
-            agentConfig: input.agentConfig ?? null,
-            // Creation reserves identity, not runnable work. The atomic start
-            // transaction installs queued status together with its turn/wake.
-            status: "idle",
-          },
-          "initialMessage",
-          "initialMessageCodecVersion",
-        ),
-      )
-      .onConflictDoNothing()
-      .returning();
+    const insertValues: typeof schema.sessions.$inferInsert = withLosslessContentWriteVersion(
+      {
+        id,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        initialMessage: input.initialMessage,
+        initialModelContext: input.initialModelContext ?? null,
+        title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+        titleSource: "agent",
+        resources: input.resources,
+        skills: input.skills ?? [],
+        tools: input.tools ?? [],
+        toolPolicy: input.toolPolicy ?? {
+          mode: "explicit",
+          inheritedFromSessionId: input.parentSessionId ?? null,
+        },
+        metadata: sessionMetadata,
+        mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
+        ...creatorColumns(frozenCreator),
+        ...(privateCreateOwnerMembershipId
+          ? {
+              ownerOrganizationMembershipId: privateCreateOwnerMembershipId,
+              ownerSubjectId: privateCreateOwnerSubjectId,
+            }
+          : {}),
+        model: input.model,
+        reasoningEffort: input.reasoningEffort,
+        latencyMode: input.latencyMode,
+        sandboxBackend: input.sandboxBackend,
+        sandboxOs: input.sandboxOs ?? "linux",
+        sandboxGroupId: input.sandboxGroupId ?? id,
+        variableSetIds,
+        variableSetId,
+        rigId: input.rigId ?? null,
+        rigVersionId: input.rigVersionId ?? null,
+        channelId: input.channelId ?? null,
+        firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+        firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
+        initialMcpAccountBindings: acceptedMcpAccountBindings,
+        initialConnectionAccountIntent: parseConnectionAccountIntent(input.connectionAccountIntent),
+        initialPersonalResourceAttachmentIntent:
+          input.initialPersonalResourceAttachmentIntent ?? null,
+        visibility: createRequestedVisibility,
+        createRequestedVisibility,
+        initialXaiProviderAccountAuthoritySnapshot,
+        initialClaudeProviderAccountAuthoritySnapshot,
+        instructions: input.instructions ?? null,
+        ...(input.vaultPolicy !== undefined ? { vaultPolicy: input.vaultPolicy } : {}),
+        policyRole: input.policyRole ?? null,
+        agentAccess: input.agentAccess ?? "workspace",
+        scopeSubjectId:
+          input.scopeSubjectId !== undefined
+            ? input.scopeSubjectId
+            : frozenCreator.initiator.kind === "subject" &&
+                /^(?:user:|external_user:)/u.test(frozenCreator.initiator.subjectId)
+              ? frozenCreator.initiator.subjectId
+              : null,
+        // Retained columns are historical only. Canonical scope is derived
+        // from the creator resolved under the admission locks above.
+        endUserSource: null,
+        endUserId: null,
+        memoryScope: input.memoryScope ?? "workspace",
+        parentSessionId: input.parentSessionId ?? null,
+        parentTurnId,
+        createIdempotencyKey,
+        rootSessionId: decision.rootSessionId,
+        nestedAgentDepth: decision.nestedAgentDepth,
+        maxNestedAgentDepthOverride: decision.maxNestedAgentDepthOverride,
+        effectiveMaxNestedAgentDepth: decision.effectiveMaxNestedAgentDepth,
+        nestedAgentDepthPolicySource: decision.nestedAgentDepthPolicySource,
+        nestedAgentDepthPolicySessionId: decision.nestedAgentDepthPolicySessionId,
+        // Freeze once at create from the effective create model + workspace
+        // default. Later workspace setting changes never move existing sessions.
+        codexCompactionMode:
+          input.frozenCodexCompactionMode ??
+          (isCodexBilledModel(input.model)
+            ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
+            : "portable"),
+        codeSearchEnabled,
+        agentConfig: input.agentConfig ?? null,
+        // Creation reserves identity, not runnable work. The atomic start
+        // transaction installs queued status together with its turn/wake.
+        status: "idle",
+      },
+      "initialMessage",
+      "initialMessageCodecVersion",
+    );
+    if (
+      input.createdByActor &&
+      parentTurnId &&
+      input.subjectId &&
+      frozenCreator.initiator.kind === "subject"
+    ) {
+      // The SQL creation seam inserts the row and immutable witness together.
+      // It never upgrades a direct INSERT or an existing session's provenance.
+      const columns = getTableColumns(schema.sessions);
+      const valuesByColumn = Object.fromEntries(
+        Object.entries(insertValues)
+          .filter(([, value]) => value !== undefined)
+          .map(([key, value]) => [columns[key as keyof typeof columns].name, value]),
+      );
+      const actor = input.createdByActor;
+      const created = await tx.execute<{
+        id: string;
+      }>(sql`select id from create_agent_child_session(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${actor.sessionId}::uuid,
+        ${actor.turnId}::uuid, ${actor.attemptId}::uuid, ${actor.executionGeneration}::integer,
+        ${JSON.stringify(valuesByColumn)}::jsonb
+      )`);
+      insertedRows = created.length
+        ? await tx.select().from(schema.sessions).where(eq(schema.sessions.id, created[0]!.id))
+        : [];
+    } else {
+      // Service-attributed, unscoped legacy and non-agent creates retain their
+      // original path. Never infer the request subject from readable parent
+      // IDs: these creates do not gain the owner-human machine-tree witness.
+      insertedRows = await tx
+        .insert(schema.sessions)
+        .values(insertValues)
+        .onConflictDoNothing()
+        .returning();
+    }
     if (privateCreateCapabilityId) {
       await closePrivateSessionCreateCapability(tx, privateCreateCapabilityId);
       privateCreateCapabilityId = null;
@@ -30137,16 +30164,6 @@ async function createSessionInTransaction(
     throw error;
   }
   const [inserted] = insertedRows;
-  if (inserted && input.createdByActor && parentTurnId) {
-    // Parent IDs are not delegation proof. Stamp the protected witness only
-    // inside this creation transaction, after SQL verifies the exact live
-    // parent attempt. Old rows and direct app-role INSERTs cannot acquire it.
-    await tx.execute(sql`select record_session_agent_creation(
-      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${inserted.id}::uuid,
-      ${input.createdByActor.sessionId}::uuid, ${input.createdByActor.turnId}::uuid,
-      ${input.createdByActor.attemptId}::uuid, ${input.createdByActor.executionGeneration}::integer
-    )`);
-  }
   if (inserted && !input.archivedImport) {
     await copySubscriptionAuthorityCompatInTransaction(tx, [
       { kind: "session_initial", workspaceId: input.workspaceId, id: inserted.id },

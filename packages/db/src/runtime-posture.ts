@@ -879,7 +879,7 @@ const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
   "close_private_session_create_capability(uuid)",
 ] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
-  "record_session_agent_creation(uuid, uuid, uuid, uuid, uuid, uuid, integer)",
+  "create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb)",
   "lock_live_native_original_origin_v2(jsonb)",
   "modal_native_origin_member_read_active(uuid, text)",
   LEGACY_FORK_SESSION_CONTENT_ROUTINE,
@@ -1471,7 +1471,7 @@ export const BILLING_SUBSCRIPTION_OPERATION_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
-  "record_session_agent_creation(uuid, uuid, uuid, uuid, uuid, uuid, integer)",
+  "create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb)",
   ...BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
   ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
   "scheduled_task_is_exhausted(uuid)",

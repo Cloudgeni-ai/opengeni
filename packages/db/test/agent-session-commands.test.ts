@@ -914,6 +914,11 @@ describe("attempt-fenced Agent session commands", () => {
       createdByActor: parent.actor,
       personalConnectionDelegations: spawningDelegations,
     });
+    // This legacy internal create has no authenticated request subject. Its
+    // existing MCP lineage remains valid, but it receives no machine consent.
+    const [machineWitness] = await shared.admin`select agent_creation_attempt_id
+      from sessions where id=${child.id}`;
+    expect(machineWitness!.agent_creation_attempt_id).toBeNull();
 
     await applySessionTurnSettlement(client.db, grant.workspaceId!, {
       sessionId: parent.session.id,

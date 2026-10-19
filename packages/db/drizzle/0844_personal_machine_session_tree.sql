@@ -5,34 +5,26 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
--- Parent IDs alone are app-writable on INSERT. Only the exact agent-create
--- seam may add the attempt witness, and only in the child's creation transaction.
+-- Parent IDs alone are app-writable on INSERT. Only the atomic agent-create
+-- seam may INSERT the attempt witness; no function can stamp an existing row.
 -- Existing/old-binary children have no witness and do not gain tree consent.
-ALTER TABLE sessions ADD COLUMN agent_creation_transaction_id xid8,
-  ADD COLUMN agent_creation_attempt_id uuid;
+ALTER TABLE sessions ADD COLUMN agent_creation_attempt_id uuid;
 
 CREATE FUNCTION guard_session_agent_creation_provenance() RETURNS trigger
 LANGUAGE plpgsql SECURITY INVOKER SET search_path FROM CURRENT AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
-    IF NEW.agent_creation_attempt_id IS NOT NULL THEN
+    IF NEW.agent_creation_attempt_id IS NOT NULL
+      AND current_user IS DISTINCT FROM pg_get_userbyid((
+        SELECT relowner FROM pg_class WHERE oid = TG_RELID)) THEN
       RAISE EXCEPTION 'agent creation witness requires the exact creation seam' USING ERRCODE = '42501';
     END IF;
-    NEW.agent_creation_transaction_id := pg_current_xact_id();
   ELSE
-    IF NEW.agent_creation_transaction_id IS DISTINCT FROM OLD.agent_creation_transaction_id
+    IF NEW.agent_creation_attempt_id IS DISTINCT FROM OLD.agent_creation_attempt_id
       OR (OLD.agent_creation_attempt_id IS NOT NULL AND (
         NEW.parent_session_id IS DISTINCT FROM OLD.parent_session_id
         OR NEW.parent_turn_id IS DISTINCT FROM OLD.parent_turn_id)) THEN
       RAISE EXCEPTION 'agent creation provenance is immutable' USING ERRCODE = '42501';
-    END IF;
-    IF NEW.agent_creation_attempt_id IS DISTINCT FROM OLD.agent_creation_attempt_id THEN
-      IF OLD.agent_creation_attempt_id IS NOT NULL OR NEW.agent_creation_attempt_id IS NULL
-        OR OLD.agent_creation_transaction_id IS DISTINCT FROM pg_current_xact_id()
-        OR current_user IS DISTINCT FROM pg_get_userbyid((
-          SELECT relowner FROM pg_class WHERE oid = TG_RELID)) THEN
-        RAISE EXCEPTION 'agent creation witness requires the exact creation seam' USING ERRCODE = '42501';
-      END IF;
     END IF;
   END IF;
   RETURN NEW;
@@ -42,21 +34,69 @@ REVOKE ALL ON FUNCTION guard_session_agent_creation_provenance() FROM PUBLIC;
 CREATE TRIGGER session_agent_creation_provenance_guard BEFORE INSERT OR UPDATE ON sessions
 FOR EACH ROW EXECUTE FUNCTION guard_session_agent_creation_provenance();
 
-CREATE FUNCTION record_session_agent_creation(
-  p_account uuid, p_workspace uuid, p_child uuid, p_parent uuid,
-  p_turn uuid, p_attempt uuid, p_generation integer
-) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
-DECLARE cap_added integer;
+CREATE FUNCTION create_agent_child_session(
+  p_account uuid, p_workspace uuid, p_parent uuid,
+  p_turn uuid, p_attempt uuid, p_generation integer, p_values jsonb
+) RETURNS TABLE (id uuid) LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+DECLARE
+  cap_added integer;
+  caller_subject text := nullif(current_setting('opengeni.subject_id',true),'');
+  child_id uuid;
+  column_names text;
+  allowed_columns constant text[] := ARRAY[
+    'id','account_id','workspace_id','initial_message','initial_message_codec_version',
+    'initial_model_context','title','title_source','resources','skills','tools','tool_policy',
+    'metadata','mcp_approval_policies','created_by_kind','created_by_subject_id','created_by_context',
+    'owner_organization_membership_id','owner_subject_id','model','reasoning_effort','latency_mode',
+    'sandbox_backend','sandbox_os','sandbox_group_id','variable_set_ids','variable_set_id','rig_id',
+    'rig_version_id','channel_id','first_party_mcp_permissions','first_party_mcp_tools',
+    'initial_personal_connection_delegations','initial_mcp_account_bindings',
+    'initial_connection_account_intent','initial_personal_resource_attachment_intent',
+    'visibility','create_requested_visibility','initial_xai_provider_account_authority_snapshot',
+    'initial_claude_provider_account_authority_snapshot','instructions','vault_policy','policy_role',
+    'agent_access','scope_subject_id','end_user_source','end_user_id','memory_scope',
+    'parent_session_id','parent_turn_id','create_idempotency_key','root_session_id','nested_agent_depth',
+    'max_nested_agent_depth_override','effective_max_nested_agent_depth','nested_agent_depth_policy_source',
+    'nested_agent_depth_policy_session_id','codex_compaction_mode','code_search_enabled','agent_config','status'
+  ];
 BEGIN
+  -- Like existing exact-session machine checks, this trusts claims set by the
+  -- authenticated API. It does not claim to authenticate a compromised app role.
   IF p_account IS DISTINCT FROM opengeni_private.current_account_id()
     OR p_workspace IS DISTINCT FROM opengeni_private.current_workspace_id()
-    OR p_account IS NULL OR p_workspace IS NULL OR p_child = p_parent
+    OR p_account IS NULL OR p_workspace IS NULL OR caller_subject IS NULL
     OR p_generation IS NULL OR p_generation < 1 THEN
     RAISE EXCEPTION 'exact agent creation scope required' USING ERRCODE = '42501';
+  END IF;
+  IF jsonb_typeof(p_values) IS DISTINCT FROM 'object' THEN
+    RAISE EXCEPTION 'agent child creation values required' USING ERRCODE = '42501';
+  END IF;
+  IF EXISTS (SELECT 1 FROM jsonb_object_keys(p_values) key WHERE NOT key = ANY(allowed_columns))
+    OR p_values->>'account_id' IS DISTINCT FROM p_account::text
+    OR p_values->>'workspace_id' IS DISTINCT FROM p_workspace::text
+    OR p_values->>'parent_session_id' IS DISTINCT FROM p_parent::text
+    OR p_values->>'parent_turn_id' IS DISTINCT FROM p_turn::text
+    OR p_values->>'created_by_kind' IS DISTINCT FROM 'subject'
+    OR p_values->>'created_by_subject_id' IS DISTINCT FROM caller_subject
+    OR (p_values ? 'owner_subject_id' AND p_values->>'owner_subject_id' IS DISTINCT FROM caller_subject)
+    OR p_values->>'status' IS DISTINCT FROM 'idle' THEN
+    RAISE EXCEPTION 'agent child does not match its request claims' USING ERRCODE = '42501';
+  END IF;
+  child_id := (p_values->>'id')::uuid;
+  IF child_id IS NULL OR child_id = p_parent THEN
+    RAISE EXCEPTION 'fresh agent child identity required' USING ERRCODE = '42501';
   END IF;
   INSERT INTO opengeni_private.scoped_compute_capabilities(backend_pid,transaction_id,capability_kind)
     VALUES (pg_backend_pid(),pg_current_xact_id(),'write') ON CONFLICT DO NOTHING;
   GET DIAGNOSTICS cap_added = ROW_COUNT;
+  IF p_values ? 'owner_organization_membership_id' AND NOT EXISTS (
+    SELECT 1 FROM organization_memberships owner_value
+    WHERE owner_value.account_id = p_account AND owner_value.subject_id = caller_subject
+      AND owner_value.id::text = p_values->>'owner_organization_membership_id'
+      AND owner_value.status = 'active' AND owner_value.revoked_at IS NULL
+  ) THEN
+    RAISE EXCEPTION 'agent child owner does not match request subject' USING ERRCODE = '42501';
+  END IF;
   -- Use the same live attempt/turn/epoch/interruption fences as agent commands.
   -- These locks are already held by createSession's frozen-creator check.
   PERFORM 1 FROM sessions parent
@@ -70,7 +110,10 @@ BEGIN
     AND turn_value.active_attempt_id = p_attempt AND attempt.id = p_attempt
     AND turn_value.execution_generation = p_generation AND attempt.execution_generation = p_generation
     AND turn_value.status IN ('running','requires_action','recovering','waiting_capacity')
-    AND attempt.state IN ('claimed','running')
+    AND attempt.state IN ('claimed','running') AND attempt.closed_at IS NULL AND attempt.quiesced_at IS NULL
+    AND coalesce(nullif(btrim(turn_value.initiating_human_subject_id),''),
+      CASE WHEN turn_value.initiator_kind='subject' THEN turn_value.initiator_subject_id END) = caller_subject
+    AND turn_value.initiator_kind = 'subject' AND turn_value.initiator_subject_id = caller_subject
     AND attempt.authority_epoch BETWEEN parent.execution_authority_epoch AND parent.authority_epoch
     AND NOT EXISTS (SELECT 1 FROM session_attempt_interruptions interruption
       WHERE interruption.workspace_id = p_workspace AND interruption.attempt_id = p_attempt
@@ -79,31 +122,36 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'agent creation attempt is stale or unauthorized' USING ERRCODE = '42501';
   END IF;
-  UPDATE sessions child SET agent_creation_attempt_id = p_attempt
-  WHERE child.account_id = p_account AND child.workspace_id = p_workspace AND child.id = p_child
-    AND child.parent_session_id = p_parent AND child.parent_turn_id = p_turn
-    AND child.agent_creation_transaction_id = pg_current_xact_id()
-    AND child.agent_creation_attempt_id IS NULL AND child.active_turn_id IS NULL AND child.status = 'idle'
-    AND NOT EXISTS (SELECT 1 FROM session_turns accepted WHERE accepted.session_id = child.id);
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'agent creation witness requires a fresh exact child' USING ERRCODE = '42501';
+  IF EXISTS (SELECT 1 FROM sessions existing WHERE existing.id = child_id) THEN
+    RAISE EXCEPTION 'agent creation cannot stamp an existing session' USING ERRCODE = '42501';
   END IF;
+  -- Omitted values retain the table defaults, as with the ordinary INSERT.
+  -- A closed column allowlist and typed populate_record avoid arbitrary SQL or
+  -- writable execution/authority state. Provenance is added only here.
+  p_values := p_values || jsonb_build_object('agent_creation_attempt_id',p_attempt);
+  SELECT string_agg(format('%I',key),',' ORDER BY key) INTO column_names
+    FROM jsonb_object_keys(p_values) key;
+  RETURN QUERY EXECUTE format(
+    'INSERT INTO %s AS inserted (%s) SELECT %s FROM jsonb_populate_record(NULL::%s,$1) '
+    'ON CONFLICT DO NOTHING RETURNING inserted.id',
+    'sessions'::regclass,column_names,column_names,'sessions'::regclass
+  ) USING p_values;
   IF cap_added = 1 THEN
     DELETE FROM opengeni_private.scoped_compute_capabilities
       WHERE backend_pid = pg_backend_pid() AND transaction_id = pg_current_xact_id() AND capability_kind = 'write';
   END IF;
 END
 $$;
-REVOKE ALL ON FUNCTION record_session_agent_creation(uuid,uuid,uuid,uuid,uuid,uuid,integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb) FROM PUBLIC;
 DO $creation_acl$
 DECLARE role_name text;
 BEGIN
   EXECUTE format('ALTER FUNCTION guard_session_agent_creation_provenance() SET search_path=pg_catalog,%I,pg_temp',current_schema());
-  EXECUTE format('ALTER FUNCTION record_session_agent_creation(uuid,uuid,uuid,uuid,uuid,uuid,integer) SET search_path=pg_catalog,%I,pg_temp',current_schema());
+  EXECUTE format('ALTER FUNCTION create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb) SET search_path=pg_catalog,%I,pg_temp',current_schema());
   FOR role_name IN SELECT rolname FROM pg_roles WHERE rolname <> current_user
     AND has_function_privilege(oid,'open_private_child_session_create_capability(uuid,uuid,uuid,uuid,uuid,uuid,integer)','EXECUTE')
   LOOP
-    EXECUTE format('GRANT EXECUTE ON FUNCTION record_session_agent_creation(uuid,uuid,uuid,uuid,uuid,uuid,integer) TO %I',role_name);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION create_agent_child_session(uuid,uuid,uuid,uuid,uuid,integer,jsonb) TO %I',role_name);
   END LOOP;
 END
 $creation_acl$;

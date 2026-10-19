@@ -6,6 +6,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import {
+  applySessionTurnSettlement,
   assertPersonalMachineForAttempt,
   authorizePersonalMachineForAttempt,
   claimSessionWorkForAttempt,
@@ -177,28 +178,81 @@ async function fixture(
   const grants =
     () => admin`select id,session_id,mode,generation from organization_user_resource_grants
     where account_id=${accountId} and action='connected_machine.use'`;
+  const atomicCreationSql = (
+    parent: Attempt,
+    id: string,
+    creator = subjectId,
+    actor = parent,
+    extraValues: Record<string, unknown> = {},
+  ) => {
+    const values = {
+      id,
+      account_id: accountId,
+      workspace_id: workspaceId,
+      initial_message: "Atomic child",
+      model: "test-model",
+      reasoning_effort: "medium",
+      latency_mode: "standard",
+      sandbox_backend: "none",
+      sandbox_group_id: id,
+      tool_policy: { mode: "explicit", inheritedFromSessionId: parent.sessionId },
+      created_by_kind: "subject",
+      created_by_subject_id: creator,
+      parent_session_id: parent.sessionId,
+      parent_turn_id: parent.turnId,
+      status: "idle",
+      ...extraValues,
+    };
+    return sql`select id from create_agent_child_session(${accountId}::uuid,${workspaceId}::uuid,
+      ${actor.sessionId}::uuid,${actor.turnId}::uuid,${actor.attemptId}::uuid,
+      ${actor.executionGeneration},${JSON.stringify(values)}::jsonb)`;
+  };
+  const atomic = (
+    parent: Attempt,
+    options: {
+      id?: string;
+      subject?: string;
+      creator?: string;
+      actor?: Partial<Attempt>;
+      extraValues?: Record<string, unknown>;
+    } = {},
+  ) =>
+    withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      options.subject ?? subjectId,
+      (db) =>
+        db.execute(
+          atomicCreationSql(
+            parent,
+            options.id ?? crypto.randomUUID(),
+            options.creator ?? options.subject ?? subjectId,
+            { ...parent, ...options.actor },
+            options.extraValues,
+          ),
+        ),
+    );
   const forge = async (
     parent: Attempt,
-    options: { start?: boolean; witness?: string; stamp?: Partial<Attempt> } = {},
+    options: { start?: boolean; witness?: string; stamp?: Partial<Attempt>; subject?: string } = {},
   ) => {
     const id = crypto.randomUUID();
     // Restricted app INSERT deliberately bypasses createSession's exact actor
     // path. Parent IDs are readable data, not creation provenance.
-    await withWorkspaceSubjectSessionActivityRls(client.db, workspaceId, subjectId, async (db) => {
+    const caller = options.subject ?? subjectId;
+    await withWorkspaceSubjectSessionActivityRls(client.db, workspaceId, caller, async (db) => {
       await db.execute(sql`insert into sessions (
         id, account_id, workspace_id, initial_message, model, reasoning_effort,
         latency_mode, sandbox_backend, sandbox_group_id, tool_policy,
         created_by_kind, created_by_subject_id, parent_session_id, parent_turn_id,
         active_sandbox_id, status ${options.witness ? sql`, agent_creation_attempt_id` : sql``}
       ) values (${id},${accountId},${workspaceId},'forged child','test-model','medium',
-        'standard','none',${id},'{"mode":"explicit","inheritedFromSessionId":null}'::jsonb,'subject',${subjectId},
+        'standard','none',${id},'{"mode":"explicit","inheritedFromSessionId":null}'::jsonb,'subject',${caller},
         ${parent.sessionId},${parent.turnId},${machine.sandbox_id},'idle'
         ${options.witness ? sql`, ${options.witness}` : sql``})`);
       if (options.stamp) {
         const actor = { ...parent, ...options.stamp };
-        await db.execute(sql`select record_session_agent_creation(${accountId}::uuid,
-          ${workspaceId}::uuid,${id}::uuid,${actor.sessionId}::uuid,${actor.turnId}::uuid,
-          ${actor.attemptId}::uuid,${actor.executionGeneration})`);
+        await db.execute(atomicCreationSql(parent, id, caller, actor));
       }
     });
     if (options.start !== false)
@@ -225,6 +279,7 @@ async function fixture(
     use,
     grants,
     forge,
+    atomic,
   };
 }
 
@@ -440,20 +495,36 @@ for (const source of ["grant", "move_receipt"] as const) {
         });
       const forged = await f.forge(root);
       await denied(f.claim(forged));
+      // Reading exact live IDs cannot upgrade a direct INSERT, even in the
+      // same transaction, by invoking the atomic creation seam afterwards.
+      await denied(f.forge(root, { stamp: {} }));
+      await denied(f.atomic(root, { id: forged }));
     } finally {
       await f.client.close();
     }
   }, 180_000);
 }
 
-test("agent creation witnesses cannot be inserted, rewritten, or added after the creation transaction", async () => {
+test("agent creation witnesses are insert-only and reject foreign subjects and stale attempts", async () => {
   const f = await fixture();
   try {
     const root = await f.claim((await f.create({ mode: "session" })).id);
     await denied(f.forge(root, { witness: root.attemptId }));
-    await denied(f.forge(root, { stamp: { attemptId: crypto.randomUUID() } }));
-    await denied(f.forge(root, { stamp: { turnId: crypto.randomUUID() } }));
-    await denied(f.forge(root, { stamp: { executionGeneration: root.executionGeneration + 1 } }));
+    await denied(f.atomic(root, { actor: { attemptId: crypto.randomUUID() } }));
+    await denied(f.atomic(root, { actor: { turnId: crypto.randomUUID() } }));
+    await denied(f.atomic(root, { actor: { executionGeneration: root.executionGeneration + 1 } }));
+    await denied(f.atomic(root, { subject: f.otherSubjectId }));
+    await denied(f.atomic(root, { subject: f.otherSubjectId, creator: f.subjectId }));
+    await denied(f.atomic(root, { creator: f.otherSubjectId }));
+    await denied(f.atomic(root, { extraValues: { owner_subject_id: f.otherSubjectId } }));
+    const [foreignOwner] = await f.admin`select id from organization_memberships
+      where account_id=${f.accountId} and subject_id=${f.otherSubjectId}`;
+    await denied(
+      f.atomic(root, { extraValues: { owner_organization_membership_id: foreignOwner!.id } }),
+    );
+    await denied(f.atomic(root, { extraValues: { agent_creation_attempt_id: root.attemptId } }));
+    await denied(f.forge(root, { stamp: {}, subject: f.otherSubjectId }));
+    await denied(f.create({ parent: root, subject: f.otherSubjectId }));
     const forged = await f.forge(root, { start: false });
     const scoped = (query: ReturnType<typeof sql>) =>
       withWorkspaceSubjectSessionActivityRls(f.client.db, f.workspaceId, f.subjectId, (db) =>
@@ -463,15 +534,10 @@ test("agent creation witnesses cannot be inserted, rewritten, or added after the
       scoped(sql`update sessions set agent_creation_attempt_id=${root.attemptId}
       where id=${forged}`),
     );
-    await denied(
-      scoped(sql`update sessions set agent_creation_transaction_id=pg_current_xact_id()
-      where id=${forged}`),
-    );
-    await denied(
-      scoped(sql`select record_session_agent_creation(${f.accountId}::uuid,
-      ${f.workspaceId}::uuid,${forged}::uuid,${root.sessionId}::uuid,${root.turnId}::uuid,
-      ${root.attemptId}::uuid,${root.executionGeneration})`),
-    );
+    await denied(f.atomic(root, { id: forged }));
+    const [oldSeam] = await f.admin`select to_regprocedure(
+      'record_session_agent_creation(uuid,uuid,uuid,uuid,uuid,uuid,integer)') as routine`;
+    expect(oldSeam!.routine).toBeNull();
     const child = await f.create({ parent: root });
     const [witness] =
       await f.admin`select agent_creation_attempt_id from sessions where id=${child.id}`;
@@ -480,6 +546,19 @@ test("agent creation witnesses cannot be inserted, rewritten, or added after the
       scoped(sql`update sessions set agent_creation_attempt_id=null where id=${child.id}`),
     );
     await denied(scoped(sql`update sessions set parent_session_id=null where id=${child.id}`));
+    const [turn] =
+      await f.admin`select trigger_event_id from session_turns where id=${root.turnId}`;
+    await applySessionTurnSettlement(f.client.db, f.workspaceId, {
+      sessionId: root.sessionId,
+      turnId: root.turnId,
+      attemptId: root.attemptId,
+      triggerEventId: turn!.trigger_event_id,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    await denied(f.atomic(root));
   } finally {
     await f.client.close();
   }
