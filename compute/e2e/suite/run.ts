@@ -3046,7 +3046,10 @@ for (const one of checks.filter((c) => selected.has(c.id))) {
     detail,
     seconds: (Date.now() - start) / 1000,
   };
-  if (status === "pass" && proofs.length > 0) result.proofs = proofs;
+  // Kept whatever the status: the verifier checks a pass's proofs, and a
+  // journal a failed check kept before stopping a host still declares it,
+  // so earlier passes on that host keep their evidence.
+  if (proofs.length > 0) result.proofs = proofs;
   results.push(result);
   log(`${status} ${one.id}: ${detail}`);
   writeFileSync(`${OUT}/results.json`, JSON.stringify({ results }, null, 2));

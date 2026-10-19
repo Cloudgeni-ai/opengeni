@@ -63,7 +63,7 @@ const unsynced: Unsynced[] = [];
 // machine (host-loss), whose journal its replacement does not have. A
 // machine that came back keeps its journal, so an event can be in both:
 // it counts once. A kept journal is read only once it is known good: its
-// name well formed, declared by a check's journal proof (host, instance and
+// name well formed, declared by a check's journal proof of any status (host, instance and
 // boot), and its header, written on the machine itself, naming that same
 // instance and boot. Any other file is left out, with the reason.
 const declared = new Map<string, JournalProof>();
