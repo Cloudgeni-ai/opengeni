@@ -2440,7 +2440,10 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("scoped_enrollment") ||
         routine.name.includes("scoped_sandbox") ||
         routine.name.includes("scoped_machine_dependent_sessions") ||
-        routine.name.includes("personal_machine") ||
+        (routine.name.includes("personal_machine") &&
+          !(runtimePosture.RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES as readonly string[]).includes(
+            routine.name,
+          )) ||
         routine.name.startsWith("get_session_attempt_machine(") ||
         routine.name.startsWith("get_session_machine_access(") ||
         routine.name.includes("connected_machine_audience") ||

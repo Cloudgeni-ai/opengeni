@@ -1543,6 +1543,8 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  "personal_machine_grant_covers_descendant(uuid, uuid, uuid, uuid)",
+  "personal_machine_turn_consent_covers_descendant(uuid, uuid, uuid)",
   "live_session_turn_machine_consent(uuid)",
   "bind_session_attempt_machine_consent(uuid, uuid, uuid)",
   "assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean)",

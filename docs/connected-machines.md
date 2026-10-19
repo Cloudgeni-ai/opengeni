@@ -422,6 +422,20 @@ Rules to keep in mind:
   with neither an inherited nor explicit machine is rejected before an unusable
   session starts.
 
+Personal-machine consent also covers the consenting session's agent-created
+descendants (0844). Every causal parent/turn link must remain in the same workspace
+and belong to the same machine owner and initiating human. Admission and dispatch
+reuse the original grant, never mint child grants, and recheck each parent machine
+snapshot plus live membership, machine authority, grant generation, expiry and
+revocation. `once` covers only descendants of the originating accepted turn;
+`session` covers its consented session tree. A sibling of the consenting session,
+an unrelated chat, a bare parent/group ID, another human's turn, or another machine
+is not covered. Other personal-resource grants remain exact-session.
+An owner move's logical-turn receipt follows the same causal tree and live
+authority checks when no exact-session machine grant exists. If a source grant
+exists in the current execution epoch, tree coverage stays grant-derived: a
+move receipt cannot bypass its expiry or revocation.
+
 The model-facing first-party `session_create` tool makes the dependency
 structural: it accepts an optional `machineTarget` object containing required
 `targetSandboxId` plus optional `workingDir`, then maps that object to the stable
