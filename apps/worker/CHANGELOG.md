@@ -1,5 +1,38 @@
 # @opengeni/worker-bundle
 
+## 4.1.3
+
+### Patch Changes
+
+- 18c8700: Re-read scheduled-task execution and authority after a concurrent task-head change rejects fresh producer admission, so simultaneous cold reusable runs converge without waiting for an activity retry. Preserve the exact database authority fence and accepted-producer replay.
+- Updated dependencies [175f595]
+- Updated dependencies [404e017]
+  - @opengeni/db@4.1.2
+  - @opengeni/sdk@4.1.2
+  - @opengeni/core@4.1.2
+  - @opengeni/documents@4.1.2
+  - @opengeni/events@4.1.2
+  - @opengeni/codemode@4.1.2
+  - @opengeni/runtime@4.1.2
+  - @opengeni/agent-proto@4.1.2
+  - @opengeni/capabilities@4.1.2
+  - @opengeni/codex@4.1.2
+  - @opengeni/config@4.1.2
+  - @opengeni/contracts@4.1.2
+  - @opengeni/github@4.1.2
+  - @opengeni/interaction@4.1.2
+  - @opengeni/jev@4.1.2
+  - @opengeni/network@4.1.2
+  - @opengeni/observability@4.1.2
+  - @opengeni/storage@4.1.2
+  - @opengeni/subscriptions@4.1.2
+  - @opengeni/tool-gateway@4.1.2
+  - @opengeni/vaults@4.1.2
+  - @opengeni/vaults-keeper@4.1.2
+  - @opengeni/vaults-onepassword@4.1.2
+  - @opengeni/vaults-protonpass@4.1.2
+  - @opengeni/xai-subscription@4.1.2
+
 ## 4.1.1
 
 ### Patch Changes

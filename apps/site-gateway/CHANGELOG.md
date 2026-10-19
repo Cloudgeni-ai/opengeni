@@ -1,5 +1,13 @@
 # @opengeni/site-gateway
 
+## 0.1.8
+
+### Patch Changes
+
+- Updated dependencies [404e017]
+  - @opengeni/sdk@4.1.2
+  - @opengeni/contracts@4.1.2
+
 ## 0.1.7
 
 ### Patch Changes
