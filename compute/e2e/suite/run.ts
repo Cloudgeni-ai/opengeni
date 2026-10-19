@@ -1480,7 +1480,12 @@ async function pagerAfter(host: string, since: number): Promise<string> {
 // sandbox to saved and wakes it with a read; every file must come back
 // whole, both as the guest sees it and through the API, and the agent must
 // not have had to reconnect anywhere in it.
+// The transfers run at least LINK_WINDOW_MS, and on until the host's state
+// has shown two checkpoints begin and end during them (a checkpoint under
+// this load takes 20 to 30 s, so the minute's spacing alone can leave the
+// second one finishing just after), at most LINK_WINDOW_MAX_MS.
 const LINK_WINDOW_MS = 170_000;
+const LINK_WINDOW_MAX_MS = 330_000;
 const LINK_FILE_BYTES = 4 << 20;
 const LINK_SLOTS = 6;
 check(
@@ -1530,7 +1535,16 @@ check(
     const start = Date.now();
     let cycles = 0;
     const durations: number[] = [];
-    while (Date.now() - start < LINK_WINDOW_MS) {
+    // Checkpoints the host's state showed begin and end inside the window:
+    // one counts only if it was seen not under way, then under way, then
+    // not (a checkpoint already under way at the start is not counted).
+    let checkpointing = (await sandboxState()).step === "checkpoint";
+    let checkpointSeenBegin = false;
+    let checkpointsSeen = 0;
+    while (
+      Date.now() - start < LINK_WINDOW_MS ||
+      (checkpointsSeen < 2 && Date.now() - start < LINK_WINDOW_MAX_MS)
+    ) {
       const slot = cycles % LINK_SLOTS;
       const began = Date.now();
       await step(`cycle ${cycles + 1}`, async () => {
@@ -1554,6 +1568,13 @@ check(
       });
       durations.push(Date.now() - began);
       cycles += 1;
+      const now = (await sandboxState()).step === "checkpoint";
+      if (now && !checkpointing) checkpointSeenBegin = true;
+      if (!now && checkpointing && checkpointSeenBegin) {
+        checkpointsSeen += 1;
+        checkpointSeenBegin = false;
+      }
+      checkpointing = now;
     }
     const to = new Date().toISOString();
     const moved = cycles * LINK_FILE_BYTES;
@@ -1629,6 +1650,7 @@ check(
     return (
       `${cycles} cycles in ${((Date.parse(to) - start) / 1000).toFixed(0)} s (each ${mib(LINK_FILE_BYTES)} in and ${mib(2 * LINK_FILE_BYTES)} out, ` +
       `${(Math.min(...durations) / 1000).toFixed(1)}-${(Math.max(...durations) / 1000).toFixed(1)} s): ${mib(moved)} in, ${mib(2 * moved)} out, every sha256 matching; ` +
+      `${checkpointsSeen} checkpoint(s) the host's state showed begin and end meanwhile; ` +
       `saved in ${(reached.ms / 1000).toFixed(1)} s, a read woke it in ${woke}, and all ${sums.size} files matched both ways after; ` +
       `generation ${boot}; on ${host} throughout; console during the transfers ${describeGrowth(during)}, going to sleep ${describeGrowth(asleep)}, after the wake ${describeGrowth(growth)}`
     );
