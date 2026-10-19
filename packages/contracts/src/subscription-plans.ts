@@ -40,6 +40,8 @@ export const BillingPlanBalance = z.object({
   creditRemainingMicros: z.number().int().nonnegative(),
   /** Already unavailable, but not yet removed from the physical ledger. */
   creditPendingExpiryMicros: z.number().int().nonnegative().optional(),
+  /** The granted period is model-scoped, rather than part of general credit. */
+  creditScoped: z.boolean().optional(),
   periodResetAt: z.string().nullable(),
   seatLimit: z.number().int().positive().nullable(),
   seatsUsed: z.number().int().nonnegative(),

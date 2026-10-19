@@ -11230,6 +11230,7 @@
         "$.creditGrantedMicros": "integer!",
         "$.creditPendingExpiryMicros": "integer?",
         "$.creditRemainingMicros": "integer!",
+        "$.creditScoped": "boolean?",
         "$.key": "string!",
         "$.label": "string!",
         "$.periodResetAt": "string! null",
@@ -22236,6 +22237,7 @@
         "$.eligibleModelIds[]": "string",
         "$.grantId": "string!",
         "$.label": "string!",
+        "$.planCredit": "boolean?",
         "$.remainingMicros": "integer!"
       }
     },

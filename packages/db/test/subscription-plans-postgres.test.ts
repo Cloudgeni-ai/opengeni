@@ -691,6 +691,7 @@ test("only the organization that actually received the verified signup trial is 
     operationId: crypto.randomUUID(),
     requestFingerprint: "a".repeat(64),
     trialCreditsEnabled: true,
+    trialCreditModelIds: ["model-a"],
   });
   expect(await freePlanCreditEligible(client.db, setup.organizationId)).toBe(true);
   const input = await activate(setup.organizationId, "free");
@@ -719,7 +720,7 @@ test("only the organization that actually received the verified signup trial is 
   expect(await getBillingBalance(client.db, setup.organizationId)).toMatchObject({
     balanceMicros: beforeUpgrade.balanceMicros + 190 * M,
     plan: { key: "pro", creditGrantedMicros: 200 * M, creditRemainingMicros: 200 * M },
-    promotionalCredits: beforeUpgrade.promotionalCredits,
+    promotionalCredits: beforeUpgrade.promotionalCredits?.filter((grant) => !grant.planCredit),
   });
 }, 180_000);
 

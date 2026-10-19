@@ -66,6 +66,7 @@ async function account(eligible = false) {
       operationId: crypto.randomUUID(),
       requestFingerprint: "a".repeat(64),
       trialCreditsEnabled: true,
+      trialCreditModelIds: ["model-a"],
     })
   ).organizationId;
 }
