@@ -328,5 +328,7 @@ export const embeddingMigrationTail = [
   "0846_independent_session_titles.sql",
   // Extends machine grant predicates rewritten by withheld 0501.
   "0851_personal_machine_session_tree.sql",
+  // Temporarily disables the sessions fence trigger installed by withheld 0345.
+  "0853_connected_machine_root_working_dirs.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];

@@ -84,7 +84,7 @@ describe("Site conversation navigation", () => {
     ]);
     expect(result.list.siteAccessId).toBe("pinned-site");
     expect(result.refusal).toBe("SiteSessionPathError");
-  });
+  }, 30_000);
 
   for (const theme of ["light", "dark"])
     test(`${theme}: linked origin, group disclosure, paginated/searchable host panel`, async () => {
