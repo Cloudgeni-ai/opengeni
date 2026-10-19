@@ -191,6 +191,12 @@ Stalled finalization requests host-owned graceful shutdown: peers checkpoint
 before the shutdown ceiling contains stuck writers. Cleanup can consume exact,
 independently committed retained-process terminal proof, never manufacture
 quiescence or replay unknown commands.
+For a failed Connected Machine exec, the launch client may also query its exact
+runner for a zero-frame terminal record (failed spawn or cancel-before-start).
+That proof releases the turn's local writer custody without waiting for an exit
+frame that never existed, changing the original command error, or inventing an
+output receipt. Running, lost, mismatched and unavailable observations remain
+fenced; the proof says nothing about effects before spawn cleanup.
 
 Unavailable control reads/owned attempts retain bounded, interruptible waits,
 not idle/settlement, writer revocation or successor dispatch. Temporal metadata
