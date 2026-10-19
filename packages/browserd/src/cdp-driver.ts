@@ -177,6 +177,8 @@ const FRAME_CAPTURE_FAILURE_LIMIT = 3;
 const MAX_FRAME_PROFILES_PER_TARGET = 4;
 const MAX_FRAME_SUBSCRIPTIONS_PER_TARGET = 32;
 const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
+/** How long the controller's own close request may take to be acknowledged. */
+const BROWSER_CLOSE_REQUEST_TIMEOUT_MS = 5_000;
 const NETWORK_IDLE_MS = 500;
 /** How long a navigation may wait for its server to answer before the tab
  * stops loading. Chromium itself waits for the operating system's connect
@@ -955,6 +957,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
     }
     if (this.started && this.targetLifecycle === "runner") {
+      // agent-browser runs its own CDP work in line with its commands. A tab
+      // that closes while it is still preparing that page leaves a request
+      // Chromium never answers, and its daemon then holds every command,
+      // `close` included, for its 30 second CDP deadline. The controller's
+      // own connection is independent of that queue, so it asks the browser
+      // to shut down cleanly first; the daemon's close then only reconciles a
+      // browser that is already exiting.
+      if (connection) {
+        try {
+          await connection.send(
+            "Browser.close",
+            {},
+            { timeoutMs: BROWSER_CLOSE_REQUEST_TIMEOUT_MS },
+          );
+        } catch {
+          // The daemon's close below still shuts the browser down.
+        }
+      }
       try {
         await this.runner.run(["close"], {
           timeoutMs: GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS,

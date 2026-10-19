@@ -2419,6 +2419,11 @@ chromiumE2e(
         code: "resource_unavailable",
         message: "browser could not navigate to the requested URL (net::ERR_CONNECTION_REFUSED)",
       });
+      // agent-browser was still preparing the tabs that closed above; its
+      // queued work must not hold the browser's shutdown.
+      const closing = Date.now();
+      await driver.close();
+      expect(Date.now() - closing).toBeLessThan(10_000);
     } finally {
       silent.stop(true);
       await driver.close();
