@@ -874,6 +874,8 @@ from that commit. Results carry the commits as `backend+agent`.
 | r11 20:23 | df78a13f3+af0b4552f | 53fe2cd59 | 13 | 10 | none before create: create (first turn 25.1 s), commands, egress, files, git, port, browser, sleep-paused (verified), move (32.3 s), connected-machine pass; see below |
 | r13 21:51 | cf5152969+5faf66b21+6270b6eae | a1972ae1a | 21 | 3 | ui (desktop view too small in the dock; the e2e now maximizes it), delete (409 for 10 minutes; the cleanup row fails with it); every other check passes, the four sleeps verified in the journals; see below |
 | r14 22:49 | 130eeb930+ac1951242+6270b6eae | 40a9c32dc | 24 | 0 | none; run-as is n/a (Opengeni cannot ask for it); see below |
+| r15 23:06 | 8e8577dba | e53aa9512 | 24 | 3 | the suite's own host access (OS Login lacked `compute.projects.get`; fixed in the e2e); every product check passes |
+| r16 00:51 | 41f1e7bae+58d022965+6270b6eae | b593c5e25 | 19 | 7 | ui desktop (the chart predated the relay's owner routing); vm-crash, move, host-loss, delete (a request in flight across a VM crash never ends); link-stream (the window was too short for two checkpoints under load); see below |
 
 Checks after create were skipped through r6 because they need create.
 In r8 (every request now carries a nonzero agent epoch) create and most
@@ -1114,3 +1116,84 @@ The guest consoles cannot show the reconnects of this run: a VMM writes a
 new console at each launch, so the minute copies keep only the last
 launch, and the sandbox goes with the delete. From r15 the link-stream and
 vm-crash checks count them on the host during the check.
+
+### r16: the stock chart, every check
+
+r16 (2026-10-19, 00:51 to 01:27) ran every check on three freshly
+replaced hosts and a new database (`FRESH=1`). The backend was 41f1e7bae,
+merged with the run-as branch 58d022965 and the agent's fabric branch
+6270b6eae, and compute was b593c5e25. The relays ran as a stock install
+has them: the chart's two replicas behind Caddy's plain reverse proxy, with
+no channel affinity. Checkpoints ran every 60 s. Rerun it with:
+
+```sh
+. p4.env   # PROJECT, PREFIX, LABELS, the three refs, the Azure account
+compute/e2e/env.sh build && compute/e2e/env.sh fleet &&
+  FRESH=1 compute/e2e/env.sh deploy && RUN=r16 compute/e2e/env.sh suite
+```
+
+The shapes are those of r14: three n2-standard-8 hosts and the n2-standard-32
+stack VM with two API, two relay and two compute-control replicas. 19
+checks passed, 7 failed and run-as is not applicable. Two causes account
+for six of the failures; the seventh was a check whose window was too
+short.
+
+- The deployed chart predated #4925, which lets any relay replica forward
+  a viewer to the replica that owns its channel. The images had it, but
+  the chart's relay lacked `OPENGENI_RELAY_ADVERTISE_IP`, so a viewer that
+  reached the other replica waited forever. The web app's desktop view
+  stayed on "Connecting..." while the API's own screenshot of the same
+  desktop passed. With the chart carrying #4925 (compute a5f205ea2,
+  same images, no affinity), terminal and ui passed in all three reruns
+  (r16b, r16c, r16d): the desktop view drew 1422x888 frames, and the ui
+  pass took 66.6 to 66.7 s.
+- A request in flight when a sandbox's VM process dies never ends. The
+  agent comes back on a new connection, but the request stays bound to the
+  old one. It keeps a lease holder alive, so deleting the session answers
+  409 for the whole 10 minutes of the delete check. It also asks the fleet
+  to wake the sandbox every 5 s, which undid move's sleep to Saved and
+  host-loss's sleep to Remote. Everything else vm-crash asserts held:
+  - both writes were kept;
+  - the boot generation went up by one;
+  - the running process was gone, and the host raised a `programs_lost`
+    alarm;
+  - the VMM launched once and the agent connected once;
+  - the old streams ended on host lines naming the sandbox, with no
+    protocol error.
+  The backend's fix is under review; vm-crash, move, host-loss, delete and
+  background are rerun at its head.
+- link-stream's data held (84 cycles, 336 MiB in and 672 MiB out, every
+  sha256 matching, no reconnect), but the journal had only one checkpoint
+  begin and end inside its 170 s window. Under that load a checkpoint took
+  23 to 30 s, so the second ended at the window's edge. The check now
+  transfers until the host's state has shown two checkpoints begin and end
+  with a transfer after the second, and fails at 330 s. Its window is the
+  transfers' own, under one deadline. The verifier passed it in both reruns:
+  - r16b moved 352 MiB in and 704 MiB out over 88 cycles in 178 s.
+  - r16e, at 6a0e7e253, moved 336 MiB in and 672 MiB out over 84 cycles in
+    171 s, with checkpoints at 01:48:39 and 01:49:58. The sandbox was saved
+    in 6.1 s and a read woke it in 0.9 s, over the agent link, 0.03 s
+    after the request.
+
+| check | what it proves | r16 (reruns) |
+| --- | --- | --- |
+| health, hosts, workspace | the API answers; three hosts are live in the fleet | 0.1 s |
+| create | a session on the compute backend gets a fabric sandbox and its first model turn runs a shell command in it | 25.3 s to the reply (22.0 and 21.7 s in r16b and r16c) |
+| commands | stdout, stderr and a nonzero exit status come back as the guest produced them | 0.3 s |
+| egress | the sandbox reaches the internet (HTTPS 200) | 0.4 s |
+| background | the agent's background command is read back by id with its output and status; a running one stopped through the API ends and its processes are gone | stopped in 2.2 s |
+| files, git | write, read and list agree; git works in the workspace | 0.3 and 0.4 s |
+| terminal | a viewer terminal through a stock two-replica relay runs a typed command whose file appears | 0.9 s (0.8 s in each rerun) |
+| checkpoint | a viewer terminal (150 ticks) and a command (110 ticks) stream without a gap across running checkpoints the journal shows | 2 checkpoints, quiet at most 1.6 s |
+| port | a guest TCP port answers through the fabric's connect stream | 2.1 s |
+| browser | the agent's browser tool loads a page served in the sandbox and returns its random title | 14.6 s |
+| desktop | the agent opens a computer session, takes a screenshot, and the API's frame decodes to a real screen | 1024x640, 157 colours |
+| ui | Playwright: the web app's file browser, terminal and desktop view | failed on the desktop view (chart without #4925); passed 3 of 3 with it, 66.6 to 66.7 s |
+| sleep-paused, -saved, -archived, -remote | the host reached the level (state and journal), nothing began to wake it before the suite's request, the request woke it over the agent link, and a 32 MiB process kept its pid and memory under the same boot generation | reached in 3.0, 6.8, 15.7 and 20.3 s; first answer 0.1, 0.4, 1.1 and 8.8 s; each woken by `agent_link` 0.04 to 0.06 s after the request; the saved wake's pager wrote `learned.json` 2 s after it, no "Permission denied" |
+| link-stream | 4 MiB files both ways through the agent's link across at least two running checkpoints and a Saved sleep, every file matching both ways, with no agent reconnect and one VMM launch for the wake | failed on the checkpoint window; passed in r16b (88 cycles in 178 s, saved in 8.9 s, woken by a read in 0.8 s) and r16e (84 cycles in 171 s, saved in 6.1 s, woken in 0.9 s) |
+| vm-crash | a killed VM process boots again from its live disk (ADR 10): both writes kept, generation +1, programs lost and reported, one reconnect, old streams ended cleanly; the request in flight ends with an error | failed: the next command's first try and the request in flight never answered |
+| move | a saved sandbox moves to another host and answers there with its files | failed: never reached Saved (woken every 5 s) |
+| host-loss | a stopped host's sandbox comes back on another live host under a higher owner epoch, the old host fenced | failed: woken before reaching Remote |
+| delete | deleting the session deletes its fabric sandbox | failed: 409 for 10 minutes |
+| connected-machine | the same agent build enrolled on the stack VM comes online, runs a turn and an exec, and still answers after 90 s idle with the same process | online in 3.1 s |
+| cleanup | the run's sessions are deleted and its enrollment revoked | failed with delete; nothing left in r16b, r16c and r16d |
