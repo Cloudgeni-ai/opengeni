@@ -6,10 +6,12 @@ import {
 
 /** Most distinct secret values one controller remembers; the oldest drop first. */
 const MAX_REMEMBERED_SECRETS = 256;
-/** Most sessions whose typed values this process keeps; the least recently used drop first. */
-const MAX_REMEMBERING_SESSIONS = 1_024;
 
-const sessions = new Map<string, TypedSecretMemory>();
+/** Typed values per session, for the life of this process. A session enters
+ * only once a secret is typed into it, and never leaves while the process
+ * runs: it can be reattached at any time, and dropping its values would show
+ * them again. */
+const sessions = new Map<string, Set<string>>();
 
 /**
  * Secret values typed into one browser or computer session's pages or desktop.
@@ -23,24 +25,27 @@ const sessions = new Map<string, TypedSecretMemory>();
  * reattaches to the same live browser or desktop keeps it.
  */
 export class TypedSecretMemory {
-  private readonly values = new Set<string>();
+  private localValues: Set<string> | null = null;
+
+  /** A memory of its own (tests, one-off use); forSession shares one per session. */
+  constructor(private readonly sessionKey: string | null = null) {}
 
   /** The memory shared by every driver of one session in this process. */
   static forSession(kind: "browser" | "computer", sessionId: string): TypedSecretMemory {
-    const key = `${kind}:${sessionId}`;
-    const existing = sessions.get(key);
-    if (existing !== undefined) {
-      sessions.delete(key);
-      sessions.set(key, existing);
-      return existing;
+    return new TypedSecretMemory(`${kind}:${sessionId}`);
+  }
+
+  private values(create: boolean): Set<string> | null {
+    if (this.sessionKey === null) {
+      if (create && this.localValues === null) this.localValues = new Set();
+      return this.localValues;
     }
-    const memory = new TypedSecretMemory();
-    sessions.set(key, memory);
-    if (sessions.size > MAX_REMEMBERING_SESSIONS) {
-      const oldest = sessions.keys().next().value;
-      if (oldest !== undefined) sessions.delete(oldest);
+    let values = sessions.get(this.sessionKey) ?? null;
+    if (values === null && create) {
+      values = new Set();
+      sessions.set(this.sessionKey, values);
     }
-    return memory;
+    return values;
   }
 
   remember(secretValues: InteractionSecretValues | undefined): void {
@@ -49,11 +54,13 @@ export class TypedSecretMemory {
     // its field, after the action that typed it.
     for (const value of Object.values(secretValues)) {
       if (value.length < INTERACTION_MIN_REDACTED_SECRET_CHARS) continue;
-      this.values.delete(value);
-      this.values.add(value);
-      if (this.values.size > MAX_REMEMBERED_SECRETS) {
-        const oldest = this.values.values().next().value;
-        if (oldest !== undefined) this.values.delete(oldest);
+      const values = this.values(true);
+      if (values === null) return;
+      values.delete(value);
+      values.add(value);
+      if (values.size > MAX_REMEMBERED_SECRETS) {
+        const oldest = values.values().next().value;
+        if (oldest !== undefined) values.delete(oldest);
       }
     }
   }
@@ -61,10 +68,11 @@ export class TypedSecretMemory {
   /** The remembered values plus any currently supplied ones, in the shape
    * redactInteractionSecretValues takes; undefined when there are none. */
   merged(current?: InteractionSecretValues): InteractionSecretValues | undefined {
-    if (this.values.size === 0) return current;
+    const values = this.values(false);
+    if (values === null || values.size === 0) return current;
     const merged: Record<string, string> = {};
     let index = 0;
-    for (const remembered of this.values) merged[`remembered:${index++}`] = remembered;
+    for (const remembered of values) merged[`remembered:${index++}`] = remembered;
     if (current !== undefined) {
       for (const [key, secret] of Object.entries(current)) merged[`current:${key}`] = secret;
     }

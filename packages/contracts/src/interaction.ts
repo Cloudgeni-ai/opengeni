@@ -3997,6 +3997,9 @@ function secretNeedles(secretValues: InteractionSecretValues): string[] {
     } catch {
       // A lone surrogate has no URI form; the raw value is still searched.
     }
+    // Submitted forms and URLSearchParams encode more characters (for
+    // example "!" as "%21") than encodeURIComponent does.
+    needles.add(new URLSearchParams({ v: value }).toString().slice(2));
   }
   return [...needles].sort((left, right) => right.length - left.length);
 }

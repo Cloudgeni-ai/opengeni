@@ -60,6 +60,9 @@ second line</textarea></label>
             document.getElementById('echo').textContent = 'Key ends ' + event.target.value;
             document.title = 'Key ' + event.target.value;
             location.hash = 'key=' + encodeURIComponent(event.target.value);
+            // Clipped at 4096 characters partway through the value, then
+            // joined with the next argument.
+            console.log('x'.repeat(4088) + event.target.value, 'marker');
           });
         </script>`)}`,
       );
@@ -114,6 +117,13 @@ second line</textarea></label>
       expect(JSON.stringify(tabs)).not.toContain(secret);
       expect(tabs.find((tab) => tab.id === start.target.id)?.title).toBe("Key [secret]");
       expect(JSON.stringify(await driver.target(start.target.id))).not.toContain(secret);
+
+      // A console message clipped partway through the value, with more text
+      // after it, still hides the value's start.
+      const consoleEntries = (await driver.debug(start.target.id, { kinds: ["console"] })).entries;
+      const logged = consoleEntries.find((entry) => entry.message.endsWith(" marker"));
+      expect(logged?.message).toBe(`${"x".repeat(4088)}[secret] marker`);
+      expect(JSON.stringify(consoleEntries)).not.toContain(secret.slice(0, 8));
 
       // Another controller of the same session (a reattach after recovery)
       // still hides what this one typed.

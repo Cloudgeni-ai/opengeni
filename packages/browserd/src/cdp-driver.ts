@@ -2485,7 +2485,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           this.appendDiagnostic(state, {
             kind: "console",
             level,
-            message: consoleMessage(event.params.args),
+            message: consoleMessage(event.params.args, (text) => this.typedSecrets.redact(text)),
             url: null,
             method: null,
             status: null,
@@ -2504,7 +2504,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           this.appendDiagnostic(state, {
             kind: "page_error",
             level: "error",
-            message: exceptionMessage(details),
+            message: exceptionMessage(details, (text) => this.typedSecrets.redact(text)),
             url: boundedUrlField(details.url),
             method: null,
             status: null,
@@ -7152,33 +7152,46 @@ function consoleLevel(value: unknown): BrowserDiagnosticEntry["level"] {
   return "info";
 }
 
-function consoleMessage(value: unknown): string {
+/** Console text with each argument redacted before it is clipped and joined:
+ * a secret clipped mid-argument and followed by more text would otherwise
+ * survive as an unrecognizable prefix. */
+function consoleMessage(value: unknown, redact: (text: string) => string): string {
   if (!Array.isArray(value) || value.length === 0) return "Console event";
-  const text = value.slice(0, 100).map(remoteObjectText).filter(Boolean).join(" ").slice(0, 8_192);
+  const text = value
+    .slice(0, 100)
+    .map((entry) => remoteObjectText(entry, redact))
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 8_192);
   return text || "Console event";
 }
 
-function remoteObjectText(value: unknown): string {
+function remoteObjectText(value: unknown, redact: (text: string) => string): string {
   if (!isRecord(value)) return "";
   if (value.value !== undefined) {
-    if (typeof value.value === "string") return value.value.slice(0, 4_096);
+    if (typeof value.value === "string") return redact(value.value).slice(0, 4_096);
     try {
-      return JSON.stringify(value.value).slice(0, 4_096);
+      return redact(JSON.stringify(value.value)).slice(0, 4_096);
     } catch {
       return "[unserializable value]";
     }
   }
-  if (typeof value.description === "string") return value.description.slice(0, 4_096);
+  if (typeof value.description === "string") return redact(value.description).slice(0, 4_096);
   return typeof value.type === "string" ? `[${value.type.slice(0, 128)}]` : "";
 }
 
-function exceptionMessage(details: Record<string, unknown>): string {
+function exceptionMessage(
+  details: Record<string, unknown>,
+  redact: (text: string) => string,
+): string {
   const exception = isRecord(details.exception) ? details.exception : {};
-  return (
-    boundedTextField(exception.description, 8_192) ??
-    boundedTextField(details.text, 8_192) ??
-    "Unhandled page exception"
-  );
+  const text =
+    typeof exception.description === "string"
+      ? exception.description
+      : typeof details.text === "string"
+        ? details.text
+        : null;
+  return text === null ? "Unhandled page exception" : redact(text).slice(0, 8_192);
 }
 
 function boundedTextField(value: unknown, maxLength: number): string | null {

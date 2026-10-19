@@ -245,6 +245,14 @@ describe("redactInteractionSecretValues", () => {
       unrelated: "s3cret is a word",
     });
   });
+
+  test("hides values in form-encoded addresses that escape punctuation", () => {
+    const typed = { key: "review!synthetic token(1)*'~" };
+    const form = new URLSearchParams({ q: typed.key }).toString();
+    expect(form).toContain("%21");
+    const result = redactInteractionSecretValues({ url: `https://example.test/?${form}` }, typed);
+    expect(result.url).toBe(`https://example.test/?q=${INTERACTION_REDACTED_SECRET}`);
+  });
 });
 
 describe("passkey sync contracts", () => {
