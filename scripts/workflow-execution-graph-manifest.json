@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "c7007f1f6cf29c2b8167719f0b447459b5bf4c4107291d05c694fff57719f8cf"
+      "sha256": "fd10ad3b8823353d35fa65de7a0332f5b33e6eac1cff16c340b160fef179f980"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -613,7 +613,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "automation-admission",
       "step": "Reproduce deterministic Version PR tree",
-      "sha256": "74d5ec04aa741753f63a6b5fa961b817b1544411cc5e3f993c2bdc5d338911c0"
+      "sha256": "7079e1170abb046e25eee7468ed9b9d1421bfe647d40b70c73b82fad532fb710"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -876,6 +876,12 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
+      "step": "Check committed Site browser runtime before builds",
+      "sha256": "05ad79d8a4f14bc9868e1a2863355bc44441eb00c8703163059a287fee4142b0"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "source-contracts",
       "step": "Impact, resource, and profiling contracts",
       "sha256": "c2d190b02b8c0d2abb536b7622ce6bc5497e57fddcf8a2bb093afa2c07999167"
     },
@@ -889,7 +895,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "42c6ad458ed243282cdb4786fae53e7568b9ffe1bddcbc39eda960cb47a74833"
+      "sha256": "fbab7e8a5fdaf68c2d4f93db3459471d662614f035a05c751b7dceecba760600"
     },
     {
       "workflow": ".github/workflows/ci.yml",

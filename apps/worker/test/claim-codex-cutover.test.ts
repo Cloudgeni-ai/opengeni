@@ -54,7 +54,9 @@ async function claimWithCutover(
   cutover: "not_configured" | "disabled" | "enabled",
   policy: typeof ordinaryPolicy,
   extraMetadata: Record<string, unknown> = {},
+  options: { failover?: boolean; source?: string; omitPolicy?: boolean } = {},
 ) {
+  const steps: string[] = [];
   const context = createTurnContext({ settings, cancellationRequestedAt: null });
   const stop = new Error("fixture stopped after the Codex claim overlay");
   const legacyActive = spyOn(db, "workspaceCodexSubscriptionActive").mockResolvedValue(true);
@@ -99,10 +101,12 @@ async function claimWithCutover(
         sessionId: scope.sessionId,
         executionGeneration: 1,
         triggerEventId: "66666666-6666-4666-8666-666666666666",
-        source: "user",
+        source: options.source ?? "user",
         initiator: { kind: "subject", subjectId: "user:owner" },
         initiatorContext: {},
-        metadata: metadataWithTurnExecutionPolicyV1(extraMetadata, policy),
+        metadata: options.omitPolicy
+          ? extraMetadata
+          : metadataWithTurnExecutionPolicyV1(extraMetadata, policy),
         model: policy.productModelId,
         reasoningEffort: "low",
         latencyMode: "standard",
@@ -116,8 +120,14 @@ async function claimWithCutover(
         await callback({} as never),
     ),
     spyOn(capabilities, "settingsWithEnabledCapabilityMcpServers").mockImplementation(
-      async (_db: unknown, _workspaceId: unknown, _settings: unknown, options?: unknown) => {
-        overlayCodexApps = (options as { codexApps?: unknown } | undefined)?.codexApps;
+      async (
+        _db: unknown,
+        _workspaceId: unknown,
+        _settings: unknown,
+        capabilityOptions?: unknown,
+      ) => {
+        steps.push("capability-read");
+        overlayCodexApps = (capabilityOptions as { codexApps?: unknown } | undefined)?.codexApps;
         return settings;
       },
     ),
@@ -128,7 +138,10 @@ async function claimWithCutover(
   await expect(
     claimTurnAttempt({
       ...context,
-      settings,
+      settings: {
+        ...settings,
+        subscriptionCrossProviderFailoverEnabled: options.failover ?? false,
+      },
       catalogSourceSettings: settings,
       db: {},
       input: {
@@ -139,9 +152,14 @@ async function claimWithCutover(
       },
       dispatchId: "fixture-dispatch",
       leases: { codex: { holderId: null } },
+      startCodexEntitlementPreparation: (turn) => {
+        expect(context.attempt.turnId).toBe(turn.id);
+        steps.push("entitlement-hint");
+      },
     } as ClaimTurnDeps),
   ).rejects.toBe(stop);
   return {
+    steps,
     legacyActiveCalls: legacyActive.mock.calls.length,
     legacyAppsCalls: legacyApps.mock.calls.length,
     coreAppsCalls: coreApps.mock.calls.length,
@@ -155,6 +173,24 @@ async function claimWithCutover(
 }
 
 describe("claim-time Codex cutover", () => {
+  test("a valid accepted Codex claim prepares before capability reads and later policy fences", async () => {
+    const result = await claimWithCutover("enabled", codexPolicy);
+    expect(result.steps).toEqual(["entitlement-hint", "capability-read"]);
+  });
+
+  test.each([
+    ["ordinary model", ordinaryPolicy, {}],
+    ["provider failover", codexPolicy, { failover: true }],
+    ["compaction", codexPolicy, { source: "compaction" }],
+    ["missing frozen policy", codexPolicy, { omitPolicy: true }],
+  ] as const)(
+    "%s keeps entitlement preparation on the ordinary capacity path",
+    async (_label, policy, options) => {
+      const result = await claimWithCutover("enabled", policy, {}, options);
+      expect(result.steps).not.toContain("entitlement-hint");
+    },
+  );
+
   test("without a cutover row the claim fails closed without Codex reads", async () => {
     const result = await claimWithCutover("not_configured", codexPolicy);
     expect(result.legacyActiveCalls).toBe(0);

@@ -1037,7 +1037,16 @@ bun run db:provision-roles
 bun run db:assert-runtime-posture
 ```
 
-The Job receives the ordinary runtime Secret first and the separate
+The Job reads an incoming-release ConfigMap snapshot created before its hook,
+not the previous release's still-live workload ConfigMap. Chart-managed runtime
+Secrets (`secret.create=true`) receive the same hook-scoped snapshot treatment;
+externally managed runtime and migration Secrets must already contain the desired
+values before Helm runs. Migration and catalog-import snapshots reuse the
+canonical chart rendering and follow their Job's hook events at an earlier
+weight, with cleanup after the hook event succeeds. See the
+[chart hook settings contract](../deploy/helm/opengeni/README.md#hook-release-settings).
+
+After that config source, the Job receives the ordinary runtime Secret first and the separate
 migration-only Secret second. This gives the assertion the restricted
 `OPENGENI_DATABASE_URL` while keeping the owner URL and provisioning password
 out of API and worker pods. Its default command serializes `db:migrate`,

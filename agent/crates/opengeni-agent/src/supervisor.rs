@@ -1249,6 +1249,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             // Keep the frame/reply scope alive. Returning would make the outer
             // reconciler respawn this same rejected link in a tight loop.
             self.link_stop_notified(link).await;
+            info!(connection_id = %link.connection_id, "paused connection stopped or updated");
             return;
         }
         let mut backoff = Backoff::standard();
@@ -2364,27 +2365,6 @@ impl<P: Platform + 'static> Supervisor<P> {
         }
     }
 
-    /// Dials NATS presenting the enrollment BEARER as the connect auth-token (the
-    /// AUTH-CALLOUT model, / M-AUTH): the server delegates to the
-    /// control-plane callout responder, which validates the bearer and returns a
-    /// process-scoped user JWT — so this connection can pub/sub ONLY its exact
-    /// `agent.<ws>.<id>.connection.<instance>.>` subtree (and publish reply inboxes).
-    /// The URL(s) are `wss://` (the relay-symmetric
-    /// TLS ingress); async-nats's default features include the websocket transport,
-    /// so a `wss://` server URL rides the same TLS endpoint as the relay with no
-    /// separate TCP load balancer.
-    ///
-    /// Per §10.6 we run our OWN supervised reconnect (full-jitter), so we minimize
-    /// the client's internal retry and treat a drop as a return to the outer loop
-    /// where the backoff lives. NOTE: async-nats treats `max_reconnects(Some(0))` as
-    /// `None` (= UNLIMITED internal retry, the opposite of what we want), so we pass
-    /// `Some(1)` — the minimal value that still surfaces a sustained outage to our
-    /// supervised loop rather than letting the client silently retry forever.
-    ///
-    /// A rejected bearer (revoked/expired enrollment, or a callout denial) surfaces
-    /// as a connect error → [`SupervisorError::Connect`], which the supervise loop
-    /// treats as a transient disconnect and backs off + retries with the SAME
-    /// (possibly rotated, on re-enroll) bearer — never a panic.
     /// Dials one connection unless the link stops or a reconnect is asked
     /// for first. A server that accepts the socket but never sends `INFO`
     /// holds a dial indefinitely, so neither waits behind one; a reconnect
@@ -2428,6 +2408,26 @@ impl<P: Platform + 'static> Supervisor<P> {
         }
     }
 
+    /// Dials NATS presenting the enrollment BEARER as the connect auth-token (the
+    /// AUTH-CALLOUT model, / M-AUTH): the server delegates to the
+    /// control-plane callout responder, which validates the bearer and returns a
+    /// process-scoped user JWT — so this connection can pub/sub ONLY its exact
+    /// `agent.<ws>.<id>.connection.<instance>.>` subtree (and publish reply inboxes).
+    /// The URL(s) are `wss://` (the relay-symmetric
+    /// TLS ingress); async-nats's default features include the websocket transport,
+    /// so a `wss://` server URL rides the same TLS endpoint as the relay with no
+    /// separate TCP load balancer.
+    ///
+    /// Per §10.6 we run our OWN supervised reconnect (full-jitter), so we minimize
+    /// the client's internal retry and treat a drop as a return to the outer loop
+    /// where the backoff lives. NOTE: async-nats treats `max_reconnects(Some(0))` as
+    /// `None` (= UNLIMITED internal retry, the opposite of what we want), so we pass
+    /// `Some(1)` — the minimal value that still surfaces a sustained outage to our
+    /// supervised loop rather than letting the client silently retry forever.
+    ///
+    /// A rejected bearer surfaces as [`SupervisorError::Authentication`]. The
+    /// link stays paused until renewal or explicit reconnect supplies credentials;
+    /// transport failures alone use the reconnect backoff.
     async fn connect(&self, link: &WorkspaceLink<P>) -> Result<ConnectedNats, SupervisorError> {
         // A fabric agent dials its own host, which authenticates the sandbox
         // on its link; it presents no credential.
@@ -5256,10 +5256,25 @@ mod tests {
     #[allow(clippy::too_many_lines)] // one real multi-link transport lifecycle
     async fn rejected_link_stops_dialing_and_recovers_without_interrupting_healthy_links() {
         use opengeni_agent_platform::NativePlatform;
+        use tokio::io::AsyncWriteExt as _;
         let Some(nats_bin) = it::find_nats_server() else {
             panic!("authentication regression requires nats-server");
         };
-        let (_lock, _dir) = crate::config::tests::with_temp_config();
+        let (_lock, dir) = crate::config::tests::with_temp_config();
+        crate::enrollment::InstallIdentity::load_or_generate(dir.path()).unwrap();
+        let renewal_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", renewal_listener.local_addr().unwrap());
+        let renewal_server = tokio::spawn(async move {
+            let (mut socket, _) = renewal_listener.accept().await.unwrap();
+            crate::credential_renewal::tests::read_renewal_request(&mut socket).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            renewal_listener
+        });
         let port = it::free_local_port();
         let monitor_port = it::free_local_port();
         let _server = it::NatsServerGuard::spawn_authenticated(&nats_bin, port, monitor_port);
@@ -5281,10 +5296,7 @@ mod tests {
         let platform = Arc::new(NativePlatform::new());
         let mut rejected_credentials = it::test_credentials(&url);
         rejected_credentials.nats_bearer = "rejected-test-token".into();
-        let stored = crate::config::StoredConnection::new(
-            "https://api.example",
-            rejected_credentials.clone(),
-        );
+        let stored = crate::config::StoredConnection::new(&api_url, rejected_credentials.clone());
         crate::config::save_connection(&stored).unwrap();
         let rejected = SupervisorLink::new(
             stored.connection_id.clone(),
@@ -5338,6 +5350,34 @@ mod tests {
         .expect("rejected credential must be suspended");
         let monitor = format!("http://127.0.0.1:{monitor_port}/varz");
         let before: serde_json::Value = reqwest::get(&monitor).await.unwrap().json().await.unwrap();
+        // Exercise the periodic renewal path and the same state reconciliation
+        // as the file watcher, not just the short quiet interval after rejection.
+        let mut diagnostics = crate::credential_renewal::RenewalDiagnostics::default();
+        crate::credential_renewal::renew_due_connections(&api_url, &mut diagnostics)
+            .await
+            .unwrap();
+        let listener = renewal_server.await.unwrap();
+        for _ in 0..3 {
+            let saved = crate::config::load_connection(&stored.connection_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                saved.authentication_state,
+                Some(crate::config::AuthenticationState::ReconnectRequired)
+            );
+            let mut suspended = rejected.clone();
+            suspended.authentication_state = saved.authentication_state;
+            updates.send(vec![suspended, healthy.clone()]).unwrap();
+            crate::credential_renewal::renew_due_connections(&api_url, &mut diagnostics)
+                .await
+                .unwrap();
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "paused connection must not retry HTTP renewal either"
+        );
         tokio::time::sleep(Duration::from_secs(4)).await;
         let after: serde_json::Value = reqwest::get(&monitor).await.unwrap().json().await.unwrap();
         assert_eq!(
@@ -5358,10 +5398,21 @@ mod tests {
             "a persisted terminal state must not dial, even with a transport that would accept it"
         );
         recovered.authentication_state = None;
-        updates.send(vec![recovered, healthy]).unwrap();
+        updates.send(vec![recovered, healthy.clone()]).unwrap();
         assert!(
             it::wait_for_event(
                 &mut rejected_events,
+                Duration::from_secs(10),
+                |event| matches!(event.event, Some(Event::Heartbeat(_)))
+            )
+            .await
+        );
+        // Removing the recovered connection must still leave the healthy link
+        // online, with no reconnect of that sibling.
+        updates.send(vec![healthy]).unwrap();
+        assert!(
+            it::wait_for_event(
+                &mut healthy_events,
                 Duration::from_secs(10),
                 |event| matches!(event.event, Some(Event::Heartbeat(_)))
             )

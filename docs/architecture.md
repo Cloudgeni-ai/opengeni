@@ -631,6 +631,12 @@ token/probe path. Successful durable composer saves can prepare those facts via
 turn, starts a workflow, acquires a turn lease, calls a model, or wakes compute.
 Its credential read is fresh-only: renewal and connection-health changes are
 left to normal access, so preparing a draft cannot revoke its own readiness.
+The worker can start the same fresh-only hint after atomic claim of a valid
+frozen Codex turn, alongside settings and policy preparation. Cross-provider
+failover and compaction retain the ordinary path. The activity owns and drains
+the hint; account placement still runs its original live entitlement check,
+which alone may renew credentials and consumes only generation-matched,
+unexpired stored facts. No model-input projection moves with this hint.
 See [typing preparation](design/typing-turn-preparation.md).
 
 Claude projects system inputs at native phase boundaries, adding a labeled
@@ -2606,6 +2612,12 @@ Helm owns applications/integrations; cloud Terraform roots/stack wrappers compos
 external infrastructure. Bundled Postgres/Temporal/NATS/storage templates
 serve development, CI, conformance and documented single-machine fixtures.
 They are not production defaults.
+
+Migration and catalog-import Jobs consume incoming-release settings snapshots
+(`deploy/helm/opengeni/templates/job-settings.yaml`), rendered through the same
+ConfigMap/Secret templates as ordinary workloads and ordered before each Job's
+hook. Pre-upgrade hooks never depend on the previous workload ConfigMap; external
+Secrets remain operator-provisioned references. See the chart's hook settings contract.
 
 The turn-worker's default-off queue-demand scaler is a separate
 schema-v1 Helm contract: fresh global Temporal ACTIVITY queue MAX plus SDK

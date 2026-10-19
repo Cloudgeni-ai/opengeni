@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
-import { CdpCommandTimeoutError, CdpTransportError } from "../src/cdp";
+import { CdpCommandTimeoutError, CdpProtocolError, CdpTransportError } from "../src/cdp";
 import {
   AttachedChromeCdpConnection,
   type AttachedBrowserBridgeTransport,
@@ -67,6 +67,55 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
 }
 
 describe("AttachedChromeCdpConnection", () => {
+  test("reports Chrome's protocol refusals as definite CDP errors that keep the tab", async () => {
+    const bridge = new FakeBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    try {
+      const { sessionId } = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: "7",
+        flatten: true,
+      });
+      const request = bridge.request.bind(bridge);
+      let message = '{"code":-32000,"message":"Not allowed"}';
+      bridge.request = async (payload) => {
+        if (payload.type === "debugger.command")
+          throw new AttachedBrowserBridgeError("driver_rejected", message, false);
+        return request(payload);
+      };
+      const refused = await connection
+        .send("DOM.setFileInputFiles", { files: ["/tmp/a"], backendNodeId: 1 }, { sessionId })
+        .catch((error: unknown) => error);
+      expect(refused).toBeInstanceOf(CdpProtocolError);
+      expect(refused).toMatchObject({ code: -32_000, message: "Not allowed" });
+      bridge.request = request;
+      // A refused command left nothing in flight, so the tab can be attached again.
+      const again = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: "7",
+        flatten: true,
+      });
+      bridge.request = async (payload) => {
+        if (payload.type === "debugger.command")
+          throw new AttachedBrowserBridgeError("driver_rejected", message, false);
+        return request(payload);
+      };
+      message = "Chrome command failed";
+      const opaque = await connection
+        .send("Input.dispatchMouseEvent", {}, { sessionId: again.sessionId })
+        .catch((error: unknown) => error);
+      expect(opaque).toMatchObject({ code: -32_000, message: "Chrome command failed" });
+      bridge.request = request;
+      // An unexplained failure of input may still arrive later.
+      await expect(
+        connection.send("Target.attachToTarget", { targetId: "7", flatten: true }),
+      ).rejects.toThrow("disconnected during input");
+    } finally {
+      connection.close();
+    }
+  });
+
   test("keeps target command timeouts distinct from lost bridge transport", async () => {
     const bridge = new FakeBridge();
     const connection = new AttachedChromeCdpConnection(bridge, {

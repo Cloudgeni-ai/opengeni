@@ -82,6 +82,25 @@ function fixture(fetchImpl: CodexFetch) {
 }
 
 describe("core model discovery physical request custody", () => {
+  test("a refused fresh-token hint does not renew credentials or persist an entitlement denial", async () => {
+    const upstream = mock<CodexFetch>(async () => new Response("unauthorized", { status: 401 }));
+    const f = fixture(upstream);
+    const fresh = f.deps.getCoreToken;
+    const credentialModes: boolean[] = [];
+    f.deps.getCoreToken = async (...args) => {
+      credentialModes.push(args[4]);
+      return fresh(...args);
+    };
+    await refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps, {
+      refreshCredentials: false,
+    });
+    expect(credentialModes).toEqual([false]);
+    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(f.deps.recordModels).not.toHaveBeenCalled();
+    expect(f.reserve).toHaveBeenCalledTimes(1);
+    expect(f.settle).toHaveBeenCalledTimes(1);
+  });
+
   test("typing skips a refresh-due credential without probing or poisoning normal access", async () => {
     const upstream = mock<CodexFetch>(async () => Response.json({ models: [] }));
     const f = fixture(upstream);

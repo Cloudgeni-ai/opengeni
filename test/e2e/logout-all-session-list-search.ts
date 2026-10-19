@@ -68,7 +68,8 @@ function matchesShape(params: URLSearchParams, keys: readonly string[], shape: R
     if (!values.includes(params.get(key) ?? "\u0000")) return false;
   }
   return keys.every((key) => {
-    if (key in shape.required) return true;
+    if (Object.hasOwn(shape.required, key)) return true;
+    if (!Object.hasOwn(optional, key)) return false;
     const values = optional[key];
     return values !== undefined && values.includes(params.get(key)!);
   });

@@ -381,3 +381,79 @@ uppercase, malformed, missing and non-string JSON values; pin the existing
 normalization differences; check wrong-workspace/session nonmatches; and verify
 parameterized index scans with retained history. Existing receiver-context,
 sender-binding and subscription-authority suites remain the behavioral gates.
+
+## Follow-up: overlap accepted-turn catalog discovery
+
+Expired shared-account catalogs still put a provider metadata request on the
+accepted path. A mixed production interval measured a mean 442 ms for the
+Codex entitlement phase. That is not a per-turn percentile or proof that every
+turn queried the provider. Starting after all claim preparation would hide only
+about 20 ms in that interval: learning freeze, identity read and health recovery
+were already short. Start earlier, after the atomic claim has established the
+exact attempt and its valid frozen Codex policy, alongside post-claim settings
+and policy preparation.
+
+The hint uses the same deployment settings and initiating human as the existing
+reader, but only fresh credentials. It never renews a token or changes account
+health before run admission. A renewal-due token skips preparation and remains
+the responsibility of normal placement. Invalid or absent frozen policies,
+compaction and deployments enabling cross-provider failover skip the hint; they
+keep their existing capacity path rather than probing a possible fallback.
+
+Placement joins the owned hint best-effort, then **always** runs the original
+live entitlement check after health recovery. That reader checks current scope,
+cutover, serving accounts, credential generation and expiry. A valid observation
+avoids another provider request. A missing or renewal-deferred observation takes
+the existing token/probe path. A failed early provider probe retains today's
+five-second unknown-result cache; it is not persisted as an entitlement denial.
+An early database error cannot replace an admission error or a later successful
+live read. There is no new authority snapshot, TTL, model request or queue path.
+
+The hint can use another existing pool connection while settings are read; no
+pool configuration or resource control changes. Activity cleanup drains it on
+every exit, including admission refusal, fencing and cancellation. The metadata
+read retains its existing bounded timeout, so an early exit can still wait for
+that in-flight read before final cleanup. No credential renewal is started by
+the hint. Model input, tool disclosure and prompt-cache prefixes are unchanged.
+
+### Claim attribution
+
+Claim timing is not synonymous with SQL execution. Database admission includes
+connection acquisition and BEGIN; nested admission includes SAVEPOINT. Scope
+setup and callback timing can contain planning, locks and other reads, and nested
+callbacks overlap their parents. Record bounded per-claim totals and counts for
+those four stages, plus the continued-account and pending-update authority
+callbacks. They are not additive critical-path intervals and carry no query,
+session, account or credential identifiers as metric labels.
+
+A local real-PostgreSQL child-result fixture invoked continued-account resolution
+once and used nine nested scopes. Its ten measured claims had a median/p90 of
+48/70 ms, of which the callback took 17/29 ms. This does not explain the mixed
+production atomic-claim mean of 525 ms: production phase evidence, not that
+source-reading hypothesis, must determine any further claim rewrite.
+
+### Matched development-stack evidence
+
+The full API/Temporal/PostgreSQL worker stack used a synthetic Codex account,
+no tools or inference calls, and a fixed 442 ms `/models` response delay. Each
+turn changed only the fixture's credential generation to force a cold catalog;
+ordinary admission and placement still ran. Each traced cohort contained ten
+new-chat/follow-up pairs after two separate warm-up pairs. Worker reload markers
+confirmed the actual control/candidate path and were removed afterwards.
+
+| Metric, milliseconds (median / p90) | Chat | Control | Candidate | Repeat candidate |
+| --- | --- | ---: | ---: | ---: |
+| Live entitlement wait | New | 455 / 459 | 395 / 400 | 399 / 405 |
+| Live entitlement wait | Existing | 455 / 458 | 395 / 401 | 404 / 407 |
+| Acceptance → request-start audit | New | 956 / 1,007 | 981 / 1,057 | 937 / 965 |
+| Acceptance → request-start audit | Existing | 943 / 1,041 | 964 / 1,263 | 934 / 960 |
+
+Candidate refresh work still took about 456–460 ms; overlapping it removed
+roughly 50–60 ms from the local live wait, not the entire provider request.
+The table presents control first for comparison; execution order was candidate,
+control, repeat candidate. Total startup drifted enough that a stable end-to-end
+improvement is not established. An earlier untraced run likewise showed no
+reliable total-latency win. Production's longer post-claim window may hide more,
+but that remains a canary hypothesis, not a measured saving. Warm catalog hits
+still pay the live scope/serving read, and the hint adds an early read; track
+both hit cost and cold-probe overlap before claiming a general improvement.

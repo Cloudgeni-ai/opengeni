@@ -148,7 +148,7 @@ pub struct StoredConnection {
 pub enum AuthenticationState {
     /// The transport refused these credentials; the renewal loop checks authority.
     RenewalRequired,
-    /// Renewal definitively refused the grant.
+    /// Renewal refused the grant or cannot recover the rejected transport.
     ReconnectRequired,
 }
 
