@@ -160,7 +160,10 @@ see `docs/connected-machines.md`.
 Connected Machine control replies use a negotiated, process-scoped receipt
 journal (`agent/crates/opengeni-agent/src/rpc_replay.rs`). NATS/JWT rotation
 rebuilds transport, not execution: immutable delivery identities join accepted
-work or replay its reply. Expired deliveries cannot execute after receipt GC;
+work or replay its reply. Each delivery first obtains a receiver-issued token
+with a suspend-inclusive monotonic lifetime; neither admission nor requester retry budgets depend
+on synchronized wall clocks. Unknown/expired tokens and changed payloads return
+prompt non-retryable errors preserving uncertain outcomes. Expired deliveries cannot execute after receipt GC;
 unknown outcomes never become never-sent merely because a later retry has no
 responder. `packages/runtime/src/sandbox/selfhosted/control-replay.ts` owns negotiation and
 bounded recovery. The requester listens for the exact process's hello before

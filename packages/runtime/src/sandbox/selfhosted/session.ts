@@ -2202,7 +2202,7 @@ export class SelfhostedSession {
       requestId: crypto.randomUUID(),
       epoch: this.epoch,
       resourcePolicy: undefined,
-      op: { $case: "ping", ping: { nonce } },
+      op: { $case: "ping", ping: { nonce, controlReplayWindowMs: "0" } },
     };
     const res = await this.controlRpc.request(admission.subject, req, {
       timeoutMs: this.timeoutMs,

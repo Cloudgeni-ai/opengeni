@@ -28,6 +28,12 @@
 #[allow(unsafe_code)]
 mod ffi;
 
+/// Milliseconds since boot including sleep, unaffected by wall-clock changes.
+#[cfg(windows)]
+pub fn continuous_millis() -> u64 {
+    ffi::continuous_millis()
+}
+
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod process_job;

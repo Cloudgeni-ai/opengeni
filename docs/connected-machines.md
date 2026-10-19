@@ -44,17 +44,25 @@ it does not carry these NATS control requests. Codemode's NATS dispatch is only
 a wake-up for its PostgreSQL operation journal; clients re-notify the same
 operation, and the worker claims that row before execution.
 
-For control reply recovery, a read-only ping negotiates the NATS response header
-`Opengeni-Control-Replay: 1`. Supporting agents accept an immutable delivery at
-`<exact-process-rpc-subject>.replay.<expiry-unix-ms>.<delivery-uuid>`, with the
-unchanged protobuf request as its payload. One atomic admission owns execution;
-duplicates join its pending reply or retrieve the exact retained bytes. A changed
-payload or expiry under an existing identity is refused. The journal survives
+For control reply recovery, each call first uses a read-only ping to request a
+lease duration and negotiate the NATS response header `Opengeni-Control-Replay: 2`.
+The receiver issues an opaque random token and retains its deadline on a
+suspend-inclusive elapsed clock (Linux BOOTTIME, macOS MONOTONIC_RAW, Windows
+GetTickCount64), never civil time. Sleeping does not extend the delivery window.
+Supporting callers send the immutable delivery to
+`<exact-process-rpc-subject>.replay.<token>`, with the unchanged protobuf request
+as its payload. Only issued, unexpired tokens can admit work. First admission
+binds the payload digest; duplicates join its pending reply or retrieve the exact
+retained bytes. Changed payloads are refused. The journal survives
 socket/JWT/credential replacement, including removal and re-addition of the same
 exact origin/connection/process scope, but is not shared across different scopes.
-Receipts are collected after expiry; the expired delivery itself remains
-inadmissible, including after an observed wall-clock rollback. Controller and
-machine clocks must be synchronized, as for absolute command deadlines.
+Receipts and unused tokens are collected after expiry; unknown tokens are never
+admitted, so collection cannot license another execution. Neither admission nor
+the caller's retry budget reads wall time: clock skew, jumps and corrections do
+not poison this transport. Streamed exec uses its existing relative timeout from
+receiver lease issuance as well; delivery or retries cannot reset that deadline.
+The absolute exec deadline remains only for legacy one-shot peers. This does not
+change external authentication systems' clock requirements.
 
 The requester retries transient transport failures within the operation's request
 timeout plus a two-minute recovery allowance, preserving the delivery identity
@@ -68,19 +76,25 @@ removed when the request settles. This continuity requires the runtime deploymen
 and agent readiness ordering; older agents remain wire-compatible, and mutations
 without negotiated journal support remain one-shot.
 
-It never retries a received tool error. A later no-responder cannot
+It never retries a received tool error. Rejected expired/unknown or conflicting
+deliveries return a non-retryable protocol error promptly, explicitly preserving
+an unknown prior outcome instead of silently timing out. A later no-responder cannot
 erase uncertainty from an earlier send. Accepted physical work and any unflushed
 reply retain the existing update-drain reservation until a successful socket
-publication; expiry without that proof remains unsettled. This is transport proof,
+publication or receipt expiry; independent physical producers retain their own
+reservations until they settle. This is transport proof,
 not proof that a caller consumed the reply.
 
 The guarantee requires both the updated server runtime and a native agent with
-the journal. An older agent does not advertise the header and retains the
-existing conservative mutation behavior. Native process replacement, revoked
+the v2 journal. Mixed versions (including a v1 journal) use the existing
+conservative one-shot mutation behavior. An old caller with a cached v1
+negotiation receives an explicit unknown-receipt error from a v2 receiver, never
+fresh execution. Native process replacement, revoked
 authority, genuine tool errors, and outages beyond the recovery deadline are not
 transparent successes: the existing failure/unknown-outcome semantics remain,
 and ambiguous mutations are never automatically reissued as fresh deliveries.
-No model-visible schema, result text, or previously sent history changes.
+No tool schema or previously sent history changes. Protocol rejection messages
+can reach tools and therefore require model-facing review.
 
 ### Enrollment maintenance boundary
 

@@ -1276,7 +1276,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
               requestId: req.requestId,
               result: {
                 $case: "ping",
-                ping: { nonce: "1", agentMonotonicMs: "1" },
+                ping: { nonce: "1", agentMonotonicMs: "1", controlReplayToken: "" },
               },
             }).finish(),
           };
@@ -1286,7 +1286,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     const req = {
       requestId: "retry-connection",
       epoch: 0,
-      op: { $case: "ping", ping: { nonce: "1" } },
+      op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
     } as ControlRequest;
 
     expect((await rpc.request("agent.x.y.rpc", req, { timeoutMs: 10 })).error?.code).toBe(
@@ -1313,7 +1313,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
               requestId: req.requestId,
               result: {
                 $case: "ping",
-                ping: { nonce: "1", agentMonotonicMs: "1" },
+                ping: { nonce: "1", agentMonotonicMs: "1", controlReplayToken: "" },
               },
             }).finish(),
           };
@@ -1323,7 +1323,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     const req = {
       requestId: "shared-connect",
       epoch: 0,
-      op: { $case: "ping", ping: { nonce: "1" } },
+      op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
     } as ControlRequest;
 
     const [first, second] = await Promise.all([
@@ -1349,7 +1349,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
       {
         requestId: "r",
         epoch: 0,
-        op: { $case: "ping", ping: { nonce: "1" } },
+        op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
       } as ControlRequest,
       { timeoutMs: 10 },
     );
@@ -1370,7 +1370,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
       {
         requestId: "r",
         epoch: 0,
-        op: { $case: "ping", ping: { nonce: "1" } },
+        op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
       } as ControlRequest,
       { timeoutMs: 10 },
     );
@@ -1391,6 +1391,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
             ping: {
               nonce: req.op?.$case === "ping" ? req.op.ping.nonce : "",
               agentMonotonicMs: "1",
+              controlReplayToken: "",
             },
           },
         };

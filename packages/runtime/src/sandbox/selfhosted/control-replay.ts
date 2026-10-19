@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ControlRequest } from "@opengeni/agent-proto";
+import { ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import type { NatsRequestConnection } from "./control-rpc";
 
 /** Wire-only capability, deliberately absent from model-facing tool contracts. */
@@ -16,11 +16,10 @@ function transient(error: unknown): boolean {
 
 /** Negotiates against one exact process, never an enrollment or a replacement
  * process. Retries keep the entire subject and payload immutable. The native
- * journal atomically joins duplicates and refuses expired deliveries even after
- * their retained reply has been collected. Legacy mutations remain one-shot. */
+ * journal issues a monotonic lease before execution, then atomically joins
+ * duplicates. Unknown/collected identities are never admitted. Legacy mutations
+ * remain one-shot; sender wall-clock deadlines are no longer negotiated. */
 export class ControlReplyRecovery {
-  private readonly supported = new Map<string, Promise<boolean>>();
-
   constructor(
     private readonly recoveryMs = RECOVERY_MS,
     private readonly retryDelayMs = 250,
@@ -33,26 +32,45 @@ export class ControlReplyRecovery {
     timeoutMs: number,
   ): Promise<{ data: Uint8Array }> {
     if (!conn.supportsHeaders) return conn.request(subject, payload, { timeout: timeoutMs });
-    const deadline = Date.now() + timeoutMs + this.recoveryMs;
+    const lifetimeMs = Math.ceil(timeoutMs + this.recoveryMs);
+    const deadline = performance.now() + lifetimeMs;
     const readySubject = subject.endsWith(".rpc") ? `${subject.slice(0, -4)}.hello` : undefined;
-    let supported = this.supported.get(subject);
-    if (!supported) {
-      const probe = ControlRequest.encode(
-        ControlRequest.fromPartial({
-          requestId: randomUUID(),
-          op: { $case: "ping", ping: { nonce: "0" } },
-        }),
-      ).finish();
-      supported = this.retry(conn, subject, probe, timeoutMs, deadline, readySubject).then(
-        (reply) => reply.headers?.get(REPLAY_HEADER) === "1",
-      );
-      this.supported.set(subject, supported);
-      void supported.catch(() => {
-        if (this.supported.get(subject) === supported) this.supported.delete(subject);
-      });
+    // Each call needs a fresh receiver-issued identity. Retrying this safe ping
+    // may issue an unused lease, never execute the requested operation.
+    const probe = ControlRequest.encode(
+      ControlRequest.fromPartial({
+        requestId: randomUUID(),
+        op: { $case: "ping", ping: { nonce: "0", controlReplayWindowMs: String(lifetimeMs) } },
+      }),
+    ).finish();
+    const negotiated = await this.retry(conn, subject, probe, timeoutMs, deadline, readySubject);
+    if (negotiated.headers?.get(REPLAY_HEADER) !== "2") {
+      return conn.request(subject, payload, { timeout: timeoutMs });
     }
-    if (!(await supported)) return conn.request(subject, payload, { timeout: timeoutMs });
-    const delivery = `${subject}.replay.${deadline}.${randomUUID()}`;
+    let response: ControlResponse;
+    try {
+      response = ControlResponse.decode(negotiated.data);
+    } catch {
+      // Let the existing malformed-response boundary classify these bytes as a
+      // protocol error, not a transport outage. The mutation was never sent.
+      return negotiated;
+    }
+    const token = response.result?.$case === "ping" ? response.result.ping.controlReplayToken : "";
+    if (response.error || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(token)) {
+      return {
+        data: ControlResponse.encode({
+          requestId: ControlRequest.decode(payload).requestId,
+          result: undefined,
+          error: response.error ?? {
+            code: ErrorCode.ERROR_CODE_PROTOCOL,
+            message: "The machine did not issue a valid control delivery token.",
+            retryable: false,
+            detail: {},
+          },
+        }).finish(),
+      };
+    }
+    const delivery = `${subject}.replay.${token}`;
     return this.retry(conn, delivery, payload, timeoutMs, deadline, readySubject);
   }
 
@@ -66,9 +84,13 @@ export class ControlReplyRecovery {
   ): ReturnType<NatsRequestConnection["request"]> {
     let uncertain: unknown;
     for (;;) {
+      const remainingMs = deadline - performance.now();
+      if (remainingMs <= 0) {
+        throw uncertain ?? Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
+      }
       try {
         return await conn.request(subject, payload, {
-          timeout: Math.max(1, Math.min(timeoutMs, deadline - Date.now())),
+          timeout: Math.max(1, Math.min(timeoutMs, remainingMs)),
           ...(readySubject ? { resendOn: readySubject } : {}),
         });
       } catch (error) {
@@ -83,7 +105,7 @@ export class ControlReplyRecovery {
         // ambiguity across retries so the caller cannot classify this as a
         // never-sent mutation and mint another delivery after the journal expires.
         if ((error as { code?: string }).code !== "503") uncertain ??= error;
-        if (Date.now() + this.retryDelayMs >= deadline) throw uncertain ?? error;
+        if (performance.now() + this.retryDelayMs >= deadline) throw uncertain ?? error;
         await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs));
       }
     }

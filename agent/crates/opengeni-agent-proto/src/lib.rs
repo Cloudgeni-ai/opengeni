@@ -17,7 +17,7 @@
 //! ```no_run
 //! use opengeni_agent_proto::{v1, Message};
 //!
-//! let ping = v1::PingRequest { nonce: 42 };
+//! let ping = v1::PingRequest { nonce: 42, ..Default::default() };
 //! let bytes = ping.encode_to_vec();
 //! let decoded = v1::PingRequest::decode(bytes.as_slice()).unwrap();
 //! assert_eq!(ping.nonce, decoded.nonce);

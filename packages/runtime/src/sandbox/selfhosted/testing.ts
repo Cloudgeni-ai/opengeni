@@ -129,7 +129,7 @@ export class MockAgentResponder implements ControlRpc {
       case "ping":
         return ok(req.requestId, {
           $case: "ping",
-          ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" },
+          ping: { nonce: op.ping.nonce, agentMonotonicMs: "0", controlReplayToken: "" },
         });
       case "fsRead": {
         const bytes = this.files.get(normalize(op.fsRead.path));

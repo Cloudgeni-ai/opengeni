@@ -904,10 +904,10 @@ class OpConsumer {
           {
             $case: "opStart",
             opStart: {
-              op: { $case: "exec", exec },
+              op: { $case: "exec", exec: { ...exec, timeoutMs: Math.max(0, deadlineMs) } },
               windowBytes: String(this.windowBytes),
-              // Absolute epoch deadline (the runner's clock decides the actual
-              // budget; host clock skew shifts it — a known wire caveat).
+              // Legacy peers use the absolute field. A v2 delivery uses the
+              // relative exec budget from receiver lease issuance instead.
               deadlineMs: deadlineMs > 0 ? String(Date.now() + deadlineMs) : "0",
               originId: this.deps.rpcSubject,
             },
@@ -929,6 +929,7 @@ class OpConsumer {
         if (!(error instanceof SelfhostedControlError)) {
           throw error;
         }
+        if (error.detail.outcome_unknown === "true") throw error;
         // A PROTOCOL/UNSUPPORTED refusal of the START ITSELF means the runner
         // does not speak the required op-stream protocol. The op provably
         // never started, so surface a typed availability error without trying
