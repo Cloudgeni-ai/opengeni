@@ -105,6 +105,7 @@ import {
   describeInvalidToolArguments,
   interactionToolInputJsonSchema,
   browserActModelInputSchema,
+  computerActModelInputSchema,
 } from "./interaction-tool-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
 import { compactComputerImage, compactComputerImageContent } from "./computer-image-encoding";
@@ -863,6 +864,33 @@ const ComputerObserveOutput = ComputerObservation.extend({
     .optional(),
 }).strict();
 const ComputerClipboardInput = z.object({ computerSessionId: z.string().uuid() }).strict();
+/** Action types a computer_act batch runs. Each acts on the state the one
+ * before it left; a pointer action needs the pixels of one exact screenshot,
+ * so it is not batched. */
+const COMPUTER_BATCH_ACTION_TYPES: ReadonlySet<ComputerAction["type"]> = new Set([
+  "semantic",
+  "keyboard",
+]);
+const ComputerActionBatch = z
+  .object({
+    type: z.literal("batch"),
+    actions: z
+      .array(ComputerAction)
+      .min(1)
+      .max(INTERACTION_MAX_ACTIONS_PER_BATCH)
+      .superRefine((actions, context) => {
+        actions.forEach((action, index) => {
+          if (!COMPUTER_BATCH_ACTION_TYPES.has(action.type)) {
+            context.addIssue({
+              code: "custom",
+              path: [index, "type"],
+              message: `a batch runs semantic and keyboard actions; run a ${action.type} action on its own`,
+            });
+          }
+        });
+      }),
+  })
+  .strict();
 const ComputerActInput = z
   .object({
     computerSessionId: z.string().uuid(),
@@ -870,9 +898,30 @@ const ComputerActInput = z
     expectedTargetGeneration: z.string().min(1).max(256).optional(),
     expectedObservationId: ComputerObservation.shape.observationId.nullable().optional(),
     expectedFrameId: z.string().min(1).max(256).nullable().optional(),
-    action: ComputerAction,
+    action: z.union([ComputerAction, ComputerActionBatch]),
   })
   .strict();
+/** What a computer_act batch did: each action's settled operation, in order,
+ * up to the first one that did not complete, and the latest observation of
+ * the target. */
+const ComputerActionBatchReceipt = z
+  .object({
+    type: z.literal("batch"),
+    targetId: z.string().min(1).max(512),
+    actionCount: z.number().int().positive(),
+    steps: z.array(
+      z
+        .object({
+          operationId: z.string().uuid(),
+          state: ComputerActionReceipt.shape.state,
+          error: ComputerActionReceipt.shape.error,
+        })
+        .strict(),
+    ),
+    observation: ComputerObservation.nullable(),
+  })
+  .strict();
+const ComputerActOutput = z.union([ComputerActionReceipt, ComputerActionBatchReceipt]);
 const ComputerLifecycleInput = z
   .object({
     computerSessionId: z.string().uuid(),
@@ -2160,17 +2209,28 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "act"],
     title: "Act in app or window",
     description:
-      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Keyboard type, set_value and clipboard write text may contain {{secret:…}} references, typed at dispatch and never shown to you. Returns the durable causal receipt.",
+      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Keyboard type, set_value and clipboard write text may contain {{secret:…}} references, typed at dispatch and never shown to you. When you already know several steps in the same target, such as pressing a run of buttons or filling known fields, send them in one call with action={type:'batch',actions:[...]} (semantic and keyboard actions): they run in order, stop at the first failure, and return the target's state after the last one. Pause for new state instead of batching steps that depend on an unseen result. Returns the durable causal receipt.",
     input: ComputerActInput,
-    output: ComputerActionReceipt,
+    output: ComputerActOutput,
     readOnly: false,
     idempotent: true,
+    modelInputSchema: computerActModelInputSchema,
     modelText: computerActionText,
     execute: async (value, context) => {
+      const action = value.action;
+      if (action.type === "batch") {
+        return await actInComputerBatch(
+          input.transport,
+          input.workspaceId,
+          value,
+          action.actions,
+          context.operationId,
+        );
+      }
       const current =
         value.expectedTargetGeneration !== undefined &&
-        (value.action.type === "pointer"
-          ? (value.expectedFrameId ?? value.action.frameId) != null
+        (action.type === "pointer"
+          ? (value.expectedFrameId ?? action.frameId) != null
           : value.expectedObservationId != null)
           ? null
           : await input.transport.observeComputerTarget(
@@ -2188,12 +2248,12 @@ export function createInteractionAttemptToolDefinitions(
             ? (current?.observationId ?? null)
             : value.expectedObservationId,
         expectedFrameId:
-          value.action.type === "pointer"
+          action.type === "pointer"
             ? value.expectedFrameId === undefined
-              ? value.action.frameId
+              ? action.frameId
               : value.expectedFrameId
             : null,
-        action: value.action,
+        action,
       });
     },
   });
@@ -2497,6 +2557,76 @@ function derivedOperationId(purpose: string, operationId: string, subject: strin
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * Run a computer_act batch: each action is its own durable operation, fenced
+ * by the observation the action before it returned, so it acts on the state
+ * that action left. Stops at the first action that does not complete. A
+ * retried call derives the same operation IDs and gets the same receipts back.
+ */
+async function actInComputerBatch(
+  transport: InteractionTransport,
+  workspaceId: string,
+  value: z.output<typeof ComputerActInput>,
+  actions: ComputerAction[],
+  operationId: string,
+): Promise<z.output<typeof ComputerActionBatchReceipt>> {
+  let generation = value.expectedTargetGeneration;
+  let observationId = value.expectedObservationId;
+  let observation: z.output<typeof ComputerObservation> | null = null;
+  const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
+  for (const [index, action] of actions.entries()) {
+    if (generation === undefined || observationId == null) {
+      const current = await transport.observeComputerTarget(
+        workspaceId,
+        value.computerSessionId,
+        value.targetId,
+      );
+      generation ??= current.target.targetGeneration;
+      observationId ??= current.observationId;
+      observation = current;
+    }
+    const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
+    let receipt: z.output<typeof ComputerActionReceipt>;
+    try {
+      receipt = await transport.actInComputer(workspaceId, value.computerSessionId, {
+        operationId: stepOperationId,
+        targetId: value.targetId,
+        expectedTargetGeneration: generation,
+        expectedObservationId: observationId,
+        expectedFrameId: null,
+        action,
+      });
+    } catch (error) {
+      // The first action failing is the call failing. A later one must still
+      // report the actions before it, which did run.
+      if (index === 0) throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      steps.push({
+        operationId: stepOperationId,
+        state: "outcome_unknown",
+        error: {
+          code: "outcome_unknown",
+          message: `the request for this action failed: ${reason}`.slice(0, 8_192),
+          retryable: false,
+        },
+      });
+      break;
+    }
+    steps.push({ operationId: receipt.operationId, state: receipt.state, error: receipt.error });
+    if (receipt.observation) observation = receipt.observation;
+    if (receipt.state !== "completed") break;
+    generation = receipt.observation?.target.targetGeneration;
+    observationId = receipt.observation?.observationId ?? null;
+  }
+  return {
+    type: "batch",
+    targetId: value.targetId,
+    actionCount: actions.length,
+    steps,
+    observation,
+  };
 }
 
 async function openBrowser(

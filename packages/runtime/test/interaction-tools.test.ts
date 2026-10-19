@@ -2618,6 +2618,191 @@ describe("interaction attempt tools", () => {
     expect(result.isError).not.toBe(true);
   });
 
+  test("runs a Computer batch in order, fencing each action by the observation the one before it returned", async () => {
+    const target = computerTarget();
+    const initial = computerObservation(target);
+    const requests: ComputerActionRequest[] = [];
+    let observed = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => {
+          observed += 1;
+          return initial;
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          return computerReceipt(value.operationId, {
+            ...computerObservation({
+              ...target,
+              targetGeneration: `target-${requests.length + 2}`,
+            }),
+            observationId: `after-${requests.length}`,
+          });
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const actions = [
+      { type: "keyboard", action: "press", value: "5" },
+      {
+        type: "semantic",
+        locator: { kind: "role", role: "button", name: "Multiply" },
+        action: "invoke",
+      },
+      { type: "keyboard", action: "type", value: "12" },
+    ];
+    const operationId = randomUUID();
+    const run = async () =>
+      await definitions[0]!.execute(
+        { computerSessionId, targetId: target.id, action: { type: "batch", actions } },
+        { operationId, caller: { kind: "model", subjectId: "model:test" } },
+      );
+    const result = await run();
+
+    expect(observed).toBe(1);
+    expect(requests.map((request) => request.action)).toEqual(actions as never);
+    expect(
+      requests.map((request) => [request.expectedTargetGeneration, request.expectedObservationId]),
+    ).toEqual([
+      [target.targetGeneration, initial.observationId],
+      ["target-3", "after-1"],
+      ["target-4", "after-2"],
+    ]);
+    expect(requests.every((request) => request.expectedFrameId === null)).toBe(true);
+    const operationIds = requests.map((request) => request.operationId);
+    expect(new Set([...operationIds, operationId]).size).toBe(4);
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      type: "batch",
+      actionCount: 3,
+      steps: operationIds.map((id) => ({ operationId: id, state: "completed", error: null })),
+      observation: { observationId: "after-3" },
+    });
+    expect((result.content[0] as { text: string }).text).toStartWith(
+      `Batch completed on ${target.id}: 3 actions.\n`,
+    );
+
+    // A retried call repeats the same operations instead of starting others.
+    requests.length = 0;
+    await run();
+    expect(requests.map((request) => request.operationId)).toEqual(operationIds);
+  });
+
+  test("stops a Computer batch at the first action that does not complete and says what ran", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    const requests: ComputerActionRequest[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => observation,
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          if (requests.length < 2) return computerReceipt(value.operationId, observation);
+          return {
+            ...computerReceipt(value.operationId, observation),
+            state: "failed",
+            observation: null,
+            error: {
+              code: "unsupported",
+              message: "CUA type_text refused the operation",
+              retryable: false,
+            },
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      {
+        computerSessionId,
+        targetId: target.id,
+        action: {
+          type: "batch",
+          actions: [
+            { type: "keyboard", action: "press", value: "5" },
+            { type: "keyboard", action: "type", value: "*" },
+            { type: "keyboard", action: "press", value: "3" },
+            { type: "keyboard", action: "press", value: "return" },
+          ],
+        },
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(requests).toHaveLength(2);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text.split("\n").slice(0, 4)).toEqual([
+      `Batch stopped on ${target.id} at action 2 of 4: action 2 failed (operation ${requests[1]!.operationId}).`,
+      "Error unsupported: CUA type_text refused the operation",
+      "Action 1 completed.",
+      "Actions 3 to 4 were not run.",
+    ]);
+    // The state the first action left stays in view.
+    expect(result.structuredContent).toMatchObject({
+      observation: { observationId: observation.observationId },
+    });
+  });
+
+  test("keeps pointer actions out of a Computer batch and shows the model one compact batch item", async () => {
+    let called = false;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        actInComputer: async () => {
+          called = true;
+          throw new Error("must not dispatch");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const environment = createAttemptToolEnvironment({
+      scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 7 },
+      generation: 3,
+      definitions,
+    });
+    const pointerBatch = {
+      computerSessionId,
+      targetId: "window-1",
+      action: {
+        type: "batch",
+        actions: [{ type: "pointer", frameId: "frame-1", action: "click", x: 1, y: 2 }],
+      },
+    };
+    await expect(
+      environment.callModel({
+        operationId: randomUUID(),
+        modelName: "interaction__computer_act",
+        subjectId: "model:test",
+        arguments: pointerBatch,
+      }),
+    ).rejects.toThrow('"action.actions[0].type" must be one of "semantic", "keyboard"');
+    const direct = await definitions[0]!.execute(pointerBatch, {
+      operationId: randomUUID(),
+      caller: { kind: "model", subjectId: "model:test" },
+    });
+    expect(called).toBe(false);
+    expect(direct).toMatchObject({ isError: true });
+    expect(JSON.stringify(direct.content)).toContain("run a pointer action on its own");
+
+    const action = (definitions[0]!.inputSchema.properties as Record<string, any>).action;
+    expect(action.properties.type.enum).toContain("batch");
+    expect(action.properties.actions.items).toEqual({
+      type: "object",
+      properties: { type: { type: "string", enum: ["semantic", "keyboard"] } },
+      required: ["type"],
+      description: "One semantic or keyboard action with the same fields as action.",
+    });
+    expect(action.description).toContain("batch: actions");
+  });
+
   test("accepts native opaque Computer observation fences through the model tool catalog", async () => {
     const target = computerTarget();
     const observation = {
