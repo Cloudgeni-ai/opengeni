@@ -162,7 +162,7 @@ fi
 if [ -s request/host.pem ] && pair request/host.pem request/host.key; then
   publish request
   rm -rf request
-  log "installed the certificate issued for $COMPUTE_NAME, until $(openssl x509 -in host.pem -noout -enddate | cut -d= -f2)"
+  log "installed the certificate issued for $COMPUTE_NAME, serial $(openssl x509 -in host.pem -noout -serial | cut -d= -f2), until $(openssl x509 -in host.pem -noout -enddate | cut -d= -f2)"
   activate
   exit 0
 fi
@@ -224,5 +224,5 @@ chmod 644 "$work/ca.pem"
 cmp -s "$work/ca.pem" ca.pem || mv "$work/ca.pem" ca.pem
 publish "$work"
 rm -rf request
-log "a certificate for $name by $by, until $(openssl x509 -in host.pem -noout -enddate | cut -d= -f2)"
+log "a certificate for $name by $by, serial $(openssl x509 -in host.pem -noout -serial | cut -d= -f2), until $(openssl x509 -in host.pem -noout -enddate | cut -d= -f2)"
 activate

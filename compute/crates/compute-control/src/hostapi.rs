@@ -143,6 +143,7 @@ impl Certificates {
             certificate: issued.pem,
             authorities: self.authority.pem().to_owned(),
             not_after_ms,
+            serial: issued.serial,
         })
     }
 }
@@ -388,7 +389,13 @@ async fn certificate<S: Store>(
         Proven::GceIdentity => "an instance identity token",
         Proven::Certificate => "its certificate",
     };
-    tracing::info!(host = %name, by, not_after_ms = issued.not_after_ms, "issued a host certificate");
+    tracing::info!(
+        host = %name,
+        by,
+        not_after_ms = issued.not_after_ms,
+        serial = %issued.serial,
+        "issued a host certificate",
+    );
     Ok(Json(issued))
 }
 
@@ -662,6 +669,22 @@ mod tests {
         verify(&api.authority.roots(), &der, now, "host-1").unwrap();
         assert!(verify(&api.authority.roots(), &der, now, "host-2").is_err());
         assert_eq!(issued.authorities, api.authority.pem());
+        // The answer names the certificate's own serial, in openssl's hex.
+        let serial = rcgen::CertificateParams::from_ca_cert_der(&der)
+            .unwrap()
+            .serial_number
+            .unwrap();
+        let hex = crate::authority::serial_hex(&serial);
+        assert_eq!(issued.serial, hex);
+        assert!(
+            issued.serial.len() == 32
+                && issued
+                    .serial
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte)),
+            "{}",
+            issued.serial,
+        );
         // A token is proof even from a caller whose certificate names
         // another host: the token decides.
         let asked = token_asked(api.google.token("host-3"), csr("host-3"));
@@ -675,6 +698,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let issued: HostCertificate = serde_json::from_slice(&body).unwrap();
         assert_eq!(issued.name, "host-3");
+        assert_ne!(issued.serial, hex, "each certificate its own serial");
     }
 
     #[tokio::test]

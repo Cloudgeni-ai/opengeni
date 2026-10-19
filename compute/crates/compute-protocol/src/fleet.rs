@@ -380,6 +380,9 @@ pub struct HostCertificate {
     pub authorities: String,
     /// When it stops being valid, in milliseconds since the Unix epoch.
     pub not_after_ms: u64,
+    /// Its serial number in hexadecimal, as `openssl x509 -serial` prints
+    /// it.
+    pub serial: String,
 }
 
 #[cfg(test)]
