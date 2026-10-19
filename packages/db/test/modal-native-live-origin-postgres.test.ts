@@ -21,6 +21,7 @@ import {
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
   submitHumanPromptInTransaction,
+  steerQueuedTurnInTransaction,
 } from "../src";
 import { rawRows, withRlsContext, type Database } from "../src/database";
 import { migrate } from "../src/migrate";
@@ -236,7 +237,12 @@ async function control(f: Awaited<ReturnType<typeof seed>>, action: "pause" | "c
   );
 }
 
-async function steer(f: Awaited<ReturnType<typeof seed>>) {
+/**
+ * A person's Steer. By default it waits for the running attempt's next model
+ * step, so the attempt stays the live owner. `interrupt` is "Send now", which
+ * interrupts the attempt in the same transaction.
+ */
+async function steer(f: Awaited<ReturnType<typeof seed>>, options: { interrupt?: boolean } = {}) {
   return withWorkspaceSubjectSessionActivityRls(client.db, f.scope.workspaceId, f.human, (tx) =>
     submitHumanPromptInTransaction(tx, {
       accountId: f.scope.accountId,
@@ -250,6 +256,20 @@ async function steer(f: Awaited<ReturnType<typeof seed>>) {
       resources: [],
       reasoningEffortFallback: "low",
       source: "user",
+    }).then(async (submitted) => {
+      if (options.interrupt !== true) return submitted;
+      const steered = await steerQueuedTurnInTransaction(tx, {
+        accountId: f.scope.accountId,
+        workspaceId: f.scope.workspaceId,
+        sessionId: f.scope.sessionId,
+        turnId: submitted.turn.id,
+        expectedTurnVersion: submitted.turn.version,
+        actor: { type: "human", subjectId: f.human },
+        operationKey: crypto.randomUUID(),
+        interrupt: true,
+      });
+      expect(steered.interruptionCount).toBe(1);
+      return submitted;
     }),
   );
 }
@@ -608,11 +628,17 @@ describe("inert LIVE native origin projection under restricted FORCE RLS", () =>
       expect((await truth(f.scope))!.metadata).toEqual(f.metadata);
     });
 
-  test("real Steer creates an interruption; no successor/human substitution", async () => {
+  test("real Steer waits for the next model step; Send now interrupts with no substitution", async () => {
     const f = await seed({ count: 1 });
     await steer(f);
-    expect(await project(f.scope)).toEqual({ kind: "fenced" });
+    // A waiting Steer leaves the original attempt the live owner until its
+    // next model step hands over.
+    expect((await project(f.scope)).kind).toBe("live");
     expect((await truth(f.scope))!.metadata).toEqual(f.metadata);
+    const g = await seed({ count: 1 });
+    await steer(g, { interrupt: true });
+    expect(await project(g.scope)).toEqual({ kind: "fenced" });
+    expect((await truth(g.scope))!.metadata).toEqual(g.metadata);
   });
 
   test("model dispatch, pending tool/open suffix, and closed-but-unquiesced are unsupported", async () => {
@@ -691,7 +717,7 @@ describe("inert LIVE native origin projection under restricted FORCE RLS", () =>
       const pid = await entered.promise;
       const writer =
         action === "steer"
-          ? steer(f)
+          ? steer(f, { interrupt: true })
           : action === "revoke"
             ? adminMutation(
                 f,

@@ -64,7 +64,7 @@ function Fixture() {
             title={origin.title}
             client={{
               listSessionPage: async (_workspace, options = {}) => {
-                if (options.originSiteId !== siteId) throw new Error("Missing Site filter");
+                if (options.siteAccessId !== siteId) throw new Error("Missing Site filter");
                 const matches = sessions.filter((s) =>
                   s.title!.toLowerCase().includes(options.search?.toLowerCase() ?? ""),
                 );
@@ -78,9 +78,11 @@ function Fixture() {
                   nextCursor:
                     !options.archivedOnly && !options.cursor && matches.length > 2 ? "older" : null,
                   filtersApplied: true,
-                  originSiteId: siteId,
+                  siteAccessId: siteId,
                 };
               },
+              listSiteSessionAccess: async () => ({ sessionIds: [] }),
+              setSiteSessionAccess: async () => undefined,
             }}
           />
         </div>

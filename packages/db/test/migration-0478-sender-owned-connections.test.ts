@@ -116,6 +116,8 @@ const withheldMigrations = [
   "0777_workspace_admin_subscription_connections.sql",
   // Adds an UPDATE trigger for the MCP account-binding fence withheld 0494 installs.
   "0836_cheaper_session_write_fences.sql",
+  // Patches the receipt/context fences and compatibility readers withheld above.
+  "0843_indexed_inbox_lineage.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

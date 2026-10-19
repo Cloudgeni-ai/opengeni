@@ -114,7 +114,7 @@ export function tryParseJson(text: string): unknown {
 
 /**
  * The canonical credit-death sentence. Credit exhaustion is the one failure a
- * user can fix themselves — the copy must say what happened (empty balance),
+ * user can fix themselves — the copy must say what happened (no usable credit for this model),
  * what to do (add credits), and what is safe (nothing was lost). Crucially it
  * must NOT say "send a message to revive": a revive turn burns credits the
  * workspace no longer has.
@@ -376,6 +376,10 @@ export function presentFailure(
   if (databaseFailure) {
     return { reason: t("lib.format.theServiceEncounteredADatabase"), safetyRefusal: false };
   }
+  // Failures the server identifies by code read in the host's language; the
+  // stored (and model-facing) English text stays on the event.
+  const coded = typeof payload.code === "string" ? CODED_FAILURE_TEXT[payload.code] : undefined;
+  if (coded) return { reason: coded(t), safetyRefusal: false };
   const text = (key: string): string | null => {
     const value = payload[key];
     return typeof value === "string" && value.trim() ? value : null;
@@ -413,3 +417,12 @@ export function presentFailure(
     safetyRefusal: false,
   };
 }
+
+const capacityRecoveryExhausted = (t: OpenGeniText) => t("lib.format.capacityRecoveryExhausted");
+
+/** Server failure codes whose recorded text is operator English, not end-user copy. */
+const CODED_FAILURE_TEXT: Readonly<Record<string, ((t: OpenGeniText) => string) | undefined>> = {
+  codex_capacity_recovery_exhausted: capacityRecoveryExhausted,
+  xai_capacity_recovery_exhausted: capacityRecoveryExhausted,
+  claude_capacity_recovery_exhausted: capacityRecoveryExhausted,
+};

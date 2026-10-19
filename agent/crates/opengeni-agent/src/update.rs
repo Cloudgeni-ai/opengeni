@@ -349,7 +349,14 @@ pub fn apply_managed(
     let plan = match check_update_manifest(&source, &config) {
         Ok(ManifestCheckOutcome::Available(plan)) => plan,
         Ok(ManifestCheckOutcome::UpToDate(_)) => return Err("target_not_offered".to_string()),
-        Err(_) => return Err("manifest_verification_failed".to_string()),
+        Err(error) => {
+            return Err(managed_fetch_failure(
+                operation_id,
+                target_version,
+                "manifest",
+                &error,
+            ));
+        }
     };
     if plan.version != target_version {
         return Err("target_manifest_mismatch".to_string());
@@ -358,7 +365,7 @@ pub fn apply_managed(
     progress(ManagedUpdatePhase::Downloading);
     let pending = plan
         .download(&source)
-        .map_err(|_| "artifact_verification_failed".to_string())?;
+        .map_err(|error| managed_fetch_failure(operation_id, target_version, "artifact", &error))?;
     progress(ManagedUpdatePhase::Verifying);
     progress(ManagedUpdatePhase::Applying);
     #[cfg(target_os = "macos")]
@@ -406,6 +413,29 @@ pub fn apply_managed(
         warn!(%error, "verified update is live; stale rollback backup cleanup failed");
     }
     Ok(ManagedUpdateResult { expected_sha256 })
+}
+
+fn managed_fetch_failure(
+    operation_id: &str,
+    target_version: &str,
+    stage: &str,
+    error: &UpdateError,
+) -> String {
+    let (suffix, failure_kind) = match error {
+        UpdateError::Download { .. } if error.is_download_timeout() => {
+            ("download_timeout", "timeout")
+        }
+        UpdateError::Download { .. } => ("download_failed", "transport"),
+        UpdateError::Signature(_) => ("verification_failed", "signature"),
+        UpdateError::Checksum { .. } => ("verification_failed", "checksum"),
+        _ => ("verification_failed", "manifest_or_target"),
+    };
+    let error_code = format!("{stage}_{suffix}");
+    // Progress error_code is an open string on the existing wire contract. Keep
+    // verification codes stable, and never log release URLs that may be signed.
+    warn!(operation_id, target_version, stage, %error_code, failure_kind,
+        "managed update fetch or verification failed; installed agent unchanged");
+    error_code
 }
 
 /// Executes the newly-swapped binary through the smallest stable startup surface.
@@ -482,6 +512,44 @@ fn resolve_channel(
 mod tests {
     use super::*;
     use crate::config::StoredCredentials;
+
+    #[test]
+    fn managed_fetch_failures_distinguish_transport_timeout_and_verification() {
+        for stage in ["manifest", "artifact"] {
+            for (error, suffix) in [
+                (
+                    UpdateError::Download {
+                        url: "https://example.test/artifact?token=not-for-logs".to_string(),
+                        source: Box::new(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+                    },
+                    "download_timeout",
+                ),
+                (
+                    UpdateError::Download {
+                        url: "https://example.test/artifact".to_string(),
+                        source: Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+                    },
+                    "download_failed",
+                ),
+                (
+                    UpdateError::Signature("bad signature".to_string()),
+                    "verification_failed",
+                ),
+                (
+                    UpdateError::Checksum {
+                        expected: "a".to_string(),
+                        actual: "b".to_string(),
+                    },
+                    "verification_failed",
+                ),
+            ] {
+                assert_eq!(
+                    managed_fetch_failure("operation", "1.0.0", stage, &error),
+                    format!("{stage}_{suffix}")
+                );
+            }
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

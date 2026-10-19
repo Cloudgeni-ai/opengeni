@@ -166,6 +166,16 @@ bearer; established op-stream commands detach, keep running, and replay any
 missed output after re-attachment. Full-jitter backoff is reserved for actual
 transport failures.
 
+An authentication refusal pauses that connection's transport until credentials
+are renewed or the person reconnects. Failed renewal never re-enables the same
+rejected credentials. If the rejected connection has no verified renewal origin,
+no install identity, or its renewal endpoint refuses or does not support renewal,
+it stays `reconnect_required` without further network attempts. Temporary network
+failures, server outages and clock skew can still recover through renewal, without
+redialing the rejected transport or repeating an unchanged warning each minute.
+`opengeni-agent connections` shows the saved authentication status and how to
+reconnect or remove the connection. Other connections keep serving independently.
+
 On Linux each accepted host operation gets a separate cgroup-v2 memory/lifecycle
 leaf while the generated systemd fragment requests an unlimited aggregate. Admin
 drop-ins and ancestor constraints remain authoritative. The

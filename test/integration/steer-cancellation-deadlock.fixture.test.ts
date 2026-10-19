@@ -14,10 +14,10 @@ import {
   listOutstandingSessionSystemUpdates,
   listSessionTurns,
   markSessionWorkflowWakeDelivered,
-  steerAgentSessionInTransaction,
+  steerQueuedTurnInTransaction,
   withWorkspaceRls,
-  withWorkspaceSessionActivityRls,
-  type SessionCommandActor,
+  withWorkspaceSubjectSessionActivityRls,
+  type Database,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
@@ -46,7 +46,7 @@ type RequiredServices = Pick<
   "databaseUrl" | "natsUrl" | "temporalHost" | "migrate" | "down"
 >;
 
-describe("cancellation-settlement lane Agent Steer cancellation deadlock production fixture", () => {
+describe("cancellation-settlement lane Steer cancellation deadlock production fixture", () => {
   let services: RequiredServices;
   let dbClient: ReturnType<typeof createDb>;
   let bus: EventBus;
@@ -86,54 +86,9 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
       const grant = access.workspaceGrants[0]!;
       const workspaceId = grant.workspaceId!;
 
-      // Agent Steer authority is attempt-fenced. Keep a separate caller attempt
-      // current while the target workflow owns the deliberately stuck attempt.
-      const caller = await createSession(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        initialMessage: "caller",
-        resources: [],
-        tools: [],
-        metadata: {},
-        model: "scripted-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-      });
-      await submitTestHumanPrompt(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId: caller.id,
-        subjectId: grant.subjectId,
-        text: "caller is working",
-        resources: [],
-        tools: [],
-        reasoningEffortFallback: "low",
-      });
-      const callerAttemptId = crypto.randomUUID();
-      const callerClaim = await claimSessionWorkForAttempt(dbClient.db, workspaceId, {
-        sessionId: caller.id,
-        workflowId: `session-${caller.id}`,
-        workflowRunId: crypto.randomUUID(),
-        attemptId: callerAttemptId,
-        dispatchId: `caller-${callerAttemptId}`,
-        trigger: { kind: "next" },
-      });
-      if (callerClaim.action !== "claimed") {
-        throw new Error(`Caller attempt was not claimed: ${callerClaim.reason}`);
-      }
-      const actor: Extract<SessionCommandActor, { type: "agent_attempt" }> = {
-        type: "agent_attempt",
-        sessionId: caller.id,
-        turnId: callerClaim.turn.id,
-        attemptId: callerAttemptId,
-        executionGeneration: callerClaim.turn.executionGeneration,
-      };
-
       const target = await createSession(dbClient.db, {
         accountId: grant.accountId,
         workspaceId,
-        parentSessionId: caller.id,
         initialMessage: "target",
         resources: [],
         tools: [],
@@ -243,8 +198,8 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
       try {
         await waitFor(() => targetClaim !== undefined && heartbeats >= 3);
 
-        // Six ordinary updates plus the canonical Agent Steer instruction
-        // reproduce the seven pending updates in the recorded fixture.
+        // Six ordinary updates stay pending alongside the interrupting Steer,
+        // as in the recorded fixture.
         for (let index = 0; index < 6; index += 1) {
           const update = await addSessionSystemUpdate(dbClient.db, {
             accountId: grant.accountId,
@@ -264,30 +219,17 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
           expect(update.reason).toBe("added");
         }
 
-        const steered = await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (scoped) =>
-          steerAgentSessionInTransaction(scoped, {
-            accountId: grant.accountId,
-            workspaceId,
-            targetSessionId: target.id,
-            actor,
-            operationKey: `cancellation-settlement-steer-${suffix}`,
-            instruction: "replace the superseded direction exactly once",
-          }),
-        );
-        expect(steered.interruptionCount).toBe(1);
-        expect(steered.wakeRevision).toBeGreaterThan(0);
-        await handle.signal("sessionControl");
-        const wakeDelivery = await markSessionWorkflowWakeDelivered(dbClient.db, {
+        const { steered, steerTurn } = await interruptWithSteer(dbClient.db, {
           accountId: grant.accountId,
           workspaceId,
           sessionId: target.id,
-          temporalWorkflowId: workflowId,
-          wakeRevision: steered.wakeRevision,
+          subjectId: grant.subjectId,
+          operationKey: `cancellation-settlement-steer-${suffix}`,
+          text: "replace the superseded direction exactly once",
         });
-        expect(wakeDelivery).toEqual({
-          action: "pending_admission",
-          blocker: "pending_agent_steer",
-        });
+        expect(steered.interruptionCount).toBe(1);
+        expect(steered.wakeRevision).toBeGreaterThan(0);
+        await handle.signal("sessionControl");
 
         // The workflow logically settles Steer before waiting forever for the
         // activity promise. This is the exact split-brain production state.
@@ -304,6 +246,21 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
           return pending?.state === encodePendingActivityState("CANCEL_REQUESTED");
         });
         expect(pendingActivityId).toBeTruthy();
+
+        // Signal acceptance alone races logical settlement. CANCEL_REQUESTED
+        // follows the database settlement commit, so assert the closed attempt's
+        // physical-quiescence fence rather than the earlier queued-prompt state.
+        const wakeDelivery = await markSessionWorkflowWakeDelivered(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: target.id,
+          temporalWorkflowId: workflowId,
+          wakeRevision: steered.wakeRevision,
+        });
+        expect(wakeDelivery).toEqual({
+          action: "pending_admission",
+          blocker: "pending_quiescence",
+        });
 
         const beatsAfterCancelRequest = heartbeats;
         await waitFor(() => heartbeats >= beatsAfterCancelRequest + 3);
@@ -344,20 +301,25 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
           queueHeadPosition: 0,
           queueTailPosition: 1,
         });
-        expect(turns).toHaveLength(1);
-        expect(turns[0]).toMatchObject({
+        expect(turns).toHaveLength(2);
+        expect(turns.find((turn) => turn.id === targetClaim!.turn.id)).toMatchObject({
           id: targetClaim!.turn.id,
           status: "superseded",
           activeAttemptId: null,
         });
-        expect(updates).toHaveLength(7);
-        expect(updates.filter((update) => update.kind === "agent_steer_instruction")).toHaveLength(
-          1,
-        );
+        // The Steer is first in line but must not start while the superseded
+        // activity is still physically running.
+        expect(turns.find((turn) => turn.id === steerTurn.id)).toMatchObject({
+          status: "queued",
+          activeAttemptId: null,
+        });
+        expect(updates).toHaveLength(6);
         expect(updates.every((update) => update.state === "pending")).toBe(true);
-        // Agent Steer has no visible user/API replacement row yet, but the
-        // latest interruption still truthfully reports the unquiesced fence.
-        expect(queue).toMatchObject({ items: [], stoppingPreviousAttempt: true });
+        // The latest interruption truthfully reports the unquiesced fence.
+        expect(queue).toMatchObject({
+          items: [expect.objectContaining({ id: steerTurn.id })],
+          stoppingPreviousAttempt: true,
+        });
         expect(rows.attempt).toMatchObject({
           state: "closed",
           outcome: "superseded",
@@ -418,53 +380,9 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
       });
       const grant = access.workspaceGrants[0]!;
       const workspaceId = grant.workspaceId!;
-
-      const caller = await createSession(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        initialMessage: "caller",
-        resources: [],
-        tools: [],
-        metadata: {},
-        model: "scripted-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-      });
-      await submitTestHumanPrompt(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId: caller.id,
-        subjectId: grant.subjectId,
-        text: "caller is working",
-        resources: [],
-        tools: [],
-        reasoningEffortFallback: "low",
-      });
-      const callerAttemptId = crypto.randomUUID();
-      const callerClaim = await claimSessionWorkForAttempt(dbClient.db, workspaceId, {
-        sessionId: caller.id,
-        workflowId: `session-${caller.id}`,
-        workflowRunId: crypto.randomUUID(),
-        attemptId: callerAttemptId,
-        dispatchId: `caller-${callerAttemptId}`,
-        trigger: { kind: "next" },
-      });
-      if (callerClaim.action !== "claimed") {
-        throw new Error(`Caller attempt was not claimed: ${callerClaim.reason}`);
-      }
-      const actor: Extract<SessionCommandActor, { type: "agent_attempt" }> = {
-        type: "agent_attempt",
-        sessionId: caller.id,
-        turnId: callerClaim.turn.id,
-        attemptId: callerAttemptId,
-        executionGeneration: callerClaim.turn.executionGeneration,
-      };
-
       const target = await createSession(dbClient.db, {
         accountId: grant.accountId,
         workspaceId,
-        parentSessionId: caller.id,
         initialMessage: "target",
         resources: [],
         tools: [],
@@ -578,30 +496,17 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
       try {
         await waitFor(() => targetClaim !== undefined && heartbeats >= 3);
 
-        const steered = await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (scoped) =>
-          steerAgentSessionInTransaction(scoped, {
-            accountId: grant.accountId,
-            workspaceId,
-            targetSessionId: target.id,
-            actor,
-            operationKey: `cancellation-settlement-failed-steer-${suffix}`,
-            instruction: "deliver this existing direction exactly once after typed recovery",
-          }),
-        );
-        expect(steered.interruptionCount).toBe(1);
-        expect(steered.wakeRevision).toBeGreaterThan(0);
-        await handle.signal("sessionControl");
-        const wakeDelivery = await markSessionWorkflowWakeDelivered(dbClient.db, {
+        const { steered } = await interruptWithSteer(dbClient.db, {
           accountId: grant.accountId,
           workspaceId,
           sessionId: target.id,
-          temporalWorkflowId: workflowId,
-          wakeRevision: steered.wakeRevision,
+          subjectId: grant.subjectId,
+          operationKey: `cancellation-settlement-failed-steer-${suffix}`,
+          text: "deliver this existing direction exactly once after typed recovery",
         });
-        expect(wakeDelivery).toEqual({
-          action: "pending_admission",
-          blocker: "pending_agent_steer",
-        });
+        expect(steered.interruptionCount).toBe(1);
+        expect(steered.wakeRevision).toBeGreaterThan(0);
+        await handle.signal("sessionControl");
 
         await waitFor(async () => {
           const description = await handle.describe();
@@ -612,6 +517,20 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
           return pending?.state === encodePendingActivityState("CANCEL_REQUESTED");
         });
         expect(pendingActivityId).toBeTruthy();
+
+        // The cancellation request proves logical settlement already committed,
+        // not that the still-running activity has physically stopped.
+        const wakeDelivery = await markSessionWorkflowWakeDelivered(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: target.id,
+          temporalWorkflowId: workflowId,
+          wakeRevision: steered.wakeRevision,
+        });
+        expect(wakeDelivery).toEqual({
+          action: "pending_admission",
+          blocker: "pending_quiescence",
+        });
 
         // Stop acknowledging the server heartbeat contract without allowing
         // the local function to settle. The receipt-gated workflow closes its
@@ -654,6 +573,52 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
     failedWorkflowFixtureTimeoutMs,
   );
 });
+
+/**
+ * The Steer that still interrupts a live attempt: a person's queued message
+ * sent now ("Send now"). Every other Steer, including an Agent Steer, waits for
+ * the attempt's next model step and never cancels its activity.
+ */
+async function interruptWithSteer(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    operationKey: string;
+    text: string;
+  },
+) {
+  const queued = await submitTestHumanPrompt(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    subjectId: input.subjectId,
+    text: input.text,
+    resources: [],
+    tools: [],
+    reasoningEffortFallback: "low",
+  });
+  expect(queued.turn.status).toBe("queued");
+  const steered = await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    (scoped) =>
+      steerQueuedTurnInTransaction(scoped, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: queued.turn.id,
+        expectedTurnVersion: queued.turn.version,
+        actor: { type: "human", subjectId: input.subjectId },
+        operationKey: input.operationKey,
+        interrupt: true,
+      }),
+  );
+  return { steered, steerTurn: queued.turn };
+}
 
 async function fixtureWorker(
   nativeConnection: NativeConnection,

@@ -1,5 +1,30 @@
 # @opengeni/codemode
 
+## 4.1.3
+
+### Patch Changes
+
+- Updated dependencies [404e017]
+  - @opengeni/sdk@4.1.2
+  - @opengeni/contracts@4.1.2
+  - @opengeni/tool-gateway@4.1.2
+
+## 4.1.1
+
+### Patch Changes
+
+- e4e30b8: Reuse integrity verification for the exact immutable catalog snapshot produced by `createAttemptToolEnvironment`, reducing repeated turn-start parsing and hashing. The factory's catalog is now deeply frozen and detached from caller-owned schemas; callers constructing modified fixtures should clone it first. Deserialized catalogs and database reads retain full integrity checks. Catalog bytes, tool definitions and execution authority are unchanged.
+
+  Allow an owning runtime to start deferred tool preparation at provider dispatch rather than during first-request setup. Earlier tool demand starts the same operation, while closing before either event releases resources without starting unused preparation. Existing embedded callers retain immediate background preparation by default.
+
+- Updated dependencies [afff3f9]
+- Updated dependencies [04019de]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [9be9a82]
+  - @opengeni/contracts@4.1.0
+  - @opengeni/sdk@4.1.0
+  - @opengeni/tool-gateway@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes

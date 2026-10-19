@@ -20,6 +20,8 @@ import {
   ControlResponse,
   ErrorCode,
   FsEntryKind,
+  OpLostReason,
+  OpState,
   StreamKind,
   type BrowserControlEnsureRequest,
   type BrowserControlEnsureResponse,
@@ -28,6 +30,7 @@ import {
   type ExecRequest,
   type ExecResponse,
   type OperationResourcePolicy,
+  type OpStatus,
   type StreamChannel,
 } from "@opengeni/agent-proto";
 import { DESKTOP_STREAM_PORT, CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
@@ -1363,6 +1366,28 @@ export class SelfhostedSession {
       retainedOutput.completed = { status: "completed", result: nativeResult };
       return nativeResult;
     } catch (error) {
+      if (
+        !terminalProof &&
+        !adoptedCommandId &&
+        !ownershipTransferPending &&
+        !(error instanceof OpStreamUnavailableError && error.unavailableKind === "transport") &&
+        !(
+          error instanceof SelfhostedControlError &&
+          (error.neverSent || error.agentOffline || error.reason === "agent_reconnecting")
+        )
+      ) {
+        // A refused spawn can leave a terminal registry record without any
+        // output pump or exit frame. An RPC error alone proves nothing; ask the
+        // exact launch runner before releasing the turn's physical writer.
+        try {
+          if (isZeroFrameTerminalOperation(await client.query(opId))) {
+            terminalProof = true;
+            notifyRemoteOperationNotDispatched(opId);
+          }
+        } catch {
+          // Preserve both custody and the original failure when proof is lost.
+        }
+      }
       if (ownershipTransferPending && !adoptedCommandId) {
         // The live consumer's failed-adoption cleanup has also rejected. Its
         // exact client remains retained below, so turn cleanup must rejoin it.
@@ -2273,7 +2298,8 @@ export class SelfhostedSession {
       `ws=${encodeURIComponent(channel.workspaceId)}` +
       `&agent=${encodeURIComponent(channel.agentId)}` +
       `&port=${channel.port}` +
-      `&channel=${encodeURIComponent(channel.channelId)}`;
+      `&channel=${encodeURIComponent(channel.channelId)}` +
+      (channel.relayRoute ? `&route=${encodeURIComponent(channel.relayRoute)}` : "");
     return {
       host: this.relay.host,
       port: this.relay.port ?? (tls ? 443 : 80),
@@ -2288,6 +2314,29 @@ export class SelfhostedSession {
   async serializeSessionState(): Promise<SelfhostedSessionState> {
     return { agentId: this.agentId };
   }
+}
+
+function isZeroFrameTerminalOperation(status: OpStatus): boolean {
+  const exit = status.exit;
+  if (
+    status.state !== OpState.OP_STATE_COMPLETE ||
+    status.lostReason !== OpLostReason.OP_LOST_REASON_UNSPECIFIED ||
+    !exit
+  )
+    return false;
+  // A cancel-before-start tombstone has no handles, frames or output totals.
+  if (status.nextSeq === "0") return exit.cancelled && !exit.failureCode && !exit.timedOut;
+  // Failed spawn records have handles but no stored frame (watermark zero).
+  // A process may briefly have existed before spawn cleanup killed it; this
+  // proves terminal custody, not that the command had no effects.
+  return (
+    status.nextSeq === "1" &&
+    !exit.cancelled &&
+    !exit.timedOut &&
+    Boolean(exit.failureCode) &&
+    exit.totals.stdout === "0" &&
+    exit.totals.stderr === "0"
+  );
 }
 
 /**

@@ -5391,6 +5391,15 @@ function AuthNeededRow({
     }
   };
 
+  if (recommendation?.id === "api:connected-machine") {
+    return (
+      <div className="og-session-capability-setup" role="status">
+        <p>{t("thisComputer.card.name")}</p>
+        <p>{t("thisComputer.card.hostSetupUnavailable")}</p>
+      </div>
+    );
+  }
+
   return (
     <div className={cn(enter && "animate-og-enter", "flex flex-col gap-2")} role="status">
       <div className="flex flex-col gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-3.5 py-3 sm:flex-row sm:items-center">

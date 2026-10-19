@@ -859,6 +859,9 @@ migrations:
   # The pre-upgrade hook is the rollout gate: schema first, then exact runtime
   # grants, then a connection through the restricted runtime identity. Helm
   # does not begin replacing API/worker pods unless all three steps succeed.
+  # Job-scoped config (and chart-managed runtime Secret) snapshots follow these
+  # hook events at weight -1 relative to this Job, using incoming release values.
+  # Externally managed Secrets must be updated before invoking Helm.
   command:
     - /bin/sh
     - -ec

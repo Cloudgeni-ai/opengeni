@@ -655,6 +655,10 @@ describe("site gateway in workerd", () => {
         origin: `https://pub.${DOMAIN}`,
         cookie: `${visitorCookie}; __Host-og_session=${SESSION}; other=1`,
         authorization: "Bearer og_live_secret",
+        "x-opengeni-site-frame": "1",
+        "x-opengeni-site-frame-id": "forged-console-frame",
+        "x-opengeni-site-id": "33333333-3333-4333-8333-333333333333",
+        "x-opengeni-site-version": VERSION,
         "x-forwarded-for": "10.0.0.1",
         "cf-connecting-ip": "203.0.113.7",
         accept: "application/json",
@@ -669,6 +673,11 @@ describe("site gateway in workerd", () => {
     expect(upstream.search).toBe("?limit=5");
     expect(upstream.headers.get("cookie")).toBeNull();
     expect(upstream.headers.get("authorization")).toBeNull();
+    expect(upstream.headers.get("x-opengeni-site-frame")).toBeNull();
+    expect(upstream.headers.get("x-opengeni-site-frame-id")).toBeNull();
+    expect(upstream.headers.get("x-opengeni-site-id")).toBeNull();
+    expect(upstream.headers.get("x-opengeni-site-version")).toBeNull();
+    expect(upstream.path).toBe(`${SITE_RUNTIME_API_PREFIX}/sessions`);
     expect(upstream.headers.get("x-forwarded-for")).toBeNull();
     expect(upstream.headers.get(SITE_GATEWAY_HOST_HEADER)).toBe(`pub.${DOMAIN}`);
     expect(upstream.headers.get(SITE_GATEWAY_VISITOR_HEADER)).toBe(visitorId);

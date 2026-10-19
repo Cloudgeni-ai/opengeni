@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createSiteToolBridge } from "@opengeni/sdk/site";
 import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
 import { SITE_NO_ORIGIN_ID } from "@opengeni/contracts/site-session-http";
 import { LEARNING_REFUSAL_META_KEY } from "@opengeni/contracts/learning-refusal";
@@ -297,6 +298,309 @@ async function fixture(overrides: { sandboxBackend?: "none" | "docker" } = {}) {
     liveAgentGrant,
   };
 }
+
+test("existing-chat search includes pinned private children", async () => {
+  const f = await fixture();
+  const rootResponse = await f.call(
+    "POST",
+    "/sessions",
+    {},
+    {
+      initialMessage: "Existing project",
+      visibility: "private",
+      sandboxBackend: "none",
+    },
+  );
+  expect(rootResponse.status, await rootResponse.clone().text()).toBe(202);
+  const root = ((await rootResponse.json()) as { id: string }).id;
+  const agent = await f.liveAgentGrant(root);
+  const child = await withSessionRlsActorContext({ subjectId: f.grant.subjectId }, () =>
+    createSession(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      parentSessionId: root,
+      visibility: "user_private",
+      createdByActor: {
+        type: "agent_attempt",
+        sessionId: root,
+        turnId: String(agent.metadata!.turnId),
+        attemptId: String(agent.metadata!.attemptId),
+        executionGeneration: 1,
+      },
+      initialMessage: "Existing specialist",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: f.grant.subjectId },
+      subjectId: f.grant.subjectId,
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    }),
+  );
+  const title = "Long-running specialist child";
+  const renamed = await f.call("PATCH", `/sessions/${child.id}`, {}, { title });
+  expect(renamed.status, await renamed.clone().text()).toBe(200);
+  expect((await f.call("PUT", `/sessions/${child.id}/pin`, {}, { pinned: true })).status).toBe(200);
+  const search = `/sessions?view=page&search=${encodeURIComponent(title)}`;
+  const omitted = await (await f.call("GET", `${search}&includePinned=false`)).json();
+  expect([...omitted.pinned, ...omitted.sessions]).toEqual([]);
+  const found = await (await f.call("GET", search)).json();
+  expect(found.pinned.map((s: { id: string }) => s.id)).toEqual([child.id]);
+  expect(found.pinned[0].tenancy.ownedByCurrentUser).toBe(true);
+});
+
+test("Site composer config binds the host workspace instead of querying the site-host alias", async () => {
+  const f = await fixture();
+  const site = await f.publish("Config dashboard", { visibility: "private" });
+  const bridge = createSiteToolBridge({
+    workspaceId: f.workspace.id,
+    artifactId: site.siteId,
+    siteVersionId: site.versionId,
+    requestedTools: [],
+    workspaceTools: {
+      $catalog: async () => {
+        throw new Error("unused");
+      },
+    },
+    callTool: async () => {
+      throw new Error("unused");
+    },
+    fetchResponse: (path, init) =>
+      f.app.request(path, {
+        ...init,
+        headers: { ...f.headers, ...Object.fromEntries(new Headers(init.headers)) },
+      }),
+  });
+  const response = await bridge.fetch!(
+    {
+      type: "opengeni.site.http",
+      requestId: "config",
+      method: "GET",
+      path: "/v1/config/client?workspaceId=site-host",
+      headers: [],
+    },
+    new AbortController().signal,
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect(await response.json()).toHaveProperty("allowedModels");
+  const invalid = await f.app.request("/v1/config/client?workspaceId=site-host", {
+    headers: f.headers,
+  });
+  expect(invalid.status).toBe(422);
+});
+
+test("an owner can allow an existing chat in one private console Site and revoke its live stream", async () => {
+  const f = await fixture();
+  const site = await f.publish("Private dashboard", { visibility: "private" });
+  const other = await f.publish("Other dashboard", { visibility: "private" });
+  const sharedSite = await f.publish("Shared dashboard");
+  const sessionId = await f.startSession();
+  const unrelated = await f.startSession();
+  const before = await f.sessionRow(sessionId);
+  const access = `/published-artifacts/${site.siteId}/session-access/${sessionId}`;
+  const frame = site.frame("dashboard");
+  expect((await f.call("GET", `/sessions/${sessionId}`, frame)).status).toBe(404);
+  expect((await f.call("PUT", access, frame)).status).toBe(404);
+  expect(
+    (await f.call("PUT", `/published-artifacts/${sharedSite.siteId}/session-access/${sessionId}`))
+      .status,
+  ).toBe(404);
+  const allowed = await f.call("PUT", access);
+  expect(allowed.status, await allowed.clone().text()).toBe(200);
+  expect((await f.call("PUT", access)).status).toBe(200);
+  expect((await f.call("GET", `/sessions/${sessionId}`, frame)).status).toBe(200);
+  expect((await f.call("GET", `/sessions/${unrelated}`, frame)).status).toBe(404);
+  expect((await f.call("GET", `/sessions/${sessionId}`, other.frame("other"))).status).toBe(404);
+  // Published-runtime dispatch carries Site/version provenance, never the console marker.
+  expect(
+    (
+      await f.call("GET", `/sessions/${sessionId}`, {
+        "x-opengeni-site-id": site.siteId,
+        "x-opengeni-site-version": site.versionId,
+      })
+    ).status,
+  ).toBe(404);
+  expect(
+    (
+      await f.call("GET", `/sessions/${sessionId}`, {
+        ...frame,
+        "x-opengeni-site-frame": "preview",
+      })
+    ).status,
+  ).toBe(404);
+  const list = await f.call("GET", `/sessions?view=page&siteAccessId=${site.siteId}`, frame);
+  expect(list.status).toBe(200);
+  const page = await list.json();
+  expect([...page.pinned, ...page.sessions].map((s: { id: string }) => s.id)).toEqual([sessionId]);
+  expect(page.siteAccessId).toBe(site.siteId);
+  const originList = await f.call("GET", `/sessions?view=page&originSiteId=${site.siteId}`, frame);
+  expect((await originList.json()).sessions).toEqual([]);
+  for (const filter of ["originSiteId", "siteAccessId"]) {
+    // Console-only projections do not honor Site filters and must never bypass them.
+    expect(
+      (await f.call("GET", `/sessions?view=running_commands&${filter}=${site.siteId}`, frame))
+        .status,
+    ).toBe(404);
+  }
+  const draftPath = `/sessions/${sessionId}/composer-draft`;
+  const initialDraft = await f.call("GET", draftPath, frame);
+  expect(initialDraft.status).toBe(200);
+  const initial = await initialDraft.json();
+  const draft = {
+    text: "Prepared for the owner to review and edit, not send",
+    resources: [],
+    model: initial.model,
+    reasoningEffort: initial.reasoningEffort,
+    latencyMode: initial.latencyMode,
+    expectedRevision: initial.revision,
+  };
+  const turnsBeforeDraft = await f.turns(sessionId);
+  const saved = await f.call("PUT", draftPath, frame, draft);
+  expect(saved.status, await saved.clone().text()).toBe(200);
+  const savedDraft = await saved.json();
+  expect(savedDraft).toMatchObject({ text: draft.text, revision: initial.revision + 1 });
+  expect(await (await f.call("GET", draftPath, frame)).json()).toMatchObject(savedDraft);
+  expect(
+    (await f.call("PUT", draftPath, frame, { ...draft, text: "Stale overwrite" })).status,
+  ).toBe(409);
+  expect(await f.turns(sessionId)).toEqual(turnsBeforeDraft);
+  expect((await f.call("GET", `/sessions/${sessionId}/events`, frame)).status).toBe(200);
+  expect(
+    (
+      await f.call("POST", `/sessions/${sessionId}/events`, frame, {
+        type: "user.message",
+        payload: { text: "unsafe", modelContext: "hidden" },
+      })
+    ).status,
+  ).toBe(403);
+  const sent = await f.call("POST", `/sessions/${sessionId}/events`, frame, {
+    type: "user.message",
+    payload: { text: "From the dashboard" },
+  });
+  expect(sent.status, await sent.clone().text()).toBeLessThan(300);
+  expect((await f.sessionRow(sessionId)).metadata).toEqual(before.metadata);
+  expect((await f.turns(sessionId)).at(-1)?.surface).toBe("site");
+  const controller = new AbortController();
+  const stream = await f.app.request(
+    `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}/events/stream`,
+    {
+      headers: { ...f.headers, ...frame },
+      signal: controller.signal,
+    },
+  );
+  expect(stream.status).toBe(200);
+  const drained = stream.text();
+  const deadline = setTimeout(
+    () => controller.abort(new Error("revoked stream did not close")),
+    8_000,
+  );
+  try {
+    expect((await f.call("DELETE", access)).status).toBe(200);
+    expect((await f.call("GET", `/sessions/${sessionId}`, frame)).status).toBe(404);
+    expect((await f.call("GET", draftPath, frame)).status).toBe(404);
+    expect(
+      (
+        await f.call("PUT", draftPath, frame, {
+          ...draft,
+          expectedRevision: savedDraft.revision,
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (await f.call("POST", `/sessions/${sessionId}/events`, frame, { text: "No longer allowed" }))
+        .status,
+    ).toBe(404);
+    const revokedList = await f.call(
+      "GET",
+      `/sessions?view=page&siteAccessId=${site.siteId}`,
+      frame,
+    );
+    expect((await revokedList.json()).sessions).toEqual([]);
+    await drained;
+    expect(controller.signal.aborted).toBe(false);
+  } finally {
+    clearTimeout(deadline);
+    controller.abort();
+  }
+  expect((await f.call("GET", `/sessions/${sessionId}`)).status).toBe(200);
+}, 30_000);
+
+test("Site chat grants cannot cross viewers or be minted by Site-origin agents", async () => {
+  const f = await fixture();
+  const site = await f.publish("Owner's dashboard", { visibility: "private" });
+  const sessionId = await f.startSession();
+  const path = `/published-artifacts/${site.siteId}/session-access/${sessionId}`;
+  const other = await ensureExternalIdentity(db.db, {
+    accountId: f.accountId,
+    source: "example:instance",
+    externalId: crypto.randomUUID(),
+  });
+  const added = await f.app.request(`/v1/workspaces/${f.workspace.id}/external-members`, {
+    method: "POST",
+    headers: f.service,
+    body: JSON.stringify({
+      identity: { source: "example:instance", externalId: other.externalId },
+      permissions,
+      operationId: crypto.randomUUID(),
+    }),
+  });
+  expect(added.status).toBe(200);
+  const otherHeaders = {
+    "x-opengeni-external-actor": encodeURIComponent(
+      JSON.stringify({
+        mode: "external",
+        identity: { source: "example:instance", externalId: other.externalId },
+      }),
+    ),
+  };
+  expect((await f.call("PUT", path, otherHeaders)).status).toBe(404);
+  expect((await f.call("PUT", path)).status).toBe(200);
+  expect(
+    (
+      await f.call("GET", `/sessions/${sessionId}`, {
+        ...site.frame("other-viewer"),
+        ...otherHeaders,
+      })
+    ).status,
+  ).toBe(404);
+  expect(
+    (
+      await (
+        await f.call("GET", `/published-artifacts/${site.siteId}/session-access`, otherHeaders)
+      ).json()
+    ).sessionIds,
+  ).toEqual([]);
+  const makeBearer = async (session: string) => {
+    const grant = await f.liveAgentGrant(session);
+    return `Bearer ${await signDelegatedAccessToken(f.settings.delegationSecret!, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: "worker:first-party-mcp",
+      permissions: [...permissions],
+      principalKind: "agent_attempt",
+      ...(grant.metadata as {
+        sessionId: string;
+        turnId: string;
+        attemptId: string;
+        executionGeneration: number;
+      }),
+      exp: Math.floor(Date.now() / 1000) + 600,
+    })}`;
+  };
+  const plainToken = await makeBearer(await f.startSession());
+  const agentRequest = (token: string, method: string) =>
+    f.app.request(`/v1/workspaces/${f.workspace.id}${path}`, {
+      method,
+      headers: { authorization: token },
+    });
+  expect((await agentRequest(plainToken, "DELETE")).status).toBe(200);
+  const grantResponse = await agentRequest(plainToken, "PUT");
+  expect(grantResponse.status, await grantResponse.clone().text()).toBe(200);
+  const clamped = await makeBearer(await f.startSession(site.frame("site-agent")));
+  expect((await agentRequest(clamped, "PUT")).status).toBe(403);
+  expect((await agentRequest(clamped, "DELETE")).status).toBe(403);
+}, 30_000);
 
 test("a published Site frame reaches only SITE_OPERATIONS and only its own Site's sessions", async () => {
   const f = await fixture();

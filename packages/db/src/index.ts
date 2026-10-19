@@ -1,4 +1,7 @@
 export { getSessionMachineAccess } from "./session-machine-access";
+import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
+export * from "./site-session-access";
+import { siteSessionAccessFilter } from "./site-session-access";
 import {
   decodeActivityXid,
   encodeActivityXid,
@@ -15,6 +18,7 @@ export {
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./model-call-timing";
+export * from "./model-provider-execution-inputs";
 import {
   modelCallTimingColumns,
   modelCallTimingOrNull,
@@ -1295,6 +1299,7 @@ import {
   withWorkspaceSubjectRls,
   withWorkspaceSubjectSessionActivityRls,
   withWorkspaceUsageLock,
+  WorkspaceNotFoundError,
   type Database,
   type SessionActivityDatabase,
 } from "./database";
@@ -16016,10 +16021,13 @@ export async function loadWorkspaceProviderApiKey(
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   turnModelId?: string | null,
+  connectionMetadata?: readonly ConnectionMetadataWithVerification[],
 ): Promise<string | null> {
   if (providerKind === "claude_subscription" && !settings.claudeSubscriptionEnabled) return null;
   const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
-  const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
+  const metadata = (
+    connectionMetadata ?? (await listConnectionsMetadata(db, workspaceId, null))
+  ).find(
     (connection) =>
       connection.subjectId === null &&
       connection.providerDomain.toLowerCase() === spec.providerDomain &&
@@ -16062,6 +16070,7 @@ export async function loadWorkspaceVercelAiGatewayApiKey(
   settings: Settings,
   workspaceId: string,
   turnModelId?: string | null,
+  connectionMetadata?: readonly ConnectionMetadataWithVerification[],
 ): Promise<string | null> {
   return await loadWorkspaceProviderApiKey(
     db,
@@ -16069,6 +16078,7 @@ export async function loadWorkspaceVercelAiGatewayApiKey(
     workspaceId,
     "vercel_gateway",
     turnModelId?.startsWith("workspace-gateway/") ? turnModelId : null,
+    connectionMetadata,
   );
 }
 
@@ -16078,6 +16088,7 @@ export async function loadWorkspaceOpenRouterApiKey(
   settings: Settings,
   workspaceId: string,
   turnModelId?: string | null,
+  connectionMetadata?: readonly ConnectionMetadataWithVerification[],
 ): Promise<string | null> {
   return await loadWorkspaceProviderApiKey(
     db,
@@ -16085,6 +16096,7 @@ export async function loadWorkspaceOpenRouterApiKey(
     workspaceId,
     "openrouter",
     turnModelId?.startsWith("workspace-openrouter/") ? turnModelId : null,
+    connectionMetadata,
   );
 }
 
@@ -16094,6 +16106,7 @@ export async function loadWorkspaceOpperApiKey(
   settings: Settings,
   workspaceId: string,
   turnModelId?: string | null,
+  connectionMetadata?: readonly ConnectionMetadataWithVerification[],
 ): Promise<string | null> {
   return await loadWorkspaceProviderApiKey(
     db,
@@ -16101,6 +16114,7 @@ export async function loadWorkspaceOpperApiKey(
     workspaceId,
     "opper",
     turnModelId?.startsWith("workspace-opper/") ? turnModelId : null,
+    connectionMetadata,
   );
 }
 
@@ -31613,6 +31627,8 @@ export type SessionListKeysetCursor = {
 export type SessionListCursor = SessionListSnapshotCursor | SessionListKeysetCursor;
 
 export type SessionListFilterOptions = {
+  /** Sessions this viewer may use from this private console Site. */
+  siteAccessId?: string;
   /** Sessions created through this published Site, independent of project. */
   originSiteId?: string;
   /** Exact workspace project; null selects unfiled sessions. */
@@ -32786,6 +32802,7 @@ function sessionFilters(
     | "archiveStatus"
     | "channelId"
     | "originSiteId"
+    | "siteAccessId"
     | "createdBy"
     | "updatedFrom"
     | "updatedBefore"
@@ -32812,7 +32829,9 @@ function sessionFilters(
     filters.push(sql`${schema.sessions.contentArchiveState} = 'archived'`);
   }
   if (options.mineOnly) filters.push(sessionMineSql(options.subjectId));
-  if (options.originSiteId) {
+  if (options.siteAccessId) {
+    filters.push(siteSessionAccessFilter(options.siteAccessId, options.subjectId));
+  } else if (options.originSiteId) {
     filters.push(
       eq(schema.sessions.siteId, options.originSiteId),
       sql`${schema.sessions.siteAccessRootId} is not null`,
@@ -33063,6 +33082,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
   if (
     !hasChannel &&
     !options.originSiteId &&
+    !options.siteAccessId &&
     !options.createdBy &&
     !options.updatedFrom &&
     !options.updatedBefore &&
@@ -33076,6 +33096,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     return "all";
   }
   return JSON.stringify([
+    ...(options.siteAccessId ? [["siteAccess", options.siteAccessId]] : []),
     ...(options.originSiteId ? [["originSite", options.originSiteId]] : []),
     hasChannel ? ["channel", options.channelId] : null,
     options.createdBy ? ["creator", options.createdBy.kind, options.createdBy.subjectId] : null,
@@ -33310,6 +33331,51 @@ export async function searchSessionMessagesForSubject(
       );
     }),
   );
+}
+
+/** Console projection over live commands, with the same membership and audience
+ * boundary as ordinary chat discovery. Archived chats may still own live work. */
+export async function listWorkspaceBackgroundCommandsForSubject(
+  db: Database,
+  workspaceId: string,
+  authority: Pick<
+    ListSessionsForSubjectOptions,
+    "subjectId" | "authorizationScope" | "personalWorkspaceOwnerException"
+  >,
+  afterId?: string,
+) {
+  return withWorkspaceSubjectRls(db, workspaceId, authority.subjectId, async (tx) => {
+    await lockSessionPersonalStateShared(tx, workspaceId, authority.subjectId);
+    const [membership] = await tx
+      .select({ id: schema.workspaceMemberships.id })
+      .from(schema.workspaceMemberships)
+      .where(
+        and(
+          eq(schema.workspaceMemberships.workspaceId, workspaceId),
+          eq(schema.workspaceMemberships.subjectId, authority.subjectId),
+        ),
+      )
+      .limit(1);
+    if (
+      !membership &&
+      authority.subjectId.startsWith("user:") &&
+      !(
+        authority.personalWorkspaceOwnerException === true &&
+        (await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+          accountId: await accountIdInRlsScope(tx),
+          workspaceId,
+          subjectId: authority.subjectId,
+        }))
+      )
+    )
+      throw new SessionListAccessError();
+    return listWorkspaceBackgroundCommandsInScope(
+      tx,
+      workspaceId,
+      sessionFilters({ ...authority, archiveStatus: "all" }),
+      afterId,
+    );
+  });
 }
 
 /**
@@ -60215,19 +60281,26 @@ export async function getEnrollment(
     );
   }
   const workspaceId = access;
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.enrollments)
-      .where(
-        and(
-          eq(schema.enrollments.workspaceId, workspaceId),
-          eq(schema.enrollments.id, enrollmentId),
-        ),
-      )
-      .limit(1);
-    return row ? mapEnrollment(row) : null;
-  });
+  try {
+    return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+      const [row] = await scopedDb
+        .select()
+        .from(schema.enrollments)
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, workspaceId),
+            eq(schema.enrollments.id, enrollmentId),
+          ),
+        )
+        .limit(1);
+      return row ? mapEnrollment(row) : null;
+    });
+  } catch (error) {
+    // A signed credential can outlive its workspace. Treat that as an absent
+    // enrollment, not an outage, without swallowing database/RLS failures.
+    if (error instanceof WorkspaceNotFoundError && error.workspaceId === workspaceId) return null;
+    throw error;
+  }
 }
 
 /** Read an enrollment only while its exact runner claim is live according to
@@ -87096,11 +87169,12 @@ export async function loadDirectModelProviderConnection(
   settings: Settings,
   workspaceId: string,
   modelId: string,
+  connectionMetadata?: readonly ConnectionMetadataWithVerification[],
 ) {
   if (!isDirectModelId(modelId)) return null;
-  const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
-    (candidate) => directModelConnectionSpec(candidate)?.modelId === modelId,
-  );
+  const metadata = (
+    connectionMetadata ?? (await listConnectionsMetadata(db, workspaceId, null))
+  ).find((candidate) => directModelConnectionSpec(candidate)?.modelId === modelId);
   if (!metadata) throw new Error("OpenAI or Azure OpenAI connection is no longer available");
   const connection = await loadConnectionCredentialForBroker(db, settings, {
     workspaceId,

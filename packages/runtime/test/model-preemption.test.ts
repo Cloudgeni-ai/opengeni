@@ -7,6 +7,7 @@ import { OpenGeniResponsesModel } from "../src/model-provider-routing";
 import { AssistantMessagePhaseTracker } from "../src/run-events";
 import {
   ModelPreemption,
+  PREEMPTION_GRACE_MS,
   isPreemptedModelResponse,
   preemptedResponseCutOffText,
   preemptedResponseDone,
@@ -106,6 +107,52 @@ describe("streamWithPreemption", () => {
     expect(isPreemptedModelResponse(done)).toBe(true);
     expect(done.response.output).toEqual([]);
     expect(preemptedResponseCutOffText(done)).toBe("Half an ans");
+  });
+
+  test("a transport that ignores the abort is still cut within the grace period", async () => {
+    let closed = false;
+    let produced = 0;
+    const startedAt = performance.now();
+    const { done, events } = await preemptAfter(
+      async function* () {
+        try {
+          // Keeps streaming for about 100 s and never looks at its signal.
+          for (let index = 0; index < 10_000; index += 1) {
+            await Bun.sleep(10);
+            produced += 1;
+            yield { type: "output_text_delta", delta: "working ", itemId: "m1" } as StreamEvent;
+          }
+        } finally {
+          closed = true;
+        }
+      },
+      { afterMs: 100 },
+    );
+    expect(performance.now() - startedAt).toBeLessThan(100 + PREEMPTION_GRACE_MS + 500);
+    expect(isPreemptedModelResponse(done)).toBe(true);
+    expect(done.response.output).toEqual([]);
+    const deltas = events.filter((event) => event.type === "output_text_delta").length;
+    expect(preemptedResponseCutOffText(done)).toBe("working ".repeat(deltas));
+    // The transport stream is closed rather than left running.
+    await Bun.sleep(50);
+    expect(closed).toBe(true);
+    const producedAtClose = produced;
+    await Bun.sleep(100);
+    expect(produced).toBe(producedAtClose);
+  });
+
+  test("a transport stalled between events is cut within the grace period", async () => {
+    const startedAt = performance.now();
+    const { done } = await preemptAfter(
+      async function* () {
+        yield { type: "output_text_delta", delta: "Thinking", itemId: "m1" } as StreamEvent;
+        await new Promise(() => undefined);
+      },
+      (event) => event.type === "output_text_delta",
+    );
+    expect(performance.now() - startedAt).toBeLessThan(PREEMPTION_GRACE_MS + 500);
+    expect(isPreemptedModelResponse(done)).toBe(true);
+    expect(preemptedResponseCutOffText(done)).toBe("Thinking");
   });
 
   test("the caller's own cancellation and ordinary failures still propagate", async () => {

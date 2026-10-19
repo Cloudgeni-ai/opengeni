@@ -13,6 +13,7 @@ import {
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectRls,
   withWorkspaceUsageLock,
+  WorkspaceNotFoundError,
   type Database,
 } from "../src/database";
 import { bootstrapWorkspace } from "../src/index";
@@ -178,7 +179,7 @@ describe("one-statement RLS scope", () => {
       withWorkspaceRls(db, missing, async () => {
         ran = true;
       }),
-    ).rejects.toThrow(`Workspace not found: ${missing}`);
+    ).rejects.toBeInstanceOf(WorkspaceNotFoundError);
     expect(ran).toBe(false);
   });
 

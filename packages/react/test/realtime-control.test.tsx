@@ -17,7 +17,7 @@ import {
   useSessionRealtime,
 } from "../src/realtime/realtime-control";
 import type { SessionRealtimeController } from "@opengeni/sdk/realtime";
-import { createOpenGeniText } from "../src/messages/runtime";
+import { createOpenGeniText, OpenGeniMessagesProvider } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
 
@@ -356,9 +356,7 @@ describe("ordinary session Codex realtime control", () => {
       );
     });
     const region = container.querySelector('[role="group"][aria-label="Realtime voice"]');
-    const start = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Start voice with Codex Live"]',
-    );
+    const start = container.querySelector<HTMLButtonElement>('button[aria-label="Start voice"]');
     expect(region).not.toBeNull();
     expect(region?.classList.contains("og-realtime-control")).toBe(true);
     expect(region?.getAttribute("data-model-menu")).toBe("split");
@@ -1022,8 +1020,46 @@ describe("ordinary session Codex realtime control", () => {
     expect(resume?.disabled).toBe(false);
     await act(async () => resume?.click());
     expect(calls).toEqual(["audio"]);
-    expect(container.querySelector('button[aria-label="Start voice with Codex Live"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Start voice"]')).toBeNull();
     expect(container.querySelector('button[aria-label="Resume voice audio"]')).not.toBeNull();
+  });
+
+  test("names the voice action without the model, and a host can name it", async () => {
+    const render = async (messages?: Record<string, string>) =>
+      await act(async () => {
+        root.render(
+          <OpenGeniMessagesProvider messages={messages}>
+            <RealtimeVoiceControl
+              snapshot={idle}
+              canStart={true}
+              modelAvailable={true}
+              audioRef={createRef<HTMLAudioElement>()}
+              onStart={async () => undefined}
+              onStop={async () => undefined}
+              onRetry={async () => undefined}
+              onRetryAudibleOutput={async () => undefined}
+              onSetInputMuted={() => undefined}
+              onSetOutputMuted={() => undefined}
+            />
+          </OpenGeniMessagesProvider>,
+        );
+      });
+    const primary = () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="realtime-primary-action"]');
+    const status = () => container.querySelector('[role="status"]')?.textContent ?? "";
+
+    await render();
+    expect(primary()?.getAttribute("aria-label")).toBe("Start voice");
+    expect(status()).toContain("Talk live with the agent.");
+    expect(status()).not.toContain("Codex Live");
+
+    await render({
+      "realtime.realtimeControl.startVoice": "Talk to Ava",
+      "realtime.realtimeControl.talkLiveWithTheAgent": "Ava answers out loud.",
+    });
+    expect(primary()?.getAttribute("aria-label")).toBe("Talk to Ava");
+    expect(status()).toContain("Talk to Ava");
+    expect(status()).toContain("Ava answers out loud.");
   });
 
   test("shows why a voice start failed until the user dismisses or retries it", async () => {
@@ -1063,7 +1099,7 @@ describe("ordinary session Codex realtime control", () => {
     const start = container.querySelector<HTMLButtonElement>(
       '[data-testid="realtime-primary-action"]',
     );
-    expect(start?.getAttribute("aria-label")).toBe("Try voice again with Codex Live");
+    expect(start?.getAttribute("aria-label")).toBe("Try voice again");
     await act(async () => start?.click());
     expect(calls).toEqual(["start"]);
 

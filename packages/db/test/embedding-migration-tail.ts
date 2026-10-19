@@ -315,4 +315,9 @@ export const embeddingMigrationTail = [
   // Derives the versioned retained-process claim from the body 0345 repaired
   // and turns the original claim into a wrapper; replay after 0345.
   "0840_retained_process_reconciler_version.sql",
+  // The Site chat-access grant policy reads the sessions.site_access_root_id
+  // column added by withheld 0793; replay after it.
+  "0842_site_session_access.sql",
+  // Patches the withheld provenance fences and subscription compatibility readers.
+  "0843_indexed_inbox_lineage.sql",
 ];

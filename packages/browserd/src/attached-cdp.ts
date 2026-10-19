@@ -20,6 +20,10 @@ import {
 
 const POLL_INTERVAL_MS = 50;
 const POLL_LIMIT = 1_000;
+// Bound on waiting for events the extension already holds to reach listeners.
+// Polling normally delivers them within one interval; this only stops a
+// stalled bridge from holding an action open.
+const EVENT_FLUSH_LIMIT_MS = 1_000;
 const MAX_EVENT_LISTENERS = 16_384;
 // Chrome reports the debugger detach that ends a refused navigation on its own
 // event stream, usually just before or after the failed command's reply.
@@ -106,6 +110,10 @@ export async function createAttachedChromeTransport(options: AttachedChromeDrive
 export function createAttachedChromeDriver(
   session: { browserSessionId: string; controllerGeneration: string },
   transport: { runner: BrowserCommandRunner; connection: AttachedChromeCdpConnection },
+  resolveWorkspaceFiles?: (
+    operationId: string,
+    workspaceFileIds: readonly string[],
+  ) => Promise<readonly string[]>,
 ): AgentBrowserDriver {
   return new AgentBrowserDriver({
     browserSessionId: session.browserSessionId,
@@ -121,6 +129,7 @@ export function createAttachedChromeDriver(
     // Agent tabs open in the background so the user's foreground stays
     // theirs; focus emulation keeps them rendering and taking input.
     focusEmulation: true,
+    ...(resolveWorkspaceFiles ? { resolveWorkspaceFiles } : {}),
   });
 }
 
@@ -182,6 +191,8 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private cursor = 0;
   private pollTask: Promise<void> | null = null;
   private pollReady: Promise<void> | null = null;
+  private wakePoll: (() => void) | null = null;
+  private readonly flushWaiters = new Set<{ sequence: number; release: () => void }>();
   private stopped = false;
   private failure: CdpTransportError | null = null;
 
@@ -238,7 +249,9 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         } catch (error) {
           // A failed bridge reply does not prove that a queued command cannot
           // arrive later. Do not attach a replacement debugger underneath it.
-          if (mayChangePage) this.uncertainTabs.add(tabId);
+          // Chrome's own protocol refusal is the reply to that exact command,
+          // so it leaves nothing in flight.
+          if (mayChangePage && !chromeProtocolRefusal(error)) this.uncertainTabs.add(tabId);
           if (navigation && (await this.navigationEndedControl(tabId, detachEpoch)))
             throw new InteractionDefiniteDriverError(
               "unsupported",
@@ -281,6 +294,39 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       listeners.delete(listener);
       if (listeners.size === 0) this.listeners.delete(key);
     };
+  }
+
+  /**
+   * Resolves once every debugger event the extension recorded before this
+   * call has reached listeners. Events arrive by polling here, so a command
+   * reply alone does not prove that the events Chrome sent before it (a
+   * navigation a click started, a request it sent) have been seen yet.
+   * Best effort and bounded: a stalled bridge only loses the guarantee.
+   */
+  async flushEvents(): Promise<void> {
+    if (this.failure || this.stopped || !this.pollTask) return;
+    try {
+      await this.pollReady;
+      // Asking for events after the largest sequence returns none, only the
+      // extension's current sequence.
+      const { cursor: sequence } = await this.pollEvents(Number.MAX_SAFE_INTEGER);
+      if (this.cursor >= sequence || this.failure || this.stopped) return;
+      await new Promise<void>((resolve) => {
+        const waiter = {
+          sequence,
+          release: () => {
+            clearTimeout(timer);
+            this.flushWaiters.delete(waiter);
+            resolve();
+          },
+        };
+        const timer = setTimeout(waiter.release, EVENT_FLUSH_LIMIT_MS);
+        this.flushWaiters.add(waiter);
+        this.wakePoll?.();
+      });
+    } catch {
+      // Flushing only sharpens what the caller observes next; it never fails it.
+    }
   }
 
   async waitForEvent(
@@ -332,6 +378,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.pendingInput.clear();
     this.uncertainTabs.clear();
     this.listeners.clear();
+    this.releaseFlushWaiters();
     this.bridge.close();
   }
 
@@ -351,6 +398,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.pendingInput.clear();
     this.uncertainTabs.clear();
     this.listeners.clear();
+    this.releaseFlushWaiters();
     this.bridge.close();
     await this.pollTask?.catch(() => undefined);
   }
@@ -491,8 +539,29 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       }
       for (const event of batch.events) this.emit(event);
       this.cursor = batch.cursor;
-      if (batch.events.length === 0) await delay(POLL_INTERVAL_MS);
+      for (const waiter of this.flushWaiters) {
+        if (this.cursor >= waiter.sequence) waiter.release();
+      }
+      if (batch.events.length === 0 && this.flushWaiters.size === 0) await this.pollPause();
     }
+  }
+
+  /** Waits one poll interval, or less when a flush needs the next batch now. */
+  private async pollPause(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const wake = () => {
+        clearTimeout(timer);
+        if (this.wakePoll === wake) this.wakePoll = null;
+        resolve();
+      };
+      const timer = setTimeout(wake, POLL_INTERVAL_MS);
+      this.wakePoll = wake;
+    });
+  }
+
+  private releaseFlushWaiters(): void {
+    for (const waiter of this.flushWaiters) waiter.release();
+    this.wakePoll?.();
   }
 
   private async pollEvents(afterSequence: number): Promise<{
@@ -572,6 +641,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.failure =
       error instanceof CdpTransportError ? error : new CdpTransportError(error.message);
     this.listeners.clear();
+    this.releaseFlushWaiters();
   }
 }
 
@@ -624,11 +694,34 @@ function mapBridgeError(method: string, error: unknown, sessionId?: string): Err
         "Browser tab debugging unavailable; observe the tab again",
         true,
       );
-    return error.code === "driver_rejected"
-      ? new CdpProtocolError(method, -32_000, error.message)
-      : new CdpTransportError(error.message);
+    if (error.code !== "driver_rejected") return new CdpTransportError(error.message);
+    const refusal = chromeProtocolRefusal(error);
+    return refusal
+      ? new CdpProtocolError(method, refusal.code, refusal.message)
+      : new CdpProtocolError(method, -32_000, error.message);
   }
   return new CdpTransportError(error instanceof Error ? error.message : "attached Chrome failed");
+}
+
+/** chrome.debugger rejects a command the browser refused with the protocol's
+ * own error object serialized as the message, for example
+ * {"code":-32000,"message":"Not allowed"}. Unwrap it so attached Chrome
+ * reports the same protocol errors as a direct CDP connection. */
+export function chromeProtocolRefusal(error: unknown): { code: number; message: string } | null {
+  if (!(error instanceof AttachedBrowserBridgeError) || error.code !== "driver_rejected")
+    return null;
+  const text = error.message.trim();
+  if (!text.startsWith("{")) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!Number.isSafeInteger(record.code) || typeof record.message !== "string") return null;
+  return { code: record.code as number, message: record.message };
 }
 
 function nestedSessionId(sessionId: string): string | undefined {

@@ -40,6 +40,7 @@ import {
   recordScheduledTaskAdmissionFailure,
   createSession,
   getScheduledTaskRunAcceptedExecution,
+  getScheduledTaskRunByProducerKey,
   getScheduledTask,
   getNestedAgentDepthDeploymentPolicy,
   getScheduledTaskRevisionAuthority,
@@ -51,6 +52,7 @@ import {
   requireSession,
   updateScheduledTask,
   type DbClient,
+  type Database,
 } from "@opengeni/db";
 import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
 import {
@@ -61,6 +63,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
 import { MockAgentResponder, subjectFor } from "@opengeni/runtime";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
@@ -225,6 +228,7 @@ function delegation(
 function activities(
   overrides: Parameters<typeof testSettings>[0] = {},
   bus = new MemoryEventBus(),
+  db = client.db,
 ) {
   return createScheduledTaskActivities(
     async () =>
@@ -247,7 +251,7 @@ function activities(
           ],
           ...overrides,
         }),
-        db: client.db,
+        db,
         bus,
       }) as unknown as ActivityServices,
   );
@@ -1623,6 +1627,116 @@ describe("scheduled task personal MCP authority", () => {
     `;
     expect(evidence).toEqual({ runs: 2, sessions: 1 });
   });
+
+  for (const change of ["materialized", "edited", "paused"] as const) {
+    test(`stale cold admission re-reads the ${change} task`, async () => {
+      if (!available) return;
+      const workspace = await workspaceFixture();
+      await commonConnectionDelegationFixture(workspace);
+      const task = await createScheduledTask(client.db, {
+        ...workspace,
+        name: "stale cold producer admission",
+        status: "active",
+        schedule: { type: "interval", everySeconds: 3_600 },
+        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+        runMode: "reusable_session",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "Original message",
+          resources: [],
+          tools: [{ kind: "mcp", id: "scheduled-common" }],
+          metadata: {},
+        },
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        metadata: {},
+      });
+      let interleaved = false;
+      let firstSessionId: string | undefined;
+      const dialect = new PgDialect();
+      // Hold only the second producer immediately before its real SQL admission.
+      // Its cold snapshot is already resolved; let the first dispatch commit the
+      // reusable binding before submitting that now-stale snapshot to PostgreSQL.
+      const intercept = (db: Database): Database =>
+        new Proxy(db, {
+          get(target, property) {
+            if (property === "transaction") {
+              return (callback: (tx: Database) => Promise<unknown>) =>
+                target.transaction((tx) => callback(intercept(tx)));
+            }
+            if (property === "execute") {
+              return async (query: Parameters<Database["execute"]>[0]) => {
+                const text =
+                  typeof query === "string" ? query : dialect.sqlToQuery(query.getSQL()).sql;
+                if (!interleaved && text.includes("create_scheduled_agent_run_with_admission(")) {
+                  interleaved = true;
+                  const first = await activities().dispatchScheduledTaskRun({
+                    workspaceId: workspace.workspaceId,
+                    taskId: task.id,
+                    triggerType: "scheduled",
+                    producerKey: `stale-cold-first-${crypto.randomUUID()}`,
+                  });
+                  expect(first.action).toBe("start");
+                  firstSessionId = first.sessionId;
+                  const bound = await getScheduledTask(client.db, workspace.workspaceId, task.id);
+                  expect(bound!.authorityRevision).toBe(task.authorityRevision + 1);
+                  expect(bound!.executionDigest).not.toBe(task.executionDigest);
+                  expect(bound!.reusableSessionId).toBe(firstSessionId);
+                  if (change !== "materialized") {
+                    await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
+                      ...(change === "paused"
+                        ? { status: "paused" }
+                        : { agentConfig: { ...task.agentConfig, prompt: "Updated message" } }),
+                    });
+                  }
+                }
+                return target.execute(query);
+              };
+            }
+            const value = Reflect.get(target, property);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      const input = {
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled" as const,
+        producerKey: `stale-cold-second-${crypto.randomUUID()}`,
+      };
+      const second = await activities(
+        {},
+        new MemoryEventBus(),
+        intercept(client.db),
+      ).dispatchScheduledTaskRun(input);
+      expect(interleaved).toBe(true);
+      const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+      if (change === "paused") {
+        expect(second).toEqual({ action: "blocked", reason: "scheduled_task_paused" });
+        expect(runs).toHaveLength(1);
+      } else {
+        expect(second).toMatchObject({ action: "signal", sessionId: firstSessionId });
+        expect(runs).toHaveLength(2);
+        expect(new Set(runs.map((run) => run.sessionId))).toEqual(new Set([firstSessionId]));
+        const secondRun = await getScheduledTaskRunByProducerKey(client.db, input);
+        expect(secondRun).not.toBeNull();
+        const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+          workspaceId: workspace.workspaceId,
+          runId: secondRun!.id,
+        });
+        expect(accepted!.task.reusableSessionId).toBe(firstSessionId);
+        expect(accepted!.task.agentConfig.prompt).toBe(
+          change === "edited" ? "Updated message" : "Original message",
+        );
+        expect(await activities().dispatchScheduledTaskRun(input)).toMatchObject({
+          action: "signal",
+          sessionId: firstSessionId,
+          triggerEventId: second.triggerEventId,
+        });
+        expect(
+          await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10),
+        ).toHaveLength(2);
+      }
+    }, 30_000);
+  }
 
   test("0414 rolling producer fence replay preserves identity and refuses definition drift", async () => {
     if (!available) return;

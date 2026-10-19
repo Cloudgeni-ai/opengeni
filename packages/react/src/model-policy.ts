@@ -338,21 +338,26 @@ function withoutTrailingQualifiers(name: string): string {
   return words.join(" ");
 }
 
+/**
+ * Older published Site hosts list bare `{ id }` rows. A row without readiness
+ * or availability is one the server offers, so it is ready and selectable.
+ */
 export function projectPickerRows(
   t: OpenGeniText,
   models: WorkspaceModelCatalogModel[],
 ): PickerModelRow[] {
   return models
-    .filter((catalog) => catalog.credentialReadiness.status === "ready")
+    .filter((catalog) => (catalog.credentialReadiness?.status ?? "ready") === "ready")
     .map((catalog) => {
       const billingClass = billingClassForModel(catalog);
+      const selectable = catalog.availability?.selectable ?? true;
       return {
         id: catalog.id,
         label: modelDisplayName(catalog),
         ...compactLabel(catalog),
         billingClass,
         billingClassLabel: billingClassLabel(t, billingClass),
-        selectable: catalog.availability.selectable,
+        selectable,
         fundingHint:
           catalog.creditFunding === "promotional"
             ? t("modelPolicy.freeCredits")
@@ -361,9 +366,9 @@ export function projectPickerRows(
               : catalog.creditFunding === "unavailable"
                 ? t("modelPolicy.needsCredits")
                 : undefined,
-        unavailableReason: catalog.availability.selectable
+        unavailableReason: selectable
           ? null
-          : availabilityReasonLabel(t, catalog.availability.reason),
+          : availabilityReasonLabel(t, catalog.availability?.reason ?? null),
         provider: catalog.provider,
         providerLabel: catalog.providerLabel,
         catalog,

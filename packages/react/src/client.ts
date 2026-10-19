@@ -171,6 +171,7 @@ type SessionClientMethods = Pick<
       | "createVideoArtifactPlaybackSource"
       | "streamWorkspaceLiveEvents"
       | "listSessionBackgroundCommands"
+      | "listWorkspaceBackgroundCommands"
       | "cancelSessionBackgroundCommand"
       | "getComputerInputPosture"
       | "getSessionModelAccount"

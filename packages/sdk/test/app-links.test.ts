@@ -6,6 +6,8 @@ import {
   normalizeServerUrl,
   parseAppLink,
   serverLabel,
+  computerConnectUrl,
+  parseComputerConnectLink,
 } from "../src/app-links";
 
 describe("app links", () => {
@@ -51,5 +53,45 @@ describe("app links", () => {
     expect(accountForAppLink(link("https://other.example.com/workspaces/w2"), accounts, "a")).toBe(
       null,
     );
+  });
+});
+
+describe("computer connection handoff", () => {
+  const webUrl = "https://app.example.com/workspaces/w1/sessions/s1";
+  test("keeps destination and exact account, including a product's own scheme", () => {
+    const url = computerConnectUrl({ webUrl, subjectId: "user:one", scheme: "acme" });
+    expect(parseComputerConnectLink(url, "acme")).toMatchObject({
+      origin: "https://app.example.com",
+      workspaceId: "w1",
+      sessionId: "s1",
+      subjectId: "user:one",
+    });
+    expect(parseComputerConnectLink(url)).toBeNull();
+    expect(url).not.toContain("token");
+  });
+  test("rejects credentials, arbitrary paths, query payloads and non-web origins", () => {
+    for (const destination of [
+      "ftp://app.example.com/workspaces/w1",
+      "https://u:p@app.example.com/workspaces/w1",
+      "https://app.example.com/settings",
+      `${webUrl}?command=anything`,
+      `${webUrl}#token`,
+      "javascript:alert(1)",
+    ]) {
+      expect(
+        parseComputerConnectLink(
+          `opengeni://connect?subject=u&url=${encodeURIComponent(destination)}`,
+        ),
+      ).toBeNull();
+    }
+    expect(
+      parseComputerConnectLink(`opengeni://connect?url=${encodeURIComponent(webUrl)}`),
+    ).toBeNull();
+    expect(() => computerConnectUrl({ webUrl, subjectId: "", scheme: "acme" })).toThrow();
+    expect(
+      parseComputerConnectLink(
+        computerConnectUrl({ webUrl: "http://localhost:3000/workspaces/w1", subjectId: "u" }),
+      ),
+    ).not.toBeNull();
   });
 });

@@ -1,5 +1,23 @@
 # @opengeni/vaults-protonpass
 
+## 4.1.3
+
+### Patch Changes
+
+- @opengeni/contracts@4.1.2
+- @opengeni/vaults@4.1.2
+
+## 4.1.1
+
+### Patch Changes
+
+- 781a3c1: Accept Proton Pass item and vault ids that start with "-". Proton ids are URL-safe base64, so about one in 64 newly created items was wrongly reported as an unknown outcome. Ids still reach pass-cli only as `--name=value`, so they can never be read as options.
+- Updated dependencies [afff3f9]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [9be9a82]
+  - @opengeni/contracts@4.1.0
+  - @opengeni/vaults@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes

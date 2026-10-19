@@ -1035,6 +1035,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             // Keep the frame/reply scope alive. Returning would make the outer
             // reconciler respawn this same rejected link in a tight loop.
             self.link_stop_notified(link).await;
+            info!(connection_id = %link.connection_id, "paused connection stopped or updated");
             return;
         }
         let mut backoff = Backoff::standard();
@@ -1155,14 +1156,6 @@ impl<P: Platform + 'static> Supervisor<P> {
             return ConnectionOutcome::CleanShutdown;
         }
 
-        // Send the connect hello. A failure here is just a disconnect (retry).
-        if let Err(e) = self.send_hello(link, &client).await {
-            return ConnectionOutcome::Disconnected(format!("hello failed: {e}"));
-        }
-
-        // A successful connect + hello resets the backoff window.
-        backoff.reset();
-
         // Subscribe to the RPC subject — this IS the registry.
         let subscription = match client.subscribe(link.rpc_subject()).await {
             Ok(sub) => sub,
@@ -1212,14 +1205,16 @@ impl<P: Platform + 'static> Supervisor<P> {
         ));
         *link.bulk_tx.write().expect("bulk lock") = Some(bulk_tx);
 
-        // T-derived sizing becomes active only after every generation seam is
-        // ready. Early hello/subscribe/bulk failures therefore cannot leave a
-        // stale payload entry in the shared engine.
-        self.engine
-            .set_link_max_payload(&link.connection_id, client.server_info().max_payload);
-
-        let outcome = self
-            .serve_connection_generation(
+        // Hello is also the controller's recovery notification. Send it only
+        // after both lanes and all subscriptions exist: recovered requests must
+        // reach this generation, not a gap before its subscription is installed.
+        let outcome = if let Err(e) = self.send_hello(link, &client).await {
+            ConnectionOutcome::Disconnected(format!("hello failed: {e}"))
+        } else {
+            backoff.reset();
+            self.engine
+                .set_link_max_payload(&link.connection_id, client.server_info().max_payload);
+            self.serve_connection_generation(
                 link,
                 &client,
                 subscription,
@@ -1227,7 +1222,8 @@ impl<P: Platform + 'static> Supervisor<P> {
                 control_transport_lost,
                 bulk_transport_lost,
             )
-            .await;
+            .await
+        };
 
         // Tear the bulk lane down with the generation: hooks see None and
         // drop frames until the next generation re-attaches consumers.
@@ -2119,10 +2115,9 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// `Some(1)` — the minimal value that still surfaces a sustained outage to our
     /// supervised loop rather than letting the client silently retry forever.
     ///
-    /// A rejected bearer (revoked/expired enrollment, or a callout denial) surfaces
-    /// as a connect error → [`SupervisorError::Connect`], which the supervise loop
-    /// treats as a transient disconnect and backs off + retries with the SAME
-    /// (possibly rotated, on re-enroll) bearer — never a panic.
+    /// A rejected bearer surfaces as [`SupervisorError::Authentication`]. The
+    /// link stays paused until renewal or explicit reconnect supplies credentials;
+    /// transport failures alone use the reconnect backoff.
     async fn connect(&self, link: &WorkspaceLink<P>) -> Result<ConnectedNats, SupervisorError> {
         if link.creds.nats_bearer.is_empty() {
             // No bearer means the control plane never minted one (an enrollment from
@@ -4858,10 +4853,25 @@ mod tests {
     #[allow(clippy::too_many_lines)] // one real multi-link transport lifecycle
     async fn rejected_link_stops_dialing_and_recovers_without_interrupting_healthy_links() {
         use opengeni_agent_platform::NativePlatform;
+        use tokio::io::AsyncWriteExt as _;
         let Some(nats_bin) = it::find_nats_server() else {
             panic!("authentication regression requires nats-server");
         };
-        let (_lock, _dir) = crate::config::tests::with_temp_config();
+        let (_lock, dir) = crate::config::tests::with_temp_config();
+        crate::enrollment::InstallIdentity::load_or_generate(dir.path()).unwrap();
+        let renewal_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", renewal_listener.local_addr().unwrap());
+        let renewal_server = tokio::spawn(async move {
+            let (mut socket, _) = renewal_listener.accept().await.unwrap();
+            crate::credential_renewal::tests::read_renewal_request(&mut socket).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            renewal_listener
+        });
         let port = it::free_local_port();
         let monitor_port = it::free_local_port();
         let _server = it::NatsServerGuard::spawn_authenticated(&nats_bin, port, monitor_port);
@@ -4883,10 +4893,7 @@ mod tests {
         let platform = Arc::new(NativePlatform::new());
         let mut rejected_credentials = it::test_credentials(&url);
         rejected_credentials.nats_bearer = "rejected-test-token".into();
-        let stored = crate::config::StoredConnection::new(
-            "https://api.example",
-            rejected_credentials.clone(),
-        );
+        let stored = crate::config::StoredConnection::new(&api_url, rejected_credentials.clone());
         crate::config::save_connection(&stored).unwrap();
         let rejected = SupervisorLink::new(
             stored.connection_id.clone(),
@@ -4940,6 +4947,34 @@ mod tests {
         .expect("rejected credential must be suspended");
         let monitor = format!("http://127.0.0.1:{monitor_port}/varz");
         let before: serde_json::Value = reqwest::get(&monitor).await.unwrap().json().await.unwrap();
+        // Exercise the periodic renewal path and the same state reconciliation
+        // as the file watcher, not just the short quiet interval after rejection.
+        let mut diagnostics = crate::credential_renewal::RenewalDiagnostics::default();
+        crate::credential_renewal::renew_due_connections(&api_url, &mut diagnostics)
+            .await
+            .unwrap();
+        let listener = renewal_server.await.unwrap();
+        for _ in 0..3 {
+            let saved = crate::config::load_connection(&stored.connection_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                saved.authentication_state,
+                Some(crate::config::AuthenticationState::ReconnectRequired)
+            );
+            let mut suspended = rejected.clone();
+            suspended.authentication_state = saved.authentication_state;
+            updates.send(vec![suspended, healthy.clone()]).unwrap();
+            crate::credential_renewal::renew_due_connections(&api_url, &mut diagnostics)
+                .await
+                .unwrap();
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "paused connection must not retry HTTP renewal either"
+        );
         tokio::time::sleep(Duration::from_secs(4)).await;
         let after: serde_json::Value = reqwest::get(&monitor).await.unwrap().json().await.unwrap();
         assert_eq!(
@@ -4960,10 +4995,21 @@ mod tests {
             "a persisted terminal state must not dial, even with a transport that would accept it"
         );
         recovered.authentication_state = None;
-        updates.send(vec![recovered, healthy]).unwrap();
+        updates.send(vec![recovered, healthy.clone()]).unwrap();
         assert!(
             it::wait_for_event(
                 &mut rejected_events,
+                Duration::from_secs(10),
+                |event| matches!(event.event, Some(Event::Heartbeat(_)))
+            )
+            .await
+        );
+        // Removing the recovered connection must still leave the healthy link
+        // online, with no reconnect of that sibling.
+        updates.send(vec![healthy]).unwrap();
+        assert!(
+            it::wait_for_event(
+                &mut healthy_events,
                 Duration::from_secs(10),
                 |event| matches!(event.event, Some(Event::Heartbeat(_)))
             )
@@ -5698,6 +5744,66 @@ mod tests {
             definition.with_api_url("https://other.example.test"),
         ));
         assert!(!Arc::ptr_eq(&retained, &other.replies));
+    }
+
+    /// Cross-language fixture for the real JWT-expiration probe. No-op in a
+    /// normal unit run; the runtime integration test owns the isolated broker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn control_rotation_probe_agent() {
+        use opengeni_agent_platform::{DesktopBackend, NativePlatform, PlatformResult};
+        use std::sync::atomic::AtomicUsize;
+
+        struct SlowInput {
+            executions: AtomicUsize,
+            root: std::path::PathBuf,
+        }
+        #[async_trait::async_trait]
+        impl DesktopBackend for SlowInput {
+            fn probe(&self) -> Option<v1::Display> {
+                None
+            }
+            async fn capture(&self) -> PlatformResult<opengeni_agent_platform::CapturedFrame> {
+                unreachable!("input probe only")
+            }
+            async fn inject(&self, _: &v1::DesktopInput) -> PlatformResult<()> {
+                let number = self.executions.fetch_add(1, Ordering::SeqCst) + 1;
+                std::fs::write(self.root.join(format!("execution-{number}")), b"once").unwrap();
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                Ok(())
+            }
+        }
+        let Ok(url) = std::env::var("OPENGENI_ROTATION_PROBE_NATS") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(
+            std::env::var("OPENGENI_ROTATION_PROBE_ROOT").expect("probe root"),
+        );
+        let input = Arc::new(SlowInput {
+            executions: AtomicUsize::new(0),
+            root: root.clone(),
+        });
+        let mut credentials = it::test_credentials(&url);
+        credentials.consented_screen_control = true;
+        let definition = SupervisorLink::new(
+            "rotation-probe",
+            Arc::new(NativePlatform::with_root(&root).with_desktop(input)),
+            credentials,
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let supervisor =
+            Supervisor::new_links(&[definition], "test-0.0.0").with_spool_root(root.join("spool"));
+        let shutdown = supervisor.shutdown_handle();
+        let run = tokio::spawn(async move { supervisor.run().await });
+        let deadline = Instant::now() + Duration::from_secs(150);
+        while !root.join("stop").exists() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     /// The first non-idempotent move commits, but nobody receives its reply.

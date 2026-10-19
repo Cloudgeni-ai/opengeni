@@ -2825,6 +2825,9 @@ export const BrowserSessionMutationResponse = /* @__PURE__ */ defineSchema(() =>
         .object({
           targets: z.array(BrowserTarget).max(10_000),
           observation: BrowserObservation,
+          /** A plain line about how this browser was launched, for example
+           * that it shares the machine's network. */
+          notice: z.string().min(1).max(1_024).optional(),
         })
         .strict()
         .optional(),

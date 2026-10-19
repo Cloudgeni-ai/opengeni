@@ -333,6 +333,16 @@ export class OpStreamExecClient {
     }
   }
 
+  /** Read terminal custody proof from this operation's pinned runner. */
+  async query(opId: string): Promise<OpStatus> {
+    return await querySelfhostedOp({
+      controlRpc: this.deps.controlRpc,
+      rpcSubject: this.deps.rpcSubject,
+      opId,
+      controlTimeoutMs: this.deps.controlTimeoutMs,
+    });
+  }
+
   /**
    * Run one exec over the op stream. `opId` is the durable id (B1) — a re-issue
    * with the same id attaches instead of re-running. `deadlineMs` is the exec

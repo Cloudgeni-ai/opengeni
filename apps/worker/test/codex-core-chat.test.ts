@@ -19,6 +19,8 @@ import {
 import {
   assertTurnModelConnection,
   buildCoreCodexRequestTokenResolver,
+  CODEX_CORE_TURN_PROVIDER,
+  prepareCoreCodexTurnEntitlements,
 } from "../src/activities/agent-turn/codex-core-capacity";
 import {
   claimCodexActiveFromCutover,
@@ -242,6 +244,88 @@ function gate(state: "not_configured" | "disabled" | "enabled") {
   spy(db, "readSubscriptionProviderCutoverState").mockResolvedValue(state);
 }
 
+describe("accepted-turn entitlement preparation", () => {
+  test("starts the same scoped read early and placement joins it", async () => {
+    const deps = capacityDeps();
+    deps.turn.initiatingHumanSubjectId = identity.initiatingHumanSubjectId;
+    const refreshGate = Promise.withResolvers<number>();
+    const refresh = spy(coreApi, "refreshCoreCodexModelEntitlements").mockReturnValue(
+      refreshGate.promise,
+    );
+    deps.codexEntitlementPreparation = prepareCoreCodexTurnEntitlements(deps);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith(
+      deps.db,
+      deps.settings,
+      {
+        accountId: deps.input.accountId,
+        workspaceId: deps.input.workspaceId,
+        subjectId: identity.initiatingHumanSubjectId,
+      },
+      undefined,
+      { refreshCredentials: false },
+    );
+    let ready = false;
+    const placementGate = CODEX_CORE_TURN_PROVIDER.beforePlacement!(deps, identity).then(() => {
+      ready = true;
+    });
+    await Promise.resolve();
+    expect(ready).toBe(false);
+    refreshGate.resolve(Date.now() + 60_000);
+    await placementGate;
+    expect(ready).toBe(true);
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    ["expired preparation", -1],
+    ["still-fresh preparation", 60_000],
+  ] as const)("rechecks %s before placement", async (_label, remainingMs) => {
+    const deps = capacityDeps();
+    deps.codexEntitlementPreparation = Promise.resolve(Date.now() + remainingMs);
+    const refresh = spy(coreApi, "refreshCoreCodexModelEntitlements").mockResolvedValue(
+      Date.now() + 60_000,
+    );
+    await CODEX_CORE_TURN_PROVIDER.beforePlacement!(deps, identity);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith(deps.db, deps.settings, {
+      accountId: deps.input.accountId,
+      workspaceId: deps.input.workspaceId,
+      subjectId: identity.initiatingHumanSubjectId,
+    });
+  });
+
+  test("without preparation the existing live check still runs", async () => {
+    const deps = capacityDeps();
+    const refresh = spy(coreApi, "refreshCoreCodexModelEntitlements").mockResolvedValue(
+      Date.now() + 60_000,
+    );
+    await CODEX_CORE_TURN_PROVIDER.beforePlacement!(deps, identity);
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  test("a failed hint leaves the live placement check authoritative", async () => {
+    const deps = capacityDeps();
+    const failure = new Error("catalog scope refused");
+    const refresh = spy(coreApi, "refreshCoreCodexModelEntitlements").mockRejectedValue(failure);
+    deps.codexEntitlementPreparation = prepareCoreCodexTurnEntitlements(deps);
+    void deps.codexEntitlementPreparation.catch(() => undefined);
+    await expect(CODEX_CORE_TURN_PROVIDER.beforePlacement!(deps, identity)).rejects.toBe(failure);
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  test("a failed hint does not fail a successful live check", async () => {
+    const deps = capacityDeps();
+    const refresh = spy(coreApi, "refreshCoreCodexModelEntitlements")
+      .mockRejectedValueOnce(new Error("early scope read failed"))
+      .mockResolvedValue(Date.now() + 60_000);
+    deps.codexEntitlementPreparation = prepareCoreCodexTurnEntitlements(deps);
+    void deps.codexEntitlementPreparation.catch(() => undefined);
+    await CODEX_CORE_TURN_PROVIDER.beforePlacement!(deps, identity);
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("Codex cutover gate dispositions", () => {
   test("no cutover row fails closed and never touches either selector", async () => {
     gate("not_configured");
@@ -352,6 +436,8 @@ describe("Codex cutover gate dispositions", () => {
     });
     spy(db, "getSessionGoal").mockResolvedValue(null as never);
     spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    // No Steer is waiting for this turn's next model step unless a test says so.
+    const waitingSteer = spy(db, "resolveWaitingSteer").mockResolvedValue(null);
     const waiter = {
       waiterId: "waiter-1",
       accountId: "account-1",
@@ -384,7 +470,7 @@ describe("Codex cutover gate dispositions", () => {
     });
     const evaluate = spy(db, "evaluateSubscriptionCoreCodexPlacement");
     const reconcile = spy(db, "reconcileSubscriptionCoreCodexCapacityWait");
-    return { waiter, armed, evaluate, reconcile };
+    return { waiter, armed, evaluate, reconcile, waitingSteer };
   }
 
   test("a core wait parks the turn on the durable core waiter and hands the workflow its reference", async () => {
@@ -504,6 +590,24 @@ describe("Codex cutover gate dispositions", () => {
       expect(credits).not.toHaveBeenCalled();
     },
   );
+
+  test("a Steer waiting for the next model step replaces a new core wait", async () => {
+    gate("enabled");
+    const { armed, evaluate, reconcile, waitingSteer } = coreWaitMocks(
+      new Date(Date.now() + 60_000),
+    );
+    waitingSteer.mockResolvedValue({ wakeRevision: 2, workflowId: "session-1", eventIds: [] });
+    const deps = capacityDeps();
+    const outcome = (await selectCodexTurnCapacity(deps)) as { exit?: { status?: string } };
+    // A Steer waiting for the next model step replaces the capacity wait at once:
+    // the turn ends idle, so the Steer is claimed next, and the wait is never re-evaluated.
+    expect(outcome.exit?.status).toBe("idle");
+    expect(armed).toHaveBeenCalledTimes(1);
+    expect(waitingSteer).toHaveBeenCalledTimes(1);
+    expect(waitingSteer.mock.calls[0]![1]).toMatchObject({ sessionId: "session-1" });
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
+  });
 
   test("a core wait whose re-evaluation can already run resumes the same turn", async () => {
     gate("enabled");
@@ -2507,6 +2611,41 @@ describe("claim-time Codex cutover handling", () => {
 });
 
 describe("run and finalization wiring for core turns", () => {
+  test("early entitlement work belongs to the accepted activity and drains on every exit", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
+    ).text();
+    const claimSource = await Bun.file(
+      new URL("../src/activities/agent-turn/claim.ts", import.meta.url),
+    ).text();
+    const claimed = claimSource.indexOf('if (claim.action === "unclaimed")');
+    const hint = claimSource.indexOf("deps.startCodexEntitlementPreparation?.(turn)");
+    expect(hint).toBeGreaterThan(claimed);
+    expect(claimSource.slice(claimed, hint)).toContain('claimedPolicy.kind === "valid"');
+    expect(claimSource.slice(claimed, hint)).toContain(
+      "!settings.subscriptionCrossProviderFailoverEnabled",
+    );
+    const prepare = source.indexOf(
+      "codexEntitlementPreparation ??= prepareCoreCodexTurnEntitlements(",
+    );
+    const learning = source.indexOf(
+      "const [learningResult, attachmentResult] = await Promise.allSettled(",
+    );
+    const actor = source.indexOf("return await withSessionRlsActorContext(", learning);
+    expect(prepare).toBeGreaterThan(0);
+    expect(learning).toBeGreaterThan(prepare);
+    expect(actor).toBeGreaterThan(learning);
+    expect(source.slice(prepare, learning)).toContain("settings,");
+    expect(source.slice(prepare, learning)).toContain(
+      "void codexEntitlementPreparation.catch(() => undefined)",
+    );
+    const drain = source.indexOf("await Promise.allSettled([codexEntitlementPreparation])");
+    const cleanup = source.lastIndexOf("} finally {", drain);
+    const finalize = source.indexOf("await finalizeTurnAttempt(", cleanup);
+    expect(drain).toBeGreaterThan(cleanup);
+    expect(finalize).toBeGreaterThan(drain);
+  });
+
   const core: CodexSubscriptionCoreTurn = {
     identity,
     connectionId: "connection-core",

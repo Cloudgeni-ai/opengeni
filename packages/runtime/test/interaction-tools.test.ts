@@ -928,6 +928,142 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test.each([true, false])(
+    "browser_open create returns the tab it opened, not an older tab on the same URL (view=%s)",
+    async (withView) => {
+      // A person's Chrome (or a concurrent session sharing the profile) can
+      // already show the requested URL. The new session must get its own tab.
+      const session = discoveredBrowserSession(browserSessionId, sessionId);
+      session.lifecycle = "active";
+      session.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const url = "https://requested.example.test/";
+      const older = { ...browserTarget(), id: "tab-older", url, selected: false };
+      const opened = { ...browserTarget(), id: "tab-opened", url, selected: true };
+      const observed: string[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+          createBrowserSession: async () =>
+            ({
+              session,
+              ...(withView
+                ? {
+                    initialView: {
+                      targets: [older, opened],
+                      observation: browserObservation(opened),
+                    },
+                  }
+                : {}),
+            }) as never,
+          listBrowserTargets: async () => ({
+            browserSessionId,
+            controllerGeneration: "controller-1",
+            targets: [older, opened],
+          }),
+          observeBrowserTarget: async (_workspaceId, _browserSessionId, targetId) => {
+            observed.push(targetId);
+            return browserObservation(targetId === opened.id ? opened : older);
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { initialUrl: url },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(observed).toEqual(withView ? [] : [opened.id]);
+      const content = result.structuredContent as Record<string, unknown>;
+      expect(content.targets).toEqual([agentTarget(opened)]);
+      expect(content.otherTabCount).toBe(1);
+      expect(content.observation).toMatchObject({ target: agentTarget(opened) });
+    },
+  );
+
+  test.each([
+    ["controller_resource_missing", true],
+    ["controller_transition_expired", true],
+    ["browser_crashed", false],
+    [null, false],
+  ] as const)(
+    "browser_open continues a lost browser only through the resume route (%s)",
+    async (failureCode, resumable) => {
+      const lost = discoveredBrowserSession(browserSessionId, sessionId);
+      lost.lifecycle = "lost";
+      lost.failureCode = failureCode;
+      const active = discoveredBrowserSession(browserSessionId, sessionId);
+      active.lifecycle = "active";
+      active.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const target = browserTarget();
+      const resumes: string[] = [];
+      let refuse = false;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          getBrowserSession: async () => lost,
+          resumeBrowserSession: async (_workspaceId, resumedId) => {
+            resumes.push(resumedId);
+            if (refuse)
+              throw new OpenGeniApiError(
+                409,
+                JSON.stringify({
+                  error: {
+                    code: "conflict",
+                    message:
+                      "BrowserSession was lost when its controller restarted, and its working copy could not be recovered",
+                    retryable: false,
+                  },
+                }),
+              );
+            return { session: active } as never;
+          },
+          listBrowserTargets: async () => ({
+            browserSessionId,
+            controllerGeneration: "controller-1",
+            targets: [target],
+          }),
+          observeBrowserTarget: async () => browserObservation(target),
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const open = async () =>
+        await definitions[0]!.execute(
+          { browserSessionId },
+          { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+        );
+      const result = await open();
+      const content = result.structuredContent as Record<string, unknown>;
+      expect(resumes).toEqual(resumable ? [browserSessionId] : []);
+      expect(content.session).toMatchObject({ lifecycle: resumable ? "active" : "lost" });
+      expect(content.targets).toEqual(resumable ? [agentTarget(target)] : []);
+      if (!resumable) return;
+      refuse = true;
+      // A refused resume is a definite answer the model can act on.
+      expect(await open()).toMatchObject({
+        isError: true,
+        structuredContent: {
+          error: {
+            code: "conflict",
+            message: expect.stringContaining("working copy could not be recovered"),
+            retryable: false,
+          },
+        },
+      });
+    },
+  );
+
   test.each(["matching", "missing", "unknown", "session", "generation", "target"] as const)(
     "browser_open reuse preserves no-op, refusal and unknown boundaries (%s)",
     async (scenario) => {

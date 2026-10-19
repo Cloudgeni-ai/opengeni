@@ -289,6 +289,33 @@ export const workspaceArtifacts = pgTable(
   }),
 );
 
+export const siteSessionAccess = pgTable(
+  "site_session_access",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    ownerSubjectId: text("owner_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.siteId, table.sessionId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+  ],
+);
+
 export const workspaceArtifactUploads = pgTable(
   "workspace_artifact_uploads",
   {

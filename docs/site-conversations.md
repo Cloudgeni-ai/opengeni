@@ -32,6 +32,38 @@
   shared histories are not silently converted or exposed as new private Site
   history. Existing Site HTML and source are not rewritten.
 
+## Allowing an existing chat in a private console Site
+
+In the console's Site **Conversations** tab, the owner can choose **Allow an
+existing chat**. This grants that private Site access to one exact chat owned
+by the same person. It does not share the chat with other viewers, move it,
+change its tools, rewrite its creation origin, or grant access to descendants.
+Making the Site shared or archiving it disables this extra access. Existing
+Site-created conversations retain their original audience rules.
+
+Owner-authorized agents can use the normal SDK's `setSiteSessionAccess` and
+`listSiteSessionAccess` outside a Site. Site frames and Site-origin agents cannot
+manage these grants. Published guest/runtime Sites do not consume them.
+
+Inside the console Site, use `listSessionPage(workspaceId, { siteAccessId:
+"current" })` to list available chats, then mount the normal
+`SessionConversation` with the chosen session ID. `originSiteId` still means
+creation provenance and does not include explicitly allowed older chats.
+Both list filters remain viewer-authorized and bound into pagination cursors.
+
+The Site retains the same operation and text-only body restrictions; approvals,
+credentials, attachments and hidden model context still belong in the console.
+Site-submitted turns record their real Site origin and retain existing Site
+execution restrictions. Ordinary console requests retain their normal behavior.
+**Remove access** revokes subsequent reads and writes immediately; an open event
+stream rechecks every two seconds and closes on revocation. Already accepted
+work is not cancelled and already delivered text cannot be recalled.
+
+Management routes are `GET /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access`
+and `PUT`/`DELETE` on its `/:sessionId` suffix. They are deliberately absent from
+the frame operation allowlist. Migration `0842_site_session_access.sql` adds
+the tenant/owner-isolated grant table without backfilling or modifying sessions.
+
 ## Inline AI and app-defined interaction
 
 `createOpenGeniSiteClient().ai` is a convenience over native session creation and
@@ -69,6 +101,16 @@ does not make separately published artifacts or shared Site Data private; use
 their existing audience controls deliberately.
 
 ## API and implementation
+
+The injected browser client is the checked-in
+`packages/sdk/src/site-browser-runtime.gen.ts`, built from the SDK and shared
+Site route contracts. After changing either dependency, use the repository's
+pinned Bun to run `bun scripts/generate-site-browser-runtime.ts` and commit its
+output. `bun scripts/generate-site-browser-runtime.ts --check` verifies freshness
+without rewriting it; CI runs this before package builds, which otherwise
+regenerate the file and can hide stale committed bytes. The generated-runtime
+SDK tests execute those bytes through the real host bridge and preview transport;
+the Site conversations browser test also executes the injected script tag.
 
 `GET /v1/workspaces/:id/sessions?view=page&originSiteId=<uuid>` combines Site
 origin with ordinary project/search/date/visibility filters before pagination.

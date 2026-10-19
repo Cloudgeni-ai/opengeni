@@ -7,6 +7,7 @@ import {
   SITE_GATEWAY_BODY_SHA256_HEADER,
   SITE_GATEWAY_CALLBACK_PATH,
   DEFAULT_SITE_LIMITS,
+  WorkspaceModelCatalogResponse,
   type AccessGrant,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
@@ -992,7 +993,13 @@ test("site-runtime checks the gateway signature before anything else", async () 
   // People outside the workspace see the one concrete model they would use.
   const catalog = (await f.gateway(site.host, "GET", "/model-catalog", { visitor })).json;
   expect(catalog.defaultModel).toEqual(expect.any(String));
-  expect(catalog.models).toEqual([{ id: catalog.defaultModel }]);
+  // Full workspace catalog rows: the in-Site chat picker reads readiness and availability.
+  expect(catalog.models.map((model: { id: string }) => model.id)).toEqual([catalog.defaultModel]);
+  expect(WorkspaceModelCatalogResponse.safeParse({ models: catalog.models }).success).toBe(true);
+  expect(catalog.models[0]).toMatchObject({
+    credentialReadiness: { status: "ready" },
+    availability: { selectable: true },
+  });
   const tools = await f.gateway(site.host, "POST", "/tools/catalog", { visitor, body: {} });
   expect(tools.status).toBe(403);
   expect(code(tools)).toBe("not_available_for_viewer");

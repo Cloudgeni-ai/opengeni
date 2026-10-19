@@ -1,5 +1,6 @@
 import {
   CLAUDE_CONNECTION_KINDS,
+  environmentsEncryptionKeyBytes,
   claudeProviderId,
   withClaudeConnectionCatalog,
   withClaudeConnectionCredential,
@@ -43,6 +44,8 @@ import {
   getWorkspaceProviderCustomModelForExecution,
   loadWorkspaceProviderApiKey,
   type Database,
+  loadModelProviderExecutionInputs,
+  type ModelProviderExecutionInputs,
 } from "@opengeni/db";
 
 /**
@@ -100,11 +103,14 @@ export async function settingsWithWorkspaceGatewayCredential(
   workspaceId: string,
   settings: Settings,
   retainedProductModelId?: string | null,
+  prepared?: ModelProviderExecutionInputs,
 ): Promise<Settings> {
-  const activeCustomModels = await listWorkspaceGatewayCustomModels(db, {
-    accountId,
-    workspaceId,
-  });
+  const activeCustomModels =
+    prepared?.workspaceModels.vercel_gateway ??
+    (await listWorkspaceGatewayCustomModels(db, {
+      accountId,
+      workspaceId,
+    }));
   const retainedUpstreamModelId = retainedProductModelId?.startsWith(
     WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   )
@@ -130,6 +136,7 @@ export async function settingsWithWorkspaceGatewayCredential(
     settings,
     workspaceId,
     retainedProductModelId,
+    prepared?.workspaceConnections,
   );
   return apiKey
     ? withWorkspaceGatewayCredential(catalogSettings, apiKey, customModels)
@@ -142,11 +149,14 @@ export async function settingsWithWorkspaceOpenRouterCredential(
   workspaceId: string,
   settings: Settings,
   retainedProductModelId?: string | null,
+  prepared?: ModelProviderExecutionInputs,
 ): Promise<Settings> {
-  const activeCustomModels = await listWorkspaceOpenRouterCustomModels(db, {
-    accountId,
-    workspaceId,
-  });
+  const activeCustomModels =
+    prepared?.workspaceModels.openrouter ??
+    (await listWorkspaceOpenRouterCustomModels(db, {
+      accountId,
+      workspaceId,
+    }));
   const retainedUpstreamModelId = retainedProductModelId?.startsWith(
     WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   )
@@ -172,6 +182,7 @@ export async function settingsWithWorkspaceOpenRouterCredential(
     settings,
     workspaceId,
     retainedProductModelId,
+    prepared?.workspaceConnections,
   );
   return apiKey
     ? withWorkspaceOpenRouterCredential(catalogSettings, apiKey, customModels)
@@ -185,12 +196,15 @@ export async function settingsWithWorkspaceOpperCredential(
   workspaceId: string,
   settings: Settings,
   retainedProductModelId?: string | null,
+  prepared?: ModelProviderExecutionInputs,
 ): Promise<Settings> {
-  const activeCustomModels = await listWorkspaceProviderCustomModels(db, {
-    accountId,
-    workspaceId,
-    providerKind: "opper",
-  });
+  const activeCustomModels =
+    prepared?.workspaceModels.opper ??
+    (await listWorkspaceProviderCustomModels(db, {
+      accountId,
+      workspaceId,
+      providerKind: "opper",
+    }));
   const retainedUpstreamModelId = retainedProductModelId?.startsWith(
     WORKSPACE_OPPER_MODEL_ID_PREFIX,
   )
@@ -212,7 +226,13 @@ export async function settingsWithWorkspaceOpperCredential(
       ? [...activeCustomModels, retainedCustomModel]
       : activeCustomModels;
   const catalogSettings = withWorkspaceOpperCatalogProvider(settings, customModels);
-  const apiKey = await loadWorkspaceOpperApiKey(db, settings, workspaceId, retainedProductModelId);
+  const apiKey = await loadWorkspaceOpperApiKey(
+    db,
+    settings,
+    workspaceId,
+    retainedProductModelId,
+    prepared?.workspaceConnections,
+  );
   return apiKey
     ? withWorkspaceOpperCredential(catalogSettings, apiKey, customModels)
     : catalogSettings;
@@ -224,16 +244,22 @@ export async function settingsWithOrganizationProviderCredentials(
   workspaceId: string,
   settings: Settings,
   retainedProductModelId?: string | null,
+  prepared?: ModelProviderExecutionInputs,
 ): Promise<Settings> {
+  if (prepared && prepared.claudeSubscriptionEnabled !== settings.claudeSubscriptionEnabled) {
+    throw new Error("Prepared provider catalog does not match subscription settings");
+  }
   const buildModels = async (
     providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper",
     prefix: string,
   ) => {
-    const active = await listOrganizationModelProviderCustomModelsForWorkspace(db, {
-      accountId,
-      workspaceId,
-      providerKind,
-    });
+    const active =
+      prepared?.organizationModels[providerKind] ??
+      (await listOrganizationModelProviderCustomModelsForWorkspace(db, {
+        accountId,
+        workspaceId,
+        providerKind,
+      }));
     const upstreamModelId = retainedProductModelId?.startsWith(prefix)
       ? retainedProductModelId.slice(prefix.length)
       : null;
@@ -251,28 +277,43 @@ export async function settingsWithOrganizationProviderCredentials(
   };
   const gatewayModels = await buildModels("vercel_gateway", ORGANIZATION_GATEWAY_MODEL_ID_PREFIX);
   const openRouterModels = await buildModels("openrouter", ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX);
-  const gatewayKey = await loadOrganizationModelProviderApiKey(db, settings, {
-    accountId,
-    workspaceId,
-    providerKind: "vercel_gateway",
-  });
+  const gatewayKey = await loadOrganizationModelProviderApiKey(
+    db,
+    settings,
+    {
+      accountId,
+      workspaceId,
+      providerKind: "vercel_gateway",
+    },
+    prepared,
+  );
   const gatewaySettings = gatewayKey
     ? withOrganizationGatewayCredential(settings, gatewayKey, gatewayModels)
     : withOrganizationGatewayCatalogProvider(settings, gatewayModels);
-  const openRouterKey = await loadOrganizationModelProviderApiKey(db, settings, {
-    accountId,
-    workspaceId,
-    providerKind: "openrouter",
-  });
+  const openRouterKey = await loadOrganizationModelProviderApiKey(
+    db,
+    settings,
+    {
+      accountId,
+      workspaceId,
+      providerKind: "openrouter",
+    },
+    prepared,
+  );
   const openRouterSettings = openRouterKey
     ? withOrganizationOpenRouterCredential(gatewaySettings, openRouterKey, openRouterModels)
     : withOrganizationOpenRouterCatalogProvider(gatewaySettings, openRouterModels);
   const opperModels = await buildModels("opper", ORGANIZATION_OPPER_MODEL_ID_PREFIX);
-  const opperKey = await loadOrganizationModelProviderApiKey(db, settings, {
-    accountId,
-    workspaceId,
-    providerKind: "opper",
-  });
+  const opperKey = await loadOrganizationModelProviderApiKey(
+    db,
+    settings,
+    {
+      accountId,
+      workspaceId,
+      providerKind: "opper",
+    },
+    prepared,
+  );
   let result = opperKey
     ? withOrganizationOpperCredential(openRouterSettings, opperKey, opperModels)
     : withOrganizationOpperCatalogProvider(openRouterSettings, opperModels);
@@ -283,18 +324,25 @@ export async function settingsWithOrganizationProviderCredentials(
     const credential =
       kind === "claude_subscription"
         ? null
-        : await loadOrganizationModelProviderApiKey(db, settings, {
-            accountId,
-            workspaceId,
-            providerKind: kind,
-          });
+        : await loadOrganizationModelProviderApiKey(
+            db,
+            settings,
+            {
+              accountId,
+              workspaceId,
+              providerKind: kind,
+            },
+            prepared,
+          );
     if (credential)
       result = withClaudeConnectionCredential(result, kind, credential, "organization", undefined);
-    const workspaceModels = await listWorkspaceProviderCustomModels(db, {
-      accountId,
-      workspaceId,
-      providerKind: kind,
-    });
+    const workspaceModels = prepared
+      ? [...prepared.workspaceModels[kind]]
+      : await listWorkspaceProviderCustomModels(db, {
+          accountId,
+          workspaceId,
+          providerKind: kind,
+        });
     const workspacePrefix = claudeProviderId(kind, "workspace") + "/";
     const workspaceModelId = retainedProductModelId?.startsWith(workspacePrefix)
       ? retainedProductModelId
@@ -317,7 +365,14 @@ export async function settingsWithOrganizationProviderCredentials(
     const workspaceCredential =
       kind === "claude_subscription"
         ? null
-        : await loadWorkspaceProviderApiKey(db, settings, workspaceId, kind, workspaceModelId);
+        : await loadWorkspaceProviderApiKey(
+            db,
+            settings,
+            workspaceId,
+            kind,
+            workspaceModelId,
+            prepared?.workspaceConnections,
+          );
     if (workspaceCredential)
       result = withClaudeConnectionCredential(
         result,
@@ -356,12 +411,19 @@ export async function settingsWithModelProviderCredentials(
   const xaiSettings = codexSettings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionProvider(codexSettings)
     : codexSettings;
+  const prepared = await loadModelProviderExecutionInputs(db, {
+    accountId,
+    workspaceId,
+    claudeSubscriptionEnabled: xaiSettings.claudeSubscriptionEnabled,
+    loadOrganizationCredentials: environmentsEncryptionKeyBytes(xaiSettings) !== null,
+  });
   const gatewaySettings = await settingsWithWorkspaceGatewayCredential(
     db,
     accountId,
     workspaceId,
     xaiSettings,
     productModelId,
+    prepared,
   );
   const openRouterSettings = await settingsWithWorkspaceOpenRouterCredential(
     db,
@@ -369,6 +431,7 @@ export async function settingsWithModelProviderCredentials(
     workspaceId,
     gatewaySettings,
     productModelId,
+    prepared,
   );
   const workspaceProviderSettings = await settingsWithWorkspaceOpperCredential(
     db,
@@ -376,6 +439,7 @@ export async function settingsWithModelProviderCredentials(
     workspaceId,
     openRouterSettings,
     productModelId,
+    prepared,
   );
   const capabilitySettings = await settingsWithOrganizationProviderCredentials(
     db,
@@ -383,12 +447,14 @@ export async function settingsWithModelProviderCredentials(
     workspaceId,
     workspaceProviderSettings,
     productModelId,
+    prepared,
   );
   const direct = await loadDirectModelProviderConnection(
     db,
     capabilitySettings,
     workspaceId,
     productModelId ?? "",
+    prepared.workspaceConnections,
   );
   return direct ? withDirectModelProviders(capabilitySettings, [direct]) : capabilitySettings;
 }

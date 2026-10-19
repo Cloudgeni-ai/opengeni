@@ -89,6 +89,49 @@ Embedded defaults keep Opengeni's own product choices out of the host's
 product. The Opengeni web app does not mount these surfaces and keeps its own
 behavior. Existing explicit settings keep working.
 
+### Computer connection offers
+
+The agent offers `api:connected-machine` without deciding whether the person is
+in a desktop app or browser. `SessionConversation` recognizes that offer and
+renders `ThisComputerCard` with the host's `computerConnection` props. Supply the
+same props through `OpenGeniChat.conversationProps` or `SessionConversationView`.
+The existing `timelineProps.renderAuthNeeded` override still takes precedence.
+
+```tsx
+import "@opengeni/react/this-computer.css";
+
+<SessionConversation
+  sessionId={sessionId}
+  computerConnection={{
+    productName: "Acme",
+    // Inside your desktop app: useThisComputer(yourHost, workspaceId).
+    computer: desktopComputer,
+    // Only needed for outstanding operating-system permissions.
+    onSetup: () => setPermissionGuideOpen(true),
+    // Outside it: your OS-appropriate installer and account/workspace handoff.
+    downloads: [{ label: "Download Acme for Mac", url: yourMacDownloadUrl }],
+    openAppUrl: yourConnectUrl,
+  }}
+/>
+```
+
+For a product using the desktop kit, build `yourConnectUrl` with
+`computerConnectUrl({ scheme: "acme", webUrl, subjectId })` from
+`@opengeni/sdk/app-links`; `webUrl` is the product deployment's native workspace
+or chat destination. Other desktop architectures can supply `onConnect` to open
+their own connection flow instead. A callback finishing does not claim that a
+computer is online: provide the actual `computer` status or personal `machines`
+inventory for that. Keep these props bound to the current signed-in person and
+workspace; callbacks and links come from the host, never the model's event.
+
+Inside the desktop app one click invokes the host connection; on the web, the
+person installs the product's app and returns to **Open app and connect**. System
+permissions and sign-in/consent are not bypassed. Without host configuration the
+default offer explains that computer setup is unavailable. It never substitutes
+an Opengeni download, setup token, shell command, or model-supplied setup URL.
+
+### Embedded defaults
+
 | Default in `SessionConversation` / `OpenGeniChat` | How the host changes it |
 | --- | --- |
 | Live voice is off: a call spends the workspace's credits and asks for the microphone. | `realtimeVoice={true}` (or `conversationProps`), or `createSessionProxyHandler({ realtimeVoice: true })`, which reports `realtimeVoice: true` in the client config. Proxy `realtimeVoice: false` still refuses voice. |

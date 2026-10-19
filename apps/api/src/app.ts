@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { z } from "zod";
 
 import { registerClaudeSubscriptionAccountRoutes } from "./routes/claude-subscription-accounts";
 import { isPreparedMcpConnectPath } from "./prepared-mcp-permissions";
@@ -30,6 +31,7 @@ import {
 import { codemodeSessionRequest } from "./codemode";
 import { siteClampedAgentGuard } from "./site-agent-guard";
 import { siteFrameGuard } from "./site-frame-guard";
+import { registerSiteSessionAccessRoutes } from "./routes/site-session-access";
 import { SiteDataUnsupportedError } from "@opengeni/contracts/site-session-http";
 import {
   SiteSessionPathError,
@@ -1400,8 +1402,11 @@ export function createAppComposition(deps: AppDependencies): {
     let voiceInputAvailable = false;
     let voiceInputProviders: string[] = [];
     const requestedWorkspaceId = c.req.query("workspaceId");
-    if (requestedWorkspaceId !== undefined && requestedWorkspaceId.trim() === "") {
-      throw new HTTPException(422, { message: "workspaceId must not be empty" });
+    if (
+      requestedWorkspaceId !== undefined &&
+      !z.string().uuid().safeParse(requestedWorkspaceId).success
+    ) {
+      throw new HTTPException(422, { message: "workspaceId must be a UUID" });
     }
     const callerScoped =
       requestedWorkspaceId !== undefined ||
@@ -2325,6 +2330,7 @@ export function createAppComposition(deps: AppDependencies): {
   // only classifies the session module's own paths.
   registerInboxRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
   registerWorkspaceIntegrationRoutes(app, routeDeps);

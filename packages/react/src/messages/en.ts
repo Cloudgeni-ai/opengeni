@@ -921,6 +921,8 @@ export const englishMessages = {
   "connectSetup.workspaceConnection": "Workspace connection",
   "connectSetup.yourRequestWasSentGithub":
     "Your request was sent. GitHub asked the owners of your organization to approve Opengeni.",
+  "conversationRenderBoundary.chatUnavailable": "This chat couldn't be displayed.",
+  "conversationRenderBoundary.tryAgain": "Try again",
   "copyButton.copied": "Copied",
   "copyButton.copy": "Copy",
   "counts.agents_one": "{count} agent",
@@ -1277,6 +1279,8 @@ export const englishMessages = {
   "interactionInterventionBanner.open": "Open",
   "interactionInterventionBanner.signInNeeded": "Sign in needed",
   "interactionInterventionBanner.verificationNeeded": "Verification needed",
+  "lib.format.capacityRecoveryExhausted":
+    "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
@@ -1285,7 +1289,7 @@ export const englishMessages = {
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
   "lib.format.now": "now",
   "lib.format.outOfCreditsThisWorkspace":
-    "Out of credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.",
+    "Out of credits for this model. Add credits to continue; the conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
   "lib.format.providerBlockedRequestDetail": "The model provider blocked this request. {detail}",
   "lib.format.reconcileBeforeRetry":
@@ -2451,12 +2455,11 @@ export const englishMessages = {
     "Saving the remaining conversation context.",
   "realtime.realtimeControl.speaking": "Speaking",
   "realtime.realtimeControl.startVoice": "Start voice",
-  "realtime.realtimeControl.startVoiceWithLabel": "Start voice with {label}",
   "realtime.realtimeControl.supergrokXaiPlan": "SuperGrok / xAI plan",
-  "realtime.realtimeControl.talkLiveWithModellabel": "Talk live with {modelLabel}.",
+  "realtime.realtimeControl.talkLiveWithTheAgent": "Talk live with the agent.",
   "realtime.realtimeControl.theConnectionCouldNotBe": "The connection could not be started.",
   "realtime.realtimeControl.theVoiceSessionCouldNot": "The voice session could not be created.",
-  "realtime.realtimeControl.tryVoiceAgainWithLabel": "Try voice again with {label}",
+  "realtime.realtimeControl.tryVoiceAgain": "Try voice again",
   "realtime.realtimeControl.unmuteMicrophone": "Unmute microphone",
   "realtime.realtimeControl.unmuteVoiceAudio": "Unmute voice audio",
   "realtime.realtimeControl.usageLimitReached": "Usage limit reached",
@@ -2951,7 +2954,7 @@ export const englishMessages = {
   "skillDiscovery.viewAllSkills": "View all skills",
   "thisComputer.title": "Use this computer",
   "thisComputer.offer": "Let agents work on {machineName}.",
-  "thisComputer.offerAction": "Set up",
+  "thisComputer.offerAction": "Use this computer",
   "thisComputer.notNow": "Not now",
   "thisComputer.intro": "Agents can work on {machineName} for you, like a helper at the keyboard.",
   "thisComputer.abilities.screen": "See the screen and use apps",
@@ -3033,7 +3036,14 @@ export const englishMessages = {
   "thisComputer.card.getApp":
     "Install the {productName} app on your computer, then turn on “Use this computer”.",
   "thisComputer.card.getAppAction": "Get {productName} for desktop",
-  "thisComputer.card.note": "Only you can use your computer, in your own chats.",
+  "thisComputer.card.note":
+    "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app.",
+  "thisComputer.card.openApp": "Open app and connect",
+  "thisComputer.card.installThenOpen":
+    "Install the app, then return here to open it and connect. The app will confirm your account and ask for any system permissions it needs.",
+  "thisComputer.card.connectFailed": "Couldn't open the connection flow. Try again.",
+  "thisComputer.card.hostSetupUnavailable":
+    "This app hasn't enabled computer setup here. Ask its administrator how to connect your computer.",
   "timeline.activityRail.archived": "Archived.",
   "timeline.activityRail.brief": "Brief",
   "timeline.activityRail.decision": "Decision",

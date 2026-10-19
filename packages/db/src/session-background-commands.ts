@@ -473,6 +473,66 @@ export async function listSessionBackgroundCommands(
   );
 }
 
+export type WorkspaceBackgroundCommand = SessionBackgroundCommand & {
+  sessionTitle: string | null;
+  machineName: string | null;
+};
+
+/** Caller supplies the ordinary session-list audience inside subject RLS. */
+export async function listWorkspaceBackgroundCommandsInScope(
+  db: Database,
+  workspaceId: string,
+  filters: SQL[],
+  afterId?: string,
+): Promise<{ commands: WorkspaceBackgroundCommand[]; nextCursor: string | null }> {
+  const command = schema.sessionBackgroundCommands;
+  const rows = await db
+    .select({
+      ...commandReadColumns,
+      sessionTitle: schema.sessions.title,
+      // Resolve the immutable launch target, never the session's current pointer.
+      // A removed or no-longer-visible machine has no name in this projection.
+      machineName: sql<string | null>`(select machine.name from ${schema.sandboxes} machine
+        where machine.account_id = ${command.accountId} and (
+          (${command.provider} = 'connected_machine'
+            and machine.workspace_id = ${command.controlWorkspaceId}
+            and machine.enrollment_id = ${command.enrollmentId})
+          or (${command.provider} = 'managed' and machine.id = (
+            select process.route_target_id from ${schema.sandboxRetainedProcesses} process
+            where process.id = ${command.retainedProcessId}
+              and process.workspace_id = ${command.workspaceId}
+              and process.session_id = ${command.sessionId})))
+        order by machine.id limit 1)`,
+    })
+    .from(command)
+    .innerJoin(
+      schema.sessions,
+      and(
+        eq(schema.sessions.workspaceId, command.workspaceId),
+        eq(schema.sessions.id, command.sessionId),
+      ),
+    )
+    .where(
+      and(
+        eq(command.workspaceId, workspaceId),
+        inArray(command.state, ["running", "stopping"]),
+        ...(afterId ? [sql`${command.id} > ${afterId}::uuid`] : []),
+        ...filters,
+      ),
+    )
+    .orderBy(asc(command.id))
+    .limit(101);
+  const page = rows.slice(0, 100);
+  return {
+    commands: page.map((row) => ({
+      ...mapCommand(row),
+      sessionTitle: row.sessionTitle,
+      machineName: row.machineName,
+    })),
+    nextCursor: rows.length > 100 ? page.at(-1)!.id : null,
+  };
+}
+
 /** @internal Caller must already hold the canonical session/control fence. */
 export async function insertManagedSessionBackgroundCommandInTransaction(
   db: Database,
