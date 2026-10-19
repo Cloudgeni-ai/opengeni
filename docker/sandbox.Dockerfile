@@ -49,8 +49,7 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     --mount=type=cache,id=opengeni-sandbox-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
     set -eux; \
     rust_target="$(xx-cargo --print-target-triple)"; \
-    xx-cargo build --locked --release --target-dir /src/agent/target \
-      -p opengeni-computer-native -p opengeni-agent; \
+    xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native -p opengeni-agent; \
     mkdir -p /out; \
     install -m 0755 "target/${rust_target}/release/opengeni-computer-native" /out/opengeni-computer-native; \
     xx-verify /out/opengeni-computer-native; \
