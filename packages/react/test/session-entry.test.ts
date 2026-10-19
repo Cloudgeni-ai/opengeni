@@ -145,7 +145,12 @@ describe("session-only entry", () => {
     );
     // Retained conversation views for a reopen, on the shared-query store.
     expect(reactSources.some((id) => id.endsWith("/src/hooks/session-view-cache.ts"))).toBe(true);
-    expect(reactSources.length).toBe(39);
+    // Custom layouts mark an open conversation read through the shared hook and its pure model.
+    expect(
+      reactSources.some((id) => id.endsWith("/src/hooks/use-session-read-acknowledgement.ts")),
+    ).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/session-attention-model.ts"))).toBe(true);
+    expect(reactSources.length).toBe(41);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

@@ -132,6 +132,22 @@ within seconds. There is no Queue choice beside Send and no Queue or Steer
 words; a message sent while the workstream is paused waits and shows as a
 waiting message. Add `offerQueue: true` to offer Queue beside Send again.
 
+An open conversation marks itself read for the signed-in person while they can
+see it: its timeline is on screen, the page is visible, the window is focused,
+and it shows the live end of the conversation. Each delivered reply, question
+or failure is acknowledged once (never per streamed token) through
+`updateSessionAttention` with `acknowledgedThroughSequence`, so a late request
+never hides a newer reply. Unread state, and notifications your server derives
+from it (for example a `turn.completed` webhook that skips sessions where
+`session.unread` is false), then leave out replies the person already watched.
+A timeline your layout hides (for example a collapsed bar that keeps only the
+composer), a background tab, or an unfocused window acknowledges nothing. Pass
+`readAcknowledgement={false}` when viewing must not count as reading. Behind
+`createSessionProxyHandler` this uses its `PUT …/attention` route, which
+accepts only `{ unread: false }`. Custom layouts around
+`useSessionConversation` call `useSessionReadAcknowledgement` (from
+`@opengeni/react/session`) with their own `active` signal.
+
 Bearer-token apps pass `headers` (a function runs per request) or a custom
 `fetch`; a `client` passed with `baseUrl` replaces the one the component
 creates:

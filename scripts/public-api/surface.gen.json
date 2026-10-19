@@ -33826,6 +33826,7 @@
       "SESSION_EVENT_BROWSER_PENDING_MAX_COUNT": "value",
       "SESSION_STATUS_META": "value",
       "sessionAdmissionBlocked": "value",
+      "SessionAttentionClientLike": "type",
       "sessionAuthRecommendation": "value",
       "SessionCapabilitiesState": "type",
       "SessionCapabilityAccessPlan": "type",
@@ -34037,6 +34038,8 @@
       "UseSessionModelAccountOptions": "type",
       "UseSessionModelAccountResult": "type",
       "UseSessionOptions": "type",
+      "useSessionReadAcknowledgement": "value",
+      "UseSessionReadAcknowledgementInput": "type",
       "UseSessionResult": "type",
       "useSessionSecrets": "value",
       "useSlashCommands": "value",
@@ -34932,6 +34935,7 @@
       "readClientConfig": "value",
       "ReasoningItem": "type",
       "SandboxItem": "type",
+      "SessionAttentionClientLike": "type",
       "SessionClientLike": "type",
       "SessionConversationController": "type",
       "SessionEventsConnectionState": "type",
@@ -34983,6 +34987,8 @@
       "UseSessionMcpApprovalPolicyOptions": "type",
       "UseSessionMcpApprovalPolicyResult": "type",
       "UseSessionOptions": "type",
+      "useSessionReadAcknowledgement": "value",
+      "UseSessionReadAcknowledgementInput": "type",
       "UseSessionResult": "type",
       "useTurnQueue": "value",
       "UseTurnQueueOptions": "type",
@@ -34996,6 +35002,7 @@
       "sessionGoalStateLabel": "value"
     },
     "@opengeni/react/session-attention-model": {
+      "readAcknowledgementFrontier": "value",
       "SESSION_ATTENTION_EVENT_TYPES": "value",
       "sessionAttentionReadThroughSequence": "value"
     },

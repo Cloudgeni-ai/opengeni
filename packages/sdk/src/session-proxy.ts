@@ -1128,6 +1128,30 @@ export function createSessionProxyHandler(
           }
           return json(await client.requestJson("PATCH", session, { title }));
         }
+        case "PUT attention": {
+          // Only "I have read this", for the resolved user's own read state:
+          // an open conversation acknowledges replies the person watched.
+          const through = body?.acknowledgedThroughSequence;
+          const keys = Object.keys(body ?? {});
+          if (
+            body?.unread !== false ||
+            keys.some((key) => key !== "unread" && key !== "acknowledgedThroughSequence") ||
+            (through !== undefined &&
+              (typeof through !== "number" || !Number.isSafeInteger(through) || through < 0))
+          ) {
+            reject(
+              400,
+              "invalid_body",
+              "Only { unread: false, acknowledgedThroughSequence? } may be set.",
+            );
+          }
+          return json(
+            await client.requestJson("PUT", `${session}/attention`, {
+              unread: false,
+              ...(through !== undefined ? { acknowledgedThroughSequence: through } : {}),
+            }),
+          );
+        }
         case "GET events":
           return await listEvents(client, `${session}/events`, query, call);
         case "GET events/stream":
