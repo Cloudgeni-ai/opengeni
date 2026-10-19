@@ -103,7 +103,7 @@ async function fixture() {
     });
     await shared.admin`update enrollments set connection_instance_id = 'connection-1',
       connection_generation = 1, connection_lease_expires_at = now() + interval '1 hour',
-      workspace_root = '/Users/alex' where id = ${machine!.enrollmentId}`;
+      workspace_root = '/Users/user' where id = ${machine!.enrollmentId}`;
     return machine!;
   };
   return {
@@ -143,7 +143,7 @@ async function chatOnMachine(f: Fixture, sandboxId: string) {
       subjectId: f.owner,
       expectedEpoch: session.activeEpoch,
       targetSandboxId: sandboxId,
-      workingDir: "/Users/alex/project",
+      workingDir: "/Users/user/project",
     }),
   ).toMatchObject({ swapped: true });
   return session.id;
@@ -237,7 +237,7 @@ async function firstMessageIsAdmitted(f: Fixture, sessionId: string, subjectId: 
 const onTheMachine = (sandboxId: string) => ({
   activeSandboxId: sandboxId,
   activeEpoch: 1,
-  workingDir: "/Users/alex/project",
+  workingDir: "/Users/user/project",
 });
 
 describe("a fork runs on its source's machine", () => {

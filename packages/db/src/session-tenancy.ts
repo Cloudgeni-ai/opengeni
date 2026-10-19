@@ -12,7 +12,7 @@ import {
   withWorkspaceSubjectRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "./database";
-import { setActiveSandbox } from "./index";
+import { setActiveSandbox } from "./active-sandbox";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { registerSessionWorkflowWakeInTransaction } from "./session-control";
 import { endSessionRealtimeForPrivateTransitionInTransaction } from "./session-realtime";

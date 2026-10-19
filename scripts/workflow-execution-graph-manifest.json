@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "d102bf773c7abd10de2e2ef752c88571c5c6a29686154e0a0abf112dcdb09770"
+      "sha256": "6805bdded9e4fb8547c18a446a82967f7b2b223f73f152c0ed2d9d29a83d8e2e"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -367,7 +367,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "macOS codesign + notarize (if creds present)",
-      "sha256": "04409b0e9e5fec5243e7686dc8c4c43ce5628c8a45b2a1785b6ebdac17696d06"
+      "sha256": "e969d335e54c74e801ac8817faf163438be50da56e81560b9b13e26f604d327d"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",

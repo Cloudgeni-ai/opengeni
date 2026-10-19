@@ -41,13 +41,18 @@ import {
 
 export const MIGRATIONS_DIR = "packages/db/drizzle";
 
-// The complete 0697 statement (including comments) only reads catalog source
-// and replaces a routine definition. Its embedded SELECT runs in that routine,
+// Each complete statement here (including comments) only reads catalog source
+// and replaces a routine definition. The writes it names run in that routine,
 // not during migration. Bind this classification to reviewed bytes: changed
 // statements keep conservative analysis, as do every adjacent statement and
 // all migration-time backfills. The grandfather lists below remain frozen.
-const REVIEWED_ROUTINE_SOURCE_PATCH_SHA256 =
-  "68249f30d87220cb0cdc78882a237613e32e481122beb96ca5cadde0c64f46e4";
+const REVIEWED_ROUTINE_SOURCE_PATCH_SHA256 = new Set([
+  // 0697: one routine source patch.
+  "68249f30d87220cb0cdc78882a237613e32e481122beb96ca5cadde0c64f46e4",
+  // 0855 statements 3 and 4: patch both fork routines, then check the patch.
+  "0b02e5d3e8647e158836970622896e15d0ecc8c0bbd9c1a06583594e648639a3",
+  "2ec24b44e91326ab518e13ea90d1b65bbebafb24ec1361ce589032ebe9c7904b",
+]);
 
 /**
  * Migrations that shipped before this class was identified. Their bytes are
@@ -592,8 +597,9 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
     for (const rawStatement of splitStatements(raw)) {
       statementNumber += 1;
       if (
-        createHash("sha256").update(rawStatement).digest("hex") ===
-        REVIEWED_ROUTINE_SOURCE_PATCH_SHA256
+        REVIEWED_ROUTINE_SOURCE_PATCH_SHA256.has(
+          createHash("sha256").update(rawStatement).digest("hex"),
+        )
       )
         continue;
       const statement = stripComments(rawStatement);
