@@ -1,5 +1,25 @@
 # @opengeni/runtime
 
+## 4.1.3
+
+### Patch Changes
+
+- 1e77fbc: browser_open now returns and observes the tab it opened. Before, it picked the first tab in the profile showing the requested URL, so on a person's own Chrome an older tab, or another session's tab on the same URL, could be handed to the agent. Parallel sessions then acted on one shared tab and failed.
+- Updated dependencies [404e017]
+  - @opengeni/sdk@4.1.2
+  - @opengeni/codemode@4.1.2
+  - @opengeni/agent-proto@4.1.2
+  - @opengeni/capabilities@4.1.2
+  - @opengeni/codex@4.1.2
+  - @opengeni/config@4.1.2
+  - @opengeni/contracts@4.1.2
+  - @opengeni/interaction@4.1.2
+  - @opengeni/network@4.1.2
+  - @opengeni/observability@4.1.2
+  - @opengeni/tool-gateway@4.1.2
+  - @opengeni/vaults@4.1.2
+  - @opengeni/xai-subscription@4.1.2
+
 ## 4.1.1
 
 ### Minor Changes
