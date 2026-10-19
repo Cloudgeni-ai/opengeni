@@ -366,6 +366,12 @@ export function execDeadlineHint(seconds: number): string {
  *  `SelfhostedControlError.neverSent`. Reserved (never sent by the agent). */
 export const NEVER_SENT_DETAIL_KEY = "_never_sent";
 
+/** The reserved `detail` key the transport sets to "1" when a no-responder fault
+ *  comes after it already waited out its reconnect window for that exact process.
+ *  Re-issuing would only wait the same window again. Reserved (never sent by the
+ *  agent). */
+export const RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY = "_responder_wait_exhausted";
+
 /** Build a synthesized AGENT_OFFLINE `AgentError` — the control plane uses this
  *  when no agent responds on the subject at all. `neverSent` marks that the request
  *  provably never reached the machine (no connection / no responder), which makes it
@@ -555,7 +561,13 @@ export class NatsControlRpc implements ControlRpc {
       if (isNoRespondersError(err)) {
         // No subscriber on the subject at all → the request reached no responder and
         // was NOT delivered → NEVER SENT (provably not executed): safe to re-issue.
-        return offlineControlResponse(req.requestId, true);
+        const offline = offlineControlResponse(req.requestId, true);
+        // A connection with headers already waited for this process to come back
+        // (the reply recovery window); say so, so callers do not wait it again.
+        if (conn.supportsHeaders && offline.error) {
+          offline.error.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY] = "1";
+        }
+        return offline;
       }
       if (isRequestTimeoutError(err)) {
         // A responder may exist but the request timed out → a transient blip. AMBIGUOUS
