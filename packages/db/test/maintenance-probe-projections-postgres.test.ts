@@ -610,7 +610,7 @@ test("strict-owner backfill retains preexisting work and restores FORCE RLS", as
   // at head rebuilds its projections with 0848's columns, so these run after it
   // to widen them again, as on a database migrated in order.
   const widening = await Promise.all(
-    ["0857_compute_commands_settle_by_push.sql"].map(
+    ["0858_compute_commands_settle_by_push.sql"].map(
       async (name) => await readFile(new URL(`../drizzle/${name}`, import.meta.url), "utf8"),
     ),
   );
