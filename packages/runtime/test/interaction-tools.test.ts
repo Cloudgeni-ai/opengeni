@@ -1249,52 +1249,77 @@ describe("interaction attempt tools", () => {
     expect(browser.acted).toEqual(["tab-2"]);
   });
 
-  test("an action waits for a resume still in flight and does not run", async () => {
-    const browser = stoppedBrowser();
-    // The resume's own tab inventory is slow; other listings answer at once.
-    let releaseInventory!: () => void;
-    const inventoryHeld = new Promise<void>((resolve) => (releaseInventory = resolve));
-    let signalHeld!: () => void;
-    const held = new Promise<void>((resolve) => (signalHeld = resolve));
-    let heldOnce = false;
-    const definitions = createInteractionAttemptToolDefinitions({
-      transport: partialTransport({
-        ...browser.transport,
-        listBrowserTargets: async (...args) => {
-          if (browser.running() && !heldOnce) {
-            heldOnce = true;
-            signalHeld();
-            await inventoryHeld;
-          }
-          return await browser.transport.listBrowserTargets!(...args);
-        },
-      }),
-      workspaceId,
-      sessionId,
-      selectedTools: ["browser_observe", "browser_act"],
-      permissions: ["sessions:read", "sessions:control"],
-    });
-    const call = (name: string, args: Record<string, unknown>) =>
-      definitions
-        .find((definition) => definition.modelName === `interaction__${name}`)!
-        .execute(args, {
-          operationId: randomUUID(),
-          caller: { kind: "model", subjectId: "model:test" },
+  test.each(["succeeds", "fails"] as const)(
+    "an action waits for a resume still in flight and does not run (inventory %s)",
+    async (inventory) => {
+      const browser = stoppedBrowser();
+      // The resume's own tab inventory is slow; other listings answer at once.
+      let releaseInventory!: (outcome: "succeeds" | "fails") => void;
+      const inventoryHeld = new Promise<"succeeds" | "fails">(
+        (resolve) => (releaseInventory = resolve),
+      );
+      let signalHeld!: () => void;
+      const held = new Promise<void>((resolve) => (signalHeld = resolve));
+      let heldOnce = false;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          ...browser.transport,
+          listBrowserTargets: async (...args) => {
+            if (browser.running() && !heldOnce) {
+              heldOnce = true;
+              signalHeld();
+              if ((await inventoryHeld) === "fails") {
+                throw new OpenGeniApiError(503, "browser controller is unavailable");
+              }
+            }
+            return await browser.transport.listBrowserTargets!(...args);
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_observe", "browser_act"],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const call = (name: string, args: Record<string, unknown>) =>
+        definitions
+          .find((definition) => definition.modelName === `interaction__${name}`)!
+          .execute(args, {
+            operationId: randomUUID(),
+            caller: { kind: "model", subjectId: "model:test" },
+          });
+      const observe = call("browser_observe", { browserSessionId });
+      await held;
+      const press = () =>
+        call("browser_act", { browserSessionId, action: { type: "press", key: "Enter" } }).catch(
+          (error: unknown) => error,
+        );
+      const act = press();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      releaseInventory(inventory);
+      const [observed, acted] = await Promise.all([observe, act]);
+      expect(browser.acted).toEqual([]);
+      expect(browser.resumes).toHaveLength(1);
+      if (inventory === "succeeds") {
+        expect((observed as { isError?: boolean }).isError).toBeFalsy();
+        expect(acted).toMatchObject({
+          isError: true,
+          structuredContent: { error: { code: "browser_resumed" } },
         });
-    const observe = call("browser_observe", { browserSessionId });
-    await held;
-    const act = call("browser_act", { browserSessionId, action: { type: "press", key: "Enter" } });
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    releaseInventory();
-    const [observed, acted] = await Promise.all([observe, act]);
-    expect(observed.isError).toBeFalsy();
-    expect(acted).toMatchObject({
-      isError: true,
-      structuredContent: { error: { code: "browser_resumed" } },
-    });
-    expect(browser.acted).toEqual([]);
-    expect(browser.resumes).toHaveLength(1);
-  });
+      } else {
+        // The resume's failure is the action's answer; the next action is told
+        // about the reloaded tabs before any action runs.
+        expect(acted).toBeInstanceOf(OpenGeniApiError);
+        expect(await press()).toMatchObject({
+          isError: true,
+          structuredContent: { error: { code: "browser_resumed" } },
+        });
+        expect(browser.acted).toEqual([]);
+      }
+      expect((await press()) as object).not.toBeInstanceOf(Error);
+      expect(browser.acted).toEqual(["tab-2"]);
+      expect(browser.resumes).toHaveLength(1);
+    },
+  );
 
   test("a tab opened before the browser stopped is not opened again", async () => {
     const browser = stoppedBrowser({ running: true });

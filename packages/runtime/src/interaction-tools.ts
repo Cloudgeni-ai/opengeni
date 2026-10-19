@@ -913,17 +913,28 @@ export function createInteractionAttemptToolDefinitions(
   // that, or one whose resume no result has shown yet, has new tab IDs and
   // reloaded pages the caller has not seen.
   let resumeCount = 0;
+  const resumeFailures = new WeakSet<Error>();
   type ResumedTabs = z.infer<typeof BrowserTargetListResponse>;
   /** Resumes in flight, shared by concurrent calls on the same browser. */
   const resumesInFlight = new Map<string, Promise<ResumedTabs | null>>();
-  /** Each browser's latest completed resume. */
-  const lastResumes = new Map<string, { count: number; tabs: ResumedTabs; shown: boolean }>();
-  /** This browser's completed resume that the caller of a call started at
-   * `startedAt` has not seen, if any. */
+  /** Each browser's latest resume that may have reloaded its tabs, with the
+   * restored tabs once they were read. */
+  const lastResumes = new Map<
+    string,
+    { count: number; tabs: ResumedTabs | null; shown: boolean }
+  >();
+  /** This browser's resume that the caller of a call started at `startedAt`
+   * has not seen, if any. */
   const unseenResume = (browserSessionId: string, startedAt: number) => {
     const resume = lastResumes.get(browserSessionId);
-    return resume && (resume.count > startedAt || !resume.shown) ? resume.tabs : null;
+    return resume && (resume.count > startedAt || !resume.shown) ? resume : null;
   };
+  /** The tabs a resume restored, read again if the resume could not. */
+  const restoredTabs = async (
+    browserSessionId: string,
+    resume: { tabs: ResumedTabs | null },
+  ): Promise<ResumedTabs> =>
+    resume.tabs ?? (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId));
   /** A result about the browser's current tabs reached the caller. */
   const markResumeShown = (browserSessionId: string) => {
     const resume = lastResumes.get(browserSessionId);
@@ -945,11 +956,15 @@ export function createInteractionAttemptToolDefinitions(
     // The browser was resumed while this call ran, so its refusal came from
     // before that resume.
     const completed = lastResumes.get(browserSessionId);
-    if (completed && completed.count > startedAt) return completed.tabs;
+    if (completed && completed.count > startedAt) {
+      return await restoredTabs(browserSessionId, completed);
+    }
     const count = ++resumeCount;
-    const resume = resumeBrowser(browserSessionId, operationId).then((tabs) => {
-      if (tabs) lastResumes.set(browserSessionId, { count, tabs, shown: false });
-      return tabs;
+    const resume = resumeBrowser(browserSessionId, operationId, count).catch((error: unknown) => {
+      // A failed resume is the answer for every call waiting on it; none of
+      // them retries it.
+      if (error instanceof Error) resumeFailures.add(error);
+      throw error;
     });
     resumesInFlight.set(browserSessionId, resume);
     try {
@@ -961,6 +976,7 @@ export function createInteractionAttemptToolDefinitions(
   const resumeBrowser = async (
     browserSessionId: string,
     operationId: string,
+    count: number,
   ): Promise<z.infer<typeof BrowserTargetListResponse> | null> => {
     let before: z.infer<typeof BrowserSession>;
     try {
@@ -975,6 +991,13 @@ export function createInteractionAttemptToolDefinitions(
       browserSessionId,
       { operationId: derivedOperationId("browser-tool-resume", operationId, browserSessionId) },
     );
+    const resumed = { count, tabs: null as ResumedTabs | null, shown: false };
+    if (response.operation.state !== "failed") {
+      // From here the browser may have reloaded its tabs, even if what
+      // follows fails. Earlier tab IDs are gone.
+      lastResumes.set(browserSessionId, resumed);
+      currentTab.use(browserSessionId, null);
+    }
     const failure = response.operation.error;
     if (response.operation.state === "outcome_unknown") {
       throw new OpenGeniApiError(
@@ -1000,11 +1023,14 @@ export function createInteractionAttemptToolDefinitions(
         { code: "browser_resuming", retryable: true },
       );
     }
-    const tabs = await input.transport.listBrowserTargets(input.workspaceId, browserSessionId);
-    // Earlier tab IDs are gone. Later calls on the current tab use the
-    // restored selected tab, whether or not this call goes on to succeed.
-    currentTab.use(browserSessionId, tabs.targets.find((target) => target.selected)?.id ?? null);
-    return tabs;
+    resumed.tabs = await input.transport.listBrowserTargets(input.workspaceId, browserSessionId);
+    // Later calls on the current tab use the restored selected tab, whether
+    // or not this call goes on to succeed.
+    currentTab.use(
+      browserSessionId,
+      resumed.tabs.targets.find((target) => target.selected)?.id ?? null,
+    );
+    return resumed.tabs;
   };
   /** After a resume, tab IDs are new and unsaved page state may be gone, so a
    * call aimed at an earlier tab does not run. Report the restored tabs and
@@ -1060,12 +1086,13 @@ export function createInteractionAttemptToolDefinitions(
       tab = await currentTab.target(value);
       if (afterResume === "report") {
         // A resume still in flight, or one no result has shown yet, means
-        // the page this call would act on reloaded unseen.
-        const inFlight = resumesInFlight.get(tab.browserSessionId);
-        const resumedTabs = inFlight
-          ? await inFlight.catch(() => null)
-          : unseenResume(tab.browserSessionId, startedAt);
-        if (resumedTabs) throw await resumedBrowserError(resumedTabs);
+        // the page this call would act on reloaded unseen. A failed resume
+        // fails this call too.
+        await resumesInFlight.get(tab.browserSessionId);
+        const unseen = unseenResume(tab.browserSessionId, startedAt);
+        if (unseen) {
+          throw await resumedBrowserError(await restoredTabs(tab.browserSessionId, unseen));
+        }
       }
       const output = await run(tab);
       currentTab.use(tab.browserSessionId, tab.targetId);
@@ -1073,7 +1100,7 @@ export function createInteractionAttemptToolDefinitions(
       return output;
     } catch (error) {
       if (tab && isGoneBrowserError(error)) currentTab.failed(tab);
-      if (!isBrowserNotRunningError(error)) throw error;
+      if (!isBrowserNotRunningError(error) || resumeFailures.has(error as Error)) throw error;
       const browser = tab ?? (await currentTab.session(value.browserSessionId));
       const resumed = await resumePausedBrowser(
         browser.browserSessionId,
