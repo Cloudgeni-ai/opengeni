@@ -494,6 +494,7 @@ import { withPoolWakeServiceScopeInTransaction } from "./subscription-session-ac
 import {
   readSubscriptionProviderCutoverState as readCoreProviderCutoverState,
   readSubscriptionSessionBinding as readCoreSessionBinding,
+  recordSubscriptionCoreRateLimitResetInTransaction,
 } from "./subscription-core-repository";
 import {
   wakeSubscriptionCoreCapacityWaiters,
@@ -26569,12 +26570,14 @@ export async function fenceSubscriptionCoreCodexResetCredit(
 
 /**
  * Persist the exact provider outcome of a core redemption with its audit
- * record. A credit that restores capacity clears the connection's stored
- * exhaustion only when it was observed with the connection's current
- * refresh generation (an observation of an older credential is left for the
- * generation fence to discard), and returns a core wake for the caller to
- * deliver after commit. The legacy credential columns and outbox are never
- * touched.
+ * record. A credit that restores capacity (`reset` or `alreadyRedeemed`)
+ * invalidates the connection's stored usage windows and exhaustion deadline
+ * (`recordSubscriptionCoreRateLimitResetInTransaction`: they were read before
+ * the reset), so a woken waiter places on the connection again instead of
+ * re-waiting on a stale window's reset; only a quota observed with the
+ * connection's current refresh generation is rewritten. It returns a core
+ * wake for the caller to deliver after commit. The legacy credential columns
+ * and outbox are never touched.
  */
 export async function completeSubscriptionCoreCodexResetRedemption(
   db: Database,
@@ -26645,19 +26648,12 @@ export async function completeSubscriptionCoreCodexResetRedemption(
         if (!completed) throw new Error("Codex redemption completion returned no row");
         const restoresCapacity = input.outcome === "reset" || input.outcome === "alreadyRedeemed";
         if (restoresCapacity) {
-          await tx.execute(sql`
-            update subscription_connection_quota quota
-            set quota = quota.quota || '{"exhaustedUntil": null, "exhaustedKind": null}'::jsonb,
-                revision = quota.revision + 1,
-                updated_at = clock_timestamp()
-            from subscription_connections connection
-            where quota.account_id = ${input.accountId}::uuid
-              and quota.connection_id = ${current.credentialId}::uuid
-              and connection.account_id = quota.account_id
-              and connection.id = quota.connection_id
-              and connection.provider = 'codex'
-              and quota.observed_refresh_generation = connection.refresh_generation
-              and quota.quota->>'exhaustedUntil' is not null`);
+          await recordSubscriptionCoreRateLimitResetInTransaction(tx as unknown as Database, {
+            accountId: input.accountId,
+            provider: "codex",
+            connectionId: current.credentialId,
+            resetAt: completedAt,
+          });
         }
         await tx.insert(schema.auditEvents).values(
           withLosslessContentWriteVersion(
