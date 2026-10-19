@@ -23,7 +23,7 @@ import {
   type NetworkRouteConfiguration as NetworkRouteConfigurationValue,
   type NetworkRouteConsistency as NetworkRouteConsistencyValue,
 } from "@opengeni/contracts";
-import { and, desc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, ne, notInArray, sql } from "drizzle-orm";
 import { attachedDeviceGenerationMatches } from "./attached-browser-devices";
 import { type Database, withRlsContext } from "./database";
 import {
@@ -476,6 +476,71 @@ async function replayedMutation(
 
 /** Lifecycles that never return to use; `includeTerminal: false` omits them in SQL. */
 const TERMINAL_INTERACTION_LIFECYCLES = ["ended", "failed"] as const;
+
+/**
+ * Saveable browsers on one controller, least recently used first, that a full
+ * controller may suspend to make room for a new browser. Only active browsers
+ * with a private checkpoint, bound to this exact placement instance, unused
+ * since `idleBefore` and with no lifecycle operation in flight qualify.
+ */
+export async function listBrowserCapacitySuspendCandidates(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    placement: InteractionPlacement;
+    placementInstanceId: string;
+    excludeBrowserSessionId: string;
+    idleBefore: Date;
+    limit: number;
+  },
+): Promise<string[]> {
+  const placementFilter =
+    input.placement.kind === "connected_machine"
+      ? and(
+          eq(schema.browserSessions.placementKind, "connected_machine"),
+          eq(schema.browserSessions.connectedSandboxId, input.placement.sandboxId),
+        )
+      : input.placement.kind === "sandbox_group"
+        ? and(
+            eq(schema.browserSessions.placementKind, "sandbox_group"),
+            eq(schema.browserSessions.sandboxGroupId, input.placement.sandboxGroupId),
+          )
+        : null;
+  if (!placementFilter) return [];
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select({ id: schema.browserSessions.id })
+        .from(schema.browserSessions)
+        .where(
+          and(
+            eq(schema.browserSessions.workspaceId, input.workspaceId),
+            eq(schema.browserSessions.lifecycle, "active"),
+            placementFilter,
+            eq(schema.browserSessions.placementInstanceId, input.placementInstanceId),
+            sql`${schema.browserSessions.controllerGeneration} is not null`,
+            sql`(${schema.browserSessions.capabilities} ->> 'privateCheckpoint') = 'true'`,
+            lt(schema.browserSessions.lastUsedAt, input.idleBefore),
+            ne(schema.browserSessions.id, input.excludeBrowserSessionId),
+            sql`not exists (
+              select 1 from ${schema.interactionOperations}
+              where ${schema.interactionOperations.workspaceId} = ${input.workspaceId}
+                and ${schema.interactionOperations.resourceKind} = 'browser_session'
+                and ${schema.interactionOperations.resourceId} = ${schema.browserSessions.id}
+                and ${schema.interactionOperations.state} in ('prepared', 'dispatched')
+            )`,
+          ),
+        )
+        .orderBy(schema.browserSessions.lastUsedAt, schema.browserSessions.id)
+        .limit(input.limit);
+      return rows.map((row) => row.id);
+    },
+    CONSISTENT_READ,
+  );
+}
 
 export async function listBrowserSessions(
   db: Database,

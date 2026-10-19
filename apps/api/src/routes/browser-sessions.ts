@@ -128,6 +128,7 @@ import {
   InteractionResourceNotFoundError,
   InteractionResourceStateError,
   listAuthRuns,
+  listBrowserCapacitySuspendCandidates,
   listBrowserSessions,
   listAttachedBrowserDevices,
   interactionControllerGone,
@@ -443,223 +444,249 @@ export function registerBrowserSessionRoutes(
       if (sourceRead.status === "rejected") throw sourceRead.reason;
       const sourceSession = sourceRead.value;
       stages.mark("source_session");
-      const response = await withBrowserPlacement(
-        sourceSession,
-        grant,
-        existing?.session.placement ?? request.placement ?? null,
-        existing?.session.controller?.placementInstanceId ?? null,
-        "browser.create",
-        context.req.raw.signal,
-        async (placement) => {
-          stages.mark("placement_resolve");
-          let revisionAuthority: BrowserRevisionArtifactAuthority | null = null;
-          if (!prepared) {
-            prepared = await prepareBrowserSessionCreate(
-              deps.db,
-              browserCreateInput(grant, workspaceId, request, placement.placement),
-            );
-          }
-          stages.mark("prepare");
-          if (isTerminalOperation(prepared.operation.state)) return prepared;
-
-          if (prepared.session.baseRevisionId && !revisionAuthority) {
-            if (!prepared.session.identityId) {
-              throw new BrowserIdentityStateError("BrowserSession base revision has no identity");
+      // A full controller makes room once by saving its least recently used
+      // idle browser; the create then runs again under the same operation.
+      let capacitySuspendAllowed = true;
+      const createOnPlacement = async () =>
+        await withBrowserPlacement(
+          sourceSession,
+          grant,
+          existing?.session.placement ?? request.placement ?? null,
+          existing?.session.controller?.placementInstanceId ?? null,
+          "browser.create",
+          context.req.raw.signal,
+          async (placement) => {
+            stages.mark("placement_resolve");
+            let revisionAuthority: BrowserRevisionArtifactAuthority | null = null;
+            if (!prepared) {
+              prepared = await prepareBrowserSessionCreate(
+                deps.db,
+                browserCreateInput(grant, workspaceId, request, placement.placement),
+              );
             }
-            revisionAuthority = await getBrowserRevisionArtifactAuthority(deps.db, {
-              accountId: grant.accountId,
-              workspaceId,
-              identityId: prepared.session.identityId,
-              revisionId: prepared.session.baseRevisionId,
-            });
-          }
-          const restore = await prepareBrowserStateRestore(
-            deps,
-            grant,
-            prepared.session,
-            placement.placement,
-            revisionAuthority,
-          );
-          stages.mark("restore");
+            stages.mark("prepare");
+            if (isTerminalOperation(prepared.operation.state)) return prepared;
 
-          try {
-            const networkRoute = await resolveBrowserNetworkRouteLaunch({
-              deps,
-              grant,
-              workspaceId,
-              browserSessionId: prepared.session.id,
-              operationId: request.operationId,
-              rootSecret: authority,
-              placement: placement.placement,
-            });
-            stages.mark("network_route");
-            const interactionHeld = await ensureInteractionHolder(
-              deps,
-              grant,
-              sourceSession,
-              prepared.session.id,
-              placement,
-              context.req.raw.signal,
-            );
-            stages.mark("holder");
-            const record = await ensureDispatchedGeneration(
-              deps,
-              grant,
-              workspaceId,
-              prepared.session.id,
-              request.operationId,
-              placement.placementInstanceId,
-            ).catch(async (error: unknown) => {
-              if (interactionHeld) {
-                await releaseInteractionHolder(
-                  deps,
-                  grant,
-                  workspaceId,
-                  prepared!.session.id,
-                  placement.controllerHostSandboxGroupId,
-                ).catch(() => undefined);
+            if (prepared.session.baseRevisionId && !revisionAuthority) {
+              if (!prepared.session.identityId) {
+                throw new BrowserIdentityStateError("BrowserSession base revision has no identity");
               }
-              throw error;
-            });
-            stages.mark("generation");
-            const preparedSession = prepared.session;
-            const controllerGeneration = requireOperationGeneration(record);
-            const adminToken = deriveBrowserControllerAdminToken({
-              rootSecret: authority,
-              accountId: grant.accountId,
-              workspaceId,
-              placement: placement.placement,
-              placementInstanceId: placement.placementInstanceId,
-            });
-            const tokens = deriveBrowserSessionControllerTokens({
-              rootSecret: authority,
-              accountId: grant.accountId,
-              workspaceId,
-              browserSessionId: prepared.session.id,
-              placement: placement.placement,
-              placementInstanceId: placement.placementInstanceId,
-              controllerGeneration,
-              tokenGeneration: record.tokenGeneration,
-            });
+              revisionAuthority = await getBrowserRevisionArtifactAuthority(deps.db, {
+                accountId: grant.accountId,
+                workspaceId,
+                identityId: prepared.session.identityId,
+                revisionId: prepared.session.baseRevisionId,
+              });
+            }
+            const restore = await prepareBrowserStateRestore(
+              deps,
+              grant,
+              prepared.session,
+              placement.placement,
+              revisionAuthority,
+            );
+            stages.mark("restore");
+
             try {
-              await withBrowserCreationController(
+              const networkRoute = await resolveBrowserNetworkRouteLaunch({
                 deps,
                 grant,
                 workspaceId,
+                browserSessionId: prepared.session.id,
+                operationId: request.operationId,
+                rootSecret: authority,
+                placement: placement.placement,
+              });
+              stages.mark("network_route");
+              const interactionHeld = await ensureInteractionHolder(
+                deps,
+                grant,
+                sourceSession,
+                prepared.session.id,
                 placement,
-                adminToken,
-                origin,
-                async (client) => {
-                  const linkedComputer = await ensureLinkedComputerController(
+                context.req.raw.signal,
+              );
+              stages.mark("holder");
+              const record = await ensureDispatchedGeneration(
+                deps,
+                grant,
+                workspaceId,
+                prepared.session.id,
+                request.operationId,
+                placement.placementInstanceId,
+              ).catch(async (error: unknown) => {
+                if (interactionHeld) {
+                  await releaseInteractionHolder(
                     deps,
                     grant,
-                    preparedSession,
-                    placement,
-                    client,
-                  );
-                  return await withInteractionHolderHeartbeat(
-                    deps,
-                    {
-                      grant,
-                      workspaceId,
-                      sandboxGroupId: placement.controllerHostSandboxGroupId,
-                      holderId: interactionHolderId(preparedSession.id),
-                      operationId: request.operationId,
-                      resourceId: preparedSession.id,
-                      controllerGeneration,
-                    },
-                    async () => {
-                      stages.mark("provision");
-                      await ensureHeadedBrowserDisplayStack(
-                        placement.session,
-                        preparedSession.headless,
-                        linkedComputer !== null,
-                      );
-                      stages.mark("display");
-                      launch.result = await client.createSession({
-                        browserSessionId: preparedSession.id,
-                        controllerGeneration,
-                        tokenGeneration: record.tokenGeneration,
-                        ...tokens,
-                        headed: !preparedSession.headless,
-                        transport: browserRuntimeTransport(
-                          preparedSession,
-                          placement.transport,
-                          placement.placementInstanceId,
-                          authority,
-                        ),
-                        ...(linkedComputer ? { linkedComputer } : {}),
-                        ...(networkRoute ? { networkRoute } : {}),
-                        ...(request.initialUrl ? { initialUrl: request.initialUrl } : {}),
-                        ...(restore ? { restore } : {}),
-                      });
-                      return launch.result;
-                    },
-                  );
-                },
-              );
-              stages.mark("launch");
-              await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
-                () => placement,
-              );
-              stages.mark("placement_cache_write");
-            } catch (error) {
-              // A full supervisor from an older agent claims to be retryable,
-              // but nothing frees capacity on its own: fail the create so it
-              // does not sit in "starting" until the transition expires.
-              if (
-                error instanceof BrowserControlTransportError ||
-                (error instanceof BrowserControlRequestError &&
-                  error.retryable &&
-                  !legacyInteractionCapacityError(error, "browser")) ||
-                isAbort(error)
-              )
+                    workspaceId,
+                    prepared!.session.id,
+                    placement.controllerHostSandboxGroupId,
+                  ).catch(() => undefined);
+                }
                 throw error;
-              const failure = interactionFailure(error);
-              const failed = await failBrowserSessionOperation(deps.db, {
+              });
+              stages.mark("generation");
+              const preparedSession = prepared.session;
+              const controllerGeneration = requireOperationGeneration(record);
+              const adminToken = deriveBrowserControllerAdminToken({
+                rootSecret: authority,
+                accountId: grant.accountId,
+                workspaceId,
+                placement: placement.placement,
+                placementInstanceId: placement.placementInstanceId,
+              });
+              const tokens = deriveBrowserSessionControllerTokens({
+                rootSecret: authority,
+                accountId: grant.accountId,
+                workspaceId,
+                browserSessionId: prepared.session.id,
+                placement: placement.placement,
+                placementInstanceId: placement.placementInstanceId,
+                controllerGeneration,
+                tokenGeneration: record.tokenGeneration,
+              });
+              try {
+                await withBrowserCreationController(
+                  deps,
+                  grant,
+                  workspaceId,
+                  placement,
+                  adminToken,
+                  origin,
+                  async (client) => {
+                    const linkedComputer = await ensureLinkedComputerController(
+                      deps,
+                      grant,
+                      preparedSession,
+                      placement,
+                      client,
+                    );
+                    return await withInteractionHolderHeartbeat(
+                      deps,
+                      {
+                        grant,
+                        workspaceId,
+                        sandboxGroupId: placement.controllerHostSandboxGroupId,
+                        holderId: interactionHolderId(preparedSession.id),
+                        operationId: request.operationId,
+                        resourceId: preparedSession.id,
+                        controllerGeneration,
+                      },
+                      async () => {
+                        stages.mark("provision");
+                        await ensureHeadedBrowserDisplayStack(
+                          placement.session,
+                          preparedSession.headless,
+                          linkedComputer !== null,
+                        );
+                        stages.mark("display");
+                        launch.result = await client.createSession({
+                          browserSessionId: preparedSession.id,
+                          controllerGeneration,
+                          tokenGeneration: record.tokenGeneration,
+                          ...tokens,
+                          headed: !preparedSession.headless,
+                          transport: browserRuntimeTransport(
+                            preparedSession,
+                            placement.transport,
+                            placement.placementInstanceId,
+                            authority,
+                          ),
+                          ...(linkedComputer ? { linkedComputer } : {}),
+                          ...(networkRoute ? { networkRoute } : {}),
+                          ...(request.initialUrl ? { initialUrl: request.initialUrl } : {}),
+                          ...(restore ? { restore } : {}),
+                        });
+                        return launch.result;
+                      },
+                    );
+                  },
+                );
+                stages.mark("launch");
+                await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
+                  () => placement,
+                );
+                stages.mark("placement_cache_write");
+              } catch (error) {
+                // A full supervisor from an older agent claims to be retryable,
+                // but nothing frees capacity on its own: fail the create so it
+                // does not sit in "starting" until the transition expires.
+                if (
+                  error instanceof BrowserControlTransportError ||
+                  (error instanceof BrowserControlRequestError &&
+                    error.retryable &&
+                    !legacyInteractionCapacityError(error, "browser")) ||
+                  isAbort(error)
+                )
+                  throw error;
+                if (capacitySuspendAllowed && browserControllerCapacityExhausted(error)) {
+                  capacitySuspendAllowed = false;
+                  throw new BrowserControllerFull(
+                    placement.placement,
+                    placement.placementInstanceId,
+                  );
+                }
+                const failure = interactionFailure(error);
+                const failed = await failBrowserSessionOperation(deps.db, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  operationId: request.operationId,
+                  browserSessionId: prepared.session.id,
+                  ...(error instanceof BrowserControlProtocolError
+                    ? { state: "outcome_unknown" as const }
+                    : {}),
+                  error: failure,
+                });
+                if (interactionHeld && !(error instanceof BrowserControlProtocolError)) {
+                  await releaseInteractionHolder(
+                    deps,
+                    grant,
+                    workspaceId,
+                    prepared.session.id,
+                    placement.controllerHostSandboxGroupId,
+                  ).catch(() => undefined);
+                }
+                return failed;
+              }
+              // Once the controller has accepted the exact binding, a persistence
+              // failure is retried against that same idempotent physical session.
+              // Never terminalize or release its placement authority here.
+              const activated = await activateBrowserSession(deps.db, {
                 accountId: grant.accountId,
                 workspaceId,
                 operationId: request.operationId,
                 browserSessionId: prepared.session.id,
-                ...(error instanceof BrowserControlProtocolError
-                  ? { state: "outcome_unknown" as const }
-                  : {}),
-                error: failure,
+                controller: {
+                  controllerId: "opengeni-browserd",
+                  controllerGeneration,
+                  placementInstanceId: placement.placementInstanceId,
+                },
+                engineVersion: null,
               });
-              if (interactionHeld && !(error instanceof BrowserControlProtocolError)) {
-                await releaseInteractionHolder(
-                  deps,
-                  grant,
-                  workspaceId,
-                  prepared.session.id,
-                  placement.controllerHostSandboxGroupId,
-                ).catch(() => undefined);
-              }
-              return failed;
+              stages.mark("activate");
+              return activated;
+            } finally {
+              restore?.dataKey.fill(0);
+              restore?.aad.fill(0);
             }
-            // Once the controller has accepted the exact binding, a persistence
-            // failure is retried against that same idempotent physical session.
-            // Never terminalize or release its placement authority here.
-            const activated = await activateBrowserSession(deps.db, {
-              accountId: grant.accountId,
-              workspaceId,
-              operationId: request.operationId,
-              browserSessionId: prepared.session.id,
-              controller: {
-                controllerId: "opengeni-browserd",
-                controllerGeneration,
-                placementInstanceId: placement.placementInstanceId,
-              },
-              engineVersion: null,
-            });
-            stages.mark("activate");
-            return activated;
-          } finally {
-            restore?.dataKey.fill(0);
-            restore?.aad.fill(0);
-          }
-        },
-      );
+          },
+        );
+      let response: Awaited<ReturnType<typeof createOnPlacement>>;
+      try {
+        response = await createOnPlacement();
+      } catch (error) {
+        if (!(error instanceof BrowserControllerFull)) throw error;
+        await suspendLeastRecentlyUsedBrowser(
+          context,
+          grant,
+          workspaceId,
+          sourceSession,
+          error,
+          prepared!.session.id,
+        );
+        response = await createOnPlacement();
+      }
       const parsed = BrowserSessionMutationResponse.parse(withInitialView(response, launch.result));
       observeLifecycleResult(deps.observability, startedAtMs, parsed);
       reportInteractionRouteStages(context, deps.observability, stages);
@@ -2223,8 +2250,6 @@ export function registerBrowserSessionRoutes(
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
       const startedAtMs = performance.now();
-      const origin = requestOrigin(context, deps.settings);
-      let preparedForDispatch = false;
       try {
         const before = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -2232,226 +2257,17 @@ export function registerBrowserSessionRoutes(
           browserSessionId,
         });
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
-        if (!before.session.capabilities.privateCheckpoint) {
-          throw new BrowserControlUnsupportedError(
-            "this browser placement does not support private checkpoint suspension",
-          );
-        }
-        browserAuthorityRoot(deps);
-        if (!deps.objectStorage) {
-          throw new HTTPException(503, {
-            message: "browser state storage is not configured",
-          });
-        }
-        await recoverRestartedBrowserControllerBeforeSuspend(context, grant, workspaceId, before);
-        const prepared = await prepareBrowserSessionSuspend(deps.db, {
-          accountId: grant.accountId,
-          workspaceId,
-          browserSessionId,
-          operationId: request.operationId,
-          actorSubjectId: grant.subjectId,
-        });
-        if (isTerminalOperation(prepared.operation.state)) {
-          if (prepared.operation.state === "completed") {
-            await finishSuspendedBrowserControllerCleanup(
-              context,
-              grant,
-              workspaceId,
-              browserSessionId,
-            );
-            const parsed = BrowserSessionMutationResponse.parse({
-              session: (
-                await getBrowserSessionControlRecord(deps.db, {
-                  accountId: grant.accountId,
-                  workspaceId,
-                  browserSessionId,
-                })
-              ).session,
-              operation: prepared.operation,
-            });
-            observeLifecycleResult(deps.observability, startedAtMs, parsed);
-            return context.json(parsed, 200);
-          }
-          const parsed = BrowserSessionMutationResponse.parse(prepared);
-          observeLifecycleResult(deps.observability, startedAtMs, parsed);
-          return context.json(parsed, 200);
-        }
-
-        preparedForDispatch = true;
-
-        const record = await getBrowserSessionControlRecord(deps.db, {
-          accountId: grant.accountId,
-          workspaceId,
-          browserSessionId,
-          operationId: request.operationId,
-        });
-        const binding = record.session.controller;
-        if (!binding) {
-          throw new BrowserSessionStateError("BrowserSession suspension controller is absent");
-        }
-        const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
-        const response = await withBrowserPlacement(
-          sourceSession,
+        const parsed = await suspendBrowserSessionCheckpoint(
+          context,
           grant,
-          record.session.placement,
-          binding.placementInstanceId,
-          "browser.suspend",
-          context.req.raw.signal,
-          async (placement) => {
-            const objectStorage = deps.objectStorage!;
-            const rootKey = requireBrowserStateRoot(deps);
-            const objectKey = browserStateObjectKey(workspaceId, request.operationId);
-            const dataKey = deriveBrowserStateDataKey(rootKey, {
-              accountId: grant.accountId,
-              workspaceId,
-              browserSessionId,
-              operationId: request.operationId,
-              objectKey,
-            });
-            const aad = browserStateArtifactAad({
-              accountId: grant.accountId,
-              workspaceId,
-              objectKey,
-            });
-            try {
-              await dispatchBrowserSessionOperation(deps.db, {
-                accountId: grant.accountId,
-                workspaceId,
-                operationId: request.operationId,
-                browserSessionId,
-                controllerGeneration: binding.controllerGeneration,
-                stateUpload: {
-                  objectKey,
-                  cleanupAfter: new Date(Date.now() + BROWSER_STATE_UPLOAD_CLEANUP_GRACE_MS),
-                },
-              });
-              const signed = await objectStorage.createPutUrl({
-                key: objectKey,
-                contentType: BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
-                audience: signedUrlAudienceForPlacement(record.session.placement),
-              });
-              const client = await provisionController(deps, grant, record, placement, origin);
-              // Suspension removes the browser's working directory, and with
-              // it every download. Keep completed ones as workspace files.
-              await retainBrowserDownloads(grant, workspaceId, record, binding, placement, client);
-              let receipt: PlacementBrowserStateCaptureReceipt;
-              try {
-                receipt = await withInteractionHolderHeartbeat(
-                  deps,
-                  {
-                    grant,
-                    workspaceId,
-                    sandboxGroupId: record.controllerHostSandboxGroupId,
-                    holderId: interactionHolderId(browserSessionId),
-                    operationId: request.operationId,
-                    resourceId: browserSessionId,
-                    controllerGeneration: binding.controllerGeneration,
-                  },
-                  async () =>
-                    await client.captureState({
-                      browserSessionId,
-                      controllerGeneration: binding.controllerGeneration,
-                      operationId: request.operationId,
-                      objectKey,
-                      afterCapture: "stop",
-                      dataKey,
-                      aad,
-                      upload: {
-                        url: signed.url,
-                        requiredHeaders: signed.requiredHeaders,
-                        expiresAt: signed.expiresAt.toISOString(),
-                      },
-                    }),
-                );
-              } catch (error) {
-                const failed = await settleBrowserSessionSuspensionCaptureFailure(
-                  deps,
-                  {
-                    accountId: grant.accountId,
-                    workspaceId,
-                    operationId: request.operationId,
-                    browserSessionId,
-                    controllerGeneration: binding.controllerGeneration,
-                  },
-                  error,
-                );
-                if (failed) return failed;
-                throw error;
-              }
-              const materialization = browserRevisionMaterialization(
-                receipt.manifest,
-                record.session.placement,
-              );
-              const manifestDigest = browserStateManifestDigest(receipt.manifest);
-              const encryptedDataKey = wrapBrowserStateDataKey(rootKey, dataKey, {
-                accountId: grant.accountId,
-                workspaceId,
-                objectKey,
-                artifactDigest: receipt.artifactDigest,
-                contentDigest: receipt.contentDigest,
-              });
-              const committed = await commitBrowserSessionSuspension(deps.db, {
-                accountId: grant.accountId,
-                workspaceId,
-                operationId: request.operationId,
-                browserSessionId,
-                controllerGeneration: binding.controllerGeneration,
-                artifact: {
-                  kind: "chromium_profile",
-                  format: receipt.format,
-                  artifactDigest: receipt.artifactDigest,
-                  contentDigest: receipt.contentDigest,
-                  manifestDigest,
-                  objectKey,
-                  encryptedDataKey,
-                  sizeBytes: receipt.sizeBytes,
-                  materialization,
-                },
-              });
-              await endCapturedBrowserController(client, browserSessionId, binding);
-              await clearSuspendedBrowserSessionController(deps.db, {
-                accountId: grant.accountId,
-                workspaceId,
-                browserSessionId,
-                expectedControllerGeneration: binding.controllerGeneration,
-              });
-              await releaseInteractionHolder(
-                deps,
-                grant,
-                workspaceId,
-                browserSessionId,
-                record.controllerHostSandboxGroupId,
-              );
-              return BrowserSessionMutationResponse.parse({
-                session: (
-                  await getBrowserSessionControlRecord(deps.db, {
-                    accountId: grant.accountId,
-                    workspaceId,
-                    browserSessionId,
-                  })
-                ).session,
-                operation: committed.operation,
-              });
-            } finally {
-              dataKey.fill(0);
-              rootKey.fill(0);
-              aad.fill(0);
-            }
-          },
+          workspaceId,
+          browserSessionId,
+          request.operationId,
+          { before, recoverController: true },
         );
-        const parsed = BrowserSessionMutationResponse.parse(response);
         observeLifecycleResult(deps.observability, startedAtMs, parsed);
         return context.json(parsed, 200);
       } catch (error) {
-        if (preparedForDispatch) {
-          await failPreparedBrowserSessionSuspend(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            browserSessionId,
-            operationId: request.operationId,
-            error: interactionFailure(error),
-          });
-        }
         throw browserRouteError(error);
       }
     },
@@ -3280,6 +3096,333 @@ export function registerBrowserSessionRoutes(
     },
   );
 
+  /**
+   * Makes room on a full browser controller by saving and stopping its least
+   * recently used idle browser, which resumes from that save on its next open.
+   * Busy or failing candidates are skipped; when none can be saved the retried
+   * create reports the controller's own capacity error.
+   */
+  async function suspendLeastRecentlyUsedBrowser(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    routeSourceSession: Session,
+    full: BrowserControllerFull,
+    creatingBrowserSessionId: string,
+  ): Promise<boolean> {
+    if (!deps.objectStorage) return false;
+    const idleBefore = Date.now() - BROWSER_CAPACITY_SUSPEND_IDLE_MS;
+    const candidates = await listBrowserCapacitySuspendCandidates(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      placement: full.placement,
+      placementInstanceId: full.placementInstanceId,
+      excludeBrowserSessionId: creatingBrowserSessionId,
+      idleBefore: new Date(idleBefore),
+      limit: BROWSER_CAPACITY_SUSPEND_CANDIDATES,
+    }).catch((error: unknown) => {
+      console.warn("browser.capacity_suspend_failed", {
+        workspaceId,
+        browserSessionId: null,
+        failure: interactionFailure(error),
+      });
+      return [];
+    });
+    for (const browserSessionId of candidates) {
+      try {
+        const before = await getBrowserSessionControlRecord(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          browserSessionId,
+        });
+        if (
+          before.session.lifecycle !== "active" ||
+          Date.parse(before.session.lastUsedAt) >= idleBefore
+        ) {
+          continue;
+        }
+        const result = await suspendBrowserSessionCheckpoint(
+          context,
+          grant,
+          workspaceId,
+          browserSessionId,
+          randomUUID(),
+          { before, recoverController: false, capacityFor: { routeSourceSession } },
+        );
+        if (result.operation.state === "completed") {
+          console.info("browser.capacity_suspended", {
+            workspaceId,
+            browserSessionId,
+            forBrowserSessionId: creatingBrowserSessionId,
+          });
+          return true;
+        }
+      } catch (error) {
+        console.warn("browser.capacity_suspend_failed", {
+          workspaceId,
+          browserSessionId,
+          failure: interactionFailure(error),
+        });
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Saves one browser's encrypted private working copy and stops its process.
+   * The suspend route and capacity eviction share this. `routeSourceSession`
+   * reaches the placement through another chat on the same machine, because
+   * the browser's own chat may have moved elsewhere since it last used it.
+   */
+  async function suspendBrowserSessionCheckpoint(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    browserSessionId: string,
+    operationId: string,
+    checkpoint: {
+      before: BrowserSessionControlRecord;
+      recoverController: boolean;
+      /** Set for a save the system makes to free capacity: the browser's own
+       * chat may have moved, and neither the save nor the downloads it keeps
+       * belong to the caller. */
+      capacityFor?: { routeSourceSession: Session };
+    },
+  ): Promise<ReturnType<typeof BrowserSessionMutationResponse.parse>> {
+    const origin = requestOrigin(context, deps.settings);
+    const { before } = checkpoint;
+    let preparedForDispatch = false;
+    try {
+      if (!before.session.capabilities.privateCheckpoint) {
+        throw new BrowserControlUnsupportedError(
+          "this browser placement does not support private checkpoint suspension",
+        );
+      }
+      browserAuthorityRoot(deps);
+      if (!deps.objectStorage) {
+        throw new HTTPException(503, {
+          message: "browser state storage is not configured",
+        });
+      }
+      if (checkpoint.recoverController) {
+        await recoverRestartedBrowserControllerBeforeSuspend(context, grant, workspaceId, before);
+      }
+      const prepared = await prepareBrowserSessionSuspend(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        browserSessionId,
+        operationId,
+        actorSubjectId: checkpoint.capacityFor ? BROWSER_CAPACITY_SUSPEND_ACTOR : grant.subjectId,
+      });
+      if (isTerminalOperation(prepared.operation.state)) {
+        if (prepared.operation.state === "completed") {
+          await finishSuspendedBrowserControllerCleanup(
+            context,
+            grant,
+            workspaceId,
+            browserSessionId,
+          );
+          return BrowserSessionMutationResponse.parse({
+            session: (
+              await getBrowserSessionControlRecord(deps.db, {
+                accountId: grant.accountId,
+                workspaceId,
+                browserSessionId,
+              })
+            ).session,
+            operation: prepared.operation,
+          });
+        }
+        return BrowserSessionMutationResponse.parse(prepared);
+      }
+
+      preparedForDispatch = true;
+
+      const record = await getBrowserSessionControlRecord(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        browserSessionId,
+        operationId,
+      });
+      const binding = record.session.controller;
+      if (!binding) {
+        throw new BrowserSessionStateError("BrowserSession suspension controller is absent");
+      }
+      const sourceSession =
+        checkpoint.capacityFor?.routeSourceSession ??
+        (await requireSourceSession(deps, workspaceId, record.sourceSessionId));
+      const response = await withBrowserPlacement(
+        sourceSession,
+        grant,
+        record.session.placement,
+        binding.placementInstanceId,
+        "browser.suspend",
+        context.req.raw.signal,
+        async (placement) => {
+          const objectStorage = deps.objectStorage!;
+          const rootKey = requireBrowserStateRoot(deps);
+          const objectKey = browserStateObjectKey(workspaceId, operationId);
+          const dataKey = deriveBrowserStateDataKey(rootKey, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+            operationId: operationId,
+            objectKey,
+          });
+          const aad = browserStateArtifactAad({
+            accountId: grant.accountId,
+            workspaceId,
+            objectKey,
+          });
+          try {
+            await dispatchBrowserSessionOperation(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              operationId: operationId,
+              browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              stateUpload: {
+                objectKey,
+                cleanupAfter: new Date(Date.now() + BROWSER_STATE_UPLOAD_CLEANUP_GRACE_MS),
+              },
+            });
+            const signed = await objectStorage.createPutUrl({
+              key: objectKey,
+              contentType: BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
+              audience: signedUrlAudienceForPlacement(record.session.placement),
+            });
+            const client = await provisionController(deps, grant, record, placement, origin);
+            // Suspension removes the browser's working directory, and with
+            // it every download. Keep completed ones as workspace files.
+            await retainBrowserDownloads(
+              grant,
+              workspaceId,
+              record,
+              binding,
+              placement,
+              client,
+              checkpoint.capacityFor ? null : grant.subjectId,
+            );
+            let receipt: PlacementBrowserStateCaptureReceipt;
+            try {
+              receipt = await withInteractionHolderHeartbeat(
+                deps,
+                {
+                  grant,
+                  workspaceId,
+                  sandboxGroupId: record.controllerHostSandboxGroupId,
+                  holderId: interactionHolderId(browserSessionId),
+                  operationId: operationId,
+                  resourceId: browserSessionId,
+                  controllerGeneration: binding.controllerGeneration,
+                },
+                async () =>
+                  await client.captureState({
+                    browserSessionId,
+                    controllerGeneration: binding.controllerGeneration,
+                    operationId: operationId,
+                    objectKey,
+                    afterCapture: "stop",
+                    dataKey,
+                    aad,
+                    upload: {
+                      url: signed.url,
+                      requiredHeaders: signed.requiredHeaders,
+                      expiresAt: signed.expiresAt.toISOString(),
+                    },
+                  }),
+              );
+            } catch (error) {
+              const failed = await settleBrowserSessionSuspensionCaptureFailure(
+                deps,
+                {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  operationId: operationId,
+                  browserSessionId,
+                  controllerGeneration: binding.controllerGeneration,
+                },
+                error,
+              );
+              if (failed) return failed;
+              throw error;
+            }
+            const materialization = browserRevisionMaterialization(
+              receipt.manifest,
+              record.session.placement,
+            );
+            const manifestDigest = browserStateManifestDigest(receipt.manifest);
+            const encryptedDataKey = wrapBrowserStateDataKey(rootKey, dataKey, {
+              accountId: grant.accountId,
+              workspaceId,
+              objectKey,
+              artifactDigest: receipt.artifactDigest,
+              contentDigest: receipt.contentDigest,
+            });
+            const committed = await commitBrowserSessionSuspension(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              operationId: operationId,
+              browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              artifact: {
+                kind: "chromium_profile",
+                format: receipt.format,
+                artifactDigest: receipt.artifactDigest,
+                contentDigest: receipt.contentDigest,
+                manifestDigest,
+                objectKey,
+                encryptedDataKey,
+                sizeBytes: receipt.sizeBytes,
+                materialization,
+              },
+            });
+            await endCapturedBrowserController(client, browserSessionId, binding);
+            await clearSuspendedBrowserSessionController(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              browserSessionId,
+              expectedControllerGeneration: binding.controllerGeneration,
+            });
+            await releaseInteractionHolder(
+              deps,
+              grant,
+              workspaceId,
+              browserSessionId,
+              record.controllerHostSandboxGroupId,
+            );
+            return BrowserSessionMutationResponse.parse({
+              session: (
+                await getBrowserSessionControlRecord(deps.db, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  browserSessionId,
+                })
+              ).session,
+              operation: committed.operation,
+            });
+          } finally {
+            dataKey.fill(0);
+            rootKey.fill(0);
+            aad.fill(0);
+          }
+        },
+      );
+      return BrowserSessionMutationResponse.parse(response);
+    } catch (error) {
+      if (preparedForDispatch) {
+        await failPreparedBrowserSessionSuspend(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          browserSessionId,
+          operationId,
+          error: interactionFailure(error),
+        });
+      }
+      throw error;
+    }
+  }
+
   async function withBrowserPlacement<T>(
     sourceSession: Session,
     grant: AccessGrant,
@@ -3702,6 +3845,7 @@ export function registerBrowserSessionRoutes(
     binding: NonNullable<BrowserSessionControlRecord["session"]["controller"]>,
     placement: BrowserPlacement,
     client: BrowserControlClient,
+    subjectId: string | null,
   ): Promise<void> {
     const objectStorage = deps.objectStorage;
     if (!objectStorage || !record.session.capabilities.downloads) return;
@@ -3725,7 +3869,7 @@ export function registerBrowserSessionRoutes(
         {
           accountId: grant.accountId,
           workspaceId,
-          subjectId: grant.subjectId,
+          subjectId,
           browserSessionId,
           source,
           uploadAudience: signedUrlAudienceForPlacement(record.session.placement),
@@ -5075,6 +5219,30 @@ async function ensureInteractionHolder(
     instanceId: acquired.lease.instanceId,
   }).catch(() => false);
   return true;
+}
+
+/** How long a browser must sit unused before a full controller may save it to
+ * make room. Longer than an agent's ordinary pause between browser steps. */
+const BROWSER_CAPACITY_SUSPEND_IDLE_MS = 5 * 60_000;
+/** Candidates tried, in least-recently-used order, before giving up. */
+const BROWSER_CAPACITY_SUSPEND_CANDIDATES = 3;
+const BROWSER_CAPACITY_SUSPEND_ACTOR = "system:browser-capacity";
+
+/** A create reached a controller already at its browser limit. */
+class BrowserControllerFull extends Error {
+  constructor(
+    readonly placement: InteractionPlacement,
+    readonly placementInstanceId: string,
+  ) {
+    super("browser controller is at its browser limit");
+  }
+}
+
+function browserControllerCapacityExhausted(error: unknown): boolean {
+  return (
+    (error instanceof BrowserControlRequestError && error.error.code === "capacity_exhausted") ||
+    legacyInteractionCapacityError(error, "browser") !== null
+  );
 }
 
 async function ensureDispatchedGeneration(
