@@ -1686,7 +1686,7 @@ describe("API helpers", () => {
       message = error instanceof Error ? error.message : String(error);
     }
 
-    expect(message).toContain("Could not initialize configured.example");
+    expect(message).toContain("the workspace could not initialize configured.example");
     expect(message).not.toContain(fixturePassword);
     expect(message).not.toContain(fixtureSecret);
     expect(message).not.toContain("fixture-user");
@@ -1712,7 +1712,7 @@ describe("API helpers", () => {
         throw new Error("Streamable HTTP error: POSTing to endpoint: HTTP 404 Not Found");
       }),
     ).rejects.toThrow(
-      'MCP capability "Gmail" could not be enabled because Could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
+      'MCP capability "Gmail" could not be enabled because the workspace could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
     );
   });
 

@@ -294,7 +294,7 @@ test("scoped checkout through first use, policy changes and paid top-ups stays c
         countsTowardTokenCap: true,
         initiatingHumanSubjectId: null,
       }),
-      /insufficient credits/,
+      /insufficient workspace credits/,
     );
     const usage = { inputTokens: 100, outputTokens: 10, totalTokens: 110 };
     const common = {

@@ -381,7 +381,7 @@ describe("contracts", () => {
         error: {
           status: 402,
           code: "payment_required",
-          message: "insufficient credits",
+          message: "insufficient workspace credits",
           retryable: false,
         },
       }),
@@ -389,7 +389,7 @@ describe("contracts", () => {
       error: {
         status: 402,
         code: "payment_required",
-        message: "insufficient credits",
+        message: "insufficient workspace credits",
         retryable: false,
       },
     });

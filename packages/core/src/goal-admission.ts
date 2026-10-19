@@ -139,7 +139,7 @@ export async function goalRunBudgetBlocked(
         }
       : {
           pausedReason: "credits",
-          message: "Insufficient credits. Add credits before resuming.",
+          message: "Insufficient workspace credits. Add credits before resuming.",
         },
     allowance_exhausted: {
       pausedReason: "allowance",

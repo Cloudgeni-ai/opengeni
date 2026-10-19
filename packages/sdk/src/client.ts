@@ -11556,7 +11556,7 @@ async function assertJsonResponse(
     retryable: true,
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     outcomeUnknown: isMutationMethod(context.method),
-    displayMessage: "Opengeni is temporarily unavailable — retry.",
+    displayMessage: "The workspace is temporarily unavailable — retry.",
   });
 }
 

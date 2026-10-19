@@ -433,7 +433,7 @@ export async function ensureRunAllowed(
       quantity: 1,
     });
     if (!decision.allowed) {
-      throw new Error(decision.reason || "insufficient credits");
+      throw new Error(decision.reason || "insufficient workspace credits");
     }
   } else if (
     chargesOpenGeniCredits &&
@@ -442,7 +442,7 @@ export async function ensureRunAllowed(
     const balance = await getSpendableCreditBalance(db, accountId, modelId);
     creditPolicyRevision = balance.creditPolicyRevision;
     if (balance.balanceMicros <= 0) {
-      throw new Error("insufficient credits");
+      throw new Error("insufficient workspace credits");
     }
   }
   const refusal = await checkWorkspaceAllowance(db, {

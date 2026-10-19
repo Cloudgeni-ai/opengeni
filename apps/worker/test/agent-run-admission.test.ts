@@ -137,7 +137,7 @@ describe("worker agent-run admission funding", () => {
           initiatingHumanSubjectId: null,
         });
         if (allowed) await expect(check).resolves.toBe(7);
-        else await expect(check).rejects.toThrow("insufficient credits");
+        else await expect(check).rejects.toThrow("insufficient workspace credits");
       }
     } finally {
       balance.mockRestore();

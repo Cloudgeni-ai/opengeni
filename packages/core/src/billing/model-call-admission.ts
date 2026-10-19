@@ -53,7 +53,7 @@ export async function admitModelCall(
         return {
           allowed: false,
           denial: "insufficient_credits",
-          message: decision.reason || "Insufficient credits.",
+          message: decision.reason || "Insufficient workspace credits.",
         };
       }
     } else {
@@ -63,7 +63,7 @@ export async function admitModelCall(
         return {
           allowed: false,
           denial: "insufficient_credits",
-          message: "Insufficient credits.",
+          message: "Insufficient workspace credits.",
         };
       }
     }

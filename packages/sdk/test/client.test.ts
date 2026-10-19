@@ -1894,7 +1894,7 @@ describe("OpenGeniClient", () => {
       body: "",
     });
     expect((error as Error).message).toMatch(
-      /^Opengeni could not confirm the request — reconcile before retrying\. Reference: [0-9a-f-]{36}\.$/,
+      /^The request could not be confirmed — reconcile before retrying\. Reference: [0-9a-f-]{36}\.$/,
     );
     expect((error as Error).message).not.toContain("PRIVATE");
     expect((error as Error).message).not.toContain("bearer");

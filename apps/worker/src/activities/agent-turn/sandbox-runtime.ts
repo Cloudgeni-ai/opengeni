@@ -840,7 +840,7 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
           if (status.fence === "funding") {
             stopLeaseHeartbeat();
             sandboxRotationController.abort(
-              new Error("Insufficient credits to extend paid sandbox compute"),
+              new Error("Insufficient workspace credits to extend paid sandbox compute"),
             );
             return;
           }
