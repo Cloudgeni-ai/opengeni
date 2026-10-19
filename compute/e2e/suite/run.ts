@@ -2175,8 +2175,9 @@ function copiesIn(journal: string, boxId: string): Copy[] {
 /** What the machine behind `host` says of `boxId` in one read: which
  * machine it is (its metadata server's instance id) and its boot, then,
  * from its journal of that boot since `sinceMs`, the sandbox's completed
- * steps in order, its VMM launches, and how many times it was adopted from
- * its files (its memory image left out); and its guest console's agent
+ * steps in order, its VMM launches, how many times it was adopted from
+ * its files (its memory image left out) and its programs_lost alarms; and
+ * its guest console's agent
  * connections, counted over the whole file (with one launch since, that
  * launch's). The journal and the console are one snapshot: the sandbox's
  * running VMM (its pid, that process's start time and the console's inode)
@@ -2190,6 +2191,7 @@ type Adoption = {
   restores: number;
   launches: number;
   fromFiles: number;
+  programsLost: number;
   connected: number;
   reconnecting: number;
   lost: number;
@@ -2228,6 +2230,7 @@ function adoptionOn(host: string, sinceMs: number, boxId: string): Adoption {
   const steps: string[] = [];
   let launches = 0;
   let fromFiles = 0;
+  let programsLost = 0;
   for (const line of Buffer.from(out[1] ?? "", "base64")
     .toString("utf8")
     .split("\n")) {
@@ -2242,6 +2245,7 @@ function adoptionOn(host: string, sinceMs: number, boxId: string): Adoption {
     }
     if (event["compute.sandbox.id"] !== boxId) continue;
     launches += Number(event["compute.launches"] ?? 0);
+    if (event["compute.alarm"] === "programs_lost") programsLost += 1;
     if (event.event === "compute.step" && event["compute.outcome"] === "done")
       steps.push(String(event["compute.step"]));
   }
@@ -2258,6 +2262,7 @@ function adoptionOn(host: string, sinceMs: number, boxId: string): Adoption {
     restores: steps.filter((name) => name === "restore").length,
     launches,
     fromFiles,
+    programsLost,
     connected,
     reconnecting,
     lost,
@@ -2283,10 +2288,11 @@ check(
     await execOk("cat e2e/kept.txt", 120_000);
     const before = await sandbox();
     const lost = before.host!;
-    // What the loss must change: the guest's boot, the host's boot
-    // generation, and the agent's connection instance.
+    // What the loss must change: the guest's boot and the agent's
+    // connection instance. The boot generation is reported, not compared:
+    // each owner numbers its boots afresh, so generations compare only
+    // under one owner epoch.
     const boot = (await sandboxState()).generation;
-    if (boot === null) throw new Error("the host reports no boot generation");
     const bootId = await guestBoot();
     const linkBefore = connectionInstance();
     if (!linkBefore) {
@@ -2634,13 +2640,10 @@ check(
         failures.push(`the command in flight ended ${took} s after it was sent, past its bound`);
       }
     }
-    // A new boot of the guest, under a later boot generation.
+    // A new boot of the guest.
     const bootIdAfter = await guestBoot();
     if (bootIdAfter === bootId) {
       failures.push(`the guest's boot id is ${bootId} before and after: it was not booted`);
-    }
-    if (!(typeof now.generation === "number" && now.generation > boot)) {
-      failures.push(`generation ${boot} -> ${now.generation}, not a boot`);
     }
     // Programs end with the lost host; the command in flight is not run
     // again on the new boot (it would note that boot in its file).
@@ -2744,10 +2747,17 @@ check(
     if (adopting.fromFiles < 1) {
       failures.push(`${newHost}'s journal has no "adopted from its files" line for id=${id}`);
     }
+    // Setting the memory image aside ends whatever ran, as a VM crash
+    // does, and the adopting host says so with the programs_lost alarm.
+    if (adopting.programsLost < 1) {
+      failures.push(
+        `${newHost}'s journal of boot ${hostBoot} has no programs_lost alarm for ${id}`,
+      );
+    }
     if (failures.length > 0) throw new Error(failures.join("; "));
     return (
       `${lost} stopped; back on ${after.host} (owner epoch ${before.owner_epoch} -> ${after.owner_epoch}) in ${seconds(start)}; ` +
-      `booted from files (generation ${boot} -> ${now.generation}, guest boot id changed, steps ${adopting.steps.join(", ")}, "adopted from its files" ${adopting.fromFiles}); ` +
+      `booted from files (guest boot id changed, steps ${adopting.steps.join(", ")}, "adopted from its files" ${adopting.fromFiles}, programs_lost alarm ${adopting.programsLost}; generation ${boot} under the old owner, ${now.generation} under the new); ` +
       `the archived file kept, the checkpointed write kept, the late write ${lateHow}; program and command in flight gone, not run again; ` +
       `the command in flight ended with ${inflightHow}; connection instance ${linkBefore} -> ${linkAfter}; on ${newHost} (instance ${newInstance}, boot ${hostBoot}): ${consoleWords}; ${lost} is ${fenced}`
     );

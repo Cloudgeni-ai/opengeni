@@ -887,7 +887,7 @@ from that commit. Results carry the commits as `backend+agent`.
 | r16 00:51 | 41f1e7bae+58d022965+6270b6eae | b593c5e25 | 19 | 7 | ui desktop (the chart predated the relay's owner routing); vm-crash, move, host-loss, delete (a request in flight across a VM crash never ends); link-stream (the window was too short for two checkpoints under load); see below |
 | r17 01:58 | 35d102db7+dc048ebe1+6270b6eae | 939d29e3b | 24 | 2 | vm-crash (the suite read the journal before the stream-end line), host-loss (the instance group recreated the host under its old name); both were check defects, fixed and passing in reruns; every product check passes; see below |
 | r18 04:17 | 4da6a3229+971f1b9b6+6270b6eae | 167d351ea | 10 | 0 | none; a rerun of background, vm-crash, host-loss and delete on the link-lost fix; see below |
-| r19 05:50 | 2c15dcf7d | 85708a8a7 | 8 | 6 | the first run of host-loss as a boot from files: the boot held, but the generation fell (2 -> 1) and the request in flight ended as a timeout (exit 124), not outcome unknown; sleep-saved and sleep-archived were woken by the reaper; three more failed only in the verifier (a suite defect, fixed); see below |
+| r19 05:50 | 2c15dcf7d | 85708a8a7 | 8 | 6 | the first run of host-loss as a boot from files: the boot held, but the request in flight ended as a timeout (exit 124), not outcome unknown, and the check wrongly required the generation to rise across owners; sleep-saved and sleep-archived were woken by the reaper; three more failed only in the verifier (a suite defect, fixed); see below |
 
 Checks after create were skipped through r6 because they need create.
 In r8 (every request now carries a nonzero agent epoch) create and most
@@ -1409,10 +1409,13 @@ launch and no restore. The guest's boot id and the agent's connection
 instance changed, the program was gone, the archived and checkpointed
 files were there and the late write was not. Two assertions failed:
 
-- The generation fell from 2 to 1. The adopting host's boot step logged
-  `generation=1` at 06:00:03.8, so the generation is not carried across
-  an adoption from files, and a later reader cannot tell the boot from
-  the first one. This is in the fabric.
+- The generation went from 2 to 1, and the check required it to rise.
+  That requirement was wrong: each owner numbers its boots afresh, so
+  generations compare only under one owner epoch (the restore notice
+  orders by owner epoch first). The adopting host's boot step logged
+  `generation=1` at 06:00:03.8, as designed. The check now reports the
+  generation and no longer compares it across owners; the boot itself is
+  shown by the new guest boot id and the adopting host's journal.
 - The request in flight at the loss (a 120 s command) came back as HTTP
   200 with exit status 124 after 149.1 s, not as outcome unknown. The API
   logged it as still running at 05:58:35.8 and 05:59:35.8, the new agent
@@ -1442,7 +1445,8 @@ now saves a check's proofs whatever its outcome (54424e676), so earlier
 passes on a stopped host keep their evidence. r19's saved results predate
 that and cannot be re-verified.
 
-Two gaps stay open. A boot from files after a host loss raises no
-programs-lost alarm, unlike a VM crash. And the in-flight check reads
-the API's answer, not a model turn's tool result; both carry the same
-text.
+A boot from files after a host loss raised no programs-lost alarm in
+r19, unlike a VM crash. Compute 1d58a47c0 raises it when an adoption
+sets the memory image aside, and host-loss now requires it on the
+adopting host. One gap stays open: the in-flight check reads the API's
+answer, not a model turn's tool result; both carry the same text.
