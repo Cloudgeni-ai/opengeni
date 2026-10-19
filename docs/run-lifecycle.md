@@ -3567,6 +3567,22 @@ counts inspections (`checkpointing` when browser saves were prepared,
 `inspection_failed`). A person returning exactly as the box is being released
 may see the browser `suspending`, then resume it.
 
+**Full browser controllers.** One browser controller runs per workspace and
+placement (a Connected Machine or a box). Its browser limit defaults to half
+of the machine's memory (or its container's cgroup limit, when lower) at
+300 MiB per browser, about the p90 resident size of live agent browsers, and
+never under 8: 27 browsers on 16 GiB, 81 on 48 GiB, 147 on 86 GiB.
+`OPENGENI_BROWSERD_MAX_SESSIONS` overrides it. When a create reaches a full
+controller, the API saves the least recently used checkpoint-capable browser
+on that same controller instance that has been unused for at least five
+minutes and has no lifecycle operation in flight, through the same private
+checkpoint as an explicit suspend (actor `system:browser-capacity`; kept
+downloads are not attributed to the caller), then retries
+the create once under its own operation. Up to three candidates are tried;
+when none can be saved, the create fails with the controller's
+`capacity_exhausted` error as before. Nothing happens below the limit. The
+saved browser resumes from its working copy on its next open.
+
 **Idle command containment.** An unsupervised retained command (a legacy Modal
 command, or any Docker or local background command) keeps its box warm through
 a non-expiring process holder, so the zero-holder idle drain never runs for it.
