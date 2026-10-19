@@ -425,13 +425,26 @@ async fn serve_port(
 struct Agent {
     client: async_nats::Client,
     events: mpsc::UnboundedReceiver<async_nats::Event>,
+    /// Whether the agent process it stands for has ended.
+    ended: Arc<AtomicBool>,
 }
 
 async fn connect(addr: SocketAddr, instance: &str) -> Agent {
     let (sender, events) = mpsc::unbounded_channel();
+    let ended = Arc::new(AtomicBool::new(false));
+    let gone = Arc::clone(&ended);
     let client = async_nats::ConnectOptions::new()
         .name(format!("opengeni-agent/connection/{instance}"))
         .max_reconnects(Some(1))
+        // At once, as by default for its one attempt, unless its process
+        // has ended: then never, as within a test.
+        .reconnect_delay_callback(move |_| {
+            if gone.load(Ordering::SeqCst) {
+                Duration::from_secs(24 * 60 * 60)
+            } else {
+                Duration::ZERO
+            }
+        })
         .event_callback(move |event| {
             let sender = sender.clone();
             async move {
@@ -441,10 +454,20 @@ async fn connect(addr: SocketAddr, instance: &str) -> Agent {
         .connect(format!("nats://{addr}"))
         .await
         .expect("the agent connects");
-    Agent { client, events }
+    Agent {
+        client,
+        events,
+        ended,
+    }
 }
 
 impl Agent {
+    /// The agent process it stands for ends: its client connects no more,
+    /// as that process could not.
+    fn end(&self) {
+        self.ended.store(true, Ordering::SeqCst);
+    }
+
     /// The next server error the client heard.
     async fn server_error(&mut self) -> String {
         loop {
@@ -1230,7 +1253,10 @@ async fn an_agents_control_and_bulk_connections_share_its_session() {
     gateway.quiet(Duration::from_millis(200)).await;
     control.still_connected();
 
-    // Another agent process ends the session and its connections.
+    // Another agent process ends the session and its connections. The
+    // first has ended (still running, its client's reconnect would end the
+    // new session in turn: the latest process to connect holds it).
+    control.end();
     let connecting = tokio::spawn(async move { connect(addr, "inst-2").await });
     let (frame, _) = gateway.frame().await;
     assert_eq!(frame, HostFrame::Close { s });
