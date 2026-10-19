@@ -766,8 +766,8 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
       otherMicros: 3_000_000,
     });
 
-    // The verified-signup trial grant runs inside setup's own trigger and is
-    // attributed to the new owner.
+    // Setup's zero-value eligibility receipt must not emit a money-grant fact
+    // or inflate the historical signup-trial money counters.
     const trialPerson = await insertAuthUser({ verified: true, provider: "credential" });
     const trialSetup = await completeSelfServiceOrganizationSetup(client.db, {
       authUserId: trialPerson.userId,
@@ -781,12 +781,10 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
       type: "credits.granted",
       accountId: trialSetup.organizationId,
     });
-    expect(trial.map((row) => [row.payload.attribute, row.initiator?.subjectId])).toEqual([
-      ["signup_trial", trialPerson.subjectId],
-    ]);
+    expect(trial).toEqual([]);
     const afterTrial = await readCreditGrantTotals(client.db);
-    expect(afterTrial.signup_trial.count - after.signup_trial.count).toBe(1);
-    expect(afterTrial.signup_trial.micros - after.signup_trial.micros).toBe(10_000_000);
+    expect(afterTrial.signup_trial.count - after.signup_trial.count).toBe(0);
+    expect(afterTrial.signup_trial.micros - after.signup_trial.micros).toBe(0);
 
     // Connection revocation and deletion of a live connection, with the same
     // provider class list as creation; an already revoked row is not counted twice.

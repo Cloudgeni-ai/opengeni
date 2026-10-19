@@ -83,6 +83,7 @@ export async function completeSelfServiceOrganizationSetup(
     organizationName: string;
     operationId: string;
     requestFingerprint: string;
+    /** Legacy compatibility flag; eligibility issuance is unconditional after migration 0845. */
     trialCreditsEnabled?: boolean;
     trialCreditModelIds?: string[] | undefined;
   },
@@ -91,8 +92,9 @@ export async function completeSelfServiceOrganizationSetup(
     const txDb = tx as unknown as Database;
     await setSubjectRlsContext(txDb, input.actorSubjectId);
     // Transaction-local and set by the trusted API, never the request body.
-    // The AFTER INSERT receipt trigger handles the grant atomically with setup;
-    // replaying an old receipt cannot create a new grant after launch.
+    // The AFTER INSERT trigger records non-monetary Free eligibility atomically
+    // with setup. Keep the legacy GUC for pre-0845 compatibility; it cannot
+    // enable a monetary signup bonus on the current schema.
     await rawRows(
       txDb,
       sql`select pg_catalog.set_config(

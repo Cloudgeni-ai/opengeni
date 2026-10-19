@@ -35,19 +35,20 @@ test("only Free monthly credit funds the catalog hint and uncovered-model gap", 
     await applyCreditLedgerEntry(client.db, {
       accountId: grant.accountId,
       type: "grant",
-      amountMicros: 1,
+      amountMicros: 0,
       sourceType: "verified_signup_trial",
       sourceId: user,
       idempotencyKey: `verified-signup-trial:v1:${user}`,
       eligibleModelIds: ["gpt-6-luna"],
     });
-    await applyCreditDebitUpToBalance(client.db, {
+    const beforeMonthly = await applyCreditDebitUpToBalance(client.db, {
       accountId: grant.accountId,
       type: "model_debit",
       requestedAmountMicros: 1,
       modelId: "gpt-6-luna",
       idempotencyKey: crypto.randomUUID(),
     });
+    expect(beforeMonthly.debitedMicros).toBe(0);
     const period = {
       accountId: grant.accountId,
       planKey: "free",
