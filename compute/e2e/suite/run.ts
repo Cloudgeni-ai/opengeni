@@ -2507,9 +2507,11 @@ check(
       inflightHow = "no answer";
     } else {
       const took = ((settledInflight.settled - inflightSent) / 1000).toFixed(1);
-      if (settledInflight.settled < stoppedAt) {
+      // Sent just before the stop was asked for, with a 120 s timeout: an
+      // end before the stop was asked for is not the loss's doing.
+      if (settledInflight.settled < start) {
         failures.push(
-          `the command in flight ended ${took} s after it was sent, before its host was stopped, so the loss did not end it`,
+          `the command in flight ended ${took} s after it was sent, before its host's stop was asked for, so the loss did not end it`,
         );
       }
       if (settledInflight.result) {
