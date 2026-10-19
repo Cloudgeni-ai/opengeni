@@ -31,7 +31,7 @@ blake3 = { workspace = true }
 uuid = { workspace = true }
 # The serializable record of a running command handed to a successor process.
 serde = { workspace = true }
-fs2 = "0.4"
+fs2 = "=0.4.3"
 
 # Interactive terminal: a real PTY (openpty / ConPTY) via the safe portable-pty
 # crate — no unsafe, cross-platform (the M8 terminal seam).

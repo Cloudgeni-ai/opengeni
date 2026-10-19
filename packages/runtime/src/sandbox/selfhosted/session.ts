@@ -289,8 +289,7 @@ export interface SelfhostedBackgroundCommandAdoption {
   abandoned?: boolean;
 }
 
-/** Exact command-admission snapshot. A worker resolves this immediately before
- * every exec/Git admission; retries and already-started operations retain it. */
+/** Register content-free cleanup ownership before any native file dispatch. */
 export type SelfhostedSecretFileLifecycle = (target: {
   scope: string;
   controlWorkspaceId: string;
@@ -298,6 +297,7 @@ export type SelfhostedSecretFileLifecycle = (target: {
   connectionInstanceId: string;
 }) => Promise<{ close(): Promise<void>; complete(): Promise<void> }>;
 
+/** Exact command-admission snapshot. Retries and accepted work retain it. */
 export interface SelfhostedOperationAdmission {
   secretFileFencingSupported?: boolean;
   secretFileLifecycle?: SelfhostedSecretFileLifecycle | undefined;

@@ -226,13 +226,10 @@ impl SecretFiles {
             return Err(failure("invalid private file name"));
         }
         let _lock = self.lock(scope)?;
-        if self
-            .state
-            .join(format!("{scope}.closed"))
-            .try_exists()
-            .map_err(failure)?
-        {
-            return Err(failure("private file scope is closed"));
+        match fs::symlink_metadata(self.state.join(format!("{scope}.closed"))) {
+            Ok(_) => return Err(failure("private file scope is closed")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(failure(error)),
         }
         admitted();
         if let Some(parent) = self.root.parent() {
@@ -488,6 +485,12 @@ mod tests {
         fs::rename(saved, &store.root).unwrap();
         reopened.close("closed").unwrap();
         assert!(!store.root.join("closed").exists());
+        symlink(
+            store.state.join("missing"),
+            store.state.join("damaged.closed"),
+        )
+        .unwrap();
+        assert!(reopened.write("damaged", "file", b"late").is_err());
     }
 
     #[cfg(unix)]

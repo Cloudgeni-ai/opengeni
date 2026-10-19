@@ -35,6 +35,11 @@ BEGIN
   EXECUTE format('CREATE POLICY private_cleanup_inventory ON %1$I.connected_secret_file_scopes
     USING (%1$I.session_tenancy_fence_owner_policy_active(current_user,%2$L,%3$s::oid,workspace_id,true))
     WITH CHECK (%1$I.session_tenancy_fence_owner_policy_active(current_user,%2$L,%3$s::oid,workspace_id,true))', data_schema, owner_name, schema_oid);
+  -- The boolean maintenance probe must not mint a write-backed inventory.
+  -- Only the migration owner (including its fixed SECURITY DEFINER probe)
+  -- can read this content-free ledger without one; the app role cannot.
+  EXECUTE format('CREATE POLICY private_cleanup_owner_read ON %I.connected_secret_file_scopes
+    FOR SELECT USING (current_user = %L)', data_schema, owner_name);
 
   EXECUTE format($ddl$
     CREATE FUNCTION opengeni_private.register_connected_secret_scope(
@@ -80,19 +85,12 @@ BEGIN
     END $fn$;
 
     CREATE FUNCTION opengeni_private.connected_secret_scopes_due()
-    RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $fn$
-    DECLARE inventory uuid; result boolean;
-    BEGIN
-      inventory := opengeni_private.open_session_tenancy_fence_inventory(%1$I.session_tenancy_fence_target_schema());
+    RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $fn$
+      -- A read-only superset: active owners can yield a harmless empty sweep.
+      -- The claim below alone decides terminal-owner cleanup eligibility.
       SELECT EXISTS (SELECT 1 FROM %1$I.connected_secret_file_scopes x
-        WHERE x.retry_after <= now() AND (x.claimed_at IS NULL OR x.claimed_at < now()-interval '5 minutes')
-          AND (x.close_requested_at IS NOT NULL OR NOT EXISTS
-            (SELECT 1 FROM %1$I.session_turn_attempts a WHERE a.id=x.attempt_id AND a.closed_at IS NULL))) INTO result;
-      PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory);
-      RETURN result;
-    EXCEPTION WHEN OTHERS THEN
-      PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory); RAISE;
-    END $fn$;
+        WHERE x.retry_after <= now() AND (x.claimed_at IS NULL OR x.claimed_at < now()-interval '5 minutes'));
+    $fn$;
 
     CREATE FUNCTION opengeni_private.claim_connected_secret_scopes(claim uuid, batch integer, ttl_ms integer)
     RETURNS SETOF %1$I.connected_secret_file_scopes

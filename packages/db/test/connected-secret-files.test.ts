@@ -5,6 +5,8 @@ import {
 } from "@opengeni/testing";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { sql } from "drizzle-orm";
+import { rawRows } from "../src/database";
 import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -188,6 +190,26 @@ test("another tenant cannot close or acknowledge an obligation", async () => {
     await shared.admin`select close_requested_at from connected_secret_file_scopes where id=${id}`;
   expect(rows).toHaveLength(1);
   expect(rows[0]!.close_requested_at).toBeNull();
+  await requestConnectedSecretScopeClose(client.db, owner, id);
+  await completeConnectedSecretScope(client.db, owner, id);
+});
+
+test("maintenance probe is read-only under FORCE RLS without exposing the ledger", async () => {
+  const { owner, target } = await fixture();
+  const id = await registerConnectedSecretScope(client.db, owner, target);
+  await client.db.transaction(async (tx) => {
+    await tx.execute(sql`set transaction read only`);
+    const rows = await rawRows<{ due: boolean }>(
+      tx,
+      sql`select opengeni_private.connected_secret_scopes_due() as due`,
+    );
+    expect(rows[0]!.due).toBe(true);
+  });
+  await expect(
+    rawRows(client.db, sql`select id from connected_secret_file_scopes where id=${id}::uuid`),
+  ).rejects.toThrow();
+  // The probe may over-report live owners, but the claim must not close them.
+  expect((await claim()).some((row) => row.id === id)).toBe(false);
   await requestConnectedSecretScopeClose(client.db, owner, id);
   await completeConnectedSecretScope(client.db, owner, id);
 });
