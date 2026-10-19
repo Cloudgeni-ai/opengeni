@@ -1,0 +1,1053 @@
+//! The host agent's local API: one JSON request per line on a Unix socket,
+//! answered by one JSON reply line.
+//!
+//! A `connect` request turns the connection into a byte stream to a port
+//! inside the sandbox after its reply line, waking the sandbox first. That
+//! single primitive serves commands, terminals, file access and previews.
+
+use std::fmt;
+use std::str::FromStr;
+use std::time::Duration;
+
+use compute_core::{Durability, Level, Priority, SandboxId, SleepPolicy, SleepRules, Step};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// A sandbox id on the wire: 32 lowercase hex digits (a UUID without dashes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Id(pub SandboxId);
+
+impl fmt::Display for Id {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:032x}", self.0.0)
+    }
+}
+
+impl FromStr for Id {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let digits: String = text.chars().filter(|c| *c != '-').collect();
+        if digits.len() != 32 {
+            return Err(format!("sandbox id must have 32 hex digits: {text}"));
+        }
+        u128::from_str_radix(&digits, 16)
+            .map(|value| Self(SandboxId(value)))
+            .map_err(|error| format!("bad sandbox id {text}: {error}"))
+    }
+}
+
+impl Serialize for Id {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Id {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// [`Level`] on the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum LevelName {
+    Running,
+    Paused,
+    Compressed,
+    Saved,
+    Archived,
+    Remote,
+}
+
+impl From<Level> for LevelName {
+    fn from(level: Level) -> Self {
+        match level {
+            Level::Running => Self::Running,
+            Level::Paused => Self::Paused,
+            Level::Compressed => Self::Compressed,
+            Level::Saved => Self::Saved,
+            Level::Archived => Self::Archived,
+            Level::Remote => Self::Remote,
+        }
+    }
+}
+
+impl From<LevelName> for Level {
+    fn from(level: LevelName) -> Self {
+        match level {
+            LevelName::Running => Self::Running,
+            LevelName::Paused => Self::Paused,
+            LevelName::Compressed => Self::Compressed,
+            LevelName::Saved => Self::Saved,
+            LevelName::Archived => Self::Archived,
+            LevelName::Remote => Self::Remote,
+        }
+    }
+}
+
+/// [`Priority`] on the wire.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum PriorityName {
+    #[default]
+    Interactive,
+    Proactive,
+    Background,
+}
+
+impl From<PriorityName> for Priority {
+    fn from(priority: PriorityName) -> Self {
+        match priority {
+            PriorityName::Interactive => Self::Interactive,
+            PriorityName::Proactive => Self::Proactive,
+            PriorityName::Background => Self::Background,
+        }
+    }
+}
+
+/// [`Durability`] on the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum DurabilityName {
+    Volatile,
+    Local,
+    Remote,
+}
+
+impl From<Durability> for DurabilityName {
+    fn from(durability: Durability) -> Self {
+        match durability {
+            Durability::Volatile => Self::Volatile,
+            Durability::Local => Self::Local,
+            Durability::Remote => Self::Remote,
+        }
+    }
+}
+
+/// How a sandbox sleeps: idle milliseconds before each rule applies, and an
+/// omitted rule never applies. The default never sleeps. See
+/// [`SleepRules`] for what each rule does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SleepConfig {
+    /// Pause the VM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_after_ms: Option<u64>,
+    /// Save to local disk while the VM stays paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_after_ms: Option<u64>,
+    /// Copy the saved state to object storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_after_ms: Option<u64>,
+    /// End the VM process even without memory pressure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_after_ms: Option<u64>,
+    /// Delete the local copy, keeping object storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evict_after_ms: Option<u64>,
+    /// Delete the memory image, keeping the files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forget_after_ms: Option<u64>,
+    /// Let memory pressure compress the paused VM's memory, on hosts that
+    /// can.
+    #[serde(default)]
+    pub compress: bool,
+    /// Copy the sandbox to object storage after it ran this many
+    /// milliseconds since its last copy there, while it runs; counts running
+    /// time, not idle time (see [`SleepRules::checkpoint_every`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_every_ms: Option<u64>,
+}
+
+impl SleepConfig {
+    /// [`SleepRules::RECOMMENDED`] on the wire.
+    pub const RECOMMENDED: Self = Self::from_rules(SleepRules::RECOMMENDED);
+
+    /// The rules on the wire. Durations round down to whole milliseconds.
+    #[must_use]
+    pub const fn from_rules(rules: SleepRules) -> Self {
+        const fn ms(duration: Option<Duration>) -> Option<u64> {
+            match duration {
+                // Saturates far beyond any useful idle time.
+                #[allow(clippy::cast_possible_truncation)]
+                Some(duration) => Some(duration.as_millis() as u64),
+                None => None,
+            }
+        }
+        Self {
+            pause_after_ms: ms(rules.pause_after),
+            save_after_ms: ms(rules.save_after),
+            archive_after_ms: ms(rules.archive_after),
+            drop_after_ms: ms(rules.drop_after),
+            evict_after_ms: ms(rules.evict_after),
+            forget_after_ms: ms(rules.forget_after),
+            compress: rules.compress_under_pressure,
+            checkpoint_every_ms: ms(rules.checkpoint_every),
+        }
+    }
+
+    /// The rules these settings describe.
+    #[must_use]
+    pub fn rules(&self) -> SleepRules {
+        let after = |ms: Option<u64>| ms.map(Duration::from_millis);
+        SleepRules {
+            pause_after: after(self.pause_after_ms),
+            save_after: after(self.save_after_ms),
+            archive_after: after(self.archive_after_ms),
+            drop_after: after(self.drop_after_ms),
+            evict_after: after(self.evict_after_ms),
+            forget_after: after(self.forget_after_ms),
+            compress_under_pressure: self.compress,
+            checkpoint_every: after(self.checkpoint_every_ms),
+        }
+    }
+}
+
+/// The most guest memory a sandbox may have, in MiB.
+pub const MAX_MEMORY_MIB: u32 = 65_536;
+
+/// A sandbox image built from an OCI image (ADR 19): the BLAKE3 digest of
+/// its ext4 file, written as 64 lowercase hex digits. The same file always
+/// has the same id, on every host, and a host checks a fetched image
+/// against it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ImageId(pub [u8; 32]);
+
+impl fmt::Display for ImageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for ImageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ImageId({self})")
+    }
+}
+
+impl FromStr for ImageId {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let bad = || format!("image id {text:?} is not 64 lowercase hex digits");
+        let digits = text.as_bytes();
+        if digits.len() != 64 {
+            return Err(bad());
+        }
+        let nibble = |digit: u8| match digit {
+            b'0'..=b'9' => Some(digit - b'0'),
+            b'a'..=b'f' => Some(digit - b'a' + 10),
+            _ => None,
+        };
+        let mut id = [0; 32];
+        for (byte, [high, low]) in id.iter_mut().zip(digits.as_chunks::<2>().0) {
+            *byte = (nibble(*high).ok_or_else(bad)? << 4) | nibble(*low).ok_or_else(bad)?;
+        }
+        Ok(Self(id))
+    }
+}
+
+impl Serialize for ImageId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// What a sandbox looks like and how it sleeps.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// Virtual processors.
+    pub vcpus: u8,
+    /// Guest memory in MiB.
+    pub memory_mib: u32,
+    /// Guest memory in MiB the sandbox is guaranteed while it runs: what the
+    /// host reserves for it when it wakes. Above this it may use free memory
+    /// up to `memory_mib`, best effort. Omitted, it is `memory_mib`. Hosts
+    /// that back guest memory with huge pages cannot take memory back from a
+    /// guest, so they reserve `memory_mib` whatever this says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_request_mib: Option<u32>,
+    /// Processor time the sandbox is guaranteed when processors are
+    /// contended, in thousandths of a processor; shares of contended time
+    /// follow it. `vcpus` stays the ceiling. Omitted, it is `vcpus` whole
+    /// processors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_request_millis: Option<u32>,
+    /// How it sleeps; omitted, it never sleeps.
+    #[serde(default)]
+    pub sleep: SleepConfig,
+    /// The image its disk starts as; omitted, the host's base image. A
+    /// host that does not have it yet fetches it from its store first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageId>,
+    /// How the host reaches its guest's Opengeni agent, when it runs one
+    /// ([ADR 21](../../docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)):
+    /// the control service sets it for the host and owner epoch it gives the
+    /// sandbox to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<crate::link::AgentLink>,
+}
+
+impl SandboxConfig {
+    /// A sandbox of `vcpus` processors and `memory_mib` of memory, all of
+    /// it guaranteed, sleeping as `sleep` says.
+    #[must_use]
+    pub fn new(vcpus: u8, memory_mib: u32, sleep: SleepConfig) -> Self {
+        Self {
+            vcpus,
+            memory_mib,
+            memory_request_mib: None,
+            cpu_request_millis: None,
+            sleep,
+            image: None,
+            link: None,
+        }
+    }
+
+    /// The same, starting from the image `image`.
+    #[must_use]
+    pub fn with_image(mut self, image: ImageId) -> Self {
+        self.image = Some(image);
+        self
+    }
+
+    /// Whether `other` asks for the same sandbox: equal in everything but
+    /// its [`Self::link`], which the control service sets for each host and
+    /// owner epoch it gives the sandbox to, and may send again changed.
+    #[must_use]
+    pub fn same_sandbox(&self, other: &Self) -> bool {
+        let Self {
+            vcpus,
+            memory_mib,
+            memory_request_mib,
+            cpu_request_millis,
+            sleep,
+            image,
+            link: _,
+        } = self;
+        *vcpus == other.vcpus
+            && *memory_mib == other.memory_mib
+            && *memory_request_mib == other.memory_request_mib
+            && *cpu_request_millis == other.cpu_request_millis
+            && *sleep == other.sleep
+            && *image == other.image
+    }
+
+    /// Guest memory in MiB it is guaranteed.
+    #[must_use]
+    pub fn memory_request(&self) -> u32 {
+        self.memory_request_mib.unwrap_or(self.memory_mib)
+    }
+
+    /// Its `cpu.weight`: 100 per processor requested.
+    #[must_use]
+    pub fn cpu_weight(&self) -> u16 {
+        let millis = self
+            .cpu_request_millis
+            .unwrap_or(u32::from(self.vcpus) * 1000);
+        u16::try_from((millis / 10).clamp(1, 10_000)).unwrap_or(10_000)
+    }
+
+    /// The sleep settings as a validated core policy.
+    pub fn sleep_policy(&self) -> Result<SleepPolicy, String> {
+        SleepPolicy::new(self.sleep.rules())
+            .map_err(|error| format!("invalid sleep settings: {error}"))
+    }
+
+    /// Checks everything that can be wrong before any work is done.
+    pub fn validate(&self) -> Result<SleepPolicy, String> {
+        if self.vcpus == 0 || self.vcpus > 32 {
+            return Err("vcpus must be between 1 and 32".into());
+        }
+        if !(128..=MAX_MEMORY_MIB).contains(&self.memory_mib) {
+            return Err(format!(
+                "memory_mib must be between 128 and {MAX_MEMORY_MIB}"
+            ));
+        }
+        if let Some(request) = self.memory_request_mib
+            && !(64..=self.memory_mib).contains(&request)
+        {
+            return Err("memory_request_mib must be between 64 and memory_mib".into());
+        }
+        if let Some(millis) = self.cpu_request_millis
+            && !(10..=u32::from(self.vcpus) * 1000).contains(&millis)
+        {
+            return Err("cpu_request_millis must be between 10 and vcpus * 1000".into());
+        }
+        self.sleep_policy()
+    }
+}
+
+/// One request.
+///
+/// Requests about an existing sandbox may name the `generation` (the
+/// sandbox's execution, from [`SandboxStatus::generation`]) they were issued
+/// under. Such a request is refused with [`ErrorCode::Stale`] once a boot has
+/// replaced that execution (memory was lost), so a caller relying on programs
+/// it started inside the sandbox learns they are gone instead of acting on a
+/// different execution. Pausing, saving and restoring continue the same
+/// execution and keep the generation.
+///
+/// Every request may be retried after a lost reply. Create is idempotent:
+/// repeating it with the same settings succeeds, with other settings it is
+/// refused with [`ErrorCode::Exists`], and while the first attempt is still
+/// under way with [`ErrorCode::Busy`]. Remove reports
+/// [`ErrorCode::NotFound`] once the sandbox is gone, which a retrying
+/// caller takes as done. Waking, holding and connecting change nothing a
+/// repeat would undo.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum Request {
+    /// Create a sandbox, or confirm one made with the same settings. It
+    /// costs nothing until first needed: the first wake boots it.
+    Create {
+        /// Its id.
+        id: Id,
+        /// Its shape and sleep ladder.
+        config: SandboxConfig,
+    },
+    /// Delete a sandbox and everything it stores.
+    Remove {
+        /// Its id.
+        id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
+    },
+    /// Note that a sandbox will probably be needed soon and start waking it,
+    /// without waiting.
+    Touch {
+        /// Its id.
+        id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
+        /// How urgently.
+        #[serde(default)]
+        priority: PriorityName,
+    },
+    /// Wake a sandbox and reply once it runs.
+    Wake {
+        /// Its id.
+        id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
+        /// How urgently.
+        #[serde(default)]
+        priority: PriorityName,
+    },
+    /// Wake a sandbox, then turn this connection into a byte stream to
+    /// `port` inside it. The sandbox stays awake while the stream carries
+    /// traffic; once it has been silent both ways for the host's stream
+    /// idle time it may sleep, and the next byte either way wakes it. A
+    /// stream whose sandbox slept past Paused ends.
+    Connect {
+        /// Its id.
+        id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
+        /// The guest vsock port.
+        port: u32,
+        /// How urgently.
+        #[serde(default)]
+        priority: PriorityName,
+    },
+    /// Put a sandbox at least as deep as `level` now, whatever its sleep
+    /// settings say, for example to drain the host. Replies at once; the
+    /// sandbox waits while something holds it awake, and a later wake
+    /// cancels the request.
+    Sleep {
+        /// Its id.
+        id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
+        /// The least depth to reach.
+        level: LevelName,
+    },
+    /// Keep a sandbox awake for a named reason, such as an agent turn in
+    /// progress, waking it if it sleeps. Replies once the hold is on disk,
+    /// without waiting for the wake: it outlasts a restart of the host
+    /// agent. Holding again under the same name refreshes the hold, and
+    /// with `ttl_ms` it lapses on its own unless refreshed in time, so a
+    /// caller that disappears cannot keep a sandbox awake forever.
+    Hold {
+        /// Its id.
+        id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
+        /// The reason, unique within the sandbox.
+        hold: String,
+        /// Milliseconds until the hold lapses; omitted, it lasts until
+        /// released.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_ms: Option<u64>,
+        /// How urgently to wake for it.
+        #[serde(default)]
+        priority: PriorityName,
+    },
+    /// End a named hold. Ending one that does not exist does nothing.
+    Release {
+        /// Its id.
+        id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
+        /// The reason that ended.
+        hold: String,
+    },
+    /// Take a sandbox over from the store's latest copy, as its owner under
+    /// `owner_epoch`
+    /// ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)).
+    /// The host claims the copy under that epoch, so no earlier owner's
+    /// archive can land after it, and keeps the sandbox at Remote: its
+    /// next wake fetches it. A copy of the sandbox this host holds under an
+    /// earlier epoch is dropped first. Adopting again under the same epoch
+    /// succeeds; under an earlier epoch than the one held, or than the
+    /// store's, it is refused with [`ErrorCode::Stale`], and without a
+    /// stored copy with [`ErrorCode::NotFound`].
+    ///
+    /// The host restores the copy's memory only with `whole`, which the
+    /// service sends when it knows the copy to be the sandbox's whole
+    /// latest state (its last owner handed it off). Otherwise the copy may
+    /// be older than the sandbox had become, as when its last owner was
+    /// lost, and its memory image would bring back programs at a point
+    /// they had already run past: the host deletes the image from the
+    /// store's copy as it claims it, and the next wake boots from the
+    /// copy's files, as after a crash. So a service from before the field
+    /// never has a copy's memory restored; a host from before it ignores
+    /// the field and always restores memory, so hosts are upgraded before
+    /// the service.
+    Adopt {
+        /// Its id.
+        id: Id,
+        /// Its shape and sleep ladder.
+        config: SandboxConfig,
+        /// The owner epoch the host takes it under.
+        owner_epoch: u64,
+        /// Whether the copy is whole, memory and all.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        whole: bool,
+    },
+    /// Hand a sandbox off to whichever host adopts it next: the host stops
+    /// taking wakes for it (they are refused with [`ErrorCode::Busy`]),
+    /// archives its latest state, ends its VM, forgets it, keeping the
+    /// store's copy, and replies once all that is done. Only the last step,
+    /// forgetting it, is recorded, so a restarted agent finishes a hand-off
+    /// that got that far; one cut short earlier leaves the sandbox here,
+    /// awake or asleep, and the service, which had no answer, sends it
+    /// again. Refused with [`ErrorCode::Busy`] while something holds the
+    /// sandbox awake, with [`ErrorCode::Stale`] under an earlier owner
+    /// epoch than the one held, and with [`ErrorCode::NotFound`] under a
+    /// later one, which this host never held; once it is done the host no
+    /// longer has the sandbox ([`ErrorCode::NotFound`]).
+    HandOff {
+        /// Its id.
+        id: Id,
+        /// The owner epoch the host holds it under.
+        owner_epoch: u64,
+    },
+    /// Report every sandbox and host counters.
+    Status,
+}
+
+/// One reply.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum Reply {
+    /// The request succeeded.
+    Done,
+    /// The sandbox runs. `waited_us` is how long the host waited for it.
+    Woken {
+        /// Microseconds spent waking.
+        waited_us: u64,
+        /// The step under way when the wake arrived, if any; a wake during
+        /// a sleep step such as `pause` or `save` cancels it or waits for
+        /// it to finish.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        during: Option<String>,
+        /// The execution that is running. It changes only when the sandbox
+        /// boots afresh, which ends every program in it; pass it to later
+        /// requests that rely on programs started now.
+        #[serde(default)]
+        generation: u64,
+    },
+    /// The stream to the guest port follows this line.
+    Connected {
+        /// Microseconds spent waking.
+        waited_us: u64,
+        /// Microseconds spent reaching the guest port after waking.
+        connect_us: u64,
+        /// The execution the stream reached, as in [`Reply::Woken`].
+        #[serde(default)]
+        generation: u64,
+    },
+    /// The host's state.
+    Status(Box<HostStatus>),
+    /// The request failed.
+    Error {
+        /// What went wrong.
+        message: String,
+        /// What kind of failure, for callers that act on it.
+        #[serde(default)]
+        code: ErrorCode,
+    },
+}
+
+/// What kind of failure a [`Reply::Error`] reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// The request is malformed or not allowed.
+    Invalid,
+    /// No such sandbox.
+    NotFound,
+    /// A sandbox of that id exists with other settings, or is being
+    /// removed.
+    Exists,
+    /// The sandbox is still being created; try again.
+    Busy,
+    /// The sandbox failed in a way this host cannot retry: it can be
+    /// removed, or restored elsewhere from a stored copy. Retrying here
+    /// does not help.
+    Broken,
+    /// The host does not manage the sandbox until someone resolves why
+    /// (status lists it under `blocked`, with the reason). Its files and
+    /// any VM are kept as they are, and it can still be removed. Retrying
+    /// does not help until then.
+    Blocked,
+    /// The sandbox was removed while the request waited.
+    Removed,
+    /// The request names a generation the sandbox has moved past.
+    Stale,
+    /// A guest port did not answer.
+    Unreachable,
+    /// The host cannot take on the sandbox's memory now, even after ending
+    /// its idle VMs that are already saved. It answers at once, never after
+    /// slow work, and keeps making room in the background. Retry later or
+    /// on another host; the message says how much was needed.
+    HostFull,
+    /// The host does not take requests sent under this registration, or
+    /// may not run sandboxes now: it holds no sandbox the request is
+    /// about, under it. Only requests from the control service get it.
+    Unavailable,
+    /// The request was sent more renewals ago than the host still takes:
+    /// it changed nothing. Only requests from the control service get it.
+    Expired,
+    /// The host failed; the request may succeed if retried.
+    #[default]
+    Internal,
+}
+
+/// One sandbox's state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxStatus {
+    /// Its id.
+    pub id: Id,
+    /// Its execution: raised by every boot; pausing, saving and restoring
+    /// keep it.
+    pub generation: u64,
+    /// The ownership of it this host holds (see [`Request::Adopt`]); 1
+    /// outside a fleet.
+    #[serde(default = "first_owner")]
+    pub owner_epoch: u64,
+    /// How many times its record has been written.
+    pub revision: u64,
+    /// Where its state lives.
+    pub level: LevelName,
+    /// Where a copy of its current state is kept besides the VM.
+    pub durability: DurabilityName,
+    /// When the store's latest copy of it was made, in milliseconds since
+    /// the Unix epoch: what losing this host would go back to. A sandbox
+    /// that stays busy is not archived, so this can be long ago.
+    #[serde(default)]
+    pub backed_up_ms: Option<u64>,
+    /// Whether its running programs survive (a memory image or live VM).
+    pub memory_saved: bool,
+    /// The step in progress.
+    pub step: Option<String>,
+    /// Reasons it is held awake.
+    pub holds: usize,
+    /// VM processes started for it, boots and restores alike, since the
+    /// host agent started: every one the engine saw running, including
+    /// those that then failed to boot or restore.
+    #[serde(default)]
+    pub launches: u64,
+    /// Host memory it holds, when a VM process exists.
+    pub resident_bytes: Option<u64>,
+    /// Whether no copy of its VM process can be trusted, such as when its
+    /// disk may have lost writes: it keeps running and pausing, but sleeps
+    /// no deeper than compressed until its VM process is replaced.
+    #[serde(default)]
+    pub unsavable: bool,
+    /// Whether it is beyond recovery on this host.
+    pub broken: bool,
+    /// Bytes of memory it waits for while held awake with its wake refused
+    /// because the host is full ([`ErrorCode::HostFull`]); it wakes by
+    /// itself once room can be made. Also set while it waits after being
+    /// paused for host memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for_room: Option<u64>,
+    /// Bytes of host memory its VM held when the host paused it, or began
+    /// pausing and saving it, to free memory while it was in use above its
+    /// memory request; set until it wakes again. It loses nothing and
+    /// wakes by itself once there is room; a control plane may rather move
+    /// it to another host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_for_memory: Option<u64>,
+    /// Bytes the host asked its guest to give back through its balloon
+    /// while it runs above its memory request, when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balloon_bytes: Option<u64>,
+    /// Its VM's zswap traffic and memory pressure, when a VM process exists
+    /// and the engine reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryStatus>,
+    /// The last step that failed and has not succeeded since, such as a
+    /// save that could not be written for want of disk; it is retried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_step: Option<FailedStep>,
+}
+
+fn first_owner() -> u64 {
+    1
+}
+
+/// A step that failed, with what went wrong.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedStep {
+    /// The step, such as `save`.
+    pub step: String,
+    /// What went wrong.
+    pub error: String,
+}
+
+/// A VM's zswap traffic and memory pressure. A running VM is never
+/// compressed: its `zswpout` grows only while it is paused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryStatus {
+    /// Pages compressed into zswap since the VM process started.
+    pub zswpout: u64,
+    /// Pages brought back from zswap since the VM process started.
+    pub zswpin: u64,
+    /// Share of the last ten seconds in which some of its processes waited
+    /// for memory, in hundredths of a percent; `None` without pressure
+    /// stall information.
+    pub pressure_some_avg10_hundredths: Option<u32>,
+}
+
+impl MemoryStatus {
+    /// From a VM cgroup's zswap counters and its `some avg10` memory
+    /// pressure in percent.
+    #[must_use]
+    pub fn new(zswpout: u64, zswpin: u64, pressure_some_avg10: Option<f64>) -> Self {
+        Self {
+            zswpout,
+            zswpin,
+            pressure_some_avg10_hundredths: pressure_some_avg10.map(|percent| {
+                // At most 100 percent: 10 000 hundredths.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let hundredths = (percent * 100.0).round().clamp(0.0, 10_000.0) as u32;
+                hundredths
+            }),
+        }
+    }
+}
+
+/// Counters for one kind of step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepStats {
+    /// Steps started.
+    pub started: u64,
+    /// Steps that reached their target.
+    pub done: u64,
+    /// Steps cancelled before taking effect.
+    pub cancelled: u64,
+    /// Steps that failed.
+    pub failed: u64,
+    /// Running now.
+    pub in_flight: u32,
+    /// Total microseconds of finished steps.
+    pub total_us: u64,
+    /// Slowest finished step in microseconds.
+    pub max_us: u64,
+}
+
+/// The host's state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostStatus {
+    /// Every sandbox.
+    pub sandboxes: Vec<SandboxStatus>,
+    /// Counters per step kind, by name.
+    pub steps: Vec<(String, StepStats)>,
+    /// Host memory available, as last sampled.
+    pub available_memory: Option<u64>,
+    /// Host memory that ending idle, saved VM processes would free at once
+    /// without losing anything. Placement can count it as available.
+    #[serde(default)]
+    pub reclaimable_memory: u64,
+    /// Sandboxes the host cannot manage: their record could not be read,
+    /// their recovery or removal failed. Their ids are refused for new
+    /// sandboxes and their files and any VM left alone; removing one retries
+    /// when its record is readable.
+    #[serde(default)]
+    pub blocked: Vec<BlockedSandbox>,
+    /// How much memory is promised to sandboxes; `None` on a host that
+    /// does not limit what it takes on.
+    #[serde(default)]
+    pub capacity: Option<CapacityStatus>,
+    /// How much of the local disk saves have booked; `None` on a host that
+    /// does not book disk.
+    #[serde(default)]
+    pub disk: Option<DiskStatus>,
+    /// The warm templates new sandboxes start from, one per shape.
+    #[serde(default)]
+    pub templates: Vec<TemplateStatus>,
+    /// How long, in milliseconds, memory waking from object storage has
+    /// been failing to arrive, because the store does not answer or its
+    /// pages cannot be written to local disk, if it is. Sandboxes waking
+    /// from the store stall meanwhile; they lose nothing and carry on once
+    /// the store answers and there is room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_stalled_ms: Option<u64>,
+    /// Running sandboxes whose processor use and traffic could not be read
+    /// lately. They count as busy, so none falls asleep unseen; a number
+    /// above zero means the host's sensing is failing.
+    #[serde(default)]
+    pub unseen_activity: usize,
+    /// What the host runs.
+    #[serde(default)]
+    pub about: About,
+}
+
+/// How much of a host's guest memory its sandboxes are promised, for
+/// placing sandboxes and watching a buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapacityStatus {
+    /// Bytes of guest memory the host lets its sandboxes take at once.
+    pub total: u64,
+    /// Bytes guaranteed to sandboxes awake or waking: their requests.
+    pub reserved: u64,
+    /// Bytes taken: the requests of awake sandboxes or what they use beyond
+    /// them, and what paused ones still hold.
+    pub occupied: u64,
+    /// Bytes a wake can take without ending any VM first.
+    pub free: u64,
+    /// Sandboxes awake or waking.
+    pub awake: u32,
+}
+
+/// How much of a host's local disk the next saves of VMs not saved yet may
+/// need; a wake that would book more than is free is refused as host full.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskStatus {
+    /// Bytes available at the last reading.
+    pub available: u64,
+    /// Bytes booked for saves.
+    pub booked: u64,
+    /// Bytes never booked.
+    pub reserve: u64,
+    /// Bytes more wakes may book.
+    pub free: u64,
+    /// Inodes available at the last reading.
+    pub inodes_available: u64,
+    /// Inodes booked for saves.
+    pub inodes_booked: u64,
+    /// Inodes more wakes may book.
+    pub inodes_free: u64,
+}
+
+/// What a host agent runs, so a measurement can say what it measured.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct About {
+    /// The agent's build: the start of a hash of its executable.
+    #[serde(default)]
+    pub build: String,
+    /// What memory images made here depend on, such as the VMM's version
+    /// and the processor.
+    #[serde(default)]
+    pub runtime: String,
+    /// How guest memory is backed.
+    #[serde(default)]
+    pub memory_profile: String,
+    /// The disk image new sandboxes start from: its path, size and last
+    /// change.
+    #[serde(default)]
+    pub base_image: String,
+    /// Whether it checkpoints running sandboxes that ask for it: it has a
+    /// store, and files under its state root share extents.
+    #[serde(default)]
+    pub checkpoints: bool,
+}
+
+/// One shape's warm template.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateStatus {
+    pub vcpus: u8,
+    pub memory_mib: u32,
+    /// The image its sandboxes start as; omitted, the host's base image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageId>,
+    pub state: TemplateState,
+    /// Ready sandboxes of the shape: restored, warm and paused, waiting
+    /// for a create to claim one.
+    #[serde(default)]
+    pub ready: u32,
+    /// What the ready sandboxes of the shape hold in memory.
+    #[serde(default)]
+    pub ready_resident_bytes: u64,
+    /// How many ready sandboxes the host keeps of the shape.
+    #[serde(default)]
+    pub target: u32,
+    /// Ready sandboxes of the shape being filled.
+    #[serde(default)]
+    pub filling: u32,
+}
+
+/// Whether new sandboxes of a shape can start from its template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateState {
+    /// New sandboxes of the shape start from it.
+    Ready,
+    /// Being built; new sandboxes boot cold meanwhile.
+    Building,
+    /// The last build failed; new sandboxes boot cold, and a later one
+    /// tries again.
+    Failed,
+    /// Unused for long enough that the host gave it and its ready
+    /// sandboxes up; the next create of the shape boots cold and builds it
+    /// again.
+    Retired,
+}
+
+/// A sandbox the host cannot manage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedSandbox {
+    /// Its id, which the host refuses to reuse.
+    pub id: Id,
+    /// What went wrong.
+    pub problem: String,
+}
+
+/// A step's name on the wire.
+#[must_use]
+pub fn step_name(step: Step) -> &'static str {
+    match step {
+        Step::Resume => "resume",
+        Step::Restore => "restore",
+        Step::Boot => "boot",
+        Step::Fetch => "fetch",
+        Step::Pause => "pause",
+        Step::Drop => "drop",
+        Step::Compress => "compress",
+        Step::Save => "save",
+        Step::Archive => "archive",
+        Step::Evict => "evict",
+        Step::Forget => "forget",
+        Step::Checkpoint => "checkpoint",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_round_trip_with_or_without_dashes() {
+        let id: Id = "0193f3c2-7a1b-7cde-8f00-112233445566".parse().unwrap();
+        assert_eq!(id.to_string(), "0193f3c27a1b7cde8f00112233445566");
+        assert_eq!(id.to_string().parse::<Id>().unwrap(), id);
+        assert!("abc".parse::<Id>().is_err());
+    }
+
+    #[test]
+    fn requests_parse_from_compact_json() {
+        let request: Request = serde_json::from_str(
+            r#"{"op":"connect","id":"0193f3c27a1b7cde8f00112233445566","port":52}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            Request::Connect {
+                port: 52,
+                priority: PriorityName::Interactive,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fleet_requests_name_the_owner_epoch() {
+        let request: Request = serde_json::from_str(
+            r#"{"op":"hand_off","id":"0193f3c27a1b7cde8f00112233445566","owner_epoch":3}"#,
+        )
+        .unwrap();
+        assert!(matches!(request, Request::HandOff { owner_epoch: 3, .. }));
+        assert!(
+            serde_json::from_str::<Request>(
+                r#"{"op":"hand_off","id":"0193f3c27a1b7cde8f00112233445566"}"#
+            )
+            .is_err(),
+            "a hand-off says which ownership it ends"
+        );
+        let code: ErrorCode = serde_json::from_str(r#""unavailable""#).unwrap();
+        assert_eq!(code, ErrorCode::Unavailable);
+    }
+
+    #[test]
+    fn configs_are_validated() {
+        let mut config = SandboxConfig {
+            image: None,
+            vcpus: 2,
+            memory_mib: 1024,
+            memory_request_mib: None,
+            cpu_request_millis: None,
+            sleep: SleepConfig::RECOMMENDED,
+            link: None,
+        };
+        assert!(config.validate().is_ok());
+        config.sleep.pause_after_ms = None;
+        assert!(config.validate().is_err(), "saving requires pausing");
+        config.sleep = SleepConfig::default();
+        assert!(config.validate().is_ok(), "never sleeping is valid");
+        config.vcpus = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn sleep_settings_round_trip_and_omit_disabled_rules() {
+        assert_eq!(
+            SleepConfig::RECOMMENDED.rules(),
+            compute_core::SleepRules::RECOMMENDED
+        );
+        let json = serde_json::to_string(&SleepConfig {
+            pause_after_ms: Some(10_000),
+            ..SleepConfig::default()
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"pause_after_ms":10000,"compress":false}"#);
+        let parsed: SleepConfig = serde_json::from_str(r#"{"pause_after_ms":5}"#).unwrap();
+        assert_eq!(parsed.rules().pause_after, Some(Duration::from_millis(5)));
+        assert!(serde_json::from_str::<SleepConfig>(r#"{"pause":5}"#).is_err());
+    }
+}

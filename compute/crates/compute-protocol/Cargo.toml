@@ -1,0 +1,19 @@
+[package]
+name = "compute-protocol"
+description = "Wire types of Opengeni compute: the host agent's API, the control service's host API and the agent link"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+compute-core = { path = "../compute-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[lints]
+workspace = true

@@ -41,6 +41,16 @@ spec:
             matchLabels:
               {{- include "opengeni.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: postgres-upgrade-preflight
+        {{- if .Values.computeControl.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: compute-control
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: compute-database
+        {{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.postgres.service.port }}
