@@ -246,6 +246,12 @@ export type BrowserCdpConnection = {
     options?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal },
   ): Promise<T>;
   on(method: string, listener: (event: CdpEvent) => void, sessionId?: string): () => void;
+  /**
+   * Resolves once events the browser sent before this call have reached
+   * listeners. Omitted by transports that deliver events in order with
+   * command replies, where a reply already proves it.
+   */
+  flushEvents?: () => Promise<void>;
   waitForEvent(
     method: string,
     options?: {
@@ -5450,8 +5456,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     try {
       // The renderer reports a request or navigation it starts before it
       // answers a later command on the same session, so one cheap round trip
-      // makes sure the ones this action started have been seen.
+      // makes sure the ones this action started have been sent, and a flush
+      // that they have been seen where events arrive separately from replies.
       await this.sendTarget(state, "Runtime.getIsolateId", {});
+      await (await this.ensureConnection()).flushEvents?.();
     } catch {
       // Settling only improves the snapshot; it never decides the outcome.
     }
