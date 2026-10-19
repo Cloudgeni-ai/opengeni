@@ -1833,7 +1833,7 @@ BEGIN
         ${literal(schema)}, ${literal(role)}
       );
     END IF;
-    -- 0849's migration grants the atomic agent-child creation seam only to
+    -- 0851's migration grants the atomic agent-child creation seam only to
     -- roles that existed then; a role provisioned later needs it here too.
     IF to_regprocedure(
       format(

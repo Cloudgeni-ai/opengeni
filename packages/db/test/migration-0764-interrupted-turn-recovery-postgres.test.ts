@@ -106,7 +106,7 @@ async function start(
   },
   options: { goal?: boolean; requestedSessionId?: string } = {},
 ) {
-  // This schema stops before 0764, so 0849's atomic agent-child creation seam
+  // This schema stops before 0764, so 0851's atomic agent-child creation seam
   // is absent. Child creates carry no request subject and keep the ordinary
   // insert path; machine-tree witnesses are outside this fixture's scope.
   const { subjectId: requestSubjectId, ...tenant } = scope;

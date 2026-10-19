@@ -30,7 +30,7 @@ import {
   inspectRuntimeDatabasePosture,
 } from "../src/runtime-posture";
 
-const migration = "0849_personal_machine_session_tree.sql";
+const migration = "0851_personal_machine_session_tree.sql";
 let shared: SharedTestDatabase;
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("machine-tree");

@@ -373,7 +373,7 @@ BEGIN
     scope_start := strpos(definition, '    AND (grant_value.context = session_row.visibility OR (');
     scope_end := strpos(definition, '  ORDER BY CASE grant_value.mode WHEN ''once'' THEN 1 WHEN ''session'' THEN 2 ELSE 3 END,');
     IF scope_start = 0 OR scope_end <= scope_start THEN
-      RAISE EXCEPTION '0849 machine grant predicate drift: %', signature;
+      RAISE EXCEPTION '0851 machine grant predicate drift: %', signature;
     END IF;
     old_predicate := substring(definition FROM scope_start FOR scope_end - scope_start);
     IF signature = 'admit_session_attempt_personal_machine()' THEN
@@ -386,7 +386,7 @@ BEGIN
     IF strpos(old_predicate, 'grant_value.session_id = ' || session_expr) = 0
       OR strpos(old_predicate, 'grant_value.authority_epoch BETWEEN session_row.execution_authority_epoch AND session_row.authority_epoch') = 0
       OR (length(definition) - length(replace(definition, consume_guard, ''))) / length(consume_guard) <> 1 THEN
-      RAISE EXCEPTION '0849 machine grant scope drift: %', signature;
+      RAISE EXCEPTION '0851 machine grant scope drift: %', signature;
     END IF;
     new_predicate := '    AND ((' || substring(old_predicate FROM 9) || ') OR personal_machine_grant_covers_descendant(grant_value.id, '
       || session_expr || ', ' || turn_expr || ', enrollment_row.id))' || chr(10);
@@ -402,7 +402,7 @@ BEGIN
   definition := pg_get_functiondef(signature::regprocedure);
   old_predicate := 'AND ((authorization_row.grant_mode = ''once'' AND grant_value.status = ''consumed''';
   IF (length(definition) - length(replace(definition, old_predicate, ''))) / length(old_predicate) <> 1 THEN
-    RAISE EXCEPTION '0849 machine runtime predicate drift';
+    RAISE EXCEPTION '0851 machine runtime predicate drift';
   END IF;
   EXECUTE replace(definition, old_predicate,
     'AND (personal_machine_grant_covers_descendant(grant_value.id, p_session_id, p_turn_id, p_enrollment_id) OR (authorization_row.grant_mode = ''once'' AND grant_value.status = ''consumed''');
@@ -427,7 +427,7 @@ BEGIN
     OR personal_machine_turn_consent_covers_descendant(consent.id, p_session_id, p_turn_id)
   ORDER BY (consent.session_id = p_session_id) DESC, consent.route_epoch DESC, consent.id LIMIT 1;$after$;
   IF (length(definition) - length(replace(definition, before_text, ''))) / length(before_text) <> 1 THEN
-    RAISE EXCEPTION '0849 turn-consent binding drift';
+    RAISE EXCEPTION '0851 turn-consent binding drift';
   END IF;
   EXECUTE replace(definition, before_text, after_text);
 
@@ -435,7 +435,7 @@ BEGIN
   before_text := E'AND consent.session_id = p_session_id\n    AND consent.turn_id = p_turn_id';
   after_text := E'AND ((consent.session_id = p_session_id AND consent.turn_id = p_turn_id)\n      OR personal_machine_turn_consent_covers_descendant(consent.id, p_session_id, p_turn_id))';
   IF (length(definition) - length(replace(definition, before_text, ''))) / length(before_text) <> 1 THEN
-    RAISE EXCEPTION '0849 turn-consent dispatch drift';
+    RAISE EXCEPTION '0851 turn-consent dispatch drift';
   END IF;
   EXECUTE replace(definition, before_text, after_text);
 END

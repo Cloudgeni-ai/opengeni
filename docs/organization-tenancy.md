@@ -83,7 +83,7 @@ target workspace must belong to the same organization and remain accessible to
 the owner. `workspace_shared` requires an explicit durable shared-output
 acknowledgement. Revocation is immediate and advances grant generation.
 
-Personal Connected Machines have one bounded tree exception (0849): a machine's
+Personal Connected Machines have one bounded tree exception (0851): a machine's
 original `session` grant, or its consumed `once` grant for the originating logical
 turn, can cover true agent-created descendants of the consenting session. Every
 parent/turn link must retain the same workspace, owner and initiating human, with

@@ -729,7 +729,7 @@ Omitted child placement inherits parent machine/root and shared home/group,
 including attached `backend:none`; selfhosted-only children require a machine.
 Personal machine tree consent uses protected exact-attempt creation witnesses,
 immutable parent/turn links, same-owner causal
-humans and the original revocable grant at claim and dispatch (0849); it neither
+humans and the original revocable grant at claim and dispatch (0851); it neither
 copies grants nor expands other personal resources. Every ancestor machine
 snapshot must remain current. See [Connected Machines](connected-machines.md).
 
