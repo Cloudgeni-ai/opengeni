@@ -19,14 +19,20 @@
 //! the guest does not take up again within [`TAKE_UP`] after taking up
 //! another of the sandbox's streams, is one the guest no longer has, as
 //! after a restore from a checkpoint older than it: it ends too, so the
-//! hub does not keep a connection no agent holds. One whose connection's
-//! end the host sees only after that take-up (a reset that reaches the host
-//! after the guest's new hello) still counts as carried then, and ends at
-//! the sweep of the next take-up instead: a window that starts at a
-//! connection's end, rather than at a take-up that proves the guest runs,
-//! could run out before a slow wake lets the guest connect. [`TAKE_UP`] counts only
-//! time in which the guest could run ([`RunClock`]): a guest paused just
-//! after taking one stream up has all of it, once it runs again, for the
+//! hub does not keep a connection no agent holds. A take-up is what
+//! proves the guest runs well enough to connect: a guest just restored
+//! may take a while, as its memory comes in, and a window that started
+//! before it connected could run out first. So a stream whose connection's
+//! end the host sees only after a take-up (a reset that reaches the host
+//! after the guest's new hello) gets a window of its own from that end,
+//! if its guest took a stream up since it was last launched: that guest
+//! takes up every stream it has within moments of the stream's
+//! connection ending. A window lapses when the guest is launched again
+//! (a restore or a boot, [`RunClock::launched`]) before it runs out: the
+//! new guest has yet to prove it runs, and its first take-up's window
+//! covers every stream not carried by then. [`TAKE_UP`] counts only time in
+//! which the guest could run ([`RunClock`]): a guest paused just after
+//! taking one stream up has all of it, once it runs again, for the
 //! others.
 //!
 //! A new connection takes the stream over at once, under the stream's
@@ -72,17 +78,25 @@ struct ClockInner {
 }
 
 /// What the clock counted before the guest last began to run, and since
-/// when it runs, if it does.
+/// when it runs, if it does; and how many times its VM was launched.
 #[derive(Debug, Default, Clone, Copy)]
 struct Ran {
     before: Duration,
     since: Option<Instant>,
+    launch: u64,
 }
 
 impl Ran {
     fn now(self) -> Duration {
         self.before + self.since.map_or(Duration::ZERO, |since| since.elapsed())
     }
+}
+
+/// Time on a sandbox's [`RunClock`], and the launch of its VM then.
+#[derive(Debug, Clone, Copy)]
+struct At {
+    time: Duration,
+    launch: u64,
 }
 
 impl RunClock {
@@ -110,6 +124,7 @@ impl RunClock {
                 *ran = Ran {
                     before: ran.now(),
                     since: None,
+                    launch: ran.launch,
                 }
             }
             _ => return,
@@ -118,9 +133,27 @@ impl RunClock {
         self.inner.changed.notify_waiters();
     }
 
-    /// The time the guest could run so far.
-    fn now(&self) -> Duration {
-        self.lock().now()
+    /// A VM process for the sandbox is about to start, restored or booted:
+    /// its guest is a new one, which has yet to prove it runs by taking a
+    /// stream up. Told before the process starts, so before that guest
+    /// can connect.
+    pub(crate) fn launched(&self) {
+        self.lock().launch += 1;
+    }
+
+    /// The launches it was told of.
+    #[cfg(test)]
+    pub(crate) fn launches(&self) -> u64 {
+        self.lock().launch
+    }
+
+    /// The time the guest could run so far, and the launch it runs in.
+    fn at(&self) -> At {
+        let ran = *self.lock();
+        At {
+            time: ran.now(),
+            launch: ran.launch,
+        }
     }
 
     /// Returns once the guest could run for `at` in all.
@@ -182,12 +215,15 @@ struct Inner<F> {
 struct Map {
     streams: HashMap<StreamId, Entry>,
     /// Whether a sweep for streams not taken up again is waiting, and the
-    /// latest take-up since it began waiting, on the sandbox's clock.
+    /// latest one asked for since it began waiting.
     sweeping: bool,
-    next_sweep: Option<Duration>,
+    next_sweep: Option<At>,
     /// The sweep's task, which ends with the sandbox's streams: it may wait
     /// on a clock that never runs again.
     sweeper: Option<Tasks>,
+    /// The launch in which the guest last took a stream up, which proves
+    /// that guest runs: it takes up every stream it has at once.
+    proven: Option<u64>,
 }
 
 struct Entry {
@@ -247,15 +283,18 @@ impl Shared {
     }
 
     /// Connection `carrier` ended under the stream at `now` on the
-    /// sandbox's clock.
-    fn uncarried(&self, carrier: u64, now: Duration) {
+    /// sandbox's clock. Whether that left the stream without one: an
+    /// ended connection that another had replaced did not.
+    fn uncarried(&self, carrier: u64, now: Duration) -> bool {
         let mut state = self.lock();
-        if state.carrier == carrier && state.carried {
+        let left = state.carrier == carrier && state.carried;
+        if left {
             state.carried = false;
             state.uncarried_since = Some(now);
         }
         drop(state);
         self.changed();
+        left
     }
 }
 
@@ -266,11 +305,40 @@ impl<F> Inner<F> {
 }
 
 /// Connection `carrier` ended under the stream `shared`, if `inner` is
-/// still there.
-fn uncarried<F>(inner: &Weak<Inner<F>>, shared: &Shared, carrier: u64) {
-    if let Some(inner) = inner.upgrade() {
-        shared.uncarried(carrier, inner.clock.now());
+/// still there. If that leaves the stream without one, and its guest took
+/// a stream up since it was launched, the stream gets a window of its own
+/// from now: that guest takes up every stream it has at once.
+fn uncarried<F>(inner: &Weak<Inner<F>>, shared: &Shared, carrier: u64)
+where
+    F: Send + Sync + 'static,
+{
+    let Some(inner) = inner.upgrade() else {
+        return;
+    };
+    let now = inner.clock.at();
+    if !shared.uncarried(carrier, now.time) {
+        return;
     }
+    let mut map = inner.lock();
+    if map.proven == Some(now.launch) {
+        sweep_later(&inner, &mut map, now);
+    }
+}
+
+/// Ends the streams not carried at `at` that are not taken up within
+/// [`TAKE_UP`] of the guest's running after it, unless the guest is
+/// launched again before then.
+fn sweep_later<F>(inner: &Arc<Inner<F>>, map: &mut Map, at: At)
+where
+    F: Send + Sync + 'static,
+{
+    if map.sweeping {
+        map.next_sweep = Some(at);
+        return;
+    }
+    map.sweeping = true;
+    let task = tokio::spawn(sweep(Arc::downgrade(inner), at));
+    map.sweeper = Some(Tasks(vec![task.abort_handle()]));
 }
 
 /// Ends stream `id` as connection `carrier` saw it end, if `inner` and it
@@ -346,8 +414,9 @@ where
     where
         C: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        let now = self.inner.clock.now();
+        let now = self.inner.clock.at();
         let mut map = self.inner.lock();
+        map.proven = Some(now.launch);
         if !map.streams.contains_key(&hello.id) {
             if hello.received > 0 || map.streams.len() >= self.inner.limit {
                 tracing::debug!(
@@ -355,7 +424,7 @@ where
                     stream = %hello.id,
                     "an agent-link stream the host does not have",
                 );
-                self.sweep_later(&mut map, now);
+                sweep_later(&self.inner, &mut map, now);
                 drop(map);
                 tokio::spawn(gone(connection));
                 return;
@@ -419,7 +488,7 @@ where
         // Replacing them ends the connection that carried it before.
         entry.carrier = Tasks(vec![reader.abort_handle(), writer.abort_handle()]);
         shared.changed();
-        self.sweep_later(&mut map, now);
+        sweep_later(&self.inner, &mut map, now);
     }
 
     /// A new stream, its hub end handed to the hub.
@@ -441,21 +510,9 @@ where
             carrier: Tasks::default(),
         }
     }
-
-    /// After a take-up at `now`, ends the streams that were not carried
-    /// then and are not taken up within [`TAKE_UP`] of the guest's running.
-    fn sweep_later(&self, map: &mut Map, now: Duration) {
-        if map.sweeping {
-            map.next_sweep = Some(now);
-            return;
-        }
-        map.sweeping = true;
-        let task = tokio::spawn(sweep(Arc::downgrade(&self.inner), now));
-        map.sweeper = Some(Tasks(vec![task.abort_handle()]));
-    }
 }
 
-async fn sweep<F>(inner: Weak<Inner<F>>, mut since: Duration) {
+async fn sweep<F>(inner: Weak<Inner<F>>, mut since: At) {
     loop {
         let Some((take_up, clock)) = inner
             .upgrade()
@@ -463,19 +520,23 @@ async fn sweep<F>(inner: Weak<Inner<F>>, mut since: Duration) {
         else {
             return;
         };
-        clock.reaches(since + take_up).await;
+        clock.reaches(since.time + take_up).await;
         let Some(strong) = inner.upgrade() else {
             return;
         };
         let mut map = strong.lock();
         let before = map.streams.len();
-        map.streams.retain(|_, entry| {
-            entry
-                .shared
-                .lock()
-                .uncarried_since
-                .is_none_or(|uncarried| uncarried > since)
-        });
+        // A guest launched since is a new one, which has yet to prove it
+        // runs: its first take-up's window covers these streams instead.
+        if clock.at().launch == since.launch {
+            map.streams.retain(|_, entry| {
+                entry
+                    .shared
+                    .lock()
+                    .uncarried_since
+                    .is_none_or(|uncarried| uncarried > since.time)
+            });
+        }
         let ended = before - map.streams.len();
         if ended > 0 {
             tracing::info!(
@@ -579,6 +640,7 @@ async fn read_frames<C, F>(
     id: StreamId,
 ) where
     C: AsyncRead + Unpin,
+    F: Send + Sync + 'static,
 {
     let mut pending: Vec<u8> = Vec::with_capacity(2 * CHUNK);
     let mut buffer = vec![0; CHUNK + 16];
@@ -654,6 +716,7 @@ async fn write_frames<C, F>(
     id: StreamId,
 ) where
     C: AsyncWrite + Unpin,
+    F: Send + Sync + 'static,
 {
     if connection.write_all(answer.as_bytes()).await.is_err() {
         uncarried(&inner, &shared, carrier);
@@ -700,505 +763,4 @@ async fn write_frames<C, F>(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::io::{Read, Write};
-    use std::net::Shutdown;
-    use std::os::unix::net::UnixStream as Socket;
-    use std::path::{Path, PathBuf};
-
-    use compute_guest::resume::relay::{Ended, relay};
-    use tokio::net::UnixListener;
-    use tokio::sync::mpsc;
-    use tokio::task::{JoinHandle, JoinSet};
-
-    use super::*;
-
-    const WAIT: Duration = Duration::from_secs(10);
-
-    type Serve = Box<dyn Fn(DuplexStream) + Send + Sync>;
-
-    /// A sandbox's streams behind a socket, and the hub ends they begin.
-    struct Rig {
-        socket: PathBuf,
-        hub: mpsc::UnboundedReceiver<DuplexStream>,
-        streams: Streams<Serve>,
-        clock: RunClock,
-        _dir: tempfile::TempDir,
-        accept: JoinHandle<()>,
-    }
-
-    impl Drop for Rig {
-        fn drop(&mut self) {
-            self.accept.abort();
-        }
-    }
-
-    fn rig(limit: usize, take_up: Duration) -> Rig {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("link.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let (began, hub) = mpsc::unbounded_channel();
-        let clock = RunClock::running();
-        let streams = Streams::new(
-            Arc::from("sandbox"),
-            Box::new(move |end| {
-                let _ = began.send(end);
-            }) as Serve,
-            limit,
-            take_up,
-            clock.clone(),
-        );
-        let serving = streams.clone();
-        let accept = tokio::spawn(async move {
-            let mut hellos = JoinSet::new();
-            loop {
-                let (connection, _) = listener.accept().await.unwrap();
-                hellos.spawn(serving.clone().take(connection));
-            }
-        });
-        Rig {
-            socket,
-            hub,
-            streams,
-            clock,
-            _dir: dir,
-            accept,
-        }
-    }
-
-    impl Rig {
-        async fn next_stream(&mut self) -> DuplexStream {
-            tokio::time::timeout(WAIT, self.hub.recv())
-                .await
-                .expect("no stream began")
-                .unwrap()
-        }
-
-        /// Waits until the host has seen the connection under stream `id`
-        /// end, as it does a moment after the connection ends.
-        async fn until_uncarried(&self, id: u128) {
-            let seen = async {
-                while self
-                    .streams
-                    .inner
-                    .lock()
-                    .streams
-                    .get(&StreamId(id))
-                    .is_some_and(|entry| entry.shared.lock().carried)
-                {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            };
-            tokio::time::timeout(WAIT, seen)
-                .await
-                .expect("the host never saw the connection end");
-        }
-    }
-
-    /// The guest's relay of an agent connection on a thread, its dialed
-    /// connections kept so a test can end them as a snapshot does.
-    struct Guest {
-        agent: Socket,
-        dialed: Arc<Mutex<Vec<Socket>>>,
-        ended: std::sync::mpsc::Receiver<Ended>,
-    }
-
-    impl Guest {
-        fn start(socket: &Path, id: u128) -> Self {
-            let (agent, local) = Socket::pair().unwrap();
-            agent.set_read_timeout(Some(WAIT)).unwrap();
-            let dialed = Arc::new(Mutex::new(Vec::new()));
-            let (done, ended) = std::sync::mpsc::channel();
-            let (socket, kept) = (socket.to_path_buf(), Arc::clone(&dialed));
-            std::thread::spawn(move || {
-                let ended = relay(
-                    local,
-                    StreamId(id),
-                    || {
-                        let connection = Socket::connect(&socket)?;
-                        kept.lock().unwrap().push(connection.try_clone()?);
-                        Ok(connection)
-                    },
-                    |_| {},
-                );
-                let _ = done.send(ended);
-            });
-            Self {
-                agent,
-                dialed,
-                ended,
-            }
-        }
-
-        /// Ends every connection under the stream, as a snapshot does.
-        fn reset(&self) {
-            for connection in self.dialed.lock().unwrap().drain(..) {
-                let _ = connection.shutdown(Shutdown::Both);
-            }
-        }
-    }
-
-    async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
-        tokio::task::spawn_blocking(work).await.unwrap()
-    }
-
-    async fn read_exactly(end: &mut DuplexStream, length: usize) -> Vec<u8> {
-        let mut bytes = vec![0; length];
-        tokio::time::timeout(WAIT, end.read_exact(&mut bytes))
-            .await
-            .expect("the hub end got nothing")
-            .unwrap();
-        bytes
-    }
-
-    async fn ends_within(end: &mut DuplexStream, limit: Duration) -> bool {
-        let mut rest = Vec::new();
-        matches!(
-            tokio::time::timeout(limit, end.read_to_end(&mut rest)).await,
-            Ok(Ok(_))
-        )
-    }
-
-    /// A guest connection that speaks the protocol by hand, and the answer
-    /// to its hello.
-    fn raw(socket: &Path, hello: &Hello) -> (Socket, String) {
-        let mut connection = Socket::connect(socket).unwrap();
-        connection.set_read_timeout(Some(WAIT)).unwrap();
-        connection.write_all(hello.line().as_bytes()).unwrap();
-        let mut line = Vec::new();
-        let mut byte = [0];
-        while connection.read(&mut byte).unwrap() == 1 {
-            line.push(byte[0]);
-            if byte[0] == b'\n' {
-                break;
-            }
-        }
-        (connection, String::from_utf8(line).unwrap())
-    }
-
-    async fn raw_hello(rig: &Rig, id: u128, received: u64, sent: u64) -> (Socket, String) {
-        let socket = rig.socket.clone();
-        let hello = Hello {
-            id: StreamId(id),
-            received,
-            sent,
-        };
-        blocking(move || raw(&socket, &hello)).await
-    }
-
-    fn data(offset: u64, bytes: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        Frame::Data { offset, bytes }.encode(&mut out);
-        out
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_stream_outlives_the_connections_under_it_and_the_hub_sees_one() {
-        let mut rig = rig(4, TAKE_UP);
-        let guest = Guest::start(&rig.socket, 1);
-        let mut agent = guest.agent.try_clone().unwrap();
-        blocking(move || agent.write_all(b"CONNECT {}\r\nPING\r\n").unwrap()).await;
-        let mut end = rig.next_stream().await;
-        assert_eq!(read_exactly(&mut end, 18).await, b"CONNECT {}\r\nPING\r\n");
-
-        // A snapshot ends the connection; what the agent and the hub send
-        // crosses on the next one, each byte once, and no stream begins.
-        for round in 0..3_u8 {
-            guest.reset();
-            let mut agent = guest.agent.try_clone().unwrap();
-            let sent = vec![b'a' + round; 300_000];
-            let expected = sent.clone();
-            blocking(move || agent.write_all(&sent).unwrap()).await;
-            assert_eq!(read_exactly(&mut end, 300_000).await, expected);
-            let reply = vec![b'z' - round; 70_000];
-            end.write_all(&reply).await.unwrap();
-            let mut agent = guest.agent.try_clone().unwrap();
-            let got = blocking(move || {
-                let mut got = vec![0; 70_000];
-                agent.read_exact(&mut got).unwrap();
-                got
-            })
-            .await;
-            assert_eq!(got, reply);
-        }
-        assert!(rig.hub.try_recv().is_err(), "one stream throughout");
-
-        // The agent hangs up, then the hub: the stream finishes.
-        guest.agent.shutdown(Shutdown::Write).unwrap();
-        assert!(ends_within(&mut end, WAIT).await);
-        drop(end);
-        let ended = blocking(move || guest.ended.recv_timeout(WAIT)).await;
-        assert_eq!(ended, Ok(Ended::Finished));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_guest_the_host_cannot_go_on_with_is_told_gone_and_the_hub_end_closes() {
-        let mut rig = rig(4, TAKE_UP);
-        let (mut connection, answer) = raw_hello(&rig, 7, 0, 0).await;
-        assert_eq!(answer, "ok 0\n");
-        connection.write_all(&data(0, b"abc")).unwrap();
-        let mut end = rig.next_stream().await;
-        assert_eq!(read_exactly(&mut end, 3).await, b"abc");
-
-        // Restored from before it sent "abc": the host cannot take it back.
-        let (_, answer) = raw_hello(&rig, 7, 0, 1).await;
-        assert_eq!(answer, "gone\n");
-        assert!(ends_within(&mut end, WAIT).await, "the hub's end went too");
-
-        // A stream the host never had, with something received, is gone.
-        let (_, answer) = raw_hello(&rig, 8, 5, 5).await;
-        assert_eq!(answer, "gone\n");
-        assert!(rig.hub.try_recv().is_err());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn streams_not_taken_up_again_end_and_those_taken_up_go_on() {
-        let take_up = Duration::from_millis(300);
-        let mut rig = rig(4, take_up);
-        let mut ends = Vec::new();
-        for id in [1, 2] {
-            let (connection, answer) = raw_hello(&rig, id, 0, 0).await;
-            assert_eq!(answer, "ok 0\n");
-            ends.push(rig.next_stream().await);
-            drop(connection);
-        }
-        // Both ends seen before the take-up, as after a restore (one seen
-        // only after it waits for the next take-up; see the module's docs).
-        rig.until_uncarried(1).await;
-        rig.until_uncarried(2).await;
-        let (mut kept, answer) = raw_hello(&rig, 1, 0, 0).await;
-        assert_eq!(answer, "ok 0\n");
-        let mut not_taken_up = ends.pop().unwrap();
-        let mut resumed = ends.pop().unwrap();
-        assert!(ends_within(&mut not_taken_up, take_up * 10).await);
-        resumed.write_all(b"still").await.unwrap();
-        let frame = blocking(move || {
-            let mut frame = vec![0; 13 + 5];
-            kept.read_exact(&mut frame).unwrap();
-            frame
-        })
-        .await;
-        assert_eq!(frame, data(0, b"still"));
-    }
-
-    /// A stream whose connection the host sees end only after another was
-    /// taken up is not ended on that take-up's clock, which a slow wake
-    /// could outrun, but on the next take-up's.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_stream_seen_uncarried_after_a_take_up_ends_at_the_next_one() {
-        let take_up = Duration::from_millis(300);
-        let mut rig = rig(4, take_up);
-        let mut connections = Vec::new();
-        let mut ends = Vec::new();
-        for id in [1, 2] {
-            let (connection, answer) = raw_hello(&rig, id, 0, 0).await;
-            assert_eq!(answer, "ok 0\n");
-            connections.push(connection);
-            ends.push(rig.next_stream().await);
-        }
-        let late = connections.pop().unwrap();
-        drop(connections.pop().unwrap());
-        rig.until_uncarried(1).await;
-        let (first, answer) = raw_hello(&rig, 1, 0, 0).await;
-        assert_eq!(answer, "ok 0\n");
-        drop(late);
-        rig.until_uncarried(2).await;
-        let mut not_taken_up = ends.pop().unwrap();
-        assert!(
-            !ends_within(&mut not_taken_up, take_up * 4).await,
-            "kept past the take-up before its end was seen"
-        );
-
-        // The next take-up's sweep ends it.
-        drop(first);
-        rig.until_uncarried(1).await;
-        let (_again, answer) = raw_hello(&rig, 1, 0, 0).await;
-        assert_eq!(answer, "ok 0\n");
-        assert!(ends_within(&mut not_taken_up, take_up * 10).await);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_sandbox_may_hold_only_so_many_streams() {
-        let mut rig = rig(2, TAKE_UP);
-        let mut held = Vec::new();
-        for id in 1..=3 {
-            let (connection, answer) = raw_hello(&rig, id, 0, 0).await;
-            assert_eq!(answer, if id <= 2 { "ok 0\n" } else { "gone\n" });
-            held.push(connection);
-        }
-        rig.next_stream().await;
-        rig.next_stream().await;
-        assert!(rig.hub.try_recv().is_err());
-    }
-
-    /// The next frame on a raw guest connection.
-    fn next_frame(connection: &mut Socket) -> Vec<u8> {
-        let mut pending = Vec::new();
-        let mut buffer = vec![0; CHUNK + 16];
-        loop {
-            if let Some((_, length)) = Frame::decode(&pending).unwrap() {
-                pending.truncate(length);
-                return pending;
-            }
-            let read = connection.read(&mut buffer).unwrap();
-            assert!(read > 0, "the host ended the connection");
-            pending.extend_from_slice(&buffer[..read]);
-        }
-    }
-
-    fn ack(through: u64) -> Vec<u8> {
-        let mut out = Vec::new();
-        Frame::Ack(through).encode(&mut out);
-        out
-    }
-
-    /// A guest whose window is full sends nothing more until it hears an
-    /// acknowledgement, so the host repeats on a new connection the one
-    /// it may have lost with the connection before.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_acknowledgement_lost_with_its_connection_is_repeated_on_the_next() {
-        const WINDOW: u64 = compute_guest::resume::stream::WINDOW as u64;
-        let mut rig = rig(4, TAKE_UP);
-        let (mut connection, answer) = raw_hello(&rig, 9, 0, 0).await;
-        assert_eq!(answer, "ok 0\n");
-        let writing = tokio::task::spawn_blocking(move || {
-            let mut offset = 0;
-            while offset < WINDOW {
-                let length = CHUNK.min(usize::try_from(WINDOW - offset).unwrap());
-                connection
-                    .write_all(&data(offset, &vec![7; length]))
-                    .unwrap();
-                offset += length as u64;
-            }
-            connection
-        });
-        let mut end = rig.next_stream().await;
-        let window = usize::try_from(WINDOW).unwrap();
-        assert_eq!(read_exactly(&mut end, window).await, vec![7; window]);
-        // The connection ends before the guest reads the acknowledgement.
-        writing.await.unwrap().shutdown(Shutdown::Both).unwrap();
-
-        let (mut connection, answer) = raw_hello(&rig, 9, 0, WINDOW).await;
-        assert_eq!(answer, format!("ok {WINDOW}\n"));
-        let frame = blocking(move || next_frame(&mut connection)).await;
-        assert_eq!(frame, ack(WINDOW));
-    }
-
-    /// A connection another took the stream over from reads nothing more
-    /// into it, whatever it still has: aborting its task is no fence, as
-    /// the task may be past its last wait.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_connection_taken_over_reads_nothing_more_into_the_stream() {
-        let mut rig = rig(4, TAKE_UP);
-        let (first, answer) = raw_hello(&rig, 10, 0, 0).await;
-        assert_eq!(answer, "ok 0\n");
-        let mut end = rig.next_stream().await;
-        let shared = Arc::clone(&rig.streams.inner.lock().streams[&StreamId(10)].shared);
-        let old = shared.lock().carrier;
-        // A restored guest says hello again, having sent nothing.
-        let (mut second, answer) = raw_hello(&rig, 10, 0, 0).await;
-        assert_eq!(answer, "ok 0\n");
-        drop(first);
-        // What the connection before still had, read after the take-over.
-        let (mut late, reader) = tokio::io::duplex(1024);
-        late.write_all(&data(0, b"OLD")).await.unwrap();
-        drop(late);
-        read_frames(
-            reader,
-            Arc::clone(&shared),
-            old,
-            Arc::downgrade(&rig.streams.inner),
-            StreamId(10),
-        )
-        .await;
-        assert_eq!(shared.lock().stream.received(), 0);
-        blocking(move || second.write_all(&data(0, b"NEW")).unwrap()).await;
-        assert_eq!(read_exactly(&mut end, 3).await, b"NEW");
-    }
-
-    /// A sandbox at its limit whose streams no connection carries, none
-    /// taken up since, still ends those its guest no longer has: the next
-    /// fresh connection is refused, but starts the sweep, and one after
-    /// it is let in.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_sandbox_at_its_limit_still_ends_streams_its_guest_no_longer_has() {
-        let take_up = Duration::from_millis(300);
-        let mut rig = rig(2, take_up);
-        let mut held = Vec::new();
-        for id in [1, 2] {
-            let (connection, answer) = raw_hello(&rig, id, 0, 0).await;
-            assert_eq!(answer, "ok 0\n");
-            held.push((connection, rig.next_stream().await));
-        }
-        let mut ends = Vec::new();
-        for (connection, end) in held {
-            drop(connection);
-            ends.push(end);
-        }
-        rig.until_uncarried(1).await;
-        rig.until_uncarried(2).await;
-        // Past the sweeps their own take-ups began.
-        tokio::time::sleep(take_up * 2).await;
-        let (_, answer) = raw_hello(&rig, 3, 0, 0).await;
-        assert_eq!(answer, "gone\n");
-        for end in &mut ends {
-            assert!(ends_within(end, take_up * 10).await);
-        }
-        let (_, answer) = raw_hello(&rig, 4, 0, 0).await;
-        assert_eq!(answer, "ok 0\n");
-    }
-
-    /// Time the guest cannot run does not count against the streams it
-    /// has yet to take up: paused just after taking one up, it takes the
-    /// other up once it runs again, however long the pause.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_guest_paused_mid_take_up_keeps_the_streams_it_has_yet_to_take_up() {
-        let take_up = Duration::from_millis(300);
-        let mut rig = rig(4, take_up);
-        let mut held = Vec::new();
-        for id in [1, 2] {
-            let (connection, answer) = raw_hello(&rig, id, 0, 0).await;
-            assert_eq!(answer, "ok 0\n");
-            held.push((connection, rig.next_stream().await));
-        }
-        tokio::time::sleep(take_up * 2).await;
-        let mut ends = Vec::new();
-        for (connection, end) in held {
-            drop(connection);
-            ends.push(end);
-        }
-        rig.until_uncarried(1).await;
-        rig.until_uncarried(2).await;
-        let (_kept, answer) = raw_hello(&rig, 1, 0, 0).await;
-        assert_eq!(answer, "ok 0\n");
-        rig.clock.set(false);
-        assert!(
-            !ends_within(&mut ends[1], take_up * 4).await,
-            "a paused guest's stream is kept"
-        );
-        rig.clock.set(true);
-        let (_resumed, answer) = raw_hello(&rig, 2, 0, 0).await;
-        assert_eq!(answer, "ok 0\n");
-    }
-
-    /// A sandbox's streams that go while its guest cannot run take their
-    /// sweep with them: it does not wait on a clock that may never run
-    /// again.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_sweep_ends_with_the_sandboxs_streams() {
-        let rig = rig(4, Duration::from_millis(300));
-        let (connection, answer) = raw_hello(&rig, 1, 0, 0).await;
-        assert_eq!(answer, "ok 0\n");
-        rig.clock.set(false);
-        let clock = rig.clock.clone();
-        drop((rig, connection));
-        let deadline = tokio::time::Instant::now() + WAIT;
-        while Arc::strong_count(&clock.inner) > 1 {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "something still waits on the clock"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
-}
+mod tests;

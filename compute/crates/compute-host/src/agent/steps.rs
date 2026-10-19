@@ -445,12 +445,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         let (spec, paths) = (VmSpec::clone(&slot.spec), Paths::clone(&slot.paths));
         let live = if needs_vm { slot.vm.take() } else { None };
+        let link_clock = slot.link_clock.clone();
         // A sandbox paused for memory is known to wait for room before
         // any step can leave it saved: a restart then still wakes it.
         let kept =
             (!step.wakes() && slot.holds.paused_for_memory().is_some()).then(|| slot.holds.flush());
         let mut job = self.job(record, spec, paths, cancel);
         job.live = live;
+        job.link_clock = Some(link_clock);
         job.unthrottle = Some({
             let events = events.clone();
             Box::new(move || {
@@ -529,6 +531,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             fetcher: self.fetcher.clone(),
             pager: self.pager.clone(),
             launches: 0,
+            link_clock: None,
             untouched: false,
             unthrottle: None,
             meter: None,
