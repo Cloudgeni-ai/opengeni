@@ -1027,11 +1027,13 @@ registered an `OpengeniAgent` Windows Service that could never start; `start`
 deletes it when allowed, and otherwise prints the one elevated command that
 removes it.
 
-The agent also never treats a filesystem root as its workspace, so an older
-service definition needs no manual step: when `run` starts with `/` (or a
-Windows drive root) as its working directory and the user's home directory
-exists, it moves into that home directory before connecting and reports it as
-the workspace root. Any other launch directory is kept as chosen.
+The agent also never treats a filesystem root or the Windows system directory
+as its workspace, so an older service definition needs no manual step: when
+`run` starts with `/` (or a Windows drive root, or `%SystemRoot%` such as the
+`C:\Windows\System32` a Windows service starts in) as its working directory
+and the user's home directory is usable, it moves into that home directory
+before connecting and reports it as the workspace root. Any other launch
+directory is kept as chosen.
 
 Regenerating an older service definition with `opengeni-agent service install
 --restart` is still useful to pick up other plist changes (such as the stderr log).
@@ -1040,15 +1042,16 @@ plist on disk. If an earlier install wrote the plist but failed before reloading
 a retry still reloads the stale job without requiring `--restart`. Dry-run
 rendering and installation share the `HOME`, then `USERPROFILE`, resolver;
 unsupported control characters and XML-invalid home paths are rejected before a
-plist is written. Existing sessions retain their saved absolute folder; restarting the service does not
-change an already-saved `/`. The existing-session Runs on menu changes the machine,
-not the folder. For a session with `/` saved, start a new session on that machine
-with a writable custom path in the new-session **Runs on** settings (or pass an
-explicit `workingDir` to `createSession`). Historical attachments are not restaged
-automatically; retrieve them explicitly through Files or attach them to a new
-message when needed.
+plist is written. Existing sessions retain their saved absolute folder, except
+that a filesystem or drive root, or anything inside the Windows directory, is
+never used as a working directory: the machine's reported root applies instead.
+Migration 0853 also cleared the saved `/` (and saved Windows
+`C:\Windows\System32` service launch directories) left by older agents. The existing-session Runs
+on menu changes the machine, not the folder. Historical attachments are not
+restaged automatically; retrieve them explicitly through Files or attach them
+to a new message when needed.
 
-While a session keeps `/`, staging an attachment, spilled tool result or generated
+While a machine still reports `/` (an older agent without a usable home), staging an attachment, spilled tool result or generated
 image into it usually still fails. When the turn's effective backend is a
 Connected Machine and its working directory is `/`, any failed staging command
 gets a reason that says the filesystem root is often not writable (read-only on
