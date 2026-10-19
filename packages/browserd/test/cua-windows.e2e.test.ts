@@ -139,19 +139,22 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
       expect(await supervisor.action(click)).toMatchObject({ state: "completed" });
       await until((state) => state.clicks === 1, "button click");
 
-      // Apps launch in the background by full path.
+      // Apps launch in the background by full path. The app must open a
+      // window and keep running (a console tool such as whoami.exe exits;
+      // Notepad on Windows 11 hands off to a packaged app).
       expect(session.capabilities.appLaunch).toBe(true);
       observed = await supervisor.observe(reference, target.id);
-      expect(
-        await supervisor.action(
-          command(observed, {
-            type: "launch",
-            applicationId: join(process.env.SystemRoot ?? "C:\\Windows", "System32", "whoami.exe"),
-          }),
-        ),
-      ).toMatchObject({ state: "completed" });
+      const launched = await supervisor.action(
+        command(observed, {
+          type: "launch",
+          applicationId: join(process.env.SystemRoot ?? "C:\\Windows", "System32", "charmap.exe"),
+        }),
+      );
+      // On failure, CUA's own reason is in the receipt's error.
+      expect(launched).toMatchObject({ state: "completed" });
     } finally {
       await supervisor?.close();
+      Bun.spawnSync(["taskkill", "/F", "/IM", "charmap.exe"]);
       fixture.kill();
       await fixture.exited;
       await rm(root, { recursive: true, force: true });

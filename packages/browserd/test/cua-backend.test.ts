@@ -1368,6 +1368,19 @@ describe("CUA desktop boundary", () => {
       code: "frame_stale",
       dispatched: false,
     });
+    // A failure CUA reports only as text keeps CUA's reason.
+    fixture.mutation = {
+      text: "Failed to launch: The system cannot find the file specified.",
+      images: [],
+      isError: true,
+      degraded: false,
+      rawJson: "{}",
+    };
+    await expect(callDesktop(fixture, "launch_app", {}, "caller-settles")).rejects.toMatchObject({
+      code: "outcome_unknown",
+      message:
+        "CUA launch_app did not return a valid result: Failed to launch: The system cannot find the file specified.",
+    });
     // The failure carries CUA's own reason and hint, not only that it refused.
     fixture.mutation = result(
       {
