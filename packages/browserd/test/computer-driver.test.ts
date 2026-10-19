@@ -684,6 +684,36 @@ describe("ComputerDriver", () => {
     }
   });
 
+  test("a backend's failure text is redacted in full before it is bounded", async () => {
+    const raw = ["{{", "secret:Desk/token", "}}"].join("");
+    for (const secret of ["line-one\nline-two-secret", `long-${"x".repeat(3_000)}-secret`]) {
+      const transport = new FixtureNativeTransport();
+      transport.dispatchError = new ComputerBackendError(
+        "driver_failed",
+        `CUA type_text refused the operation: could not type ${secret} into the field`,
+        false,
+        false,
+      );
+      const driver = new ComputerDriver({
+        computerSessionId,
+        controllerGeneration,
+        client: transport,
+      });
+      const error = await driver
+        .dispatch({
+          ...typeCommand(raw),
+          secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
+        })
+        .then(
+          () => null,
+          (caught: unknown) => caught as Error,
+        );
+      expect(error?.message).toBe(
+        "CUA type_text refused the operation: could not type [secret] into the field",
+      );
+    }
+  });
+
   test("never pastes text that carries a resolved secret", async () => {
     const transport = new UntypeableTextTransport();
     const driver = new ComputerDriver({

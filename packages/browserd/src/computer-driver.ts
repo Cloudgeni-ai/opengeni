@@ -192,7 +192,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
     } catch (error) {
       if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
-        const message = redactInteractionSecretValues(error.message, secretValues);
+        const message = driverErrorMessage(error.message, secretValues);
         if (!error.dispatched) {
           throw new InteractionDefiniteDriverError(code, message, error.retryable);
         }
@@ -237,7 +237,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
     } catch (error) {
       if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
-        const message = redactInteractionSecretValues(error.message, secretValues);
+        const message = driverErrorMessage(error.message, secretValues);
         if (!error.dispatched) {
           throw new InteractionDefiniteDriverError(code, message, error.retryable);
         }
@@ -710,6 +710,21 @@ function recoverableNativeFailure(error: unknown): boolean {
     error.retryable &&
     (error.code === "timeout" || error.code === "driver_failed" || error.code === "unavailable")
   );
+}
+
+const DRIVER_ERROR_MAX_CHARS = 1_200;
+
+/** A backend failure's text as the caller sees it: typed secrets are redacted
+ * from the full text before it is bounded, so clipping cannot leave part of a
+ * secret behind. */
+function driverErrorMessage(
+  message: string,
+  secretValues: Parameters<typeof redactInteractionSecretValues>[1],
+): string {
+  const redacted = redactInteractionSecretValues(message, secretValues);
+  return redacted.length > DRIVER_ERROR_MAX_CHARS
+    ? `${redacted.slice(0, DRIVER_ERROR_MAX_CHARS - 1)}…`
+    : redacted;
 }
 
 function nativeCommand(command: ComputerActionCommand): ComputerBackendActionCommand {
