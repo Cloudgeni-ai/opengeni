@@ -186,6 +186,12 @@ mod tests {
         (reader, writer.into())
     }
 
+    /// The test's own search path, where `sh` and `sleep` are found on any
+    /// Linux, not only those that keep them in `/usr/bin` or `/bin`.
+    fn search_path() -> String {
+        std::env::var("PATH").unwrap()
+    }
+
     /// The holder joins its group itself before it holds anything, so
     /// whatever happens to the agent that started it, it never holds a
     /// file outside the group: when the group is gone, nothing holds it.
@@ -194,7 +200,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut reader, writer) = pipe();
         let gone = Cgroup::at(dir.path().join("gone"));
-        assert!(hold(gone, "/usr/bin:/bin", writer).await.is_err());
+        assert!(hold(gone, &search_path(), writer).await.is_err());
         let mut rest = Vec::new();
         assert_eq!(
             reader.read_to_end(&mut rest).unwrap(),
@@ -207,7 +213,7 @@ mod tests {
         let group = Cgroup::at(dir.path());
         std::fs::write(dir.path().join("cgroup.procs"), "").unwrap();
         let (mut reader, writer) = pipe();
-        let pid = start(&group, "/usr/bin:/bin", writer).await.unwrap();
+        let pid = start(&group, &search_path(), writer).await.unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("cgroup.procs")).unwrap(),
             "0\n"
