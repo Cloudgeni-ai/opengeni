@@ -163,12 +163,14 @@ mod tests {
                     agent_id: "ag".to_string(),
                     kind: v1::StreamKind::Pty as i32,
                     port: 7681,
+                    relay_route: None,
                 }),
             }),
             RelayMessage::OpenAck(v1::StreamOpenAck {
                 accepted: true,
                 error: None,
                 resume_from_seq: 7,
+                relay_route: None,
             }),
             RelayMessage::Frame(v1::StreamFrame {
                 channel_id: "ch-1".to_string(),

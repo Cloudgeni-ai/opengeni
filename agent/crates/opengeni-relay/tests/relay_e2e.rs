@@ -112,6 +112,7 @@ fn producer_config(base: &str, port: u32) -> ChannelConfig {
             agent_id: AGENT.to_string(),
             kind: v1::StreamKind::Pty as i32,
             port,
+            relay_route: None,
         },
         token: agent_token(),
         relay_url: base.to_string(),
@@ -132,8 +133,23 @@ impl Viewer {
         epoch: u64,
         resume_from_seq: u64,
     ) -> Result<(Self, v1::StreamOpenAck), String> {
+        Self::connect_routed(base, port, epoch, resume_from_seq, None).await
+    }
+
+    async fn connect_routed(
+        base: &str,
+        port: u32,
+        epoch: u64,
+        resume_from_seq: u64,
+        route: Option<&str>,
+    ) -> Result<(Self, v1::StreamOpenAck), String> {
         let channel_id = format!("ch-{port}");
-        let url = format!("{base}?ws={WORKSPACE}&agent={AGENT}&port={port}&channel={channel_id}");
+        let mut url =
+            format!("{base}?ws={WORKSPACE}&agent={AGENT}&port={port}&channel={channel_id}");
+        if let Some(route) = route {
+            url.push_str("&route=");
+            url.push_str(route);
+        }
         let (mut socket, _resp) = tokio_tungstenite::connect_async(&url)
             .await
             .map_err(|e| format!("dial: {e}"))?;
@@ -144,6 +160,7 @@ impl Viewer {
                 agent_id: AGENT.to_string(),
                 kind: v1::StreamKind::Pty as i32,
                 port,
+                relay_route: None,
             }),
             token: viewer_token(epoch, port),
             role: v1::StreamRole::Client as i32,
@@ -198,6 +215,276 @@ async fn next_msg(
 }
 
 // ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // One channel's replay/fence history must span all reconnects.
+async fn different_replicas_share_pairing_replay_and_epoch_fences_without_affinity() {
+    let (owner, _owner_shutdown, owner_metrics) = start_relay_on(free_port().await, |c| {
+        c.advertise_ip = Some("127.0.0.1".parse().unwrap());
+    })
+    .await;
+    let (edge, _edge_shutdown, edge_metrics) = start_relay_on(free_port().await, |c| {
+        c.advertise_ip = Some("127.0.0.1".parse().unwrap());
+    })
+    .await;
+    let mut producer = RelayChannel::register(producer_config(&owner, PTY_PORT))
+        .await
+        .unwrap();
+    let route = producer
+        .channel()
+        .relay_route
+        .clone()
+        .expect("producer receives owner route");
+    producer
+        .send_frame(bytes::Bytes::from_static(b"before-viewer"))
+        .await
+        .unwrap();
+    let (mut viewer, ack) = Viewer::connect_routed(&edge, PTY_PORT, 5, 0, Some(&route))
+        .await
+        .unwrap();
+    assert!(ack.accepted);
+    assert_eq!(ack.relay_route.as_deref(), Some(route.as_str()));
+    assert_eq!(
+        edge_metrics.live_channels(),
+        0,
+        "proxy does not create a second registry"
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), viewer.recv_frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .as_ref(),
+        b"before-viewer"
+    );
+    viewer.send_frame(0, b"input-across-replicas").await;
+    let incoming = tokio::time::timeout(Duration::from_secs(2), producer.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(incoming, RelayMessage::Frame(f) if f.data.as_ref() == b"input-across-replicas")
+    );
+    let (_, stale) = Viewer::connect_routed(&edge, PTY_PORT, 4, 0, Some(&route))
+        .await
+        .unwrap();
+    assert!(
+        !stale.accepted,
+        "the owner's epoch floor also fences a different ingress replica"
+    );
+    drop(viewer);
+    producer
+        .send_frame(bytes::Bytes::from_static(b"after-drop"))
+        .await
+        .unwrap();
+    let (mut resumed, ack) = Viewer::connect_routed(&edge, PTY_PORT, 5, 1, Some(&route))
+        .await
+        .unwrap();
+    assert!(ack.accepted);
+    let frame = tokio::time::timeout(Duration::from_secs(2), resumed.recv_frame())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(frame.seq, 1);
+    assert_eq!(frame.data.as_ref(), b"after-drop");
+    let (_, wrong_channel) = Viewer::connect_routed(&edge, 6080, 5, 0, Some(&route))
+        .await
+        .unwrap();
+    assert!(
+        !wrong_channel.accepted,
+        "route is bound to the full channel identity"
+    );
+    let (_, tampered) = Viewer::connect_routed(&edge, PTY_PORT, 5, 0, Some(&format!("{route}x")))
+        .await
+        .unwrap();
+    assert!(!tampered.accepted);
+
+    // Even a correctly signed route cannot cause an unauthenticated private
+    // dial: the ingress edge rejects the ordinary viewer token first.
+    let rejected_before = owner_metrics.opens_rejected();
+    let url = format!(
+        "{edge}?ws={WORKSPACE}&agent={AGENT}&port={PTY_PORT}&channel=ch-{PTY_PORT}&route={route}"
+    );
+    let (mut unauthorized, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    unauthorized
+        .send(WsMessage::Binary(
+            RelayMessage::Open(v1::StreamOpen {
+                channel: Some(producer.channel().clone()),
+                token: "invalid".into(),
+                role: v1::StreamRole::Client as i32,
+                resume_from_seq: 0,
+            })
+            .encode(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(next_msg(&mut unauthorized).await, Some(RelayMessage::OpenAck(ack)) if !ack.accepted)
+    );
+    assert_eq!(owner_metrics.opens_rejected(), rejected_before);
+    assert_eq!(edge_metrics.opens_rejected(), 1);
+
+    // The producer can itself re-enter through the other edge while retaining
+    // the original owner and its viewer. Replacing the producer generation must
+    // not let the old socket teardown detach the replacement.
+    let mut config = producer_config(&edge, PTY_PORT);
+    config.channel.relay_route = Some(route.clone());
+    let mut replacement = RelayChannel::register(config).await.unwrap();
+    drop(producer);
+    resumed.send_frame(1, b"after-producer-reconnect").await;
+    let incoming = tokio::time::timeout(Duration::from_secs(2), replacement.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(incoming, RelayMessage::Frame(f) if f.data.as_ref() == b"input-across-replicas")
+    );
+    let incoming = tokio::time::timeout(Duration::from_secs(2), replacement.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(incoming, RelayMessage::Frame(f) if f.data.as_ref() == b"after-producer-reconnect")
+    );
+}
+
+struct RelayProcess(std::process::Child);
+
+impl Drop for RelayProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+async fn relay_process(port: u16) -> RelayProcess {
+    let process = RelayProcess(
+        std::process::Command::new(env!("CARGO_BIN_EXE_opengeni-relay"))
+            .args([
+                "--bind",
+                &format!("127.0.0.1:{port}"),
+                "--advertise-ip",
+                "127.0.0.1",
+                "--stream-token-secret",
+                SECRET,
+            ])
+            .env_remove("OPENGENI_RELAY_TOKEN_SECRET")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            return process;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("relay process did not start");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dead_owner_and_reused_pod_address_refresh_route_without_restarting_producer() {
+    let owner_port = free_port().await;
+    let owner_process = relay_process(owner_port).await;
+    let owner_base = format!("ws://127.0.0.1:{owner_port}/stream");
+    let (edge, _edge_shutdown, _) = start_relay_on(free_port().await, |c| {
+        c.advertise_ip = Some("127.0.0.1".parse().unwrap());
+    })
+    .await;
+    let initial = RelayChannel::register(producer_config(&owner_base, PTY_PORT))
+        .await
+        .unwrap();
+    let old_route = initial.channel().relay_route.clone().unwrap();
+    let mut config = producer_config(&edge, PTY_PORT);
+    config.channel.relay_route = Some(old_route.clone());
+    let mut producer = RelayChannel::register(config).await.unwrap();
+    let descriptor = producer.descriptor_updates();
+    drop(initial);
+    drop(owner_process);
+
+    let (_, unavailable) = Viewer::connect_routed(&edge, PTY_PORT, 0, 0, Some(&old_route))
+        .await
+        .unwrap();
+    assert!(!unavailable.accepted);
+    assert!(unavailable.error.unwrap().retryable);
+
+    // An endpoint that accepts WebSocket but never acknowledges StreamOpen is
+    // also unavailable; the edge must reject in bounded time rather than hang.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", owner_port))
+        .await
+        .unwrap();
+    let stalled = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let _ = socket.next().await;
+        std::future::pending::<()>().await;
+    });
+    let (_, unavailable) = tokio::time::timeout(
+        Duration::from_secs(7),
+        Viewer::connect_routed(&edge, PTY_PORT, 0, 0, Some(&old_route)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!unavailable.accepted);
+    assert!(unavailable.error.unwrap().retryable);
+    stalled.abort();
+    let _ = stalled.await;
+
+    // A process on the same IP:port is not the previous channel owner. It must
+    // reject the stale incarnation, not form a forwarding loop or false pair.
+    let _reused_address = relay_process(owner_port).await;
+    let (_, rejected) = Viewer::connect_routed(&edge, PTY_PORT, 0, 0, Some(&old_route))
+        .await
+        .unwrap();
+    assert!(!rejected.accepted);
+    assert_eq!(
+        rejected
+            .error
+            .unwrap()
+            .detail
+            .get("relay_owner_unavailable")
+            .map(String::as_str),
+        Some("true")
+    );
+    tokio::time::timeout(Duration::from_secs(3), producer.reconnect(Duration::ZERO))
+        .await
+        .unwrap()
+        .unwrap();
+    let new_route = descriptor
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .relay_route
+        .clone()
+        .unwrap();
+    assert_ne!(new_route, old_route);
+    let (mut viewer, ack) = Viewer::connect_routed(&edge, PTY_PORT, 0, 0, Some(&new_route))
+        .await
+        .unwrap();
+    assert!(ack.accepted);
+    producer
+        .send_frame(bytes::Bytes::from_static(b"same-producer-new-owner"))
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), viewer.recv_frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .as_ref(),
+        b"same-producer-new-owner"
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn frames_splice_end_to_end_bidirectionally() {

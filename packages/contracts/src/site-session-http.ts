@@ -55,6 +55,19 @@ function unsafePathname(pathname: string): boolean {
 }
 
 function hostWorkspacePath(path: string, workspaceId: string): string {
+  const url = new URL(path, "http://site.invalid");
+  if (url.pathname === "/v1/config/client") {
+    const requested = url.searchParams.getAll("workspaceId");
+    if (
+      requested.length > 1 ||
+      (requested.length === 1 && requested[0] !== "site-host" && requested[0] !== workspaceId)
+    )
+      throw new SiteSessionPathError();
+    // The SDK's scoped config read uses a query, not a workspace path segment.
+    // Both the console bridge and Codemode proxy bind it to their own workspace.
+    if (workspaceId !== "site-host") url.searchParams.set("workspaceId", workspaceId);
+    return url.pathname + url.search;
+  }
   return path.replace("/workspaces/site-host", `/workspaces/${encodeURIComponent(workspaceId)}`);
 }
 

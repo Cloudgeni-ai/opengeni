@@ -65,7 +65,6 @@ export function SiteConversationsPanel({
       try {
         const next = await client.listSessionPage(workspaceId, {
           ...(!adding ? { siteAccessId: siteId } : {}),
-          includePinned: false,
           search,
           archivedOnly,
           limit: 30,

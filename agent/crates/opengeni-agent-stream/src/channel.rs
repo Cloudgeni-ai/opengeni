@@ -87,7 +87,13 @@ impl ChannelConfig {
         } else {
             '?'
         };
-        format!("{}{}{}", self.relay_url, sep, self.key().query())
+        let mut url = format!("{}{}{}", self.relay_url, sep, self.key().query());
+        if let Some(route) = &self.channel.relay_route {
+            // Relay-issued base64url metadata; never a stream credential.
+            url.push_str("&route=");
+            url.push_str(route);
+        }
+        url
     }
 }
 
@@ -102,6 +108,8 @@ pub struct RelayChannel {
     /// The next peer frame sequence the agent has not processed yet. This is the
     /// cursor presented on reconnect so the relay replays the opposite direction.
     recv_next_seq: u64,
+    /// The hub's scoped terminal response observes owner changes after reconnect.
+    descriptor: tokio::sync::watch::Sender<Option<StreamChannel>>,
     #[cfg(any(test, feature = "test-support"))]
     reconnect_transports: std::collections::VecDeque<Box<dyn RelayTransport>>,
 }
@@ -147,7 +155,7 @@ impl RelayChannel {
     /// against an in-process mock relay double.
     async fn open_on(
         mut transport: Box<dyn RelayTransport>,
-        config: ChannelConfig,
+        mut config: ChannelConfig,
         resume_from_seq: u64,
     ) -> StreamResult<Self> {
         let open = RelayMessage::Open(StreamOpen {
@@ -160,14 +168,30 @@ impl RelayChannel {
 
         // Await the relay's ack (the first inbound message).
         match transport.recv().await? {
-            Some(RelayMessage::OpenAck(ack)) if ack.accepted => Ok(Self {
-                config,
-                transport,
-                send_next_seq: 0,
-                recv_next_seq: ack.resume_from_seq.max(resume_from_seq),
-                #[cfg(any(test, feature = "test-support"))]
-                reconnect_transports: std::collections::VecDeque::new(),
-            }),
+            Some(RelayMessage::OpenAck(ack)) if ack.accepted => {
+                config.channel.relay_route = ack.relay_route;
+                let (descriptor, _) = tokio::sync::watch::channel(Some(config.channel.clone()));
+                Ok(Self {
+                    config,
+                    transport,
+                    send_next_seq: 0,
+                    recv_next_seq: ack.resume_from_seq.max(resume_from_seq),
+                    descriptor,
+                    #[cfg(any(test, feature = "test-support"))]
+                    reconnect_transports: std::collections::VecDeque::new(),
+                })
+            }
+            Some(RelayMessage::OpenAck(ack))
+                if ack.error.as_ref().is_some_and(|error| {
+                    error.retryable
+                        && error
+                            .detail
+                            .get("relay_owner_unavailable")
+                            .is_some_and(|value| value == "true")
+                }) =>
+            {
+                Err(StreamError::OwnerUnavailable)
+            }
             Some(RelayMessage::OpenAck(ack)) => Err(StreamError::OpenRejected(
                 ack.error
                     .map_or_else(|| "rejected".to_string(), |e| e.message),
@@ -209,12 +233,28 @@ impl RelayChannel {
     /// Propagates the registration error; a transport error is retryable (the
     /// caller loops), a rejected open is terminal.
     pub async fn reconnect(&mut self, backoff_delay: Duration) -> StreamResult<()> {
+        // A grant refresh must wait for the new registration, not return the
+        // known-dead owner while the producer is backing off.
+        self.descriptor.send_replace(None);
         tokio::time::sleep(backoff_delay).await;
         #[cfg(any(test, feature = "test-support"))]
         if let Some(transport) = self.reconnect_transports.pop_front() {
             return self.reconnect_on(transport).await;
         }
-        let resumed = Self::register_from(self.config.clone(), self.recv_next_seq).await?;
+        let resumed = match Self::register_from(self.config.clone(), self.recv_next_seq).await {
+            Err(StreamError::OwnerUnavailable) => {
+                // Only the authenticated edge's explicit owner-loss response
+                // permits migration. An ordinary ingress dial failure keeps the
+                // route, so reconnects don't randomly move a live channel.
+                let mut config = self.config.clone();
+                config.channel.relay_route = None;
+                Self::register_from(config, self.recv_next_seq).await?
+            }
+            other => other?,
+        };
+        self.config.channel = resumed.config.channel;
+        self.descriptor
+            .send_replace(Some(self.config.channel.clone()));
         self.transport = resumed.transport;
         // The ack is the peer replay cursor, never the agent's outbound sequence.
         self.recv_next_seq = resumed.recv_next_seq.max(self.recv_next_seq);
@@ -229,7 +269,11 @@ impl RelayChannel {
     /// opening the replacement channel.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn reconnect_on(&mut self, transport: Box<dyn RelayTransport>) -> StreamResult<()> {
+        self.descriptor.send_replace(None);
         let resumed = Self::open_on(transport, self.config.clone(), self.recv_next_seq).await?;
+        self.config.channel = resumed.config.channel;
+        self.descriptor
+            .send_replace(Some(self.config.channel.clone()));
         self.transport = resumed.transport;
         self.recv_next_seq = resumed.recv_next_seq.max(self.recv_next_seq);
         Ok(())
@@ -245,6 +289,12 @@ impl RelayChannel {
     #[must_use]
     pub fn channel(&self) -> &StreamChannel {
         &self.config.channel
+    }
+
+    /// Observe the current producer-selected route without restarting the PTY.
+    #[must_use]
+    pub fn descriptor_updates(&self) -> tokio::sync::watch::Receiver<Option<StreamChannel>> {
+        self.descriptor.subscribe()
     }
 
     /// The channel id (for frame addressing).
@@ -331,11 +381,13 @@ impl RelayChannel {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_transport(config: ChannelConfig, transport: Box<dyn RelayTransport>) -> Self {
+        let (descriptor, _) = tokio::sync::watch::channel(Some(config.channel.clone()));
         Self {
             config,
             transport,
             send_next_seq: 0,
             recv_next_seq: 0,
+            descriptor,
             reconnect_transports: std::collections::VecDeque::new(),
         }
     }
@@ -360,6 +412,7 @@ mod tests {
                 agent_id: "ag-1".to_string(),
                 kind: v1::StreamKind::Pty as i32,
                 port: 7681,
+                relay_route: None,
             },
             token: "ogs_secret".to_string(),
             relay_url: "wss://relay.example/stream".to_string(),
@@ -419,6 +472,7 @@ mod tests {
                         error: None,
                         // The relay tells the agent the seq to resume sending from.
                         resume_from_seq: open.resume_from_seq,
+                        relay_route: None,
                     })
                 } else {
                     RelayMessage::OpenAck(v1::StreamOpenAck {
@@ -430,6 +484,7 @@ mod tests {
                             detail: std::collections::HashMap::new(),
                         }),
                         resume_from_seq: 0,
+                        relay_route: None,
                     })
                 };
                 relay_side.send(&ack).await.expect("ack");
