@@ -128,6 +128,13 @@ impl Orders {
             self.latest = Some(order);
         }
     }
+
+    /// Whether `order` is the latest applied: a notice at it is another
+    /// attempt of the one the guest applied last.
+    #[must_use]
+    pub fn is_latest(&self, order: Order) -> bool {
+        self.latest == Some(order)
+    }
 }
 
 #[cfg(test)]
@@ -202,7 +209,9 @@ mod tests {
         assert!(orders.admits((0, 0, 0)));
         orders.applied((1, 2, 5));
         assert!(orders.admits((1, 2, 5)), "a retry of the same notice");
+        assert!(orders.is_latest((1, 2, 5)));
         assert!(orders.admits((1, 2, 6)));
+        assert!(!orders.is_latest((1, 2, 6)));
         assert!(orders.admits((1, 3, 0)), "generation before revision");
         assert!(!orders.admits((1, 2, 4)));
         assert!(!orders.admits((1, 1, 99)));

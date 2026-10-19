@@ -275,11 +275,12 @@ impl Guest {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// envd answers: gives it everything kept, with the time. Only then
-    /// does it count as up.
+    /// envd answers: gives it everything kept. Only then
+    /// does it count as up, and only then does the gateway reach it: until
+    /// then it would take requests without the sandbox's access token.
     pub fn envd_started(&self) -> io::Result<()> {
         let state = self.state();
-        call_init(&state.effective()?, now_nanos())?;
+        call_init(&state.effective()?)?;
         self.envd.lock().unwrap_or_else(PoisonError::into_inner).up = true;
         self.envd_changed.notify_all();
         Ok(())
@@ -304,6 +305,12 @@ impl Guest {
         envd.up
     }
 
+    /// Whether the gateway may relay to envd: it is up, or the image has
+    /// none.
+    fn envd_reachable(&self) -> bool {
+        !self.has_envd || self.envd.lock().unwrap_or_else(PoisonError::into_inner).up
+    }
+
     /// Handles one connection to the notice port. Notices are handled one
     /// at a time, on the listener's thread, and so are the host's
     /// `activity` question and `sync` request.
@@ -326,12 +333,21 @@ impl Guest {
         let Some(notice) = Notice::parse(&line) else {
             return;
         };
-        if !self.state().orders.admits(notice.order) {
-            // Said, so that a host sending it learns at once.
-            let _ = stream.write_all(notice::STALE);
-            return;
-        }
-        if let Err(error) = sys::set_clock(notice.nanos) {
+        let retry = {
+            let state = self.state();
+            if !state.orders.admits(notice.order) {
+                // Said, so that a host sending it learns at once.
+                let _ = stream.write_all(notice::STALE);
+                return;
+            }
+            state.orders.is_latest(notice.order)
+        };
+        // Another attempt of the notice applied last carries the host's time
+        // from when it was sent, and the guest may get to it late, after the
+        // attempt before it: it moves the clock only forward.
+        if (!retry || notice.nanos > now_nanos())
+            && let Err(error) = sys::set_clock(notice.nanos)
+        {
             log(&format!("clock: {error}"));
         }
         if let Some(sandbox) = &notice.sandbox
@@ -353,9 +369,7 @@ impl Guest {
         }
         let mut state = self.state();
         if self.has_envd
-            && let Err(error) = state
-                .effective()
-                .and_then(|data| call_init(&data, now_nanos()))
+            && let Err(error) = state.effective().and_then(|data| call_init(&data))
         {
             log(&format!("restore notice: envd /init: {error}"));
             return;
@@ -376,6 +390,9 @@ impl Guest {
             }
         };
         match Header::parse(&line) {
+            Ok(Header::Tcp(ENVD_PORT)) if !self.envd_reachable() => {
+                let _ = stream.write_all(&gateway::error("envd is not up"));
+            }
             Ok(Header::Tcp(port)) => {
                 let _ = stream.set_read_timeout(None);
                 relay(stream, &rest, port);
@@ -420,7 +437,7 @@ impl Guest {
         }
         if self.has_envd {
             let state = self.state();
-            call_init(&state.effective()?, now_nanos())?;
+            call_init(&state.effective()?)?;
             drop(state);
         }
         self.start_command(env);
@@ -453,9 +470,9 @@ fn read_line(stream: &mut Stream, limit: usize) -> io::Result<(String, Vec<u8>)>
     }
 }
 
-/// Calls envd's `/init` with `data` and the time `nanos`.
-fn call_init(data: &InitData, nanos: u64) -> io::Result<()> {
-    let body = data.body(Some(nanos));
+/// Calls envd's `/init` with `data`, and no time (see [`crate::envd`]).
+fn call_init(data: &InitData) -> io::Result<()> {
+    let body = data.body();
     let status = call_envd(&envd::request("POST", "/init", Some(&body)), INIT_LIMIT)?;
     if (200..300).contains(&status) {
         Ok(())

@@ -11,7 +11,9 @@
 //!   device carries no half-close from the guest and the caller would
 //!   otherwise never see the end of what it sent ([`crate::relay`]). A
 //!   caller may send its first bytes right after the header without
-//!   waiting for the answer.
+//!   waiting for the answer. envd's port answers an error while envd is
+//!   not up: one that just started has not yet taken what the sandbox was
+//!   given, its access token included, and would take any request.
 //! - `init <json>`: the sandbox's own environment, access token, default
 //!   user and directory ([`crate::envd::InitData`]), as a create gives
 //!   them. The guest keeps them on its disk for good, passes them to

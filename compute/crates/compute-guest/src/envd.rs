@@ -5,7 +5,17 @@
 //! So the guest keeps the whole of what the sandbox was last given
 //! ([`InitData`]) and sends all of it every time: after its first boot,
 //! when a create gives the sandbox its own environment and token, after
-//! every restore with the time, and after envd itself restarts.
+//! every restore, and after envd itself restarts.
+//!
+//! The guest sends no `timestamp`. envd applies an `/init` with one only
+//! when it is later than the latest it applied, and answers success either
+//! way. The guest's clock can step back (a retried restore notice the
+//! guest got to late carries the host's time from when it was sent), and
+//! envd would then drop the next `/init` without a word: a create's access
+//! token with it, leaving envd open to requests without one. The guest
+//! already makes its calls one at a time, each with everything it keeps,
+//! and sets its clock itself from the host's notices, so envd has nothing
+//! to order and no time to set.
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
@@ -58,51 +68,17 @@ impl fmt::Debug for InitData {
 }
 
 impl InitData {
-    /// The `/init` body: all of `self` but the agent, and the time `nanos`
-    /// (Unix nanoseconds) when given.
+    /// The `/init` body: all of `self` but the agent, and no `timestamp`
+    /// (see the module documentation).
     #[must_use]
-    pub fn body(&self, nanos: Option<u64>) -> String {
+    pub fn body(&self) -> String {
         let mut body = match serde_json::to_value(self) {
             Ok(Value::Object(map)) => map,
             _ => Map::new(),
         };
         body.remove("agent");
-        if let Some(nanos) = nanos {
-            body.insert("timestamp".into(), Value::String(rfc3339(nanos)));
-        }
         Value::Object(body).to_string()
     }
-}
-
-/// `nanos` since the Unix epoch as RFC 3339 in UTC, with nanoseconds.
-#[must_use]
-pub fn rfc3339(nanos: u64) -> String {
-    let seconds = nanos / 1_000_000_000;
-    let fraction = nanos % 1_000_000_000;
-    let days = seconds / 86_400;
-    let of_day = seconds % 86_400;
-    let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{fraction:09}Z",
-        of_day / 3600,
-        of_day / 60 % 60,
-        of_day % 60
-    )
-}
-
-/// The calendar date `days` after 1970-01-01 (Howard Hinnant's
-/// `civil_from_days`, for days on or after the epoch).
-fn civil_from_days(days: u64) -> (u64, u64, u64) {
-    let z = days + 719_468;
-    let era = z / 146_097;
-    let doe = z % 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + u64::from(month <= 2);
-    (year, month, day)
 }
 
 /// An HTTP/1.1 request to envd on the loopback, closing the connection
@@ -141,26 +117,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn times_are_rfc3339_with_nanoseconds() {
-        assert_eq!(rfc3339(0), "1970-01-01T00:00:00.000000000Z");
-        // date -u -d @1760000000 → Thu Oct  9 08:53:20 UTC 2025
-        assert_eq!(
-            rfc3339(1_760_000_000_000_000_007),
-            "2025-10-09T08:53:20.000000007Z"
-        );
-        // A leap day, and the last second of a year.
-        assert_eq!(
-            rfc3339(951_782_400 * 1_000_000_000),
-            "2000-02-29T00:00:00.000000000Z"
-        );
-        assert_eq!(
-            rfc3339(1_798_761_599 * 1_000_000_000 + 999_999_999),
-            "2026-12-31T23:59:59.999999999Z"
-        );
-    }
-
-    #[test]
-    fn bodies_carry_everything_kept_and_the_time() {
+    fn bodies_carry_everything_kept_and_never_a_time() {
         let data = InitData {
             env_vars: BTreeMap::from([("A".into(), "1".into())]),
             access_token: Some("secret".into()),
@@ -173,17 +130,16 @@ mod tests {
                 desktop: true,
             }),
         };
-        let body: Value = serde_json::from_str(&data.body(Some(0))).unwrap();
+        let body: Value = serde_json::from_str(&data.body()).unwrap();
         assert_eq!(
             body,
             serde_json::json!({
                 "envVars": {"A": "1"},
                 "accessToken": "secret",
                 "defaultUser": "user",
-                "timestamp": "1970-01-01T00:00:00.000000000Z",
             })
         );
-        let bare: Value = serde_json::from_str(&InitData::default().body(None)).unwrap();
+        let bare: Value = serde_json::from_str(&InitData::default().body()).unwrap();
         assert_eq!(bare, serde_json::json!({"envVars": {}}));
     }
 
