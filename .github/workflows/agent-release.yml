@@ -763,6 +763,8 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: agent-v${{ needs.guard.outputs.version }}
+          # Manual dispatch may publish after main advances; tag the built commit.
+          target_commitish: ${{ github.sha }}
           name: opengeni-agent v${{ needs.guard.outputs.version }}
           body: |
             opengeni-agent v${{ needs.guard.outputs.version }} — cross-platform signed release.
