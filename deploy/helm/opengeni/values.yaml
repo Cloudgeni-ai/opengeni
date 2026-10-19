@@ -1375,11 +1375,31 @@ computeControl:
     existingSecret: ""
     key: keys
   operatorTeam: operator
-  # Mutual TLS with the hosts: the service's certificate (tls.crt, tls.key)
-  # for the name hosts dial, and the authority that signs host certificates
-  # (ca.crt), from one Secret, for example a cert-manager Certificate.
+  # The URL hosts reach the service at (https://name:port), exactly as they
+  # are given it (the Terraform module's control_url): the service's own
+  # certificate is for its host name, and hosts' identity tokens are for
+  # this URL.
+  hostUrl: ""
+  # Mutual TLS with the hosts. The service is the hosts' certificate
+  # authority: the Secret holds the authority's certificate (ca.crt) and
+  # key (ca.key, PKCS#8 PEM), as the Terraform module's host_authority_pem
+  # and host_authority_key_pem outputs or `compute-control
+  # new-host-authority` make them. ca.crt may hold further authorities after
+  # the first, trusted beside it while one is rotated out. The service
+  # issues its own short-lived certificate from it, for hostUrl's host and
+  # extraNames, and renews it in memory.
   hostsTls:
     secretName: ""
+    extraNames: []
+  # Google Compute Engine instances of this project, running as this
+  # service account, get host certificates for their own instance name by
+  # proving it with an instance identity token (the Terraform module's
+  # identity_tokens output). Empty: hosts renew only with their current
+  # certificate, and first certificates come from `compute-control
+  # issue-host-certificate`.
+  hostIdentity:
+    gcpProject: ""
+    gcpAccount: ""
   # HTTPS for the public API (tls.crt, tls.key naming apiTls.host, and the
   # ca.crt that signed it), required outside local development: Opengeni
   # sends the API key to it and refuses plain HTTP there. When set, the API,

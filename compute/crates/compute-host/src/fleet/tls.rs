@@ -1,9 +1,12 @@
 //! Mutual TLS between a host and the control service.
 //!
-//! Each side proves itself with a certificate, and each trusts only the
-//! other side's authority: a host trusts the service's, the service the
-//! hosts'. So a host that is broken into can still not pass itself off as
-//! the service to other hosts.
+//! Each side proves itself with a certificate of the hosts' authority,
+//! which the service holds: it issues its own certificate, for the name
+//! hosts reach it by, and each host's, for the host's own name. A host
+//! trusts that authority alone, and takes the service's requests only from
+//! a certificate valid for the service's name ([`names_service`]), which the
+//! service never issues to a host: so a host that is broken into can still
+//! not pass itself off as the service to other hosts.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,7 +14,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::pem::PemObject as _;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
@@ -22,7 +25,8 @@ pub struct TlsFiles {
     pub cert: PathBuf,
     /// The host's private key, PEM.
     pub key: PathBuf,
-    /// The authority that signs the service's certificates, PEM.
+    /// The hosts' authority, which issues the service's certificate too,
+    /// PEM; several while one authority replaces another.
     pub peer_ca: PathBuf,
 }
 
@@ -94,12 +98,32 @@ impl Tls {
     }
 }
 
+/// Whether `certificate`, already verified as the authority's, is valid
+/// for `service`: the name the service is reached by.
+pub(super) fn names_service(certificate: &CertificateDer<'_>, service: &ServerName<'_>) -> bool {
+    webpki::EndEntityCert::try_from(certificate)
+        .is_ok_and(|end| end.verify_is_valid_for_subject_name(service).is_ok())
+}
+
+/// The name the service at `control`, an `https://` URL, is reached by.
+pub(super) fn service_name(control: &str) -> anyhow::Result<ServerName<'static>> {
+    let url = reqwest::Url::parse(control)
+        .with_context(|| format!("the control service's URL {control:?}"))?;
+    // An IPv6 address comes in brackets.
+    let host = url
+        .host_str()
+        .with_context(|| format!("{control:?} names no host"))?
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    ServerName::try_from(host.to_owned())
+        .with_context(|| format!("{control:?} names no host a certificate can be for"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::io;
 
     use rcgen::{BasicConstraints, Certificate, CertificateParams, IsCa, KeyPair};
-    use rustls::pki_types::ServerName;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio_rustls::{TlsAcceptor, TlsConnector};
 
@@ -170,5 +194,33 @@ mod tests {
         let other = Tls::load(&issue(dir.path(), "other", &hosts, &services)).unwrap();
         assert!(connects(&host, &other).await.is_err());
         assert!(connects(&other, &host).await.is_err());
+    }
+
+    #[test]
+    fn the_service_is_told_from_hosts_by_the_name_it_is_reached_by() {
+        let hosts = authority("hosts");
+        let issue = |names: Vec<String>| {
+            let key = KeyPair::generate().unwrap();
+            let params = CertificateParams::new(names).unwrap();
+            params
+                .signed_by(&key, &hosts.cert, &hosts.key)
+                .unwrap()
+                .der()
+                .clone()
+        };
+        let service = service_name("https://control.example:8443").unwrap();
+        assert!(names_service(
+            &issue(vec!["control.example".into()]),
+            &service
+        ));
+        assert!(!names_service(&issue(vec!["host-1".into()]), &service));
+        let by_address = service_name("https://10.0.0.2:8443/").unwrap();
+        assert!(names_service(&issue(vec!["10.0.0.2".into()]), &by_address));
+        assert!(!names_service(
+            &issue(vec!["control.example".into()]),
+            &by_address
+        ));
+        assert!(service_name("https://[::1]:8443").is_ok());
+        assert!(service_name("not a url").is_err());
     }
 }

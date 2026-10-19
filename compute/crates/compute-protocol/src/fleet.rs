@@ -26,6 +26,10 @@ pub const REPORT_PATH: &str = "/v1/hosts/report";
 /// See [`REGISTER_PATH`]: where a host asks for its agent-link tokens
 /// ([`LinkTokensAsked`]).
 pub const LINK_TOKENS_PATH: &str = "/v1/hosts/link-tokens";
+/// See [`REGISTER_PATH`]: where a host gets its certificate
+/// ([`CertificateAsked`]), the one route a caller without a certificate
+/// may use.
+pub const CERTIFICATE_PATH: &str = "/v1/hosts/certificate";
 
 /// How long a lease lasts and how often it is renewed, as the service
 /// tells a host when it registers.
@@ -323,9 +327,92 @@ impl std::fmt::Debug for LinkToken {
     }
 }
 
+/// A host asks for a certificate: the service issues one for the name the
+/// proof shows, for the key that signed `csr`, whatever `csr` names.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertificateAsked {
+    /// A PKCS#10 certificate request, PEM; only its public key is used.
+    pub csr: String,
+    pub proof: Proof,
+}
+
+impl std::fmt::Debug for CertificateAsked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CertificateAsked")
+            .field("proof", &self.proof)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What shows which host is asking.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Proof {
+    /// A Google Compute Engine instance identity token for the service's
+    /// host URL, `format=full`: it names the instance.
+    GceIdentity { token: String },
+    /// The client certificate the request came with, current and of the
+    /// hosts' authority: it names the host.
+    Certificate,
+}
+
+impl std::fmt::Debug for Proof {
+    /// Never shows the token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GceIdentity { .. } => f.write_str("GceIdentity"),
+            Self::Certificate => f.write_str("Certificate"),
+        }
+    }
+}
+
+/// The answer to [`CertificateAsked`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostCertificate {
+    /// The name it is for, its common name and only DNS name.
+    pub name: String,
+    /// The certificate, PEM.
+    pub certificate: String,
+    /// The authorities the service trusts for hosts, PEM: what the host
+    /// trusts the service by.
+    pub authorities: String,
+    /// When it stops being valid, in milliseconds since the Unix epoch.
+    pub not_after_ms: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_certificate_request_names_its_proof() {
+        let asked: CertificateAsked = serde_json::from_str(
+            r#"{"csr":"PEM","proof":{"kind":"gce_identity","token":"a.b.c"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            asked.proof,
+            Proof::GceIdentity {
+                token: "a.b.c".into()
+            }
+        );
+        let renewal: CertificateAsked =
+            serde_json::from_str(r#"{"csr":"PEM","proof":{"kind":"certificate"}}"#).unwrap();
+        assert_eq!(renewal.proof, Proof::Certificate);
+        for bad in [
+            r#"{"csr":"PEM","proof":{"kind":"password","token":"x"}}"#,
+            r#"{"csr":"PEM","proof":{"kind":"certificate"},"name":"other"}"#,
+            r#"{"csr":"PEM"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<CertificateAsked>(bad).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(!format!("{asked:?}").contains("a.b.c"), "no token in logs");
+    }
 
     #[test]
     fn wire_forms_are_stable() {

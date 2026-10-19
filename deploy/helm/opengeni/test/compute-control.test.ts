@@ -55,6 +55,7 @@ const enabled = {
     database: { existingSecret: "compute-db" },
     keys: { existingSecret: "compute-keys" },
     hostsTls: { secretName: "compute-hosts-tls" },
+    hostUrl: "https://compute-control.example.com:8443",
     archive: "gs://example-archive/archive",
     storedImages: { opengeni: "0123abcd" },
   },
@@ -91,7 +92,11 @@ describe("computeControl", () => {
     );
     expect(container.args).toContain("--archive=gs://example-archive/archive");
     expect(container.args).toContain("--stored-image=opengeni=0123abcd");
-    expect(container.args).toContain("--host-ca=/etc/compute/tls/ca.crt");
+    // The service is the hosts' authority, and issues its own certificate
+    // for the name hosts dial.
+    expect(container.args).toContain("--host-authority=/etc/compute/tls");
+    expect(container.args).toContain("--host-url=https://compute-control.example.com:8443");
+    expect(container.args.some((a: string) => a.startsWith("--gce-"))).toBe(false);
     const database = container.env.find((e: any) => e.name === "COMPUTE_CONTROL_DATABASE");
     expect(database.value).toBe(
       "host='cc-opengeni-postgres' port='5432' dbname='opengeni' user='compute' sslmode='disable'",
@@ -407,6 +412,36 @@ describe("computeControl", () => {
     });
     expect(plain.exitCode).not.toBe(0);
     expect(plain.stderr).toContain("computeControl.teamLinks.opengeni must be a wss:// URL");
+  });
+
+  test("lets GCE instances prove themselves hosts, and refuses a host URL it cannot serve", async () => {
+    const manifests = await render({
+      ...enabled,
+      computeControl: {
+        ...enabled.computeControl,
+        hostsTls: { secretName: "compute-hosts-tls", extraNames: ["10.0.0.5"] },
+        hostIdentity: { gcpProject: "example", gcpAccount: "hosts@example.iam.gserviceaccount.com" },
+      },
+    });
+    const args = find(manifests, "Deployment", "cc-opengeni-compute-control").spec.template.spec
+      .containers[0].args;
+    expect(args).toContain("--host-name=10.0.0.5");
+    expect(args).toContain("--gce-project=example");
+    expect(args).toContain("--gce-host-account=hosts@example.iam.gserviceaccount.com");
+    for (const hostUrl of ["", "http://compute-control.example.com:8443", "https://x/path"]) {
+      const refused = await helmTemplate({
+        ...enabled,
+        computeControl: { ...enabled.computeControl, hostUrl },
+      });
+      expect(refused.exitCode).not.toBe(0);
+      expect(refused.stderr).toContain("computeControl.hostUrl must be the https:// URL");
+    }
+    const half = await helmTemplate({
+      ...enabled,
+      computeControl: { ...enabled.computeControl, hostIdentity: { gcpProject: "example" } },
+    });
+    expect(half.exitCode).not.toBe(0);
+    expect(half.stderr).toContain("computeControl.hostIdentity needs both");
   });
 
   test("refuses to render without an image pin or object storage", async () => {

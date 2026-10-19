@@ -90,7 +90,13 @@ round to a revision another value also gives. */ -}}
 {{- fail "computeControl.keys.existingSecret is required" -}}
 {{- end -}}
 {{- if not $cc.hostsTls.secretName -}}
-{{- fail "computeControl.hostsTls.secretName is required: hosts and the service authenticate each other with TLS" -}}
+{{- fail "computeControl.hostsTls.secretName is required: the hosts' certificate authority (ca.crt, ca.key)" -}}
+{{- end -}}
+{{- if not (regexMatch "^https://[^/?#]+/?$" ($cc.hostUrl | default "")) -}}
+{{- fail "computeControl.hostUrl must be the https:// URL hosts reach the service at, such as https://compute-control.example.com:8443" -}}
+{{- end -}}
+{{- if ne (empty $cc.hostIdentity.gcpProject) (empty $cc.hostIdentity.gcpAccount) -}}
+{{- fail "computeControl.hostIdentity needs both gcpProject and gcpAccount, or neither" -}}
 {{- end -}}
 {{- if and $cc.teamLinks (not $cc.link.existingSecret) -}}
 {{- fail "computeControl.teamLinks needs computeControl.link.existingSecret, the key link tokens are signed with" -}}

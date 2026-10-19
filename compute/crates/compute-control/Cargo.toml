@@ -31,6 +31,8 @@ getrandom = { version = "0.3", features = ["std"] }
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["server", "service", "tokio", "http1"] }
+pem = "3"
+rcgen = { version = "0.13", features = ["x509-parser"] }
 ring = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
@@ -38,6 +40,7 @@ rustls-webpki = { version = "0.103", default-features = false, features = ["ring
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+time = "0.3"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 tokio-postgres-rustls = "0.13"
@@ -48,7 +51,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 object_store = "0.12.4"
-rcgen = "0.13"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 

@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Gets this host its certificate from the control service, which is the
+# hosts' certificate authority, and renews it when fewer than four days of
+# its week are left. A new certificate restarts the agent to use it (its VMs
+# keep running). install.sh installs it and runs it before the agent starts;
+# compute-host-certificate.timer runs it daily.
+#
+#   compute-host-certificate [--force] [--config FILE]
+#
+#   --force         renew even if the certificate has days left
+#   --config FILE   the host's configuration (default /etc/compute/host.env)
+#
+# How the host proves which host it is:
+#   - on Google Cloud (the metadata server answers), with an instance
+#     identity token for COMPUTE_CONTROL: the certificate is for the
+#     instance's own name, so a host whose certificate expired gets a new one
+#     all the same;
+#   - elsewhere, with its current certificate: a new one for the same name;
+#   - a host off Google Cloud that has none gets its first with
+#     `compute-control issue-host-certificate`, run where the authority's key
+#     is, for the request this script leaves at /etc/compute/host.csr.
+#
+# It trusts the service by /etc/compute/ca.pem, the hosts' authority, and
+# replaces that with the authorities the service hands out, so a host
+# follows the authority being replaced (operations.md, Keys and
+# certificates).
+set -euo pipefail
+
+config=/etc/compute/host.env
+force=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force) force=1; shift ;;
+    --config) config=$2; shift 2 ;;
+    *) echo "compute-host-certificate: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+dir=${COMPUTE_CERTIFICATE_DIR:-/etc/compute}
+metadata=${COMPUTE_METADATA_URL:-http://metadata.google.internal/computeMetadata/v1}
+# Renewed with four of its seven days left.
+renew_within=$((4 * 24 * 3600))
+
+log() { echo "compute-host-certificate: $*"; }
+fail() { echo "compute-host-certificate: $*" >&2; exit 1; }
+
+# shellcheck source=host.env.example
+source "$config"
+: "${COMPUTE_CONTROL:?COMPUTE_CONTROL is not set in $config}"
+: "${COMPUTE_NAME:?COMPUTE_NAME is not set in $config}"
+[ -s "$dir/ca.pem" ] ||
+  fail "$dir/ca.pem is missing: it holds the hosts' authority, ca.crt of the control service's hosts TLS Secret (install.sh --authority installs it)"
+cd "$dir"
+
+current() { [ -s host.pem ] && [ -s host.key ] && openssl x509 -in host.pem -noout -checkend "${1:-0}" >/dev/null 2>&1; }
+if [ -z "$force" ] && current "$renew_within"; then
+  exit 0
+fi
+
+on_gce=
+if curl -fsS --max-time 3 -H Metadata-Flavor:Google "$metadata/instance/id" >/dev/null 2>&1; then
+  on_gce=1
+fi
+if [ -n "$on_gce" ]; then
+  token=$(curl -fsS --max-time 10 --retry 3 -H Metadata-Flavor:Google -G \
+    --data-urlencode "audience=$COMPUTE_CONTROL" --data-urlencode format=full \
+    "$metadata/instance/service-accounts/default/identity") ||
+    fail "the metadata server gave no identity token for $COMPUTE_CONTROL"
+  proof=$(jq -n --arg token "$token" '{kind: "gce_identity", token: $token}')
+  client=()
+  by="an instance identity token"
+elif current; then
+  proof='{"kind": "certificate"}'
+  client=(--cert "$dir/host.pem" --key "$dir/host.key")
+  by="its current certificate"
+else
+  if [ ! -s host.csr ] || [ ! -s host.key ]; then
+    (umask 077 && openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -keyout host.key -subj "/CN=$COMPUTE_NAME" -out host.csr 2>/dev/null)
+  fi
+  fail "no current certificate, and not on Google Cloud: get this host its first one where the authority's key is, with
+  compute-control issue-host-certificate --name $COMPUTE_NAME --csr host.csr --authority <dir> > host.pem
+copying $dir/host.csr there and the certificate back to $dir/host.pem, then run this again"
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+(umask 077 && openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout "$work/host.key" -subj "/CN=$COMPUTE_NAME" -out "$work/host.csr" 2>/dev/null)
+jq -n --rawfile csr "$work/host.csr" --argjson proof "$proof" '{csr: $csr, proof: $proof}' >"$work/asked.json"
+if ! curl -sS --fail-with-body --max-time 30 --retry 3 --cacert "$dir/ca.pem" "${client[@]}" \
+  -H 'content-type: application/json' --data-binary "@$work/asked.json" \
+  -o "$work/answer.json" "${COMPUTE_CONTROL%/}/v1/hosts/certificate"; then
+  fail "the control service at $COMPUTE_CONTROL issued no certificate: $(cat "$work/answer.json" 2>/dev/null)"
+fi
+name=$(jq -r .name "$work/answer.json")
+[ "$name" = "$COMPUTE_NAME" ] ||
+  fail "the service issued a certificate for $name, but this host is $COMPUTE_NAME (COMPUTE_NAME in $config)"
+jq -r .certificate "$work/answer.json" >"$work/host.pem"
+jq -r .authorities "$work/answer.json" >"$work/ca.pem"
+# The certificate is the new key's, and of an authority the service trusts.
+[ "$(openssl x509 -in "$work/host.pem" -noout -pubkey)" = "$(openssl pkey -in "$work/host.key" -pubout)" ] ||
+  fail "the certificate the service issued is not for the key this host sent"
+openssl verify -CAfile "$work/ca.pem" "$work/host.pem" >/dev/null ||
+  fail "the certificate the service issued does not verify against the authorities it gave"
+
+chmod 600 "$work/host.key" "$work/host.pem"
+chmod 644 "$work/ca.pem"
+mv "$work/host.key" host.key
+mv "$work/host.pem" host.pem
+cmp -s "$work/ca.pem" ca.pem || mv "$work/ca.pem" ca.pem
+rm -f host.csr
+log "a certificate for $name by $by, until $(openssl x509 -in host.pem -noout -enddate | cut -d= -f2)"
+if systemctl is-active -q compute-host.service; then
+  systemctl restart compute-host.service
+fi

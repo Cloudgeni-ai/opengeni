@@ -18,8 +18,8 @@ the workstation only drives it.
    VM's internal address only (for their journals), an Artifact Registry
    repository.
 2. **fleet**: `deploy/terraform/gcp-compute` with this environment's
-   settings: service accounts, the fleet's certificate authority, the
-   control service's host-endpoint certificate, the archive bucket (deleted
+   settings: service accounts, the hosts' authority (a key and certificate
+   the control service issues certificates with), the archive bucket (deleted
    with its objects on `down`), firewall rules between the stack and the
    hosts, the host template and an empty zonal group the control service
    grows to `HOSTS`.
@@ -120,13 +120,12 @@ on.
 ## Settings and cost
 
 See the header of `env.sh`. Defaults: three n2-standard-8 hosts, an
-n2-standard-32 stack VM with 500 GB of SSD, one Cloud NAT, an Enterprise
-certificate authority. Run `env.sh down` (and `model-down`) when done: it
+n2-standard-32 stack VM with 500 GB of SSD, one Cloud NAT. Run `env.sh down` (and `model-down`) when done: it
 deletes the VM, everything Terraform made, the registry, NAT, addresses
 and firewall rules. It carries on past a failed step and lists whatever is
 left at the end; `env.sh status` lists everything that still costs money,
-including the certificate pool, custom roles and the model deployment. State, keys and results stay in `$STATE`, outside the
-repository.
+including custom roles and the model deployment. State, keys and results
+stay in `$STATE`, outside the repository.
 
 The stack has no login (the chart's default local access mode); its HTTPS
 front only admits the workstation, the hosts' NAT address and itself.

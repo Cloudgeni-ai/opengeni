@@ -43,13 +43,17 @@ pub struct FleetArgs {
     /// host's ready clones are reported under.
     #[arg(long = "fleet-image", id = "fleet_image", default_value = "base")]
     pub image: String,
-    /// The host's certificate chain, PEM, signed by the hosts' authority.
+    /// The host's certificate chain, PEM, from the hosts' authority, which
+    /// the control service holds (`compute-host-certificate` gets and renews
+    /// it).
     #[arg(long = "fleet-cert", id = "fleet_cert")]
     pub cert: Option<PathBuf>,
     /// The host's private key, PEM.
     #[arg(long = "fleet-key", id = "fleet_key")]
     pub key: Option<PathBuf>,
-    /// The authority that signs the control service's certificates, PEM.
+    /// The hosts' authority, PEM, which issues the control service's
+    /// certificate too; the service is the holder of a certificate for the
+    /// host of `--fleet-control`.
     #[arg(long = "fleet-ca", id = "fleet_ca")]
     pub ca: Option<PathBuf>,
     /// The only authority to trust for Opengeni's agent-link gateways, PEM,

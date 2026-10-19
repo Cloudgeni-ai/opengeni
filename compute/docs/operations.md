@@ -86,17 +86,31 @@ enabling it changes no session's backend.
    `OPENGENI_COMPUTE_API_KEY`, and keep the operator key in the operators'
    secret store.
 3. **TLS with the hosts.** The service and its hosts authenticate each
-   other: one Secret (`computeControl.hostsTls.secretName`) holds the
-   service's certificate and key for the name hosts dial (`tls.crt`,
-   `tls.key`) and the authority that signs host certificates (`ca.crt`).
-   Hosts trust the authority that signed the service's certificate. The
-   GCP root issues both from one private authority and prints them as
-   outputs (`fleet_ca_pem`, `control_certificate_pem`,
-   `control_private_key_pem`).
+   other with certificates of one authority, the hosts' authority, and the
+   service is that authority: one Secret
+   (`computeControl.hostsTls.secretName`) holds its certificate (`ca.crt`)
+   and key (`ca.key`, PKCS#8). The GCP root makes it (outputs
+   `host_authority_pem` and `host_authority_key_pem`); elsewhere
+   `compute-control new-host-authority --out <dir>` does:
+
+   ```sh
+   terraform output -raw host_authority_pem > ca.crt
+   terraform output -raw host_authority_key_pem > ca.key
+   kubectl create secret generic compute-hosts-tls --from-file=ca.crt --from-file=ca.key
+   ```
+
+   The service issues itself a week's certificate from it, for the host
+   of `computeControl.hostUrl` (and `hostsTls.extraNames`), and a new one
+   every day, in memory, with no restart. Hosts trust the authority alone
+   and get their own certificates from the service (see Hosts). On GCP set
+   `computeControl.hostIdentity` to the `identity_tokens` output: the
+   project and service account whose instances may prove themselves hosts.
 4. **Where hosts reach it.** `computeControl.hostsService` exposes port
    8443 outside the cluster: an internal `LoadBalancer` (with the cloud's
-   annotation) or a `NodePort`. The certificate must name the address
-   hosts dial.
+   annotation) or a `NodePort`. `computeControl.hostUrl` is the URL hosts
+   dial, exactly as they are given it (the Terraform root's
+   `control_url`): the service's certificate is for its host, and hosts'
+   identity tokens are for the URL.
 5. **HTTPS for the API.** Opengeni sends its key to the API and refuses
    plain HTTP outside local development. Give the service a certificate
    for the name Opengeni calls (`computeControl.apiTls.secretName`:
@@ -155,8 +169,12 @@ computeControl:
     existingSecret: compute-database   # COMPUTE_DATABASE_PASSWORD
   keys:
     existingSecret: compute-keys
+  hostUrl: https://compute-control.example.com:8443
   hostsTls:
-    secretName: compute-hosts-tls      # tls.crt, tls.key, ca.crt
+    secretName: compute-hosts-tls      # ca.crt, ca.key
+  hostIdentity:                        # the identity_tokens output
+    gcpProject: example
+    gcpAccount: opengeni-compute-host@example.iam.gserviceaccount.com
   apiTls:
     secretName: compute-api-tls        # tls.crt, tls.key, ca.crt
   link:
@@ -187,29 +205,43 @@ Cloud Storage; with an `az://` or `s3://` archive turn it off
 On GCP, `deploy/terraform/gcp-compute` makes the whole host side: the
 hosts' instance template and zonal managed instance group (nested
 virtualization, or bare metal), the archive bucket (uniform access, no
-public access, a week of soft delete), the fleet's certificate authority
-(CA Service), a host and a control service account with only what each
-needs, and the firewall rules (the service to hosts on 7443, hosts to the
-service, optional SSH). See its `terraform.tfvars.example`. Each host's
-startup script prepares the state volume (local NVMe SSDs, striped, or a
-persistent disk), fetches and checks the bundle the template names, gets a
-30-day certificate for its instance name and renews it daily, and runs
-`install.sh`. Terraform sets the group's first size; the service sizes it
+public access, a week of soft delete), the hosts' authority (a key and
+certificate, in Terraform's state; no managed certificate authority), a
+host and a control service account with only what each needs, and the
+firewall rules (the service to hosts on 7443, hosts to the service,
+optional SSH). See its `terraform.tfvars.example`. Each host's startup
+script prepares the state volume (local NVMe SSDs, striped, or a
+persistent disk), fetches and checks the bundle the template names, and
+runs `install.sh` with the authority's certificate from the template's
+metadata. `install.sh` gets the host its certificate from the service
+(`compute-host-certificate`): the host proves its instance name with the
+instance's identity token, for `control_url`, and the service issues a
+week's certificate for that name; a daily timer renews it when fewer than
+four days are left, with a new token, so a host whose certificate expired
+gets a new one all the same. Terraform sets the group's first size; the service sizes it
 from then on. The group has no auto-healing (the service decides when a
 host is lost and fences it), and a new template reaches hosts only as they
 are replaced.
 
 Elsewhere, install a host by hand: a systemd Linux machine with KVM, an
-XFS state volume, a certificate signed by the fleet's authority for a name
-unique in the fleet, and the bundle:
+XFS state volume, a name unique among the hosts, and the bundle. With no
+identity token to prove its name, the host's first certificate comes from
+`compute-control issue-host-certificate`, run where the authority's key is
+(the service's Secret); from then on the host renews it with the current
+one:
 
 ```sh
 tar -xzf compute-host-0.1.0-x86_64-linux.tar.gz && cd compute-host-0.1.0-x86_64-linux
 cp host.env.example host.env   # fill in the service, name, address, zone, store
-sudo install -d -m 700 /etc/compute
-sudo install -m 600 host.pem host.key ca.pem -t /etc/compute/
-sudo ./install.sh --config host.env --state-device /dev/nvme1n1
+sudo ./install.sh --config host.env --authority ca.crt --state-device /dev/nvme1n1
+# fails, naming the request it left at /etc/compute/host.csr; where ca.key is:
+compute-control issue-host-certificate --name compute-host-1 --csr host.csr --authority <dir> > host.pem
+# back on the host:
+sudo install -m 600 host.pem /etc/compute/host.pem && sudo ./install.sh
 ```
+
+A host whose certificate expired (off for over a week) needs a new one the
+same way.
 
 Nothing else on a host may drop forwarded traffic. A packet passes a
 firewall hook only if every chain on it accepts it, so another firewall
@@ -354,20 +386,37 @@ authority alone for agent links.
   (`printf %s "$key" | b3sum`). Callers send keys as `X-API-Key`. To rotate Opengeni's key: add the new one, switch
   `OPENGENI_COMPUTE_API_KEY` and roll Opengeni out, then delete the old
   row.
-- **Host certificates** are 30 days, from the fleet's authority, renewed by
-  each host's daily timer when fewer than 10 days are left (the agent is
-  restarted to use it; its VMs keep running).
-- **The service's certificate** lasts 30 days. Run `terraform apply` at
-  least every 10 days: from 20 days after an issue it makes a new key and
-  a certificate of a new name (the authority keeps every name it issued,
-  revoked ones too), and revokes the old one only after. Put the new
-  `control_certificate_pem` and `control_private_key_pem` outputs in the
-  Secret and restart the service. Hosts keep their connection until it
-  breaks and dial again.
-- **The authority.** To replace it, add the new authority to the pool, let
-  hosts renew under it (they trust the pool's certificates, read at each
-  renewal), give the service both authorities in `ca.crt`, then retire
-  the old one.
+- **Host certificates** last a week, from the service
+  (`POST /v1/hosts/certificate`), and each host's daily timer
+  (`compute-host-certificate.timer`) renews its own when fewer than four
+  days are left; the agent is restarted to use it, and its VMs keep
+  running. `compute-host-certificate --force` renews at once. The service
+  builds every certificate itself: it takes only the public key from the
+  host's request and names the host it proved, never a name the request
+  asks for, nor the service's own names.
+- **The service's certificate** needs nothing: the service issues itself
+  one for a week, from the authority, and a new one every day, for both
+  ends of its links with hosts. Open links keep the certificate they began
+  with.
+- **The authority** is ten years' (Terraform's) or as long as you made it.
+  Replace it in three steps, each a Secret change and a restart of the
+  service (`kubectl rollout restart`); hosts follow, because each renewal
+  replaces a host's `ca.pem` with the authorities the service trusts:
+  1. Make the new authority (`compute-control new-host-authority`, or with
+     Terraform keep the current `host_authority_pem` and
+     `host_authority_key_pem`, set `previous_host_authority_pem` to that
+     certificate, and `terraform apply
+     -replace=tls_private_key.authority`). Put both certificates in
+     `ca.crt`, the old one first, with the old key in `ca.key`. The service
+     still issues from the old one and now trusts both; new hosts trust
+     both. Wait a week, so every host has renewed and trusts the new one.
+  2. Put the new certificate first in `ca.crt`, then the old one, with the
+     new key in `ca.key`. The service issues from the new one and still
+     accepts hosts' certificates from the old. Wait a week, so every host's
+     certificate is from the new one.
+  3. Leave only the new certificate in `ca.crt`, set
+     `previous_host_authority_pem` to empty and apply, and destroy the old
+     key.
 - **The database password.** Change it in the Secret, set a new
   `computeControl.database.passwordRevision`, a whole number above the
   last, and upgrade the release: the revision runs a new database Job,
@@ -428,12 +477,21 @@ before users move to compute from Modal:
   in the fleet; run hosts in a project of their own, with no other
   workloads, OS Login and no SSH from the internet.
 - **Host identity.** Hosts and the service authenticate each other with
-  certificates from the fleet's authority. On GCP any instance running as
-  the host account can ask for a certificate of any host name, so a host
-  compromised to root can impersonate another host to the service. The
-  intended fix is for the service to issue host certificates itself
-  against the instance's identity token; until then, treat the host
-  account as one trust domain.
+  certificates of the hosts' authority, which only the service issues. On
+  GCP a host proves its instance name with the instance's identity token
+  (signed by Google, for the service's URL, of the configured project and
+  host service account), and its certificate names that instance only, so
+  a host compromised to root cannot get a certificate for another host.
+  Instance names are unique in a zone, not across zones: keep each
+  project's host names unique (the Terraform root's group does). Anyone
+  who can create an instance running as the host account can add a host,
+  so grant `iam.serviceAccountUser` on it to no one but the service. Off
+  GCP, a host's stolen certificate and key renew themselves until the
+  host is removed and its certificates expire (a week at most).
+- **The authority's key** (`ca.key` in the service's Secret, and the
+  Terraform state that made it) is the hosts' trust root: whoever holds it
+  can act as any host or as the service. Keep it as the service's other
+  keys; it never reaches the service's database.
 - **The service.** It holds the Opengeni and operator keys' digests, the
   host group's permissions (resize, reset, stop, start) and the bucket's
   objects. Opengeni reaches it inside the cluster; only the host endpoint
@@ -683,6 +741,8 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
 - **Busy is busy.** A sandbox that keeps computing stays awake, whether it
   builds code or mines coins. Sleep policy does not decide who pays: usage
   for billing and account budgets belongs to the layer above.
+- **Certificates cost nothing.** The hosts' authority is a key the service
+  holds; no managed certificate authority is billed.
 - **Sharing between customers.** Identical chunks are shared within a store
   prefix. Give each sharing domain (one customer, or one trust zone) its own
   prefix, chosen by the control plane; a host whose sandboxes span domains

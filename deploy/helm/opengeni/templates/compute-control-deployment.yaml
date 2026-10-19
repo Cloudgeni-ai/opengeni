@@ -113,9 +113,15 @@ spec:
             - --api=0.0.0.0:{{ $cc.service.apiPort }}
             - --hosts=0.0.0.0:8443
             - --connections={{ $cc.database.connections }}
-            - --cert=/etc/compute/tls/tls.crt
-            - --key=/etc/compute/tls/tls.key
-            - --host-ca=/etc/compute/tls/ca.crt
+            - --host-authority=/etc/compute/tls
+            - --host-url={{ $cc.hostUrl }}
+            {{- range $cc.hostsTls.extraNames }}
+            - --host-name={{ . }}
+            {{- end }}
+            {{- with $cc.hostIdentity.gcpProject }}
+            - --gce-project={{ . }}
+            - --gce-host-account={{ $cc.hostIdentity.gcpAccount }}
+            {{- end }}
             {{- if $cc.apiTls.secretName }}
             - --api-tls-cert=/etc/compute/api-tls/tls.crt
             - --api-tls-key=/etc/compute/api-tls/tls.key

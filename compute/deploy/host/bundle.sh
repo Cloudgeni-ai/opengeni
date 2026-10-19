@@ -7,8 +7,9 @@
 # produces $OUT/compute-host-$VERSION-x86_64-linux.tar.gz and its .sha256.
 # The bundle holds the agent as a static (musl) binary, the guest programs
 # every sandbox image gets (guest/build.sh: compute-guest, envd, bash), the
-# systemd units, install.sh, pins.env (Firecracker, jailer and the guest
-# kernel, downloaded and checked at install) and SHA256SUMS of all of it.
+# systemd units, install.sh, compute-host-certificate, pins.env
+# (Firecracker, jailer and the guest kernel, downloaded and checked at
+# install) and SHA256SUMS of all of it.
 # Builds are reproducible: the same commit and toolchain give the same
 # bytes (paths remapped, archive entries sorted and dated from
 # SOURCE_DATE_EPOCH, by default the commit's time). GUEST may name a
@@ -58,9 +59,11 @@ fi
 chmod 755 "$dir/guest/compute-guest" "$dir/guest/envd" "$dir/guest/bash"
 chmod 644 "$dir/guest/VERSIONS"
 
-install -m 755 "$here/install.sh" "$here/check-host" "$here/host-setup" "$dir/"
+install -m 755 "$here/install.sh" "$here/check-host" "$here/host-setup" \
+  "$here/compute-host-certificate" "$dir/"
 install -m 644 "$here/pins.env" "$here/host.env.example" "$here/compute-host.service" \
-  "$here/compute-guard.service" "$here/compute-host-setup.service" "$dir/"
+  "$here/compute-guard.service" "$here/compute-host-setup.service" \
+  "$here/compute-host-certificate.service" "$here/compute-host-certificate.timer" "$dir/"
 echo "$VERSION" >"$dir/VERSION"
 (cd "$dir" && find . -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort | xargs sha256sum >SHA256SUMS)
 

@@ -5,17 +5,17 @@
 //! as a test tells them to.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use compute_control::api::key_digest;
+use compute_control::authority::Authority;
 use compute_control::leader::Scaling;
 use compute_control::service::Settings;
 use compute_control::store::{MemoryStore, Store as _};
-use compute_control::tls::{Tls, TlsFiles};
+use compute_control::tls::Tls;
 use compute_control::{Config, Running};
 use compute_fleet::{LeaseTerms, OwnerEpoch, Stamp};
 use compute_protocol::fleet::{
@@ -24,9 +24,7 @@ use compute_protocol::fleet::{
 };
 use compute_protocol::host::{ErrorCode, Id, Reply, Request};
 use compute_storage::store::{Begun, ChunkStore};
-use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, SanType,
-};
+use rcgen::{BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair};
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -44,6 +42,8 @@ pub const KEY: &str = "key-of-team-a";
 pub const OTHER_KEY: &str = "key-of-team-b";
 /// The operator's key.
 pub const OPERATOR_KEY: &str = "key-of-the-operator";
+/// The name hosts reach the service by.
+pub const SERVICE: &str = "service.example";
 
 /// Lease terms short enough for a test to see a host lapse: a two-second
 /// term, renewed every 200 ms, with the margin the rules need.
@@ -91,14 +91,18 @@ impl Pki {
         }
     }
 
-    /// A certificate valid for `name` (and loopback, for the service), as
-    /// PEM: the certificate and its key.
-    fn issue(&self, name: &str, loopback: bool) -> (String, String) {
+    /// A certificate valid for `name`, as PEM: the certificate and its key.
+    #[must_use]
+    pub fn issue_pem(&self, name: &str) -> (String, String) {
+        self.issue_until(name, None)
+    }
+
+    /// The same, valid until `not_after` if given.
+    fn issue_until(&self, name: &str, not_after: Option<time::OffsetDateTime>) -> (String, String) {
         let mut params = CertificateParams::new(vec![name.to_owned()]).unwrap();
-        if loopback {
-            params
-                .subject_alt_names
-                .push(SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        if let Some(not_after) = not_after {
+            params.not_before = not_after - time::Duration::days(2);
+            params.not_after = not_after;
         }
         params.extended_key_usages = vec![
             ExtendedKeyUsagePurpose::ServerAuth,
@@ -115,21 +119,23 @@ impl Pki {
         Arc::new(roots)
     }
 
-    fn write(&self, name: &str, contents: &str) -> PathBuf {
-        let path = self.dir.path().join(name);
-        std::fs::write(&path, contents).unwrap();
-        path
+    /// The authority, as the service holds it, loaded from a directory as
+    /// it loads it.
+    #[must_use]
+    pub fn authority(&self) -> Arc<Authority> {
+        let dir = self.dir.path();
+        std::fs::write(dir.join("ca.crt"), self.ca.pem()).unwrap();
+        std::fs::write(dir.join("ca.key"), self.ca_key.serialize_pem()).unwrap();
+        Arc::new(Authority::load(dir).unwrap())
     }
 
-    /// The service's settings, loaded from files as it loads them.
+    /// The service's settings, for the names the tests reach it by.
     #[must_use]
     pub fn service(&self) -> Tls {
-        let (cert, key) = self.issue("service.example", true);
-        Tls::load(&TlsFiles {
-            cert: self.write("service.pem", &cert),
-            key: self.write("service.key", &key),
-            host_ca: self.write("ca.pem", &self.ca.pem()),
-        })
+        Tls::new(
+            self.authority(),
+            vec![SERVICE.to_owned(), Ipv4Addr::LOCALHOST.to_string()],
+        )
         .unwrap()
     }
 
@@ -146,13 +152,32 @@ impl Pki {
     /// What a host calls the service with: its certificate for `name`.
     #[must_use]
     pub fn host_client(&self, name: &str) -> ClientConfig {
-        let (chain, key) = Self::parts(&self.issue(name, false));
+        Self::client_of(&self.issue_pem(name), self.roots())
+    }
+
+    /// The same, with a certificate that expired a day ago.
+    #[must_use]
+    pub fn expired_host_client(&self, name: &str) -> ClientConfig {
+        let yesterday = time::OffsetDateTime::now_utc() - time::Duration::days(1);
+        Self::client_of(&self.issue_until(name, Some(yesterday)), self.roots())
+    }
+
+    /// A client presenting `pem` (certificate and key), trusting `roots`.
+    #[must_use]
+    pub fn client_of(pem: &(String, String), roots: Arc<RootCertStore>) -> ClientConfig {
+        let (chain, key) = Self::parts(pem);
         ClientConfig::builder_with_provider(provider())
             .with_safe_default_protocol_versions()
             .unwrap()
-            .with_root_certificates(self.roots())
+            .with_root_certificates(roots)
             .with_client_auth_cert(chain, key)
             .unwrap()
+    }
+
+    /// The authority's roots, for a client of the service.
+    #[must_use]
+    pub fn trusted(&self) -> Arc<RootCertStore> {
+        self.roots()
     }
 
     /// What a caller without a host certificate calls the service with: it
@@ -169,7 +194,7 @@ impl Pki {
     /// What a host serves the service with, trusting only the authority.
     #[must_use]
     pub fn host_server(&self, name: &str) -> ServerConfig {
-        let (chain, key) = Self::parts(&self.issue(name, false));
+        let (chain, key) = Self::parts(&self.issue_pem(name));
         let verifier = WebPkiClientVerifier::builder_with_provider(self.roots(), provider())
             .build()
             .unwrap();
@@ -258,6 +283,7 @@ impl Fleet {
                 api_tls: None,
                 hosts: loopback,
                 tls: pki.service(),
+                identity: None,
                 archive: Some(archive.clone()),
                 settings,
                 operator: "operator".into(),

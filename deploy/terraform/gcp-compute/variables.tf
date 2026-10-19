@@ -15,7 +15,7 @@ variable "name_prefix" {
 }
 
 variable "region" {
-  description = "Region of the archive bucket and the certificate authority."
+  description = "Region of the archive bucket and the hosts."
   type        = string
   default     = "europe-west4"
 }
@@ -131,14 +131,14 @@ variable "base_image_ref" {
 }
 
 variable "control_url" {
-  description = "The control service's host endpoint hosts dial, such as https://compute-control.example.com:8443. Its certificate must name this host."
+  description = "The control service's host endpoint hosts dial, such as https://compute-control.example.com:8443: computeControl.hostUrl in the Helm chart, exactly. The service's certificate is for its host, and hosts' identity tokens are for it."
   type        = string
 }
 
-variable "control_dns_names" {
-  description = "DNS names on the control service's host-endpoint certificate this root issues. Empty: no certificate is issued (bring one from the same authority)."
-  type        = list(string)
-  default     = []
+variable "previous_host_authority_pem" {
+  description = "While the hosts' authority is replaced: the authority being retired (its certificate, PEM), which new hosts trust beside the current one. Empty otherwise. See operations.md, Keys and certificates."
+  type        = string
+  default     = ""
 }
 
 variable "control_source_ranges" {
@@ -191,7 +191,7 @@ variable "control_workload_identity" {
 }
 
 variable "for_tests" {
-  description = "Let terraform destroy remove the bucket with its objects and the certificate authority at once. Never in production."
+  description = "Let terraform destroy remove the bucket with its objects. Never in production."
   type        = bool
   default     = false
 }

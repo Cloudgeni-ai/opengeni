@@ -2,10 +2,11 @@
 # A compute host's startup script on Google Cloud, run as root at every
 # boot from the instance template's metadata (main.tf). It prepares the
 # state volume, fetches and checks the host bundle the template names,
-# makes sure the host has a current certificate from the fleet's authority,
-# writes /etc/compute/host.env and runs the bundle's install.sh, which
-# starts the guard and the agent. A new bundle reaches a host when the host
-# is replaced or rebooted with a template naming it.
+# writes /etc/compute/host.env and runs the bundle's install.sh with the
+# hosts' authority from the metadata, which gets the host its certificate
+# from the control service and starts the guard and the agent. A new
+# bundle reaches a host when the host is replaced or rebooted with a
+# template naming it.
 set -euo pipefail
 export PATH=$PATH:/snap/bin
 
@@ -14,9 +15,8 @@ attr() { meta "instance/attributes/$1"; }
 log() { echo "compute-startup: $*"; }
 
 # Every step below is safe to run again, and several reach the network
-# (the bundle's store, the certificate authority, the base image's
-# registry), so a failed attempt runs again, after a wait growing to five
-# minutes, until the host is installed. A host whose one attempt failed
+# (the bundle's store, the control service, the base image's registry),
+# so a failed attempt runs again, after a wait growing to five minutes, until the host is installed. A host whose one attempt failed
 # would otherwise run without ever registering, and nothing would replace
 # it: the instance group has no health check (main.tf).
 if [ -z "${COMPUTE_STARTUP_ATTEMPT:-}" ]; then
@@ -79,62 +79,11 @@ if [ ! -f "$bundle/install.sh" ]; then
   mv "$bundle.part" "$bundle"
 fi
 
-# --- The host's certificate, renewed by a daily timer.
+# --- The hosts' authority, the host's first trust in the control service;
+# install.sh gets the host its certificate, for its instance name, with the
+# instance's identity token, and renews it daily.
 install -d -m 700 /etc/compute
-cat >/usr/local/sbin/compute-host-certificate <<'CERT'
-#!/usr/bin/env bash
-# Gets this host a 30-day certificate from the fleet's authority when it
-# has none or its own expires within 10 days, then restarts the agent to
-# use it (its VMs keep running). The authority's certificate is the trust
-# root for the control service.
-set -euo pipefail
-export PATH=$PATH:/snap/bin
-meta() { curl -fsS -H Metadata-Flavor:Google "http://metadata.google.internal/computeMetadata/v1/$1"; }
-NAME=$(meta instance/name)
-POOL=$(meta instance/attributes/compute-ca-pool)
-LOCATION=$(meta instance/attributes/compute-ca-location)
-cd /etc/compute
-if [ -f host.pem ] && openssl x509 -in host.pem -noout -checkend 864000 >/dev/null; then
-  exit 0
-fi
-openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout host.key.new \
-  -subj "/CN=$NAME" -addext "subjectAltName=DNS:$NAME" -out host.csr 2>/dev/null
-gcloud privateca certificates create --quiet --issuer-pool "$POOL" --issuer-location "$LOCATION" \
-  --csr host.csr --cert-output-file host.pem.new --validity P30D
-gcloud privateca pools get-ca-certs "$POOL" --location "$LOCATION" --output-file ca.pem.new
-chmod 600 host.key.new host.pem.new
-chmod 644 ca.pem.new
-mv host.key.new host.key
-mv host.pem.new host.pem
-mv ca.pem.new ca.pem
-rm -f host.csr
-if systemctl is-active -q compute-host.service; then
-  systemctl restart compute-host.service
-fi
-CERT
-chmod 755 /usr/local/sbin/compute-host-certificate
-cat >/etc/systemd/system/compute-host-certificate.service <<'UNIT'
-[Unit]
-Description=Renew the compute host's certificate
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/compute-host-certificate
-UNIT
-cat >/etc/systemd/system/compute-host-certificate.timer <<'UNIT'
-[Unit]
-Description=Renew the compute host's certificate daily
-[Timer]
-OnCalendar=daily
-RandomizedDelaySec=1h
-Persistent=true
-[Install]
-WantedBy=timers.target
-UNIT
-systemctl daemon-reload
-systemctl enable -q --now compute-host-certificate.timer
-/usr/local/sbin/compute-host-certificate
+attr compute-host-authority >/etc/compute/authority.pem.new
 
 # --- The host's configuration.
 huge_pages=0
@@ -157,5 +106,6 @@ COMPUTE_HOST_ARGS="$args"
 ENV
 
 log "installing $(cat "$bundle/VERSION") as $NAME"
-"$bundle/install.sh" --config /etc/compute/host.env.new ${state_device:+--state-device "$state_device"}
-rm -f /etc/compute/host.env.new
+"$bundle/install.sh" --config /etc/compute/host.env.new --authority /etc/compute/authority.pem.new \
+  ${state_device:+--state-device "$state_device"}
+rm -f /etc/compute/host.env.new /etc/compute/authority.pem.new
