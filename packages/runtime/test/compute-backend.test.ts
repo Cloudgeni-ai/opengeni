@@ -235,6 +235,9 @@ class FakeAgentPlane implements ComputeAgentPlane {
   natsTransport = false;
   /** Every subject a request was sent on over that connection. */
   readonly natsSubjects: string[] = [];
+  /** Instances whose host still takes requests but whose agent is gone: a
+   * request there is held and never answered, so it times out. */
+  readonly heldInstances = new Set<string>();
   /** The agent's Hello advertised transactional file writes, and whether
    * they also accept machine-addressed (epoch 0) transactions. */
   transactional = false;
@@ -283,6 +286,10 @@ class FakeAgentPlane implements ComputeAgentPlane {
       request: async (subject, payload, opts) => {
         this.natsSubjects.push(subject);
         const base = subject.split(".replay.")[0]!;
+        if (this.heldInstances.has(base.split(".")[4] ?? "")) {
+          await Bun.sleep(opts.timeout);
+          throw Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
+        }
         if (this.sessions.get(base.split(".")[2] ?? "") !== base.split(".")[4]) {
           throw Object.assign(new Error("503 no responders"), { code: "503" });
         }
@@ -462,7 +469,13 @@ function agentIdOf(box: FabricBox): string {
 }
 
 function setup(
-  options: { connectOnCreate?: boolean; readyTimeoutMs?: number; desktop?: boolean } = {},
+  options: {
+    connectOnCreate?: boolean;
+    readyTimeoutMs?: number;
+    desktop?: boolean;
+    controlTimeoutMs?: number;
+    execTimeoutMs?: number;
+  } = {},
 ) {
   const fabric = new FakeFabric();
   fabrics.push(fabric);
@@ -485,6 +498,10 @@ function setup(
     vcpus: 2,
     memoryMib: 4096,
     readyTimeoutMs: options.readyTimeoutMs ?? 2_000,
+    ...(options.controlTimeoutMs !== undefined
+      ? { controlTimeoutMs: options.controlTimeoutMs }
+      : {}),
+    ...(options.execTimeoutMs !== undefined ? { execTimeoutMs: options.execTimeoutMs } : {}),
     environment: { FOO: "bar" },
   });
   return { fabric, plane, client };
@@ -1591,4 +1608,67 @@ describe("waking a compute sandbox for an exact-locator request", () => {
     expect(await onNoResponders(subject)).toBe(true);
     expect(lookups).toBe(2);
   });
+});
+
+describe("an operation whose agent restarts", () => {
+  // The VM dies and boots fresh on its disk: the host still takes requests
+  // for the old agent connection and holds them, and the new agent comes up
+  // with a new connection instance.
+  function restartAgent(plane: FakeAgentPlane, agentId: string, afterMs: number): string {
+    const old = plane.sessions.get(agentId)!;
+    plane.heldInstances.add(old);
+    setTimeout(() => plane.open(agentId), afterMs);
+    return old;
+  }
+
+  test("an exec in flight ends as lost once the new agent is live, and the next one runs", async () => {
+    const { plane, client, fabric } = setup({ controlTimeoutMs: 500, execTimeoutMs: 30_000 });
+    plane.natsTransport = true;
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    expect((await session.exec({ cmd: "echo hi" })).exitCode).toBe(0);
+    const old = restartAgent(plane, session.state.enrollmentId, 200);
+    const startedAt = Date.now();
+    const error = await session.exec({ cmd: "echo again" }).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(String(error)).toMatch(/restarted/);
+    // Well inside the exec's own 30 s timeout and the 120 s recovery allowance.
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    expect(fabric.wakes).toBe(0);
+    const next = await session.exec({ cmd: "echo after" });
+    expect(next.exitCode).toBe(0);
+    expect(plane.sent.at(-1)?.subject.split(".")[4]).not.toBe(old);
+  }, 20_000);
+
+  test("a read in flight across the restart is read again from the new agent", async () => {
+    const { plane, client, fabric } = setup({ controlTimeoutMs: 500 });
+    plane.natsTransport = true;
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    await session.writeFile({ path: "/workspace/r.txt", content: "kept" });
+    const old = restartAgent(plane, session.state.enrollmentId, 200);
+    const startedAt = Date.now();
+    const bytes = await session.readFile({ path: "/workspace/r.txt" });
+    expect(new TextDecoder().decode(bytes)).toBe("kept");
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    expect(fabric.wakes).toBe(0);
+    const reads = plane.sent.filter((s) => s.req.op?.$case === "fsRead");
+    expect(reads.at(-1)?.subject.split(".")[4]).not.toBe(old);
+  }, 20_000);
+
+  test("an exec whose agent never answers ends at its own timeout, start included", async () => {
+    const { plane, client } = setup({ controlTimeoutMs: 500, execTimeoutMs: 1_000 });
+    plane.natsTransport = true;
+    const session = await client.create(undefined, { opengeniCreateIdentity: identity });
+    expect((await session.exec({ cmd: "echo hi" })).exitCode).toBe(0);
+    // The same agent connection stays current, but nothing answers on it.
+    plane.heldInstances.add(plane.sessions.get(session.state.enrollmentId)!);
+    const startedAt = Date.now();
+    const error = await session.exec({ cmd: "sleep 600" }).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeDefined();
+    expect(Date.now() - startedAt).toBeLessThan(15_000);
+  }, 30_000);
 });

@@ -22,7 +22,7 @@
 
 import { AgentError, ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import type { CapabilityUnavailableReason } from "@opengeni/contracts";
-import { ControlReplyRecovery } from "./control-replay";
+import { ControlConnectionReplacedError, ControlReplyRecovery } from "./control-replay";
 
 // Re-export the contracts reason union locally so callers of the mapping below
 // don't have to import from two places. CapabilityUnavailableReason here is the
@@ -51,7 +51,15 @@ export interface ControlRpc {
   request(
     subject: string,
     req: ControlRequest,
-    opts: { timeoutMs: number },
+    opts: {
+      timeoutMs: number;
+      /** Whether the agent connection the subject names is still the
+       * enrollment's live one. A transport asks it after an attempt fails;
+       * false means that agent process was replaced (it restarted), so nothing
+       * will ever answer the subject again: the transport stops retrying and
+       * answers with a connection-replaced AGENT_OFFLINE. Unknown is true. */
+      connectionCurrent?: () => Promise<boolean>;
+    },
   ): Promise<ControlResponse>;
 }
 
@@ -105,6 +113,11 @@ export class SelfhostedControlError extends Error {
    *  (a post-send timeout is ambiguous — at-least-once — and must not be re-sent
    *  unless the op is read-only). Never set for an agent-returned error. */
   readonly neverSent: boolean;
+  /** The agent connection the request was sent to was replaced: that agent
+   *  process restarted, so whatever it was running is gone and the subject is
+   *  never answered again. Only the transport sets it (with `neverSent` when
+   *  the request reached no responder). */
+  readonly connectionReplaced: boolean;
   /** Exact inner control request that produced this failure. Safe opaque
    * correlation only; never a NATS subject, token, or machine credential. */
   readonly controlRequestId: string | null;
@@ -121,6 +134,7 @@ export class SelfhostedControlError extends Error {
     osNotFound?: boolean;
     payloadTooLarge?: boolean;
     neverSent?: boolean;
+    connectionReplaced?: boolean;
     controlRequestId?: string | null;
     detail?: Record<string, string>;
   }) {
@@ -134,6 +148,7 @@ export class SelfhostedControlError extends Error {
     this.osNotFound = input.osNotFound ?? false;
     this.payloadTooLarge = input.payloadTooLarge ?? false;
     this.neverSent = input.neverSent ?? false;
+    this.connectionReplaced = input.connectionReplaced ?? false;
     this.controlRequestId = input.controlRequestId ?? null;
     this.detail = input.detail ?? {};
   }
@@ -179,6 +194,7 @@ export function agentErrorToControlError(
         retryable: false,
         agentOffline: true,
         neverSent: detail[NEVER_SENT_DETAIL_KEY] === "1",
+        connectionReplaced: detail[CONNECTION_REPLACED_DETAIL_KEY] === "1",
         controlRequestId,
         detail,
       });
@@ -366,6 +382,28 @@ export function execDeadlineHint(seconds: number): string {
  *  `SelfhostedControlError.neverSent`. Reserved (never sent by the agent). */
 export const NEVER_SENT_DETAIL_KEY = "_never_sent";
 
+/** The reserved `detail` key the transport sets to "1" when the agent
+ *  connection a request was sent to was replaced by a new one (the agent
+ *  restarted). `agentErrorToControlError` reads it into
+ *  `SelfhostedControlError.connectionReplaced`. Reserved (never sent by the agent). */
+export const CONNECTION_REPLACED_DETAIL_KEY = "_connection_replaced";
+
+/** The synthesized AGENT_OFFLINE for a request whose agent connection was
+ *  replaced: the agent restarted. `neverSent` when it reached no responder. */
+export function connectionReplacedAgentError(neverSent: boolean): AgentError {
+  return {
+    code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+    message: neverSent
+      ? "The machine's agent restarted before this request reached it, so it did not run."
+      : "The machine's agent restarted while this request was in flight, so its outcome is unknown.",
+    retryable: false,
+    detail: {
+      [CONNECTION_REPLACED_DETAIL_KEY]: "1",
+      ...(neverSent ? { [NEVER_SENT_DETAIL_KEY]: "1" } : {}),
+    },
+  };
+}
+
 /** Build a synthesized AGENT_OFFLINE `AgentError` — the control plane uses this
  *  when no agent responds on the subject at all. `neverSent` marks that the request
  *  provably never reached the machine (no connection / no responder), which makes it
@@ -519,7 +557,7 @@ export class NatsControlRpc implements ControlRpc {
   async request(
     subject: string,
     req: ControlRequest,
-    opts: { timeoutMs: number },
+    opts: { timeoutMs: number; connectionCurrent?: () => Promise<boolean> },
   ): Promise<ControlResponse> {
     const conn = await this.resolveConnection();
     if (!conn) {
@@ -530,8 +568,21 @@ export class NatsControlRpc implements ControlRpc {
     const payload = ControlRequest.encode(req).finish();
     let reply: { data: Uint8Array };
     try {
-      reply = await this.recovery.request(conn, subject, payload, opts.timeoutMs);
+      reply = await this.recovery.request(
+        conn,
+        subject,
+        payload,
+        opts.timeoutMs,
+        opts.connectionCurrent,
+      );
     } catch (err) {
+      if (err instanceof ControlConnectionReplacedError) {
+        return {
+          requestId: req.requestId,
+          error: connectionReplacedAgentError(err.neverSent),
+          result: undefined,
+        };
+      }
       const denied = natsAuthorizationFailure(err);
       if (denied) throw denied;
       // The client rejects this before publishing. Keep the healthy connection;
@@ -554,7 +605,21 @@ export class NatsControlRpc implements ControlRpc {
         };
       }
       // Re-allow a future request to re-dial if the cached conn was torn down.
-      if (isNoRespondersError(err)) {
+      const noResponders = isNoRespondersError(err);
+      // A one-shot attempt (no replay) that failed: say so when its connection
+      // was replaced, as the replay retries do.
+      if (
+        (noResponders || isRequestTimeoutError(err)) &&
+        opts.connectionCurrent &&
+        !(await opts.connectionCurrent().catch(() => true))
+      ) {
+        return {
+          requestId: req.requestId,
+          error: connectionReplacedAgentError(noResponders),
+          result: undefined,
+        };
+      }
+      if (noResponders) {
         // No subscriber on the subject at all → the request reached no responder and
         // was NOT delivered → NEVER SENT (provably not executed): safe to re-issue.
         return offlineControlResponse(req.requestId, true);

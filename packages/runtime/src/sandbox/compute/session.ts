@@ -48,6 +48,7 @@ import { ErrorCode, type ControlRequest, type ControlResponse } from "@opengeni/
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
 import { archiveRestoreScript } from "../providers/opensandbox-adapter";
 import {
+  CONNECTION_REPLACED_DETAIL_KEY,
   NEVER_SENT_DETAIL_KEY,
   SelfhostedControlError,
   subjectFor,
@@ -133,7 +134,9 @@ function agentOfflineError(message: string): SelfhostedControlError {
 function isNoResponder(response: ControlResponse): boolean {
   return (
     response.error?.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE &&
-    response.error.detail?.[NEVER_SENT_DETAIL_KEY] === "1"
+    response.error.detail?.[NEVER_SENT_DETAIL_KEY] === "1" &&
+    // A request whose agent restarted is answered, not resent.
+    response.error.detail?.[CONNECTION_REPLACED_DETAIL_KEY] !== "1"
   );
 }
 
@@ -465,6 +468,9 @@ export class ComputeSandboxSession extends SelfhostedSession {
       workspaceRoot: COMPUTE_WORKSPACE_ROOT,
       environment: state.environment,
       resolveOperationAdmission,
+      // Without waking anything: only after a failed request, to tell a
+      // restarted agent (a new instance) from an unreachable one.
+      liveConnectionInstance: async () => (await resolveConnection())?.connectionInstanceId ?? null,
       ...(deps.controlTimeoutMs !== undefined ? { timeoutMs: deps.controlTimeoutMs } : {}),
       ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
       // Machine-addressed (epoch 0): the sandbox's agent holds no session

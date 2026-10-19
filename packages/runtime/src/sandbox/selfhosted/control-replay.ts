@@ -14,6 +14,16 @@ function transient(error: unknown): boolean {
   );
 }
 
+/** Retrying stopped because the agent connection the request's subject names
+ * was replaced by a new one: that agent process is gone, and nothing will ever
+ * answer the subject again. `neverSent` when no attempt reached a responder. */
+export class ControlConnectionReplacedError extends Error {
+  constructor(readonly neverSent: boolean) {
+    super("the agent connection this request was sent to was replaced");
+    this.name = "ControlConnectionReplacedError";
+  }
+}
+
 /** Negotiates against one exact process, never an enrollment or a replacement
  * process. Retries keep the entire subject and payload immutable. The native
  * journal atomically joins duplicates and refuses expired deliveries even after
@@ -35,6 +45,8 @@ export class ControlReplyRecovery {
     subject: string,
     payload: Uint8Array,
     timeoutMs: number,
+    /** False once the subject's connection was replaced; see ControlRpc. */
+    connectionCurrent?: () => Promise<boolean>,
   ): Promise<{ data: Uint8Array }> {
     if (!conn.supportsHeaders) return conn.request(subject, payload, { timeout: timeoutMs });
     const deadline = Date.now() + timeoutMs + this.recoveryMs;
@@ -46,9 +58,15 @@ export class ControlReplyRecovery {
           op: { $case: "ping", ping: { nonce: "0" } },
         }),
       ).finish();
-      supported = this.retry(conn, subject, subject, probe, timeoutMs, deadline).then(
-        (reply) => reply.headers?.get(REPLAY_HEADER) === "1",
-      );
+      supported = this.retry(
+        conn,
+        subject,
+        subject,
+        probe,
+        timeoutMs,
+        deadline,
+        connectionCurrent,
+      ).then((reply) => reply.headers?.get(REPLAY_HEADER) === "1");
       this.supported.set(subject, supported);
       void supported.catch(() => {
         if (this.supported.get(subject) === supported) this.supported.delete(subject);
@@ -61,7 +79,7 @@ export class ControlReplyRecovery {
       });
     }
     const delivery = `${subject}.replay.${deadline}.${randomUUID()}`;
-    return this.retry(conn, subject, delivery, payload, timeoutMs, deadline);
+    return this.retry(conn, subject, delivery, payload, timeoutMs, deadline, connectionCurrent);
   }
 
   private async retry(
@@ -71,6 +89,7 @@ export class ControlReplyRecovery {
     payload: Uint8Array,
     timeoutMs: number,
     deadline: number,
+    connectionCurrent?: () => Promise<boolean>,
   ): ReturnType<NatsRequestConnection["request"]> {
     let uncertain: unknown;
     for (;;) {
@@ -86,7 +105,11 @@ export class ControlReplyRecovery {
         // ambiguity across retries so the caller cannot classify this as a
         // never-sent mutation and mint another delivery after the journal expires.
         if ((error as { code?: string }).code !== "503") uncertain ??= error;
-        else if (this.onNoResponders) {
+        // A replaced connection never answers again: its process is gone.
+        if (connectionCurrent && !(await connectionCurrent().catch(() => true))) {
+          throw new ControlConnectionReplacedError(uncertain === undefined);
+        }
+        if ((error as { code?: string }).code === "503" && this.onNoResponders) {
           const keepTrying = await this.onNoResponders(target).catch(() => false);
           if (!keepTrying) throw uncertain ?? error;
         }

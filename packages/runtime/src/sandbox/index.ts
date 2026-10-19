@@ -548,6 +548,8 @@ export {
   drainingMessage,
   execDeadlineHint,
   NEVER_SENT_DETAIL_KEY,
+  CONNECTION_REPLACED_DETAIL_KEY,
+  connectionReplacedAgentError,
   type NatsRequestConnection,
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";

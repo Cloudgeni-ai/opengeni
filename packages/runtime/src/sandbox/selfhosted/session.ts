@@ -380,6 +380,11 @@ export interface SelfhostedSessionDeps {
    * capabilities, op-stream state, and any caller-owned live authority from one
    * authoritative snapshot. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
+  /** The connection instance the agent is live on now, or null when that is
+   * unknown (no live connection). Asked only after a request fails, to tell
+   * an agent that restarted (a new instance) from one briefly unreachable.
+   * Without it, the instance resolveOperationAdmission reports is used. */
+  liveConnectionInstance?: () => Promise<string | null>;
   /** Durable session ownership transfer for model-facing exec that outlives its
    * bounded wait. Omitted for one-off/Channel-A callers, which remain terminal. */
   adoptBackgroundCommand?: (
@@ -662,6 +667,7 @@ export class SelfhostedSession {
   private readonly resolveOperationAdmission:
     | (() => Promise<SelfhostedOperationAdmission | null>)
     | undefined;
+  private readonly liveConnectionInstance: (() => Promise<string | null>) | undefined;
   private readonly adoptBackgroundCommand:
     | SelfhostedSessionDeps["adoptBackgroundCommand"]
     | undefined;
@@ -736,6 +742,12 @@ export class SelfhostedSession {
     this.defaultOpStream = deps.opStream;
     this.connectionInstanceId = deps.connectionInstanceId;
     this.resolveOperationAdmission = deps.resolveOperationAdmission;
+    const resolveAdmission = deps.resolveOperationAdmission;
+    this.liveConnectionInstance =
+      deps.liveConnectionInstance ??
+      (resolveAdmission
+        ? async () => (await resolveAdmission())?.connectionInstanceId ?? null
+        : undefined);
     this.adoptBackgroundCommand = deps.adoptBackgroundCommand;
     this.settleBackgroundCommand = deps.settleBackgroundCommand;
     this.captureBackgroundCommandOutput = deps.captureBackgroundCommandOutput;
@@ -942,6 +954,19 @@ export class SelfhostedSession {
     }
   }
 
+  /** Whether `admission`'s connection is still the agent's live one (see
+   * ControlRpc). Unknown counts as current. A static session cannot tell. */
+  private connectionCurrentFor(admission: {
+    connectionInstanceId: string;
+  }): (() => Promise<boolean>) | undefined {
+    const live = this.liveConnectionInstance;
+    if (!live) return undefined;
+    return async () => {
+      const instance = await live().catch(() => null);
+      return instance === null || instance === admission.connectionInstanceId;
+    };
+  }
+
   private opStreamClientFor(
     admission: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
   ): OpStreamExecClient | undefined {
@@ -956,6 +981,7 @@ export class SelfhostedSession {
     ]);
     const existing = this.opStreamClients.get(key);
     if (existing) return existing;
+    const connectionCurrent = this.connectionCurrentFor(admission);
     const client = new OpStreamExecClient({
       workspaceId: admission.controlWorkspaceId,
       agentId: this.agentId,
@@ -982,6 +1008,7 @@ export class SelfhostedSession {
         ? { silenceTimeoutMs: stream.silenceTimeoutMs }
         : {}),
       ...(stream.reconnectHoldMs !== undefined ? { reconnectHoldMs: stream.reconnectHoldMs } : {}),
+      ...(connectionCurrent ? { connectionCurrent } : {}),
     });
     this.opStreamClients.set(key, client);
     return client;
@@ -1028,8 +1055,10 @@ export class SelfhostedSession {
         resourcePolicy,
         op: runAsForRunner(op, operationAdmission.runAsSupported, this.runAsRequired),
       };
+      const connectionCurrent = this.connectionCurrentFor(operationAdmission);
       const res = await this.controlRpc.request(operationAdmission.subject, req, {
         timeoutMs,
+        ...(connectionCurrent ? { connectionCurrent } : {}),
       });
       if (!res.error && res.result) {
         const retries = drainingRetries + timeoutRetries + neverSentRetries;
@@ -1998,6 +2027,7 @@ export class SelfhostedSession {
         if (requestedRunAs(op) !== "" && !current.runAsSupported) {
           throw runAsUnsupportedError(writesFiles(op));
         }
+        const connectionCurrent = this.connectionCurrentFor(current);
         const response = await this.controlRpc.request(
           current.subject,
           {
@@ -2006,7 +2036,7 @@ export class SelfhostedSession {
             op,
             resourcePolicy: undefined,
           },
-          { timeoutMs: this.timeoutMs },
+          { timeoutMs: this.timeoutMs, ...(connectionCurrent ? { connectionCurrent } : {}) },
         );
         if (response.requestId !== requestId)
           throw new Error("The machine returned a mismatched file-transfer response identity.");

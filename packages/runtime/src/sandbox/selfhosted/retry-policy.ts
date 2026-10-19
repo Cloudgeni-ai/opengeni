@@ -125,6 +125,18 @@ export function decideSelfhostedRetry(input: {
 }): SelfhostedRetryDecision {
   const { opKind, error, drainingRetries, timeoutRetries, neverSentRetries = 0, jitter } = input;
 
+  if (
+    error.connectionReplaced &&
+    !error.neverSent &&
+    SELFHOSTED_IDEMPOTENT_READONLY_OPS.has(opKind)
+  ) {
+    // The agent restarted with a read in flight: read again from the new one.
+    if (timeoutRetries >= SELFHOSTED_TIMEOUT_MAX_RETRIES) {
+      return { action: "fail" };
+    }
+    return { action: "retry", delayMs: selfhostedRetryBackoffMs(timeoutRetries, jitter) };
+  }
+
   if (error.neverSent) {
     // Provably not executed (the request never reached the machine) → safe to
     // re-issue for ANY op kind. Bounded so a genuinely-offline machine surfaces

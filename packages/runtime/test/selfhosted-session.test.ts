@@ -1495,6 +1495,84 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     const session = sessionWith(rpc);
     expect(await session.ping("42")).toBe(true);
   });
+
+  test("a request bound to a replaced agent connection ends at once, never sent", async () => {
+    const { NatsControlRpc, CONNECTION_REPLACED_DETAIL_KEY } = await import("../src/sandbox");
+    let deliveries = 0;
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      request: async () => {
+        deliveries += 1;
+        throw Object.assign(new Error("503 no responders"), { code: "503" });
+      },
+    }));
+    let checks = 0;
+    const startedAt = Date.now();
+    const res = await rpc.request(
+      "agent.x.y.rpc",
+      { requestId: "r", epoch: 0, op: { $case: "ping", ping: { nonce: "1" } } } as ControlRequest,
+      {
+        timeoutMs: 50,
+        // The agent restarted after the first delivery found no responder.
+        connectionCurrent: async () => (checks += 1) < 2,
+      },
+    );
+    expect(res.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
+    expect(res.error?.message).toMatch(/restarted before this request reached it/);
+    expect(res.error?.detail[CONNECTION_REPLACED_DETAIL_KEY]).toBeDefined();
+    // Well inside the transport's 120 s recovery allowance.
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(deliveries).toBe(2);
+  });
+
+  test("a Connected Machine read in flight when its agent restarts is read again from the new agent", async () => {
+    const { NatsControlRpc } = await import("../src/sandbox");
+    const NEW_INSTANCE = "33333333-3333-4333-8333-333333333333";
+    const mock = new MockAgentResponder({ files: { "/home/user/project/a.txt": "kept" } });
+    let live = CONNECTION_INSTANCE;
+    const subjects: string[] = [];
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      request: async (subject: string, payload: Uint8Array) => {
+        subjects.push(subject);
+        if (!subject.includes(live)) {
+          throw Object.assign(new Error("503 no responders"), { code: "503" });
+        }
+        if (subject.includes(CONNECTION_INSTANCE)) {
+          // The agent restarts: its old connection is gone, a new one is live.
+          live = NEW_INSTANCE;
+          throw Object.assign(new Error("503 no responders"), { code: "503" });
+        }
+        const base = subject.split(".replay.")[0]!;
+        const answer = await mock.request(base, ControlRequest.decode(payload), {
+          timeoutMs: 1_000,
+        });
+        return {
+          data: ControlResponse.encode(answer).finish(),
+          headers: { get: (name: string) => (name === "Opengeni-Control-Replay" ? "1" : "") },
+        };
+      },
+    }));
+    const session = sessionWith(rpc, 0, undefined, {
+      resolveOperationAdmission: async () => ({
+        connectionInstanceId: live,
+        workspaceRoot: "/home/user/project",
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+        },
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
+      }),
+    });
+    const startedAt = Date.now();
+    const bytes = await session.readFile({ path: "/home/user/project/a.txt" });
+    expect(new TextDecoder().decode(bytes)).toBe("kept");
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    expect(subjects.some((subject) => subject.includes(NEW_INSTANCE))).toBe(true);
+  });
 });
 
 describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {

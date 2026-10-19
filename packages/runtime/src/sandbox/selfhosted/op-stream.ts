@@ -142,6 +142,9 @@ export interface OpStreamExecClientDeps {
    * physical OpStart dispatch. An already-accepted or outcome-ambiguous
    * operation never calls this hook again. */
   revalidateBeforeStartRetry?: () => void | Promise<void>;
+  /** Whether the pinned connection instance is still the agent's live one;
+   * see ControlRpc. Once it is not, the agent restarted and the op is lost. */
+  connectionCurrent?: () => Promise<boolean>;
 }
 
 /** A completed op-stream exec: the SDK-facing response plus the healing
@@ -617,6 +620,8 @@ class OpConsumer {
   private settleResolve: (() => void) | undefined;
   private settleReject: ((error: unknown) => void) | undefined;
   private torn = false;
+  /** The command's wall passed before its start was answered: send no more. */
+  private startAbandoned = false;
 
   constructor(
     deps: OpStreamExecClientDeps,
@@ -700,18 +705,27 @@ class OpConsumer {
       (payload) => this.onFramePayload(payload),
     );
 
-    const startRetries = exec === null ? 0 : await this.startOp(exec, deadlineMs);
+    // The op's own wall covers its start too: a start whose agent cannot be
+    // reached ends with the op's timeout, never after it.
+    const runStartedAt = Date.now();
+    const startWall = this.startWall(wallMs);
+    let startRetries: number;
+    try {
+      startRetries = exec === null ? 0 : await startWall.race(this.startOp(exec, deadlineMs));
 
-    // The universal begin (B2): attach from our contiguous frontier under the
-    // initial window — for a FRESH op that is seq 0 (replay nothing, start live
-    // flow); for a KNOWN op (re-dispatch) it replays everything we do not hold.
-    await this.attach(this.windowBytes);
+      // The universal begin (B2): attach from our contiguous frontier under the
+      // initial window — for a FRESH op that is seq 0 (replay nothing, start live
+      // flow); for a KNOWN op (re-dispatch) it replays everything we do not hold.
+      await startWall.race(this.attach(this.windowBytes));
+    } finally {
+      startWall.clear();
+    }
 
     // Cumulative-ack repetition (M1) — the periodic leg.
     this.ackTimer = setInterval(() => {
       void this.sendAck();
     }, this.ackIntervalMs);
-    const liveness = this.watchLiveness(wallMs);
+    const liveness = this.watchLiveness(wallMs, runStartedAt);
     let yieldTimer: ReturnType<typeof setTimeout> | undefined;
     let adopted = false;
     try {
@@ -836,6 +850,10 @@ class OpConsumer {
         await this.attach(0);
         return;
       } catch (error) {
+        // The agent restarted: the op went with it, and nothing will answer.
+        if (error instanceof SelfhostedControlError && error.connectionReplaced) {
+          throw lostToControlError({ lostReason: OpLostReason.OP_LOST_REASON_AGENT_RESTARTED });
+        }
         if (
           error instanceof SelfhostedControlError &&
           (error.retryable || error.agentOffline || error.reason === "agent_reconnecting")
@@ -885,6 +903,7 @@ class OpConsumer {
     let drainingRetries = 0;
     let blipRetries = 0;
     for (;;) {
+      if (this.startAbandoned) throw agentErrorToControlError(timeoutAgentError());
       // Subscription setup can yield after the caller's initial admission.
       // Close that window, and the equivalent proven-unstarted retry windows,
       // at the last boundary before bytes can reach the provider.
@@ -931,6 +950,13 @@ class OpConsumer {
             `the runner refused OpStart (${error.message})`,
             "runner",
           );
+        }
+        // The agent it was admitted to restarted. A start that reached no
+        // responder did not run; one that may have reached it was lost with it.
+        if (error.connectionReplaced) {
+          throw error.neverSent
+            ? error
+            : lostToControlError({ lostReason: OpLostReason.OP_LOST_REASON_AGENT_RESTARTED });
         }
         const blip = error.reason === "agent_reconnecting" || error.neverSent;
         if (error.draining && drainingRetries < OP_START_DRAINING_MAX_RETRIES) {
@@ -985,7 +1011,12 @@ class OpConsumer {
         resourcePolicy,
         op,
       },
-      { timeoutMs: this.deps.controlTimeoutMs },
+      {
+        timeoutMs: this.deps.controlTimeoutMs,
+        // A start the op's wall abandoned stops retrying in the background.
+        connectionCurrent: async () =>
+          !this.startAbandoned && ((await this.deps.connectionCurrent?.()) ?? true),
+      },
     );
     if (res.error || !res.result) {
       throw agentErrorToControlError(
@@ -1034,7 +1065,15 @@ class OpConsumer {
         this.heals += 1;
       })
       .catch((error) => {
-        if (error instanceof SelfhostedControlError && !error.retryable && !error.agentOffline) {
+        if (error instanceof SelfhostedControlError && error.connectionReplaced) {
+          this.settleReject?.(
+            lostToControlError({ lostReason: OpLostReason.OP_LOST_REASON_AGENT_RESTARTED }),
+          );
+        } else if (
+          error instanceof SelfhostedControlError &&
+          !error.retryable &&
+          !error.agentOffline
+        ) {
           this.settleReject?.(error);
         }
       })
@@ -1177,11 +1216,23 @@ class OpConsumer {
    * open through the reconnect window, and enforces an explicit client-side wall.
    * Resolves only by rejection (typed failure) or by `stop()` at settle.
    */
-  private watchLiveness(wallMs: number): { wall: Promise<never>; stop: () => void } {
+  private watchLiveness(
+    wallMs: number,
+    startedAt: number,
+  ): { wall: Promise<never>; stop: () => void } {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let wallTimer: ReturnType<typeof setTimeout> | undefined;
     const wall = new Promise<never>((_, reject) => {
-      const startedAt = Date.now();
+      // The wall holds whatever a probe is waiting on.
+      if (wallMs > 0) {
+        wallTimer = setTimeout(
+          () => {
+            if (!stopped) reject(agentErrorToControlError(timeoutAgentError()));
+          },
+          Math.max(0, startedAt + wallMs - Date.now()),
+        );
+      }
       const tick = async () => {
         if (stopped) {
           return;
@@ -1212,7 +1263,30 @@ class OpConsumer {
         if (timer) {
           clearTimeout(timer);
         }
+        if (wallTimer) {
+          clearTimeout(wallTimer);
+        }
       },
+    };
+  }
+
+  /** The op's wall while its start and first attach are in flight. */
+  private startWall(wallMs: number): {
+    race: <T>(work: Promise<T>) => Promise<T>;
+    clear: () => void;
+  } {
+    if (wallMs <= 0) return { race: (work) => work, clear: () => {} };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const wall = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        this.startAbandoned = true;
+        reject(agentErrorToControlError(timeoutAgentError()));
+      }, wallMs);
+    });
+    void wall.catch(() => {});
+    return {
+      race: async (work) => await Promise.race([work, wall]),
+      clear: () => clearTimeout(timer),
     };
   }
 
@@ -1239,6 +1313,11 @@ class OpConsumer {
     } catch (error) {
       if (!(error instanceof SelfhostedControlError)) {
         throw error;
+      }
+      // The agent restarted: the op is gone with it. Waiting cannot bring it back.
+      if (error.connectionReplaced) {
+        reject(lostToControlError({ lostReason: OpLostReason.OP_LOST_REASON_AGENT_RESTARTED }));
+        return;
       }
       const transient =
         error.agentOffline || error.reason === "agent_reconnecting" || error.draining;
@@ -1322,7 +1401,7 @@ function protocolError(message: string): SelfhostedControlError {
 /** A definitive `lost` status → a typed op-level failure. The result was
  *  bounded-retention collateral (LRU eviction / a runner restart predating the
  *  persistence milestone) — honest, never silent. */
-function lostToControlError(status: OpStatus): SelfhostedControlError {
+function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedControlError {
   const reason =
     status.lostReason === OpLostReason.OP_LOST_REASON_EVICTED
       ? "its retained result was evicted before collection"
