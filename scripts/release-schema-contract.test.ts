@@ -2871,6 +2871,7 @@ describe("release schema contract", () => {
       "0852_maintenance_predicate_privileges.sql",
       "0853_connected_machine_root_working_dirs.sql",
       "0854_file_visibility.sql",
+      "0855_session_fork_agent_parity.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

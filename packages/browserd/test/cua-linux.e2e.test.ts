@@ -234,6 +234,21 @@ test.skipIf(process.platform !== "linux" || process.env.OPENGENI_CUA_E2E !== "1"
           /^(WAYLAND_DISPLAY|XAUTHORITY|AT_SPI_BUS_ADDRESS)=/.test(entry),
         ),
       ).toBe(false);
+      // The adapter's own app launch accepts the process CUA reports for it.
+      const beforeLaunch = await supervisor.observe(references[0]!, target!.id);
+      expect(
+        await supervisor.action({
+          protocolVersion: 1,
+          operationId: randomUUID(),
+          ...references[0]!,
+          targetId: target!.id,
+          expectedTargetGeneration: beforeLaunch.target.targetGeneration,
+          expectedObservationId: beforeLaunch.observationId,
+          expectedFrameId: null,
+          actor: { kind: "agent", subjectId: "agent:fixture" },
+          action: { type: "launch", applicationId: "true" },
+        }),
+      ).toMatchObject({ state: "completed" });
       await supervisor.endSession(references[0]!);
       let childStopped = false;
       try {
