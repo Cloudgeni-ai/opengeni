@@ -35,17 +35,28 @@
 //! taking one stream up has all of it, once it runs again, for the
 //! others.
 //!
+//! Only a connection from the VM process launched last proves anything,
+//! or carries a stream: one from an earlier process says nothing of the
+//! guest now, and could take a stream over from the new guest's. So each
+//! connection is let in as of a launch ([`Door`]), and one from an
+//! earlier launch than the current is closed unanswered, as are those
+//! still waiting to be let in when a launch begins: no VM process of the
+//! sandbox runs then, so only an earlier one can have made them.
+//!
 //! A new connection takes the stream over at once, under the stream's
 //! lock, from the one before: what the connection before still reads goes
 //! nowhere, so it can neither add to the stream nor end it.
 
 use std::collections::HashMap;
+use std::io;
+use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use compute_guest::resume::stream::Received;
 use compute_guest::resume::{Answer, CHUNK, Delivery, Frame, Hello, LINE_MAX, Stream, StreamId};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream};
+use tokio::net::UnixStream;
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tokio::time::Instant;
@@ -75,6 +86,9 @@ pub(crate) struct RunClock {
 struct ClockInner {
     state: Mutex<Ran>,
     changed: tokio::sync::Notify,
+    /// The socket the guest's link connections come in on, whose waiting
+    /// ones a launch closes (see [`Door`]).
+    door: Mutex<Weak<UnixListener>>,
 }
 
 /// What the clock counted before the guest last began to run, and since
@@ -93,11 +107,27 @@ impl Ran {
 }
 
 /// Time on a sandbox's [`RunClock`], and the launch of its VM then.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct At {
     time: Duration,
     launch: u64,
 }
+
+impl At {
+    /// The later of the two.
+    fn later(self, other: Self) -> Self {
+        if (other.launch, other.time) > (self.launch, self.time) {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// The launch of a sandbox's VM a connection from its guest came in under:
+/// it was made by that launch's VM process (see [`Door`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Launch(u64);
 
 impl RunClock {
     /// A clock of a guest that runs from now on, as tests use.
@@ -136,9 +166,21 @@ impl RunClock {
     /// A VM process for the sandbox is about to start, restored or booted:
     /// its guest is a new one, which has yet to prove it runs by taking a
     /// stream up. Told before the process starts, so before that guest
-    /// can connect.
+    /// can connect, and while no other VM process of the sandbox runs: the
+    /// connections still waiting at the door are an earlier one's, and are
+    /// closed.
     pub(crate) fn launched(&self) {
-        self.lock().launch += 1;
+        let mut ran = self.lock();
+        let door = self
+            .inner
+            .door
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .upgrade();
+        if let Some(door) = door {
+            close_waiting(&door);
+        }
+        ran.launch += 1;
     }
 
     /// The launches it was told of.
@@ -175,6 +217,70 @@ impl RunClock {
                 None => changed.await,
             }
         }
+    }
+}
+
+/// Closes every connection waiting on `door`.
+fn close_waiting(door: &UnixListener) {
+    loop {
+        match door.accept() {
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
+                ) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "could not close the agent-link connections an earlier VM process left waiting",
+                );
+                return;
+            }
+        }
+    }
+}
+
+/// The socket a sandbox's guest connects to for its link. A connection is
+/// let in as of the launch it came in under, read under the same lock as a
+/// launch is counted under, and a launch first closes the connections
+/// still waiting: so a connection's launch is that of the VM process that
+/// made it.
+pub(crate) struct Door {
+    socket: tokio::net::UnixListener,
+    /// The same socket, for a launch to close the waiting connections with.
+    _closer: Arc<UnixListener>,
+    clock: RunClock,
+}
+
+impl Door {
+    /// `listener` as the door of the sandbox whose guest's time `clock`
+    /// counts. Must run inside a Tokio runtime.
+    pub(crate) fn new(listener: UnixListener, clock: RunClock) -> io::Result<Self> {
+        listener.set_nonblocking(true)?;
+        let closer = Arc::new(listener.try_clone()?);
+        *clock
+            .inner
+            .door
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&closer);
+        Ok(Self {
+            socket: tokio::net::UnixListener::from_std(listener)?,
+            _closer: closer,
+            clock,
+        })
+    }
+
+    /// The next connection, and the launch it came in under.
+    pub(crate) async fn accept(&self) -> io::Result<(UnixStream, Launch)> {
+        std::future::poll_fn(|cx| {
+            let ran = self.clock.lock();
+            self.socket
+                .poll_accept(cx)
+                .map_ok(|(connection, _)| (connection, Launch(ran.launch)))
+        })
+        .await
     }
 }
 
@@ -315,12 +421,11 @@ where
     let Some(inner) = inner.upgrade() else {
         return;
     };
-    let now = inner.clock.at();
-    if !shared.uncarried(carrier, now.time) {
-        return;
-    }
+    // Read under the map's lock, as every window's start is, so windows
+    // are asked for in the order of their starts.
     let mut map = inner.lock();
-    if map.proven == Some(now.launch) {
+    let now = inner.clock.at();
+    if shared.uncarried(carrier, now.time) && map.proven == Some(now.launch) {
         sweep_later(&inner, &mut map, now);
     }
 }
@@ -333,7 +438,8 @@ where
     F: Send + Sync + 'static,
 {
     if map.sweeping {
-        map.next_sweep = Some(at);
+        // The latest window covers every stream an earlier one would end.
+        map.next_sweep = Some(map.next_sweep.map_or(at, |next| next.later(at)));
         return;
     }
     map.sweeping = true;
@@ -385,9 +491,10 @@ where
         }
     }
 
-    /// Takes a new connection from the guest: reads its hello, and either
-    /// has it carry its stream or answers `gone` and closes it.
-    pub(crate) async fn take<C>(self, mut connection: C)
+    /// Takes a new connection from the guest, which came in under
+    /// `launch`: reads its hello, and either has it carry its stream or
+    /// answers `gone` and closes it.
+    pub(crate) async fn take<C>(self, mut connection: C, launch: Launch)
     where
         C: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
@@ -402,20 +509,29 @@ where
             );
             return;
         };
-        self.carry(&hello, connection);
+        self.carry(&hello, connection, launch);
     }
 
-    /// Has the connection that said `hello` carry its stream, starting it if
-    /// new, or tells the guest on it that the stream is gone. A guest that
-    /// connects runs, so a take-up's sweep starts either way: the streams
-    /// it no longer has end even with the sandbox at its limit, and a new
-    /// stream is let in once they have.
-    fn carry<C>(&self, hello: &Hello, connection: C)
+    /// Has the connection that said `hello`, which came in under `launch`,
+    /// carry its stream, starting it if new, or tells the guest on it that
+    /// the stream is gone. A guest that connects runs, so a take-up's sweep
+    /// starts either way: the streams it no longer has end even with the
+    /// sandbox at its limit, and a new stream is let in once they have. A
+    /// connection from an earlier launch's VM process is closed unanswered.
+    fn carry<C>(&self, hello: &Hello, connection: C, launch: Launch)
     where
         C: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        let now = self.inner.clock.at();
         let mut map = self.inner.lock();
+        let now = self.inner.clock.at();
+        if launch.0 != now.launch {
+            tracing::debug!(
+                sandbox = %self.inner.sandbox,
+                stream = %hello.id,
+                "an agent-link connection from an earlier VM process; closing it",
+            );
+            return;
+        }
         map.proven = Some(now.launch);
         if !map.streams.contains_key(&hello.id) {
             if hello.received > 0 || map.streams.len() >= self.inner.limit {

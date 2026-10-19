@@ -4,7 +4,6 @@ use std::os::unix::net::UnixStream as Socket;
 use std::path::{Path, PathBuf};
 
 use compute_guest::resume::relay::{Ended, relay};
-use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -18,6 +17,8 @@ type Serve = Box<dyn Fn(DuplexStream) + Send + Sync>;
 struct Rig {
     socket: PathBuf,
     hub: mpsc::UnboundedReceiver<DuplexStream>,
+    /// The launch each connection let in came in under.
+    let_in: mpsc::UnboundedReceiver<Launch>,
     streams: Streams<Serve>,
     clock: RunClock,
     _dir: tempfile::TempDir,
@@ -33,9 +34,14 @@ impl Drop for Rig {
 fn rig(limit: usize, take_up: Duration) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("link.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
     let (began, hub) = mpsc::unbounded_channel();
     let clock = RunClock::running();
+    let door = Door::new(
+        std::os::unix::net::UnixListener::bind(&socket).unwrap(),
+        clock.clone(),
+    )
+    .unwrap();
+    let (entered, let_in) = mpsc::unbounded_channel();
     let streams = Streams::new(
         Arc::from("sandbox"),
         Box::new(move |end| {
@@ -49,13 +55,15 @@ fn rig(limit: usize, take_up: Duration) -> Rig {
     let accept = tokio::spawn(async move {
         let mut hellos = JoinSet::new();
         loop {
-            let (connection, _) = listener.accept().await.unwrap();
-            hellos.spawn(serving.clone().take(connection));
+            let (connection, launch) = door.accept().await.unwrap();
+            let _ = entered.send(launch);
+            hellos.spawn(serving.clone().take(connection, launch));
         }
     });
     Rig {
         socket,
         hub,
+        let_in,
         streams,
         clock,
         _dir: dir,
@@ -64,6 +72,14 @@ fn rig(limit: usize, take_up: Duration) -> Rig {
 }
 
 impl Rig {
+    /// The launch the next connection let in came in under.
+    async fn next_let_in(&mut self) -> Launch {
+        tokio::time::timeout(WAIT, self.let_in.recv())
+            .await
+            .expect("no connection was let in")
+            .unwrap()
+    }
+
     async fn next_stream(&mut self) -> DuplexStream {
         tokio::time::timeout(WAIT, self.hub.recv())
             .await
@@ -361,6 +377,105 @@ async fn a_guest_launched_anew_keeps_its_streams_until_it_takes_one_up() {
         !ends_within(&mut ends[0], take_up).await,
         "the stream taken up goes on"
     );
+}
+
+/// A connection the VM process before made, let in but its hello not yet
+/// read when the next is launched, is closed unanswered: it says nothing
+/// of the new guest, which has yet to prove it runs, so it begins no
+/// window and takes no stream over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_connection_from_an_earlier_vm_process_is_closed_unanswered() {
+    let take_up = Duration::from_millis(300);
+    let mut rig = rig(4, take_up);
+    let mut ends = Vec::new();
+    for id in [1, 2] {
+        let (connection, answer) = raw_hello(&rig, id, 0, 0).await;
+        assert_eq!(answer, "ok 0\n");
+        assert_eq!(rig.next_let_in().await, Launch(0));
+        ends.push(rig.next_stream().await);
+        drop(connection);
+    }
+    rig.until_uncarried(1).await;
+    rig.until_uncarried(2).await;
+    let mut stale = Socket::connect(&rig.socket).unwrap();
+    stale.set_read_timeout(Some(WAIT)).unwrap();
+    assert_eq!(rig.next_let_in().await, Launch(0));
+    rig.clock.launched();
+    let hello = Hello {
+        id: StreamId(1),
+        received: 0,
+        sent: 0,
+    };
+    let answer = blocking(move || {
+        stale.write_all(hello.line().as_bytes()).unwrap();
+        let mut answer = Vec::new();
+        stale.read_to_end(&mut answer).unwrap();
+        answer
+    })
+    .await;
+    assert!(
+        answer.is_empty(),
+        "an earlier VM process's connection was answered"
+    );
+    for end in &mut ends {
+        assert!(
+            !ends_within(end, take_up * 3).await,
+            "a stream ended on an earlier VM process's hello"
+        );
+    }
+    // The new guest's take-up begins the window.
+    let (_kept, answer) = raw_hello(&rig, 1, 0, 0).await;
+    assert_eq!(answer, "ok 0\n");
+    assert_eq!(rig.next_let_in().await, Launch(1));
+    assert!(ends_within(&mut ends[1], take_up * 10).await);
+    assert!(
+        !ends_within(&mut ends[0], take_up).await,
+        "the stream taken up goes on"
+    );
+}
+
+/// The connections still waiting to be let in when the sandbox's VM is
+/// launched anew are an earlier VM process's: the launch closes them, and
+/// the next is let in as of the new launch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_launch_closes_the_connections_still_waiting_at_the_door() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("link.sock");
+    let clock = RunClock::running();
+    let door = Door::new(
+        std::os::unix::net::UnixListener::bind(&socket).unwrap(),
+        clock.clone(),
+    )
+    .unwrap();
+    let mut waiting = Socket::connect(&socket).unwrap();
+    waiting.set_read_timeout(Some(WAIT)).unwrap();
+    clock.launched();
+    let read = blocking(move || waiting.read_to_end(&mut Vec::new()).unwrap()).await;
+    assert_eq!(read, 0, "a waiting connection was not closed");
+    let _next = Socket::connect(&socket).unwrap();
+    let (_, launch) = tokio::time::timeout(WAIT, door.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(launch, Launch(1));
+}
+
+/// A window asked for while a sweep waits never replaces a later one, so
+/// ends seen out of the order of their times still leave the latest
+/// window, which covers every stream the earlier would end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_waiting_window_never_moves_back() {
+    let rig = rig(4, Duration::from_secs(60));
+    let at = |millis| At {
+        time: Duration::from_millis(millis),
+        launch: 0,
+    };
+    let inner = &rig.streams.inner;
+    let mut map = inner.lock();
+    sweep_later(inner, &mut map, at(10));
+    sweep_later(inner, &mut map, at(30));
+    sweep_later(inner, &mut map, at(20));
+    assert_eq!(map.next_sweep, Some(at(30)));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -273,7 +273,7 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 
 impl<E: Engine, S: Store> Job<E, S> {
     /// Tells the sandbox's agent-link streams that a VM process for it is
-    /// about to start.
+    /// about to start. None of its VM processes runs then.
     fn launching(&self) {
         if let Some(clock) = &self.link_clock {
             clock.launched();
