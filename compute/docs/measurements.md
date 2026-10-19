@@ -876,6 +876,7 @@ from that commit. Results carry the commits as `backend+agent`.
 | r14 22:49 | 130eeb930+ac1951242+6270b6eae | 40a9c32dc | 24 | 0 | none; run-as is n/a (Opengeni cannot ask for it); see below |
 | r15 23:06 | 8e8577dba | e53aa9512 | 24 | 3 | the suite's own host access (OS Login lacked `compute.projects.get`; fixed in the e2e); every product check passes |
 | r16 00:51 | 41f1e7bae+58d022965+6270b6eae | b593c5e25 | 19 | 7 | ui desktop (the chart predated the relay's owner routing); vm-crash, move, host-loss, delete (a request in flight across a VM crash never ends); link-stream (the window was too short for two checkpoints under load); see below |
+| r17 01:58 | 35d102db7+dc048ebe1+6270b6eae | 939d29e3b | 24 | 2 | vm-crash (the suite read the journal before the stream-end line), host-loss (the instance group recreated the host under its old name); both were check defects, fixed and passing in reruns; every product check passes; see below |
 
 Checks after create were skipped through r6 because they need create.
 In r8 (every request now carries a nonzero agent epoch) create and most
@@ -1197,3 +1198,100 @@ short.
 | delete | deleting the session deletes its fabric sandbox | failed: 409 for 10 minutes |
 | connected-machine | the same agent build enrolled on the stack VM comes online, runs a turn and an exec, and still answers after 90 s idle with the same process | online in 3.1 s |
 | cleanup | the run's sessions are deleted and its enrollment revoked | failed with delete; nothing left in r16b, r16c and r16d |
+
+### r17: the restart fix, every check
+
+r17 (2026-10-19, 01:58 to 02:33) ran every check on three freshly
+replaced hosts and a new database (`FRESH=1`), with the stock two-replica
+relays and no channel affinity. The backend was 35d102db7, which adopts a
+command that may have started when its agent restarted and never lets a
+request bound to a replaced connection wake the sandbox. It was merged
+with the run-as branch dc048ebe1 and the agent's fabric branch 6270b6eae,
+and compute was 939d29e3b. The shapes are those of r14. Rerun it with:
+
+```sh
+. p4.env   # PROJECT, PREFIX, LABELS, the three refs, the Azure account
+compute/e2e/env.sh build && compute/e2e/env.sh fleet &&
+  FRESH=1 compute/e2e/env.sh deploy && RUN=r17 compute/e2e/env.sh suite
+# a single check against the same stack:
+RUN=r17d ONLY=vm-crash,host-loss compute/e2e/env.sh suite
+```
+
+24 checks passed, 2 failed and run-as is not applicable. Every check that
+r16's in-flight request broke now passes: the four sleeps, move, delete
+(the sandbox was gone 20.4 s after the delete) and cleanup. Both failures
+were in the checks, not the product:
+
+- vm-crash: every assertion held except the evidence that the old streams
+  ended. The host logged it ("agent-link streams the guest no longer has
+  ended", naming the sandbox) 12 s after the kill. The check read the
+  journal as soon as the first command on the new boot answered, before
+  the rebooted agent's hello. It now reads the journal after the reconnect,
+  retries for up to 30 s, and then counts the console again from the same
+  mark, so a second reconnect during that wait would also be caught.
+- host-loss: the sandbox came back as designed, but the check rejected it.
+  The instance group's autohealer replaced the stopped host with a new
+  machine under the same name. The new machine registered under a new host
+  epoch with no sandboxes, adopted the sandbox, fetched it from the archive
+  and restored its memory from there. The check compared host names. It
+  now tells machines apart by their GCE instance id, and also requires a
+  host epoch known before the stop and strictly higher after. It also keeps
+  the stopped host's journal as `host-<name>@<instance>.log` before stopping
+  it, so that the verifier can still check an earlier proof made on that
+  host. Without that, r17b failed vm-crash's checkpoint proof after the
+  host was replaced.
+
+The reruns, against the same stack:
+
+| run | compute | vm-crash | host-loss | cleanup |
+| --- | --- | --- | --- | --- |
+| r17b 02:34 | 17404e753 | assertions held; verifier failed (the replaced host took the journal with it) | pass, 285.8 s | pass |
+| r17c 02:44 | bd065b066 | pass | pass, 446.0 s | fail: the session's delete answered 409 for 5 minutes |
+| r17d 02:59 | 70dc8de19 | pass | pass, 293.3 s | pass |
+
+r17c's cleanup failure is a backend bug. The suite's exec poll woke the
+sandbox through one API replica just as the stopped host powered off. The
+replacement host then linked through the other replica, and the first
+request never ended. It held the session's live-sandbox mark, so every
+delete answered 409 with `session_delete_live_sandboxes`. The fix is the
+backend's; host-loss and delete are rerun at its head.
+
+The recovery takes 4.8 to 7.4 minutes. `gcloud compute instances stop`
+shuts the guest down gracefully, which took 2 minutes 14 s to 2 minutes
+23 s in r17, r17b and r17c, and the host kept running its sandbox and
+re-linking meanwhile. The leader fenced the host as stopped in the last
+seconds of that shutdown and gave up on it. The instance group recreated
+it at once, and the new machine registered about a minute after its
+insert. In r17 the wake was then
+delivered to a session on the old host's link, which the gateway dropped
+29 s later. Nothing reached the fabric before the new host registered:
+the adopt landed on that new, empty host 61 s after it registered,
+although the other two hosts had been live and empty all along.
+
+In vm-crash, the command in flight at the kill ended after 30.1 s in
+r17b, r17c and r17d. The API answered 409, from agent code 9: the outcome
+is unknown. The next command answered 4.2 to 5.2 s after the kill, on its
+second try.
+
+| check | what it proves | r17 (reruns) |
+| --- | --- | --- |
+| health, hosts, workspace | the API answers; three hosts are live in the fleet | 0.1 s |
+| create | a session on the compute backend gets a fabric sandbox and its first model turn runs a shell command in it | 22.2 s to the reply (25.0, 25.0 and 19.1 s in r17b, r17c and r17d) |
+| commands | stdout, stderr and a nonzero exit status come back as the guest produced them | 0.3 s |
+| egress | the sandbox reaches the internet (HTTPS 200) | 0.4 s |
+| background | the agent's background command is read back by id with its output and status; a running one stopped through the API ends and its processes are gone | stopped in 2.2 s |
+| files, git | write, read and list agree; git works in the workspace | 0.4 and 0.3 s |
+| terminal | a viewer terminal through a stock two-replica relay runs a typed command whose file appears | 0.8 s |
+| checkpoint | a viewer terminal (150 ticks) and a command (110 ticks) stream without a gap across running checkpoints the journal shows | 2 checkpoints, quiet at most 1.0 s |
+| port | a guest TCP port answers through the fabric's connect stream | 2.1 s |
+| browser | the agent's browser tool loads a page served in the sandbox and returns its random title | 14.8 s |
+| desktop | the agent opens a computer session, takes a screenshot, and the API's frame decodes to a real screen | 1024x640, 157 colours |
+| ui | Playwright: the web app's file browser, terminal and desktop view, through the stock relays | 64.8 s; the desktop view drew 1422x888 |
+| sleep-paused, -saved, -archived, -remote | the host reached the level (state and journal), nothing began to wake it before the suite's request, the request woke it over the agent link, and a 32 MiB process kept its pid and memory under the same boot generation | reached in 0.3, 6.6, 15.0 and 18.3 s; first answer 0.1, 0.3, 0.5 and 8.8 s; each woken by `agent_link` 0.03 to 0.04 s after the request; the saved wake's pager wrote `learned.json` 3 s after it, no "Permission denied" |
+| link-stream | 4 MiB files both ways through the agent's link across at least two running checkpoints and a Saved sleep, every file matching both ways, with no agent reconnect and one VMM launch for the wake | 87 cycles in 173 s (348 MiB in, 696 MiB out), 2 checkpoints, saved in 11.9 s, woken by a read in 1.1 s, 0 reconnects |
+| vm-crash | a killed VM process boots again from its live disk (ADR 10): both writes kept, generation +1, programs lost and reported, one reconnect, old streams ended on host lines naming the sandbox, no protocol error; the request in flight ends with an error within its bound | failed in the check (see above); passed in r17c and r17d, the request in flight ending with 409 after 30.1 s |
+| move | a saved sandbox moves to another host and answers there with its files | 21.8 s |
+| host-loss | a stopped host's sandbox comes back on another live machine (a new instance id and host epoch, if the instance group reused the name) under a higher owner epoch, from its archived copy, the old host fenced | failed in the check (see above); passed in r17b, r17c and r17d in 285.8, 446.0 and 293.3 s, the archived file kept and the late write lost |
+| delete | deleting the session deletes its fabric sandbox | 20.4 s |
+| connected-machine | the same agent build enrolled on the stack VM comes online, runs a turn and an exec, and still answers after 90 s idle with the same process | online in 3.1 s |
+| cleanup | the run's sessions are deleted and its enrollment revoked | nothing left; r17c failed (see above) |
