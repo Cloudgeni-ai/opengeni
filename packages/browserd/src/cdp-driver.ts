@@ -180,6 +180,9 @@ const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 /** How long the controller's own close request may take to be acknowledged. */
 const BROWSER_CLOSE_REQUEST_TIMEOUT_MS = 5_000;
 const NETWORK_IDLE_MS = 500;
+/** A request open this long is a long poll or a stream, not page loading, so
+ * it does not keep the page from being network idle. */
+const LONG_LIVED_REQUEST_MS = 10_000;
 /** How long a navigation may wait for its server to answer before the tab
  * stops loading. Chromium itself waits for the operating system's connect
  * timeout, which outlives every caller's deadline. */
@@ -385,7 +388,17 @@ type TargetState = {
   inflightRequests: Set<string>;
   networkTrackingOverflow: boolean;
   failedRequests: Set<string>;
-  requests: Map<string, { method: string; url: string; browserInitiated: boolean }>;
+  requests: Map<
+    string,
+    {
+      method: string;
+      url: string;
+      browserInitiated: boolean;
+      /** When the request was sent, and whether it is an event stream. */
+      startedAt: number;
+      stream: boolean;
+    }
+  >;
   lastNetworkActivityAt: number;
   networkActivitySequence: number;
   /** Counts cross-document navigations the page started in its main frame. */
@@ -2554,6 +2567,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               // being on almost every site, would otherwise show as a failed
               // request in every observation.
               browserInitiated: event.params.type === "Other" && initiator.type === "other",
+              startedAt: Date.now(),
+              stream: event.params.type === "EventSource",
             });
             boundMap(state.requests, 10_000);
           }
@@ -5592,10 +5607,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             true,
           );
         }
+        // Live pages keep event streams and long polls open for good; only
+        // requests that are still loading the page count. A request missing
+        // from the bounded request map was evicted as the oldest, so it is
+        // long-lived too.
+        const now = Date.now();
+        const loading = [...state.inflightRequests].some((requestId) => {
+          const request = state.requests.get(requestId);
+          return (
+            request !== undefined &&
+            !request.stream &&
+            now - request.startedAt < LONG_LIVED_REQUEST_MS
+          );
+        });
         if (
           (await this.documentReady(state)) &&
-          state.inflightRequests.size === 0 &&
-          Date.now() - state.lastNetworkActivityAt >= NETWORK_IDLE_MS
+          !loading &&
+          now - state.lastNetworkActivityAt >= NETWORK_IDLE_MS
         ) {
           return;
         }
