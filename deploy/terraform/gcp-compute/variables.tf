@@ -21,7 +21,7 @@ variable "region" {
 }
 
 variable "zone" {
-  description = "Zone of the hosts' managed instance group (the fleet service sizes and fences one zonal group)."
+  description = "Zone of the hosts' managed instance group (the control service sizes and fences one zonal group)."
   type        = string
   default     = "europe-west4-a"
 }
@@ -102,7 +102,7 @@ variable "state_disk" {
 }
 
 variable "initial_hosts" {
-  description = "Hosts the group starts with. Afterwards the fleet service sizes the group (Terraform ignores its target size)."
+  description = "Hosts the group starts with. Afterwards the control service sizes the group (Terraform ignores its target size)."
   type        = number
   default     = 3
 }
@@ -131,29 +131,29 @@ variable "base_image_ref" {
 }
 
 variable "control_url" {
-  description = "The fleet service's host endpoint hosts dial, such as https://compute-control.example.com:8443. Its certificate must name this host."
+  description = "The control service's host endpoint hosts dial, such as https://compute-control.example.com:8443. Its certificate must name this host."
   type        = string
 }
 
 variable "control_dns_names" {
-  description = "DNS names on the fleet service's host-endpoint certificate this root issues. Empty: no certificate is issued (bring one from the same authority)."
+  description = "DNS names on the control service's host-endpoint certificate this root issues. Empty: no certificate is issued (bring one from the same authority)."
   type        = list(string)
   default     = []
 }
 
 variable "control_source_ranges" {
-  description = "Addresses the fleet service reaches hosts from (port 7443), such as the cluster's pod or node ranges."
+  description = "Addresses the control service reaches hosts from (port 7443), such as the cluster's pod or node ranges."
   type        = list(string)
 }
 
 variable "control_target_tags" {
-  description = "Network tags of the machines serving the fleet service's host endpoint, when it runs on GCE or GKE nodes in this network: hosts are let in to control_hosts_port there. Empty: no rule."
+  description = "Network tags of the machines serving the control service's host endpoint, when it runs on GCE or GKE nodes in this network: hosts are let in to control_hosts_port there. Empty: no rule."
   type        = list(string)
   default     = []
 }
 
 variable "control_hosts_port" {
-  description = "Port of the fleet service's host endpoint on control_target_tags machines (8443, or the NodePort)."
+  description = "Port of the control service's host endpoint on control_target_tags machines (8443, or the NodePort)."
   type        = number
   default     = 8443
 }
@@ -182,7 +182,7 @@ variable "archive_prefix" {
 }
 
 variable "control_workload_identity" {
-  description = "Kubernetes service account the fleet service runs as on GKE, bound to its Google service account through Workload Identity. Null when the service runs elsewhere (then run it as the control service account, for example as a VM's identity)."
+  description = "Kubernetes service account the control service runs as on GKE, bound to its Google service account through Workload Identity. Null when the service runs elsewhere (then run it as the control service account, for example as a VM's identity)."
   type = object({
     namespace       = string
     service_account = string

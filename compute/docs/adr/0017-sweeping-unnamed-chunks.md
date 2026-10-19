@@ -59,7 +59,7 @@ would delete a chunk the new copy needs, after its local copy may be gone.
   on a store without deletes on condition, which today means anything but
   GCS.
 - Stamped pointers live under `pointers/v3`: after the write stamp comes
-  the owner stamp ([18](0018-the-fleet-service-leases-and-fences.md)). An
+  the owner stamp ([18](0018-the-control-service-leases-and-fences.md)). An
   agent will not start on, and a sweep will not run over, a store that
   still holds `pointers/v1` or `pointers/v2`: their copies would look
   absent and a sweep would delete what they name. Only lab stores ever
@@ -74,7 +74,7 @@ would delete a chunk the new copy needs, after its local copy may be gone.
 - Forgetting a memory image also drops its working-set pack, which holds
   memory pages; a copy without memory names no pack. The forget carries a
   change number of its own, as an archive does
-  ([18](0018-the-fleet-service-leases-and-fences.md)): tried again after
+  ([18](0018-the-control-service-leases-and-fences.md)): tried again after
   its answer was lost it finds itself done, and an archive begun before it
   can no longer land over it.
 - Anything a sweep cannot read stops it before it deletes anything; only a

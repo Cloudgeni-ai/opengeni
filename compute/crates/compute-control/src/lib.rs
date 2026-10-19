@@ -1,5 +1,5 @@
-//! The Opengeni compute fleet service
-//! ([ADR 18](../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+//! The Opengeni compute control service
+//! ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)).
 //!
 //! Hosts register with it and renew their leases ([`hostapi`]); it keeps
 //! which host owns each sandbox in a store ([`store`]); callers create,

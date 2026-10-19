@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# The fleet service and front door (compute-control) as a container image.
+# The control service and front door (compute-control) as a container image.
 # It also carries the host agent's binary for the store's daily sweep
 # (`compute-host sweep`, run as a job beside the service), never to run
 # VMs. Build context: the compute/ directory.

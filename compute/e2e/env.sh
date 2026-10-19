@@ -2,7 +2,7 @@
 # The end-to-end environment for Opengeni compute on Google Cloud: a whole
 # Opengeni (the Helm chart on a one-node k3s, with its API, workers, web,
 # relay, Postgres, Temporal, NATS and object storage) built from one
-# commit, the fleet service (the chart's computeControl) and a host fleet
+# commit, the control service (the chart's computeControl) and a host fleet
 # from deploy/terraform/gcp-compute, and the suite in suite/ that drives
 # real agent sessions through it. See README.md.
 #
@@ -55,7 +55,7 @@ USER_NAME=e2e
 KEY=$STATE/id_e2e
 # The image hosts build their base image from (sandboxes that name none).
 BASE_IMAGE_REF=${BASE_IMAGE_REF:-docker.io/library/ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac}
-# The fleet service's host endpoint on the stack VM: the chart's hosts
+# The control service's host endpoint on the stack VM: the chart's hosts
 # Service as a NodePort.
 HOSTS_PORT=30843
 
@@ -158,7 +158,7 @@ fleet() {
     "$CHECKOUT/deploy/terraform/gcp-compute/" "$dir/module/"
   internal=$(address "$STACK-internal")
   # Before the first build the template names no bundle; the group stays
-  # empty until the fleet service grows it.
+  # empty until the control service grows it.
   bundle_url=gs://$(bucket)/bundles/none.tar.gz
   bundle_sha=0000000000000000000000000000000000000000000000000000000000000000
   if [ -f "$STATE/bundle" ]; then
@@ -236,11 +236,11 @@ host_login_bound() {
   esac
 }
 
-# --- stack: the VM Opengeni and the fleet service run on -----------------
+# --- stack: the VM Opengeni and the control service run on -----------------
 stack() {
   resolve_refs
   if ! exists g compute instances describe "$STACK" --zone "$ZONE"; then
-    log "stack VM $STACK ($STACK_MACHINE), with the fleet service's identity"
+    log "stack VM $STACK ($STACK_MACHINE), with the control service's identity"
     g compute instances create "$STACK" --zone "$ZONE" --machine-type "$STACK_MACHINE" \
       --image-family ubuntu-2404-lts-amd64 --image-project ubuntu-os-cloud \
       --boot-disk-size 500GB --boot-disk-type pd-ssd \

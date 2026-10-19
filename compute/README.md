@@ -27,12 +27,12 @@ clients.
 | Admission | requests and limits, memory guarantees for running VMs |
 | Fleet decisions | placement, host leases with a safety budget, the VM guard, fences on every archive write, recovery and moves, with a seeded simulation of the whole protocol |
 | A host in a fleet | registering and renewing over mutual TLS, the guard service, owner epochs on every request, adopt, hand-off and reconcile, no decisions while the lease has run out |
-| The fleet service | Postgres store in its own schema, public API and proxy, placement from the capacity hosts push, moves and recovery through object storage, checkpoints of running sandboxes, growing a Google Cloud host group |
+| The control service | Postgres store in its own schema, public API and proxy, placement from the capacity hosts push, moves and recovery through object storage, checkpoints of running sandboxes, growing a Google Cloud host group |
 | The agent link | each host's one link to Opengeni's agent gateway, carrying every sandbox agent's session, waking a sandbox on a request ([docs/agent-link.md](docs/agent-link.md)) |
 | Observability | wide events, bounded metrics, zero alarms, per-sandbox host pressure, a canary, an OTLP exporter |
 | Sandbox images | built from OCI images; our init runs each guest and supervises Opengeni's agent, which Opengeni's sandbox image carries, and E2B's envd for the front door |
 | E2B front door | E2B's REST API and sandbox traffic, for unchanged E2B clients |
-| Packaging | the fleet service's OCI image in Opengeni's Helm chart (`computeControl`, off by default), a verified host bundle, a Terraform module for GCP hosts, release and CI workflows |
+| Packaging | the control service's OCI image in Opengeni's Helm chart (`computeControl`, off by default), a verified host bundle, a Terraform module for GCP hosts, release and CI workflows |
 | End to end | an automated suite that runs a full Opengeni stack on a multi-host GCP fleet ([e2e/README.md](e2e/README.md), results in [docs/measurements.md](docs/measurements.md)) |
 | Benchmark | activations per second and latency against Kubernetes Agent Sandbox on GKE ([docs/benchmark.md](docs/benchmark.md), `lab/compare/`) |
 
@@ -290,8 +290,8 @@ base image, as before.
 
 ## The fleet
 
-`compute-control` is the fleet service ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md),
-[ADR 18](docs/adr/0018-the-fleet-service-leases-and-fences.md)). Its
+`compute-control` is the control service ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md),
+[ADR 18](docs/adr/0018-the-control-service-leases-and-fences.md)). Its
 Postgres store holds each sandbox's configuration, lifecycle and owner:
 the host that owns it and the sandbox's owner epoch, raised each time it
 changes hands or loses its owner. Its archives, and the pointer to the
@@ -326,7 +326,7 @@ out (`--scale-spare-per-mille`, `--scale-spare-largest`).
 ## The E2B front door
 
 `compute-control` can also serve E2B's API, so clients built for E2B use
-this fabric unchanged ([ADR 19](docs/adr/0019-e2b-compatible-front-door-and-guest-init.md)).
+Opengeni compute unchanged ([ADR 19](docs/adr/0019-e2b-compatible-front-door-and-guest-init.md)).
 The baseline is the E2B JS SDK 2.56.0. One listener (`--e2b-listen`,
 `--e2b-domain`) answers the REST API (create from a template, get, list,
 connect, pause, kill, set the timeout, list templates) and traffic to
@@ -360,13 +360,13 @@ template builds, metrics and logs. A create asking for those is refused.
 | `crates/compute-host/src/observe` | What the agent reports: wide events, metrics, the canary and the OTLP/HTTP exporter ([ADR 16](docs/adr/0016-observability.md)). |
 | `crates/compute-guest` | The guest's init (PID 1): mounts, network, hostname, envd kept running, the image's command, clean shutdown, and the host's vsock ports. |
 | `crates/compute-image` | Turns an OCI image into a sandbox image: pull, checked layers, our init and envd added, an ext4 file. Run as `compute-host build-image`. |
-| `crates/compute-control` | The fleet service: its store, public API and proxy, the hosts' API, placement, moves and recovery, the leader and the host group. |
+| `crates/compute-control` | The control service: its store, public API and proxy, the hosts' API, placement, moves and recovery, the leader and the host group. |
 | `crates/compute-control/src/e2b` | The E2B front door: REST API, lifecycle states and their sweeper, traffic routing with kept streams and holds, TLS. |
 | `guest/` | Builds the guest's files: compute-guest, envd from a pinned E2B commit, and a static bash. |
 | `crates/compute-pager` | The userfaultfd pager, with a pure, separately tested memory-layout core. |
 | `crates/compute-storage` | Content-addressed chunks, manifests and stores; archive pointers stamped with their owner. |
 | `crates/compute-fleet` | Pure fleet decisions: placement, host leases, the guard that stops a cut-off host's VMs, the fence rule for archive writes, recovery and moves. No I/O, clock or randomness. |
-| `crates/compute-protocol` | The wire forms: the host agent's API and the fleet service's host API. |
+| `crates/compute-protocol` | The wire forms: the host agent's API and the control service's host API. |
 | `crates/archcheck` | Structure rules from `ARCHITECTURE.toml`, run as `cargo arch`. |
 | `smoke/` | End-to-end scenarios against a real agent, real VMs and a real guest. |
 | `lab/` | Measurement scripts used to size the design. Not production code. |
@@ -501,7 +501,7 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
   wakes and pauses a second, with its disk nearly empty
   ([docs/measurements.md](docs/measurements.md), the comparison's sustained
   activations).
-- **More than one region**: placement across regions, and a fleet service
+- **More than one region**: placement across regions, and a control service
   in more than one.
 - **E2B's other features**: what the front door leaves out, listed above.
 - **A benchmark through the front door**, and against E2B's own cloud.

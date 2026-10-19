@@ -1,5 +1,5 @@
 {{/*
-Opengeni compute's fleet service (computeControl): names and settings shared
+Opengeni compute's control service (computeControl): names and settings shared
 by its Deployment, Services, database Job and sweep.
 */}}
 {{- define "opengeni.computeControl.name" -}}
@@ -110,7 +110,7 @@ round to a revision another value also gives. */ -}}
 {{- fail "computeControl.database.host is required when the chart runs no Postgres (postgres.enabled is false), or give a whole connection string with database.urlKey" -}}
 {{- end -}}
 {{- if and $cc.database.provision (not (include "opengeni.computeControl.ownDatabase" .)) -}}
-{{- fail "computeControl.database.provision makes the role and schema in the chart's own Postgres, with the migration owner URL; for any other database set provision to false and make them there (compute/docs/operations.md, The fleet service)" -}}
+{{- fail "computeControl.database.provision makes the role and schema in the chart's own Postgres, with the migration owner URL; for any other database set provision to false and make them there (compute/docs/operations.md, The control service)" -}}
 {{- end -}}
 {{- if and $cc.sweep.enabled (not (regexMatch "^gs://" ($cc.archive | default ""))) -}}
 {{- fail "computeControl.sweep deletes only from Google Cloud Storage archives (ADR 17); set sweep.enabled to false for az:// and s3:// archives" -}}
@@ -141,7 +141,7 @@ round to a revision another value also gives. */ -}}
 {{- printf "%s://%s:%d" $scheme (include "opengeni.computeControl.apiHost" .) (.Values.computeControl.service.apiPort | int) -}}
 {{- end -}}
 
-{{/* Opengeni's pods that call the fleet service (API, control and turn
+{{/* Opengeni's pods that call the control service (API, control and turn
 workers) trust the authority of its API certificate. Each define is empty
 unless the release runs the service with apiTls. */}}
 {{- define "opengeni.computeControl.trusted" -}}

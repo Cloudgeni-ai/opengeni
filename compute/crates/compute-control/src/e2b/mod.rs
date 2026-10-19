@@ -2,7 +2,7 @@
 //! ([ADR 19](../../../../docs/adr/0019-e2b-compatible-front-door-and-guest-init.md)).
 //!
 //! One listener serves both of E2B's surfaces, so clients built for E2B,
-//! its JS SDK 2.56.0 among them, use this fabric unchanged:
+//! its JS SDK 2.56.0 among them, use Opengeni compute unchanged:
 //!
 //! - **The REST API** ([`api`]): create from a template, get, list, kill,
 //!   pause, connect (which resumes), set the timeout, and list templates,

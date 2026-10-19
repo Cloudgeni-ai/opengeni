@@ -1,6 +1,6 @@
 //! What the service does for its callers: create, wake, connect, move and
 //! delete sandboxes, by the fleet's rules
-//! ([ADR 18](../../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+//! ([ADR 18](../../../docs/adr/0018-the-control-service-leases-and-fences.md)).
 //!
 //! Every decision about ownership is `compute_fleet`'s; this module reads
 //! the store, sends requests to hosts and writes back what the rules say,
@@ -159,7 +159,7 @@ struct Asked {
     epoch: OwnerEpoch,
 }
 
-/// The fleet service.
+/// The control service.
 #[derive(Debug)]
 pub struct Service<S> {
     store: Arc<S>,

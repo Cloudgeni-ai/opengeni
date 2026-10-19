@@ -1,5 +1,5 @@
-//! A host in a fleet ([ADR 18](../../docs/adr/0018-the-fleet-service-leases-and-fences.md)):
-//! it registers with the fleet service, renews its lease, and serves the
+//! A host in a fleet ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)):
+//! it registers with the control service, renews its lease, and serves the
 //! service's requests over mutual TLS, each bounded by the lease.
 //!
 //! - [`LeaseGate`] says whether the host may run its VMs now. While it is
@@ -79,10 +79,10 @@ pub struct Prepared {
 /// come over mutual TLS.
 fn control_url(control: &str) -> anyhow::Result<()> {
     let url = reqwest::Url::parse(control)
-        .with_context(|| format!("the fleet service's URL {control:?}"))?;
+        .with_context(|| format!("the control service's URL {control:?}"))?;
     anyhow::ensure!(
         url.scheme() == "https" && url.host().is_some(),
-        "the fleet service's URL must be https://host[:port], not {control:?}"
+        "the control service's URL must be https://host[:port], not {control:?}"
     );
     Ok(())
 }
@@ -139,7 +139,7 @@ impl FleetConfig {
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .context("building the fleet service client")?;
+            .context("building the control service client")?;
         let mut attempts_from = [0; 8];
         getrandom::fill(&mut attempts_from).context("numbering registrations")?;
         let renewer = lease::Renewer {
@@ -155,7 +155,7 @@ impl FleetConfig {
         };
         tokio::select! {
             result = renewer.run() => result,
-            result = listen::listen(listener, listening) => result.context("serving the fleet service"),
+            result = listen::listen(listener, listening) => result.context("serving the control service"),
         }
     }
 }

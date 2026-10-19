@@ -1,6 +1,6 @@
 [package]
 name = "compute-control"
-description = "The Opengeni compute fleet service: hosts' leases, sandbox ownership, placement, recovery, moves and the public API"
+description = "The Opengeni compute control service: hosts' leases, sandbox ownership, placement, recovery, moves and the public API"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

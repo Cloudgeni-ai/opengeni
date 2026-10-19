@@ -1,4 +1,4 @@
-//! A fleet service on loopback over an in-memory store and archive, with
+//! A control service on loopback over an in-memory store and archive, with
 //! fake hosts that speak the host protocol over mutual TLS: they register,
 //! renew, answer requests as a host would (holding what they created or
 //! adopted, archiving on a hand-off, claiming the archive on an adopt), or
@@ -213,7 +213,7 @@ pub async fn given_up(fleet: &Fleet, host: &FakeHost) -> Instant {
     Instant::now()
 }
 
-/// A fleet service and what it runs on.
+/// A control service and what it runs on.
 pub struct Fleet {
     pub pki: Pki,
     pub store: Arc<MemoryStore>,

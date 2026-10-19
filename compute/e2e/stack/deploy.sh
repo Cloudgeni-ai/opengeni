@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploys, on the stack VM, Opengeni and its fleet service with the chart
+# Deploys, on the stack VM, Opengeni and its control service with the chart
 # from COMPUTE_SHA and the images build.sh made (env.sh deploy):
 #   - generated secrets, kept in ~/e2e/secrets across deploys;
 #   - the chart (release og, namespace opengeni) with its Postgres,
@@ -13,7 +13,7 @@
 #     the VM's address: opengeni.<ip> (web and API, the agent gateway),
 #     relay.<ip> and files.<ip> (object storage).
 # A model's settings (env.sh model-up) arrive on stdin. Waits until the
-# fleet service reports HOSTS hosts.
+# control service reports HOSTS hosts.
 set -euo pipefail
 : "${STACK_IP:?}" "${HOSTS:?}" "${ZONE:?}" "${HOSTS_PORT:?}"
 export PATH=$HOME/.cargo/bin:$HOME/.bun/bin:/snap/bin:$PATH
@@ -56,7 +56,7 @@ if [ ! -s "$sec/nats-seed" ]; then
   sed -n 2p "$sec/nats-keys" >"$sec/nats-public"
   rm -f "$sec/nats-keys"
 fi
-# The fleet service's API certificate, from an authority of this
+# The control service's API certificate, from an authority of this
 # environment that Opengeni's pods trust.
 if [ ! -s "$sec/api-ca.pem" ]; then
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
@@ -193,7 +193,7 @@ log "helm upgrade --install $release ($chart at $COMPUTE_SHA, images $OPENGENI_T
 if [ "${FRESH:-0}" = 1 ] && helm status "$release" -n "$ns" >/dev/null 2>&1; then
   # FRESH=1: a new database (Opengeni's and the fleet's), object store and
   # NATS, as a first install has. The secrets above stay; the hosts register
-  # again when the new fleet service starts.
+  # again when the new control service starts.
   log "FRESH=1: removing release $release and its volumes"
   helm uninstall "$release" -n "$ns" --wait --timeout 10m
   k delete pvc -l "app.kubernetes.io/instance=$release" --wait --timeout 5m
@@ -240,9 +240,9 @@ log "waiting for $HOSTS hosts"
 key=$(cat "$sec/compute-operator-key")
 # The service's address on the cluster network, which the node reaches
 # directly (a port-forward would stay bound to one replica as it rolls).
-fabric=$(ip "$full-compute-control")
+control=$(ip "$full-compute-control")
 for _ in $(seq 120); do
-  count=$(curl -fsS --cacert "$sec/api-ca.pem" --resolve "$full-compute-control.$ns.svc:8080:$fabric" \
+  count=$(curl -fsS --cacert "$sec/api-ca.pem" --resolve "$full-compute-control.$ns.svc:8080:$control" \
     -H "X-API-Key: $key" "https://$full-compute-control.$ns.svc:8080/v1/hosts" 2>/dev/null |
     jq '[.[] | select(.state == "live")] | length' 2>/dev/null || echo 0)
   [ "${count:-0}" -ge "$HOSTS" ] && break

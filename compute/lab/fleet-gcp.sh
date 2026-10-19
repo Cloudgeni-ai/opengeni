@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A small fleet on Google Cloud for the multi-host tests
 # (crates/compute-control/tests/cloud): hosts in a zonal managed instance
-# group that the fleet service grows and fences, the service with Postgres on
+# group that the control service grows and fences, the service with Postgres on
 # a VM of its own, which also runs the tests, and a bucket for archives.
 # Hosts run nested virtualization on N2 machines.
 #

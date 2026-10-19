@@ -6,7 +6,7 @@
 #     commit): Opengeni's images (api, worker, web, relay), imported into
 #     k3s, and its sandbox and desktop images, pushed to REGISTRY. Both
 #     must install /usr/local/bin/opengeni-agent (ADR 21), which the
-#     sandbox runs in fabric mode;
+#     sandbox runs in compute mode;
 #   - from COMPUTE_SHA: compute-control's image (into k3s) and the host
 #     bundle (deploy/host/bundle.sh), uploaded to gs://BUCKET/bundles;
 #   - the stored sandbox images: compute-host build-image of the sandbox

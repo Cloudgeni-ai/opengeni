@@ -1,6 +1,6 @@
 name: Compute Release
 
-# Release packaging for compute/, the sandbox fabric. Nothing in Opengeni
+# Release packaging for compute/, Opengeni's own sandbox system. Nothing in Opengeni
 # uses these unless a deployment turns the compute backend on.
 #
 #   control-image  ghcr.io/cloudgeni-ai/opengeni-compute-control: the fleet
@@ -122,7 +122,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ needs.guard.outputs.version }}
             org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.description=Opengeni compute fleet service
+            org.opencontainers.image.description=Opengeni compute control service
           cache-from: type=gha,scope=compute-control
           cache-to: type=gha,mode=min,scope=compute-control,ignore-error=true
       - uses: actions/attest-build-provenance@v3
@@ -292,9 +292,9 @@ jobs:
           tag_name: compute-v${{ needs.guard.outputs.version }}
           name: compute v${{ needs.guard.outputs.version }}
           body: |
-            Opengeni compute (the sandbox fabric) v${{ needs.guard.outputs.version }}.
+            Opengeni compute (Opengeni's own sandbox system) v${{ needs.guard.outputs.version }}.
 
-            - Fleet service image: `${{ env.IMAGE }}:${{ needs.guard.outputs.version }}`
+            - Control service image: `${{ env.IMAGE }}:${{ needs.guard.outputs.version }}`
             - Host agent bundle: `compute-host-${{ needs.guard.outputs.version }}-x86_64-linux.tar.gz`
               (unpack, then `sudo ./install.sh --config host.env`)
 

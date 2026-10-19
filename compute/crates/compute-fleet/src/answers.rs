@@ -20,7 +20,7 @@
 //! what follows an answer. Both are what the seeded simulation of the
 //! protocol runs, and the service too.
 //!
-//! [ADR 18]: ../../../docs/adr/0018-the-fleet-service-leases-and-fences.md
+//! [ADR 18]: ../../../docs/adr/0018-the-control-service-leases-and-fences.md
 
 use crate::ids::{HostEpoch, HostId, OwnerEpoch};
 use crate::lease::LeaseTerms;

@@ -44,7 +44,7 @@ copy-on-write root filesystem and one vsock exec channel per VM.
 
 `fleet-gcp.sh` deploys a small fleet for the multi-host tests in
 `crates/compute-control/tests/cloud`: hosts in a zonal managed instance
-group that the fleet service grows and fences, the service and its Postgres
+group that the control service grows and fences, the service and its Postgres
 store on a VM of their own, which also runs the tests, and a bucket for
 archives. Its steps are `image` (host images built with `host-setup.sh`),
 `up`, `test` and `down`; the script's header lists its settings. Each host

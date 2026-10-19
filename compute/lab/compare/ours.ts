@@ -1,5 +1,5 @@
 /**
- * This fabric through its host agent's own client protocol: one JSON line
+ * Opengeni compute through its host agent's own client protocol: one JSON line
  * per request on the agent's socket, one JSON line back; a `connect` turns
  * the connection into a byte stream to a guest port. Commands run through
  * the lab image's exec service, framed as `compute-host bench` frames them.

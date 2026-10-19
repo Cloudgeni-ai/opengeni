@@ -1,8 +1,8 @@
 # A GCP host fleet for Opengeni compute: the hosts' managed instance group
 # (nested virtualization or bare metal), the archive bucket, the authority
-# that issues host and fleet-service certificates, two service accounts
+# that issues host and control-service certificates, two service accounts
 # with only what each needs, and the firewall rules between hosts and the
-# fleet service. The fleet service itself (compute-control) runs elsewhere,
+# control service. The control service itself (compute-control) runs elsewhere,
 # for example in the Opengeni Helm chart (computeControl); see
 # compute/docs/operations.md.
 
@@ -15,7 +15,7 @@ locals {
   hosts_tag = "${var.name_prefix}-host"
   store     = "gs://${google_storage_bucket.archive.name}/${var.archive_prefix}"
   group     = "projects/${var.project_id}/zones/${var.zone}/instanceGroupManagers/${var.name_prefix}-hosts"
-  # The memory a new host offers sandboxes, which the fleet service grows
+  # The memory a new host offers sandboxes, which the control service grows
   # the group by: on a nested host its huge pages, a share of the kernel's
   # MemTotal (host-startup.sh), here estimated as 95 % of the machine
   # type's memory so the estimate errs low; on bare metal 85 % of it.
@@ -45,16 +45,16 @@ resource "google_service_account" "host" {
 
 resource "google_service_account" "control" {
   account_id   = "${var.name_prefix}-control"
-  display_name = "Opengeni compute fleet service"
-  description  = "The fleet service: reads and sweeps the archive bucket, sizes and fences the host group."
+  display_name = "Opengeni compute control service"
+  description  = "The control service: reads and sweeps the archive bucket, sizes and fences the host group."
 }
 
-# What the fleet service does to the group (crates/compute-control/src/group.rs),
+# What the control service does to the group (crates/compute-control/src/group.rs),
 # with its identity's token from the metadata server: read and resize the
 # group, list its instances, and read, reset, stop or start one to fence it.
 resource "google_project_iam_custom_role" "control" {
   role_id     = replace("${var.name_prefix}_control", "-", "_")
-  title       = "Opengeni compute fleet service"
+  title       = "Opengeni compute control service"
   description = "Size and fence the compute host group."
   permissions = [
     "compute.instanceGroupManagers.get",
@@ -123,11 +123,11 @@ resource "google_storage_bucket_iam_member" "control_objects" {
 
 # --- Certificates -----------------------------------------------------------
 #
-# One private authority signs the hosts' certificates (the fleet service
-# trusts it for host connections) and the fleet service's host-endpoint
+# One private authority signs the hosts' certificates (the control service
+# trusts it for host connections) and the control service's host-endpoint
 # certificate (hosts trust it for the service). Hosts request their own at
 # boot and renew them; any instance running as the host account can ask
-# for a certificate of any host name, so until the fleet service issues
+# for a certificate of any host name, so until the control service issues
 # host certificates against an instance identity token, the host account
 # is as trusted as every host (see operations.md, Security).
 
@@ -141,7 +141,7 @@ resource "google_privateca_ca_pool" "fleet" {
   name     = "${var.name_prefix}-fleet-${random_id.pool.hex}"
   location = var.region
   # Enterprise keeps the certificates it issues, so Terraform can manage
-  # the fleet service's certificate and a lost host's can be revoked; the
+  # the control service's certificate and a lost host's can be revoked; the
   # DevOps tier keeps none (about $20 against $200 a month per authority).
   tier   = "ENTERPRISE"
   labels = local.labels
@@ -219,14 +219,14 @@ resource "google_privateca_ca_pool_iam_member" "host_requests" {
   member  = "serviceAccount:${google_service_account.host.email}"
 }
 
-# Hosts read the authority's certificate to trust the fleet service.
+# Hosts read the authority's certificate to trust the control service.
 resource "google_privateca_ca_pool_iam_member" "host_reads" {
   ca_pool = google_privateca_ca_pool.fleet.id
   role    = "roles/privateca.poolReader"
   member  = "serviceAccount:${google_service_account.host.email}"
 }
 
-# The fleet service's host-endpoint certificate lasts 30 days. Each apply
+# The control service's host-endpoint certificate lasts 30 days. Each apply
 # from 20 days after it was issued makes a new key, so a new request and a
 # certificate of a new name: the authority keeps every name it issued, even
 # revoked, so a renewal never reuses one. The new certificate exists before
@@ -426,11 +426,11 @@ resource "google_compute_instance_group_manager" "hosts" {
     max_unavailable_fixed = 0
   }
 
-  # No auto-healing: the fleet service decides when a host is lost and
+  # No auto-healing: the control service decides when a host is lost and
   # fences it; a group that recreated instances on its own would race it.
 
   lifecycle {
-    # The fleet service sizes the group.
+    # The control service sizes the group.
     ignore_changes = [target_size]
   }
 }

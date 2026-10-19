@@ -865,7 +865,7 @@ struct Lab {
     world: Arc<World>,
     server: JoinHandle<()>,
     /// The agent's own handle, for requests the socket does not carry,
-    /// such as the fleet service's.
+    /// such as the control service's.
     handle: Handle,
 }
 

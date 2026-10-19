@@ -1,5 +1,5 @@
 //! A fleet host's agent links (see `compute_link`): the host's token for
-//! each gateway comes from the fleet service, over the same mutual TLS as
+//! each gateway comes from the control service, over the same mutual TLS as
 //! its lease, and names the host its certificate does.
 
 use std::path::Path;
@@ -26,7 +26,7 @@ impl FleetConfig {
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .context("building the fleet service client for link tokens")?;
+            .context("building the control service client for link tokens")?;
         let tokens = FleetTokens {
             http,
             url: format!("{}{LINK_TOKENS_PATH}", self.control.trim_end_matches('/')),
@@ -75,7 +75,7 @@ fn gateway_tls(ca: Option<&Path>) -> anyhow::Result<Arc<ClientConfig>> {
     Ok(Arc::new(config))
 }
 
-/// Asks the fleet service for the host's tokens.
+/// Asks the control service for the host's tokens.
 struct FleetTokens {
     http: reqwest::Client,
     url: String,
@@ -98,15 +98,15 @@ impl Tokens for FleetTokens {
                 .json(&asked)
                 .send()
                 .await
-                .map_err(|error| format!("asking the fleet service for a link token: {error}"))?;
+                .map_err(|error| format!("asking the control service for a link token: {error}"))?;
             let status = response.status();
             if !status.is_success() {
-                return Err(format!("the fleet service gave no link token: {status}"));
+                return Err(format!("the control service gave no link token: {status}"));
             }
             let answer: LinkTokens = response
                 .json()
                 .await
-                .map_err(|error| format!("reading the fleet service's link token: {error}"))?;
+                .map_err(|error| format!("reading the control service's link token: {error}"))?;
             answer
                 .tokens
                 .into_iter()
@@ -115,7 +115,7 @@ impl Tokens for FleetTokens {
                     token: token.token,
                     expires_at_ms: token.expires_at_ms,
                 })
-                .ok_or_else(|| "the fleet service gave no token for the gateway".to_owned())
+                .ok_or_else(|| "the control service gave no token for the gateway".to_owned())
         })
     }
 }

@@ -1,6 +1,6 @@
 //! The service's store: hosts and their leases, sandboxes and their owners,
 //! API keys, and the E2B lifecycle of sandboxes created through the E2B API
-//! ([ADR 18](../../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+//! ([ADR 18](../../../docs/adr/0018-the-control-service-leases-and-fences.md)).
 //!
 //! Every write is conditional: a renewal on the registration it renews, a
 //! host given up on on the renewal count the leader watched, and a sandbox

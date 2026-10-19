@@ -3,7 +3,7 @@
 Checks that unchanged E2B clients work against the E2B front door in
 `compute-control` ([ADR 19](../../docs/adr/0019-e2b-compatible-front-door-and-guest-init.md)).
 
-`run.sh` starts a whole fleet on one lab host: the fleet service with its
+`run.sh` starts a whole fleet on one lab host: the control service with its
 front door serving HTTPS for `api.e2b.test` and `*.e2b.test`, a host agent
 in the fleet with its guard, and object storage (a local Azurite unless
 `STORE` names one). It builds the public Opengeni sandbox image as the
@@ -26,7 +26,7 @@ It needs root, a lab host (`../../lab/host-setup.sh`), python 3.10 or
 later, curl, openssl, and ports 443, 10000, 17443, 18080 and 18443 free on
 127.0.0.1. It sets up the rest itself: node 22 when PATH has none (a
 pinned, checksummed download into `$LAB/tools`), the clients, certificates,
-object storage, the fleet service and the host agent. When something is
+object storage, the control service and the host agent. When something is
 missing or a port is taken it fails; it never skips a suite. The Linux
 gate (run before every merge into lab) runs it.
 

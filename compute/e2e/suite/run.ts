@@ -1,5 +1,5 @@
 // The end-to-end suite: real agent sessions through Opengeni's public API on
-// the compute backend, with the fabric's own API to sleep, wake, move and
+// the compute backend, with the control service's own API to sleep, wake, move and
 // lose what those sessions run on. It runs on the stack VM (stack/suite.sh)
 // and writes results.json and results.md into $OUT.
 //
@@ -277,9 +277,9 @@ async function execOk(command: string, timeoutMs?: number, signal?: AbortSignal)
   return result.stdout;
 }
 
-// --- The fabric's API (at its cluster address, verified as its service name) --
+// --- The control service's API (at its cluster address, verified as its service name) --
 
-function fabric<T = any>(
+function control<T = any>(
   method: string,
   path: string,
   body?: unknown,
@@ -308,14 +308,14 @@ function fabric<T = any>(
         response.on("data", (chunk) => (text += chunk));
         response.on("end", () => {
           const status = response.statusCode ?? 0;
-          if (status >= 400) reject(new HttpError(status, text, `fabric ${method} ${path}`));
+          if (status >= 400) reject(new HttpError(status, text, `control ${method} ${path}`));
           else resolve((text ? JSON.parse(text) : undefined) as T);
         });
       },
     );
     request.on("error", reject);
     request.setTimeout(900_000, () =>
-      request.destroy(new Error(`fabric ${method} ${path} timed out`)),
+      request.destroy(new Error(`control ${method} ${path} timed out`)),
     );
     const stop = (reason: unknown) =>
       request.destroy(reason instanceof Error ? reason : new Error(String(reason)));
@@ -336,8 +336,8 @@ type Sandbox = {
   owner_epoch: number;
   metadata: Record<string, string>;
 };
-const hosts = () => fabric<Host[]>("GET", "/v1/hosts", undefined, OPERATOR_KEY);
-const sandbox = () => fabric<Sandbox>("GET", `/v1/sandboxes/${state.sandbox}`);
+const hosts = () => control<Host[]>("GET", "/v1/hosts", undefined, OPERATOR_KEY);
+const sandbox = () => control<Sandbox>("GET", `/v1/sandboxes/${state.sandbox}`);
 
 // --- A host, as root's caller (OS Login as the stack VM's identity, which
 // env.sh lets log in to this environment's hosts only) ----------------------
@@ -562,7 +562,7 @@ type SandboxState = {
 async function sandboxState(signal?: AbortSignal): Promise<SandboxState> {
   for (let tries = 0; ; tries += 1) {
     try {
-      return await fabric<SandboxState>(
+      return await control<SandboxState>(
         "GET",
         `/v1/sandboxes/${state.sandbox}/state`,
         undefined,
@@ -626,7 +626,7 @@ const REACH_MS: Record<string, number> = {
 };
 
 /**
- * One HTTP GET to a TCP port inside the sandbox, over the fabric's connect
+ * One HTTP GET to a TCP port inside the sandbox, over compute's connect
  * stream. connect/<n> reaches guest vsock port n; a guest TCP port is reached
  * through the guest's gateway (vsock 57), whose first line names it.
  */
@@ -703,7 +703,7 @@ check("health", "Opengeni API is up", [], async () => {
   return "healthz 200";
 });
 
-check("hosts", `the fabric has ${HOSTS} live hosts`, [], async () => {
+check("hosts", `the control service has ${HOSTS} live hosts`, [], async () => {
   const live = (await hosts()).filter((host) => host.state === "live");
   if (live.length < HOSTS)
     throw new Error(`${live.length} live: ${live.map((h) => h.name).join(", ")}`);
@@ -738,11 +738,11 @@ check(
     if (session.sandboxBackend && session.sandboxBackend !== "compute") {
       throw new Error(`session backend is ${session.sandboxBackend}`);
     }
-    const boxes = await fabric<Sandbox[]>("GET", "/v1/sandboxes");
+    const boxes = await control<Sandbox[]>("GET", "/v1/sandboxes");
     const box = boxes.find(
       (one) => one.metadata?.opengeni_sandbox_group_id === session.sandboxGroupId,
     );
-    if (!box) throw new Error(`no fabric sandbox for sandbox group ${session.sandboxGroupId}`);
+    if (!box) throw new Error(`no compute sandbox for sandbox group ${session.sandboxGroupId}`);
     state.sandbox = box.id;
     return `first turn in ${seconds(start)}; sandbox ${box.id} on ${box.host}; reply "${turn.text.trim().slice(0, 80)}"`;
   },
@@ -1182,7 +1182,7 @@ check(
 
 check(
   "port",
-  "a guest TCP port answers through the fabric's connect stream (not an Opengeni preview URL)",
+  "a guest TCP port answers through compute's connect stream (not an Opengeni preview URL)",
   ["files"],
   async () => {
     await execOk(
@@ -1410,7 +1410,7 @@ for (const level of ["paused", "saved", "archived", "remote"]) {
       const boot = (await sandboxState()).generation;
       const from = new Date().toISOString();
       let start = Date.now();
-      await step("sleep", () => fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level }));
+      await step("sleep", () => control("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level }));
       // A host acknowledges a sleep before it is done; its state says when
       // the level is reached, and the hosts' journals confirm it (verify.ts).
       const reached = await step(`reach ${level}`, () => reachLevel(level, REACH_MS[level]!));
@@ -1643,7 +1643,7 @@ check(
     // Then a saved sleep, woken by a read.
     const sleepFrom = new Date().toISOString();
     await step("sleep", () =>
-      fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level: "saved" }),
+      control("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level: "saved" }),
     );
     const reached = await step("reach saved", () => reachLevel("saved", REACH_MS.saved!));
     // Saved, the VMM is gone and its console complete: read to its end
@@ -2028,14 +2028,14 @@ check("move", "a move to another host keeps the sandbox's files", ["files", "hos
   // moves the sleeping ones, so the check puts it to sleep first.
   const start = Date.now();
   await step("sleep", () =>
-    fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level: "saved" }),
+    control("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level: "saved" }),
   );
   await step("reach saved", () => reachLevel("saved", REACH_MS.saved!));
   await step("move", async () => {
     // A sleep the host is still finishing answers busy for a moment.
     for (let tries = 0; ; tries += 1) {
       try {
-        return await fabric("POST", `/v1/sandboxes/${state.sandbox}/move`, { to: target.name });
+        return await control("POST", `/v1/sandboxes/${state.sandbox}/move`, { to: target.name });
       } catch (error) {
         if (tries >= 30 || !String(error).includes('"busy"')) throw error;
         await Bun.sleep(2_000);
@@ -2050,7 +2050,7 @@ check("move", "a move to another host keeps the sandbox's files", ["files", "hos
   if (after.host !== target.name) throw new Error(`on ${after.host}, not ${target.name}`);
   const now = await sandboxState();
   if (now.host !== target.name)
-    throw new Error(`the fabric says ${target.name}, but ${now.host ?? "no host"} holds it`);
+    throw new Error(`the control service says ${target.name}, but ${now.host ?? "no host"} holds it`);
   return `${before.host} -> ${after.host} in ${seconds(start)}; the first command after it answered; ${describeState(now)}`;
 });
 
@@ -2289,7 +2289,7 @@ check(
       content: kept,
       encoding: "utf8",
     });
-    await fabric("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level: "remote" });
+    await control("POST", `/v1/sandboxes/${state.sandbox}/sleep`, { level: "remote" });
     // The copy the sandbox comes back from is the one this sleep archives.
     await step("reach remote", () => reachLevel("remote", REACH_MS.remote!));
     await execOk("cat e2e/kept.txt", 120_000);
@@ -2592,7 +2592,7 @@ check(
           : "gone from the fleet";
     const now = await sandboxState();
     if (now.host !== after.host)
-      throw new Error(`the fabric says ${after.host}, but ${now.host ?? "no host"} holds it`);
+      throw new Error(`the control service says ${after.host}, but ${now.host ?? "no host"} holds it`);
     const newHost = after.host;
     // The command in flight ends with an error once its sandbox is back:
     // its connection was replaced, so the request is answered as lost, not
@@ -2800,14 +2800,14 @@ async function deleteSession(limitMs: number): Promise<void> {
   }
 }
 
-check("delete", "deleting the session deletes its sandbox on the fabric", ["create"], async () => {
+check("delete", "deleting the session deletes its sandbox on compute", ["create"], async () => {
   const start = Date.now();
   const id = state.sandbox!;
   await deleteSession(10 * 60_000);
   log(`session deleted after ${seconds(start)}`);
   for (;;) {
     try {
-      await fabric("GET", `/v1/sandboxes/${id}`);
+      await control("GET", `/v1/sandboxes/${id}`);
     } catch (error) {
       if (error instanceof HttpError && (error.status === 404 || error.status === 410)) {
         return `sandbox ${id} gone ${seconds(start)} after the delete`;
@@ -2815,7 +2815,7 @@ check("delete", "deleting the session deletes its sandbox on the fabric", ["crea
       throw error;
     }
     if (Date.now() - start > 15 * 60_000)
-      throw new Error(`sandbox ${id} is still on the fabric 15 min after the delete`);
+      throw new Error(`sandbox ${id} is still on compute 15 min after the delete`);
     await sleep(5_000);
   }
 });

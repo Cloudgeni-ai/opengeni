@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The startup script of the fleet service's VM on Google Cloud, made by
+# The startup script of the control service's VM on Google Cloud, made by
 # fleet-gcp.sh; the guest agent runs it as root at every boot. Postgres on
 # the same machine holds the service's store; the service grows the hosts'
 # managed instance group and fences its instances.
@@ -33,7 +33,7 @@ chmod 755 /usr/local/bin/compute-control
 
 cat >/etc/systemd/system/compute-control.service <<UNIT
 [Unit]
-Description=Compute fleet service
+Description=Compute control service
 After=postgresql.service network-online.target
 Requires=postgresql.service
 [Service]

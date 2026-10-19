@@ -702,7 +702,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     })?;
     let prepared = fleet.as_ref().map(FleetConfig::prepare).transpose()?;
     // A host in a fleet keeps agent links for the sandboxes that run
-    // Opengeni's agent; its tokens come from the fleet service.
+    // Opengeni's agent; its tokens come from the control service.
     let agent_link = fleet.as_ref().map(FleetConfig::agent_links).transpose()?;
     let observer = args.observe.observer(&about)?;
     let canary = args.observe.canary(&args.root, args.store.is_some())?;
@@ -711,7 +711,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     anyhow::ensure!(
         fleet.is_none() || canary.is_none(),
         "the canary runs on a host outside a fleet; a host in a fleet takes its sandboxes from \
-         the fleet service only"
+         the control service only"
     );
     let config = HostConfig {
         root: args.root,

@@ -1,6 +1,6 @@
 # 15. Placement and moving sandboxes between hosts
 
-Status: Accepted, 2026-10-17. Built as [18](0018-the-fleet-service-leases-and-fences.md).
+Status: Accepted, 2026-10-17. Built as [18](0018-the-control-service-leases-and-fences.md).
 
 ## Context
 

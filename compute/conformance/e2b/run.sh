@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the E2B conformance suite against a real fleet on this machine: the
-# fleet service with its E2B front door serving HTTPS, one host agent in
+# control service with its E2B front door serving HTTPS, one host agent in
 # the fleet with its guard, real Firecracker VMs booted from the public
 # Opengeni sandbox image and a minimal image, and object storage. Then the
 # unchanged E2B JS SDK, the E2B client Opengeni uses and the E2B-style
@@ -14,7 +14,7 @@
 #
 # The suite sets up what else it needs: node 22 (a pinned, checksummed
 # download into $LAB/tools when PATH has none), the pinned clients from
-# package.json, certificates, object storage, the fleet service and
+# package.json, certificates, object storage, the control service and
 # the host agent. When it cannot, or a port it needs is taken, it fails;
 # it never skips a suite.
 #
@@ -184,7 +184,7 @@ KEY=e2b_$(openssl rand -hex 20)
 OPERATOR_KEY=op_$(openssl rand -hex 20)
 printf 'conformance %s\noperator %s\n' "$KEY" "$OPERATOR_KEY" > "$WORK/run/keys"
 
-say "starting the fleet service"
+say "starting the control service"
 RUST_LOG=${RUST_LOG:-info} "$CONTROL_BIN" serve --database memory \
   --api "$API" --hosts "$HOSTS" \
   --cert "$WORK/tls/service.pem" --key "$WORK/tls/service.key" --host-ca "$WORK/tls/ca.pem" \

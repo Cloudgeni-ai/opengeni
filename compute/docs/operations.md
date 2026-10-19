@@ -2,10 +2,10 @@
 
 How to deploy and run Opengeni compute in production, and what an operator
 must set up, check and know that the code cannot enforce alone. Each point
-says what the fabric does, what is left to the deployment, and what we
+says what compute does, what is left to the deployment, and what we
 chose not to build.
 
-- [Deploying](#deploying): the fleet service, the hosts, and Opengeni's
+- [Deploying](#deploying): the control service, the hosts, and Opengeni's
   settings
 - [Hosts](#hosts): adding, draining and removing them; a lost host
 - [Keys and certificates](#keys-and-certificates), [Backups](#backups),
@@ -22,7 +22,7 @@ A deployment has three parts:
 
 | Part | What | Shipped as |
 | --- | --- | --- |
-| Fleet service | `compute-control`: hosts' leases, placement, moves, recovery, the API Opengeni calls, optionally the E2B front door | `ghcr.io/cloudgeni-ai/opengeni-compute-control` (`docker/control.Dockerfile`), run by the Opengeni Helm chart's `computeControl` |
+| Control service | `compute-control`: hosts' leases, placement, moves, recovery, the API Opengeni calls, optionally the E2B front door | `ghcr.io/cloudgeni-ai/opengeni-compute-control` (`docker/control.Dockerfile`), run by the Opengeni Helm chart's `computeControl` |
 | Hosts | `compute-host` and its guard on Linux machines with KVM, archiving to object storage | the host bundle `compute-host-<version>-x86_64-linux.tar.gz` (`deploy/host`), installed by its `install.sh`; on GCP by `deploy/terraform/gcp-compute` |
 | Opengeni | the `compute` sandbox backend, selected per deployment or session | Opengeni's own images and chart |
 
@@ -34,7 +34,7 @@ tag (equal to `compute/Cargo.toml`'s workspace version) also tags the image
 as a GitHub Release. Verify either with `gh attestation verify`. The bundle
 is built twice from two paths and must come out byte for byte the same.
 
-### The fleet service
+### The control service
 
 Enable `computeControl` in the Opengeni chart. It is off by default, and
 enabling it changes no session's backend.
@@ -410,7 +410,7 @@ authority alone for agent links.
 ## Security
 
 What isolates a sandbox, and what a human security review must cover
-before users move to the fabric from Modal:
+before users move to compute from Modal:
 
 - **The VMM.** Every sandbox is a Firecracker microVM started through
   Firecracker's jailer: its own user and group, a chroot, its own cgroup
@@ -457,7 +457,7 @@ before users move to the fabric from Modal:
   6. the host image: kernel version and its KVM mitigations, SMT, and
      that the hosts' project runs nothing else.
 
-  Until it is done, keep Modal the default and the fabric opt-in.
+  Until it is done, keep Modal the default and compute opt-in.
 
 ## Storage
 
@@ -569,7 +569,7 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
 
 ## Upgrades
 
-- **Order.** Upgrade every host before the fleet service. A host restores
+- **Order.** Upgrade every host before the control service. A host restores
   an adopted copy's memory only when the service says the copy is whole
   (`whole`, ADR 18), and otherwise boots it from its files; a host from
   before that ignores the field and always restores memory, including a
@@ -590,7 +590,7 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   /opt/compute/releases/<version>/compute-host`). On GCP, set the new
   bundle in Terraform and replace hosts one at a time, each drained first,
   or run `install.sh` from the new bundle on each host in place.
-- **The fleet service** is a Deployment: upgrade the chart with the new
+- **The control service** is a Deployment: upgrade the chart with the new
   image. Replicas share the store; one leads at a time, and a new leader
   waits a whole lease term before giving up on any host, so a rollout
   never loses hosts.
@@ -697,7 +697,7 @@ Four layers, each a superset of what the one before cannot reach:
 | CI | `.github/workflows/compute-ci.yml` on GitHub-hosted runners | rustfmt; clippy with the workspace's pedantic lints as errors; the structure rules (`cargo arch`, comparing the baseline with the base commit's); every test that needs no KVM: unit, the seeded simulations of the core and the fleet protocol, property and crash-boundary tests, the fleet store against Postgres, checkpoints on XFS, and the smoke framework's own tests | every pull request and push to main that touches `compute/` |
 | KVM gate | the same workflow's `kvm` job | `ci/gate.sh` with real Firecracker VMs on the runner's KVM: the pager's kernel tests, the per-sandbox network, the engine, save and wake through an agent restart, many sandboxes through an agent kill, real images with our init, the smoke suite and the E2B conformance suite, on the nested profile | the same |
 | Lab gate | any Linux machine with KVM, prepared by `lab/host-setup.sh` | `ci/gate.sh` with every step, on bare metal or nested, with an object store (`STORE=gs://…`) | before a merge that changes the engine, the store or the fleet |
-| End to end | GCP, `e2e/` | a real Opengeni stack with the `compute` backend, the fleet service and three hosts; real agent sessions with a real model (below) | before a release, and on demand |
+| End to end | GCP, `e2e/` | a real Opengeni stack with the `compute` backend, the control service and three hosts; real agent sessions with a real model (below) | before a release, and on demand |
 
 GitHub's hosted x64 Linux runners are VMs with nested virtualization that
 expose `/dev/kvm` (root, group `kvm`, mode 0660); the job grants the runner

@@ -79,7 +79,7 @@ export async function untilLevel(id, levels, ms) {
   }
 }
 
-/** Asks the fleet service to put `id` to sleep at `level`. */
+/** Asks the control service to put `id` to sleep at `level`. */
 export async function sleepTo(id, levelName) {
   const response = await fetch(`${process.env.CONFORMANCE_FLEET_API}/v1/sandboxes/${id}/sleep`, {
     method: "POST",

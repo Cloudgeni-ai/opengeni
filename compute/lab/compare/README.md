@@ -13,7 +13,7 @@ shape, flags).
 | `bench.ts` | Command line: `latency`, `rate`, `summarize`, `cleanup` |
 | `run.sh` | Suites of `bench.ts` runs, one results file per operation |
 | `system.ts` | The interface every system implements, and the workload scripts |
-| `ours.ts` | This fabric through the host agent's JSON protocol |
+| `ours.ts` | Opengeni compute through the host agent's JSON protocol |
 | `gke.ts`, `kube.ts` | Agent Sandbox on GKE through the Kubernetes API and the sandbox router |
 | `e2b.ts` | E2B cloud, or our E2B-compatible front door, through the E2B SDK |
 | `load.ts`, `search.ts`, `stats.ts` | Open-loop Poisson load, the sustained-rate search, nearest-rank percentiles |
@@ -24,7 +24,7 @@ shape, flags).
 `bun test` runs the unit tests (statistics, load generation, the rate
 search, the agent protocol framing).
 
-## Our fabric
+## Our sandbox system
 
 On a lab host prepared by `../host-setup.sh`, as root:
 

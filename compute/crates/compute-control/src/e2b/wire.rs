@@ -1,7 +1,7 @@
 //! E2B's REST API on the wire: the bodies its JS SDK 2.56.0 sends and the
 //! answers it reads, with the names E2B's API specification gives them.
 //!
-//! Bodies accept fields this fabric leaves out (MCP, IAM, volumes, egress
+//! Bodies accept fields Opengeni compute leaves out (MCP, IAM, volumes, egress
 //! rules) only when they ask for nothing: a request that needs one is
 //! refused rather than silently getting less than it asked for.
 
@@ -79,7 +79,7 @@ fn asks_for(value: Option<&serde_json::Value>) -> bool {
 }
 
 impl NewSandbox {
-    /// Refuses what this fabric leaves out, naming it.
+    /// Refuses what Opengeni compute leaves out, naming it.
     ///
     /// # Errors
     ///

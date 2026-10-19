@@ -1,4 +1,4 @@
-//! Registering with the fleet service and renewing the lease, as
+//! Registering with the control service and renewing the lease, as
 //! [`compute_fleet::HostLease`] decides.
 //!
 //! One task owns the lease. It sends what is due, each request on a task
@@ -196,7 +196,7 @@ impl Running {
     async fn take(&mut self, renewal: Renewal, answer: Answer) -> anyhow::Result<()> {
         match answer {
             Answer::Failed(error) => {
-                tracing::debug!(%error, seq = renewal.seq, "no answer from the fleet service");
+                tracing::debug!(%error, seq = renewal.seq, "no answer from the control service");
             }
             Answer::Renewed(Renewed::Renewed { epoch, seq }) => {
                 let same = renewal.epoch == Some(HostEpoch(epoch)) && renewal.seq == seq;
@@ -205,7 +205,7 @@ impl Running {
                 }
             }
             Answer::Renewed(Renewed::Unknown) => {
-                tracing::warn!("the fleet service gave this host up: registering again");
+                tracing::warn!("the control service gave this host up: registering again");
                 self.renewer.lease.refused(renewal);
                 self.store()?;
             }
@@ -244,7 +244,7 @@ impl Running {
             tracing::error!(
                 ?terms,
                 ?ours,
-                "the fleet service's lease terms differ from this host's guard: not registering"
+                "the control service's lease terms differ from this host's guard: not registering"
             );
             return Ok(());
         }
@@ -252,7 +252,7 @@ impl Running {
         // Everything not kept goes first: the deadline that lets the rest
         // run again is written only after.
         if let Err(error) = renewer.handle.reconcile(rulings).await {
-            tracing::warn!(%error, "could not carry out the fleet service's rulings yet");
+            tracing::warn!(%error, "could not carry out the control service's rulings yet");
             return Ok(());
         }
         if renewer.lease.registered(renewal, HostEpoch(epoch)) {
@@ -264,7 +264,7 @@ impl Running {
                 host,
                 epoch,
                 rulings = count,
-                "registered with the fleet service"
+                "registered with the control service"
             );
         }
         Ok(())

@@ -1317,8 +1317,8 @@ selfhosted:
   natsControlUser: control
   natsCalloutUser: auth
 
-# Optional fleet service of Opengeni compute, the sandbox fabric (compute/ in
-# this repository): compute-control, which owns the fabric's hosts, places and
+# Optional control service of Opengeni compute, Opengeni's own sandbox system (compute/ in
+# this repository): compute-control, which owns compute's hosts, places and
 # moves sandboxes, and serves the API the `compute` sandbox backend calls.
 # Disabled by default; enabling it changes no session's backend
 # (config.OPENGENI_SANDBOX_BACKEND stays as set). The hosts themselves run

@@ -47,7 +47,7 @@ fn now_ms() -> u64 {
     .unwrap()
 }
 
-/// Hands out tokens as the fleet service would.
+/// Hands out tokens as the control service would.
 struct Fleet;
 
 impl Tokens for Fleet {
@@ -621,7 +621,7 @@ async fn a_restarted_host_opens_its_sandboxes_sessions_again_before_their_agents
     lab.assert_clean();
 }
 
-/// The fleet service's rulings carry each kept sandbox's link: a new owner
+/// The control service's rulings carry each kept sandbox's link: a new owner
 /// epoch's ticket opens the session again under it, and a ruling with no
 /// link ends the session even at the epoch the sandbox already had.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

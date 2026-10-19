@@ -40,13 +40,13 @@ data:
   OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT: {{ default (printf "http://%s-otel-collector:4318" (include "opengeni.fullname" .)) ((.Values.observability).otel).endpoint | quote }}
   {{- end }}
   {{- if and .Values.computeControl.enabled (not (hasKey .Values.config "OPENGENI_COMPUTE_API_URL")) }}
-  # The compute backend's fleet service in this release (computeControl); the
+  # The compute backend's control service in this release (computeControl); the
   # API key is OPENGENI_COMPUTE_API_KEY in the runtime Secret.
   OPENGENI_COMPUTE_API_URL: {{ include "opengeni.computeControl.apiUrl" . | quote }}
   {{- end }}
   {{- $computeLink := index (.Values.computeControl.teamLinks | default dict) (.Values.computeControl.opengeniTeam | default "") }}
   {{- if and .Values.computeControl.enabled $computeLink (not (hasKey .Values.config "OPENGENI_COMPUTE_LINK_URL")) }}
-  # This release's agent gateway, as its fleet service names it to hosts.
+  # This release's agent gateway, as its control service names it to hosts.
   OPENGENI_COMPUTE_LINK_URL: {{ $computeLink | quote }}
   {{- end }}
   {{- if .Values.selfhosted.enabled }}
