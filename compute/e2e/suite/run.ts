@@ -451,12 +451,16 @@ function asRoot(host: string, script: string): string {
 /** Shell that sets `now` (the host's clock) and `l`, the sandbox's VMM
  * launches the host journal records since `since` (0 with no mark). The
  * journal, not the file, says whether the console was replaced: a new
- * file can come back with the old one's inode. */
+ * file can come back with the old one's inode. A journal that cannot be
+ * read ends the script (exit 7) rather than count as no launch. */
 function launchesScript(since?: ConsoleMark): string {
   return [
     `now=$(date +%s.%N); l=0`,
     since
-      ? `l=$(journalctl --no-pager -o cat -u 'compute-*' --since @${since.at} | grep -F '"compute.sandbox.id":"${state.sandbox}"' | grep -o '"compute.launches":[0-9]*' | cut -d: -f2 | awk '{ n += $1 } END { print n + 0 }')`
+      ? [
+          `jl=$(journalctl --no-pager -o cat -u 'compute-*' --since @${since.at}) || { echo "the host journal could not be read" >&2; exit 7; }`,
+          `l=$(printf '%s\\n' "$jl" | grep -F '"compute.sandbox.id":"${state.sandbox}"' | grep -o '"compute.launches":[0-9]*' | cut -d: -f2 | awk '{ n += $1 } END { print n + 0 }')`,
+        ].join("\n")
       : "",
   ].join("\n");
 }
@@ -1603,10 +1607,12 @@ check(
     const growth = await step("the guest console after", async () =>
       consoleSince(host, asleep.mark),
     );
-    // The wake launches the VMM once; a second launch's console would hide
-    // the first's lines.
-    if (growth.launches > 1) {
-      throw new Error(`the VMM launched more than once to wake: ${describeGrowth(growth)}`);
+    // The wake from Saved launches the VMM exactly once (none means the
+    // journal missed it, more would hide the first launch's lines).
+    if (growth.launches !== 1) {
+      throw new Error(
+        `the host journal records ${growth.launches} VMM launches for the wake from Saved, not one: ${describeGrowth(growth)}`,
+      );
     }
     if (connections(growth) !== 0) {
       throw new Error(`the agent reconnected across the saved sleep: ${describeGrowth(growth)}`);
@@ -1704,6 +1710,14 @@ check(
     const inflightTimeoutMs = 60_000;
     const inflightAbort = new AbortController();
     const inflightSent = Date.now();
+    // Its bound runs from when it is sent: its own timeout and 30 s for the
+    // API. Past it the request is cut off, and a later answer fails.
+    const inflightBound = inflightSent + inflightTimeoutMs + 30_000;
+    let inflightCutAt: number | undefined;
+    const inflightTimer = setTimeout(() => {
+      inflightCutAt = Date.now();
+      inflightAbort.abort();
+    }, inflightBound - inflightSent);
     const inflight = exec(
       "touch e2e/crash-inflight; sleep 30; echo finished",
       inflightTimeoutMs,
@@ -1819,7 +1833,8 @@ check(
     // colour codes go first); only lines naming this sandbox count.
     const journal = onHost(
       host,
-      `j=$(sudo journalctl --no-pager -o cat -u 'compute-*' --since @${since} | sed 's/\\x1b\\[[0-9;]*m//g'); ` +
+      `j=$(sudo journalctl --no-pager -o cat -u 'compute-*' --since @${since}) || { echo "the host journal could not be read" >&2; exit 7; }; ` +
+        `j=$(printf '%s\\n' "$j" | sed 's/\\x1b\\[[0-9;]*m//g'); ` +
         `printf '%s\\n' "$j" | grep '"compute.alarm":"programs_lost"' | grep -c '"compute.sandbox.id":"${id}"' || true; ` +
         `for p in 'an agent-link stream cannot go on' 'agent-link streams the guest no longer has ended' ` +
         `'broke the protocol' 'did not say hello' 'too many agent-link connections'; do ` +
@@ -1836,15 +1851,21 @@ check(
         `the host journal after the kill, for sandbox=${id}: ${broke} stream(s) broke the protocol, ${nohello} connection(s) did not say hello, ${tooMany} "too many agent-link connections"`,
       );
     }
-    // The command in flight ends with an error within its own timeout (and
-    // some slack for the API), not a hang and not a run on the new boot.
-    const inflightBound = inflightSent + inflightTimeoutMs + 30_000;
-    const timer = setTimeout(() => inflightAbort.abort(), Math.max(0, inflightBound - Date.now()));
+    // The command in flight ends with an error within the bound armed when
+    // it was sent, not a hang and not a run on the new boot.
     const settledInflight = await step("the command in flight ends", () => inflight);
-    clearTimeout(timer);
+    clearTimeout(inflightTimer);
     const inflightSeconds = ((settledInflight.settled - inflightSent) / 1000).toFixed(1);
+    const boundSeconds = ((inflightBound - inflightSent) / 1000).toFixed(0);
     let inflightHow: string;
-    if (settledInflight.result) {
+    const cutOff = inflightCutAt !== undefined && settledInflight.settled >= inflightCutAt;
+    if (cutOff || settledInflight.settled > inflightBound) {
+      failures.push(
+        `the command in flight at the crash had no answer ${boundSeconds} s after it was sent (its timeout is ${inflightTimeoutMs / 1000} s): it hangs` +
+          (cutOff ? "" : ` (it ended after ${inflightSeconds} s)`),
+      );
+      inflightHow = `no answer within ${boundSeconds} s`;
+    } else if (settledInflight.result) {
       const { exitCode, stdout } = settledInflight.result;
       if (exitCode === 0 || stdout.includes("finished")) {
         failures.push(
@@ -1852,11 +1873,6 @@ check(
         );
       }
       inflightHow = `exit ${exitCode} after ${inflightSeconds} s`;
-    } else if (inflightAbort.signal.aborted) {
-      failures.push(
-        `the command in flight at the crash had no answer ${((inflightBound - inflightSent) / 1000).toFixed(0)} s after it was sent (its timeout is ${inflightTimeoutMs / 1000} s): it hangs`,
-      );
-      inflightHow = "no answer";
     } else {
       inflightHow = `${String(settledInflight.error).slice(0, 160)} after ${inflightSeconds} s`;
     }
