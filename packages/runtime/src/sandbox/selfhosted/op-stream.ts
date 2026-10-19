@@ -209,8 +209,9 @@ export type ExactSelfhostedOpControlInput = {
 
 async function exactSelfhostedOpControl(
   input: ExactSelfhostedOpControlInput,
-  operation: "query" | "cancel",
+  operation: "query" | "cancel" | { release: string },
 ): Promise<OpStatus> {
+  const name = typeof operation === "string" ? operation : "release";
   const requestId = crypto.randomUUID();
   const response = await input.controlRpc.request(
     input.rpcSubject,
@@ -224,7 +225,9 @@ async function exactSelfhostedOpControl(
       op:
         operation === "query"
           ? { $case: "opQuery", opQuery: { opId: input.opId } }
-          : { $case: "opCancel", opCancel: { opId: input.opId } },
+          : operation === "cancel"
+            ? { $case: "opCancel", opCancel: { opId: input.opId } }
+            : { $case: "opRelease", opRelease: { opId: input.opId, exitSeq: operation.release } },
     },
     { timeoutMs: input.controlTimeoutMs },
   );
@@ -232,7 +235,7 @@ async function exactSelfhostedOpControl(
     throw agentErrorToControlError(
       response.error ?? {
         code: ErrorCode.ERROR_CODE_PROTOCOL,
-        message: `op-stream ${operation} returned an empty result`,
+        message: `op-stream ${name} returned an empty result`,
         retryable: false,
         detail: {},
       },
@@ -240,10 +243,10 @@ async function exactSelfhostedOpControl(
     );
   }
   if (response.result.$case !== "opStatus") {
-    throw protocolError(`op-stream ${operation}: unexpected result ${response.result.$case}`);
+    throw protocolError(`op-stream ${name}: unexpected result ${response.result.$case}`);
   }
   if (response.result.opStatus.opId !== input.opId) {
-    throw protocolError(`op-stream ${operation}: status identity mismatch for ${input.opId}`);
+    throw protocolError(`op-stream ${name}: status identity mismatch for ${input.opId}`);
   }
   return response.result.opStatus;
 }
@@ -256,6 +259,26 @@ export async function querySelfhostedOp(input: ExactSelfhostedOpControlInput): P
 /** Cancel one durably adopted operation at its immutable physical locator. */
 export async function cancelSelfhostedOp(input: ExactSelfhostedOpControlInput): Promise<OpStatus> {
   return await exactSelfhostedOpControl(input, "cancel");
+}
+
+/** Release one adopted operation's retained output in one answered exchange
+ * (`OpRelease`, for runners advertising `capabilities.op_release`), once the
+ * caller has durably stored all of it through the terminal frame `exitSeq`.
+ * The runner drops the op at once and confirms it in its answer: "released"
+ * when it dropped the op (now, or on an earlier duplicate release), and
+ * "not_retained" when it no longer kept the op for another reason. Either way
+ * nothing is left on the runner for a later pass to observe. Any other answer
+ * (still running, or a different terminal frame) released nothing and throws.
+ * Never starts, cancels or replays anything. */
+export async function releaseSelfhostedOpOutput(
+  input: ExactSelfhostedOpControlInput & { exitSeq: string },
+): Promise<"released" | "not_retained"> {
+  if (!/^[1-9][0-9]{0,19}$/.test(input.exitSeq) || BigInt(input.exitSeq) > 18446744073709551615n)
+    throw protocolError("op-stream release: invalid retained frontier");
+  const status = await exactSelfhostedOpControl(input, { release: input.exitSeq });
+  if (status.state !== OpState.OP_STATE_LOST)
+    throw protocolError("op-stream release: durable exit frontier disagrees with runner");
+  return status.lostReason === OpLostReason.OP_LOST_REASON_RELEASED ? "released" : "not_retained";
 }
 
 /** One op settled but not yet final-acked (awaiting its result's durable point). */
@@ -498,7 +521,8 @@ export class OpStreamExecClient {
     }
   }
 
-  /** Release only an independently persisted, fully captured background exit.
+  /** Release only an independently persisted, fully captured background exit,
+   * on a runner without `OpRelease` (see `releaseSelfhostedOpOutput`).
    * Re-attach under a fresh generation before ACK so an intervening reader cannot
    * strand a stale ACK. Never starts, cancels, replays output or observes a model
    * result. A publish is not native delivery proof: retry until an exact control

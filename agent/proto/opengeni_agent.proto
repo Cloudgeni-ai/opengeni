@@ -221,6 +221,10 @@ message Capabilities {
   // as root on Linux and switches to the named user per request. False (absent)
   // runners MUST NOT receive a non-empty run_as.
   bool run_as = 19;
+  // The runner serves OpRelease: it confirms an output release in its answer
+  // and forgets the op at once. False (absent) runners keep the fire-and-forget
+  // final OpAck, which they apply at their next housekeeping pass.
+  bool op_release = 20;
 }
 
 // The three macOS Privacy & Security grants desktop capture and input need.
@@ -1190,6 +1194,9 @@ enum OpLostReason {
   // The runner process restarted and the op's in-memory scope did not survive
   // (until the journal + scope re-adoption of a later milestone).
   OP_LOST_REASON_AGENT_RESTARTED = 2;
+  // The server released the op's retained output (OpRelease): it consumed the
+  // result, and the runner dropped it. Not a loss of anything the server needs.
+  OP_LOST_REASON_RELEASED = 3;
 }
 
 // The terminal outcome of an op — carried in the Exit frame body AND echoed in
@@ -1295,8 +1302,22 @@ message OpAttach {
   uint64 window_bytes = 4;
 }
 
-// The current status of an op (server←runner reply to OpCancel/OpQuery/OpAttach,
-// and embedded in OpStarted).
+// Release a completed op's retained output (server→runner) once the server has
+// durably stored all of it, through the terminal frame at `exit_seq`. The
+// runner drops the op at once and answers with the op's status: LOST with
+// lost_reason RELEASED confirms the release (and answers every later request
+// about the op, so a duplicate release or attach is idempotent). A different
+// terminal frame, or an op still running, is answered with its actual status
+// and nothing is released. Only sent to runners advertising
+// Capabilities.op_release. Reply is OpStatus.
+message OpRelease {
+  string op_id = 1;
+  // The sequence of the op's terminal (Exit) frame the server stored.
+  uint64 exit_seq = 2;
+}
+
+// The current status of an op (server←runner reply to OpCancel/OpQuery/OpAttach/
+// OpRelease, and embedded in OpStarted).
 message OpStatus {
   string op_id = 1;
   OpState state = 2;
@@ -1429,6 +1450,7 @@ message ControlRequest {
     CredentialRenewRequest credential_renew = 40;
     BrowserControlHttpRequest browser_control_http = 41;
     BrowserControlHttpReadRequest browser_control_http_read = 42;
+    OpRelease op_release = 43;
   }
 }
 
@@ -1461,7 +1483,7 @@ message ControlResponse {
     DesktopInputResponse desktop_input = 29;
     DesktopScreenshotResponse desktop_screenshot = 30;
     // Op-stream (v1.1) replies, additive. OpStart → OpStarted; OpCancel / OpQuery /
-    // OpAttach all reply OpStatus (op_status); WriteChunk → WriteChunkAck.
+    // OpAttach / OpRelease all reply OpStatus (op_status); WriteChunk → WriteChunkAck.
     OpStarted op_start = 31;
     OpStatus op_status = 32;
     WriteChunkAck write_chunk = 35;

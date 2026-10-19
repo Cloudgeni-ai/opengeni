@@ -23,6 +23,7 @@ import { agentConnectionCurrent } from "@opengeni/core";
 import { sql } from "drizzle-orm";
 import {
   recordConnectedCommandOutputConsumption,
+  recordConnectedCommandOutputRelease,
   claimConnectedCommandOutputReleases,
   requestSessionBackgroundCommandCancellation,
   settleConnectedCommandOutputReleaseClaim,
@@ -366,11 +367,6 @@ async function terminalOutputFixture(
     (
       await shared.admin`select * from session_background_commands where id=${identity.commandId}`
     )[0]!;
-  // The gateway's record of the compute sandbox's power state.
-  const asleep = async (value: boolean) => shared.admin`update sandbox_leases lease
-    set compute_asleep_since=${value ? new Date() : null} from enrollments enrollment
-    where enrollment.id=${identity.enrollmentId} and lease.workspace_id=enrollment.workspace_id
-      and lease.sandbox_group_id=enrollment.sandbox_group_id and lease.backend='compute'`;
   await due();
   return {
     identity,
@@ -382,7 +378,6 @@ async function terminalOutputFixture(
     outputBus,
     due,
     stored,
-    asleep,
   };
 }
 
@@ -394,8 +389,10 @@ test("output capture and ACK retry survive publisher failure and a fresh reconci
     if (fail && OpAck.decode(payload).final) throw new Error("synthetic publisher failure");
     publish(subject, payload);
   };
-  // A current enrollment route is not the adopted operation's address.
-  await shared.admin`update enrollments set connection_instance_id='successor' where id=${fixture.identity.enrollmentId}`;
+  // A current enrollment route is not the adopted operation's address, and a
+  // successor process's OpRelease capability is not the adopted runner's.
+  await shared.admin`update enrollments set connection_instance_id='successor',
+    agent_capabilities=${JSON.stringify({ opRelease: true })}::jsonb where id=${fixture.identity.enrollmentId}`;
   await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
   const captured = await fixture.stored();
   expect(captured.output_exit_seq).toBe("2");
@@ -424,6 +421,7 @@ test("output capture and ACK retry survive publisher failure and a fresh reconci
   expect(events!.n).toBe(1);
   expect(updates!.n).toBe(1);
   expect(fixture.operations.filter((op) => op === "opStart" || op === "opCancel")).toEqual([]);
+  expect(fixture.operations).not.toContain("opRelease");
   expect(fixture.runner.runs.get(fixture.identity.opId)!.startCount).toBe(1);
 });
 
@@ -467,6 +465,8 @@ test("a published but undelivered final ACK remains pending for a fresh reconcil
   const row = await fixture.stored();
   expect(row.output_release_observed_at).toBeInstanceOf(Date);
   expect(row.completion_observed_at).toBeNull();
+  // A runner without OpRelease keeps the attach, final ACK and later look.
+  expect(fixture.operations).not.toContain("opRelease");
 });
 
 test("PostgreSQL capture rollback cannot authorize ACK and a later full replay remains idempotent", async () => {
@@ -1147,82 +1147,86 @@ test("a request to a replaced connection ends without a wake when another proces
   }
 }, 20_000);
 
-test("a sleeping compute sandbox's output release waits, without a request, until it is awake", async () => {
-  // The release is two passes: a final ACK, then a later look that finds the
-  // op forgotten. The agent forgets it on its own clock, which stops while
-  // the sandbox sleeps, so a pass to a sleeping sandbox would only wake it.
+test("a runner serving OpRelease settles a recovered output release in one exchange, and no later pass reaches it", async () => {
+  // The storing process died before releasing: the reaper recovers the
+  // release once, and the runner's answer settles it.
   const fixture = await terminalOutputFixture({ kind: "sandbox" });
-  const eligible = async () =>
-    (
-      await shared.admin`select opengeni_private.connected_output_runner_eligible_v1(
-        ${fixture.identity.controlWorkspaceId}::uuid, ${fixture.identity.enrollmentId}::uuid,
-        ${fixture.identity.connectionInstanceId}) ok`
-    )[0]!.ok;
-  const releaseDue = async () =>
-    (await shared.admin`select opengeni_private.connected_command_output_release_due_v1() due`)[0]!
-      .due;
   try {
-    // Asleep before the first pass: nothing is sent, nothing is attempted.
-    await fixture.asleep(true);
-    expect(await eligible()).toBe(false);
-    expect(await releaseDue()).toBe(false);
-    const quiet = noRunnerRpc();
-    await releaseOutput(client.db, settings, observability, fixture.outputBus, quiet);
-    expect(quiet.requests()).toBe(0);
-    let row = await fixture.stored();
-    expect(row.reconcile_attempts).toBe(0);
-    expect(row.output_consumed_at).toBeNull();
-
-    // Awake: the first pass captures the output and sends the final ACK.
-    await fixture.asleep(false);
-    expect(await eligible()).toBe(true);
-    expect(await releaseDue()).toBe(true);
+    await shared.admin`update enrollments set agent_capabilities=${JSON.stringify({ opRelease: true })}::jsonb where id=${fixture.identity.enrollmentId}`;
     await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
-    row = await fixture.stored();
-    expect(row.last_reconcile_outcome).toBe("output_ack_published");
-    expect(fixture.runner.runs.get(fixture.identity.opId)!.finalAcked).toBe(true);
-    const attempts = row.reconcile_attempts;
-
-    // It falls asleep before the agent forgets the op: later passes leave it
-    // asleep and the obligation untouched.
-    await fixture.asleep(true);
-    for (let pass = 0; pass < 3; pass++) {
-      await fixture.due();
-      expect(await releaseDue()).toBe(false);
-      await releaseOutput(client.db, settings, observability, fixture.outputBus, quiet);
-    }
-    expect(quiet.requests()).toBe(0);
-    row = await fixture.stored();
-    expect(row.reconcile_attempts).toBe(attempts);
-    expect(row.output_release_observed_at).toBeNull();
-
-    // Woken by something else, its agent forgets the acknowledged op, and the
-    // next pass observes the release.
-    await fixture.asleep(false);
-    fixture.runner.lostOps.add(fixture.identity.opId);
-    await fixture.due();
-    await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
-    row = await fixture.stored();
+    const row = await fixture.stored();
+    expect(row.output_exit_seq).toBe("2");
+    expect(row.output_consumed_at).toBeInstanceOf(Date);
     expect(row.output_release_observed_at).toBeInstanceOf(Date);
     expect(row.output_unavailable_at).toBeNull();
-    expect(fixture.operations.filter((op) => op === "opStart" || op === "opCancel")).toEqual([]);
+    expect(row.last_reconcile_outcome).toBe("output_released");
+    expect(fixture.operations).toEqual(["opQuery", "opAttach", "opRelease"]);
+    expect(fixture.runner.releasedOps.has(fixture.identity.opId)).toBe(true);
+    // The release needs no final ACK and no later look.
+    expect(fixture.transport.decodedAcks().some((ack) => ack.final)).toBe(false);
+    for (let pass = 0; pass < 3; pass++) {
+      await fixture.due();
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+    }
+    expect(fixture.operations).toEqual(["opQuery", "opAttach", "opRelease"]);
+    expect((await fixture.stored()).reconcile_attempts).toBe(row.reconcile_attempts);
   } finally {
     await parkSession(fixture.identity.sessionId);
   }
 });
 
-test("a sleeping compute sandbox's retired runner still settles its output", async () => {
-  // The settlement reaches no agent, so sleep does not hold it back.
-  const fixture = await terminalOutputFixture({ kind: "sandbox" });
-  try {
-    await fixture.asleep(true);
-    await shared.admin`update enrollments set connection_instance_id='fresh' where id=${fixture.identity.enrollmentId}`;
-    const rpc = noRunnerRpc();
-    await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
-    const row = await fixture.stored();
-    expect(row.output_unavailable_at).toBeInstanceOf(Date);
-    expect(row.last_reconcile_outcome).toBe("output_unavailable");
-  } finally {
-    await parkSession(fixture.identity.sessionId);
-  }
+test("a release recorded where the output was stored settles a racing reaper claim, and only for its exact frontier", async () => {
+  const fixture = await terminalOutputFixture();
+  await recordConnectedCommandOutputConsumption(client.db, {
+    ...fixture.identity,
+    receipt: { exitSeq: "2", attachGeneration: "1" },
+    exitCode: 0,
+  });
+  await fixture.due();
+  const [claim] = (
+    await claimConnectedCommandOutputReleases(client.db, {
+      claimId: crypto.randomUUID(),
+      dueBefore: new Date(),
+      limit: 100,
+      claimTtlMs: 60_000,
+    })
+  ).filter((candidate) => candidate.commandId === fixture.identity.commandId);
+  expect(claim?.receipt).toEqual({ exitSeq: "2", attachGeneration: "1" });
+  // Another terminal frame is not this output: nothing is recorded.
+  expect(
+    await recordConnectedCommandOutputRelease(client.db, { ...fixture.identity, exitSeq: "3" }),
+  ).toBe(false);
+  expect((await fixture.stored()).output_release_observed_at).toBeNull();
+  // The storing process records the runner's confirmed release while the
+  // reaper holds its claim; recording it twice changes nothing.
+  expect(
+    await recordConnectedCommandOutputRelease(client.db, { ...fixture.identity, exitSeq: "2" }),
+  ).toBe(true);
+  expect(
+    await recordConnectedCommandOutputRelease(client.db, { ...fixture.identity, exitSeq: "2" }),
+  ).toBe(false);
+  // A publish is no release: the claim does not settle as one.
+  expect(
+    await settleConnectedCommandOutputReleaseClaim(client.db, {
+      claim: claim!,
+      outcome: "published",
+      retryAfterMs: 0,
+    }),
+  ).toBe(false);
+  // The reaper's own confirmed release settles its claim without error.
+  expect(
+    await settleConnectedCommandOutputReleaseClaim(client.db, {
+      claim: claim!,
+      outcome: "released",
+      retryAfterMs: 0,
+    }),
+  ).toBe(true);
+  const row = await fixture.stored();
+  expect(row.output_release_observed_at).toBeInstanceOf(Date);
+  expect(row.last_reconcile_outcome).toBe("output_released");
+  expect(row.reconcile_claim_id).toBeNull();
+  // Nothing is left for a later pass.
+  await fixture.due();
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+  expect(fixture.operations).toEqual([]);
 });

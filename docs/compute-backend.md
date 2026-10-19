@@ -46,17 +46,16 @@ sends the cancellation from the API at once, so the process ends without
 waiting for the next maintenance pass; the claim delivers it when that
 attempt fails.
 
-A finished background command's output is released in two reconciler passes:
-the first sends the agent its final ACK, and a later one sees that the agent no
-longer keeps the command. Each pass sends a request, which wakes a sleeping
-sandbox, and the agent forgets an acknowledged command only at its next
-housekeeping pass, on its own clock, which stands still while the sandbox
-sleeps. So that work is due and claimed only while the sandbox's lease does not
-record it asleep (0849): a sleeping sandbox's release waits, untouched, and
-completes on later passes once something else has woken it. Only a pass that
-races the sandbox falling asleep, before the gateway has recorded the sleep,
-can still wake it, once. A retired runner's release reaches no agent, so it is
-not held back.
+A finished background command's output is released where it is stored, while
+the agent is live from the command: one `OpRelease` for the stored exit frame,
+which the agent answers once it has dropped the command (LOST, reason
+RELEASED), so the release is settled from that answer. Nothing about a released
+command is left for a later pass, so housekeeping has no reason to reach an
+idle sandbox. The reaper only recovers a release whose storing process died
+first; reaching a sleeping sandbox for that is real work and wakes it once,
+and the answer settles it in that one exchange. Compute agents always serve
+`OpRelease` (`capabilities.op_release`); a Connected Machine agent without it
+keeps the reaper's attach, final ACK and later look.
 
 The only timers that message an agent are the op stream's credit acks and
 silence probes, and they run only while a call is attached to a running

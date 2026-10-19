@@ -35,6 +35,7 @@ use opengeni_agent_engine::admission::{
 };
 use opengeni_agent_engine::registry::{
     BeginOutcome, CancelOutcome, OpRegistry, QueryAnswer, RegistryConfig, RegistryCounters,
+    ReleaseOutcome,
 };
 use opengeni_agent_engine::retention::{GlobalMemoryBudget, GlobalSpoolBudget, RetentionConfig};
 use opengeni_agent_engine::{Frame, HostCapacity, OpId};
@@ -1021,6 +1022,24 @@ impl Engine {
             .cancel(op_id, self.now_ms());
         if outcome == CancelOutcome::KillRunning {
             self.route_command(op_id, JobCommand::Cancel);
+        }
+        outcome
+    }
+
+    /// Releases a completed op's retained output once its consumer stored it
+    /// through `exit_seq` (wire: `OpRelease`): the registry drops it now and
+    /// its lingering pump ends, freeing the retained frames. Idempotent.
+    pub fn release(&self, op_id: &OpId, exit_seq: u64) -> ReleaseOutcome {
+        let outcome = self
+            .registry
+            .lock()
+            .expect("registry lock")
+            .release(op_id, exit_seq);
+        if outcome == ReleaseOutcome::Released {
+            // The pump finishes as consumed; dropping its route also ends it
+            // if the command cannot be queued.
+            self.route_command(op_id, JobCommand::Release);
+            self.routes.lock().expect("routes lock").remove(op_id);
         }
         outcome
     }

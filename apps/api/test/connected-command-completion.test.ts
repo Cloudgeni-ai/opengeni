@@ -1,7 +1,15 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { AgentEvent, AgentEventAck, OpExit, ExecResponse } from "@opengeni/agent-proto";
+import {
+  AgentEvent,
+  AgentEventAck,
+  OpExit,
+  ExecResponse,
+  OpLostReason,
+  OpState,
+  type ControlRequest,
+} from "@opengeni/agent-proto";
 import type { EventBus } from "@opengeni/events";
-import type { OpStreamExecClient } from "@opengeni/runtime/sandbox";
+import { subjectFor, type ControlRpc, type OpStreamExecClient } from "@opengeni/runtime/sandbox";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -12,6 +20,7 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
+  createSandboxEnrollment,
   createSession,
   createWorkspace,
   initializeSessionStartAtomically,
@@ -516,4 +525,175 @@ test("reconciled cleanup evidence remains positive across settlement", async () 
   expect((await readSessionBackgroundCommandOutput(client.db, command)).notice).toBe(
     CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
   );
+});
+
+/** The command's runner (the agent of the session's compute sandbox),
+ * enrolled and live on the command's own connection instance, with the
+ * capabilities its Hello advertised. */
+async function liveRunner(
+  command: Awaited<ReturnType<typeof fixture>>,
+  capabilities: Record<string, boolean>,
+) {
+  const [session] =
+    await shared.admin`select sandbox_group_id from sessions where id=${command.sessionId}`;
+  await createSandboxEnrollment(client.db, {
+    accountId: command.accountId,
+    workspaceId: command.controlWorkspaceId,
+    enrollmentId: command.enrollmentId,
+    sandboxGroupId: session!.sandbox_group_id,
+    hasDisplay: false,
+    workspaceRoot: "/workspace",
+  });
+  await shared.admin`update enrollments set connection_instance_id=${command.connectionInstanceId},
+    connection_lease_expires_at=now()+interval '1 hour',
+    agent_capabilities=${JSON.stringify(capabilities)}::jsonb where id=${command.enrollmentId}`;
+  return command;
+}
+
+/** The runner's answers to OpRelease: `answer` decides each one. */
+function releaseRunner(answer: (request: ControlRequest) => "released" | "complete" | "offline") {
+  const requests: Array<{ subject: string; request: ControlRequest }> = [];
+  const rpc: ControlRpc = {
+    request: async (subject, request) => {
+      requests.push({ subject, request });
+      const opId = request.op?.$case === "opRelease" ? request.op.opRelease.opId : "";
+      const outcome = answer(request);
+      if (outcome === "offline") throw new Error("synthetic: no responder");
+      return {
+        requestId: request.requestId,
+        error: undefined,
+        result: {
+          $case: "opStatus",
+          opStatus:
+            outcome === "released"
+              ? {
+                  opId,
+                  state: OpState.OP_STATE_LOST,
+                  nextSeq: "0",
+                  writeOffset: "0",
+                  exit: undefined,
+                  lostReason: OpLostReason.OP_LOST_REASON_RELEASED,
+                }
+              : {
+                  opId,
+                  state: OpState.OP_STATE_COMPLETE,
+                  nextSeq: "3",
+                  writeOffset: "0",
+                  exit: OpExit.fromPartial({ exitCode: 0 }),
+                  lostReason: OpLostReason.OP_LOST_REASON_UNSPECIFIED,
+                },
+        },
+      };
+    },
+  };
+  return { rpc, requests };
+}
+
+async function storedCustody(commandId: string) {
+  return (
+    await shared.admin`select output_consumed_at, output_release_observed_at, last_reconcile_outcome,
+      reconcile_after <= now() as output_due from session_background_commands where id = ${commandId}`
+  )[0]!;
+}
+
+test("a runner serving OpRelease has a pushed command's output released where it is stored, in one exchange", async () => {
+  const command = await liveRunner(await fixture(), { opRelease: true });
+  const runner = releaseRunner(() => "released");
+  const completed = { opId: command.opId, exit: OpExit.fromPartial({ exitCode: 0 }) };
+  await ingestConnectedCommandCompletion(
+    client.db,
+    ids(command),
+    completed,
+    new MemoryEventBus(),
+    reader(completed.exit),
+    runner.rpc,
+  );
+  expect(await getSessionBackgroundCommand(client.db, command)).toMatchObject({
+    state: "exited",
+    exitCode: 0,
+  });
+  // One OpRelease for exactly the stored exit frame, at the runner's own
+  // address; its answer settles the release.
+  expect(runner.requests).toHaveLength(1);
+  expect(runner.requests[0]!.subject).toBe(
+    subjectFor(command.controlWorkspaceId, command.enrollmentId, command.connectionInstanceId),
+  );
+  expect(runner.requests[0]!.request.op).toEqual({
+    $case: "opRelease",
+    opRelease: { opId: command.opId, exitSeq: "2" },
+  });
+  expect(await storedCustody(command.commandId)).toMatchObject({
+    output_consumed_at: expect.any(Date),
+    output_release_observed_at: expect.any(Date),
+    last_reconcile_outcome: "output_released",
+  });
+  // A duplicate push changes nothing and sends nothing.
+  await ingestConnectedCommandCompletion(
+    client.db,
+    ids(command),
+    completed,
+    new MemoryEventBus(),
+    reader(completed.exit),
+    runner.rpc,
+  );
+  expect(runner.requests).toHaveLength(1);
+});
+
+test("a runner without OpRelease, or a release that fails, leaves the stored output to the reconciler", async () => {
+  const completed = (opId: string) => ({ opId, exit: OpExit.fromPartial({ exitCode: 0 }) });
+  // No capability: no release is sent.
+  const legacy = await liveRunner(await fixture(), { opStream: true });
+  const quiet = releaseRunner(() => "released");
+  await ingestConnectedCommandCompletion(
+    client.db,
+    ids(legacy),
+    completed(legacy.opId),
+    new MemoryEventBus(),
+    reader(0),
+    quiet.rpc,
+  );
+  expect(quiet.requests).toHaveLength(0);
+  expect(await storedCustody(legacy.commandId)).toMatchObject({
+    output_consumed_at: expect.any(Date),
+    output_release_observed_at: null,
+    output_due: true,
+  });
+
+  // The runner answers the op still retained (another frontier): nothing is
+  // recorded, and the reconciler keeps the obligation.
+  const disagreeing = await liveRunner(await fixture(), { opRelease: true });
+  const complete = releaseRunner(() => "complete");
+  await ingestConnectedCommandCompletion(
+    client.db,
+    ids(disagreeing),
+    completed(disagreeing.opId),
+    new MemoryEventBus(),
+    reader(0),
+    complete.rpc,
+  );
+  expect(complete.requests).toHaveLength(1);
+  expect(await storedCustody(disagreeing.commandId)).toMatchObject({
+    output_release_observed_at: null,
+    output_due: true,
+  });
+
+  // The runner went away between storing and releasing: the command is
+  // settled all the same, and the reconciler recovers the release.
+  const gone = await liveRunner(await fixture(), { opRelease: true });
+  const offline = releaseRunner(() => "offline");
+  await ingestConnectedCommandCompletion(
+    client.db,
+    ids(gone),
+    completed(gone.opId),
+    new MemoryEventBus(),
+    reader(0),
+    offline.rpc,
+  );
+  expect(offline.requests).toHaveLength(1);
+  expect(await getSessionBackgroundCommand(client.db, gone)).toMatchObject({ state: "exited" });
+  expect(await storedCustody(gone.commandId)).toMatchObject({
+    output_consumed_at: expect.any(Date),
+    output_release_observed_at: null,
+    output_due: true,
+  });
 });

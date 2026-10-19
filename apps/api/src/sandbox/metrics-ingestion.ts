@@ -900,6 +900,7 @@ export function helloRuntimeCapabilities(hello: Hello): Record<string, boolean> 
     credentialRenew: caps.credentialRenew === true,
     browserControlHttp: caps.browserControlHttp === true,
     runAs: caps.runAs === true,
+    opRelease: caps.opRelease === true,
     screenControl: caps.consentedScreenControl === true,
     ...(caps.macPermissions ? enrollmentMacPermissionCapabilities(caps.macPermissions) : {}),
   };

@@ -722,6 +722,11 @@ export enum OpLostReason {
    * (until the journal + scope re-adoption of a later milestone).
    */
   OP_LOST_REASON_AGENT_RESTARTED = 2,
+  /**
+   * OP_LOST_REASON_RELEASED - The server released the op's retained output (OpRelease): it consumed the
+   * result, and the runner dropped it. Not a loss of anything the server needs.
+   */
+  OP_LOST_REASON_RELEASED = 3,
 }
 
 export function opLostReasonFromJSON(object: any): OpLostReason {
@@ -735,6 +740,9 @@ export function opLostReasonFromJSON(object: any): OpLostReason {
     case 2:
     case "OP_LOST_REASON_AGENT_RESTARTED":
       return OpLostReason.OP_LOST_REASON_AGENT_RESTARTED;
+    case 3:
+    case "OP_LOST_REASON_RELEASED":
+      return OpLostReason.OP_LOST_REASON_RELEASED;
     default:
       throw new globalThis.Error("Unrecognized enum value " + object + " for enum OpLostReason");
   }
@@ -748,6 +756,8 @@ export function opLostReasonToJSON(object: OpLostReason): string {
       return "OP_LOST_REASON_EVICTED";
     case OpLostReason.OP_LOST_REASON_AGENT_RESTARTED:
       return "OP_LOST_REASON_AGENT_RESTARTED";
+    case OpLostReason.OP_LOST_REASON_RELEASED:
+      return "OP_LOST_REASON_RELEASED";
     default:
       throw new globalThis.Error("Unrecognized enum value " + object + " for enum OpLostReason");
   }
@@ -1140,6 +1150,12 @@ export interface Capabilities {
    * runners MUST NOT receive a non-empty run_as.
    */
   runAs: boolean;
+  /**
+   * The runner serves OpRelease: it confirms an output release in its answer
+   * and forgets the op at once. False (absent) runners keep the fire-and-forget
+   * final OpAck, which they apply at their next housekeeping pass.
+   */
+  opRelease: boolean;
 }
 
 /** The three macOS Privacy & Security grants desktop capture and input need. */
@@ -2221,8 +2237,24 @@ export interface OpAttach {
 }
 
 /**
- * The current status of an op (server←runner reply to OpCancel/OpQuery/OpAttach,
- * and embedded in OpStarted).
+ * Release a completed op's retained output (server→runner) once the server has
+ * durably stored all of it, through the terminal frame at `exit_seq`. The
+ * runner drops the op at once and answers with the op's status: LOST with
+ * lost_reason RELEASED confirms the release (and answers every later request
+ * about the op, so a duplicate release or attach is idempotent). A different
+ * terminal frame, or an op still running, is answered with its actual status
+ * and nothing is released. Only sent to runners advertising
+ * Capabilities.op_release. Reply is OpStatus.
+ */
+export interface OpRelease {
+  opId: string;
+  /** The sequence of the op's terminal (Exit) frame the server stored. */
+  exitSeq: string;
+}
+
+/**
+ * The current status of an op (server←runner reply to OpCancel/OpQuery/OpAttach/
+ * OpRelease, and embedded in OpStarted).
  */
 export interface OpStatus {
   opId: string;
@@ -2376,6 +2408,7 @@ export interface ControlRequest {
     | { $case: "credentialRenew"; credentialRenew: CredentialRenewRequest }
     | { $case: "browserControlHttp"; browserControlHttp: BrowserControlHttpRequest }
     | { $case: "browserControlHttpRead"; browserControlHttpRead: BrowserControlHttpReadRequest }
+    | { $case: "opRelease"; opRelease: OpRelease }
     | undefined;
 }
 
@@ -2408,7 +2441,7 @@ export interface ControlResponse {
     | //
     /**
      * Op-stream (v1.1) replies, additive. OpStart → OpStarted; OpCancel / OpQuery /
-     * OpAttach all reply OpStatus (op_status); WriteChunk → WriteChunkAck.
+     * OpAttach / OpRelease all reply OpStatus (op_status); WriteChunk → WriteChunkAck.
      */
     { $case: "opStart"; opStart: OpStarted }
     | { $case: "opStatus"; opStatus: OpStatus }
@@ -3147,6 +3180,7 @@ function createBaseCapabilities(): Capabilities {
     browserControlHttp: false,
     transactionalFsWriteMachine: false,
     runAs: false,
+    opRelease: false,
   };
 }
 
@@ -3208,6 +3242,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.runAs !== false) {
       writer.uint32(152).bool(message.runAs);
+    }
+    if (message.opRelease !== false) {
+      writer.uint32(160).bool(message.opRelease);
     }
     return writer;
   },
@@ -3371,6 +3408,14 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.runAs = reader.bool();
           continue;
         }
+        case 20: {
+          if (tag !== 160) {
+            break;
+          }
+
+          message.opRelease = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3453,6 +3498,11 @@ export const Capabilities: MessageFns<Capabilities> = {
         : isSet(object.run_as)
         ? globalThis.Boolean(object.run_as)
         : false,
+      opRelease: isSet(object.opRelease)
+        ? globalThis.Boolean(object.opRelease)
+        : isSet(object.op_release)
+        ? globalThis.Boolean(object.op_release)
+        : false,
     };
   },
 
@@ -3515,6 +3565,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.runAs !== false) {
       obj.runAs = message.runAs;
     }
+    if (message.opRelease !== false) {
+      obj.opRelease = message.opRelease;
+    }
     return obj;
   },
 
@@ -3546,6 +3599,7 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.browserControlHttp = object.browserControlHttp ?? false;
     message.transactionalFsWriteMachine = object.transactionalFsWriteMachine ?? false;
     message.runAs = object.runAs ?? false;
+    message.opRelease = object.opRelease ?? false;
     return message;
   },
 };
@@ -14437,6 +14491,90 @@ export const OpAttach: MessageFns<OpAttach> = {
   },
 };
 
+function createBaseOpRelease(): OpRelease {
+  return { opId: "", exitSeq: "0" };
+}
+
+export const OpRelease: MessageFns<OpRelease> = {
+  encode(message: OpRelease, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.opId !== "") {
+      writer.uint32(10).string(message.opId);
+    }
+    if (message.exitSeq !== "0") {
+      writer.uint32(16).uint64(message.exitSeq);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OpRelease {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOpRelease();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.opId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.exitSeq = reader.uint64().toString();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OpRelease {
+    return {
+      opId: isSet(object.opId)
+        ? globalThis.String(object.opId)
+        : isSet(object.op_id)
+        ? globalThis.String(object.op_id)
+        : "",
+      exitSeq: isSet(object.exitSeq)
+        ? globalThis.String(object.exitSeq)
+        : isSet(object.exit_seq)
+        ? globalThis.String(object.exit_seq)
+        : "0",
+    };
+  },
+
+  toJSON(message: OpRelease): unknown {
+    const obj: any = {};
+    if (message.opId !== "") {
+      obj.opId = message.opId;
+    }
+    if (message.exitSeq !== "0") {
+      obj.exitSeq = message.exitSeq;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<OpRelease>, I>>(base?: I): OpRelease {
+    return OpRelease.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OpRelease>, I>>(object: I): OpRelease {
+    const message = createBaseOpRelease();
+    message.opId = object.opId ?? "";
+    message.exitSeq = object.exitSeq ?? "0";
+    return message;
+  },
+};
+
 function createBaseOpStatus(): OpStatus {
   return { opId: "", state: 0, nextSeq: "0", exit: undefined, lostReason: 0, writeOffset: "0" };
 }
@@ -15299,6 +15437,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       case "browserControlHttpRead":
         BrowserControlHttpReadRequest.encode(message.op.browserControlHttpRead, writer.uint32(338).fork()).join();
         break;
+      case "opRelease":
+        OpRelease.encode(message.op.opRelease, writer.uint32(346).fork()).join();
+        break;
     }
     return writer;
   },
@@ -15617,6 +15758,14 @@ export const ControlRequest: MessageFns<ControlRequest> = {
           };
           continue;
         }
+        case 43: {
+          if (tag !== 346) {
+            break;
+          }
+
+          message.op = { $case: "opRelease", opRelease: OpRelease.decode(reader, reader.uint32()) };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -15787,6 +15936,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
           $case: "browserControlHttpRead",
           browserControlHttpRead: BrowserControlHttpReadRequest.fromJSON(object.browser_control_http_read),
         }
+        : isSet(object.opRelease)
+        ? { $case: "opRelease", opRelease: OpRelease.fromJSON(object.opRelease) }
+        : isSet(object.op_release)
+        ? { $case: "opRelease", opRelease: OpRelease.fromJSON(object.op_release) }
         : undefined,
     };
   },
@@ -15866,6 +16019,8 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       obj.browserControlHttp = BrowserControlHttpRequest.toJSON(message.op.browserControlHttp);
     } else if (message.op?.$case === "browserControlHttpRead") {
       obj.browserControlHttpRead = BrowserControlHttpReadRequest.toJSON(message.op.browserControlHttpRead);
+    } else if (message.op?.$case === "opRelease") {
+      obj.opRelease = OpRelease.toJSON(message.op.opRelease);
     }
     return obj;
   },
@@ -16100,6 +16255,12 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             $case: "browserControlHttpRead",
             browserControlHttpRead: BrowserControlHttpReadRequest.fromPartial(object.op.browserControlHttpRead),
           };
+        }
+        break;
+      }
+      case "opRelease": {
+        if (object.op?.opRelease !== undefined && object.op?.opRelease !== null) {
+          message.op = { $case: "opRelease", opRelease: OpRelease.fromPartial(object.op.opRelease) };
         }
         break;
       }

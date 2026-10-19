@@ -900,7 +900,14 @@ connection, including after worker loss; a newer enrollment route is never
 substituted. Already captured output takes priority over full replay, so older
 uncaptured results cannot delay final acknowledgements for saved results. Publish
 success leaves the obligation pending until an exact runner
-observation establishes that output is no longer retained. Completion input to
+observation establishes that output is no longer retained. A runner that
+advertises `capabilities.op_release` in the Hello of that same connection is
+instead sent one `OpRelease` for the stored exit frame right where the output
+is stored; it drops the operation at once and confirms the release in its
+answer (LOST, reason RELEASED, which also answers any duplicate), so the
+release settles in that exchange and the reaper only recovers a release whose
+storing process died first. A different exit frame or a running operation
+releases nothing. Completion input to
 the model remains independent. Legacy rows require full replay before a receipt
 can be recorded; output lost before capture is explicitly marked unavailable
 without manufacturing consumption or an acknowledgement.

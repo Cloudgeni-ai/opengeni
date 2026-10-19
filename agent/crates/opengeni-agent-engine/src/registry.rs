@@ -65,6 +65,9 @@ pub enum LostReason {
     /// The runner restarted and the op did not survive (pre-restart-journal
     /// behavior; honest typed loss, never silence).
     RunnerRestarted,
+    /// The consumer released the op's retained result after storing it
+    /// (`OpRelease`). Nothing the consumer needs is gone.
+    Released,
 }
 
 /// The lifecycle phase of a known op.
@@ -142,6 +145,21 @@ pub enum CancelOutcome {
     AlreadyLost(LostReason),
     /// Unknown op: a tombstone was recorded so a racing begin refuses.
     TombstoneRecorded,
+}
+
+/// Outcome of a release request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseOutcome {
+    /// The completed op was dropped; it now answers `Lost(Released)`.
+    Released,
+    /// Already released (a duplicate release): nothing changes.
+    AlreadyReleased,
+    /// The op completed with a different terminal frame: nothing released.
+    FrontierMismatch,
+    /// The op is still running: nothing released.
+    Running,
+    /// The op is otherwise gone, tombstoned or unknown: nothing to release.
+    NotRetained,
 }
 
 /// Counters the integration layer exports as metrics. Monotonic.
@@ -312,6 +330,30 @@ impl<T> OpRegistry<T> {
             self.tombstone_order.push_back(id.clone());
         }
         CancelOutcome::TombstoneRecorded
+    }
+
+    /// Releases a completed op whose consumer stored its result through the
+    /// terminal frame `exit_seq`: the entry (and its runtime state) is
+    /// dropped now, not at the next GC pass, and a `Released` marker answers
+    /// later requests so a duplicate begin never re-runs it. Anything else is
+    /// left untouched.
+    pub fn release(&mut self, id: &OpId, exit_seq: u64) -> ReleaseOutcome {
+        match self.ops.get(id) {
+            Some(OpEntry::Complete {
+                exit_seq: retained, ..
+            }) if *retained == exit_seq => {}
+            Some(OpEntry::Complete { .. }) => return ReleaseOutcome::FrontierMismatch,
+            Some(OpEntry::Running { .. }) => return ReleaseOutcome::Running,
+            None => {
+                return match self.lost.get(id) {
+                    Some(LostReason::Released) => ReleaseOutcome::AlreadyReleased,
+                    _ => ReleaseOutcome::NotRetained,
+                };
+            }
+        }
+        self.ops.remove(id);
+        self.record_lost(id.clone(), LostReason::Released);
+        ReleaseOutcome::Released
     }
 
     /// Marks a completed op as fully consumed; it becomes GC-eligible.
@@ -593,6 +635,42 @@ mod tests {
                 cancel_requested: false
             }
         );
+    }
+
+    #[test]
+    fn release_drops_a_completed_op_at_once_and_answers_released() {
+        let mut r = registry();
+        let op = id("rel");
+        assert!(matches!(r.begin(&op, 7, 100), BeginOutcome::Fresh(_)));
+        assert_eq!(r.release(&op, 4), ReleaseOutcome::Running, "running: kept");
+        r.complete(&op, 4, 200);
+        assert_eq!(
+            r.release(&op, 3),
+            ReleaseOutcome::FrontierMismatch,
+            "another terminal frame releases nothing"
+        );
+        assert!(matches!(r.query(&op), QueryAnswer::Complete { .. }));
+        assert_eq!(r.release(&op, 4), ReleaseOutcome::Released);
+        assert_eq!(r.len(), 0, "dropped now, not at the next GC pass");
+        assert_eq!(r.query(&op), QueryAnswer::Lost(LostReason::Released));
+        assert_eq!(r.release(&op, 4), ReleaseOutcome::AlreadyReleased);
+        assert_eq!(
+            r.cancel(&op, 300),
+            CancelOutcome::AlreadyLost(LostReason::Released)
+        );
+        assert!(
+            matches!(
+                r.begin(&op, 8, 300),
+                BeginOutcome::Known(QueryAnswer::Lost(LostReason::Released))
+            ),
+            "a duplicate start never re-runs a released op"
+        );
+        assert_eq!(
+            r.counters().evicted_unacked_total,
+            0,
+            "a release is no loss"
+        );
+        assert_eq!(r.release(&id("unknown"), 1), ReleaseOutcome::NotRetained);
     }
 
     #[test]

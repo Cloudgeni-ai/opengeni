@@ -117,7 +117,11 @@ import {
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import { captureConnectedCommandOutput } from "../sandbox-routing";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
-import { agentConnectionCurrent } from "@opengeni/core";
+import {
+  agentConnectionCurrent,
+  connectedRunnerReleasesOutput,
+  releaseStoredConnectedCommandOutput,
+} from "@opengeni/core";
 import {
   // Normal drain teardown builds the client and resumes the envelope directly:
   // a live box gets its /workspace persisted before termination, while a gone
@@ -154,6 +158,7 @@ import {
   findModalProviderCreateReceipt,
   resolveModalCheckpointProviderBindingForSession,
   querySelfhostedOp,
+  releaseSelfhostedOpOutput,
   resumeExactSandboxSession,
   sandboxBackendForSdkBackendId,
   sandboxProviderInstanceIdFromEnvelope,
@@ -1805,6 +1810,18 @@ export async function reconcileConnectedMachineBackgroundCommands(
         });
         if (settled)
           recordConnectedCommandReconciliation(observability, `settled_${proof.outcome}`);
+        // Stored: release it on the runner now, in one answered exchange. A
+        // runner without OpRelease, or a failure, leaves it to the release pass.
+        if (receipt && proof.outcome === "exited")
+          await releaseStoredConnectedCommandOutput(db, {
+            command: claim,
+            exitSeq: receipt.exitSeq,
+            controlRpc,
+            controlTimeoutMs: Math.min(
+              settings.sandboxSelfhostedControlTimeoutMs,
+              RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+            ),
+          }).catch(() => undefined);
       } catch (error) {
         recordConnectedCommandReconciliation(observability, "settlement_failed");
         observability.warn("sandbox reaper: connected-command settlement failed", {
@@ -1835,6 +1852,7 @@ export async function reconcileConnectedCommandOutputReleases(
   const controlRpc =
     controlRpcOverride ?? new NatsControlRpc(async () => bus.getRequestConnection());
   const runnerLookups: ConnectedRunnerLookups = new Map();
+  const releaseLookups = new Map<string, Promise<boolean>>();
   do {
     let claims: Awaited<ReturnType<typeof claimConnectedCommandOutputReleases>>;
     try {
@@ -1925,7 +1943,29 @@ export async function reconcileConnectedCommandOutputReleases(
             exitCode: terminal.outcome.response.exitCode,
           });
         }
-        const outcome = await client.releaseCapturedOutput(claim.opId, receipt);
+        // A runner serving OpRelease confirms the release in its answer, so it
+        // settles in this one exchange: the recovery of a release the storing
+        // process did not finish. Others keep the attach and final ACK, and a
+        // later pass observes that the runner dropped the op.
+        const releaseKey = JSON.stringify([
+          claim.controlWorkspaceId,
+          claim.enrollmentId,
+          claim.connectionInstanceId,
+        ]);
+        let releases = releaseLookups.get(releaseKey);
+        if (!releases) {
+          releases = connectedRunnerReleasesOutput(db, claim).catch(() => false);
+          releaseLookups.set(releaseKey, releases);
+        }
+        const outcome = (await releases)
+          ? await releaseSelfhostedOpOutput({
+              controlRpc,
+              rpcSubject,
+              opId: claim.opId,
+              exitSeq: receipt.exitSeq,
+              controlTimeoutMs,
+            })
+          : await client.releaseCapturedOutput(claim.opId, receipt);
         if (
           !(await settleConnectedCommandOutputReleaseClaim(db, {
             claim,

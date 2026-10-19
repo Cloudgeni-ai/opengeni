@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ControlRequest, ControlResponse, OpAck, OpState } from "@opengeni/agent-proto";
+import { ControlRequest, ControlResponse, OpLostReason, OpState } from "@opengeni/agent-proto";
 import { verifyRelayToken } from "@opengeni/contracts";
 import {
   acquireLease,
@@ -36,6 +36,7 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import { releaseStoredConnectedCommandOutput } from "../../packages/core/src/sandbox/output-release";
 import type { ApiWebSocketConnection } from "../../apps/api/src/api-websocket";
 import { reconcileConnectedCommandOutputReleases } from "../../apps/worker/src/activities/sandbox-lease";
 import type { GatewayFrame } from "../../apps/api/src/sandbox/compute-link-frames";
@@ -695,9 +696,10 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
     }
   }, 60_000);
 
-  test("a finished command's output is released through the link only while its sandbox is awake", async () => {
+  test("a finished command's output is released in one exchange through the link, and housekeeping never reaches the sleeping sandbox", async () => {
     if (!available) return;
-    // The worker's release, as the reaper runs it, over the real NATS bus.
+    // The release where the output is stored, and the reaper's recovery, over
+    // the real NATS bus.
     const bus = await createNatsEventBus(nats.url);
     const stops: Array<() => void> = [];
     try {
@@ -765,6 +767,13 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
           connection: instance,
         }),
       ).toMatchObject({ t: "opened" });
+      expect(
+        (await getLiveEnrollmentConnection(db, agent.workspaceId, agent.agentId))
+          ?.connectionInstanceId,
+      ).toBe(instance);
+      // The agent's Hello advertised OpRelease.
+      await shared!
+        .admin`update enrollments set agent_capabilities=${JSON.stringify({ opRelease: true })}::jsonb where id=${agent.agentId}`;
       // The runner's subscriptions: its RPC subject, replayable deliveries under
       // it, and final ACKs.
       link.send({ t: "sub", s: 1, sid: 7, subject: `${scope}.rpc` });
@@ -772,62 +781,11 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       link.send({ t: "sub", s: 1, sid: 9, subject: `${scope}.rpc.>` });
       await Bun.sleep(100);
 
-      // A background command that exited, its output already consumed: what
-      // is left is releasing the agent's retained copy (frames up to seq 2).
-      const commandId = crypto.randomUUID();
-      const identity = {
-        accountId,
-        workspaceId: workspaceId!,
-        sessionId: session.id,
-        commandId,
-        controlWorkspaceId: workspaceId!,
-        enrollmentId: agent.agentId,
-        connectionInstanceId: instance,
-        opId: `op-${commandId}`,
-      };
-      await shared!
-        .admin`insert into session_background_commands(id,account_id,workspace_id,session_id,provider,state,control_workspace_id,enrollment_id,connection_instance_id,op_id,reconcile_after)
-        values (${commandId},${accountId},${workspaceId!},${session.id},'connected_machine','running',${workspaceId!},${agent.agentId},${instance},${identity.opId},'2000-01-01T00:00:00Z'::timestamptz)`;
-      await settleConnectedMachineSessionBackgroundCommand(db, {
-        ...identity,
-        outcome: "exited",
-        exitCode: 0,
-        reason: "op_exit",
-      });
-      await recordConnectedCommandOutputConsumption(db, {
-        ...identity,
-        receipt: { exitSeq: "2", attachGeneration: "1" },
-        exitCode: 0,
-      });
-      const stored = async () =>
-        (await shared!.admin`select * from session_background_commands where id=${commandId}`)[0]!;
-      const due = async () =>
-        shared!
-          .admin`update session_background_commands set reconcile_after='2000-01-01T00:00:00Z'::timestamptz,reconcile_claim_id=null,reconcile_claimed_at=null where id=${commandId}`;
-      const asleepSince = async () =>
-        (
-          await shared!.admin<{ compute_asleep_since: Date | null }[]>`
-            select compute_asleep_since from sandbox_leases
-            where workspace_id=${workspaceId!} and sandbox_group_id=${session.sandboxGroupId}`
-        )[0]!.compute_asleep_since;
-      const power = async (state: "asleep" | "awake") => {
-        link.send({ t: "state", s: 1, state });
-        const deadline = Date.now() + 5_000;
-        while (((await asleepSince()) === null) !== (state === "awake")) {
-          if (Date.now() > deadline) throw new Error(`the gateway did not record ${state}`);
-          await Bun.sleep(20);
-        }
-      };
-      const release = () =>
-        reconcileConnectedCommandOutputReleases(
-          db,
-          { sandboxLeaseReaperPeriodMs: 30_000, sandboxSelfhostedControlTimeoutMs: 2_000 } as never,
-          { incrementCounter: () => {}, warn: () => {} } as never,
-          bus as never,
-        );
-      const forwarded = (from: number) =>
-        link.frames.slice(from).filter((frame) => frame.t === "msg" && frame.s === 1);
-      let retained: OpState = OpState.OP_STATE_COMPLETE;
+      // The agent: it keeps each op's output through its exit frame (seq 2)
+      // until a release for exactly that frame, which it confirms in its
+      // answer; a released op answers released from then on.
+      const released = new Set<string>();
+      const requests: string[] = [];
       stops.push(
         answerRequests(link, 1, (frame) => {
           if (frame.sid !== 7 && frame.sid !== 9) return null;
@@ -843,22 +801,28 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
               ).finish(),
               headers: [["Opengeni-Control-Replay", "1"]],
             };
-          if (request.op?.$case !== "opAttach") return null;
-          const complete = retained === OpState.OP_STATE_COMPLETE;
+          requests.push(request.op?.$case ?? "none");
+          if (request.op?.$case !== "opRelease") return null;
+          const { opId, exitSeq } = request.op.opRelease;
+          if (exitSeq === "2") released.add(opId);
           return {
             payload: ControlResponse.encode(
               ControlResponse.fromPartial({
                 requestId: request.requestId,
                 result: {
                   $case: "opStatus",
-                  opStatus: {
-                    opId: request.op.opAttach.opId,
-                    state: retained,
-                    nextSeq: complete ? "3" : "0",
-                    ...(complete
-                      ? { exit: { exitCode: 0, durationMs: "5", digests: {}, totals: {} } }
-                      : {}),
-                  },
+                  opStatus: released.has(opId)
+                    ? {
+                        opId,
+                        state: OpState.OP_STATE_LOST,
+                        lostReason: OpLostReason.OP_LOST_REASON_RELEASED,
+                      }
+                    : {
+                        opId,
+                        state: OpState.OP_STATE_COMPLETE,
+                        nextSeq: "3",
+                        exit: { exitCode: 0, durationMs: "5", digests: {}, totals: {} },
+                      },
                 },
               }),
             ).finish(),
@@ -866,58 +830,119 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
         }),
       );
 
-      // Asleep: the release sends the sandbox nothing (a message would wake
-      // it) and leaves the obligation untouched.
-      await power("asleep");
+      // Background commands that exited, their output durably stored.
+      const stored = async (commandId: string) =>
+        (await shared!.admin`select * from session_background_commands where id=${commandId}`)[0]!;
+      const consumed = async () => {
+        const commandId = crypto.randomUUID();
+        const identity = {
+          accountId,
+          workspaceId: workspaceId!,
+          sessionId: session.id,
+          commandId,
+          controlWorkspaceId: workspaceId!,
+          enrollmentId: agent.agentId,
+          connectionInstanceId: instance,
+          opId: `op-${commandId}`,
+        };
+        await shared!
+          .admin`insert into session_background_commands(id,account_id,workspace_id,session_id,provider,state,control_workspace_id,enrollment_id,connection_instance_id,op_id,reconcile_after)
+          values (${commandId},${accountId},${workspaceId!},${session.id},'connected_machine','running',${workspaceId!},${agent.agentId},${instance},${identity.opId},'2000-01-01T00:00:00Z'::timestamptz)`;
+        await settleConnectedMachineSessionBackgroundCommand(db, {
+          ...identity,
+          outcome: "exited",
+          exitCode: 0,
+          reason: "op_exit",
+        });
+        await recordConnectedCommandOutputConsumption(db, {
+          ...identity,
+          receipt: { exitSeq: "2", attachGeneration: "1" },
+          exitCode: 0,
+        });
+        return identity;
+      };
+      const due = async () =>
+        shared!
+          .admin`update session_background_commands set reconcile_after='2000-01-01T00:00:00Z'::timestamptz,reconcile_claim_id=null,reconcile_claimed_at=null where session_id=${session.id}`;
+      const asleepSince = async () =>
+        (
+          await shared!.admin<{ compute_asleep_since: Date | null }[]>`
+            select compute_asleep_since from sandbox_leases
+            where workspace_id=${workspaceId!} and sandbox_group_id=${session.sandboxGroupId}`
+        )[0]!.compute_asleep_since;
+      const power = async (state: "asleep" | "awake") => {
+        link.send({ t: "state", s: 1, state });
+        const deadline = Date.now() + 5_000;
+        while (((await asleepSince()) === null) !== (state === "awake")) {
+          if (Date.now() > deadline) throw new Error(`the gateway did not record ${state}`);
+          await Bun.sleep(20);
+        }
+      };
+      const reaper = () =>
+        reconcileConnectedCommandOutputReleases(
+          db,
+          { sandboxLeaseReaperPeriodMs: 30_000, sandboxSelfhostedControlTimeoutMs: 2_000 } as never,
+          { incrementCounter: () => {}, warn: () => {} } as never,
+          bus as never,
+        );
+      const forwarded = (from: number) =>
+        link.frames.slice(from).filter((frame) => frame.t === "msg" && frame.s === 1);
+      const acks = () =>
+        link.frames.filter((frame) => frame.t === "msg" && frame.s === 1 && frame.sid === 8);
+
+      // Where the output is stored, while the agent is live from the command:
+      // one OpRelease, answered, and the release is settled from that answer.
+      const live = await consumed();
       let mark = link.frames.length;
-      await release();
-      await Bun.sleep(200);
-      expect(forwarded(mark)).toEqual([]);
-      expect((await stored()).reconcile_attempts).toBe(0);
-      expect((await stored()).output_release_observed_at).toBeNull();
+      expect(
+        await releaseStoredConnectedCommandOutput(db, {
+          command: live,
+          exitSeq: "2",
+          controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
+          controlTimeoutMs: 2_000,
+        }),
+      ).toBe("released");
+      expect(requests).toEqual(["opRelease"]);
+      const settled = await stored(live.commandId);
+      expect(settled.output_release_observed_at).toBeInstanceOf(Date);
+      expect(settled.last_reconcile_outcome).toBe("output_released");
+      expect(settled.reconcile_attempts).toBe(0);
 
-      // Awake: the attach and the final ACK reach the agent through the link,
-      // on the subjects its runner subscribes to.
-      await power("awake");
-      mark = link.frames.length;
-      await release();
-      expect((await stored()).last_reconcile_outcome).toBe("output_ack_published");
-      const ack = await link.next(
-        (frame) => frame.t === "msg" && frame.s === 1 && frame.sid === 8,
-        5_000,
-        mark,
-      );
-      if (ack.t !== "msg") throw new Error("not a msg");
-      expect(ack.subject).toBe(`${scope}.ack`);
-      expect(OpAck.decode(ack.payload)).toMatchObject({
-        opId: identity.opId,
-        ackedSeq: "2",
-        final: true,
-      });
-
-      // It falls asleep before its agent forgot the op: nothing more is sent.
+      // The sandbox sleeps: housekeeping passes send it nothing at all.
       await power("asleep");
-      await due();
-      mark = link.frames.length;
-      await release();
-      await Bun.sleep(200);
-      expect(forwarded(mark)).toEqual([]);
-      expect((await stored()).output_release_observed_at).toBeNull();
+      for (let pass = 0; pass < 3; pass++) {
+        await due();
+        mark = link.frames.length;
+        await reaper();
+        await Bun.sleep(100);
+        expect(forwarded(mark)).toEqual([]);
+      }
+      expect((await stored(live.commandId)).reconcile_attempts).toBe(0);
 
-      // Awake again, its agent has forgotten the acknowledged op, and the next
-      // pass observes the release; later passes send nothing.
-      await power("awake");
-      retained = OpState.OP_STATE_LOST;
-      await due();
-      await release();
-      const released = await stored();
-      expect(released.output_release_observed_at).toBeInstanceOf(Date);
-      expect(released.output_unavailable_at).toBeNull();
-      await due();
+      // A process died between storing an output and releasing it: the reaper
+      // recovers that release once. Reaching the sleeping sandbox is real work
+      // (one wake), and the answer settles it in that one exchange.
+      const orphan = await consumed();
+      requests.length = 0;
       mark = link.frames.length;
-      await release();
-      await Bun.sleep(200);
-      expect(forwarded(mark)).toEqual([]);
+      await reaper();
+      expect(requests).toEqual(["opRelease"]);
+      const recovered = await stored(orphan.commandId);
+      expect(recovered.output_release_observed_at).toBeInstanceOf(Date);
+      expect(recovered.output_unavailable_at).toBeNull();
+      expect(recovered.last_reconcile_outcome).toBe("output_released");
+      expect(recovered.reconcile_attempts).toBe(1);
+
+      // Nothing is left to poll: later passes send nothing.
+      for (let pass = 0; pass < 3; pass++) {
+        await due();
+        mark = link.frames.length;
+        await reaper();
+        await Bun.sleep(100);
+        expect(forwarded(mark)).toEqual([]);
+      }
+      // No final ACK was ever sent: the release needs none.
+      expect(acks()).toEqual([]);
       link.close();
     } finally {
       for (const stop of stops) stop();

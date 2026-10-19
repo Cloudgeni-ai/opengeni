@@ -1,6 +1,6 @@
 import { AgentEventAck, type OperationCompleted } from "@opengeni/agent-proto";
 import type { Settings } from "@opengeni/config";
-import { agentConnectionCurrent } from "@opengeni/core";
+import { agentConnectionCurrent, releaseStoredConnectedCommandOutput } from "@opengeni/core";
 import {
   computeSandboxOfEnrollment,
   settleCollectedConnectedMachineBackgroundCommand,
@@ -138,6 +138,8 @@ export async function ingestConnectedCommandCompletion(
   completed: OperationCompleted,
   bus?: EventBus,
   reader?: Pick<OpStreamExecClient, "readExisting">,
+  /** Injected for tests: the control transport of the output release. */
+  releaseRpc?: ControlRpc,
 ): Promise<void> {
   if (!completed.exit || !completed.opId || /[\s.*>]/u.test(completed.opId)) return;
   const identity = {
@@ -234,8 +236,20 @@ export async function ingestConnectedCommandCompletion(
           }
         : undefined,
     });
-    // Final ACK remains the separately retryable custody obligation, never the
-    // model's observation. All bytes are durable before terminal fanout.
+    // All bytes are durable before terminal fanout. Release them on the runner
+    // now, while it is live from this command: one answered exchange, so no
+    // later maintenance pass reaches it. A runner without OpRelease, or a
+    // failed release, leaves the release to the reconciler, which recovers it
+    // once; the model's observation never depends on it.
+    const controlRpc =
+      releaseRpc ?? (bus ? new NatsControlRpc(async () => bus.getRequestConnection()) : null);
+    if (controlRpc)
+      await releaseStoredConnectedCommandOutput(db, {
+        command: claim,
+        exitSeq: receipt.exitSeq,
+        controlRpc,
+        controlTimeoutMs,
+      }).catch(() => undefined);
   } catch (error) {
     await deferConnectedMachineBackgroundCommandReconciliation(db, {
       claim,

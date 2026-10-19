@@ -16,6 +16,7 @@ import { isDeepStrictEqual } from "node:util";
 // request/reply connection.
 
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
+import { releaseStoredConnectedCommandOutput } from "@opengeni/core";
 import {
   createProviderCommandRetainer,
   getRetainedProviderCommand,
@@ -1760,6 +1761,9 @@ async function resolveRoutedMachineConnection(
  * Machine, or the agent inside a compute sandbox): a yielded command is
  * adopted into the session's ledger, its output captured, and its exit settled.
  */
+/** One answered OpRelease to a live runner. */
+const CONNECTED_OUTPUT_RELEASE_TIMEOUT_MS = 10_000;
+
 export function agentBackgroundCommandDeps(
   db: Database,
   bus: EventBus | undefined,
@@ -1838,6 +1842,24 @@ export function agentBackgroundCommandDeps(
           receipt: command.outputReceipt,
           exitCode: command.exitCode,
         });
+        // Stored: release it on the runner now, in one answered exchange. A
+        // runner without OpRelease, or a failure, leaves it to the reconciler.
+        if (bus)
+          await releaseStoredConnectedCommandOutput(db, {
+            command: {
+              accountId: args.accountId,
+              workspaceId: args.workspaceId,
+              sessionId: args.sessionId,
+              commandId: command.commandId,
+              controlWorkspaceId: command.controlWorkspaceId,
+              enrollmentId: command.enrollmentId,
+              connectionInstanceId: command.connectionInstanceId,
+              opId: command.opId,
+            },
+            exitSeq: command.outputReceipt.exitSeq,
+            controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
+            controlTimeoutMs: CONNECTED_OUTPUT_RELEASE_TIMEOUT_MS,
+          }).catch(() => undefined);
       }
       if (settlement && bus) {
         await bus

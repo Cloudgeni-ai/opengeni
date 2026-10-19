@@ -221,19 +221,59 @@ export async function claimConnectedCommandOutputReleases(
   );
 }
 
+/** Record a release the runner confirmed in its answer (`OpRelease`), made
+ * where the output was persisted rather than by the reconciler. It settles the
+ * release obligation of exactly the stored exit frontier, whoever holds the
+ * reconciliation claim, so no later pass reaches the runner for it. Returns
+ * whether this call recorded it; false when it was already recorded, or the
+ * row is not that exact consumed output. */
+export async function recordConnectedCommandOutputRelease(
+  db: Database,
+  input: ConnectedCommandOutputIdentity & { exitSeq: string },
+): Promise<boolean> {
+  return await withSessionActivityRlsContext(db, input, async (tx) => {
+    await lockSessionEventWriteRows(tx, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [input.sessionId],
+    });
+    const command = schema.sessionBackgroundCommands;
+    const rows = await tx
+      .update(command)
+      .set({
+        outputReleaseObservedAt: new Date(),
+        lastReconcileOutcome: "output_released",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          connectedOutputIdentityWhere(input),
+          eq(command.outputExitSeq, input.exitSeq),
+          sql`${command.outputConsumedAt} is not null`,
+          sql`${command.outputReleaseObservedAt} is null and ${command.outputUnavailableAt} is null`,
+        ),
+      )
+      .returning({ id: command.id });
+    return rows.length === 1;
+  });
+}
+
 /** Publish success is only a retry milestone. Stop retrying only after an exact
- * native absence observation, or record pre-capture loss explicitly as missing
- * output. Neither outcome is a model-completion acknowledgement. */
+ * native absence observation or a confirmed release, or record pre-capture loss
+ * explicitly as missing output. Neither outcome is a model-completion
+ * acknowledgement. A release already recorded where the output was persisted
+ * also settles a racing claim. */
 export async function settleConnectedCommandOutputReleaseClaim(
   db: Database,
   input: {
     claim: ConnectedCommandOutputClaim;
-    outcome: "published" | "not_retained" | "unavailable" | "retry";
+    outcome: "published" | "released" | "not_retained" | "unavailable" | "retry";
     retryAfterMs: number;
   },
 ): Promise<boolean> {
   if (!Number.isSafeInteger(input.retryAfterMs) || input.retryAfterMs < 0)
     throw new Error("Connected command output retry delay is invalid");
+  const released = input.outcome === "released" || input.outcome === "not_retained";
   return await withSessionActivityRlsContext(db, input.claim, async (tx) => {
     await lockSessionEventWriteRows(tx, {
       workspaceId: input.claim.workspaceId,
@@ -244,19 +284,18 @@ export async function settleConnectedCommandOutputReleaseClaim(
     const rows = await tx
       .update(command)
       .set({
-        ...(input.outcome === "not_retained" ? { outputReleaseObservedAt: new Date() } : {}),
+        ...(released ? { outputReleaseObservedAt: new Date() } : {}),
         ...(input.outcome === "unavailable" ? { outputUnavailableAt: new Date() } : {}),
         reconcileAfter: new Date(Date.now() + input.retryAfterMs),
         reconcileClaimId: null,
         reconcileClaimedAt: null,
-        lastReconcileOutcome:
-          input.outcome === "not_retained"
-            ? "output_released"
-            : input.outcome === "published"
-              ? "output_ack_published"
-              : input.outcome === "unavailable"
-                ? "output_unavailable"
-                : "output_retry",
+        lastReconcileOutcome: released
+          ? "output_released"
+          : input.outcome === "published"
+            ? "output_ack_published"
+            : input.outcome === "unavailable"
+              ? "output_unavailable"
+              : "output_retry",
         updatedAt: new Date(),
       })
       .where(
@@ -272,7 +311,22 @@ export async function settleConnectedCommandOutputReleaseClaim(
         ),
       )
       .returning({ id: command.id });
-    return rows.length === 1;
+    if (rows.length === 1) return true;
+    if (!released) return false;
+    // Released where the output was persisted while this claim was out: the
+    // obligation is settled; drop the claim.
+    const settled = await tx
+      .update(command)
+      .set({ reconcileClaimId: null, reconcileClaimedAt: null, updatedAt: new Date() })
+      .where(
+        and(
+          connectedOutputIdentityWhere(input.claim),
+          eq(command.reconcileClaimId, input.claim.claimId),
+          sql`${command.outputReleaseObservedAt} is not null`,
+        ),
+      )
+      .returning({ id: command.id });
+    return settled.length === 1;
   });
 }
 

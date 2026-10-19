@@ -93,6 +93,7 @@ pub fn canonical_hello() -> v1::Hello {
         workspace_root: "/home/user".to_string(),
         capabilities: Some(v1::Capabilities {
             run_as: false,
+            op_release: false,
             exec: true,
             filesystem: true,
             git: true,

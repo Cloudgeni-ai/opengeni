@@ -680,6 +680,7 @@ export {
   OP_STREAM_RECONNECT_HOLD_MS,
   OP_STREAM_SILENCE_TIMEOUT_MS,
   querySelfhostedOp,
+  releaseSelfhostedOpOutput,
   type ExactSelfhostedOpControlInput,
   type OpStreamExecOutcome,
   type OpStreamJournal,

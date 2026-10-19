@@ -2609,6 +2609,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             browser_control_http: link.platform.browser_control_http_supported(),
             // Linux agents running as root switch user per request.
             run_as: link.platform.run_as_supported(),
+            // OpRelease is served: a release is confirmed in its answer.
+            op_release: true,
         }
     }
 
@@ -2758,7 +2760,9 @@ fn classify(request: &ControlRequest) -> Route {
         Some(Op::Ping(_)) => Route::Liveness,
         Some(Op::Git(req)) => Route::LegacyGit(req.clone()),
         Some(Op::OpStart(start)) => Route::OpStart(start.clone()),
-        Some(Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_)) => Route::OpControl,
+        Some(Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_) | Op::OpRelease(_)) => {
+            Route::OpControl
+        }
         Some(Op::AgentUpdateApply(update)) => Route::AgentUpdate(update.clone()),
         Some(Op::CredentialRenew(_)) => Route::CredentialRenew,
         _ => Route::Work(JobClass::Light),
@@ -2784,6 +2788,9 @@ fn serve_op_control(
         }
         Some(Op::OpAttach(attach)) => {
             crate::ops::serve_op_attach_scoped(engine, scope, request_id, attach)
+        }
+        Some(Op::OpRelease(release)) => {
+            crate::ops::serve_op_release_scoped(engine, scope, request_id, release)
         }
         _ => unreachable!("classified OpControl"),
     }
@@ -3092,6 +3099,7 @@ fn op_label(req: &ControlRequest) -> &'static str {
         Some(Op::OpCancel(_)) => "op_cancel",
         Some(Op::OpQuery(_)) => "op_query",
         Some(Op::OpAttach(_)) => "op_attach",
+        Some(Op::OpRelease(_)) => "op_release",
         Some(Op::WriteChunk(_)) => "write_chunk",
         None => "none",
     }

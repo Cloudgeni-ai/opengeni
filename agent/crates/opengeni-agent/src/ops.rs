@@ -353,6 +353,33 @@ pub fn serve_op_attach_scoped(
     status_reply(engine, request_id, &op_id, &attach.op_id)
 }
 
+/// Serves `OpRelease`: the server stored the op's output through its terminal
+/// frame, so the runner drops the op now and confirms in the reply (LOST,
+/// RELEASED). A duplicate release, attach or query answers the same. An op
+/// still running, or completed with another terminal frame, answers its
+/// actual status and is left untouched.
+#[cfg(test)]
+pub fn serve_op_release(
+    engine: &Arc<Engine>,
+    request_id: String,
+    release: &v1::OpRelease,
+) -> ControlResponse {
+    serve_op_release_scoped(engine, "default", request_id, release)
+}
+
+/// Multi-connection form of [`serve_op_release`].
+pub fn serve_op_release_scoped(
+    engine: &Arc<Engine>,
+    scope: &str,
+    request_id: String,
+    release: &v1::OpRelease,
+) -> ControlResponse {
+    let op_id = scoped_op_id(scope, &release.op_id);
+    let outcome = engine.release(&op_id, release.exit_seq);
+    debug!(op = %op_id, ?outcome, "op release");
+    status_reply(engine, request_id, &op_id, &release.op_id)
+}
+
 /// Sinks one `OpAck` from the ack subject into the op's pump. The pump owns
 /// generation fencing AND final-ack acceptance (the registry flips final-acked
 /// only when the pump ends `FinalAcked`), so this is pure routing.
@@ -603,6 +630,7 @@ fn op_status(op_id: &str, answer: QueryAnswer, handles: Option<&OpHandles>) -> v
             Some(match reason {
                 LostReason::Evicted => v1::OpLostReason::Evicted,
                 LostReason::RunnerRestarted => v1::OpLostReason::AgentRestarted,
+                LostReason::Released => v1::OpLostReason::Released,
             }),
         ),
         // A tombstone is "cancelled before it ever began": terminal, typed.
@@ -1188,6 +1216,134 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// One exchange releases a stored result: the reply confirms it, the op
+    /// is dropped at once (no housekeeping pass needed), and every later
+    /// release, attach, query or start answers released without re-running.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One release story, read top to bottom.
+    async fn release_confirms_in_its_answer_and_a_duplicate_attach_answers_released() {
+        fn status_of(resp: &ControlResponse) -> v1::OpStatus {
+            match &resp.result {
+                Some(RespResult::OpStatus(status)) => status.clone(),
+                other => panic!("expected OpStatus, got {other:?} / {:?}", resp.error),
+            }
+        }
+        fn released(status: &v1::OpStatus) -> bool {
+            status.state == v1::OpState::Lost as i32
+                && status.lost_reason == v1::OpLostReason::Released as i32
+        }
+        let rig = rig();
+        let release = |op_id: &str, exit_seq: u64| {
+            status_of(&serve_op_release(
+                &rig.engine,
+                "r".to_string(),
+                &v1::OpRelease {
+                    op_id: op_id.to_string(),
+                    exit_seq,
+                },
+            ))
+        };
+
+        // A running op is never released.
+        assert!(started_status(&rig.start_exec("op-live", "sleep 30", 1 << 20).await).0);
+        let live = release("op-live", 1);
+        assert_eq!(live.state, v1::OpState::Running as i32, "running: {live:?}");
+
+        assert!(started_status(&rig.start_exec("op-rel", "printf payload", 1 << 20).await).0);
+        rig.wait_for_exit_frame().await;
+        let op = scoped_op_id("default", "op-rel");
+        let mut exit_seq = None;
+        for _ in 0..500 {
+            if let QueryAnswer::Complete { exit_seq: seq, .. } = rig.engine.query(&op) {
+                exit_seq = Some(seq);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let exit_seq = exit_seq.expect("the op completes");
+        assert_eq!(rig.engine.retained_completions("default").len(), 1);
+
+        // Another terminal frame releases nothing.
+        let mismatch = release("op-rel", exit_seq + 1);
+        assert_eq!(mismatch.state, v1::OpState::Complete as i32, "{mismatch:?}");
+        assert!(matches!(
+            rig.engine.query(&op),
+            QueryAnswer::Complete { .. }
+        ));
+
+        // The release itself: confirmed in the answer, dropped at once.
+        let confirmed = release("op-rel", exit_seq);
+        assert!(released(&confirmed), "confirmed: {confirmed:?}");
+        assert_eq!(
+            rig.engine.query(&op),
+            QueryAnswer::Lost(LostReason::Released)
+        );
+        assert!(
+            !rig.engine
+                .route_command(&op, JobCommand::Detach { completed: None }),
+            "the lingering pump is gone"
+        );
+        assert!(rig.engine.handles(&op).is_none(), "retained state dropped");
+        assert_eq!(
+            rig.engine.retained_completions("default"),
+            vec![],
+            "no completion notice is retried for a released op"
+        );
+
+        // Duplicates: release, attach, query and start all answer released.
+        assert!(released(&release("op-rel", exit_seq)));
+        let frames_before = rig.frames.lock().expect("frames").len();
+        let attached = status_of(&serve_op_attach(
+            &rig.engine,
+            "a".to_string(),
+            &v1::OpAttach {
+                op_id: "op-rel".to_string(),
+                from_seq: 0,
+                attach_generation: 9,
+                window_bytes: 0,
+            },
+        ));
+        assert!(released(&attached), "attach: {attached:?}");
+        assert!(released(&status_of(&serve_op_query(
+            &rig.engine,
+            "q".to_string(),
+            &v1::OpQuery {
+                op_id: "op-rel".to_string(),
+            },
+        ))));
+        // A duplicate start attaches to the known op (accepted, as for any
+        // duplicate) and reports it released; it never runs again.
+        let (_, restarted) =
+            started_status(&rig.start_exec("op-rel", "printf again", 1 << 20).await);
+        assert!(
+            released(&restarted),
+            "a released op never re-runs: {restarted:?}"
+        );
+        assert_eq!(
+            rig.engine.query(&op),
+            QueryAnswer::Lost(LostReason::Released)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            rig.frames.lock().expect("frames").len(),
+            frames_before,
+            "nothing is replayed or re-run"
+        );
+
+        // An op this runner never had is not released, just not retained.
+        let unknown = release("op-never", 1);
+        assert_eq!(unknown.state, v1::OpState::Lost as i32);
+        assert_eq!(unknown.lost_reason, v1::OpLostReason::AgentRestarted as i32);
+
+        let _ = serve_op_cancel(
+            &rig.engine,
+            "c".to_string(),
+            &v1::OpCancel {
+                op_id: "op-live".to_string(),
+            },
+        );
     }
 
     #[tokio::test]
