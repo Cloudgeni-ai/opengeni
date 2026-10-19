@@ -2097,7 +2097,51 @@ async function processesMatching(pattern: string): Promise<number> {
   const out = await execOk(
     `for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null; echo; done | grep -c '${pattern}' || true`,
   );
+  if (!/^[0-9]+$/.test(out.trim())) {
+    throw new Error(`counting the guest's processes printed ${JSON.stringify(out.slice(0, 100))}`);
+  }
   return Number(out.trim());
+}
+
+/** The guest's boot id (`/proc/sys/kernel/random/boot_id`), checked to be one. */
+async function guestBoot(): Promise<string> {
+  const boot = (await execOk("cat /proc/sys/kernel/random/boot_id")).trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(boot)) {
+    throw new Error(`the guest's boot id reads ${JSON.stringify(boot.slice(0, 100))}`);
+  }
+  return boot;
+}
+
+/** The answers Opengeni gives a command whose agent connection was replaced
+ * before its outcome was known: started (the agent had accepted it) or not,
+ * with or without a stop requested for it. */
+const OUTCOME_UNKNOWN = [
+  "The machine's agent was replaced while this command was running, so its outcome is unknown: it may still be running, or it may have finished.",
+  "The machine's agent was replaced before this command's outcome was known: it may not have started, may still be running, or may have finished.",
+].flatMap((outcome) => [outcome, `${outcome} A stop has been requested for it.`]);
+/** The outcome-unknown answer in an API error body (a JSON string in it
+ * that is, or ends with, one of those answers whole), or undefined. */
+function outcomeUnknown(body: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  const strings: string[] = [];
+  const walk = (value: unknown) => {
+    if (typeof value === "string") strings.push(value);
+    else if (Array.isArray(value)) value.forEach(walk);
+    else if (value && typeof value === "object") Object.values(value).forEach(walk);
+  };
+  walk(parsed);
+  for (const text of strings) {
+    const found = OUTCOME_UNKNOWN.find(
+      (answer) => text === answer || text.endsWith(` ${answer}`) || text.endsWith(`: ${answer}`),
+    );
+    if (found) return found;
+  }
+  return undefined;
 }
 
 /** A copy of a sandbox a host made, by its journal: a completed
@@ -2133,22 +2177,57 @@ function copiesIn(journal: string, boxId: string): Copy[] {
   return copies;
 }
 
-/** What `host`'s journal since `sinceMs` says of `boxId`: its completed
- * steps in order, how many were boots and restores, and how many times it
- * was adopted from its files (its memory image left out). */
-function adoptedSince(
-  host: string,
-  sinceMs: number,
-  boxId: string,
-): { steps: string[]; boots: number; restores: number; fromFiles: number } {
-  const text = onHost(
+/** What the machine behind `host` says of `boxId` in one read: which
+ * machine it is (its metadata server's instance id) and its boot, then,
+ * from its journal of that boot since `sinceMs`, the sandbox's completed
+ * steps in order, its VMM launches, and how many times it was adopted from
+ * its files (its memory image left out); and its guest console's agent
+ * connections, counted over the whole file (with one launch since, that
+ * launch's). */
+type Adoption = {
+  instance: string;
+  boot: string;
+  steps: string[];
+  boots: number;
+  restores: number;
+  launches: number;
+  fromFiles: number;
+  connected: number;
+  reconnecting: number;
+  lost: number;
+  bytes: number;
+};
+function adoptionOn(host: string, sinceMs: number, boxId: string): Adoption {
+  const consoleFile = `${vmDir(boxId)}/console.log`;
+  const out = asRoot(
     host,
-    `j=$(sudo journalctl --no-pager -o cat -u 'compute-*' --since @${Math.floor(sinceMs / 1000)}) || { echo "the host journal could not be read" >&2; exit 7; }; ` +
-      `printf '%s\\n' "$j" | sed 's/\\x1b\\[[0-9;]*m//g' | grep -F '${boxId}' || true`,
-  );
+    [
+      `iid=$(curl -fsS -m 10 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/id) || { echo "the metadata server gave no instance id" >&2; exit 8; }`,
+      `boot=$(cat /proc/sys/kernel/random/boot_id) || exit 10`,
+      `echo "# instance=$iid boot=$boot"`,
+      `j=$(journalctl --no-pager -o cat -b -u 'compute-*' --since @${Math.floor(sinceMs / 1000)}) || { echo "the host journal could not be read" >&2; exit 7; }`,
+      `printf '%s\\n' "$j" | sed 's/\\x1b\\[[0-9;]*m//g' | grep -F '${boxId}' | base64 -w0; echo`,
+      `s=$(stat -L -c %s ${consoleFile}) || { echo "no guest console" >&2; exit 11; }; echo $s`,
+      `d=$(tr -d '\\000' < ${consoleFile})`,
+      `for p in 'connected to control plane' 'reconnecting at once' "lost this sandbox's connections"; do printf '%s\\n' "$d" | grep -c "$p" || true; done`,
+    ].join("\n"),
+  )
+    .trim()
+    .split("\n");
+  const header = /^# instance=([0-9]+) boot=([0-9a-f-]{36})$/.exec(out[0] ?? "");
+  const numbers = out.slice(2, 6).map((text) => (/^[0-9]+$/.test(text) ? Number(text) : NaN));
+  if (!header || out.length !== 6 || numbers.some((n) => Number.isNaN(n))) {
+    throw new Error(
+      `${host}'s adoption evidence could not be read: ${out.join(" | ").slice(0, 300)}`,
+    );
+  }
+  const [bytes, connected, reconnecting, lost] = numbers as [number, number, number, number];
   const steps: string[] = [];
+  let launches = 0;
   let fromFiles = 0;
-  for (const line of text.split("\n")) {
+  for (const line of Buffer.from(out[1] ?? "", "base64")
+    .toString("utf8")
+    .split("\n")) {
     if (line.includes("adopted from its files") && line.includes(`id=${boxId}`)) fromFiles += 1;
     const at = line.indexOf("compute_event: ");
     if (at < 0) continue;
@@ -2158,18 +2237,28 @@ function adoptedSince(
     } catch {
       continue;
     }
-    if (
-      event.event === "compute.step" &&
-      event["compute.outcome"] === "done" &&
-      event["compute.sandbox.id"] === boxId
-    )
+    if (event["compute.sandbox.id"] !== boxId) continue;
+    launches += Number(event["compute.launches"] ?? 0);
+    if (event.event === "compute.step" && event["compute.outcome"] === "done")
       steps.push(String(event["compute.step"]));
   }
+  if (bytes > CONSOLE_KEPT) {
+    throw new Error(
+      `${host}'s guest console is ${bytes} bytes, more than the host keeps of it, so a count of it could miss lines`,
+    );
+  }
   return {
+    instance: header[1]!,
+    boot: header[2]!,
     steps,
     boots: steps.filter((name) => name === "boot").length,
     restores: steps.filter((name) => name === "restore").length,
+    launches,
     fromFiles,
+    connected,
+    reconnecting,
+    lost,
+    bytes,
   };
 }
 
@@ -2195,7 +2284,7 @@ check(
     // generation, and the agent's connection instance.
     const boot = (await sandboxState()).generation;
     if (boot === null) throw new Error("the host reports no boot generation");
-    const bootId = (await execOk("cat /proc/sys/kernel/random/boot_id")).trim();
+    const bootId = await guestBoot();
     const linkBefore = connectionInstance();
     if (!linkBefore) {
       throw new Error("the sandbox's enrollment has no agent connection instance before the stop");
@@ -2527,11 +2616,7 @@ check(
           failures.push(
             `the command in flight at the loss was cut off by the suite's 600 s request limit after ${took} s: it hangs`,
           );
-        } else if (
-          !(error instanceof HttpError) ||
-          !/agent was replaced/.test(error.body) ||
-          !/outcome (is unknown|was known)/.test(error.body)
-        ) {
+        } else if (!(error instanceof HttpError) || !outcomeUnknown(error.body)) {
           // Its connection was replaced, so it is answered as an outcome
           // unknown, in the words the model's tool result gets too.
           failures.push(
@@ -2539,9 +2624,7 @@ check(
           );
         }
         const said =
-          error instanceof HttpError
-            ? (/The machine's agent was replaced[^"]*/.exec(error.body)?.[0] ?? error.body)
-            : String(error);
+          error instanceof HttpError ? (outcomeUnknown(error.body) ?? error.body) : String(error);
         inflightHow = `${error instanceof HttpError ? `HTTP ${error.status}: ` : ""}${said.slice(0, 240)} after ${took} s`;
       }
       if (settledInflight.settled > inflightBound) {
@@ -2549,7 +2632,7 @@ check(
       }
     }
     // A new boot of the guest, under a later boot generation.
-    const bootIdAfter = (await execOk("cat /proc/sys/kernel/random/boot_id")).trim();
+    const bootIdAfter = await guestBoot();
     if (bootIdAfter === bootId) {
       failures.push(`the guest's boot id is ${bootId} before and after: it was not booted`);
     }
@@ -2618,30 +2701,38 @@ check(
       );
     }
     // The adopting host booted it from files, once, and its agent
-    // connected once: its journal since the stop and the console of that
-    // launch, whole.
-    const fromStop: ConsoleMark = {
-      host: newHost,
-      inode: "none",
-      bytes: 0,
-      at: (start / 1000).toFixed(3),
+    // connected once: read on that machine (the instance GCE names for the
+    // host, in one boot), its journal of that boot since the stop and the
+    // console of that launch, whole, in each read.
+    const newInstance = newHost === lost ? ownerInstance : instanceId(newHost);
+    const read = () => {
+      const one = adoptionOn(newHost, start, id);
+      if (one.instance !== newInstance) {
+        throw new Error(`${newHost} answers as instance ${one.instance}, not ${newInstance}`);
+      }
+      return one;
     };
-    let booted = consoleSince(newHost, fromStop);
-    for (let tries = 0; booted.connected < 1 && tries < 12; tries += 1) {
+    let adopting = read();
+    const hostBoot = adopting.boot;
+    for (let tries = 0; adopting.connected < 1 && tries < 12; tries += 1) {
       await sleep(5_000);
-      booted = consoleSince(newHost, fromStop);
+      adopting = read();
+      if (adopting.boot !== hostBoot) {
+        throw new Error(
+          `${newHost} booted again (${hostBoot} -> ${adopting.boot}) while it was read`,
+        );
+      }
     }
-    if (booted.launches !== 1) {
+    const consoleWords = `"connected to control plane" ${adopting.connected}, "reconnecting at once" ${adopting.reconnecting}, "lost this sandbox's connections" ${adopting.lost} (the console, ${adopting.bytes} bytes)`;
+    if (adopting.launches !== 1) {
       failures.push(
-        `the host journal of ${newHost} records ${booted.launches} VMM launches since the stop, not one boot: ${describeGrowth(booted)}`,
+        `${newHost}'s journal of boot ${hostBoot} records ${adopting.launches} VMM launches of the sandbox since the stop, not one boot`,
+      );
+    } else if (adopting.connected !== 1) {
+      failures.push(
+        `the agent connected ${adopting.connected} times on ${newHost}, not once: ${consoleWords}`,
       );
     }
-    if (booted.connected !== 1) {
-      failures.push(
-        `the agent connected ${booted.connected} times on ${newHost}, not once: ${describeGrowth(booted)}`,
-      );
-    }
-    const adopting = adoptedSince(newHost, start, id);
     if (adopting.boots !== 1 || adopting.restores !== 0) {
       failures.push(
         `${newHost}'s journal since the stop has ${adopting.boots} boot(s) and ${adopting.restores} restore(s) of the sandbox, not one boot and no restore (steps: ${adopting.steps.join(", ") || "none"})`,
@@ -2655,7 +2746,7 @@ check(
       `${lost} stopped; back on ${after.host} (owner epoch ${before.owner_epoch} -> ${after.owner_epoch}) in ${seconds(start)}; ` +
       `booted from files (generation ${boot} -> ${now.generation}, guest boot id changed, steps ${adopting.steps.join(", ")}, "adopted from its files" ${adopting.fromFiles}); ` +
       `the archived file kept, the checkpointed write kept, the late write ${lateHow}; program and command in flight gone, not run again; ` +
-      `the command in flight ended with ${inflightHow}; connection instance ${linkBefore} -> ${linkAfter}; console ${describeGrowth(booted)}; ${lost} is ${fenced}`
+      `the command in flight ended with ${inflightHow}; connection instance ${linkBefore} -> ${linkAfter}; on ${newHost} (instance ${newInstance}, boot ${hostBoot}): ${consoleWords}; ${lost} is ${fenced}`
     );
   },
 );

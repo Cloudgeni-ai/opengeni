@@ -107,10 +107,12 @@ const seenUnsynced = new Set<string>();
 for (const name of journals) {
   for (const line of readFileSync(`${dir}/${name}`, "utf8").split("\n")) {
     if (line.includes("guest did not write its disks out")) {
+      // The journal may colour the fields: plain text first.
+      const plain = line.replace(/\x1b\[[0-9;]*m/g, "");
       const host = name.replace(/^host-|(@[^@]*)?\.log$/g, "");
-      const id = /\bid=([0-9a-f]+)/.exec(line)?.[1] ?? "";
-      const at = Date.parse(line.split(" ")[0] ?? "");
-      const key = `${host} ${line.split(" ")[0]} ${id}`;
+      const id = /\bid=([0-9a-f]{32})\b/.exec(plain)?.[1] ?? "";
+      const at = Date.parse(plain.split(" ")[0] ?? "");
+      const key = `${host} ${plain.split(" ")[0]} ${id}`;
       if (!seenUnsynced.has(key)) {
         seenUnsynced.add(key);
         unsynced.push({ at: Number.isFinite(at) ? at : Number.NaN, sandbox: id, host });
@@ -151,10 +153,13 @@ const clock = (ms: number) => new Date(ms).toISOString().slice(11, 22);
 const wake = (s: Step) => `${s.step} (${s.cause}${s.by ? `, by ${s.by}` : ""}) at ${clock(s.at)}`;
 
 /** The hosts' warnings that `sandbox`'s guest did not write its disks out
- * inside `from`..`to` (one whose time cannot be read counts as inside). */
+ * inside `from`..`to`: one whose sandbox or time cannot be read counts as
+ * this sandbox's, inside. */
 function unsyncedIn(sandbox: string, from: number, to: number): string | undefined {
   const found = unsynced.filter(
-    (one) => one.sandbox === sandbox && (Number.isNaN(one.at) || (one.at >= from && one.at <= to)),
+    (one) =>
+      (one.sandbox === "" || one.sandbox === sandbox) &&
+      (Number.isNaN(one.at) || (one.at >= from && one.at <= to)),
   );
   if (found.length === 0) return undefined;
   return `host journal: the guest did not write its disks out before ${found.length} pause(s) to copy it (${found.map((one) => `${Number.isNaN(one.at) ? "?" : clock(one.at)} on ${one.host}`).join(", ")})`;
@@ -310,7 +315,7 @@ for (const name of readdirSync(dir).filter((file) => /^consoles-.*\.log$/.test(f
 notes.push(
   `"guest did not write its disks out" warnings: ${unsynced.length}` +
     (unsynced.length
-      ? ` (${unsynced.map((one) => `${one.sandbox.slice(0, 12)} on ${one.host}${Number.isNaN(one.at) ? "" : ` at ${clock(one.at)}`}`).join(", ")})`
+      ? ` (${unsynced.map((one) => `${one.sandbox ? one.sandbox.slice(0, 12) : "an unnamed sandbox"} on ${one.host}${Number.isNaN(one.at) ? "" : ` at ${clock(one.at)}`}`).join(", ")})`
       : ""),
 );
 saved.notes = notes;
