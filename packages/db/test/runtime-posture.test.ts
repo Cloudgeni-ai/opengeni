@@ -1331,12 +1331,12 @@ describe("runtime database posture evaluator", () => {
     table.rlsForced = true;
     posture.privateRoutines.at(-1)!.configuration = ["search_path=public"];
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "sandbox file publication capability list_sandbox_file_publications(uuid, uuid, jsonb) is missing or unsafe",
+      "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
     );
     posture.privateRoutines.at(-1)!.configuration = ["search_path=pg_catalog, public, pg_temp"];
     posture.privateRoutines.at(-1)!.publicExecute = true;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "sandbox file publication capability list_sandbox_file_publications(uuid, uuid, jsonb) is missing or unsafe",
+      "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
     );
   });
 

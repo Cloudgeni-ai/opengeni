@@ -382,6 +382,8 @@ import type {
   UserMessageEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
+  UpdateFileVisibilityRequest,
+  UpdateFileVisibilityResponse,
   ConnectionMetadata,
   PersonalGitHubConnectionStatusResponse,
   PersonalGitHubDisconnectRequest,
@@ -7577,6 +7579,25 @@ export class OpenGeniClient {
     return this.requestJson(
       "GET",
       `/v1/workspaces/${workspaceId}/files${query.size ? `?${query}` : ""}`,
+    );
+  }
+
+  /**
+   * Change who can open a file: everyone in the workspace, or only you (Only
+   * me). Only the file's owner can.
+   */
+  async updateFileVisibility(
+    workspaceId: string,
+    fileId: string,
+    request: UpdateFileVisibilityRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<UpdateFileVisibilityResponse> {
+    return await this.requestJson<UpdateFileVisibilityResponse>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(fileId)}/visibility`,
+      request,
+      undefined,
+      options,
     );
   }
 

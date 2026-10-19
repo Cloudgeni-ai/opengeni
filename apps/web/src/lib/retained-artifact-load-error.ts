@@ -15,6 +15,14 @@ const unavailablePresentation = {
     "This file isn't available. It may have been removed, or you may not have access to it.",
 } as const;
 
+// Someone else's Only me file. Says only that it is private, never whose it
+// is or what it is called, and what to do about it.
+export const PRIVATE_FILE_PRESENTATION = {
+  title: "This file is private",
+  description:
+    "Only its owner can open it, usually because it came from their Only me chat. Ask them to share it with the workspace.",
+} as const;
+
 const temporaryPresentation = {
   title: "Couldn't load this file",
   description: "The file could not be loaded. Try again in a moment.",
@@ -32,6 +40,22 @@ function errorStatus(error: unknown): number | null {
   if (!error || typeof error !== "object") return null;
   const status = (error as { status?: unknown }).status;
   return typeof status === "number" ? status : null;
+}
+
+/** The API's typed "private" answer: the file exists but is Only me for someone else. */
+export function isPrivateFileLoadError(error: unknown): boolean {
+  if (errorStatus(error) !== 403 || !error || typeof error !== "object") return false;
+  const body = (error as { body?: unknown }).body;
+  if (typeof body !== "string" || body.length > 4096) return false;
+  try {
+    const parsed = JSON.parse(body) as {
+      available?: unknown;
+      reason?: unknown;
+    };
+    return parsed.available === false && parsed.reason === "private";
+  } catch {
+    return false;
+  }
 }
 
 function isNetworkTypeError(error: unknown): boolean {
@@ -68,8 +92,10 @@ function retryableHttpStatus(status: number): boolean {
 }
 
 /**
- * Route-scoped copy for retained-file loads. 403 and 404 stay indistinguishable.
- * Retry is only for typed transient/network/server failures.
+ * Route-scoped copy for retained-file loads. A missing file and any other
+ * refusal stay indistinguishable; only the API's typed private answer says
+ * the file exists and is Only me for someone else. Retry is only for typed
+ * transient/network/server failures.
  */
 export function retainedArtifactLoadErrorPresentation(
   error: unknown,
@@ -83,14 +109,28 @@ export function retainedArtifactLoadErrorPresentation(
   };
 
   if (isLocalUnavailableError(error)) return unavailable;
+  if (isPrivateFileLoadError(error))
+    return {
+      ...PRIVATE_FILE_PRESENTATION,
+      retryable: false,
+      supportReference: reference,
+    };
   if (status === 400 || status === 401 || status === 403 || status === 404) return unavailable;
 
   if (status === 0 || isNetworkTypeError(error)) {
-    return { ...networkPresentation, retryable: true, supportReference: reference };
+    return {
+      ...networkPresentation,
+      retryable: true,
+      supportReference: reference,
+    };
   }
 
   if (typedRetryable(error) || (status !== null && retryableHttpStatus(status))) {
-    return { ...temporaryPresentation, retryable: true, supportReference: reference };
+    return {
+      ...temporaryPresentation,
+      retryable: true,
+      supportReference: reference,
+    };
   }
 
   return unavailable;

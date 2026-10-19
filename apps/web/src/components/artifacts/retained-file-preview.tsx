@@ -20,6 +20,10 @@ import { isRetainedImageContentType } from "@opengeni/react/artifacts";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import {
+  PRIVATE_FILE_PRESENTATION,
+  isPrivateFileLoadError,
+} from "@/lib/retained-artifact-load-error";
 import { InlineChatImage } from "./inline-chat-image";
 import { DeferredChatMedia } from "@opengeni/react/artifacts";
 import { isRetainedTextPreview } from "./retained-text-preview-policy";
@@ -301,7 +305,9 @@ function useChatImageGalleryEntry(
         if (!(source instanceof Uint8Array))
           return source.url.trim() ? { src: source.url, caption: alt || undefined } : null;
         const url = URL.createObjectURL(
-          new Blob([source as unknown as BlobPart], { type: artifact.contentType }),
+          new Blob([source as unknown as BlobPart], {
+            type: artifact.contentType,
+          }),
         );
         return {
           src: url,
@@ -332,6 +338,8 @@ function InlineArtifactBody({
     artifact?: RetainedArtifactReference;
     filename?: string;
     error?: boolean;
+    /** Someone else's Only me file: say so, and how to get access. */
+    privateFile?: { title: string; description: string };
   } | null>(null);
   useEffect(() => {
     let active = true;
@@ -361,8 +369,14 @@ function InlineArtifactBody({
                 : undefined,
           });
       })
-      .catch(() => {
-        if (active) setLoaded({ client, accessKeyVersion, error: true });
+      .catch((error: unknown) => {
+        if (!active) return;
+        setLoaded({
+          client,
+          accessKeyVersion,
+          error: true,
+          ...(isPrivateFileLoadError(error) ? { privateFile: PRIVATE_FILE_PRESENTATION } : {}),
+        });
       });
     return () => {
       active = false;
@@ -381,6 +395,11 @@ function InlineArtifactBody({
           filename={current.filename}
           title={alt || "Artifact"}
         />
+      ) : current.privateFile ? (
+        <p role="status" className="text-sm">
+          <span className="font-medium text-fg">{current.privateFile.title}.</span>{" "}
+          <span className="text-fg-muted">{current.privateFile.description}</span>
+        </p>
       ) : (
         <p role="status">
           Artifact unavailable.{" "}
@@ -391,6 +410,7 @@ function InlineArtifactBody({
       )}
       {/* Images open in the lightbox on click; other files keep a way to open them. */}
       {!current ||
+      current.privateFile ||
       (current.artifact &&
         retainedPreviewKind(current.artifact.contentType, current.filename) === "image") ? null : (
         <Link
