@@ -1,5 +1,19 @@
 # @opengeni/db
 
+## 4.1.3
+
+### Patch Changes
+
+- 175f595: Treat enrollment lookups in deleted workspaces as missing grants so credential renewal returns the existing reconnect-required response instead of an internal error. Preserve genuine database and tenant-scope failures.
+  - @opengeni/codemode@4.1.2
+  - @opengeni/codex@4.1.2
+  - @opengeni/config@4.1.2
+  - @opengeni/contracts@4.1.2
+  - @opengeni/network@4.1.2
+  - @opengeni/observability@4.1.2
+  - @opengeni/subscriptions@4.1.2
+  - @opengeni/xai-subscription@4.1.2
+
 ## 4.1.1
 
 ### Patch Changes
