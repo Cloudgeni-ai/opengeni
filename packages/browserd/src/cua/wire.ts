@@ -149,7 +149,7 @@ export async function callDesktop(
   mode: boolean | "caller-settles" = false,
 ): Promise<{ data: Record<string, unknown>; result: ToolResult }> {
   const mutation = mode !== false;
-  let result: ToolResult;
+  let result: ToolResult | undefined;
   let data: Record<string, unknown>;
   try {
     result = await runtime.callTool(name, JSON.stringify(args));
@@ -157,9 +157,12 @@ export async function callDesktop(
       throw new Error("invalid envelope");
     data = z.record(z.string(), z.unknown()).parse(JSON.parse(result.structuredJson));
   } catch {
+    // A failure CUA reports only as text (Windows launch_app does) still says
+    // why; keep it, as written, like any other CUA reason.
+    const reason = result?.isError && result.text.trim() ? `: ${result.text}` : "";
     throw new ComputerBackendError(
       mutation ? "outcome_unknown" : "driver_failed",
-      `CUA ${name} did not return a valid result`,
+      `CUA ${name} did not return a valid result${reason}`,
       false,
       mutation,
     );

@@ -113,10 +113,25 @@ test.skipIf(process.platform !== "linux" || process.env.OPENGENI_CUA_E2E !== "1"
         arguments: args,
       });
       const windowArgs = { pid: firstState.pid, window_id: windowId };
-      expect(
-        (await supervisor.nativeCall(command("set_agent_cursor_enabled", { enabled: false }, 1)))
-          .state,
-      ).toBe("completed");
+      // A new session's cursor overlay starts in the background and can come
+      // up with its default settings after an early change (seen in CI: the
+      // state read back with CUA's default motion too). Settle the second
+      // session's cursor as disabled first; the check is that enabling the
+      // first session's cursor leaves it disabled.
+      const cursorDeadline = Date.now() + 5_000;
+      let otherDisabled = false;
+      while (!otherDisabled && Date.now() < cursorDeadline) {
+        expect(
+          (await supervisor.nativeCall(command("set_agent_cursor_enabled", { enabled: false }, 1)))
+            .state,
+        ).toBe("completed");
+        await Bun.sleep(200);
+        const settled = await supervisor.nativeCall(command("get_agent_cursor_state", {}, 1));
+        otherDisabled =
+          (settled.observation!.result.structuredContent as { enabled?: unknown }).enabled ===
+          false;
+      }
+      expect(otherDisabled).toBe(true);
       const cursor = await supervisor.nativeCall(
         command("set_agent_cursor_enabled", { enabled: true }),
       );
@@ -234,21 +249,27 @@ test.skipIf(process.platform !== "linux" || process.env.OPENGENI_CUA_E2E !== "1"
           /^(WAYLAND_DISPLAY|XAUTHORITY|AT_SPI_BUS_ADDRESS)=/.test(entry),
         ),
       ).toBe(false);
-      // The adapter's own app launch accepts the process CUA reports for it.
+      // The adapter's own app launch accepts the process CUA reports for it,
+      // and its receipt observes the launched app's new window. CUA confirms
+      // a Linux launch by a new window, so the app must open one (`true`
+      // never does).
       const beforeLaunch = await supervisor.observe(references[0]!, target!.id);
-      expect(
-        await supervisor.action({
-          protocolVersion: 1,
-          operationId: randomUUID(),
-          ...references[0]!,
-          targetId: target!.id,
-          expectedTargetGeneration: beforeLaunch.target.targetGeneration,
-          expectedObservationId: beforeLaunch.observationId,
-          expectedFrameId: null,
-          actor: { kind: "agent", subjectId: "agent:fixture" },
-          action: { type: "launch", applicationId: "true" },
-        }),
-      ).toMatchObject({ state: "completed" });
+      const launchReceipt = await supervisor.action({
+        protocolVersion: 1,
+        operationId: randomUUID(),
+        ...references[0]!,
+        targetId: target!.id,
+        expectedTargetGeneration: beforeLaunch.target.targetGeneration,
+        expectedObservationId: beforeLaunch.observationId,
+        expectedFrameId: null,
+        actor: { kind: "agent", subjectId: "agent:fixture" },
+        action: { type: "launch", applicationId: "xterm" },
+      });
+      expect(launchReceipt).toMatchObject({ state: "completed" });
+      const launchedTarget = launchReceipt.observation?.target;
+      expect(launchedTarget?.id).toBeDefined();
+      expect(launchedTarget?.id).not.toBe(target!.id);
+      expect(launchedTarget?.processId).not.toBe(firstState.pid);
       await supervisor.endSession(references[0]!);
       let childStopped = false;
       try {

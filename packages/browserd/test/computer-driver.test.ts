@@ -718,6 +718,34 @@ describe("ComputerDriver", () => {
     }
   });
 
+  test("a read failure's backend text is redacted against typed secrets", async () => {
+    const raw = ["{{", "secret:Desk/read token", "}}"].join("");
+    const secret = "read-path-secret-0123456789";
+    const transport = new FixtureNativeTransport();
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    await driver.dispatch({
+      ...typeCommand(raw),
+      secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
+    });
+    transport.targetsError = new ComputerBackendError(
+      "driver_failed",
+      `CUA list_windows did not return a valid result: window ${secret} is gone`,
+      false,
+      false,
+    );
+    const error = await driver.listTargets().then(
+      () => null,
+      (caught: unknown) => caught as Error,
+    );
+    expect(error?.message).toBe(
+      "CUA list_windows did not return a valid result: window [secret] is gone",
+    );
+  });
+
   test("never pastes text that carries a resolved secret", async () => {
     const transport = new UntypeableTextTransport();
     const driver = new ComputerDriver({
