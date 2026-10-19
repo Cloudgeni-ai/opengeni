@@ -416,7 +416,7 @@ jobs:
           cargo install --locked apple-codesign
           echo "$APPLE_CERT_P12" | base64 -d > /tmp/cert.p12
           rcodesign sign --for-notarization --p12-file /tmp/cert.p12 --p12-password "$APPLE_CERT_PASSWORD" \
-            --code-signature-flags runtime "${{ matrix.asset }}"
+            --code-signature-flags runtime --binary-identifier ai.opengeni.agent "${{ matrix.asset }}"
           echo "$APPLE_ASC_KEY" > /tmp/asc.json
           # Apple's notary service accepts distribution containers, not a raw
           # Mach-O. Submit a temporary ZIP containing the exact signed binary;

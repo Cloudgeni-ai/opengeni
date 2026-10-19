@@ -180,6 +180,8 @@ const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 /** How long the controller's own close request may take to be acknowledged. */
 const BROWSER_CLOSE_REQUEST_TIMEOUT_MS = 5_000;
 const NETWORK_IDLE_MS = 500;
+/** Response types that stay open for the life of the page by design. */
+const STREAMING_MIME_TYPES = new Set(["text/event-stream", "multipart/x-mixed-replace"]);
 /** How long a navigation may wait for its server to answer before the tab
  * stops loading. Chromium itself waits for the operating system's connect
  * timeout, which outlives every caller's deadline. */
@@ -385,7 +387,17 @@ type TargetState = {
   inflightRequests: Set<string>;
   networkTrackingOverflow: boolean;
   failedRequests: Set<string>;
-  requests: Map<string, { method: string; url: string; browserInitiated: boolean }>;
+  requests: Map<
+    string,
+    {
+      method: string;
+      url: string;
+      browserInitiated: boolean;
+      /** An event stream or other response that never finishes by design,
+       * so it does not keep the page from being network idle. */
+      stream: boolean;
+    }
+  >;
   lastNetworkActivityAt: number;
   networkActivitySequence: number;
   /** Counts cross-document navigations the page started in its main frame. */
@@ -2554,6 +2566,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               // being on almost every site, would otherwise show as a failed
               // request in every observation.
               browserInitiated: event.params.type === "Other" && initiator.type === "other",
+              stream: event.params.type === "EventSource",
             });
             boundMap(state.requests, 10_000);
           }
@@ -2601,6 +2614,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         (event) => {
           const requestId = stringField(event.params, "requestId");
           const response = isRecord(event.params.response) ? event.params.response : null;
+          const request = requestId ? state.requests.get(requestId) : undefined;
+          if (
+            request &&
+            typeof response?.mimeType === "string" &&
+            STREAMING_MIME_TYPES.has(response.mimeType.split(";")[0]!.trim().toLowerCase())
+          ) {
+            request.stream = true;
+          }
           if (requestId && typeof response?.status === "number" && response.status >= 400) {
             this.recordFailedRequest(state, requestId, {
               message: `HTTP ${Math.trunc(response.status)}`,
@@ -5592,9 +5613,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             true,
           );
         }
+        // Live pages keep event streams open for good. Only requests that
+        // can still finish count as loading; anything not positively known
+        // to be a stream (a slow fetch or a long poll alike) still counts.
+        const loading = [...state.inflightRequests].some(
+          (requestId) => state.requests.get(requestId)?.stream !== true,
+        );
         if (
           (await this.documentReady(state)) &&
-          state.inflightRequests.size === 0 &&
+          !loading &&
           Date.now() - state.lastNetworkActivityAt >= NETWORK_IDLE_MS
         ) {
           return;

@@ -806,13 +806,152 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a launch observes the launched app's window, once it appears", async () => {
+    // The launched app's window shows up in the second listing after launch.
+    class LaunchFixture extends Fixture {
+      launched = false;
+      listings = 0;
+      reportWindows = false;
+      // Linux reports the launcher process; the app's window belongs to its
+      // child, and an unrelated window appears at the same time.
+      linux = false;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "check_permissions" && this.linux) return result({ atspi: true, x11: true });
+        if (name === "launch_app") {
+          this.calls.push({ name, args });
+          this.launched = true;
+          if (this.linux) return result({ launcher_pid: 76 });
+          const window = { pid: 77, window_id: 9, title: "Untitled", app_name: "TextEdit" };
+          return result({
+            pid: 77,
+            windows: this.reportWindows
+              ? [{ ...window, bounds: { x: 0, y: 0, width: 300, height: 200 } }]
+              : [],
+          });
+        }
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "list_windows" && this.launched && ++this.listings > 1) {
+          const data = JSON.parse(response.structuredJson!);
+          // Another app opens a window at the same time, listed first.
+          if (this.linux)
+            data.windows.push({
+              pid: 99,
+              window_id: 3,
+              title: "Unrelated",
+              app_name: "Other",
+              bounds: { x: 0, y: 0, width: 300, height: 200 },
+            });
+          data.windows.push({
+            pid: 77,
+            window_id: 9,
+            title: "Untitled",
+            app_name: "TextEdit",
+            bounds: { x: 0, y: 0, width: 300, height: 200 },
+          });
+          response.structuredJson = JSON.stringify(data);
+        }
+        if (name === "get_window_state" && args.pid === 77) {
+          const data = JSON.parse(response.structuredJson!);
+          Object.assign(data, { pid: 77, window_id: 9 });
+          response.structuredJson = JSON.stringify(data);
+        }
+        return response;
+      }
+    }
+    for (const [reportWindows, linux] of [
+      [false, false],
+      [true, false],
+      [false, true],
+    ] as const) {
+      const fixture = new LaunchFixture();
+      fixture.reportWindows = reportWindows;
+      fixture.linux = linux;
+      // The app (77) runs as a child of the launcher (76); 99 is unrelated.
+      const parents = new Map([
+        [77, 76],
+        [76, 1],
+        [99, 1],
+      ]);
+      const backend = await CuaComputerBackend.open(fixture, linux ? "linux" : "macos", {
+        parentPid: (pid) => parents.get(pid) ?? null,
+      });
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        const launched = await backend.dispatch({
+          ...command(observation),
+          action: { type: "launch", applicationId: "com.apple.TextEdit" },
+        });
+        expect(launched?.target.id).toBe("cua:window:77:9");
+        expect(launched?.target.title).toBe("Untitled");
+        expect((await backend.targets()).map((listed) => listed.id)).toContain("cua:window:77:9");
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // The controller records the launched window's observation in the receipt.
+    {
+      const fixture = new LaunchFixture();
+      fixture.reportWindows = true;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const computerSessionId = crypto.randomUUID();
+        const controllerGeneration = "controller-fixture";
+        const controller = new ComputerInteractionController({
+          computerSessionId,
+          controllerGeneration,
+          driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+        });
+        const target = (await backend.targets())[0]!;
+        const observation = await controller.observe(target.id);
+        const receipt = await controller.run({
+          protocolVersion: 1,
+          operationId: crypto.randomUUID(),
+          computerSessionId,
+          controllerGeneration,
+          targetId: target.id,
+          expectedTargetGeneration: observation.target.targetGeneration,
+          expectedObservationId: null,
+          expectedFrameId: null,
+          actor: { kind: "agent", subjectId: "agent:fixture" },
+          action: { type: "launch", applicationId: "com.apple.TextEdit" },
+        });
+        expect(receipt.state).toBe("completed");
+        expect(receipt.targetId).toBe(target.id);
+        expect(receipt.observation?.target.id).toBe("cua:window:77:9");
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // An app that opens no window leaves the action's own target observed.
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, json) =>
+      name === "launch_app" ? result({ pid: 78, windows: [] }) : await original(name, json);
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const observation = await backend.observe(target.id);
+      const launched = await backend.dispatch({
+        ...command(observation),
+        action: { type: "launch", applicationId: "Menu Bar Helper" },
+      });
+      expect(launched?.target.id).toBe(target.id);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("apps launch in the background by each platform's own app name", async () => {
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);
     fixture.callTool = async (name, json) =>
       name === "launch_app"
         ? (fixture.calls.push({ name, args: JSON.parse(json) as Record<string, unknown> }),
-          result({ pid: 77, bundle_id: "com.apple.TextEdit", windows: [] }))
+          result({ pid: 42, bundle_id: "com.apple.TextEdit", windows: [] }))
         : await original(name, json);
     const backend = await CuaComputerBackend.open(fixture);
     try {
@@ -921,7 +1060,7 @@ describe("CUA desktop boundary", () => {
               args: JSON.parse(json) as Record<string, unknown>,
             }),
             // Linux reports the launcher process it started the app through.
-            result(platform === "linux" ? { launcher_pid: 92 } : { pid: 91, windows: [] }))
+            result(platform === "linux" ? { launcher_pid: 92 } : { pid: 42, windows: [] }))
           : await platformCall(name, json);
       const other = await CuaComputerBackend.open(platformFixture, platform);
       try {

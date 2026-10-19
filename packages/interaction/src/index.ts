@@ -425,6 +425,15 @@ export class ComputerInteractionController {
             );
           }
         },
+        assertActionObservationAuthority(observation, command) {
+          // A launch returns the launched app's window, which is usually not
+          // the window the command named, so any target of this controller.
+          const launch = "action" in command && command.action.type === "launch";
+          this.assertObservationAuthority(
+            observation,
+            launch && observation.target !== null ? observation.target.id : command.targetId,
+          );
+        },
         outcome(observation) {
           return observation.target === null
             ? { state: observation.outcome, error: observation.error }

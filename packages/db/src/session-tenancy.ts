@@ -12,6 +12,7 @@ import {
   withWorkspaceSubjectRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "./database";
+import { setActiveSandbox } from "./active-sandbox";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { registerSessionWorkflowWakeInTransaction } from "./session-control";
 import { endSessionRealtimeForPrivateTransitionInTransaction } from "./session-realtime";
@@ -866,6 +867,39 @@ export async function sessionHasLiveAttempts(
   );
 }
 
+/**
+ * A fork runs where its source runs. When the source is on a Connected Machine
+ * (or another named sandbox), point the new fork at the same one, in the same
+ * transaction, exactly as a create-time machine selection is seeded. The forking
+ * person must be allowed to attach it; otherwise the fork keeps the default
+ * route and its machine card offers the normal choice.
+ */
+async function carrySourceMachineToFork(
+  db: Database,
+  accountId: string,
+  input: ForkSessionContentInput,
+  result: ForkSessionContentResult,
+): Promise<void> {
+  if (result.replay) return;
+  const [source] = await rawRows<{ activeSandboxId: string | null; workingDir: string | null }>(
+    db,
+    sql`select active_sandbox_id as "activeSandboxId", working_dir as "workingDir"
+      from sessions
+      where workspace_id = ${input.sourceWorkspaceId}::uuid
+        and id = ${input.sourceSessionId}::uuid`,
+  );
+  if (!source?.activeSandboxId) return;
+  await setActiveSandbox(db, {
+    accountId,
+    workspaceId: result.workspaceId,
+    sessionId: result.sessionId,
+    targetSandboxId: source.activeSandboxId,
+    expectedEpoch: 0,
+    subjectId: input.actorSubjectId,
+    workingDir: source.workingDir,
+  });
+}
+
 export async function forkSessionContent(
   db: Database,
   input: ForkSessionContentInput,
@@ -931,6 +965,7 @@ export async function forkSessionContent(
           );
           const result = rows[0];
           if (!result) throw new Error("Session fork returned no result");
+          await carrySourceMachineToFork(scopedDb, accountId, input, result);
           await input.beforeCommit?.(scopedDb);
           return result;
         }
@@ -964,6 +999,7 @@ export async function forkSessionContent(
         );
         const result = rows[0];
         if (!result) throw new Error("Session fork returned no result");
+        await carrySourceMachineToFork(scopedDb, accountId, input, result);
         await input.beforeCommit?.(scopedDb);
         return result;
       },

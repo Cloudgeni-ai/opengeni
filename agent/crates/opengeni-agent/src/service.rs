@@ -596,7 +596,11 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
     let spec = spec_for(install_scope)?;
 
     if args.print {
-        let definition = service::render_for_host(&spec).map_err(|e| e.to_string())?;
+        let definition = if ServiceSpec::backend() == ServiceBackend::Launchd {
+            launchd_definition(&spec, &home()?)?
+        } else {
+            service::render_for_host(&spec).map_err(|e| e.to_string())?
+        };
         println!("{definition}");
         return Ok(());
     }
@@ -668,7 +672,7 @@ fn install_systemd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
 fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let user_home = home()?;
     let plist_path = service::launchd_plist_path(&user_home);
-    let body = service::render_launchd_plist(spec, &user_home).map_err(|e| e.to_string())?;
+    let body = launchd_definition(spec, &user_home)?;
     let definition_changed =
         std::fs::read(&plist_path).map_or(true, |existing| existing != body.as_bytes());
     if let Some(parent) = plist_path.parent() {
@@ -738,6 +742,45 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
         plist_path.display()
     );
     Ok(())
+}
+
+fn launchd_definition(spec: &ServiceSpec, user_home: &Path) -> Result<String, String> {
+    let existing_environment = launchd_environment(&service::launchd_plist_path(user_home))?;
+    service::render_launchd_plist_with_environment(spec, user_home, &existing_environment)
+        .map_err(|e| e.to_string())
+}
+
+fn launchd_environment(path: &Path) -> Result<std::collections::BTreeMap<String, String>, String> {
+    match std::fs::metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(std::collections::BTreeMap::new())
+        }
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+        Ok(_) => {}
+    }
+    // plutil handles both XML and binary plists; never scrape XML or silently
+    // overwrite a configuration that could not be read.
+    let output = Command::new("/usr/bin/plutil")
+        .args(["-convert", "json", "-o", "-"])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("read {}: {error}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!("could not read LaunchAgent {}", path.display()));
+    }
+    parse_launchd_environment(&output.stdout)
+}
+
+fn parse_launchd_environment(
+    json: &[u8],
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(json).map_err(|error| format!("invalid LaunchAgent: {error}"))?;
+    match value.get("EnvironmentVariables") {
+        Some(environment) => serde_json::from_value(environment.clone())
+            .map_err(|error| format!("invalid LaunchAgent environment: {error}")),
+        None => Ok(std::collections::BTreeMap::new()),
+    }
 }
 
 /// `bootout` may return before launchd has completely retired the old job.
@@ -1103,6 +1146,61 @@ mod tests {
                 PathBuf::from("/run/systemd/system.control")
             ]
         );
+    }
+
+    #[test]
+    fn restart_reads_existing_launchd_environment_without_importing_shell_values() {
+        let env = parse_launchd_environment(
+            br#"{"EnvironmentVariables":{"PATH":"/opt/tools/bin:/usr/bin","LANG":"en_US.UTF-8"}}"#,
+        )
+        .unwrap();
+        assert_eq!(env.get("PATH").unwrap(), "/opt/tools/bin:/usr/bin");
+        assert_eq!(env.get("LANG").unwrap(), "en_US.UTF-8");
+        assert!(parse_launchd_environment(b"{}").unwrap().is_empty());
+        assert!(parse_launchd_environment(br#"{"EnvironmentVariables":{"PATH":5}}"#).is_err());
+        assert!(parse_launchd_environment(b"invalid").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launchd_environment_reads_xml_and_binary_plists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = service::launchd_plist_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let environment = std::collections::BTreeMap::from([
+            ("PATH".to_string(), "/opt/tools/bin:/usr/bin".to_string()),
+            ("LANG".to_string(), "en_US.UTF-8".to_string()),
+        ]);
+        let spec = ServiceSpec {
+            binary_path: PathBuf::from(
+                "/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent",
+            ),
+            args: vec!["run".into()],
+            scope: ServiceScope::User,
+            environment_path: None,
+        };
+        let body = service::render_launchd_plist_with_environment(
+            &spec,
+            Path::new("/Users/runner"),
+            &environment,
+        )
+        .unwrap();
+        std::fs::write(&path, body).unwrap();
+        for format in ["xml1", "binary1"] {
+            assert!(Command::new("/usr/bin/plutil")
+                .args(["-convert", format])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success());
+            let parsed = launchd_environment(&path).unwrap();
+            for (key, value) in &environment {
+                assert_eq!(parsed.get(key), Some(value));
+            }
+            let rendered = launchd_definition(&spec, dir.path()).unwrap();
+            assert!(rendered.contains("/opt/tools/bin:/usr/bin"));
+            assert!(rendered.contains("en_US.UTF-8"));
+        }
     }
 
     #[test]

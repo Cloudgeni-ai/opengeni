@@ -37,10 +37,23 @@ static INSTALLED_EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new()
 pub fn installed_executable() -> Result<&'static Path, String> {
     INSTALLED_EXECUTABLE
         .get_or_init(|| {
-            std::env::current_exe().map_err(|_| "installed_binary_unavailable".to_string())
+            let path =
+                std::env::current_exe().map_err(|_| "installed_binary_unavailable".to_string())?;
+            // _NSGetExecutablePath can return the launch symlink on macOS.
+            // Resolve it BEFORE selecting an artifact or replacing anything;
+            // otherwise a bundle alias becomes a standalone executable.
+            #[cfg(target_os = "macos")]
+            let path = resolve_macos_install_path(&path)
+                .map_err(|_| "installed_binary_unavailable".to_string())?;
+            Ok(path)
         })
         .as_deref()
         .map_err(Clone::clone)
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn resolve_macos_install_path(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize()
 }
 
 fn apply_verified_update(
@@ -549,6 +562,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn macos_install_alias_resolves_before_artifact_selection_and_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir
+            .path()
+            .join("OpenGeni Agent.app/Contents/MacOS/opengeni-agent");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "sealed original").unwrap();
+        let alias = dir.path().join("agent");
+        symlink(&executable, &alias).unwrap();
+        let resolved = resolve_macos_install_path(&alias).unwrap();
+        assert_eq!(resolved, executable.canonicalize().unwrap());
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        #[cfg(target_os = "macos")]
+        {
+            let mut config = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.0");
+            select_install_target(&mut config, &resolved);
+            assert_eq!(config.target, opengeni_agent_update::APP_BUNDLE_TARGET);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn running_through_an_app_symlink_captures_the_bundle_executable() {
+        const PROBE: &str = "OPENGENI_TEST_APP_ALIAS";
+        if let Some(expected) = std::env::var_os(PROBE) {
+            let installed = installed_executable().unwrap();
+            assert_eq!(installed, Path::new(&expected));
+            let mut config = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.0");
+            select_install_target(&mut config, installed);
+            assert_eq!(config.target, opengeni_agent_update::APP_BUNDLE_TARGET);
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir
+            .path()
+            .join("OpenGeni Agent.app/Contents/MacOS/opengeni-agent");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let alias = dir.path().join("agent");
+        std::os::unix::fs::symlink(&executable, &alias).unwrap();
+        let output = std::process::Command::new(&alias)
+            .args([
+                "--exact",
+                "update::tests::running_through_an_app_symlink_captures_the_bundle_executable",
+                "--nocapture",
+            ])
+            .env(PROBE, executable.canonicalize().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[cfg(target_os = "macos")]
