@@ -50,7 +50,7 @@ beforeAll(async () => {
   await owner.unsafe(`CREATE SCHEMA IF NOT EXISTS opengeni_private;
     CREATE TABLE IF NOT EXISTS schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now());
     CREATE FUNCTION opengeni_private.test_compute_inventory_defaults() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
-      IF NEW.name='0859_compute_lease_group_end_and_sleep.sql' THEN
+      IF NEW.name='0860_compute_lease_group_end_and_sleep.sql' THEN
         EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA opengeni_private GRANT EXECUTE ON FUNCTIONS TO "${hostileRole}"';
       END IF;RETURN NEW;END $$;
     CREATE TRIGGER test_compute_inventory_defaults AFTER INSERT ON schema_migrations FOR EACH ROW EXECUTE FUNCTION opengeni_private.test_compute_inventory_defaults();`);
