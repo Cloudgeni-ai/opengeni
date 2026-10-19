@@ -177,7 +177,9 @@ jobs:
           trap 'git worktree remove --force "$expected"' EXIT
           (
             cd "$expected"
-            bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+            # The clean worktree has no node_modules. Use the controller's locked
+            # formatter instead of Bun auto-installing a different Prettier.
+            bun --no-install "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
             if [ -f scripts/release/drop-ignored-changesets.ts ]; then bun scripts/release/drop-ignored-changesets.ts; fi
             bun scripts/release/lockstep-version.ts
             bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
@@ -510,7 +512,8 @@ jobs:
 
             (
               cd "$expected"
-              bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+              # Keep formatter resolution identical to the installed generator.
+              bun --no-install "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
               if [ -f scripts/release/drop-ignored-changesets.ts ]; then bun scripts/release/drop-ignored-changesets.ts; fi
               bun scripts/release/lockstep-version.ts
               bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
