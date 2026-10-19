@@ -19,6 +19,16 @@ mock.module("@/routes/artifacts", () => ({
     <div data-site-preview={artifactId}>{embedded ? "Embedded Site" : "Full Site"}</div>
   ),
 }));
+// Library rows ask the app who the viewer is, to offer a file's owner its share action.
+mock.module("@/context", () => ({
+  useAppContext: () => ({
+    client: {},
+    accessKeyVersion: 0,
+    workspaces: [{ id: "workspace", accountId: "account", kind: "shared", name: "Design" }],
+    managedSelfContext: null,
+    accessContext: null,
+  }),
+}));
 
 const { SessionEditableArtifactsWorkspace } = await import("./editable-artifacts-workspace");
 

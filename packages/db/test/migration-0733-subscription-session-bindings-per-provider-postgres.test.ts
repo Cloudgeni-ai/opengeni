@@ -499,6 +499,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "target-schema runtime capability get_session_attempt_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, boolean, boolean) is missing or ambiguous",
       "target-schema runtime capability session_private_actor_visible_keys() is missing or ambiguous",
       "runtime role cannot read the subscription plan catalog",
+      // Nor the private-file lookup (0854).
+      "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
       ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
         (table) => `session usage limit private table ${table} is missing or unsafe`,
       ),

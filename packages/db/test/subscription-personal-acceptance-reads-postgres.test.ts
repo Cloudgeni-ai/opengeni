@@ -666,6 +666,10 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       ].map((routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`),
       "target-schema runtime capability create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb) is missing or ambiguous",
     );
+    // 0854 adds the private-file lookup.
+    heldBack.push(
+      "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
+    );
     // 0796-0798 (subscription plans and billing operations) are held back too.
     heldBack.push(
       ...[...BILLING_SUBSCRIPTION_OPERATION_ROUTINES, ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES].map(
