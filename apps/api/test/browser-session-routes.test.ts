@@ -1607,6 +1607,29 @@ describe("BrowserSession route discipline", () => {
     expect(helper).toContain('console.warn("browser.capacity_suspend_failed"');
   });
 
+  test("a resume that reaches a full controller saves its least recently used idle browser once, then retries", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resumeStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"',
+    );
+    const resume = source.slice(
+      resumeStart,
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"'),
+    );
+    // Only a capacity error, and only once, turns into a save-and-retry before
+    // the resume is failed; the browser being resumed is never the one saved.
+    expect(resume).toContain("let capacitySuspendAllowed = true;");
+    expect(
+      resume.indexOf("capacitySuspendAllowed && browserControllerCapacityExhausted(error)"),
+    ).toBeLessThan(resume.indexOf("failBrowserSessionResume(deps.db"));
+    expect(resume).toContain("capacitySuspendAllowed = false;");
+    expect(resume).toContain("if (!(error instanceof BrowserControllerFull)) throw error;");
+    const save = resume.indexOf("await suspendLeastRecentlyUsedBrowser(");
+    expect(save).toBeGreaterThan(-1);
+    expect(resume.slice(save, resume.indexOf(");", save))).toContain("browserSessionId");
+    expect(save).toBeLessThan(resume.lastIndexOf("response = await resumeOnPlacement();"));
+  });
+
   test("resumes an expired resume only after ending its retained controller generation", async () => {
     const source = await readFile(routeUrl, "utf8");
     const resumeStart = source.indexOf(
