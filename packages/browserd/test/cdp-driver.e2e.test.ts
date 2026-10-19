@@ -1777,6 +1777,21 @@ function dataUrl(html: string): string {
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
+/** Kills a tab's renderer the way a real crash or kill would. chrome://kill
+ * ends the renderer at once; Page.crash also writes a crash dump first, which
+ * takes Chromium tens of seconds. */
+async function crashTab(cdp: CdpConnection, targetId: string, sessionId: string): Promise<void> {
+  await cdp.send("Target.setDiscoverTargets", { discover: true });
+  const crashed = cdp.waitForEvent("Target.targetCrashed", {
+    timeoutMs: 10_000,
+    predicate: (params) => params.targetId === targetId,
+  });
+  void cdp
+    .send("Page.navigate", { url: "chrome://kill" }, { sessionId, timeoutMs: 10_000 })
+    .catch(() => undefined);
+  await crashed;
+}
+
 function requireNode(observation: BrowserObservation, role: string, name: string) {
   const node = nodes(observation).find(
     (candidate) => candidate.role.toLowerCase() === role && candidate.name === name,
@@ -2167,7 +2182,7 @@ chromiumE2e(
         targetId: initial.target.id,
         flatten: true,
       });
-      await cdp.send("Page.crash", {}, { sessionId: attached.sessionId }).catch(() => undefined);
+      await crashTab(cdp, initial.target.id, attached.sessionId);
 
       // Both the live attachment and a fresh re-attachment report the crash at once.
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -2233,7 +2248,7 @@ for (const mode of ["start", "restore tabs"] as const) {
           targetId: initial.target.id,
           flatten: true,
         });
-        await cdp.send("Page.crash", {}, { sessionId: attached.sessionId }).catch(() => undefined);
+        await crashTab(cdp, initial.target.id, attached.sessionId);
         await first.detach();
 
         // A new controller generation meets the dead restored tab first, as a
