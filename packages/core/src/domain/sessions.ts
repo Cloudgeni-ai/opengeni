@@ -3703,6 +3703,27 @@ async function createSessionForRequestInFileScope(
     }
   }
   // else "new": leave sandboxGroupId null → own singleton group (group ≡ id).
+  //
+  // A personal (Only me) Connected Machine is approved per chat: its owner's
+  // once/session approval names the parent chat, and nothing an agent does can
+  // approve the owner's machine for another chat. Copying that route would seed
+  // a child whose every turn the claim's `connected_machine.use` grant check
+  // refuses (an opaque 42501 admission block), so an inherited personal route
+  // stays with the parent and the child runs on its group's own home instead.
+  // Only the owner sees the machine as scope "user"; for anyone else the seed
+  // below is refused outright. An explicit machineTarget is not changed here.
+  let withheldPersonalMachineRoute = false;
+  if (inheritedActiveTarget && !payload.targetSandboxId) {
+    const inheritedSandbox = await getSandbox(
+      db,
+      personalResourceSubjectId ? { ...grant, subjectId: personalResourceSubjectId } : grant,
+      inheritedActiveTarget.sandboxId,
+    );
+    if (inheritedSandbox?.kind === "selfhosted" && inheritedSandbox.scope === "user") {
+      inheritedActiveTarget = null;
+      withheldPersonalMachineRoute = true;
+    }
+  }
   // A working dir is only meaningful for a TARGETED machine (it is the chosen
   // box's path/cwd base). Present without a targetSandboxId is a malformed request
   // — reject it at the edge (mirrors the backend:'none' guard) rather than silently
@@ -3799,8 +3820,9 @@ async function createSessionForRequestInFileScope(
     managedSessionGroupBackend(settings.sandboxBackend, effectiveSandboxBackend) === null
   ) {
     throw new HTTPException(422, {
-      message:
-        "self-hosted execution runs on a Connected Machine, but no machine was selected or inherited; connect the parent session to a machine or provide machineTarget",
+      message: withheldPersonalMachineRoute
+        ? "the parent session's Connected Machine is personal and approved only for that session, so a new session cannot use it, and this deployment has no managed sandbox to run it on; provide machineTarget for a machine approved for every session"
+        : "self-hosted execution runs on a Connected Machine, but no machine was selected or inherited; connect the parent session to a machine or provide machineTarget",
     });
   }
   if (payload.startMode !== "realtime" && !model.startsWith("codex/")) {

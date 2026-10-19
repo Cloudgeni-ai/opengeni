@@ -421,6 +421,16 @@ Rules to keep in mind:
   child. The model does not choose the machine again. A selfhosted-only create
   with neither an inherited nor explicit machine is rejected before an unusable
   session starts.
+- A **personal (Only me)** machine route is the exception: it is never copied
+  into a child. Its owner's `once`/`session` approval names the parent chat, and
+  no agent can approve the machine for a new chat, so a copied route would park
+  the child's first turn behind the `connected_machine.use` grant check (an
+  opaque `42501` admission block). The child keeps its group's own home instead
+  (no compute for a `backend:none` group). When the deployment has no managed
+  sandbox for it, the create is refused with a `422` that names the personal
+  machine, before any session is written. An explicit `machineTarget` is
+  unchanged: it is admitted only when the owner holds an `always` grant for that
+  workspace and chat visibility.
 
 The model-facing first-party `session_create` tool makes the dependency
 structural: it accepts an optional `machineTarget` object containing required

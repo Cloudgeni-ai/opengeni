@@ -727,6 +727,9 @@ Unbound `selfhosted` creates leave no queued shell.
 
 Omitted child placement inherits parent machine/root and shared home/group,
 including attached `backend:none`; selfhosted-only children require a machine.
+A personal (Only me) machine route is never inherited: its owner approved it
+for the parent chat only, so the child keeps the group home instead of a
+route whose every claim would be refused.
 
 Machine homes never pre-provision boxes. Explicit `session`/`default` clears the
 machine pointer and verifies managed compute via viewer/lease authority;
