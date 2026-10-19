@@ -1511,7 +1511,11 @@ describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
 
   test("attempt-end cleanup removes the machine's secretfile scope recursively", async () => {
     const mock = new MockAgentResponder();
-    const session = sessionWith(mock, 0, undefined, { workspaceRoot: "/home/user/project" });
+    const session = sessionWith(mock, 0, undefined, {
+      workspaceRoot: "/home/user/project",
+      secretFileFencingSupported: true,
+      secretFileLifecycle: async () => ({ close: async () => {}, complete: async () => {} }),
+    });
     const prepared = await prepareSecretExec("cat {{secretfile:Canary}}", {
       resolver: createStaticSecretResolver({ Canary: CANARY }),
       dialect: null,
@@ -1532,6 +1536,57 @@ describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
     // Idempotent: the scope is forgotten once removed.
     await session.clearSecretFilesForAttempt();
     expect(mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove")).toHaveLength(1);
+  });
+
+  test("secret preparation retains command admission across a reconnect", async () => {
+    const mock = new MockAgentResponder();
+    let connection = CONNECTION_INSTANCE;
+    let admissionReads = 0;
+    const registrations: string[] = [];
+    const request = mock.request.bind(mock);
+    mock.request = async (subject, req, opts) => {
+      if (req.op?.$case === "fsWrite") connection = "successor";
+      return await request(subject, req, opts);
+    };
+    const session = sessionWith(mock, 0, undefined, {
+      resolveOperationAdmission: async () => {
+        admissionReads++;
+        return {
+          connectionInstanceId: connection,
+          workspaceRoot: "/home/user/project",
+          operationResourcePolicy: {
+            memoryMaxBytes: null,
+            memoryHighBytes: null,
+            cpuMaxMillicores: null,
+            revision: 0,
+          },
+          operationResourcePolicySupported: false,
+          operationCpuQuotaSupported: false,
+          secretFileFencingSupported: true,
+          secretFileLifecycle: async (target) => {
+            registrations.push(target.connectionInstanceId);
+            return { close: async () => {}, complete: async () => {} };
+          },
+        };
+      },
+    });
+    const prepared = await prepareSecretExec("cat {{secretfile:Canary}}", {
+      resolver: createStaticSecretResolver({ Canary: CANARY }),
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    await expect(
+      runWithSecretCarry(prepared!.carry, () => session.exec({ cmd: prepared!.text })),
+    ).rejects.toThrow();
+    expect(registrations).toEqual([CONNECTION_INSTANCE]);
+    expect(admissionReads).toBe(2); // Initial command admission, then pre-dispatch revalidation.
+    expect(mock.requests.some((entry) => entry.req.op?.$case === "opStart")).toBe(false);
+    const write = mock.requests.find((entry) => entry.req.op?.$case === "fsWrite")!;
+    expect(write.subject).toContain(CONNECTION_INSTANCE);
+    await session.clearSecretFilesForAttempt();
+    expect(mock.requests.find((entry) => entry.req.op?.$case === "fsRemove")!.subject).toBe(
+      write.subject,
+    );
   });
 });
 

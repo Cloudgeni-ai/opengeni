@@ -199,6 +199,32 @@ and unknown shells return `unsupported_shell`. Commands without references run
 exactly as before, and nothing from a vault is copied into the machine's
 environment. See [`secrets.md`](secrets.md#where-references-resolve).
 
+Secret-file delivery requires the agent's `secretFileFencing` capability. Older
+agents are refused before any secret bytes are sent; update the agent to use
+file references. Before dispatch, the server durably records the attempt,
+scope and physical enrollment identity. Native writes and closure serialize
+under a cross-process lock. Closing a scope persists an irreversible marker
+outside its data directory before removing the files, so a timed-out write or
+replayed request cannot recreate a closed scope. The blocking filesystem worker
+owns the lock even if its network waiter is cancelled.
+
+Attempt cleanup requests closure without depending on continued execution
+authority. A successful native closure receipt retires the cleanup obligation;
+an offline agent, timeout or lost response does not. Sandbox maintenance retries
+pending closures against the same enrollment and public key, including a verified
+successor connection after restart. Startup retries removal for closed scopes
+and preserves still-open scopes across managed handover. A disconnected machine
+cannot be erased remotely: cleanup remains pending until it reconnects. Closure
+markers contain no secret content and do not expire. Separate `run_on` calls use
+separate scopes, so one call cannot close another call's files.
+
+These files expire with the attempt, not with the lifetime of a background
+consumer. Normal finalization drains its writes before closure; recovery may
+close files as soon as the attempt is durably terminal, even while cancelled or
+handed-over commands are finishing. Such commands must not rely on an expired
+attempt's file remaining available. An open attempt's handover does not expire
+its files.
+
 This authority follows the session's **active** execution path. The fleet
 `run_on` tool is a separate API-side, one-off route to a non-active machine. An
 agent call still authorizes and snapshots the frozen initiating human's exact

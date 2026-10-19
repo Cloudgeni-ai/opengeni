@@ -12,6 +12,7 @@
 // single op WITHOUT touching the active pointer.
 
 import type { VaultProviderRegistry } from "@opengeni/vaults";
+import { connectedSecretFileLifecycle } from "./secret-files";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   agentCapabilityEnabled,
@@ -1017,6 +1018,7 @@ function runOnOperationAdmission(
         }
       : undefined;
   return {
+    secretFileFencingSupported: enrollment.agentCapabilities.secretFileFencing === true,
     workspaceId: enrollment.workspaceId,
     connectionInstanceId: enrollment.connectionInstanceId,
     workspaceRoot: enrollment.workspaceRoot,
@@ -1088,6 +1090,10 @@ export async function executeRunOnSelfhostedMachine(
         dialect: null,
         use: secretUse,
       });
+      // A one-off closes when its operation ends, not when the whole attempt
+      // ends. Concurrent or subsequent calls must never share that close fence.
+      if (prepared?.carry)
+        prepared.carry = { ...prepared.carry, scope: `runon-${crypto.randomUUID()}` };
       let res: Awaited<ReturnType<typeof session.exec>>;
       try {
         res = await runWithSecretCarry(
@@ -1360,7 +1366,11 @@ export async function runOnSandbox(
                 : sandbox.workspaceId,
               sandbox.enrollmentId!,
             );
-      return runOnOperationAdmission(services, current);
+      const admission = runOnOperationAdmission(services, current);
+      const owner = options.secretResolver?.principal;
+      return admission && owner?.kind === "attempt"
+        ? { ...admission, secretFileLifecycle: connectedSecretFileLifecycle(services.db, owner) }
+        : admission;
     } catch {
       return null;
     }

@@ -538,6 +538,17 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         platform = platform.with_oom_isolation(cgroups);
     }
     let config_dir = config::config_dir().ok();
+    if let Some(directory) = &config_dir {
+        match platform
+            .clone()
+            .with_secret_file_state(directory.join("secret-file-scopes"))
+        {
+            Ok(ready) => platform = ready,
+            Err(error) => {
+                warn!(%error, "secret-file lifecycle unavailable; private writes disabled");
+            }
+        }
+    }
     let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (next_platform, browser_sidecars) =
         attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone());

@@ -120,6 +120,7 @@ export function canonicalHello(): Hello {
       credentialRenew: false,
       macPermissions: undefined,
       browserControlHttp: false,
+      secretFileFencing: false,
     },
     updateChannel: "stable",
     resumeToken: "resume-token-1",

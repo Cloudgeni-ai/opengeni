@@ -2855,6 +2855,7 @@ describe("release schema contract", () => {
       "0840_retained_process_reconciler_version.sql",
       "0842_site_session_access.sql",
       "0843_indexed_inbox_lineage.sql",
+      "0844_connected_secret_file_cleanup.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -105,6 +105,7 @@ export async function sandboxMaintenanceDue(
       or opengeni_private.session_system_update_outbox_due_v1()
       or opengeni_private.session_list_snapshots_expired_v1()
       or opengeni_private.connected_command_reconciliation_due_v1()
+      or opengeni_private.connected_secret_scopes_due()
       or opengeni_private.connected_command_output_release_due_v1()
       or opengeni_private.terminal_retained_processes_due_v1()
       or opengeni_private.sandbox_ended_epoch_blockers_due_v1()

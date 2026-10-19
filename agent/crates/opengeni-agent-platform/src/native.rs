@@ -48,6 +48,8 @@ pub struct NativePlatform {
     /// memory isolation — its children still receive the minimal relative
     /// `oom_score_adj` preference derived from the live supervisor.
     cgroups: Option<Arc<OpCgroups>>,
+    /// Durable attempt-file closure state, shared across workspace links.
+    secret_files: Option<Arc<crate::secret_files::SecretFiles>>,
 }
 
 impl std::fmt::Debug for NativePlatform {
@@ -59,6 +61,7 @@ impl std::fmt::Debug for NativePlatform {
             .field("has_stream_registry", &self.stream_registry.is_some())
             .field("has_browser_control", &self.browser_control.is_some())
             .field("has_oom_isolation", &self.cgroups.is_some())
+            .field("secret_files", &self.secret_files.is_some())
             .finish()
     }
 }
@@ -87,6 +90,7 @@ impl NativePlatform {
             stream_registry: None,
             browser_control: None,
             cgroups: None,
+            secret_files: None,
         }
     }
 
@@ -101,6 +105,7 @@ impl NativePlatform {
             stream_registry: None,
             browser_control: None,
             cgroups: None,
+            secret_files: None,
         }
     }
 
@@ -136,6 +141,60 @@ impl NativePlatform {
     pub fn with_desktop(mut self, desktop: Arc<dyn DesktopBackend>) -> Self {
         self.desktop = desktop;
         self
+    }
+
+    /// Install the durable scope fence and retry interrupted removals before
+    /// advertising safe secret-file delivery. Open scopes survive handover.
+    ///
+    /// # Errors
+    /// Returns an error if private state cannot be opened or recovered.
+    pub fn with_secret_file_state(mut self, state: PathBuf) -> PlatformResult<Self> {
+        let root = self.resolve_path(crate::secret_files::WIRE_ROOT)?;
+        let store = crate::secret_files::SecretFiles::open(root.clone(), state.clone())
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "private state unavailable; secret file writes disabled");
+                crate::secret_files::SecretFiles::unavailable(root, state)
+            });
+        self.secret_files = Some(Arc::new(store));
+        Ok(self)
+    }
+
+    fn secret_file_store(
+        &self,
+        path: &Path,
+    ) -> PlatformResult<Option<Arc<crate::secret_files::SecretFiles>>> {
+        if let Some(store) = &self.secret_files {
+            if store.contains(path)? {
+                return Ok(Some(store.clone()));
+            }
+        } else if path.starts_with(self.resolve_path(crate::secret_files::WIRE_ROOT)?) {
+            return Err(PlatformError::Unsupported(
+                "attempt-scoped private file fencing is unavailable".into(),
+            ));
+        }
+        Ok(None)
+    }
+
+    fn reject_secret_mutation(&self, path: &Path) -> PlatformResult<()> {
+        if self.secret_file_store(path)?.is_some() {
+            return Err(PlatformError::Unsupported(
+                "private scopes only support managed file writes and scope closure".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn reject_secret_tree_mutation(&self, path: &Path) -> PlatformResult<()> {
+        if let Some(store) = &self.secret_files {
+            if store.intersects(path, true)? {
+                return Err(PlatformError::Unsupported(
+                    "private scope trees cannot be moved or removed".into(),
+                ));
+            }
+        } else {
+            self.reject_secret_mutation(path)?;
+        }
+        Ok(())
     }
 
     /// Resolves a request-supplied machine path. Empty falls back to the agent
@@ -1243,11 +1302,36 @@ impl Platform for NativePlatform {
         &self,
         req: &v1::FsWriteBegin,
     ) -> PlatformResult<Box<dyn crate::transactional_write::TransactionalWrite>> {
-        crate::transactional_write::begin(&self.resolve_path(&req.path)?, req)
+        let path = self.resolve_path(&req.path)?;
+        self.reject_secret_mutation(&path)?;
+        crate::transactional_write::begin(&path, req)
+    }
+
+    fn secret_file_fencing_supported(&self) -> bool {
+        self.secret_files
+            .as_ref()
+            .is_some_and(|store| store.available())
     }
 
     async fn fs_write(&self, req: &v1::FsWriteRequest) -> PlatformResult<v1::FsWriteResponse> {
         let path = self.resolve_path(&req.path)?;
+        if let Some(store) = self.secret_file_store(&path)? {
+            let (scope, name) = store.coordinates(&path)?;
+            let name = name.ok_or_else(|| PlatformError::os("private file name is missing"))?;
+            if req.append {
+                return Err(PlatformError::Unsupported(
+                    "private file append is unsupported".into(),
+                ));
+            }
+            let content = req.content.clone();
+            let bytes_written =
+                crate::spawn_blocking_reserved(move || store.write(&scope, &name, &content))
+                    .await
+                    .map_err(|e| {
+                        PlatformError::os(format!("private file write task failed: {e}"))
+                    })??;
+            return Ok(v1::FsWriteResponse { bytes_written });
+        }
         if req.create_parents {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -1290,6 +1374,7 @@ impl Platform for NativePlatform {
 
     async fn fs_mkdir(&self, req: &v1::FsMkdirRequest) -> PlatformResult<v1::FsMkdirResponse> {
         let path = self.resolve_path(&req.path)?;
+        self.reject_secret_mutation(&path)?;
         let result = if req.parents {
             tokio::fs::create_dir_all(&path).await
         } else {
@@ -1303,6 +1388,8 @@ impl Platform for NativePlatform {
     async fn fs_move(&self, req: &v1::FsMoveRequest) -> PlatformResult<v1::FsMoveResponse> {
         let from = self.resolve_path(&req.from)?;
         let to = self.resolve_path(&req.to)?;
+        self.reject_secret_tree_mutation(&from)?;
+        self.reject_secret_tree_mutation(&to)?;
         if !req.overwrite && tokio::fs::try_exists(&to).await.unwrap_or(false) {
             return Err(PlatformError::Os {
                 message: format!("move: destination exists: {}", to.display()),
@@ -1341,6 +1428,19 @@ impl Platform for NativePlatform {
 
     async fn fs_remove(&self, req: &v1::FsRemoveRequest) -> PlatformResult<v1::FsRemoveResponse> {
         let path = self.resolve_path(&req.path)?;
+        if let Some(store) = self.secret_file_store(&path)? {
+            let (scope, name) = store.coordinates(&path)?;
+            if name.is_some() || !req.recursive {
+                return Err(PlatformError::Unsupported(
+                    "private scopes require recursive scope closure".into(),
+                ));
+            }
+            crate::spawn_blocking_reserved(move || store.close(&scope))
+                .await
+                .map_err(|e| PlatformError::os(format!("private file close task failed: {e}")))??;
+            return Ok(v1::FsRemoveResponse {});
+        }
+        self.reject_secret_tree_mutation(&path)?;
         let meta = tokio::fs::symlink_metadata(&path)
             .await
             .map_err(|e| PlatformError::from_io(&format!("stat {}", path.display()), &e))?;
@@ -1655,6 +1755,150 @@ mod tests {
         let mut platform = NativePlatform::with_root(root.path());
         platform.home_dir = Some(home.path().to_path_buf());
         (platform, root, home)
+    }
+
+    #[tokio::test]
+    async fn private_scope_routes_share_the_durable_fence() {
+        let (mut platform, dir) = rooted();
+        let root = dir.path().join("private/secrets");
+        let state = dir.path().join("state");
+        platform.secret_files = Some(Arc::new(
+            crate::secret_files::SecretFiles::open(root.clone(), state.clone()).unwrap(),
+        ));
+        let path = root
+            .join("attempt-1/value.pem")
+            .to_string_lossy()
+            .into_owned();
+        let request = FsWriteRequest {
+            path: path.clone(),
+            content: b"synthetic-material".as_slice().into(),
+            create_parents: true,
+            mode: 0o666,
+            ..Default::default()
+        };
+        assert!(platform.secret_file_fencing_supported());
+        platform.fs_write(&request).await.unwrap();
+        assert!(platform
+            .fs_write_begin(&v1::FsWriteBegin {
+                path: path.clone(),
+                ..Default::default()
+            })
+            .is_err());
+        assert!(platform
+            .fs_mkdir(&FsMkdirRequest {
+                path: root.join("other").to_string_lossy().into_owned(),
+                parents: true,
+                ..Default::default()
+            })
+            .await
+            .is_err());
+        assert!(platform
+            .fs_move(&FsMoveRequest {
+                from: path.clone(),
+                to: dir.path().join("escaped").to_string_lossy().into_owned(),
+                ..Default::default()
+            })
+            .await
+            .is_err());
+        assert!(platform
+            .fs_write(&FsWriteRequest {
+                path: state
+                    .join("attempt-1.closed")
+                    .to_string_lossy()
+                    .into_owned(),
+                ..request.clone()
+            })
+            .await
+            .is_err());
+        let close = FsRemoveRequest {
+            path: root.join("attempt-1").to_string_lossy().into_owned(),
+            recursive: true,
+        };
+        platform.fs_remove(&close).await.unwrap();
+        platform.fs_remove(&close).await.unwrap();
+        // Neither the data tree nor persistent state may be relocated through
+        // a parent-directory operation that would change lock/marker identity.
+        for ancestor in [
+            dir.path().to_path_buf(),
+            root.parent().unwrap().to_path_buf(),
+        ] {
+            let ancestor = ancestor.to_string_lossy().into_owned();
+            assert!(platform
+                .fs_remove(&FsRemoveRequest {
+                    path: ancestor.clone(),
+                    recursive: true
+                })
+                .await
+                .is_err());
+            assert!(platform
+                .fs_move(&FsMoveRequest {
+                    from: ancestor,
+                    to: dir.path().join("moved").to_string_lossy().into_owned(),
+                    ..Default::default()
+                })
+                .await
+                .is_err());
+        }
+        assert!(platform.fs_write(&request).await.is_err());
+        assert!(!Path::new(&path).exists());
+        // Reopening the native store simulates a fresh agent with retained state.
+        platform.secret_files = Some(Arc::new(
+            crate::secret_files::SecretFiles::open(root, state).unwrap(),
+        ));
+        assert!(platform.fs_write(&request).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unavailable_private_state_preserves_alias_guards_and_unrelated_io() {
+        use std::os::unix::fs::symlink;
+        let (mut platform, dir) = rooted();
+        let private = dir.path().join("private");
+        let state = private.join("state");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::write(&state, b"not a directory").unwrap();
+        let root = private.join("secrets");
+        std::fs::create_dir(&root).unwrap();
+        assert!(crate::secret_files::SecretFiles::open(root.clone(), state.clone()).is_err());
+        platform.secret_files = Some(Arc::new(crate::secret_files::SecretFiles::unavailable(
+            root.clone(),
+            state,
+        )));
+        assert!(!platform.secret_file_fencing_supported());
+        let alias = dir.path().join("alias");
+        symlink(&private, &alias).unwrap();
+        let file = FsWriteRequest {
+            path: dir.path().join("ordinary").to_string_lossy().into_owned(),
+            content: b"ordinary".as_slice().into(),
+            ..Default::default()
+        };
+        platform.fs_write(&file).await.unwrap();
+        assert!(platform
+            .fs_write(&FsWriteRequest {
+                path: alias
+                    .join("secrets/attempt/file")
+                    .to_string_lossy()
+                    .into_owned(),
+                create_parents: true,
+                ..file.clone()
+            })
+            .await
+            .is_err());
+        assert!(platform
+            .fs_remove(&FsRemoveRequest {
+                path: alias.to_string_lossy().into_owned(),
+                recursive: true
+            })
+            .await
+            .is_err());
+        assert!(platform
+            .fs_move(&FsMoveRequest {
+                from: alias.to_string_lossy().into_owned(),
+                to: dir.path().join("moved").to_string_lossy().into_owned(),
+                ..Default::default()
+            })
+            .await
+            .is_err());
     }
 
     #[test]

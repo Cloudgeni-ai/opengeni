@@ -2080,6 +2080,7 @@ version = "0.1.101"
 dependencies = [
  "async-trait",
  "blake3",
+ "fs2",
  "image",
  "nix 0.29.0",
  "opengeni-agent-engine",

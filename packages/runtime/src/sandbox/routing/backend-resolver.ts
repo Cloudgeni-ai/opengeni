@@ -58,6 +58,8 @@ export interface RoutableSandbox {
  * build can never combine a successor's RPC subject with a predecessor's
  * capability state. */
 export interface SelfhostedConnectionBinding {
+  secretFileFencingSupported?: boolean;
+  secretFileLifecycle?: SelfhostedOperationAdmission["secretFileLifecycle"];
   /** Physical machine-origin workspace used in the control-plane subject. */
   workspaceId?: string;
   connectionInstanceId: string;

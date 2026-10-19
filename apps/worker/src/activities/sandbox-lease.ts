@@ -40,6 +40,9 @@ import {
   claimSandboxCheckpointArtifactsForGc,
   claimTerminalRetainedProcesses,
   getEnrollment,
+  claimConnectedSecretScopes,
+  completeConnectedSecretScope,
+  deferConnectedSecretScope,
   countActiveRetainedProcessesByOwnerState,
   countSandboxCheckpointArtifactsByState,
   countExpiredDrainingSandboxLeases,
@@ -1047,6 +1050,7 @@ export function createSandboxLeaseActivities(
       // disabled, otherwise an exact runner exit/loss proof can remain stranded.
       await reconcileConnectedMachineBackgroundCommands(db, settings, observability, service.bus);
       await reconcileConnectedCommandOutputReleases(db, settings, observability, service.bus);
+      await reconcileConnectedSecretFiles(db, settings, observability, service.bus);
 
       // Disabling new lease ownership cannot strand a previously dispatched
       // operation. This only attributes a positive receipt; normal draining
@@ -1570,6 +1574,74 @@ async function adoptLegacyModalCheckpointReceipts(
 /** Reconcile commands only against the immutable physical locator copied at
  * adoption. A successor enrollment connection is intentionally irrelevant: no
  * query or cancellation is ever rebound to it. */
+/** Files survive process replacement. Only the same enrollment key may receive
+ * a cleanup retry; transport loss or a missing machine never proves erasure. */
+export async function reconcileConnectedSecretFiles(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  bus: ActivityServices["bus"],
+  controlRpcOverride?: ControlRpc,
+): Promise<void> {
+  const claims = await claimConnectedSecretScopes(db, {
+    claimId: crypto.randomUUID(),
+    limit: CONNECTED_COMMAND_RECONCILIATION_LIMIT,
+    claimTtlMs: CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS,
+  });
+  const rpc = controlRpcOverride ?? new NatsControlRpc(async () => bus.getRequestConnection());
+  await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
+    try {
+      const machine = await getEnrollment(db, claim.controlWorkspaceId, claim.enrollmentId);
+      if (
+        !machine ||
+        machine.accountId !== claim.accountId ||
+        machine.pubkey !== claim.pubkey ||
+        machine.status !== "active" ||
+        !machine.connectionInstanceId ||
+        !machine.connectionLeaseExpiresAt ||
+        Date.parse(machine.connectionLeaseExpiresAt) <= Date.now() ||
+        machine.agentCapabilities.secretFileFencing !== true
+      ) {
+        await deferConnectedSecretScope(
+          db,
+          claim,
+          connectedCommandReconciliationRetryMs(
+            claim.attempts,
+            settings.sandboxLeaseReaperPeriodMs,
+          ),
+        );
+        return;
+      }
+      const response = await rpc.request(
+        subjectFor(claim.controlWorkspaceId, claim.enrollmentId, machine.connectionInstanceId),
+        {
+          requestId: crypto.randomUUID(),
+          resourcePolicy: undefined,
+          epoch: 0,
+          op: {
+            $case: "fsRemove",
+            fsRemove: { path: `/tmp/opengeni-private/secrets/${claim.scope}`, recursive: true },
+          },
+        },
+        { timeoutMs: settings.sandboxSelfhostedControlTimeoutMs },
+      );
+      if (response.error || response.result?.$case !== "fsRemove")
+        throw new Error("secret scope closure not acknowledged");
+      await completeConnectedSecretScope(db, claim, claim.id, claim.claimId);
+    } catch (error) {
+      observability.warn("sandbox reaper: secret scope cleanup remains pending", {
+        scopeId: claim.id,
+        errorType: error instanceof Error ? error.name : "unknown",
+      });
+      await deferConnectedSecretScope(
+        db,
+        claim,
+        connectedCommandReconciliationRetryMs(claim.attempts, settings.sandboxLeaseReaperPeriodMs),
+      );
+    }
+  });
+}
+
 export async function reconcileConnectedMachineBackgroundCommands(
   db: ActivityServices["db"],
   settings: ActivityServices["settings"],

@@ -291,7 +291,16 @@ export interface SelfhostedBackgroundCommandAdoption {
 
 /** Exact command-admission snapshot. A worker resolves this immediately before
  * every exec/Git admission; retries and already-started operations retain it. */
+export type SelfhostedSecretFileLifecycle = (target: {
+  scope: string;
+  controlWorkspaceId: string;
+  enrollmentId: string;
+  connectionInstanceId: string;
+}) => Promise<{ close(): Promise<void>; complete(): Promise<void> }>;
+
 export interface SelfhostedOperationAdmission {
+  secretFileFencingSupported?: boolean;
+  secretFileLifecycle?: SelfhostedSecretFileLifecycle | undefined;
   transactionalFsWriteSupported?: boolean;
   transactionalFsWriteMachineSupported?: boolean;
   /** The live runner serves in-process browser/computer controller requests. */
@@ -318,6 +327,8 @@ export interface SelfhostedOperationAdmission {
 }
 
 export interface SelfhostedSessionDeps {
+  secretFileFencingSupported?: boolean;
+  secretFileLifecycle?: SelfhostedSecretFileLifecycle | undefined;
   /** Exact live daemon capability; absent preserves legacy small-file writes. */
   transactionalFsWriteSupported?: boolean;
   /** The exact live daemon also accepts machine-addressed (epoch-zero) uploads. */
@@ -496,6 +507,18 @@ export class SelfhostedSession {
   private readonly controlRpc: ControlRpc;
   /** Attempt scopes this session wrote `{{secretfile:…}}` files under. */
   private readonly secretScopes = new Set<string>();
+  private readonly closedSecretScopes = new Set<string>();
+  private secretFilesClosed = false;
+  private readonly secretRegistrations = new Map<
+    string,
+    {
+      scope: string;
+      admission: Awaited<ReturnType<SelfhostedSession["admitOperation"]>>;
+      receipt: Promise<{ close(): Promise<void>; complete(): Promise<void> }>;
+    }
+  >();
+  private readonly secretFileFencingSupported: boolean;
+  private readonly secretFileLifecycle: SelfhostedSecretFileLifecycle | undefined;
   private readonly relay: SelfhostedRelayConfig;
   private readonly terminalScopeId: string;
   private readonly epoch: number;
@@ -602,6 +625,8 @@ export class SelfhostedSession {
     this.controlWorkspaceId = deps.controlWorkspaceId ?? deps.workspaceId;
     this.agentId = deps.agentId;
     this.controlRpc = deps.controlRpc;
+    this.secretFileFencingSupported = deps.secretFileFencingSupported === true;
+    this.secretFileLifecycle = deps.secretFileLifecycle;
     this.relay = deps.relay;
     this.terminalScopeId = deps.terminalScopeId ?? "";
     this.epoch = deps.epoch ?? 0;
@@ -705,6 +730,8 @@ export class SelfhostedSession {
   }
 
   private async admitOperation(commandPolicy: boolean): Promise<{
+    secretFileFencingSupported?: boolean;
+    secretFileLifecycle?: SelfhostedSecretFileLifecycle | undefined;
     transactionalFsWriteSupported: boolean;
     transactionalFsWriteMachineSupported: boolean;
     browserControlHttpSupported: boolean;
@@ -723,6 +750,8 @@ export class SelfhostedSession {
         );
       }
       return {
+        secretFileFencingSupported: this.secretFileFencingSupported,
+        secretFileLifecycle: this.secretFileLifecycle,
         controlWorkspaceId: this.controlWorkspaceId,
         connectionInstanceId: this.connectionInstanceId,
         subject: this.subject,
@@ -756,6 +785,8 @@ export class SelfhostedSession {
       );
     }
     return {
+      secretFileFencingSupported: resolved.secretFileFencingSupported === true,
+      secretFileLifecycle: resolved.secretFileLifecycle,
       controlWorkspaceId: resolved.workspaceId ?? this.controlWorkspaceId,
       connectionInstanceId: resolved.connectionInstanceId,
       subject: subjectFor(
@@ -1011,6 +1042,7 @@ export class SelfhostedSession {
   private async prepareSecretExec(
     args: SelfhostedExecArgs,
     requestedShell: string | undefined,
+    admission: Awaited<ReturnType<SelfhostedSession["admitOperation"]>>,
   ): Promise<{ command: string; shell: string; env: Record<string, string> } | null> {
     const carry = secretExecCarryFor(args.cmd);
     if (!carry) return null;
@@ -1018,8 +1050,8 @@ export class SelfhostedSession {
     const spliced = spliceCarry(carry, dialect);
     const command = carry.spliced ? args.cmd : args.cmd.split(carry.command).join(spliced.text);
     const env = await secretExecEnvironment(carry, spliced, async (file) => {
-      await this.writePlacementPrivate({ ...file, createParents: true });
       this.secretScopes.add(carry.scope);
+      await this.writePlacementPrivateWithAdmission({ ...file, createParents: true }, admission);
     });
     const shell = requestedShell || (dialect === "powershell" ? "powershell" : "/bin/sh");
     return { command, shell, env };
@@ -1032,21 +1064,54 @@ export class SelfhostedSession {
    */
   async clearSecretFilesForAttempt(scope?: string): Promise<void> {
     const scopes = scope === undefined ? [...this.secretScopes] : [scope];
+    if (scope === undefined) this.secretFilesClosed = true;
+    const failures: unknown[] = [];
     for (const entry of scopes) {
-      const path = selfhostedPlacementPrivatePath(secretScopeDirectory(entry));
-      try {
-        const result = await this.call({
-          $case: "fsRemove",
-          fsRemove: { path, recursive: true },
-        });
-        if (result.$case !== "fsRemove") {
-          throw new Error(`selfhosted clearSecretFiles: unexpected result ${result.$case}`);
+      this.closedSecretScopes.add(entry);
+      for (const [key, registration] of this.secretRegistrations) {
+        if (registration.scope !== entry) continue;
+        try {
+          const receipt = await registration.receipt;
+          await receipt.close();
+          // Scope cleanup does not need a new execution grant from a dead attempt.
+          // Keep the original machine locator; maintenance verifies successors.
+          await this.secretFileRequest(
+            {
+              $case: "fsRemove",
+              fsRemove: { path: secretScopeDirectory(entry), recursive: true },
+            },
+            registration.admission,
+            0,
+          );
+          await receipt.complete();
+          this.secretRegistrations.delete(key);
+        } catch (error) {
+          failures.push(error);
         }
-      } catch (error) {
-        if (!(error instanceof SelfhostedControlError && error.osNotFound)) throw error;
       }
-      this.secretScopes.delete(entry);
+      if (
+        ![...this.secretRegistrations.values()].some((registration) => registration.scope === entry)
+      )
+        this.secretScopes.delete(entry);
     }
+    if (failures.length) throw new AggregateError(failures, "Secret file cleanup remains pending");
+  }
+
+  private async secretFileRequest(
+    op: NonNullable<ControlRequest["op"]>,
+    admission: Awaited<ReturnType<SelfhostedSession["admitOperation"]>>,
+    epoch = this.epoch,
+  ): Promise<NonNullable<ControlResponse["result"]>> {
+    const requestId = crypto.randomUUID();
+    const response = await this.controlRpc.request(
+      admission.subject,
+      { requestId, epoch, resourcePolicy: undefined, op },
+      { timeoutMs: this.timeoutMs },
+    );
+    if (response.error) throw agentErrorToControlError(response.error, requestId);
+    if (!response.result || response.result.$case !== op.$case)
+      throw new Error("selfhosted private file response mismatch");
+    return response.result;
   }
 
   /** Channel-A `exec`: run a command on the machine and return its output. */
@@ -1091,7 +1156,7 @@ export class SelfhostedSession {
       // (`/bin/sh -c` on POSIX, `powershell -NoProfile -NonInteractive
       // -Command` on Windows) so the splice matches the parser. `args.cmd`
       // (references) remains the command recorded for background adoption.
-      const secret = await this.prepareSecretExec(args, requestedShell);
+      const secret = await this.prepareSecretExec(args, requestedShell, admission);
       const commandText = secret?.command ?? args.cmd;
       const shell = secret?.shell ?? requestedShell;
       execReq = {
@@ -1956,10 +2021,72 @@ export class SelfhostedSession {
     createParents?: boolean;
     runAs?: string;
   }): Promise<number> {
+    return await this.writePlacementPrivateWithAdmission(args);
+  }
+
+  private async writePlacementPrivateWithAdmission(
+    args: Parameters<SelfhostedSession["writePlacementPrivate"]>[0],
+    commandAdmission?: Awaited<ReturnType<SelfhostedSession["admitOperation"]>>,
+  ): Promise<number> {
     const path = selfhostedPlacementPrivatePath(args.path);
     const content = typeof args.content === "string" ? encoder.encode(args.content) : args.content;
     if (content.byteLength > SELFHOSTED_PLACEMENT_PRIVATE_FILE_MAX_BYTES) {
       throw new TypeError("selfhosted placement-private content is invalid");
+    }
+    const secret = /^\/tmp\/opengeni-private\/secrets\/([A-Za-z0-9_-]{1,128})\/[^/]+$/u.exec(path);
+    if (path.startsWith("/tmp/opengeni-private/secrets/") && !secret)
+      throw new TypeError("Invalid secret file path");
+    if (secret) {
+      const scope = secret[1]!;
+      if (this.secretFilesClosed || this.closedSecretScopes.has(scope))
+        throw new Error("Secret file scope is closed");
+      this.secretScopes.add(scope);
+      const admission = commandAdmission ?? (await this.admitOperation(false));
+      if (!admission.secretFileFencingSupported || !admission.secretFileLifecycle) {
+        throw new SelfhostedControlError({
+          code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+          reason: null,
+          retryable: false,
+          message: !admission.secretFileFencingSupported
+            ? "This Connected Machine needs an agent update to safely deliver secret files; no secret file was written."
+            : "Secret files require an active, owned attempt; no secret file was written.",
+        });
+      }
+      if (this.secretFilesClosed || this.closedSecretScopes.has(scope))
+        throw new Error("Secret file scope is closed");
+      const key = JSON.stringify([admission.controlWorkspaceId, this.agentId, scope]);
+      let registered = this.secretRegistrations.get(key);
+      if (!registered) {
+        registered = {
+          scope,
+          admission,
+          receipt: admission.secretFileLifecycle({
+            scope,
+            controlWorkspaceId: admission.controlWorkspaceId,
+            enrollmentId: this.agentId,
+            connectionInstanceId: admission.connectionInstanceId,
+          }),
+        };
+        this.secretRegistrations.set(key, registered);
+      }
+      await registered.receipt;
+      if (this.secretFilesClosed || this.closedSecretScopes.has(scope))
+        throw new Error("Secret file scope is closed");
+      const result = await this.secretFileRequest(
+        {
+          $case: "fsWrite",
+          fsWrite: {
+            path,
+            content,
+            createParents: true,
+            append: false,
+            mode: 0o600,
+          },
+        },
+        admission,
+      );
+      if (result.$case !== "fsWrite") throw new Error("selfhosted private file response mismatch");
+      return Number(result.fsWrite.bytesWritten);
     }
     const result = await this.call({
       $case: "fsWrite",

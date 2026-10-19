@@ -2291,6 +2291,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             operation_cpu_quota: link.platform.operation_cpu_quota_supported(),
             transactional_fs_write: link.platform.transactional_fs_write_supported(),
             transactional_fs_write_machine: link.platform.transactional_fs_write_supported(),
+            secret_file_fencing: link.platform.secret_file_fencing_supported(),
             credential_renew: true,
             mac_permissions,
             browser_control_http: link.platform.browser_control_http_supported(),

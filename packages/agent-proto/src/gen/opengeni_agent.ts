@@ -1124,6 +1124,11 @@ export interface Capabilities {
    * epoch; callers MUST NOT invent one for a machine-addressed operation.
    */
   transactionalFsWriteMachine: boolean;
+  /**
+   * Reserved attempt-private secret scopes have durable, irreversible closure.
+   * Do not materialize secret files on a runner without this capability.
+   */
+  secretFileFencing: boolean;
 }
 
 /** The three macOS Privacy & Security grants desktop capture and input need. */
@@ -3102,6 +3107,7 @@ function createBaseCapabilities(): Capabilities {
     macPermissions: undefined,
     browserControlHttp: false,
     transactionalFsWriteMachine: false,
+    secretFileFencing: false,
   };
 }
 
@@ -3160,6 +3166,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.transactionalFsWriteMachine !== false) {
       writer.uint32(144).bool(message.transactionalFsWriteMachine);
+    }
+    if (message.secretFileFencing !== false) {
+      writer.uint32(152).bool(message.secretFileFencing);
     }
     return writer;
   },
@@ -3315,6 +3324,14 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.transactionalFsWriteMachine = reader.bool();
           continue;
         }
+        case 19: {
+          if (tag !== 152) {
+            break;
+          }
+
+          message.secretFileFencing = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3392,6 +3409,11 @@ export const Capabilities: MessageFns<Capabilities> = {
         : isSet(object.transactional_fs_write_machine)
         ? globalThis.Boolean(object.transactional_fs_write_machine)
         : false,
+      secretFileFencing: isSet(object.secretFileFencing)
+        ? globalThis.Boolean(object.secretFileFencing)
+        : isSet(object.secret_file_fencing)
+        ? globalThis.Boolean(object.secret_file_fencing)
+        : false,
     };
   },
 
@@ -3451,6 +3473,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.transactionalFsWriteMachine !== false) {
       obj.transactionalFsWriteMachine = message.transactionalFsWriteMachine;
     }
+    if (message.secretFileFencing !== false) {
+      obj.secretFileFencing = message.secretFileFencing;
+    }
     return obj;
   },
 
@@ -3481,6 +3506,7 @@ export const Capabilities: MessageFns<Capabilities> = {
       : undefined;
     message.browserControlHttp = object.browserControlHttp ?? false;
     message.transactionalFsWriteMachine = object.transactionalFsWriteMachine ?? false;
+    message.secretFileFencing = object.secretFileFencing ?? false;
     return message;
   },
 };

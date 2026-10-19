@@ -45,6 +45,7 @@ import {
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 export * from "./knowledge-entries-schema";
+export * from "./connected-secret-files-schema";
 export * from "./subscription-core-schema";
 import type { ResolvedAgentConfig, SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";

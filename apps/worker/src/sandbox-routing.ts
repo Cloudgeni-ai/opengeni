@@ -1,4 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
+import { connectedSecretFileLifecycle } from "@opengeni/core";
+import type { ConnectedSecretOwner } from "@opengeni/db";
 // apps/worker/src/sandbox-routing.ts — wire the agent-loop-free routing proxy
 // (`@opengeni/runtime` RoutingSandboxSession + makeActiveBackendResolver) to the
 // real DB pointer + the live NATS control plane for the WORKER TURN path (M7).
@@ -1078,7 +1080,17 @@ export function wrapTurnBoxWithRouting(
     resolveSelfhostedConnection: async (sandbox) => {
       if (!sandbox.enrollmentId) return null;
       const enrollment = await resolveRoutedMachineConnection(db, ids, sandbox);
-      return connectionBindingFor(services, enrollment);
+      return connectionBindingFor(
+        services,
+        enrollment,
+        ids.workspaceMutationFence
+          ? {
+              ...ids.workspaceMutationFence,
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+            }
+          : undefined,
+      );
     },
     relay: relayConfigFromSettings(settings),
     // A selfhosted swap target runs real commands too, so give it the same split
@@ -1397,7 +1409,17 @@ export function wrapLazyTurnBoxWithRouting(
     resolveSelfhostedConnection: async (sandbox) => {
       if (!sandbox.enrollmentId) return null;
       const enrollment = await resolveRoutedMachineConnection(db, ids, sandbox);
-      return connectionBindingFor(services, enrollment);
+      return connectionBindingFor(
+        services,
+        enrollment,
+        ids.workspaceMutationFence
+          ? {
+              ...ids.workspaceMutationFence,
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+            }
+          : undefined,
+      );
     },
     relay: relayConfigFromSettings(settings),
     ...selfhostedResolverTimeouts(settings),
@@ -1692,10 +1714,15 @@ function opStreamDepsFor(
 export function connectionBindingFor(
   services: RoutingWiringServices,
   enrollment: EnrollmentRecord | null,
+  secretOwner?: ConnectedSecretOwner,
 ): SelfhostedConnectionBinding | null {
   if (!enrollment?.connectionInstanceId) return null;
   const opStream = opStreamDepsFor(services, enrollment.opStream === true);
   return {
+    secretFileFencingSupported: enrollment.agentCapabilities.secretFileFencing === true,
+    ...(secretOwner
+      ? { secretFileLifecycle: connectedSecretFileLifecycle(services.db, secretOwner) }
+      : {}),
     workspaceId: enrollment.workspaceId,
     connectionInstanceId: enrollment.connectionInstanceId,
     workspaceRoot: enrollment.workspaceRoot,
@@ -1809,7 +1836,18 @@ export async function establishSelfhostedTurnSession(
                 requireActiveSandbox: true,
               })
             : null;
-      const binding = connectionBindingFor(services, enrollment);
+      const binding = connectionBindingFor(
+        services,
+        enrollment,
+        args.backgroundCommandAttempt
+          ? {
+              ...args.backgroundCommandAttempt,
+              accountId: args.accountId,
+              workspaceId: args.workspaceId,
+              sessionId: args.sessionId,
+            }
+          : undefined,
+      );
       if (!binding) return null;
       if (!binding.workspaceRoot) {
         throw new ActiveBackendUnresolvableError(

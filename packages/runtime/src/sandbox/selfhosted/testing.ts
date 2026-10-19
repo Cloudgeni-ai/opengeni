@@ -155,7 +155,13 @@ export class MockAgentResponder implements ControlRpc {
       }
       case "fsRemove": {
         const path = normalize(op.fsRemove.path);
-        if (!this.files.delete(path)) {
+        let removed = this.files.delete(path);
+        if (op.fsRemove.recursive) {
+          for (const file of this.files.keys()) {
+            if (file.startsWith(`${path}/`)) removed = this.files.delete(file) || removed;
+          }
+        }
+        if (!removed) {
           return errorResponse(
             req.requestId,
             ErrorCode.ERROR_CODE_NOT_FOUND,

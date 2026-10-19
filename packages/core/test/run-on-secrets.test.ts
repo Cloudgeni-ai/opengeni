@@ -94,6 +94,23 @@ async function runOn(machine: CapturingMachine, op: RunOnOp, enabled = true) {
       controlTimeoutMs: 30_000,
       execTimeoutMs: 120_000,
       secretResolver: createStaticSecretResolver({ Canary: CANARY }, { enabled }),
+      resolveOperationAdmission: async () => ({
+        workspaceId: WORKSPACE,
+        agentId: AGENT,
+        connectionInstanceId: CONNECTION_INSTANCE,
+        workspaceRoot: machine.workspaceRoot,
+        opStream: machine.opStream,
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+        },
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
+        secretFileFencingSupported: true,
+        secretFileLifecycle: async () => ({ close: async () => {}, complete: async () => {} }),
+      }),
     },
     "target",
     op,
@@ -137,6 +154,16 @@ describe("run_on secret delivery (DL-9)", () => {
     expect(machine.removes).toHaveLength(1);
     expect(machine.removes[0]!.recursive).toBe(true);
     expect(file!.path.startsWith(`${machine.removes[0]!.path}/`)).toBe(true);
+  });
+
+  test("concurrent one-off calls never close another call's secret scope", async () => {
+    const machine = new CapturingMachine("/home/user/project");
+    const results = await Promise.all([
+      runOn(machine, { kind: "exec", cmd: "wc -c {{secretfile:Canary}}" }),
+      runOn(machine, { kind: "exec", cmd: "wc -c {{secretfile:Canary}}" }),
+    ]);
+    expect(results.every((result) => result.ok)).toBe(true);
+    expect(new Set(machine.removes.map((remove) => remove.path)).size).toBe(2);
   });
 
   test("write resolves its content; read resolves nothing", async () => {

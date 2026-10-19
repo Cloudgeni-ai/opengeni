@@ -593,6 +593,7 @@ export {
   type SelfhostedSessionBuild,
   type SelfhostedOperationResourcePolicy,
   type SelfhostedOperationAdmission,
+  type SelfhostedSecretFileLifecycle,
   type SelfhostedRelayConfig,
   type SelfhostedExecArgs,
   type SelfhostedExecResult,

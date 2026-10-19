@@ -39,6 +39,7 @@ mod native;
 #[cfg(unix)]
 mod process_cleanup;
 mod pty;
+mod secret_files;
 pub mod service;
 pub mod transactional_write;
 mod work_scope;
@@ -376,6 +377,11 @@ pub trait Platform: Send + Sync {
 
     /// Lists a directory, optionally recursively.
     async fn fs_list(&self, req: &v1::FsListRequest) -> PlatformResult<v1::FsListResponse>;
+
+    /// Whether attempt-private file writes and closure share a durable fence.
+    fn secret_file_fencing_supported(&self) -> bool {
+        false
+    }
 
     /// Creates a directory (optionally `mkdir -p`).
     async fn fs_mkdir(&self, req: &v1::FsMkdirRequest) -> PlatformResult<v1::FsMkdirResponse>;

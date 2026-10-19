@@ -85,6 +85,7 @@ export * from "./default-session-model";
 // (`swapActiveSandbox` + `FleetContext`). apps/api re-imports these for its MCP
 // fleet tools, the machines REST route, and the rest of the sandbox layer.
 export * from "./sandbox/fleet";
+export * from "./sandbox/secret-files";
 export * from "./sandbox/routing";
 export * from "./sandbox/runtime-settings";
 

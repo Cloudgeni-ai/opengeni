@@ -683,6 +683,20 @@ before spawn and retains timed-out commands until matching physical results.
 The private controller update transaction fences new HTTP requests, including
 queued JSON, before the host atomically seals final admission. Operation-result
 retention and consumer-generation acknowledgments remain engine-owned.
+
+Attempt-scoped secret files use the same physical-work ownership rule. A
+registered-before-dispatch `connected_secret_file_scopes` ledger retains
+content-free cleanup ownership independently of session/attempt deletion.
+Native reserved-namespace writes and scope removal share an OS lock and a
+durable closed marker outside the removable directory; cancelled async waiters
+cannot release the physical writer's lock. Closed scopes never reopen, including
+after reconnect or restart. Sandbox maintenance claims unfinished closures only
+after explicit cleanup intent or the owning attempt ends, and retires them only
+on a positive native removal acknowledgement from the same enrolled public key.
+The successor connection may change, but the physical identity cannot. Offline
+and revoked machines retain pending obligations, not false erasure receipts.
+The agent capability gate refuses unsafe old-agent file delivery. See
+[Connected Machine secret-file lifecycle](connected-machines.md).
 Mac updates preserve signed bundles and
 [ACLs](../agent/TRANSACTIONAL-WRITES.md).
 

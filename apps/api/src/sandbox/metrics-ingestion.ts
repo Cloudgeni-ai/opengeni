@@ -896,6 +896,7 @@ export function helloRuntimeCapabilities(hello: Hello): Record<string, boolean> 
     operationCpuQuota: caps.operationCpuQuota === true,
     transactionalFsWrite: caps.transactionalFsWrite === true,
     transactionalFsWriteMachine: caps.transactionalFsWriteMachine === true,
+    secretFileFencing: caps.secretFileFencing === true,
     credentialRenew: caps.credentialRenew === true,
     browserControlHttp: caps.browserControlHttp === true,
     screenControl: caps.consentedScreenControl === true,

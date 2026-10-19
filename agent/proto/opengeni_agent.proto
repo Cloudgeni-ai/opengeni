@@ -214,6 +214,9 @@ message Capabilities {
   // Requires transactional_fs_write. Older runners require a nonzero session
   // epoch; callers MUST NOT invent one for a machine-addressed operation.
   bool transactional_fs_write_machine = 18;
+  // Reserved attempt-private secret scopes have durable, irreversible closure.
+  // Do not materialize secret files on a runner without this capability.
+  bool secret_file_fencing = 19;
 }
 
 // The three macOS Privacy & Security grants desktop capture and input need.

@@ -1,4 +1,5 @@
 export { getSessionMachineAccess } from "./session-machine-access";
+export * from "./connected-secret-files";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 export * from "./site-session-access";
 import { siteSessionAccessFilter } from "./site-session-access";
