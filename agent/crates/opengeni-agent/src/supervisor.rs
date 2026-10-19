@@ -2472,6 +2472,7 @@ fn serve_op_control(
 /// The three macOS desktop permissions, read without prompting. `None` off
 /// macOS desktop builds, where the control plane must treat them as unknown.
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+#[allow(clippy::unnecessary_wraps)] // Shared signature with the non-macOS implementation below.
 fn mac_desktop_permissions() -> Option<v1::MacDesktopPermissions> {
     let grants = opengeni_agent_platform::desktop_grants();
     Some(v1::MacDesktopPermissions {
