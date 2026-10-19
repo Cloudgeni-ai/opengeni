@@ -9,7 +9,7 @@ test("a machine allowed in another workspace is addressed where it is enrolled",
   const enrollment = {
     workspaceId: "machine-home-workspace",
     connectionInstanceId: "runner-a",
-    workspaceRoot: "/Users/person",
+    workspaceRoot: "/home/user/project",
     opStream: false,
     operationPolicy: null,
     agentCapabilities: {
@@ -21,7 +21,7 @@ test("a machine allowed in another workspace is addressed where it is enrolled",
   expect(channelAConnectionBinding({ settings: testSettings() }, enrollment)).toMatchObject({
     workspaceId: "machine-home-workspace",
     connectionInstanceId: "runner-a",
-    workspaceRoot: "/Users/person",
+    workspaceRoot: "/home/user/project",
     transactionalFsWriteSupported: true,
     transactionalFsWriteMachineSupported: true,
     browserControlHttpSupported: true,
