@@ -20,6 +20,18 @@ import {
 const root = fileURLToPath(new URL("../../", import.meta.url));
 
 describe("lockstep package versioning", () => {
+  test("both clean-worktree CI reproductions disable runtime auto-install", async () => {
+    const workflow = await readFile(join(root, ".github/workflows/ci.yml"), "utf8");
+    expect(
+      workflow.match(
+        /bun --no-install "\$GITHUB_WORKSPACE\/node_modules\/@changesets\/cli\/bin\.js" version/g,
+      ),
+    ).toHaveLength(2);
+    expect(workflow).not.toContain(
+      'bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version',
+    );
+  });
+
   test("every published package is in one fixed Changesets group at one version", async () => {
     const config = await Bun.file(join(root, ".changeset/config.json")).json();
     const published = publishableWorkspacePackages(root);
@@ -115,6 +127,17 @@ describe("lockstep package versioning", () => {
           `${JSON.stringify({ name, version: "1.0.0" }, null, 2)}\n`,
         );
       }
+      const browserDirectory = join(dir, "packages", "browserd");
+      await mkdir(browserDirectory, { recursive: true });
+      await writeFile(
+        join(browserDirectory, "package.json"),
+        JSON.stringify({
+          name: "@opengeni/browserd",
+          version: "1.0.0",
+          private: true,
+          dependencies: { "@opengeni/contracts": "workspace:*" },
+        }),
+      );
       await writeFile(
         join(dir, ".changeset/config.json"),
         JSON.stringify({
@@ -128,6 +151,10 @@ describe("lockstep package versioning", () => {
         }),
       );
       await writeFile(join(dir, ".changeset/fix.md"), '---\n"@opengeni/jev": patch\n---\n\nFix.\n');
+      await writeFile(
+        join(dir, ".changeset/browser.md"),
+        '---\n"@opengeni/browserd": patch\n---\n\nFirst paragraph.\n\nSecond paragraph.\n',
+      );
       const env = isolatedGitEnvironment({
         HOME: join(dir, "home"),
         GIT_AUTHOR_NAME: "Fixture",
@@ -153,7 +180,16 @@ describe("lockstep package versioning", () => {
       await run(["git", "init", "-b", "main"]);
       await run(["git", "add", "-A"]);
       await run(["git", "commit", "-m", "fixture"]);
-      await run(["bun", join(root, "node_modules/@changesets/cli/bin.js"), "version"]);
+      // Like CI's expected worktree, this fixture has no node_modules. Without
+      // --no-install Bun may resolve a newer formatter outside the locked CLI.
+      await run([
+        "bun",
+        "--no-install",
+        join(root, "node_modules/@changesets/cli/bin.js"),
+        "version",
+      ]);
+      const browserChangelog = await readFile(join(browserDirectory, "CHANGELOG.md"), "utf8");
+      expect(browserChangelog).toContain("Second paragraph.\n\n  - @opengeni/contracts@1.0.1");
       for (const name of names) {
         const path = join(dir, "packages", name.slice("@opengeni/".length), "package.json");
         expect(JSON.parse(await readFile(path, "utf8")).version).toBe("1.0.1");
