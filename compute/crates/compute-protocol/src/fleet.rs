@@ -1,6 +1,6 @@
-//! The fleet service's host API, and the envelope on the service's
+//! The control service's host API, and the envelope on the service's
 //! requests to hosts
-//! ([ADR 18](../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+//! ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)).
 //!
 //! A host sends JSON over HTTPS to the service: it registers
 //! ([`Register`]), renews its lease ([`Renew`]) and, between renewals,

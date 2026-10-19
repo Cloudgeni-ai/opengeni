@@ -1,6 +1,6 @@
 name: Compute CI
 
-# Checks for compute/, the sandbox fabric (Rust). Runs on pull requests and
+# Checks for compute/, Opengeni's own sandbox system (Rust). Runs on pull requests and
 # pushes to main that touch compute/, and on demand; the path filters keep it
 # off every other change. Nothing else in the repository depends on it.
 #

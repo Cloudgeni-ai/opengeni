@@ -63,7 +63,7 @@ cat >/usr/local/sbin/compute-host-certificate <<'CERT'
 # Gets this host a 30-day certificate from the fleet's authority when it
 # has none or its own expires within 10 days, then restarts the agent to
 # use it (its VMs keep running). The authority's certificate is the trust
-# root for the fleet service.
+# root for the control service.
 set -euo pipefail
 export PATH=$PATH:/snap/bin
 meta() { curl -fsS -H Metadata-Flavor:Google "http://metadata.google.internal/computeMetadata/v1/$1"; }

@@ -1,5 +1,5 @@
 //! The lease gate: whether this host may run its VMs now, as the lease it
-//! holds from the fleet service says, and which requests from the service
+//! holds from the control service says, and which requests from the service
 //! it may still carry out.
 //!
 //! The renewer moves the deadline forward as renewals are accepted; the
@@ -37,7 +37,7 @@ pub(crate) fn nanos(at: At) -> u64 {
     u64::try_from(at.since_origin().as_nanos()).unwrap_or(u64::MAX)
 }
 
-/// What a request from the fleet service was admitted under: the
+/// What a request from the control service was admitted under: the
 /// registration it named and the renewal number it was stamped with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Admission {

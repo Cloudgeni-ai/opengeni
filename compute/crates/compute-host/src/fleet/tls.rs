@@ -1,4 +1,4 @@
-//! Mutual TLS between a host and the fleet service.
+//! Mutual TLS between a host and the control service.
 //!
 //! Each side proves itself with a certificate, and each trusts only the
 //! other side's authority: a host trusts the service's, the service the

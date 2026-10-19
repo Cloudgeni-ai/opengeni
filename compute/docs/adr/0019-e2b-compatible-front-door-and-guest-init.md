@@ -7,7 +7,7 @@ Status: Accepted, 2026-10-17
 Clients built for E2B, its SDKs and Opengeni's e2b backend among them,
 expect two surfaces: a REST API for sandbox lifecycle, and envd, a daemon
 in every sandbox that answers Connect RPC for processes and files and HTTP
-for file transfer. Speaking both lets those clients use this fabric
+for file transfer. Speaking both lets those clients use Opengeni compute
 unchanged, and lets us compare it with E2B using the same client code. A
 sandbox image should be any OCI image, from any registry, with or without
 an init system of its own.

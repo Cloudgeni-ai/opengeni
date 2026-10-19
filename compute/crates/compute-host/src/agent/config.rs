@@ -81,7 +81,7 @@ pub struct HostConfig {
     /// while it has run out the agent decides nothing of its own (no
     /// sleeping, no ready sandboxes, no template builds) and serves its
     /// own tools only their status, since the guard keeps the VMs frozen
-    /// and the fleet service may be handing its sandboxes to others.
+    /// and the control service may be handing its sandboxes to others.
     /// `None` on a host on its own.
     pub lease: Option<LeaseGate>,
     /// Where the host's events and metrics go (see [`crate::observe`]).

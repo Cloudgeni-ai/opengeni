@@ -302,7 +302,7 @@ async fn requests_reach_only_the_ownership_the_host_holds() {
             local.create(id(4), config(NEVER)).await,
             Err(HostError::Invalid(_))
         ),
-        "only the fleet service creates sandboxes on a host in a fleet"
+        "only the control service creates sandboxes on a host in a fleet"
     );
     one.assert_clean();
 }

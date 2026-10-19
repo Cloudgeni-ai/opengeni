@@ -177,11 +177,11 @@ pub enum HostError {
     /// The sandbox is being handed off and takes no wake.
     #[error("sandbox {0} is being handed off")]
     HandingOff(Id),
-    /// The host's lease from the fleet service has run out: it runs
+    /// The host's lease from the control service has run out: it runs
     /// nothing until it is renewed.
-    #[error("this host's lease from the fleet service has run out")]
+    #[error("this host's lease from the control service has run out")]
     LeaseLapsed,
-    /// A request from the fleet service waited in the agent until the
+    /// A request from the control service waited in the agent until the
     /// lease no longer admitted it: it was sent under a registration this
     /// host no longer holds or too many renewals ago, or the lease ran
     /// out.
@@ -273,7 +273,7 @@ enum Command {
         owner: OwnerEpoch,
         reply: Reply<()>,
     },
-    /// The fleet service's rulings on the sandboxes the host listed when
+    /// The control service's rulings on the sandboxes the host listed when
     /// it registered.
     Reconcile {
         rulings: Vec<Ruling>,
@@ -590,9 +590,9 @@ enum Origin {
     /// The host's own tools, on a host outside a fleet.
     Local,
     /// The host's own tools, on a host in a fleet: they create, adopt and
-    /// hand off nothing, since only the fleet service tracks sandboxes.
+    /// hand off nothing, since only the control service tracks sandboxes.
     LocalToFleet,
-    /// The fleet service, for the ownership under this owner epoch of the
+    /// The control service, for the ownership under this owner epoch of the
     /// sandbox each request is about, under the admission its listener
     /// gave the request, if it came through one.
     Fleet(OwnerEpoch, Option<Admission>),

@@ -84,7 +84,7 @@ impl Handle {
         self.commands.send(command).map_err(|_| HostError::Stopped)
     }
 
-    /// A handle for the fleet service's requests about the ownership of a
+    /// A handle for the control service's requests about the ownership of a
     /// sandbox under `owner`: the agent carries each out only while this
     /// host holds that ownership (see [`crate::protocol::Request::Adopt`]).
     #[must_use]
@@ -117,7 +117,7 @@ impl Handle {
     }
 
     /// A handle for the host's own tools on a host in a fleet, which
-    /// create, adopt and hand off nothing: only the fleet service knows
+    /// create, adopt and hand off nothing: only the control service knows
     /// which sandboxes a fleet has, and where.
     #[must_use]
     pub fn local_to_fleet(&self) -> Self {
@@ -127,11 +127,11 @@ impl Handle {
         }
     }
 
-    /// Refuses what only the fleet service asks of a host in a fleet.
+    /// Refuses what only the control service asks of a host in a fleet.
     fn fleet_only(&self, what: &str) -> Result<(), HostError> {
         if self.origin == Origin::LocalToFleet {
             return Err(HostError::Invalid(format!(
-                "this host is in a fleet: only the fleet service may {what} sandboxes"
+                "this host is in a fleet: only the control service may {what} sandboxes"
             )));
         }
         Ok(())
@@ -182,7 +182,7 @@ impl Handle {
             .await?
     }
 
-    /// Takes in the fleet service's rulings on the sandboxes the host
+    /// Takes in the control service's rulings on the sandboxes the host
     /// listed when it registered, and returns once every sandbox the
     /// rulings do not keep is gone (see [`compute_protocol::fleet::Registered`]).
     /// The renewer sends these itself, under the registration they answer,

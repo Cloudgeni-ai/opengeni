@@ -43,14 +43,14 @@ if [ ! -x "$agent/opengeni-agent" ]; then
   docker rm "$holder" >/dev/null
 fi
 
-# The fleet service on the cluster network, which this node reaches directly.
-fabric=$(kubectl -n opengeni get svc "${COMPUTE_SERVICE%%.*}" -o jsonpath='{.spec.clusterIP}')
+# The control service on the cluster network, which this node reaches directly.
+control=$(kubectl -n opengeni get svc "${COMPUTE_SERVICE%%.*}" -o jsonpath='{.spec.clusterIP}')
 
 log "run $RUN"
 started=$(date -u +%s)
 status=0
 OPENGENI_URL=$OPENGENI_URL API_CONTRACT=$contract MODEL=$MODEL_DEPLOYMENT OUT=$out \
-  COMPUTE_SERVICE=$COMPUTE_SERVICE COMPUTE_ADDRESS=$fabric COMPUTE_PORT=8080 COMPUTE_CA=$sec/api-ca.pem \
+  COMPUTE_SERVICE=$COMPUTE_SERVICE COMPUTE_ADDRESS=$control COMPUTE_PORT=8080 COMPUTE_CA=$sec/api-ca.pem \
   COMPUTE_OPENGENI_KEY=$sec/compute-opengeni-key COMPUTE_OPERATOR_KEY=$sec/compute-operator-key \
   PROJECT=$PROJECT ZONE=$ZONE HOSTS=${HOSTS:-3} ONLY=${ONLY:-} KEEP=${KEEP:-} \
   PLAYWRIGHT_MODULE=$og/node_modules/playwright/index.js AGENT_BIN=$agent/opengeni-agent OPENGENI_DIR=$og \

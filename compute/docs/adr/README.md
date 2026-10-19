@@ -6,7 +6,7 @@ old one; old records stay as history.
 
 | # | Decision | Status |
 | --- | --- | --- |
-| 1 | [Our own fabric: one agent per host, Firecracker microVMs](0001-own-fabric-one-agent-per-host.md) | Accepted |
+| 1 | [Our own sandbox system: one agent per host, Firecracker microVMs](0001-own-sandbox-system-one-agent-per-host.md) | Accepted |
 | 2 | [A pure decision core](0002-pure-decision-core.md) | Accepted |
 | 3 | [Idle means no activity; a ladder of sleep levels](0003-activity-idle-and-sleep-levels.md) | Accepted |
 | 4 | [Memory pressure, not timers, evicts from RAM](0004-memory-pressure-evicts.md) | Accepted |
@@ -23,9 +23,9 @@ old one; old records stay as history.
 | 15 | [Placement and moving sandboxes between hosts](0015-placement-and-moves-between-hosts.md) | Accepted, built by 18 |
 | 16 | [Observability: wide events, small metrics, zero alarms](0016-observability.md) | Proposed |
 | 17 | [Sweeping the chunks no copy names](0017-sweeping-unnamed-chunks.md) | Accepted |
-| 18 | [The fleet: one service, leases in Postgres, fences on every write](0018-the-fleet-service-leases-and-fences.md) | Accepted, in progress |
+| 18 | [The fleet: one service, leases in Postgres, fences on every write](0018-the-control-service-leases-and-fences.md) | Accepted, in progress |
 | 19 | [An E2B-compatible front door and our own guest init](0019-e2b-compatible-front-door-and-guest-init.md) | Accepted, in progress |
-| 20 | [Opengeni runs on the fabric through its e2b backend](0020-opengeni-runs-on-the-fabric-through-its-e2b-backend.md) | Superseded by 21 for Opengeni |
+| 20 | [Opengeni runs on compute through its e2b backend](0020-opengeni-runs-on-compute-through-its-e2b-backend.md) | Superseded by 21 for Opengeni |
 | 21 | [Opengeni runs natively: its machine agent in every sandbox, behind the host's link](0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md) | Accepted |
 
 ## Format

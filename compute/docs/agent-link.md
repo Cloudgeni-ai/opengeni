@@ -3,7 +3,7 @@
 [ADR 21](adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)
 decides the design; this is the contract between its three parts:
 
-- the **guest**: `compute-guest` and `opengeni-agent` in fabric mode;
+- the **guest**: `compute-guest` and `opengeni-agent` in compute mode;
 - the **host**: `compute-host`, which speaks NATS to its guests and keeps
   one link to each Opengeni deployment its sandboxes belong to;
 - the **gateway**: Opengeni's endpoint for those links, which bridges each
@@ -99,7 +99,7 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
   `created_ms`. A caller that tags its sandboxes, as Opengeni
   does with its gateway's address, finds every one it made, so it can
   delete those its own records no longer name.
-- The API serves TLS when the fleet service is given a certificate
+- The API serves TLS when the control service is given a certificate
   (`--api-tls-cert`, `--api-tls-key`); a deployment that Opengeni reaches
   over a network it does not own must.
 
@@ -114,7 +114,7 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
    "nats_url": "nats://127.0.0.1:3958"}
   ```
 
-  and starts `opengeni-agent run --fabric /run/compute/agent/link.json`
+  and starts `opengeni-agent run --compute /run/compute/agent/link.json`
   (with `--virtual-desktop` when `desktop` is true). It restarts the agent
   after it exits, with back-off. The agent runs as root with the image's
   environment and then the sandbox's variables, plus
@@ -215,7 +215,7 @@ the agent's client uses:
 
 - The host dials `GET <gateway>` as a WebSocket over TLS, with
   `Authorization: Bearer <host token>` and the subprotocol
-  `opengeni.agent-link.v1`. A team's gateway URL is the fleet service's
+  `opengeni.agent-link.v1`. A team's gateway URL is the control service's
   configuration (`--team-link <team>=wss://...`, with the signing key in
   `--link-key` and keys being retired in `--link-previous-key`), never part
   of a create.
@@ -229,7 +229,7 @@ the agent's client uses:
 ### Tokens
 
 Both are JWTs (`alg` `EdDSA`, `typ` `JWT`, `kid` naming the key) signed by
-the fleet service. Opengeni reads the keys, and its own team, from
+the control service. Opengeni reads the keys, and its own team, from
 `GET /v1/link/keys` with its API key:
 `{"team": "...", "keys": [{"kty": "OKP", "crv": "Ed25519", "kid": "...", "x": "<base64url>"}]}`,
 cached five minutes and read again for an unknown `kid`.

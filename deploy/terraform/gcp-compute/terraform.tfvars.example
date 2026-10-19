@@ -11,7 +11,7 @@ host_bundle = {
 }
 base_image_ref = "docker.io/library/ubuntu:24.04@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
-# The fleet service in the Opengeni chart, behind an internal load balancer.
+# The control service in the Opengeni chart, behind an internal load balancer.
 control_url           = "https://compute-control.example.com:8443"
 control_dns_names     = ["compute-control.example.com"]
 control_source_ranges = ["10.0.0.0/8"]

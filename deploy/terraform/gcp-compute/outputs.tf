@@ -14,7 +14,7 @@ output "host_memory_mib" {
 }
 
 output "control_service_account" {
-  description = "Google service account the fleet service runs as (Workload Identity, or a VM's identity)."
+  description = "Google service account the control service runs as (Workload Identity, or a VM's identity)."
   value       = google_service_account.control.email
 }
 
@@ -29,12 +29,12 @@ output "fleet_ca_pem" {
 }
 
 output "control_certificate_pem" {
-  description = "The fleet service's host-endpoint certificate chain: tls.crt of computeControl.hostsTls.secretName."
+  description = "The control service's host-endpoint certificate chain: tls.crt of computeControl.hostsTls.secretName."
   value       = length(var.control_dns_names) > 0 ? join("", concat([google_privateca_certificate.control[0].pem_certificate], google_privateca_certificate.control[0].pem_certificate_chain)) : null
 }
 
 output "control_private_key_pem" {
-  description = "The fleet service's host-endpoint key: tls.key of computeControl.hostsTls.secretName."
+  description = "The control service's host-endpoint key: tls.key of computeControl.hostsTls.secretName."
   value       = length(var.control_dns_names) > 0 ? tls_private_key.control[0].private_key_pem : null
   sensitive   = true
 }

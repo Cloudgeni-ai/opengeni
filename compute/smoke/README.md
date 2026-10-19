@@ -8,7 +8,7 @@ and check that nothing was lost.
 The framework and the E2B-style (`ecw.*`) scenarios come from
 [SPACE](https://github.com/perplexityai/SPACE)'s `space_smoke`, under the
 Apache License 2.0; see [`../NOTICE`](../NOTICE). The `compute.*` scenarios
-are ours and cover what this fabric promises beyond SPACE: several sleep
+are ours and cover what Opengeni compute promises beyond SPACE: several sleep
 levels, concurrent wakes, holds, and surviving host-agent restarts.
 
 ## Running it
@@ -120,7 +120,7 @@ stream on a vsock port. The scenario bodies stay as they were.
 |---|---|
 | `pause_timeout_requires_connect` | Sandboxes here wake on access, so there is nothing to require |
 | List pagination | A control-plane job; the host agent lists one host |
-| Identity and ownership | The guest agent's job, not the fabric's |
+| Identity and ownership | The guest agent's job, not compute's |
 | Public ports and loopback | No previews yet |
 | Egress policy | Comes with egress policy |
 | `immediate_egress`, `internet_access_allowed`, `guest_vlan_frames_dropped` | Pending the per-sandbox network and firewall work |

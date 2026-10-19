@@ -1,6 +1,6 @@
 /**
  * Any E2B-compatible service through the E2B JavaScript SDK (2.56.0): E2B's
- * own cloud when `E2B_API_KEY` is set, or this fabric's front door when
+ * own cloud when `E2B_API_KEY` is set, or Opengeni compute's front door when
  * `domain` or `apiUrl` points at it. Commands stream their output, so the
  * first byte is timed when the SDK hands over the first stdout chunk.
  */

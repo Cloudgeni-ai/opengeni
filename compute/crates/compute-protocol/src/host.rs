@@ -298,7 +298,7 @@ pub struct SandboxConfig {
     pub image: Option<ImageId>,
     /// How the host reaches its guest's Opengeni agent, when it runs one
     /// ([ADR 21](../../docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)):
-    /// the fleet service sets it for the host and owner epoch it gives the
+    /// the control service sets it for the host and owner epoch it gives the
     /// sandbox to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<crate::link::AgentLink>,
@@ -328,7 +328,7 @@ impl SandboxConfig {
     }
 
     /// Whether `other` asks for the same sandbox: equal in everything but
-    /// its [`Self::link`], which the fleet service sets for each host and
+    /// its [`Self::link`], which the control service sets for each host and
     /// owner epoch it gives the sandbox to, and may send again changed.
     #[must_use]
     pub fn same_sandbox(&self, other: &Self) -> bool {
@@ -517,7 +517,7 @@ pub enum Request {
     },
     /// Take a sandbox over from the store's latest copy, as its owner under
     /// `owner_epoch`
-    /// ([ADR 18](../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+    /// ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)).
     /// The host claims the copy under that epoch, so no earlier owner's
     /// archive can land after it, and keeps the sandbox at Remote: its
     /// next wake fetches it. A copy of the sandbox this host holds under an
@@ -648,10 +648,10 @@ pub enum ErrorCode {
     HostFull,
     /// The host does not take requests sent under this registration, or
     /// may not run sandboxes now: it holds no sandbox the request is
-    /// about, under it. Only requests from the fleet service get it.
+    /// about, under it. Only requests from the control service get it.
     Unavailable,
     /// The request was sent more renewals ago than the host still takes:
-    /// it changed nothing. Only requests from the fleet service get it.
+    /// it changed nothing. Only requests from the control service get it.
     Expired,
     /// The host failed; the request may succeed if retried.
     #[default]

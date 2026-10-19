@@ -1,4 +1,4 @@
-# 20. Opengeni runs on the fabric through its e2b backend
+# 20. Opengeni runs on compute through its e2b backend
 
 Status: Accepted, 2026-10-17. Superseded for Opengeni by
 [21](0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md) on
@@ -8,10 +8,10 @@ Status: Accepted, 2026-10-17. Superseded for Opengeni by
 
 Opengeni chooses one sandbox backend per deployment (Modal, E2B, Daytona,
 Runloop, OpenSandbox, a person's own machine and others), each a small
-registration around an SDK adapter. The fabric needs to serve Opengeni
+registration around an SDK adapter. Compute needs to serve Opengeni
 sessions: create, commands and terminals, files, preview ports, and a
 sandbox that comes back with its files and programs after a pause. The
-fabric already speaks E2B's API and runs E2B's envd in every guest
+Opengeni compute already speaks E2B's API and runs E2B's envd in every guest
 (ADR 19), so that E2B clients work unchanged.
 
 Opengeni's e2b backend is dormant: the E2B SDK it loads is not installed,
@@ -38,7 +38,7 @@ The options were:
 ## Decision
 
 - **Option 1.** Opengeni uses `OPENGENI_SANDBOX_BACKEND=e2b` against the
-  fabric. The fabric's own API stays the fleet's internal interface.
+  control service. Its own API stays the fleet's internal interface.
 - **The connection is explicit configuration.** Opengeni installs the E2B
   SDK at the version the front door's conformance suite pins (2.56.0) and
   passes the API key, the domain and, optionally, the API address and a
@@ -56,11 +56,11 @@ The options were:
   The front door does not serve E2B snapshots by id (ADR 19), so
   `OPENGENI_E2B_WORKSPACE_PERSISTENCE=snapshot` is not supported on it.
 - **Recommended lifecycle**: `OPENGENI_E2B_TIMEOUT_ACTION=pause` and
-  `OPENGENI_E2B_AUTO_RESUME=true`. Idle sandboxes sleep on the fabric
+  `OPENGENI_E2B_AUTO_RESUME=true`. Idle sandboxes sleep on compute
   regardless, so E2B's timeout is not the cost lever it is on E2B's cloud;
   a paused sandbox is saved and comes back on Opengeni's next `connect`.
 - **The proof** is a real Opengeni development stack session on the
-  fabric: create, commands, files, a preview port, pause and resume, with
+  compute: create, commands, files, a preview port, pause and resume, with
   the method and results in `docs/measurements.md`. The Opengeni change
   lives on the branch `feat/opengeni-e2b-endpoint`.
 
@@ -91,6 +91,6 @@ The options were:
 - Opengeni has no tool that gives the model a preview link on any
   backend. A preview port is reachable at `https://<port>-<id>.<domain>`,
   and the adapter's exposed-port lookup returns that address; showing it
-  to the model is Opengeni's choice, not the fabric's.
+  to the model is Opengeni's choice, not compute's.
 - Features E2B's backend lacks in Opengeni, and the front door's gaps
   (snapshots by id, volumes), stay gaps until either side adds them.

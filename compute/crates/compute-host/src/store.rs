@@ -11,7 +11,7 @@
 //!
 //! Every write names its owner: the sandbox's owner epoch, raised each time
 //! it changes hands between hosts, and for an archive the owner's number
-//! for the save ([ADR 18](../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+//! for the save ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)).
 //! A store refuses a write once a later owner holds the copy, so a host the
 //! fleet gave up on can never overwrite what the next one stored.
 

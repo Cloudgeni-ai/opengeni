@@ -1,7 +1,7 @@
 //! A host in a fleet: requests fenced by the owner epoch of their
 //! sandbox, adopting a sandbox from the store, handing one off, and taking
-//! in the fleet service's rulings when the host registers
-//! ([ADR 18](../../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+//! in the control service's rulings when the host registers
+//! ([ADR 18](../../../docs/adr/0018-the-control-service-leases-and-fences.md)).
 //!
 //! The owner epoch says which ownership of a sandbox this host holds. The
 //! service names it on every request about a sandbox, and the agent checks
@@ -49,7 +49,7 @@ pub(super) struct Then {
     from_files: bool,
     reply: Reply<()>,
     /// The registration the request was admitted under, for one from the
-    /// fleet service: the adopt goes on only while the host still holds it
+    /// control service: the adopt goes on only while the host still holds it
     /// and its lease runs. `None` for the rulings' own adopts.
     under: Option<u64>,
 }
@@ -629,7 +629,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// Takes in the fleet service's rulings on the sandboxes this host
+    /// Takes in the control service's rulings on the sandboxes this host
     /// listed when it registered: keeps each it is told to under the owner
     /// epoch it names, with the agent link that epoch's ticket gives, drops
     /// the rest, keeping the store's copies, and adopts again those whose

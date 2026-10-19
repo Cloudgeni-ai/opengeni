@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-// The optional fleet service of Opengeni compute (computeControl): off by
+// The optional control service of Opengeni compute (computeControl): off by
 // default, and enabling it adds the service without changing any session's
 // sandbox backend.
 
@@ -82,7 +82,7 @@ describe("computeControl", () => {
     expect(config.data.OPENGENI_COMPUTE_API_URL).toBeUndefined();
   });
 
-  test("adds the fleet service, its store and sweep, and points Opengeni at it", async () => {
+  test("adds the control service, its store and sweep, and points Opengeni at it", async () => {
     const manifests = await render(enabled);
     const deployment = find(manifests, "Deployment", "cc-opengeni-compute-control");
     const container = deployment.spec.template.spec.containers[0];

@@ -61,7 +61,7 @@ pub fn link_file(agent: &AgentInit) -> String {
 /// The agent's arguments.
 #[must_use]
 pub fn args(agent: &AgentInit) -> Vec<&'static str> {
-    let mut args = vec!["run", "--fabric", LINK_FILE];
+    let mut args = vec!["run", "--compute", LINK_FILE];
     if agent.desktop {
         args.push("--virtual-desktop");
     }
@@ -183,10 +183,10 @@ mod tests {
 
     #[test]
     fn a_desktop_agent_starts_its_virtual_desktop() {
-        assert_eq!(args(&agent(false)), ["run", "--fabric", LINK_FILE]);
+        assert_eq!(args(&agent(false)), ["run", "--compute", LINK_FILE]);
         assert_eq!(
             args(&agent(true)),
-            ["run", "--fabric", LINK_FILE, "--virtual-desktop"]
+            ["run", "--compute", LINK_FILE, "--virtual-desktop"]
         );
     }
 

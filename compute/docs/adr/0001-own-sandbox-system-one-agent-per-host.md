@@ -1,4 +1,4 @@
-# 1. Our own fabric: one agent per host, Firecracker microVMs
+# 1. Our own sandbox system: one agent per host, Firecracker microVMs
 
 Status: Accepted, 2026-10-15
 

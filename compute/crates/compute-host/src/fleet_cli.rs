@@ -10,10 +10,10 @@ use compute_fleet::LeaseTerms;
 use compute_host::fleet::{FleetConfig, GuardConfig, TlsFiles};
 use compute_protocol::fleet::HostInfo;
 
-/// Joining a fleet ([ADR 18](../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+/// Joining a fleet ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)).
 #[derive(Args, Debug)]
 pub struct FleetArgs {
-    /// Join a fleet: the fleet service's URL, such as
+    /// Join a fleet: the control service's URL, such as
     /// `https://control.example:8443`. Needs a store in object storage and
     /// a running `compute-host guard`; the host then creates, adopts and
     /// hands off sandboxes only as the service asks.
@@ -49,7 +49,7 @@ pub struct FleetArgs {
     /// The host's private key, PEM.
     #[arg(long = "fleet-key", id = "fleet_key")]
     pub key: Option<PathBuf>,
-    /// The authority that signs the fleet service's certificates, PEM.
+    /// The authority that signs the control service's certificates, PEM.
     #[arg(long = "fleet-ca", id = "fleet_ca")]
     pub ca: Option<PathBuf>,
     /// The only authority to trust for Opengeni's agent-link gateways, PEM,

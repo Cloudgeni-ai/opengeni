@@ -153,7 +153,7 @@ pub(crate) struct Record {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backed_up_ms: Option<u64>,
     /// Its owner epoch: which ownership of the sandbox this host holds
-    /// ([ADR 18](../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+    /// ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)).
     /// The store refuses this host's writes once a later one holds it. A
     /// host outside a fleet keeps the first.
     #[serde(default = "first_owner")]
@@ -279,7 +279,7 @@ pub(crate) struct Change {
     next_save: bool,
     handed_off: bool,
     owner: Option<OwnerEpoch>,
-    /// The agent link the fleet service sent last, `None` inside for none;
+    /// The agent link the control service sent last, `None` inside for none;
     /// boxed, as most writes leave it.
     link: Option<Box<Option<compute_protocol::link::AgentLink>>>,
     disk_bytes: Option<u64>,

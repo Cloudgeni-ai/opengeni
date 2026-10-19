@@ -1,6 +1,6 @@
 # Comparison benchmark
 
-How we compare this fabric with other sandbox systems on the two things an
+How we compare Opengeni compute with other sandbox systems on the two things an
 agent platform feels: how long until a command answers, and how many
 sandboxes a host can bring back to work each second. One client harness
 (`lab/compare/`) drives every system the same way. Results are in
@@ -10,8 +10,8 @@ sandboxes a host can bring back to work each second. One client harness
 
 | System | Path the client uses | Resting states |
 | --- | --- | --- |
-| This fabric, host agent | The host agent's JSON socket, relayed over TCP to the client VM | running, paused, saved, archived, remote |
-| This fabric, front door | The E2B JavaScript SDK 2.56.0 against our E2B-compatible front door | as above |
+| Opengeni compute, host agent | The host agent's JSON socket, relayed over TCP to the client VM | running, paused, saved, archived, remote |
+| Opengeni compute, front door | The E2B JavaScript SDK 2.56.0 against our E2B-compatible front door | as above |
 | Agent Sandbox on GKE | The Kubernetes API for SandboxClaim, Sandbox and Pod Snapshot resources; the sandbox router for commands | running, suspended to a Pod Snapshot |
 | E2B cloud | The E2B JavaScript SDK 2.56.0; runs only when `E2B_API_KEY` is set | running, paused |
 

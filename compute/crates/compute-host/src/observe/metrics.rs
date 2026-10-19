@@ -123,9 +123,9 @@ pub enum RequestKind {
     Release,
     #[allow(missing_docs)]
     Status,
-    /// From the fleet service: take a sandbox over from the store.
+    /// From the control service: take a sandbox over from the store.
     Adopt,
-    /// From the fleet service: hand a sandbox off to the next host.
+    /// From the control service: hand a sandbox off to the next host.
     HandOff,
     /// A request that could not be read.
     Invalid,

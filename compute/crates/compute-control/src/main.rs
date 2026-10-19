@@ -1,4 +1,4 @@
-//! `compute-control`: the fleet service, and adding API keys to its store.
+//! `compute-control`: the control service, and adding API keys to its store.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -22,7 +22,7 @@ use compute_protocol::host::{ImageId, SleepConfig};
 use compute_storage::store::ChunkStore;
 
 #[derive(Parser)]
-#[command(about = "The Opengeni compute fleet service")]
+#[command(about = "The Opengeni compute control service")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

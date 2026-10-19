@@ -1,4 +1,4 @@
-//! The host API for the fleet service: the agent's own requests, one per
+//! The host API for the control service: the agent's own requests, one per
 //! connection, over mutual TLS, each in an [`Envelope`] that bounds it.
 //!
 //! A request goes through only while the host holds the registration it

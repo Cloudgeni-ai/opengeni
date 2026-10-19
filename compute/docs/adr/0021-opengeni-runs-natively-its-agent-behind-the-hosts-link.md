@@ -1,16 +1,16 @@
 # 21. Opengeni runs natively: its machine agent in every sandbox, behind the host's link
 
-Status: Accepted, 2026-10-18. Supersedes [20](0020-opengeni-runs-on-the-fabric-through-its-e2b-backend.md)
+Status: Accepted, 2026-10-18. Supersedes [20](0020-opengeni-runs-on-compute-through-its-e2b-backend.md)
 for Opengeni; the E2B front door ([19](0019-e2b-compatible-front-door-and-guest-init.md))
 stays for E2B clients. The wire protocol is in [agent-link.md](../agent-link.md).
 
 ## Context
 
-ADR 20 ran an Opengeni session on the fabric through Opengeni's e2b
-backend. That proved the fabric, not the integration Opengeni needs.
+ADR 20 ran an Opengeni session on compute through Opengeni's e2b
+backend. That proved compute, not the integration Opengeni needs.
 Through E2B, Opengeni has no interactive terminal, no checked desktop or
 browser, no run-as and no bucket mounts. It carries workspaces as tar files
-because it cannot see the fabric's own saves, and it adds a translation
+because it cannot see compute's own saves, and it adds a translation
 layer, and envd in every guest, to reach programs that Opengeni's own
 machine agent already knows how to run.
 
@@ -34,7 +34,7 @@ claim before the first command runs, and every sandbox holds credentials.
 The options were:
 
 1. **Keep the e2b backend (ADR 20).** Leaves the gaps above.
-2. **A `compute` backend that speaks the fabric's API and envd.** Rebuilds,
+2. **A `compute` backend that speaks the control service's API and envd.** Rebuilds,
    against a second protocol, what the agent already does.
 3. **The agent in every sandbox, dialing NATS as a Connected Machine
    does.** The agent and Opengeni stay unchanged, but with the problems
@@ -52,7 +52,7 @@ and 16.1).
 
 - **Images.** Opengeni's sandbox and desktop images carry `opengeni-agent`,
   built from the same commit as the rest of Opengeni, at
-  `/usr/local/bin/opengeni-agent`. The fabric builds its images from them
+  `/usr/local/bin/opengeni-agent`. Compute builds its images from them
   like any OCI image (ADR 19). Another backend ignores the binary.
 - **A create names the agent, without a secret.** The native API's create
   takes ADR 19's `init`, now with an `agent` section: the workspace and
@@ -63,12 +63,12 @@ and 16.1).
   identity. A create is idempotent by the caller's `request_id`.
 - **The guest runs the agent and gives it a local NATS address.**
   When the init has an `agent` section, `compute-guest` starts
-  `opengeni-agent` in fabric mode as root, supervises it, and forwards
+  `opengeni-agent` in compute mode as root, supervises it, and forwards
   every connection to `127.0.0.1:3958` in the guest to the host over vsock
   (port 58), each as a stream that outlives the vsock connections under
   it: Firecracker resets every vsock connection when it snapshots a VM, a
   checkpoint of a running one included, and a restored VM has none. The
-  agent dials that address with no credential. Fabric mode
+  agent dials that address with no credential. Compute mode
   also turns off what does not belong in a sandbox: enrollment, credential
   renewal, self-update (the image pins the agent) and service
   installation.
@@ -97,14 +97,14 @@ and 16.1).
   opens them again before its guests run.
 - **One link per host and Opengeni deployment.** The host agent dials
   Opengeni's agent gateway: a WebSocket over TLS, authenticated by a host
-  token the fleet service signs (Ed25519) for that gateway, which the host
+  token the control service signs (Ed25519) for that gateway, which the host
   asks for, and again before it expires, over its mutual-TLS host API. A
   link is opened when the first sandbox that needs it
   arrives and kept while any does. Which gateway a team's sandboxes use is
   the fleet's configuration for the team, never something a create names,
   so a host never presents its token to an address a tenant chose.
 - **Each session is fenced by the sandbox's owner epoch.** The host opens a
-  session with a ticket the fleet service signed when it gave the sandbox
+  session with a ticket the control service signed when it gave the sandbox
   to the host: the sandbox, its team, its agent's workspace and agent ids,
   the host and the owner epoch (ADR 18). Opengeni's gateway checks the
   signature, that the team is the one Opengeni uses and that the agent's
@@ -147,10 +147,10 @@ and 16.1).
   a fixed rate, changed or not; what a viewer sends still counts), and a
   browser controller that is merely running (each use of it is a message,
   which counts on the host).
-- **A sandbox with no owner is woken through the fleet service.** A
+- **A sandbox with no owner is woken through the control service.** A
   sandbox whose host was lost, or that was handed off and not yet adopted,
   has no session, so a message to it finds no responder. Opengeni's
-  backend then asks the fleet service to wake it, which places and adopts
+  backend then asks the control service to wake it, which places and adopts
   it (ADR 18); the new owner opens its session, and the request is
   retried, under its replay identity, until the agent answers. This is the
   only case in which Opengeni wakes a sandbox itself.
@@ -161,11 +161,11 @@ and 16.1).
   commands, files, git, terminal, desktop, browser and ports are the same
   code.
   - Create: make the sandbox's enrollment, create the sandbox on the
-    fabric with its init (idempotently, by Opengeni's request id) and wait
+    control service with its init (idempotently, by Opengeni's request id) and wait
     for the agent's first Hello through the gateway.
   - Resume: nothing to do; the next request wakes the sandbox.
-  - Idle sandboxes sleep on the fabric. Opengeni never tears one down for
-    being idle and never needs to capture it to keep it: the fabric keeps
+  - Idle sandboxes sleep on compute. Opengeni never tears one down for
+    being idle and never needs to capture it to keep it: compute keeps
     memory and disk, archives them and brings them back after a move. After
     the loss of a host it brings back the disk of the newest copy and boots
     it, so the agent starts afresh under a new connection instance, and
@@ -180,14 +180,14 @@ and 16.1).
 - **A Connected Machine is the other case of the same agent and code.** It
   runs the same agent and Opengeni serves it with the same session code;
   it is pinned to its owner, never sleeps and is never moved, so it dials
-  NATS itself and needs no host in between. The fleet service does not
+  NATS itself and needs no host in between. The control service does not
   list Connected Machines: there is no host agent on a person's computer,
   and adding one would put a second daemon there for nothing either side
   uses.
 
 ## Consequences
 
-- Every feature Opengeni has on a Connected Machine works on a fabric
+- Every feature Opengeni has on a Connected Machine works on compute
   sandbox, and a fix to either serves both.
 - The model sees what it sees on a Connected Machine; nothing already sent
   changes, as only new sessions on the new backend use it.
