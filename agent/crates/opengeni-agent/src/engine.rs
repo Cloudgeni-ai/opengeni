@@ -34,8 +34,8 @@ use opengeni_agent_engine::admission::{
     AdmissionConfig, AdmissionOutcome, AdmissionSnapshot, AdmissionState, JobClass, RefusalReason,
 };
 use opengeni_agent_engine::registry::{
-    BeginOutcome, CancelOutcome, OpRegistry, QueryAnswer, RegistryConfig, RegistryCounters,
-    ReleaseOutcome,
+    BeginOutcome, CancelOutcome, LostReason, OpRegistry, QueryAnswer, RegistryConfig,
+    RegistryCounters, ReleaseOutcome,
 };
 use opengeni_agent_engine::retention::{GlobalMemoryBudget, GlobalSpoolBudget, RetentionConfig};
 use opengeni_agent_engine::{Frame, HostCapacity, OpId};
@@ -1030,11 +1030,12 @@ impl Engine {
     /// through `exit_seq` (wire: `OpRelease`): the registry drops it now and
     /// its lingering pump ends, freeing the retained frames. Idempotent.
     pub fn release(&self, op_id: &OpId, exit_seq: u64) -> ReleaseOutcome {
+        let now = self.now_ms();
         let outcome = self
             .registry
             .lock()
             .expect("registry lock")
-            .release(op_id, exit_seq);
+            .release(op_id, exit_seq, now);
         if outcome == ReleaseOutcome::Released {
             // The pump finishes as consumed; dropping its route also ends it
             // if the command cannot be queued.
@@ -1042,6 +1043,29 @@ impl Engine {
             self.routes.lock().expect("routes lock").remove(op_id);
         }
         outcome
+    }
+
+    /// The ops that are gone but whose starts may still arrive, each with why
+    /// it is gone and how much longer it is kept: carried to the successor
+    /// image of an in-place update, so it answers them instead of running
+    /// them again.
+    #[must_use]
+    pub fn carried_markers(&self) -> Vec<(OpId, LostReason, u64)> {
+        let now = self.now_ms();
+        self.registry
+            .lock()
+            .expect("registry lock")
+            .lost_markers(now)
+    }
+
+    /// Keeps the markers a predecessor image carried (see
+    /// [`Self::carried_markers`]) for their remaining time.
+    pub fn restore_markers(&self, markers: impl IntoIterator<Item = (OpId, LostReason, u64)>) {
+        let now = self.now_ms();
+        let mut registry = self.registry.lock().expect("registry lock");
+        for (op_id, reason, remaining_ms) in markers {
+            registry.restore_lost(op_id, reason, remaining_ms, now);
+        }
     }
 
     /// The live state handles of a known (Running/Complete) op.

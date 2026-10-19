@@ -12,7 +12,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ControlRequest, ControlResponse, OpLostReason, OpState } from "@opengeni/agent-proto";
+import {
+  ControlRequest,
+  ControlResponse,
+  Hello,
+  OpLostReason,
+  OpState,
+} from "@opengeni/agent-proto";
 import { verifyRelayToken } from "@opengeni/contracts";
 import {
   acquireLease,
@@ -27,9 +33,13 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { recordConnectedCommandOutputConsumption } from "@opengeni/db/session-background-commands";
+import {
+  CONNECTED_COMMAND_CLAIM_TTL_MS,
+  claimConnectedCommandOutputReleases,
+  recordConnectedCommandOutputConsumption,
+} from "@opengeni/db/session-background-commands";
 import { connect, createNatsEventBus, type NatsConnection } from "@opengeni/events";
-import { NatsControlRpc } from "@opengeni/runtime/sandbox";
+import { NatsControlRpc, type ControlRpc } from "@opengeni/runtime/sandbox";
 import {
   acquireSharedTestDatabase,
   freePort,
@@ -37,8 +47,16 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { releaseStoredConnectedCommandOutput } from "../../packages/core/src/sandbox/output-release";
+import {
+  ComputeAgentIncompatibleError,
+  createComputeAgentPlane,
+} from "../../packages/core/src/sandbox/compute-plane";
+import { handleHelloPayload } from "../../apps/api/src/sandbox/metrics-ingestion";
 import type { ApiWebSocketConnection } from "../../apps/api/src/api-websocket";
-import { reconcileConnectedCommandOutputReleases } from "../../apps/worker/src/activities/sandbox-lease";
+import {
+  reconcileConnectedCommandOutputReleases,
+  releaseClaimedConnectedCommandOutput,
+} from "../../apps/worker/src/activities/sandbox-lease";
 import type { GatewayFrame } from "../../apps/api/src/sandbox/compute-link-frames";
 import { dispatchApiWebSocketUpgrade } from "../../apps/api/src/http/websocket-upgrade-dispatch";
 import {
@@ -878,11 +896,16 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
           await Bun.sleep(20);
         }
       };
+      const reaperSettings = {
+        sandboxLeaseReaperPeriodMs: 30_000,
+        sandboxSelfhostedControlTimeoutMs: 2_000,
+      } as never;
+      const reaperObservability = { incrementCounter: () => {}, warn: () => {} } as never;
       const reaper = () =>
         reconcileConnectedCommandOutputReleases(
           db,
-          { sandboxLeaseReaperPeriodMs: 30_000, sandboxSelfhostedControlTimeoutMs: 2_000 } as never,
-          { incrementCounter: () => {}, warn: () => {} } as never,
+          reaperSettings,
+          reaperObservability,
           bus as never,
         );
       const forwarded = (from: number) =>
@@ -907,9 +930,110 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       expect(settled.output_release_observed_at).toBeInstanceOf(Date);
       expect(settled.last_reconcile_outcome).toBe("output_released");
       expect(settled.reconcile_attempts).toBe(0);
+      expect(settled.reconcile_claim_id).toBeNull();
+
+      // A housekeeping pass between storing an output and releasing it takes
+      // nothing: the release is the storing process's, which then sends it.
+      const raced = await consumed();
+      requests.length = 0;
+      await reaper();
+      expect(requests).toEqual([]);
+      expect(
+        await releaseStoredConnectedCommandOutput(db, {
+          command: raced,
+          exitSeq: "2",
+          controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
+          controlTimeoutMs: 2_000,
+        }),
+      ).toBe("released");
+      expect(requests).toEqual(["opRelease"]);
+
+      // While the reaper holds an obligation (its grace passed), the storing
+      // process sends nothing for it; the reaper's one release settles it.
+      const held = await consumed();
+      await due();
+      const reaperHeld = (
+        await claimConnectedCommandOutputReleases(db, {
+          claimId: crypto.randomUUID(),
+          limit: 100,
+          claimTtlMs: CONNECTED_COMMAND_CLAIM_TTL_MS,
+        })
+      ).find((claim) => claim.commandId === held.commandId);
+      expect(reaperHeld).toBeDefined();
+      requests.length = 0;
+      expect(
+        await releaseStoredConnectedCommandOutput(db, {
+          command: held,
+          exitSeq: "2",
+          controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
+          controlTimeoutMs: 2_000,
+        }),
+      ).toBe("claimed_elsewhere");
+      expect(requests).toEqual([]);
+      await releaseClaimedConnectedCommandOutput(
+        {
+          db,
+          settings: reaperSettings,
+          observability: reaperObservability,
+          bus: bus as never,
+          controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
+        },
+        reaperHeld!,
+      );
+      expect(requests).toEqual(["opRelease"]);
+      expect((await stored(held.commandId)).output_release_observed_at).toBeInstanceOf(Date);
+
+      // One owner per release: the storing process's claim outlives its TTL
+      // while its release is in flight, so the reaper takes the obligation
+      // over. The release is answered and recorded, the sandbox sleeps, and
+      // the reaper, finding the obligation settled, sends it nothing.
+      const slow = await consumed();
+      const liveRpc = new NatsControlRpc(async () => bus.getRequestConnection());
+      let takenOver: Awaited<ReturnType<typeof claimConnectedCommandOutputReleases>> = [];
+      const slowRpc: ControlRpc = {
+        request: async (subject, request, options) => {
+          await shared!
+            .admin`update session_background_commands set reconcile_claimed_at=now() - interval '10 minutes', reconcile_after='2000-01-01T00:00:00Z'::timestamptz where id=${slow.commandId}`;
+          takenOver = await claimConnectedCommandOutputReleases(db, {
+            claimId: crypto.randomUUID(),
+            limit: 100,
+            claimTtlMs: CONNECTED_COMMAND_CLAIM_TTL_MS,
+          });
+          return await liveRpc.request(subject, request, options);
+        },
+      };
+      requests.length = 0;
+      expect(
+        await releaseStoredConnectedCommandOutput(db, {
+          command: slow,
+          exitSeq: "2",
+          controlRpc: slowRpc,
+          controlTimeoutMs: 2_000,
+        }),
+      ).toBe("released");
+      const reaperClaim = takenOver.find((claim) => claim.commandId === slow.commandId);
+      expect(reaperClaim).toBeDefined();
+      expect(requests).toEqual(["opRelease"]);
+      await power("asleep");
+      mark = link.frames.length;
+      await releaseClaimedConnectedCommandOutput(
+        {
+          db,
+          settings: reaperSettings,
+          observability: reaperObservability,
+          bus: bus as never,
+          controlRpc: liveRpc,
+        },
+        reaperClaim!,
+      );
+      await Bun.sleep(100);
+      expect(forwarded(mark)).toEqual([]);
+      expect(requests).toEqual(["opRelease"]);
+      const slowRow = await stored(slow.commandId);
+      expect(slowRow.output_release_observed_at).toBeInstanceOf(Date);
+      expect(slowRow.reconcile_claim_id).toBeNull();
 
       // The sandbox sleeps: housekeeping passes send it nothing at all.
-      await power("asleep");
       for (let pass = 0; pass < 3; pass++) {
         await due();
         mark = link.frames.length;
@@ -923,6 +1047,8 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       // recovers that release once. Reaching the sleeping sandbox is real work
       // (one wake), and the answer settles it in that one exchange.
       const orphan = await consumed();
+      // Past the storing process's grace period.
+      await due();
       requests.length = 0;
       mark = link.frames.length;
       await reaper();
@@ -949,6 +1075,63 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       await bus.close().catch(() => undefined);
     }
   }, 60_000);
+
+  test("a compute agent without OpRelease is refused as an image built with an older agent", async () => {
+    if (!available) return;
+    const bus = await createNatsEventBus(nats.url);
+    try {
+      const agent = await sandboxAgent();
+      const instance = crypto.randomUUID();
+      const link = await linkAs("h1");
+      expect(
+        await link.open({
+          s: 1,
+          sandbox: agent.sandbox,
+          ticket: await ticketFor(agent, { host: "h1", epoch: 1 }),
+          connection: instance,
+        }),
+      ).toMatchObject({ t: "opened" });
+      const subject = `agent.${agent.workspaceId}.${agent.agentId}.connection.${instance}.hello`;
+      const hello = (opRelease: boolean) =>
+        Hello.encode(
+          Hello.fromPartial({
+            agentId: agent.agentId,
+            workspaceId: agent.workspaceId,
+            agentVersion: "0.0.1",
+            capabilities: { exec: true, opStream: true, opRelease },
+          }),
+        ).finish();
+      const errors: string[] = [];
+      const observability = {
+        warn: () => {},
+        error: (message: string) => errors.push(message),
+      } as never;
+      const plane = createComputeAgentPlane({
+        db,
+        bus,
+        settings: { agentOpStreamEnabled: true },
+      });
+      const resolve = () =>
+        plane.resolveConnection({ workspaceId: agent.workspaceId, enrollmentId: agent.agentId });
+      // Before its Hello nothing is known, and nothing is refused.
+      expect((await resolve())?.connectionInstanceId).toBe(instance);
+
+      // An agent without OpRelease: a version error at its Hello, and the
+      // sandbox is refused rather than released by polling.
+      await handleHelloPayload(db, observability, hello(false), subject);
+      expect(errors).toEqual([expect.stringContaining("capabilities.op_release")]);
+      await expect(resolve()).rejects.toBeInstanceOf(ComputeAgentIncompatibleError);
+
+      // An agent from this release is served.
+      errors.length = 0;
+      await handleHelloPayload(db, observability, hello(true), subject);
+      expect(errors).toEqual([]);
+      expect((await resolve())?.connectionInstanceId).toBe(instance);
+      link.close();
+    } finally {
+      await bus.close().catch(() => undefined);
+    }
+  }, 30_000);
 
   test("a text frame or a malformed frame ends the link", async () => {
     if (!available) return;

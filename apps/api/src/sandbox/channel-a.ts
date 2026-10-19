@@ -628,6 +628,9 @@ export async function withFormerConnectedMachine<T>(
       ? {
           opStream: {
             transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
+            ...(enrollment.agentCapabilities.opRelease === true
+              ? { outputReleaseSupported: true }
+              : {}),
           },
         }
       : {}),
@@ -887,6 +890,9 @@ async function withChannelAOperation<T>(
                 transport: new NatsOpStreamTransport(
                   async () => bus.getOpStreamConnection?.() ?? null,
                 ),
+                ...(enrollment.agentCapabilities.opRelease === true
+                  ? { outputReleaseSupported: true }
+                  : {}),
               },
             }
           : {}),

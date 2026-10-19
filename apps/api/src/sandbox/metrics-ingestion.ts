@@ -1053,6 +1053,19 @@ export async function handleHelloPayload(
     });
     return;
   }
+  // Every compute sandbox agent serves OpRelease; there is no older release
+  // path for compute. An image built with an older agent is a version error,
+  // and the sandbox's operations are refused until the image is rebuilt.
+  if (authority.kind === "sandbox" && hello.capabilities?.opRelease !== true) {
+    observability?.error?.(
+      "A compute sandbox agent does not support releasing command output (capabilities.op_release); rebuild the sandbox image with the agent from this Opengeni release or later",
+      {
+        workspaceId: ids.workspaceId,
+        agentId: ids.agentId,
+        agentVersion: hello.agentVersion.trim() || "unknown",
+      },
+    );
+  }
   let workspaceRoot: string | undefined;
   if (hello.workspaceRoot.length > 0) {
     try {

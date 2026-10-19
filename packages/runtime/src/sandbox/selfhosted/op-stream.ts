@@ -35,6 +35,7 @@
 import { blake3 } from "@noble/hashes/blake3";
 import { bytesToHex } from "@noble/hashes/utils";
 import { currentOpToolCallId } from "../op-correlation";
+import { CONTROL_REPLY_RECOVERY_MS } from "./control-replay";
 import {
   ControlRequest,
   ErrorCode,
@@ -98,6 +99,14 @@ const OP_STREAM_STASH_WINDOW_MULTIPLIER = 2;
 const OP_START_DRAINING_MAX_RETRIES = 10;
 const OP_START_BLIP_MAX_RETRIES = 3;
 
+/** No OpStart for an op reaches an agent later than this after its first
+ *  start attempt: attempts stop early enough that each one's reply recovery
+ *  ends within it, and the agent refuses a delivery past its recovery
+ *  deadline. An agent keeps the id of every op it started for longer than
+ *  this after the op is gone (released, final-acked or evicted), so a late
+ *  start answers that op and never runs it again. */
+export const OP_START_RESEND_HORIZON_MS = 15 * 60 * 1000;
+
 /**
  * The durable-resume journal the worker adapts onto Temporal (design delta Δ1:
  * the attach generation is `Info.currentAttemptScheduledTimestampMs` — strictly
@@ -148,6 +157,10 @@ export interface OpStreamExecClientDeps {
    * see ControlRpc. Once it is not, another agent process holds the
    * connection, and the op's outcome is unknown to this client. */
   connectionCurrent?: () => Promise<boolean>;
+  /** The runner serves `OpRelease` (`capabilities.op_release`; every compute
+   * agent does): a durably stored op is released in one answered exchange.
+   * Without it the op is released by a final ACK. */
+  outputReleaseSupported?: boolean;
 }
 
 /** A completed op-stream exec: the SDK-facing response plus the healing
@@ -205,6 +218,8 @@ export type ExactSelfhostedOpControlInput = {
   rpcSubject: string;
   opId: string;
   controlTimeoutMs: number;
+  /** Stops waiting once the subject's connection was replaced; see ControlRpc. */
+  connectionCurrent?: () => Promise<boolean>;
 };
 
 async function exactSelfhostedOpControl(
@@ -229,7 +244,10 @@ async function exactSelfhostedOpControl(
             ? { $case: "opCancel", opCancel: { opId: input.opId } }
             : { $case: "opRelease", opRelease: { opId: input.opId, exitSeq: operation.release } },
     },
-    { timeoutMs: input.controlTimeoutMs },
+    {
+      timeoutMs: input.controlTimeoutMs,
+      ...(input.connectionCurrent ? { connectionCurrent: input.connectionCurrent } : {}),
+    },
   );
   if (response.error || !response.result) {
     throw agentErrorToControlError(
@@ -625,10 +643,16 @@ export class OpStreamExecClient {
       this.deps.agentId,
       this.deps.connectionInstanceId,
     );
+    const releasing: Promise<void>[] = [];
     for (const op of eligible) {
       // A preceding queued hook may already have acknowledged this object.
       if (!this.settled.includes(op)) continue;
       await this.deps.journal?.persistSettled(op.opId, op.exitSeq);
+      if (this.deps.outputReleaseSupported === true) {
+        // One answered exchange: the runner drops the op and confirms it.
+        releasing.push(this.releaseSettled(op));
+        continue;
+      }
       const ack = OpAck.encode({
         opId: op.opId,
         ackedSeq: op.exitSeq,
@@ -644,6 +668,26 @@ export class OpStreamExecClient {
       }
       this.settled.splice(this.settled.indexOf(op), 1);
     }
+    await Promise.all(releasing);
+  }
+
+  /** Release one durably stored op on its runner (`OpRelease`). A failed or
+   *  disagreeing answer keeps it for a later durability hook. */
+  private async releaseSettled(op: SettledOp): Promise<void> {
+    try {
+      await releaseSelfhostedOpOutput({
+        controlRpc: this.deps.controlRpc,
+        rpcSubject: this.deps.rpcSubject,
+        opId: op.opId,
+        exitSeq: op.exitSeq,
+        controlTimeoutMs: this.deps.controlTimeoutMs,
+        ...(this.deps.connectionCurrent ? { connectionCurrent: this.deps.connectionCurrent } : {}),
+      });
+    } catch {
+      return;
+    }
+    const index = this.settled.indexOf(op);
+    if (index >= 0) this.settled.splice(index, 1);
   }
 }
 
@@ -1027,9 +1071,19 @@ class OpConsumer {
     // One absolute deadline (epoch ms, 0: none), fixed when the run began, for
     // every attempt: neither subscription setup nor a retry extends it.
     const absoluteDeadline = deadlineAt > 0 ? String(deadlineAt) : "0";
-    // A start is never sent once the op's wall has ended the call or its
-    // deadline has passed.
-    const refused = () => this.startAbandoned || (deadlineAt > 0 && Date.now() >= deadlineAt);
+    // Every attempt, reply recovery included, ends within the resend horizon
+    // of the first one.
+    const lastAttemptAt =
+      Date.now() +
+      OP_START_RESEND_HORIZON_MS -
+      this.deps.controlTimeoutMs -
+      CONTROL_REPLY_RECOVERY_MS;
+    // A start is never sent once the op's wall has ended the call, its
+    // deadline has passed, or the horizon would be exceeded.
+    const refused = () =>
+      this.startAbandoned ||
+      (deadlineAt > 0 && Date.now() >= deadlineAt) ||
+      Date.now() > lastAttemptAt;
     for (;;) {
       if (refused()) throw this.startTimeoutError();
       // Subscription setup can yield after the caller's initial admission.

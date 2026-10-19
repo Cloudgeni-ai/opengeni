@@ -992,6 +992,17 @@ impl<P: Platform + 'static> Supervisor<P> {
             .and_then(|handover| handover.pending.lock().expect("pending handover").take())
     }
 
+    /// Keeps the gone-op markers a predecessor image carried, so a start it
+    /// already answered or released never runs here. Call before running.
+    #[cfg(unix)]
+    pub fn restore_lost_markers(&self, markers: Vec<crate::handover::CarriedMarker>) {
+        self.engine.restore_markers(
+            markers
+                .into_iter()
+                .map(crate::handover::CarriedMarker::into_parts),
+        );
+    }
+
     /// Continues the jobs a predecessor image handed over. Call before
     /// running: their frames flow once their links connect.
     #[cfg(unix)]
@@ -3201,6 +3212,11 @@ async fn hand_over_for_update<P: Platform>(
         from_version: from_version.to_string(),
         connection_instance_id: handover.connection_instance_id.clone(),
         ops,
+        lost_markers: engine
+            .carried_markers()
+            .into_iter()
+            .map(crate::handover::CarriedMarker::from)
+            .collect(),
     };
     if let Err(error) = crate::handover::write_manifest(&handover.manifest, &manifest) {
         warn!(%error, "could not record the update handover; commands keep running here");
@@ -6986,6 +7002,7 @@ mod tests {
             let (supervisor, platform) = handover_test_supervisor(&directory, &url, &instance);
             if let Some(manifest) = inherited {
                 assert_eq!(manifest.ops.len(), 1, "one running command handed over");
+                supervisor.restore_lost_markers(manifest.lost_markers);
                 supervisor.adopt_handed_over(&platform, manifest.ops);
                 let owned = supervisor.update_drain.snapshot().unwrap();
                 assert_eq!(

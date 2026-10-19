@@ -907,7 +907,12 @@ is stored; it drops the operation at once and confirms the release in its
 answer (LOST, reason RELEASED, which also answers any duplicate), so the
 release settles in that exchange and the reaper only recovers a release whose
 storing process died first. A different exit frame or a running operation
-releases nothing. Completion input to
+releases nothing. Foreground command output is released the same way at its
+durability point when the runner advertises the capability, and by a final ACK
+when it does not. A runner without the capability keeps the attach, final ACK
+and later observation; Connected Machines do not sleep, so that exchange is
+answered on the first pass. Compute sandboxes have no such path (see
+[compute-backend.md](compute-backend.md)). Completion input to
 the model remains independent. Legacy rows require full replay before a receipt
 can be recorded; output lost before capture is explicitly marked unavailable
 without manufacturing consumption or an acknowledgement.

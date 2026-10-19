@@ -114,6 +114,17 @@ function connectedOutputIdentityWhere(input: ConnectedCommandOutputIdentity) {
   );
 }
 
+/** How long a claim on a command's reconciliation lasts before another owner
+ * may take it over: the reconciler's, and the release claim of the process
+ * that stored the command's output. */
+export const CONNECTED_COMMAND_CLAIM_TTL_MS = 5 * 60_000;
+
+/** How long after a command's output is stored the reconciler leaves its
+ * release to the process that stored it, which releases it at once while the
+ * runner is live from the command. Past it, an unreleased output is a crash
+ * the reconciler recovers. */
+export const CONNECTED_OUTPUT_RELEASE_GRACE_MS = 60_000;
+
 /** Record full output custody only after the caller's verified, awaited capture.
  * Terminal observation is insufficient. The persisted receipt is the retry
  * obligation even when the capturing worker disappears before publishing ACK. */
@@ -154,7 +165,9 @@ export async function recordConnectedCommandOutputConsumption(
         outputExitSeq: input.receipt.exitSeq,
         outputAttachGeneration: input.receipt.attachGeneration,
         outputConsumedAt: new Date(),
-        reconcileAfter: new Date(),
+        // The process storing it releases it now; the reconciler only
+        // recovers a release that process did not finish.
+        reconcileAfter: new Date(Date.now() + CONNECTED_OUTPUT_RELEASE_GRACE_MS),
         updatedAt: new Date(),
       })
       .where(connectedOutputIdentityWhere(input));
@@ -221,12 +234,106 @@ export async function claimConnectedCommandOutputReleases(
   );
 }
 
-/** Record a release the runner confirmed in its answer (`OpRelease`), made
- * where the output was persisted rather than by the reconciler. It settles the
- * release obligation of exactly the stored exit frontier, whoever holds the
- * reconciliation claim, so no later pass reaches the runner for it. Returns
- * whether this call recorded it; false when it was already recorded, or the
- * row is not that exact consumed output. */
+/** Take the one claim on a stored output's release obligation, so exactly one
+ * owner sends its release: the process that stored it, or the reconciler
+ * recovering it. Only an open obligation of exactly that stored exit frontier
+ * that nobody holds (or whose claim expired) is taken. Returns whether this
+ * caller now holds it. */
+export async function claimConnectedCommandOutputRelease(
+  db: Database,
+  input: ConnectedCommandOutputIdentity & { exitSeq: string; claimId: string },
+): Promise<boolean> {
+  return await withSessionActivityRlsContext(db, input, async (tx) => {
+    await lockSessionEventWriteRows(tx, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [input.sessionId],
+    });
+    const command = schema.sessionBackgroundCommands;
+    const rows = await tx
+      .update(command)
+      .set({
+        reconcileClaimId: input.claimId,
+        reconcileClaimedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          connectedOutputIdentityWhere(input),
+          eq(command.outputExitSeq, input.exitSeq),
+          sql`${command.outputConsumedAt} is not null`,
+          sql`${command.outputReleaseObservedAt} is null and ${command.outputUnavailableAt} is null`,
+          sql`(${command.reconcileClaimId} is null or ${command.reconcileClaimedAt} <= now() - make_interval(secs => ${CONNECTED_COMMAND_CLAIM_TTL_MS / 1000}))`,
+        ),
+      )
+      .returning({ id: command.id });
+    return rows.length === 1;
+  });
+}
+
+/** Give up a held release claim without releasing: the obligation stays open
+ * and is due to the reconciler `afterMs` from now. */
+export async function returnConnectedCommandOutputReleaseClaim(
+  db: Database,
+  input: ConnectedCommandOutputIdentity & { claimId: string; afterMs: number },
+): Promise<void> {
+  if (!Number.isSafeInteger(input.afterMs) || input.afterMs < 0)
+    throw new Error("Connected command output retry delay is invalid");
+  await withSessionActivityRlsContext(db, input, async (tx) => {
+    await lockSessionEventWriteRows(tx, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [input.sessionId],
+    });
+    const command = schema.sessionBackgroundCommands;
+    await tx
+      .update(command)
+      .set({
+        reconcileClaimId: null,
+        reconcileClaimedAt: null,
+        reconcileAfter: new Date(Date.now() + input.afterMs),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          connectedOutputIdentityWhere(input),
+          eq(command.reconcileClaimId, input.claimId),
+          sql`${command.outputReleaseObservedAt} is null and ${command.outputUnavailableAt} is null`,
+        ),
+      );
+  });
+}
+
+/** Whether a reconciler claim on a command's output is still open and still
+ * its own. Checked immediately before anything is sent to the runner, so an
+ * owner that lost the obligation (it was released by the process that stored
+ * the output, or its claim expired and was taken over) sends nothing. */
+export async function connectedCommandOutputClaimCurrent(
+  db: Database,
+  claim: ConnectedCommandOutputClaim,
+): Promise<boolean> {
+  return await withSessionActivityRlsContext(db, claim, async (tx) => {
+    const command = schema.sessionBackgroundCommands;
+    const rows = await tx
+      .select({ id: command.id })
+      .from(command)
+      .where(
+        and(
+          connectedOutputIdentityWhere(claim),
+          eq(command.reconcileClaimId, claim.claimId),
+          sql`${command.outputReleaseObservedAt} is null and ${command.outputUnavailableAt} is null`,
+        ),
+      )
+      .limit(1);
+    return rows.length === 1;
+  });
+}
+
+/** Record a release the runner confirmed in its answer (`OpRelease`). It
+ * settles the release obligation of exactly the stored exit frontier, whoever
+ * holds its claim, and drops that claim, so no later pass reaches the runner
+ * for it. Returns whether this call recorded it; false when it was already
+ * recorded, or the row is not that exact consumed output. */
 export async function recordConnectedCommandOutputRelease(
   db: Database,
   input: ConnectedCommandOutputIdentity & { exitSeq: string },
@@ -243,6 +350,8 @@ export async function recordConnectedCommandOutputRelease(
       .set({
         outputReleaseObservedAt: new Date(),
         lastReconcileOutcome: "output_released",
+        reconcileClaimId: null,
+        reconcileClaimedAt: null,
         updatedAt: new Date(),
       })
       .where(
@@ -313,19 +422,19 @@ export async function settleConnectedCommandOutputReleaseClaim(
       .returning({ id: command.id });
     if (rows.length === 1) return true;
     if (!released) return false;
-    // Released where the output was persisted while this claim was out: the
-    // obligation is settled; drop the claim.
+    // Released and recorded by another owner while this claim was out: the
+    // obligation is settled (recording it dropped the claim).
     const settled = await tx
-      .update(command)
-      .set({ reconcileClaimId: null, reconcileClaimedAt: null, updatedAt: new Date() })
+      .select({ id: command.id })
+      .from(command)
       .where(
         and(
           connectedOutputIdentityWhere(input.claim),
-          eq(command.reconcileClaimId, input.claim.claimId),
+          sql`(${command.reconcileClaimId} is null or ${command.reconcileClaimId} = ${input.claim.claimId})`,
           sql`${command.outputReleaseObservedAt} is not null`,
         ),
       )
-      .returning({ id: command.id });
+      .limit(1);
     return settled.length === 1;
   });
 }

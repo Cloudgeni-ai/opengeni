@@ -15,6 +15,10 @@
 //!   the consumer's final ack, a TTL, or an LRU cap. Evicting an op whose
 //!   result was never final-acked is a counted, queryable event
 //!   (`lost{evicted}`) — a dropped result must never be silent.
+//! * **A started op never runs again** — whatever ends an op's retention
+//!   (a release, a final ack, eviction), its id stays known as long as
+//!   Opengeni can still deliver a start for it ([`OP_START_RESEND_HORIZON_MS`]),
+//!   bounded by time only: retention pressure never forgets it sooner.
 //!
 //! The registry is generic over the per-op runtime state `T` (retention log,
 //! credit flow, child handle …) so lifecycle rules are testable with `T = ()`
@@ -24,6 +28,13 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::OpId;
+
+/// Opengeni's start resend horizon: no start for an op is delivered later
+/// than this after its first start attempt (`OP_START_RESEND_HORIZON_MS` in
+/// the runtime's op-stream client, which enforces it). A runner receives the
+/// first start no earlier than that attempt, so keeping a departed op's id
+/// for longer than this after it departs covers every start it can still get.
+pub const OP_START_RESEND_HORIZON_MS: u64 = 15 * 60 * 1000;
 
 /// Bounds and TTLs for the registry.
 #[derive(Debug, Clone)]
@@ -36,8 +47,12 @@ pub struct RegistryConfig {
     pub tombstone_ttl_ms: u64,
     /// Max simultaneously-held tombstones (oldest evicted beyond this).
     pub max_tombstones: usize,
-    /// Max lost markers retained so late queries stay answerable.
-    pub max_lost_markers: usize,
+    /// How long the marker of an op that is gone (released, final-acked,
+    /// evicted or lost to a restart) is kept, from when it went. While it is,
+    /// a duplicate start answers it instead of running the op again. Bounded
+    /// by time, never by count, and longer than
+    /// [`OP_START_RESEND_HORIZON_MS`].
+    pub lost_marker_ttl_ms: u64,
 }
 
 impl Default for RegistryConfig {
@@ -51,7 +66,7 @@ impl Default for RegistryConfig {
             completed_ttl_ms: 60 * 60 * 1000,
             tombstone_ttl_ms: 15 * 60 * 1000,
             max_tombstones: 4096,
-            max_lost_markers: 4096,
+            lost_marker_ttl_ms: 2 * OP_START_RESEND_HORIZON_MS,
         }
     }
 }
@@ -169,12 +184,6 @@ pub struct RegistryCounters {
     pub evicted_unacked_total: u64,
     /// Tombstones evicted early because the tombstone table hit its cap.
     pub tombstones_capped_total: u64,
-    /// Lost MARKERS evicted because the marker table hit its cap — each one
-    /// silently degrades a later query for that op from a typed
-    /// `Lost(reason)` to `Unknown`, so the flip must be counted (design
-    /// review finding 7): an Unknown answer is honest only while this
-    /// counter says how many precise answers were given up.
-    pub lost_markers_capped_total: u64,
 }
 
 /// Report from one GC pass.
@@ -186,6 +195,8 @@ pub struct GcReport {
     pub dropped_completed: usize,
     /// Tombstones expired by TTL.
     pub expired_tombstones: usize,
+    /// Lost markers expired by TTL.
+    pub expired_lost_markers: usize,
 }
 
 /// The op registry. See module docs.
@@ -197,9 +208,9 @@ pub struct OpRegistry<T> {
     /// insertion (`tombstone_order`).
     tombstones: HashMap<OpId, u64>,
     tombstone_order: VecDeque<OpId>,
-    /// Markers for ops whose state is gone, so late queries answer typed.
-    lost: HashMap<OpId, LostReason>,
-    lost_order: VecDeque<OpId>,
+    /// Markers for ops whose state is gone, so late queries answer typed and
+    /// a late start never re-runs them: id → (reason, expiry_ms).
+    lost: HashMap<OpId, (LostReason, u64)>,
     counters: RegistryCounters,
 }
 
@@ -213,7 +224,6 @@ impl<T> OpRegistry<T> {
             tombstones: HashMap::new(),
             tombstone_order: VecDeque::new(),
             lost: HashMap::new(),
-            lost_order: VecDeque::new(),
             counters: RegistryCounters::default(),
         }
     }
@@ -263,7 +273,7 @@ impl<T> OpRegistry<T> {
                 },
             };
         }
-        if let Some(reason) = self.lost.get(id) {
+        if let Some((reason, _)) = self.lost.get(id) {
             return QueryAnswer::Lost(*reason);
         }
         if self.tombstones.contains_key(id) {
@@ -315,7 +325,7 @@ impl<T> OpRegistry<T> {
                 OpEntry::Complete { .. } => CancelOutcome::AlreadyComplete,
             };
         }
-        if let Some(reason) = self.lost.get(id) {
+        if let Some((reason, _)) = self.lost.get(id) {
             return CancelOutcome::AlreadyLost(*reason);
         }
         if !self.tombstones.contains_key(id) {
@@ -337,7 +347,7 @@ impl<T> OpRegistry<T> {
     /// dropped now, not at the next GC pass, and a `Released` marker answers
     /// later requests so a duplicate begin never re-runs it. Anything else is
     /// left untouched.
-    pub fn release(&mut self, id: &OpId, exit_seq: u64) -> ReleaseOutcome {
+    pub fn release(&mut self, id: &OpId, exit_seq: u64, now_ms: u64) -> ReleaseOutcome {
         match self.ops.get(id) {
             Some(OpEntry::Complete {
                 exit_seq: retained, ..
@@ -346,13 +356,13 @@ impl<T> OpRegistry<T> {
             Some(OpEntry::Running { .. }) => return ReleaseOutcome::Running,
             None => {
                 return match self.lost.get(id) {
-                    Some(LostReason::Released) => ReleaseOutcome::AlreadyReleased,
+                    Some((LostReason::Released, _)) => ReleaseOutcome::AlreadyReleased,
                     _ => ReleaseOutcome::NotRetained,
                 };
             }
         }
         self.ops.remove(id);
-        self.record_lost(id.clone(), LostReason::Released);
+        self.record_lost(id.clone(), LostReason::Released, now_ms);
         ReleaseOutcome::Released
     }
 
@@ -402,9 +412,11 @@ impl<T> OpRegistry<T> {
             if *acked || expired {
                 self.ops.remove(id);
                 if *acked {
+                    // Fully consumed: as released, a late start answers it.
+                    self.record_lost(id.clone(), LostReason::Released, now_ms);
                     report.dropped_completed += 1;
                 } else {
-                    self.record_lost(id.clone(), LostReason::Evicted);
+                    self.record_lost(id.clone(), LostReason::Evicted, now_ms);
                     report.evicted_unacked.push(id.clone());
                 }
             }
@@ -418,9 +430,10 @@ impl<T> OpRegistry<T> {
             for (id, _, acked) in completed.into_iter().take(excess) {
                 self.ops.remove(&id);
                 if acked {
+                    self.record_lost(id.clone(), LostReason::Released, now_ms);
                     report.dropped_completed += 1;
                 } else {
-                    self.record_lost(id.clone(), LostReason::Evicted);
+                    self.record_lost(id.clone(), LostReason::Evicted, now_ms);
                     report.evicted_unacked.push(id);
                 }
             }
@@ -433,28 +446,45 @@ impl<T> OpRegistry<T> {
             .retain(|id| self.tombstones.contains_key(id));
         report.expired_tombstones = before - self.tombstones.len();
 
+        // Lost-marker TTLs: past it no start for the op can still arrive.
+        let before = self.lost.len();
+        self.lost.retain(|_, (_, expiry)| *expiry > now_ms);
+        report.expired_lost_markers = before - self.lost.len();
+
         report
     }
 
     /// Registers an op as lost (e.g. every journaled-but-unrecovered op at
-    /// runner boot → `RunnerRestarted`). Bounded FIFO: a marker evicted past
-    /// [`RegistryConfig::max_lost_markers`] degrades that op's later queries
-    /// from `Lost(reason)` to `Unknown` — a LOUD counted event
-    /// ([`RegistryCounters::lost_markers_capped_total`]), never a silent
-    /// flip. (Markers cost ~an id string + a discriminant each — the default
-    /// cap holds well under a megabyte, a B-breaker, not a working figure.)
-    pub fn record_lost(&mut self, id: OpId, reason: LostReason) {
+    /// runner boot → `RunnerRestarted`). The marker is kept for
+    /// [`RegistryConfig::lost_marker_ttl_ms`] from `now_ms`, however many
+    /// others are recorded meanwhile: a marker costs an id and a
+    /// discriminant, and only ops that went within that time are held.
+    pub fn record_lost(&mut self, id: OpId, reason: LostReason, now_ms: u64) {
         if reason == LostReason::Evicted {
             self.counters.evicted_unacked_total += 1;
         }
-        if self.lost.len() >= self.config.max_lost_markers {
-            if let Some(oldest) = self.lost_order.pop_front() {
-                self.lost.remove(&oldest);
-                self.counters.lost_markers_capped_total += 1;
-            }
+        self.lost
+            .insert(id, (reason, now_ms + self.config.lost_marker_ttl_ms));
+    }
+
+    /// The lost markers still kept at `now_ms`: each op, why it is gone, and
+    /// how much longer it is kept (to carry to a successor process image).
+    #[must_use]
+    pub fn lost_markers(&self, now_ms: u64) -> Vec<(OpId, LostReason, u64)> {
+        self.lost
+            .iter()
+            .filter(|(_, (_, expiry))| *expiry > now_ms)
+            .map(|(id, (reason, expiry))| (id.clone(), *reason, expiry - now_ms))
+            .collect()
+    }
+
+    /// Keeps a carried marker for `remaining_ms` from `now_ms`, unless the op
+    /// is live here or already marked.
+    pub fn restore_lost(&mut self, id: OpId, reason: LostReason, remaining_ms: u64, now_ms: u64) {
+        if remaining_ms == 0 || self.ops.contains_key(&id) || self.lost.contains_key(&id) {
+            return;
         }
-        self.lost_order.push_back(id.clone());
-        self.lost.insert(id, reason);
+        self.lost.insert(id, (reason, now_ms + remaining_ms));
     }
 
     /// Monotonic counters for metrics export.
@@ -486,7 +516,7 @@ mod tests {
             completed_ttl_ms: 1_000,
             tombstone_ttl_ms: 500,
             max_tombstones: 2,
-            max_lost_markers: 2,
+            lost_marker_ttl_ms: 5_000,
         })
     }
 
@@ -583,7 +613,12 @@ mod tests {
         let report = r.gc(250);
         assert_eq!(report.dropped_completed, 1);
         assert_eq!(report.evicted_unacked, Vec::<OpId>::new());
-        assert_eq!(r.query(&op), QueryAnswer::Unknown);
+        // Fully consumed: a late start answers it as released, never re-runs.
+        assert_eq!(r.query(&op), QueryAnswer::Lost(LostReason::Released));
+        assert!(matches!(
+            r.begin(&op, 2, 300),
+            BeginOutcome::Known(QueryAnswer::Lost(LostReason::Released))
+        ));
         assert_eq!(r.counters().evicted_unacked_total, 0);
     }
 
@@ -642,18 +677,22 @@ mod tests {
         let mut r = registry();
         let op = id("rel");
         assert!(matches!(r.begin(&op, 7, 100), BeginOutcome::Fresh(_)));
-        assert_eq!(r.release(&op, 4), ReleaseOutcome::Running, "running: kept");
+        assert_eq!(
+            r.release(&op, 4, 150),
+            ReleaseOutcome::Running,
+            "running: kept"
+        );
         r.complete(&op, 4, 200);
         assert_eq!(
-            r.release(&op, 3),
+            r.release(&op, 3, 250),
             ReleaseOutcome::FrontierMismatch,
             "another terminal frame releases nothing"
         );
         assert!(matches!(r.query(&op), QueryAnswer::Complete { .. }));
-        assert_eq!(r.release(&op, 4), ReleaseOutcome::Released);
+        assert_eq!(r.release(&op, 4, 250), ReleaseOutcome::Released);
         assert_eq!(r.len(), 0, "dropped now, not at the next GC pass");
         assert_eq!(r.query(&op), QueryAnswer::Lost(LostReason::Released));
-        assert_eq!(r.release(&op, 4), ReleaseOutcome::AlreadyReleased);
+        assert_eq!(r.release(&op, 4, 260), ReleaseOutcome::AlreadyReleased);
         assert_eq!(
             r.cancel(&op, 300),
             CancelOutcome::AlreadyLost(LostReason::Released)
@@ -670,38 +709,77 @@ mod tests {
             0,
             "a release is no loss"
         );
-        assert_eq!(r.release(&id("unknown"), 1), ReleaseOutcome::NotRetained);
+        assert_eq!(
+            r.release(&id("unknown"), 1, 300),
+            ReleaseOutcome::NotRetained
+        );
     }
 
     #[test]
-    fn lost_markers_are_bounded() {
+    fn lost_markers_are_kept_by_time_not_count() {
         let mut r = registry();
-        r.record_lost(id("l1"), LostReason::RunnerRestarted);
-        r.record_lost(id("l2"), LostReason::RunnerRestarted);
-        assert_eq!(
-            r.counters().lost_markers_capped_total,
-            0,
-            "within the cap nothing is given up"
-        );
-        r.record_lost(id("l3"), LostReason::RunnerRestarted);
+        r.record_lost(id("l1"), LostReason::RunnerRestarted, 0);
+        r.record_lost(id("l2"), LostReason::RunnerRestarted, 1_000);
         assert_eq!(
             r.query(&id("l1")),
-            QueryAnswer::Unknown,
-            "oldest marker evicted"
-        );
-        assert_eq!(
-            r.counters().lost_markers_capped_total,
-            1,
-            "the Known-lost -> Unknown flip is a LOUD counted event (finding 7)"
-        );
-        assert_eq!(
-            r.query(&id("l3")),
             QueryAnswer::Lost(LostReason::RunnerRestarted)
         );
         // Begin of a lost op reports Known(Lost) — the caller decides to re-run.
         assert!(matches!(
-            r.begin(&id("l3"), 1, 0),
+            r.begin(&id("l1"), 1, 10),
             BeginOutcome::Known(QueryAnswer::Lost(LostReason::RunnerRestarted))
         ));
+        // Each marker lasts its TTL from when it was recorded (5 s here).
+        assert_eq!(r.gc(4_999).expired_lost_markers, 0);
+        assert_eq!(r.gc(5_000).expired_lost_markers, 1);
+        assert_eq!(r.query(&id("l1")), QueryAnswer::Unknown);
+        assert_eq!(
+            r.query(&id("l2")),
+            QueryAnswer::Lost(LostReason::RunnerRestarted)
+        );
+        assert_eq!(r.gc(6_000).expired_lost_markers, 1);
+    }
+
+    /// However many ops are released after it, a released op's start is
+    /// answered, never run again, until the marker's time is up; the marker
+    /// survives a hand-over to a successor registry with its remaining time.
+    #[test]
+    fn a_released_op_never_runs_again_however_many_follow() {
+        let mut r = registry();
+        let first = id("first");
+        assert!(matches!(r.begin(&first, 1, 0), BeginOutcome::Fresh(_)));
+        r.complete(&first, 2, 0);
+        assert_eq!(r.release(&first, 2, 0), ReleaseOutcome::Released);
+        for n in 0..5_000 {
+            let other = id(&format!("other-{n}"));
+            let _ = r.begin(&other, 1, 100);
+            r.complete(&other, 2, 100);
+            assert_eq!(r.release(&other, 2, 100), ReleaseOutcome::Released);
+        }
+        let _ = r.gc(200);
+        assert!(
+            matches!(
+                r.begin(&first, 9, 300),
+                BeginOutcome::Known(QueryAnswer::Lost(LostReason::Released))
+            ),
+            "the first of 5,001 released ops is still known"
+        );
+
+        // Carried to a successor (its clock starts again at 0).
+        let carried = r.lost_markers(1_000);
+        assert_eq!(carried.len(), 5_001);
+        let mut successor = registry();
+        for (op, reason, remaining) in carried {
+            successor.restore_lost(op, reason, remaining, 0);
+        }
+        assert!(matches!(
+            successor.begin(&first, 9, 3_999),
+            BeginOutcome::Known(QueryAnswer::Lost(LostReason::Released))
+        ));
+        let _ = successor.gc(4_000);
+        assert!(
+            matches!(successor.begin(&first, 9, 4_000), BeginOutcome::Fresh(_)),
+            "its time is up only once no start can still arrive"
+        );
     }
 }

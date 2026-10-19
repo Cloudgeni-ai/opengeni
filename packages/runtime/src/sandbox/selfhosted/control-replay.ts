@@ -4,7 +4,10 @@ import type { NatsRequestConnection } from "./control-rpc";
 
 /** Wire-only capability, deliberately absent from model-facing tool contracts. */
 const REPLAY_HEADER = "Opengeni-Control-Replay";
-const RECOVERY_MS = 120_000;
+/** How long past a request's own timeout its reply is still recovered; the
+ * agent refuses a delivery whose recovery deadline has passed. */
+export const CONTROL_REPLY_RECOVERY_MS = 120_000;
+const RECOVERY_MS = CONTROL_REPLY_RECOVERY_MS;
 /** How often a request still waiting for its reply checks that its agent
  * connection was not replaced. It reads Opengeni's own state, never the agent. */
 const REPLACEMENT_CHECK_MS = 1_000;

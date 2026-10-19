@@ -278,6 +278,10 @@ export interface SelfhostedOpStreamDeps {
   ackIntervalMs?: number;
   silenceTimeoutMs?: number;
   reconnectHoldMs?: number;
+  /** The live runner serves `OpRelease` (Hello `capabilities.op_release`;
+   * every compute agent does): stored output is released in one answered
+   * exchange instead of a final ACK. */
+  outputReleaseSupported?: boolean;
 }
 
 export interface SelfhostedOperationResourcePolicy {
@@ -1032,6 +1036,7 @@ export class SelfhostedSession {
         : {}),
       ...(stream.reconnectHoldMs !== undefined ? { reconnectHoldMs: stream.reconnectHoldMs } : {}),
       ...(connectionCurrent ? { connectionCurrent } : {}),
+      ...(stream.outputReleaseSupported === true ? { outputReleaseSupported: true } : {}),
     });
     this.opStreamClients.set(key, client);
     return client;

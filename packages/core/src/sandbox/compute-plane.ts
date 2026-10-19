@@ -21,6 +21,26 @@ import {
   type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
 
+/** A compute sandbox's agent that does not serve `OpRelease`: its image was
+ * built with an agent older than this release. Compute sandboxes carry an agent
+ * from their image and never update it, and they have no older path for
+ * releasing command output, so the sandbox is refused, not run with polling. */
+export class ComputeAgentIncompatibleError extends Error {
+  constructor(readonly enrollmentId: string) {
+    super(
+      "This compute sandbox's agent is too old: it does not support releasing command output (capabilities.op_release). Rebuild the sandbox image with the agent from this Opengeni release or later.",
+    );
+    this.name = "ComputeAgentIncompatibleError";
+  }
+}
+
+/** Whether a sandbox enrollment's agent reported capabilities that lack
+ * `OpRelease`. Before its Hello is recorded nothing is known, and nothing is
+ * refused. */
+export function computeAgentLacksOutputRelease(capabilities: Record<string, boolean>): boolean {
+  return Object.keys(capabilities).length > 0 && capabilities.opRelease !== true;
+}
+
 /**
  * Whether the agent connection an RPC subject names is still its enrollment's
  * live one. Every call reads the enrollment from the database, which every API
@@ -69,6 +89,8 @@ export function createComputeAgentPlane(deps: {
       // host holds the session open, asleep or not: a live claim is reachable.
       const enrollment = await getLiveEnrollmentConnection(db, workspaceId, enrollmentId);
       if (!enrollment?.connectionInstanceId || enrollment.kind !== "sandbox") return null;
+      if (computeAgentLacksOutputRelease(enrollment.agentCapabilities))
+        throw new ComputeAgentIncompatibleError(enrollmentId);
       return {
         workspaceId: enrollment.workspaceId,
         connectionInstanceId: enrollment.connectionInstanceId,

@@ -3492,6 +3492,9 @@ export function registerBrowserSessionRoutes(
                 transport: new NatsOpStreamTransport(
                   async () => deps.bus.getOpStreamConnection?.() ?? null,
                 ),
+                ...(enrollment.agentCapabilities.opRelease === true
+                  ? { outputReleaseSupported: true }
+                  : {}),
               },
             }
           : {}),

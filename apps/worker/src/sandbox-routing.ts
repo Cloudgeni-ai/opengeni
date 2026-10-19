@@ -1679,6 +1679,7 @@ export type SelfhostedTurnSessionArgs = {
 function opStreamDepsFor(
   services: RoutingWiringServices,
   machineAdvertisesOpStream: boolean,
+  outputReleaseSupported = false,
 ): SelfhostedOpStreamDeps | undefined {
   const { settings, bus, opJournal } = services;
   if (!machineAdvertisesOpStream || settings.agentOpStreamEnabled !== true || !bus) {
@@ -1687,6 +1688,7 @@ function opStreamDepsFor(
   return {
     transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
     ...(opJournal !== undefined ? { journal: opJournal } : {}),
+    ...(outputReleaseSupported ? { outputReleaseSupported: true } : {}),
   };
 }
 
@@ -1697,7 +1699,11 @@ export function connectionBindingFor(
   enrollment: EnrollmentRecord | null,
 ): SelfhostedConnectionBinding | null {
   if (!enrollment?.connectionInstanceId) return null;
-  const opStream = opStreamDepsFor(services, enrollment.opStream === true);
+  const opStream = opStreamDepsFor(
+    services,
+    enrollment.opStream === true,
+    enrollment.agentCapabilities.opRelease === true,
+  );
   return {
     workspaceId: enrollment.workspaceId,
     connectionInstanceId: enrollment.connectionInstanceId,

@@ -1346,6 +1346,78 @@ mod tests {
         );
     }
 
+    /// A released op's id survives an in-place update: the successor image
+    /// answers a late start for it as released and never runs it again.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_released_op_never_runs_again_after_an_update_handover() {
+        use crate::handover::{CarriedMarker, CarriedReason};
+        let rig = rig();
+        assert!(started_status(&rig.start_exec("op-once", "printf once", 1 << 20).await).0);
+        rig.wait_for_exit_frame().await;
+        let op = scoped_op_id("default", "op-once");
+        let mut exit_seq = None;
+        for _ in 0..500 {
+            if let QueryAnswer::Complete { exit_seq: seq, .. } = rig.engine.query(&op) {
+                exit_seq = Some(seq);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let released = serve_op_release(
+            &rig.engine,
+            "r".to_string(),
+            &v1::OpRelease {
+                op_id: "op-once".to_string(),
+                exit_seq: exit_seq.expect("the op completes"),
+            },
+        );
+        assert!(matches!(
+            released.result,
+            Some(RespResult::OpStatus(ref s)) if s.lost_reason == v1::OpLostReason::Released as i32
+        ));
+
+        // What the predecessor writes into its manifest, through JSON.
+        let carried: Vec<CarriedMarker> = rig
+            .engine
+            .carried_markers()
+            .into_iter()
+            .map(CarriedMarker::from)
+            .collect();
+        assert!(carried
+            .iter()
+            .any(|m| m.op_id == op.as_str() && m.reason == CarriedReason::Released));
+        let carried: Vec<CarriedMarker> =
+            serde_json::from_slice(&serde_json::to_vec(&carried).unwrap()).unwrap();
+
+        let successor = self::rig();
+        successor
+            .engine
+            .restore_markers(carried.into_iter().map(CarriedMarker::into_parts));
+        let (_, again) = started_status(
+            &successor
+                .start_exec("op-once", "printf again", 1 << 20)
+                .await,
+        );
+        assert_eq!(again.state, v1::OpState::Lost as i32, "{again:?}");
+        assert_eq!(again.lost_reason, v1::OpLostReason::Released as i32);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            successor.frames.lock().expect("frames").is_empty(),
+            "the successor never runs it"
+        );
+
+        // Negative control: a successor that was not handed the markers runs it.
+        let forgetful = self::rig();
+        let (accepted, fresh) = started_status(
+            &forgetful
+                .start_exec("op-once", "printf again", 1 << 20)
+                .await,
+        );
+        assert!(accepted);
+        assert_ne!(fresh.state, v1::OpState::Lost as i32, "{fresh:?}");
+    }
+
     #[tokio::test]
     async fn tiny_window_is_clamped_up_never_rejected() {
         let rig = rig();

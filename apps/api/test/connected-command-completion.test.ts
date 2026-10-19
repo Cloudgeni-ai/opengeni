@@ -533,6 +533,7 @@ test("reconciled cleanup evidence remains positive across settlement", async () 
 async function liveRunner(
   command: Awaited<ReturnType<typeof fixture>>,
   capabilities: Record<string, boolean>,
+  kind: "sandbox" | "machine" = "sandbox",
 ) {
   const [session] =
     await shared.admin`select sandbox_group_id from sessions where id=${command.sessionId}`;
@@ -547,6 +548,10 @@ async function liveRunner(
   await shared.admin`update enrollments set connection_instance_id=${command.connectionInstanceId},
     connection_lease_expires_at=now()+interval '1 hour',
     agent_capabilities=${JSON.stringify(capabilities)}::jsonb where id=${command.enrollmentId}`;
+  // A Connected Machine: its agent may predate OpRelease.
+  if (kind === "machine")
+    await shared.admin`update enrollments set kind='machine', sandbox_group_id=null, link_epoch=null,
+      pubkey=${`test-key-${command.enrollmentId}`} where id=${command.enrollmentId}`;
   return command;
 }
 
@@ -641,8 +646,8 @@ test("a runner serving OpRelease has a pushed command's output released where it
 
 test("a runner without OpRelease, or a release that fails, leaves the stored output to the reconciler", async () => {
   const completed = (opId: string) => ({ opId, exit: OpExit.fromPartial({ exitCode: 0 }) });
-  // No capability: no release is sent.
-  const legacy = await liveRunner(await fixture(), { opStream: true });
+  // A Connected Machine without the capability: no release is sent.
+  const legacy = await liveRunner(await fixture(), { opStream: true }, "machine");
   const quiet = releaseRunner(() => "released");
   await ingestConnectedCommandCompletion(
     client.db,

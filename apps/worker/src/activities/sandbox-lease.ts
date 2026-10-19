@@ -99,8 +99,10 @@ import {
   type LeaseSnapshot,
 } from "@opengeni/db";
 import {
+  CONNECTED_COMMAND_CLAIM_TTL_MS,
   claimConnectedCommandOutputReleases,
   claimConnectedMachineSessionBackgroundCommands,
+  connectedCommandOutputClaimCurrent,
   deferConnectedMachineBackgroundCommandReconciliation,
   connectedCommandReconciliationRetryMs,
   recordConnectedCommandOutputConsumption,
@@ -458,7 +460,7 @@ export const RETAINED_PROCESS_OUTPUT_BACKLOG_BYTES = 256 * 1024;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS = 5;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS = 24 * 60 * 60_000;
 export const CONNECTED_COMMAND_RECONCILIATION_LIMIT = 20;
-export const CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
+export const CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS = CONNECTED_COMMAND_CLAIM_TTL_MS;
 
 export class SandboxProviderCaptureTimeoutError extends Error {
   readonly name = "SandboxProviderCaptureTimeoutError";
@@ -1388,6 +1390,7 @@ type ConnectedCommandReconciliationOutcome =
   | "output_unavailable"
   | "output_ack_published"
   | "output_released"
+  | "output_claim_superseded"
   | "settlement_failed"
   | "defer_failed";
 
@@ -1851,8 +1854,7 @@ export async function reconcileConnectedCommandOutputReleases(
   const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
   const controlRpc =
     controlRpcOverride ?? new NatsControlRpc(async () => bus.getRequestConnection());
-  const runnerLookups: ConnectedRunnerLookups = new Map();
-  const releaseLookups = new Map<string, Promise<boolean>>();
+  const lookups: ConnectedOutputReleaseLookups = { runners: new Map(), releases: new Map() };
   do {
     let claims: Awaited<ReturnType<typeof claimConnectedCommandOutputReleases>>;
     try {
@@ -1869,150 +1871,188 @@ export async function reconcileConnectedCommandOutputReleases(
       });
       return;
     }
-    await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
-      let receipt = claim.receipt;
-      try {
-        if (!bus.getOpStreamConnection)
-          throw new Error("Connected command output transport unavailable");
-        const rpcSubject = subjectFor(
-          claim.controlWorkspaceId,
-          claim.enrollmentId,
-          claim.connectionInstanceId,
-        );
-        const controlTimeoutMs = Math.min(
-          settings.sandboxSelfhostedControlTimeoutMs,
-          RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
-        );
-        const client = new OpStreamExecClient({
-          workspaceId: claim.controlWorkspaceId,
-          agentId: claim.enrollmentId,
-          connectionInstanceId: claim.connectionInstanceId,
-          epoch: 0,
-          controlRpc,
-          rpcSubject,
-          transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
-          controlTimeoutMs,
-          retryClock: defaultSelfhostedRetryClock,
-          journal: {
-            attachGeneration: () => String(Date.now()),
-            persistSettled: () => {
-              throw new Error("Background output release requires its database receipt");
-            },
-          },
-        });
-        if (!receipt) {
-          const status = await querySelfhostedOp({
-            controlRpc,
-            rpcSubject,
-            opId: claim.opId,
-            controlTimeoutMs,
-          });
-          // Lost, or cancelled before it ever began (its tombstone): there is
-          // no output to read, so none is recorded and nothing is acknowledged.
-          if (status.state === OpState.OP_STATE_LOST || isOpTombstone(status, claim.opId)) {
-            if (
-              !(await settleConnectedCommandOutputReleaseClaim(db, {
-                claim,
-                outcome: "unavailable",
-                retryAfterMs: 0,
-              }))
-            )
-              throw new Error("Connected command output loss no longer owns its exact claim");
-            recordConnectedCommandReconciliation(observability, "output_unavailable");
-            return;
-          }
-          if (status.state !== OpState.OP_STATE_COMPLETE)
-            throw new Error("Terminal command output returned a live operation");
-          const replay = await replayConnectedCommandOutput(
-            client,
-            claim.opId,
-            true,
-            async (frames) =>
-              captureConnectedCommandOutput(db, claim, bus)(claim.commandId, frames),
-          );
-          const terminal = replay.status === "completed" ? replay : replay.terminal;
-          receipt =
-            replay.outputReceipt ??
-            (replay.status === "running" ? replay.terminal?.outputReceipt : undefined) ??
-            null;
-          if (!terminal || !receipt)
-            throw new Error("Connected command output replay has no complete custody receipt");
-          await recordConnectedCommandOutputConsumption(db, {
-            ...claim,
-            receipt,
-            exitCode: terminal.outcome.response.exitCode,
-          });
-        }
-        // A runner serving OpRelease confirms the release in its answer, so it
-        // settles in this one exchange: the recovery of a release the storing
-        // process did not finish. Others keep the attach and final ACK, and a
-        // later pass observes that the runner dropped the op.
-        const releaseKey = JSON.stringify([
-          claim.controlWorkspaceId,
-          claim.enrollmentId,
-          claim.connectionInstanceId,
-        ]);
-        let releases = releaseLookups.get(releaseKey);
-        if (!releases) {
-          releases = connectedRunnerReleasesOutput(db, claim).catch(() => false);
-          releaseLookups.set(releaseKey, releases);
-        }
-        const outcome = (await releases)
-          ? await releaseSelfhostedOpOutput({
-              controlRpc,
-              rpcSubject,
-              opId: claim.opId,
-              exitSeq: receipt.exitSeq,
-              controlTimeoutMs,
-            })
-          : await client.releaseCapturedOutput(claim.opId, receipt);
+    await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) =>
+      releaseClaimedConnectedCommandOutput(
+        { db, settings, observability, bus, controlRpc, lookups },
+        claim,
+      ),
+    );
+    if (claims.length < CONNECTED_COMMAND_RECONCILIATION_LIMIT) break;
+  } while (Date.now() < deadline);
+}
+
+type ConnectedOutputReleaseLookups = {
+  runners: ConnectedRunnerLookups;
+  releases: Map<string, Promise<boolean>>;
+};
+
+/** Recover one claimed output obligation: capture what was never stored, then
+ * release it on its runner in one exchange. The claim is the one ownership of
+ * that obligation. It is checked again right before anything is sent to the
+ * runner: an obligation another owner settled meanwhile (the process that
+ * stored the output released it), or whose claim passed to another owner,
+ * sends the runner nothing, so a sandbox asleep since is never reached. */
+export async function releaseClaimedConnectedCommandOutput(
+  deps: {
+    db: ActivityServices["db"];
+    settings: ActivityServices["settings"];
+    observability: ActivityServices["observability"];
+    bus: ActivityServices["bus"];
+    controlRpc: ControlRpc;
+    lookups?: ConnectedOutputReleaseLookups;
+  },
+  claim: Awaited<ReturnType<typeof claimConnectedCommandOutputReleases>>[number],
+): Promise<void> {
+  const { db, settings, observability, bus, controlRpc } = deps;
+  const lookups = deps.lookups ?? { runners: new Map(), releases: new Map() };
+  const runnerLookups = lookups.runners;
+  const releaseLookups = lookups.releases;
+  const owned = async () => await connectedCommandOutputClaimCurrent(db, claim);
+  let receipt = claim.receipt;
+  try {
+    if (!(await owned())) {
+      recordConnectedCommandReconciliation(observability, "output_claim_superseded");
+      return;
+    }
+    if (!bus.getOpStreamConnection)
+      throw new Error("Connected command output transport unavailable");
+    const rpcSubject = subjectFor(
+      claim.controlWorkspaceId,
+      claim.enrollmentId,
+      claim.connectionInstanceId,
+    );
+    const controlTimeoutMs = Math.min(
+      settings.sandboxSelfhostedControlTimeoutMs,
+      RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+    );
+    const client = new OpStreamExecClient({
+      workspaceId: claim.controlWorkspaceId,
+      agentId: claim.enrollmentId,
+      connectionInstanceId: claim.connectionInstanceId,
+      epoch: 0,
+      controlRpc,
+      rpcSubject,
+      transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
+      controlTimeoutMs,
+      retryClock: defaultSelfhostedRetryClock,
+      journal: {
+        attachGeneration: () => String(Date.now()),
+        persistSettled: () => {
+          throw new Error("Background output release requires its database receipt");
+        },
+      },
+    });
+    if (!receipt) {
+      const status = await querySelfhostedOp({
+        controlRpc,
+        rpcSubject,
+        opId: claim.opId,
+        controlTimeoutMs,
+      });
+      // Lost, or cancelled before it ever began (its tombstone): there is
+      // no output to read, so none is recorded and nothing is acknowledged.
+      if (status.state === OpState.OP_STATE_LOST || isOpTombstone(status, claim.opId)) {
         if (
           !(await settleConnectedCommandOutputReleaseClaim(db, {
             claim,
-            outcome,
-            retryAfterMs: outcome === "published" ? settings.sandboxLeaseReaperPeriodMs : 0,
+            outcome: "unavailable",
+            retryAfterMs: 0,
           }))
         )
-          throw new Error("Connected command output release no longer owns its exact claim");
-        recordConnectedCommandReconciliation(
-          observability,
-          outcome === "published" ? "output_ack_published" : "output_released",
-        );
-      } catch (error) {
-        const retired = await connectedCommandRunnerRetirement(db, claim, error, runnerLookups);
-        // A retired runner retains nothing: captured output is released, and
-        // output it never handed over is recorded as missing.
-        if (
-          retired &&
-          (await settleConnectedCommandOutputReleaseClaim(db, {
-            claim,
-            outcome: receipt ? "not_retained" : "unavailable",
-            retryAfterMs: 0,
-          }).catch(() => false))
-        ) {
-          recordConnectedCommandReconciliation(
-            observability,
-            receipt ? "output_released" : "output_unavailable",
-          );
-          return;
-        }
-        await settleConnectedCommandOutputReleaseClaim(db, {
-          claim,
-          outcome: "retry",
-          retryAfterMs: Math.min(
-            5 * 60_000,
-            Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) *
-              2 ** Math.min(4, claim.reconcileAttempts - 1),
-          ),
-        }).catch(() => false);
-        observability.warn("sandbox reaper: connected-command output release deferred", {
-          commandId: claim.commandId,
-          error: error instanceof Error ? error.message : String(error),
-        });
+          throw new Error("Connected command output loss no longer owns its exact claim");
+        recordConnectedCommandReconciliation(observability, "output_unavailable");
+        return;
       }
+      if (status.state !== OpState.OP_STATE_COMPLETE)
+        throw new Error("Terminal command output returned a live operation");
+      const replay = await replayConnectedCommandOutput(client, claim.opId, true, async (frames) =>
+        captureConnectedCommandOutput(db, claim, bus)(claim.commandId, frames),
+      );
+      const terminal = replay.status === "completed" ? replay : replay.terminal;
+      receipt =
+        replay.outputReceipt ??
+        (replay.status === "running" ? replay.terminal?.outputReceipt : undefined) ??
+        null;
+      if (!terminal || !receipt)
+        throw new Error("Connected command output replay has no complete custody receipt");
+      await recordConnectedCommandOutputConsumption(db, {
+        ...claim,
+        receipt,
+        exitCode: terminal.outcome.response.exitCode,
+      });
+    }
+    // A runner serving OpRelease confirms the release in its answer, so it
+    // settles in this one exchange: the recovery of a release the storing
+    // process did not finish. Others keep the attach and final ACK, and a
+    // later pass observes that the runner dropped the op.
+    const releaseKey = JSON.stringify([
+      claim.controlWorkspaceId,
+      claim.enrollmentId,
+      claim.connectionInstanceId,
+    ]);
+    let releases = releaseLookups.get(releaseKey);
+    if (!releases) {
+      releases = connectedRunnerReleasesOutput(db, claim).catch(() => false);
+      releaseLookups.set(releaseKey, releases);
+    }
+    const releasesOutput = await releases;
+    if (!(await owned())) {
+      recordConnectedCommandReconciliation(observability, "output_claim_superseded");
+      return;
+    }
+    const outcome = releasesOutput
+      ? await releaseSelfhostedOpOutput({
+          controlRpc,
+          rpcSubject,
+          opId: claim.opId,
+          exitSeq: receipt.exitSeq,
+          controlTimeoutMs,
+        })
+      : await client.releaseCapturedOutput(claim.opId, receipt);
+    if (
+      !(await settleConnectedCommandOutputReleaseClaim(db, {
+        claim,
+        outcome,
+        retryAfterMs: outcome === "published" ? settings.sandboxLeaseReaperPeriodMs : 0,
+      }))
+    )
+      throw new Error("Connected command output release no longer owns its exact claim");
+    recordConnectedCommandReconciliation(
+      observability,
+      outcome === "published" ? "output_ack_published" : "output_released",
+    );
+  } catch (error) {
+    const retired = await connectedCommandRunnerRetirement(db, claim, error, runnerLookups);
+    // A retired runner retains nothing: captured output is released, and
+    // output it never handed over is recorded as missing.
+    if (
+      retired &&
+      (await settleConnectedCommandOutputReleaseClaim(db, {
+        claim,
+        outcome: receipt ? "not_retained" : "unavailable",
+        retryAfterMs: 0,
+      }).catch(() => false))
+    ) {
+      recordConnectedCommandReconciliation(
+        observability,
+        receipt ? "output_released" : "output_unavailable",
+      );
+      return;
+    }
+    await settleConnectedCommandOutputReleaseClaim(db, {
+      claim,
+      outcome: "retry",
+      retryAfterMs: Math.min(
+        5 * 60_000,
+        Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) *
+          2 ** Math.min(4, claim.reconcileAttempts - 1),
+      ),
+    }).catch(() => false);
+    observability.warn("sandbox reaper: connected-command output release deferred", {
+      commandId: claim.commandId,
+      error: error instanceof Error ? error.message : String(error),
     });
-    if (claims.length < CONNECTED_COMMAND_RECONCILIATION_LIMIT) break;
-  } while (Date.now() < deadline);
+  }
 }
 
 export async function probeConnectedMachineBackgroundCommand(

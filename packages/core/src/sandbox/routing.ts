@@ -319,6 +319,9 @@ async function resolveSelfhostedConnection(
           transport: new NatsOpStreamTransport(
             async () => services.bus?.getOpStreamConnection?.() ?? null,
           ),
+          ...(enrollment.agentCapabilities.opRelease === true
+            ? { outputReleaseSupported: true }
+            : {}),
         }
       : undefined;
   return {

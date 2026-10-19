@@ -580,6 +580,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             );
         }
         if let Some(inherited) = inherited {
+            supervisor.restore_lost_markers(inherited.lost_markers);
             supervisor.adopt_handed_over(&platform, inherited.ops);
         }
     }

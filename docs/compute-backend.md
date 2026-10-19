@@ -46,16 +46,38 @@ sends the cancellation from the API at once, so the process ends without
 waiting for the next maintenance pass; the claim delivers it when that
 attempt fails.
 
-A finished background command's output is released where it is stored, while
-the agent is live from the command: one `OpRelease` for the stored exit frame,
-which the agent answers once it has dropped the command (LOST, reason
-RELEASED), so the release is settled from that answer. Nothing about a released
-command is left for a later pass, so housekeeping has no reason to reach an
-idle sandbox. The reaper only recovers a release whose storing process died
-first; reaching a sleeping sandbox for that is real work and wakes it once,
-and the answer settles it in that one exchange. Compute agents always serve
-`OpRelease` (`capabilities.op_release`); a Connected Machine agent without it
-keeps the reaper's attach, final ACK and later look.
+A finished command's output, foreground or background, is released where it
+is stored, while the agent is live from the command: one `OpRelease` for the
+stored exit frame, which the agent answers once it has dropped the command
+(LOST, reason RELEASED), so the release is settled from that answer. Each
+background release obligation has one owner at a time. The process that stores
+the output claims it and sends the release; the reaper claims only an
+obligation nobody holds (or whose claim expired), and only a grace period
+after the output was stored. Right before sending anything the reaper checks
+that its claim is still open and still its own, so an obligation settled
+meanwhile sends nothing to a sandbox that has gone to sleep since. Nothing
+about a released command is left for a later pass, so housekeeping has no
+reason to reach an idle sandbox. The reaper only recovers a release whose
+storing process died first; reaching a sleeping sandbox for that is real work
+and wakes it once, and the answer settles it in that one exchange.
+
+Every compute agent serves `OpRelease` (`capabilities.op_release`). A compute
+sandbox runs the agent from its image and never updates it in place, and
+compute images are built with an agent from this release or later, so compute
+has no attach-and-final-ACK release path. A compute agent whose Hello lacks the
+capability comes from an image built with the wrong agent: the API logs it as a
+version error and the sandbox's operations are refused until the image is
+rebuilt; nothing falls back to polling. That older path remains only for
+Connected Machines with older agents, which never sleep, so their attach and
+final ACK are answered on the first pass.
+
+A released command never runs again. No start for an operation reaches an
+agent later than 15 minutes after its first start attempt
+(`OP_START_RESEND_HORIZON_MS`), and the agent keeps the id of every operation
+that is gone (released, final-acknowledged, evicted or lost to a restart) for
+twice that, by time and never by count, and carries those ids across an
+in-place update. A late or duplicate start of a released operation is answered
+as released.
 
 The only timers that message an agent are the op stream's credit acks and
 silence probes, and they run only while a call is attached to a running
