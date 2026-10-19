@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "c7007f1f6cf29c2b8167719f0b447459b5bf4c4107291d05c694fff57719f8cf"
+      "sha256": "7ace0218d3d4f66ae8bf3405f9dabf3836b325f72e2990a90072a7994103f69e"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -872,6 +872,12 @@
       "job": "plan",
       "step": "Record dependency cache outcome",
       "sha256": "d62d858d5e25fa401e05c9dc846f4dcb3aa730f279cd7b64df76765af634124b"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "source-contracts",
+      "step": "Check committed Site browser runtime before builds",
+      "sha256": "05ad79d8a4f14bc9868e1a2863355bc44441eb00c8703163059a287fee4142b0"
     },
     {
       "workflow": ".github/workflows/ci.yml",
