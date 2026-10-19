@@ -224,6 +224,27 @@ describe("redactInteractionSecretValues", () => {
     expect(result.nested).toEqual({ name: `x${INTERACTION_REDACTED_SECRET}`, short: "ab" });
     expect(redactInteractionSecretValues("plain", undefined)).toBe("plain");
   });
+
+  test("hides values in addresses, percent-encoded values and values cut off by clipping", () => {
+    const typed = { key: "s3cret pass/word" };
+    const result = redactInteractionSecretValues(
+      {
+        url: "https://example.test/?q=s3cret%20pass%2Fword",
+        form: "https://example.test/?q=s3cret+pass%2Fword",
+        clipped: "Value: s3cret pa",
+        short: "Value: s3c",
+        unrelated: "s3cret is a word",
+      },
+      typed,
+    );
+    expect(result).toEqual({
+      url: `https://example.test/?q=${INTERACTION_REDACTED_SECRET}`,
+      form: `https://example.test/?q=${INTERACTION_REDACTED_SECRET}`,
+      clipped: `Value: ${INTERACTION_REDACTED_SECRET}`,
+      short: "Value: s3c",
+      unrelated: "s3cret is a word",
+    });
+  });
 });
 
 describe("passkey sync contracts", () => {

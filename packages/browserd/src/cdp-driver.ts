@@ -608,7 +608,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   /** Page target last brought to the front by this controller, when known. */
   private frontTargetId: string | null = null;
   /** Secret values this controller typed; redacted from everything it returns. */
-  private readonly typedSecrets = new TypedSecretMemory();
+  private readonly typedSecrets: TypedSecretMemory;
 
   constructor(options: AgentBrowserDriverOptions) {
     if (
@@ -622,6 +622,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     this.browserContextId = options.browserContextId;
     this.browserSessionId = options.browserSessionId;
+    this.typedSecrets = TypedSecretMemory.forSession("browser", options.browserSessionId);
     this.controllerGeneration = options.controllerGeneration;
     this.runner = options.runner;
     this.now = options.now ?? (() => new Date());
@@ -768,13 +769,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return process;
   }
 
+  /** Tab inventory with typed secrets hidden in titles and URLs. Saved
+   * snapshots take their tabs from here, so they never keep a typed secret
+   * either; a tab whose address carried one reopens without it. */
   async listTargets(): Promise<BrowserTargetValue[]> {
     const connection = await this.ensureConnection();
     const infos = visibleTargets(await this.targetInfos(connection));
-    return infos.map((info) => {
-      const state = this.states.get(info.targetId);
-      return this.targetFromInfo(info, state ?? null);
-    });
+    return this.typedSecrets.redact(
+      infos.map((info) => this.targetFromInfo(info, this.states.get(info.targetId) ?? null)),
+    );
   }
 
   async openTarget(
@@ -1072,7 +1075,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // dialog is handled; otherwise the controller's generic pre-dispatch
     // target validation can fail before `handle_dialog` reaches Chromium.
     if (!state.dialog) await this.refreshFrame(state);
-    return this.targetFromInfo(info, state);
+    return this.typedSecrets.redact(this.targetFromInfo(info, state));
   }
 
   async observe(targetId: string): Promise<BrowserObservationValue> {

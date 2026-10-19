@@ -58,6 +58,8 @@ second line</textarea></label>
           document.getElementById('pw').value = 'hunter' + '22-' + 'secret';
           document.querySelector('label:nth-of-type(5) input').addEventListener('input', (event) => {
             document.getElementById('echo').textContent = 'Key ends ' + event.target.value;
+            document.title = 'Key ' + event.target.value;
+            location.hash = 'key=' + encodeURIComponent(event.target.value);
           });
         </script>`)}`,
       );
@@ -94,6 +96,38 @@ second line</textarea></label>
         expectedFrameId: later.frameId!,
       });
       expect(read.text).toBe("Key ends [secret]");
+
+      // A read clipped partway through the value still hides its start.
+      const clipped = await driver.readDom(start.target.id, {
+        kind: "element",
+        locator: { kind: "css", selector: "#echo" },
+        maxChars: "Key ends ".length + secret.length - 1,
+        expectedTargetGeneration: later.target.targetGeneration,
+        expectedDocumentGeneration: later.target.documentGeneration!,
+        expectedFrameId: later.frameId!,
+      });
+      expect(clipped.text).toBe("Key ends [secret]");
+
+      // The page put the value into its title and address: the tab list and
+      // the observed target hide it there too.
+      const tabs = await driver.listTargets();
+      expect(JSON.stringify(tabs)).not.toContain(secret);
+      expect(tabs.find((tab) => tab.id === start.target.id)?.title).toBe("Key [secret]");
+      expect(JSON.stringify(await driver.target(start.target.id))).not.toContain(secret);
+
+      // Another controller of the same session (a reattach after recovery)
+      // still hides what this one typed.
+      const reattached = new AgentBrowserDriver({
+        browserSessionId: start.browserSessionId,
+        controllerGeneration: `controller-${randomUUID()}`,
+        runner,
+      });
+      expect(reattached).toBeDefined();
+      expect(
+        JSON.stringify(
+          redactWith(reattached, { echo: `Key ends ${secret}`, url: `https://x/?k=${secret}` }),
+        ),
+      ).not.toContain(secret);
     } finally {
       await driver.close();
       await rm(directory, { recursive: true, force: true });
@@ -101,6 +135,12 @@ second line</textarea></label>
   },
   60_000,
 );
+
+function redactWith(driver: AgentBrowserDriver, value: unknown): unknown {
+  return (
+    driver as unknown as { typedSecrets: { redact(value: unknown): unknown } }
+  ).typedSecrets.redact(value);
+}
 
 function valueOf(observation: BrowserObservation, role: string, name: string): unknown {
   const node = nodes(observation).find(

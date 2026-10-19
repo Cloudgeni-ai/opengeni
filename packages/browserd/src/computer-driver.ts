@@ -93,8 +93,13 @@ export class ComputerDriver implements ComputerInteractionDriver {
    * start beside it, so every later call fails with this clear reason. */
   private helperLost: InteractionControllerError | null = null;
 
+  /** Secret values typed in this session; redacted from everything it returns,
+   * since desktop accessibility trees and window titles show field values. */
+  private readonly typedSecrets: TypedSecretMemory;
+
   constructor(options: ComputerDriverOptions) {
     this.computerSessionId = options.computerSessionId;
+    this.typedSecrets = TypedSecretMemory.forSession("computer", options.computerSessionId);
     this.controllerGeneration = options.controllerGeneration;
     this.client = options.client;
     this.clientFactory = options.clientFactory;
@@ -103,10 +108,6 @@ export class ComputerDriver implements ComputerInteractionDriver {
     this.adapterId = options.client.identity.adapterId;
     this.capabilities = options.client.initialCapabilities;
   }
-
-  /** Secret values this controller typed; redacted from everything it returns,
-   * since desktop accessibility trees and window titles show field values. */
-  private readonly typedSecrets = new TypedSecretMemory();
 
   async listTargets(): Promise<ComputerTargetValue[]> {
     this.assertOpen();

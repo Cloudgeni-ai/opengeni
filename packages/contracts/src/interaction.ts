@@ -3981,27 +3981,61 @@ export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 4;
 
 /** Identifier-like keys keep their strings untouched (generations, refs,
  * digests, image payloads, timestamps): redacting inside them would corrupt
- * the result rather than protect anything. */
-const NON_TEXT_KEY = /^(id|ref|data|url|digest|mimeType|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
+ * the result rather than protect anything. URLs are text: a page can put a
+ * typed value into its address. */
+const NON_TEXT_KEY = /^(id|ref|data|digest|mimeType|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
+
+/** The forms a value takes in page text and addresses. */
+function secretNeedles(secretValues: InteractionSecretValues): string[] {
+  const needles = new Set<string>();
+  for (const value of Object.values(secretValues)) {
+    if (value.length < INTERACTION_MIN_REDACTED_SECRET_CHARS) continue;
+    needles.add(value);
+    try {
+      needles.add(encodeURIComponent(value));
+      needles.add(encodeURIComponent(value).replaceAll("%20", "+"));
+    } catch {
+      // A lone surrogate has no URI form; the raw value is still searched.
+    }
+  }
+  return [...needles].sort((left, right) => right.length - left.length);
+}
+
+/** Length of the longest start of `needle` that `text` ends with, when it is
+ * long enough to matter: text clipped to a length can end partway through a
+ * value, and that partial value is still the secret's start. */
+function clippedSecretTail(text: string, needle: string): number {
+  const probe = text.slice(-INTERACTION_MIN_REDACTED_SECRET_CHARS);
+  if (probe.length < INTERACTION_MIN_REDACTED_SECRET_CHARS) return 0;
+  let best = 0;
+  for (let at = needle.indexOf(probe); at !== -1; at = needle.indexOf(probe, at + 1)) {
+    const length = at + probe.length;
+    if (length < needle.length && length > best && text.endsWith(needle.slice(0, length)))
+      best = length;
+  }
+  return best;
+}
 
 /** Deep copy with every occurrence of a supplied secret value in a text
- * string replaced by `[secret]`. Used on results a driver returns after
- * dispatching materialized values (CUA tools echo typed text; desktop
- * accessibility trees expose field values). */
+ * string (raw or percent-encoded) replaced by `[secret]`, including a value's
+ * start left at the end of a clipped string. Used on results a driver returns
+ * after dispatching materialized values (CUA tools echo typed text; desktop
+ * accessibility trees and page fields expose values). */
 export function redactInteractionSecretValues<T>(
   value: T,
   secretValues: InteractionSecretValues | undefined,
 ): T {
   if (secretValues === undefined) return value;
-  const needles = [...new Set(Object.values(secretValues))]
-    .filter((needle) => needle.length >= INTERACTION_MIN_REDACTED_SECRET_CHARS)
-    .sort((left, right) => right.length - left.length);
+  const needles = secretNeedles(secretValues);
   if (needles.length === 0) return value;
   const redactText = (text: string): string => {
     let out = text;
     for (const needle of needles) {
       if (out.includes(needle)) out = out.split(needle).join(INTERACTION_REDACTED_SECRET);
     }
+    let tail = 0;
+    for (const needle of needles) tail = Math.max(tail, clippedSecretTail(out, needle));
+    if (tail > 0) out = out.slice(0, out.length - tail) + INTERACTION_REDACTED_SECRET;
     return out;
   };
   const visit = (entry: unknown, key: string | null): unknown => {
