@@ -46,7 +46,7 @@ import {
   handleHelloPayload,
   startMetricsIngestion,
 } from "../src/sandbox/metrics-ingestion";
-import { machineUpdateBlockedReason } from "../src/sandbox/machines";
+import { agentVersionState, machineUpdateBlockedReason } from "../src/sandbox/machines";
 import { createAutomaticAgentUpdater } from "../src/sandbox/agent-update";
 
 test("whole-app update bootstrap gate admits fixed Mac builds and preserves other platforms", () => {
@@ -1444,6 +1444,84 @@ describe("Connected Machine signed self-update orchestration", () => {
     expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
       "succeeded",
     );
+  }, 90_000);
+
+  test("a successor without an updater receipt settles the old request and reports the installed version", async () => {
+    if (!available) return;
+    for (const [installedVersion, state] of [
+      ["0.1.16", "current"],
+      ["0.1.17", "ahead"],
+      ["0.1.15", "update_failed"],
+    ] as const) {
+      const { accountId, workspaceId, enrollment } = await seed();
+      const live = (await getEnrollment(db, workspaceId, enrollment.id))!;
+      const operationId = crypto.randomUUID();
+      await beginEnrollmentAgentUpdate(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: enrollment.id,
+        connectionInstanceId: CONNECTION_INSTANCE_ID,
+        connectionGeneration: live.connectionGeneration,
+        operationId,
+        targetVersion: "0.1.16",
+      });
+      const hello = (instance: string, version: string) =>
+        handleHelloPayload(
+          db,
+          undefined,
+          Hello.encode(
+            Hello.fromPartial({
+              agentId: enrollment.id,
+              workspaceId,
+              agentVersion: version,
+              binarySha256: "ab".repeat(32),
+              updateChannel: "stable",
+              // An installer/restart has no managed-update operation receipt.
+            }),
+          ).finish(),
+          `agent.${workspaceId}.${enrollment.id}.connection.${instance}.hello`,
+        );
+      // A reconnect of the accepting process must not terminate its own update.
+      await hello(CONNECTION_INSTANCE_ID, "0.1.15");
+      expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+        "requested",
+      );
+      await admin`update enrollments set connection_lease_expires_at = now() - interval '1 second'
+        where id = ${enrollment.id}`;
+      const successor = crypto.randomUUID();
+      expect(
+        (
+          await claimEnrollmentConnection(db, {
+            workspaceId,
+            enrollmentId: enrollment.id,
+            credentialGeneration: enrollment.credentialGeneration,
+            connectionInstanceId: successor,
+            leaseMs: 20_000,
+          })
+        ).claimed,
+      ).toBe(true);
+      // Late Hello from the old instance cannot settle anything.
+      await hello(CONNECTION_INSTANCE_ID, installedVersion);
+      expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+        "requested",
+      );
+      await hello(successor, installedVersion);
+      const updated = (await getEnrollment(db, workspaceId, enrollment.id))!;
+      expect(updated.agentUpdate).toMatchObject({
+        operationId,
+        status: "failed",
+        errorCode: "accepting_process_replaced",
+        retryable: true,
+        completedAt: expect.any(String),
+      });
+      expect(updated.agentVersion).toBe(installedVersion);
+      expect(agentVersionState(updated.agentVersion, "0.1.16", updated.agentUpdate)).toBe(state);
+      // Repeated Hello does not churn the settled operation or invent success.
+      await hello(successor, installedVersion);
+      expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate).toEqual(
+        updated.agentUpdate,
+      );
+    }
   }, 90_000);
 
   test("redelivers one unconfirmed operation id instead of reserving a second update", async () => {

@@ -5143,42 +5143,76 @@ export async function findActiveApiKeyByHash(
     })
   | null
 > {
-  return await db.transaction(async (tx) => {
-    await tx.execute(sql`select set_config('opengeni.api_key_hash', ${keyHash}, true)`);
-    const [row] = await tx
-      .select()
-      .from(schema.apiKeys)
-      .where(
-        and(
-          eq(schema.apiKeys.keyHash, keyHash),
-          sql`${schema.apiKeys.revokedAt} is null`,
-          sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`,
-        ),
-      )
-      .limit(1)
-      .for("update");
-    if (!row) {
-      return null;
+  const authenticated = await db.transaction(
+    async (tx) => {
+      await tx.execute(sql`select set_config('opengeni.api_key_hash', ${keyHash}, true)`);
+      const [row] = await tx
+        .select()
+        .from(schema.apiKeys)
+        .where(
+          and(
+            eq(schema.apiKeys.keyHash, keyHash),
+            sql`${schema.apiKeys.revokedAt} is null`,
+            sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`,
+          ),
+        )
+        .limit(1);
+      if (!row) {
+        return null;
+      }
+      // Hash visibility proves this account. The join-table hash lane requires
+      // both settings and remains bounded to this key, not sibling key scopes.
+      await tx.execute(sql`select set_config('opengeni.account_id', ${row.accountId}, true)`);
+      const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
+      return {
+        ...mapApiKey(row, scopes.get(row.id)),
+        ...(row.credentialKind === "personal"
+          ? { workspaceScope: personalApiKeyAccess(row, scopes.get(row.id)).workspaceScope }
+          : {}),
+        credentialKind: row.credentialKind,
+        ownerSubjectId: row.ownerSubjectId,
+        ownerPermissions: row.ownerPermissions,
+      };
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+  if (!authenticated) return null;
+  // Read the key and its scope rows from one snapshot without locking or
+  // dirtying the key. Revocation/expiry is checked on every authentication;
+  // no authorization result is cached between requests.
+  // Last-use telemetry is not an authorization fence. Coalesce it across
+  // replicas to one update per key per minute, outside the read-only snapshot.
+  const now = new Date();
+  const lastUseBefore = new Date(now.getTime() - 60_000);
+  if (!authenticated.lastUsedAt || Date.parse(authenticated.lastUsedAt) < lastUseBefore.getTime()) {
+    try {
+      await db.transaction(async (tx) => {
+        await tx.execute(sql`select set_config('opengeni.api_key_hash', ${keyHash}, true),
+        set_config('opengeni.account_id', ${authenticated.accountId}, true)`);
+        const [touched] = await tx
+          .update(schema.apiKeys)
+          .set({ lastUsedAt: now })
+          .where(
+            and(
+              sql`${schema.apiKeys.id} = (select id from ${schema.apiKeys}
+              where id = ${authenticated.id}::uuid and revoked_at is null
+                and (expires_at is null or expires_at > now())
+                and (last_used_at is null or last_used_at < ${lastUseBefore.toISOString()}::timestamptz)
+              for update skip locked)`,
+            ),
+          )
+          .returning({ lastUsedAt: schema.apiKeys.lastUsedAt });
+        if (touched?.lastUsedAt) authenticated.lastUsedAt = touched.lastUsedAt.toISOString();
+      });
+    } catch (error) {
+      // Never expose hashes, SQL parameters or credentials in diagnostics.
+      console.warn("API key last-use telemetry update failed", {
+        keyId: authenticated.id,
+        code: nestedPostgresSqlState(error),
+      });
     }
-    // Hash visibility proves this account. The join-table hash lane requires
-    // both settings and remains bounded to this key, not sibling key scopes.
-    await tx.execute(sql`select set_config('opengeni.account_id', ${row.accountId}, true)`);
-    const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
-    const now = new Date();
-    await tx
-      .update(schema.apiKeys)
-      .set({ lastUsedAt: now, updatedAt: now })
-      .where(eq(schema.apiKeys.id, row.id));
-    return {
-      ...mapApiKey({ ...row, lastUsedAt: now }, scopes.get(row.id)),
-      ...(row.credentialKind === "personal"
-        ? { workspaceScope: personalApiKeyAccess(row, scopes.get(row.id)).workspaceScope }
-        : {}),
-      credentialKind: row.credentialKind,
-      ownerSubjectId: row.ownerSubjectId,
-      ownerPermissions: row.ownerPermissions,
-    };
-  });
+  }
+  return authenticated;
 }
 
 export async function findActiveWorkspaceApiKeyById(
@@ -62248,13 +62282,15 @@ export async function setEnrollmentAgentRuntime(
         'requested', 'accepted', 'waiting_for_idle', 'downloading', 'verifying',
         'applying', 'restarting'
       )`;
-      const successorProvesCompletion = sql`(
+      // No receipt (manual install or ordinary restart) is false, not SQL NULL:
+      // the negation below must still settle the replaced process's operation.
+      const successorProvesCompletion = sql`coalesce((
         ${activeUpdate}
         and ${schema.enrollments.agentUpdateOperationId}::text = ${completedOperationId}
         and ${schema.enrollments.agentUpdateTargetVersion} = ${completedTargetVersion}
         and ${schema.enrollments.agentUpdateTargetVersion} = ${input.agentVersion}
         and ${completedBinarySha256} = ${input.binarySha256}
-      )`;
+      ), false)`;
       const acceptingProcessWasReplaced = sql`(
         ${activeUpdate}
         and ${schema.enrollments.agentUpdateConnectionInstanceId}
