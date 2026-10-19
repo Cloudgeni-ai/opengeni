@@ -51,7 +51,7 @@ import {
 } from "@opengeni/agent-proto";
 import {
   agentErrorToControlError,
-  commandOutcomeUnknownAfterRestartAgentError,
+  commandOutcomeUnknownAfterReplacementAgentError,
   NEVER_SENT_DETAIL_KEY,
   SelfhostedControlError,
   timeoutAgentError,
@@ -145,7 +145,8 @@ export interface OpStreamExecClientDeps {
    * operation never calls this hook again. */
   revalidateBeforeStartRetry?: () => void | Promise<void>;
   /** Whether the pinned connection instance is still the agent's live one;
-   * see ControlRpc. Once it is not, the agent restarted and the op is lost. */
+   * see ControlRpc. Once it is not, another agent process holds the
+   * connection, and the op's outcome is unknown to this client. */
   connectionCurrent?: () => Promise<boolean>;
 }
 
@@ -858,9 +859,10 @@ class OpConsumer {
         await this.attach(0);
         return;
       } catch (error) {
-        // The agent restarted: the op went with it, and nothing will answer.
+        // Another agent process holds the connection: this client stops
+        // waiting, and the op's outcome is unknown.
         if (error instanceof SelfhostedControlError && error.connectionReplaced) {
-          throw agentRestartedOutcomeUnknownError();
+          throw agentReplacedOutcomeUnknownError();
         }
         if (
           error instanceof SelfhostedControlError &&
@@ -966,10 +968,11 @@ class OpConsumer {
             "runner",
           );
         }
-        // The agent it was admitted to restarted. A start no attempt delivered
-        // did not run; one that any attempt may have delivered was lost with it.
+        // The connection it was admitted to was replaced. A start no attempt
+        // delivered did not run; one any attempt may have delivered has an
+        // unknown outcome.
         if (error.connectionReplaced) {
-          throw error.neverSent && !maybeDelivered ? error : agentRestartedOutcomeUnknownError();
+          throw error.neverSent && !maybeDelivered ? error : agentReplacedOutcomeUnknownError();
         }
         if (!error.neverSent) maybeDelivered = true;
         const blip = error.reason === "agent_reconnecting" || error.neverSent;
@@ -1080,7 +1083,7 @@ class OpConsumer {
       })
       .catch((error) => {
         if (error instanceof SelfhostedControlError && error.connectionReplaced) {
-          this.settleReject?.(agentRestartedOutcomeUnknownError());
+          this.settleReject?.(agentReplacedOutcomeUnknownError());
         } else if (
           error instanceof SelfhostedControlError &&
           !error.retryable &&
@@ -1326,9 +1329,10 @@ class OpConsumer {
       if (!(error instanceof SelfhostedControlError)) {
         throw error;
       }
-      // The agent restarted: the op is gone with it. Waiting cannot bring it back.
+      // Another agent process holds the connection: stop waiting here; the
+      // op's outcome is unknown and its stop is handed over.
       if (error.connectionReplaced) {
-        reject(agentRestartedOutcomeUnknownError());
+        reject(agentReplacedOutcomeUnknownError());
         return;
       }
       const transient =
@@ -1436,8 +1440,8 @@ function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedCon
  *  can be taken over while it still runs), so the outcome is unknown. Marked
  *  connection-replaced so the session hands the op to its command ledger with
  *  a stop request bound to the old connection. */
-function agentRestartedOutcomeUnknownError(): SelfhostedControlError {
-  return agentErrorToControlError(commandOutcomeUnknownAfterRestartAgentError());
+function agentReplacedOutcomeUnknownError(): SelfhostedControlError {
+  return agentErrorToControlError(commandOutcomeUnknownAfterReplacementAgentError());
 }
 
 /** A failure once the op exists (its start was accepted, may have been, or it
@@ -1446,7 +1450,7 @@ function agentRestartedOutcomeUnknownError(): SelfhostedControlError {
  *  not delivered. */
 function startedOpError(error: unknown): unknown {
   if (!(error instanceof SelfhostedControlError)) return error;
-  if (error.connectionReplaced) return agentRestartedOutcomeUnknownError();
+  if (error.connectionReplaced) return agentReplacedOutcomeUnknownError();
   if (!error.neverSent) return error;
   return new SelfhostedControlError({
     message: error.message,

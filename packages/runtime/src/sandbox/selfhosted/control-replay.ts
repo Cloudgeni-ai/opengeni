@@ -18,8 +18,9 @@ function transient(error: unknown): boolean {
 }
 
 /** Retrying stopped because the agent connection the request's subject names
- * was replaced by a new one: that agent process is gone, and nothing will ever
- * answer the subject again. `neverSent` when no attempt reached a responder. */
+ * was replaced by a new one, so the request stops waiting on that subject.
+ * The old process may still run. `neverSent` when no attempt reached a
+ * responder. */
 export class ControlConnectionReplacedError extends Error {
   constructor(readonly neverSent: boolean) {
     super("the agent connection this request was sent to was replaced");
@@ -120,7 +121,7 @@ export class ControlReplyRecovery {
         // ambiguity across retries so the caller cannot classify this as a
         // never-sent mutation and mint another delivery after the journal expires.
         if ((error as { code?: string }).code !== "503") uncertain ??= error;
-        // A replaced connection never answers again: its process is gone.
+        // Another process holds the connection: stop retrying this subject.
         if (connectionCurrent && !(await connectionCurrent().catch(() => true))) {
           throw new ControlConnectionReplacedError(uncertain === undefined);
         }
@@ -136,8 +137,8 @@ export class ControlReplyRecovery {
 }
 
 /** One request attempt. While it waits for its reply, it ends as soon as the
- * agent connection its subject names is replaced: the old agent process is gone
- * and will never answer, however long a host holds the request. The attempt
+ * agent connection its subject names is replaced, however long a host holds
+ * the request: the caller stops waiting on the old process. The attempt
  * was published, so it may have reached that agent: never "never sent". */
 async function attempt(
   conn: NatsRequestConnection,

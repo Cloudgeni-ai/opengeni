@@ -383,7 +383,8 @@ export interface SelfhostedSessionDeps {
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   /** The connection instance the agent is live on now, or null when that is
    * unknown (no live connection). Asked only after a request fails, to tell
-   * an agent that restarted (a new instance) from one briefly unreachable.
+   * an agent connection that was replaced (a new instance) from one briefly
+   * unreachable.
    * Without it, the instance resolveOperationAdmission reports is used. */
   liveConnectionInstance?: () => Promise<string | null>;
   /** Durable session ownership transfer for model-facing exec that outlives its
@@ -393,7 +394,7 @@ export interface SelfhostedSessionDeps {
   ) => Promise<{ commandId: string }>;
   /** Record, with a stop request bound to its exact connection, a command this
    * caller already reported as failed because its machine stopped answering
-   * or its agent restarted. The session's command ledger then stops or settles
+   * or its agent connection was replaced. The session's command ledger then stops or settles
    * it, and the caller does not wait for a machine that may never answer.
    * For callers without a turn (direct requests); without it, a turn records
    * the command through adoptBackgroundCommand. */
@@ -1269,8 +1270,8 @@ export class SelfhostedSession {
     // Why an earlier attempt did not run, if one did not.
     let notRun: unknown;
     const expired = () => notRun ?? agentErrorToControlError(timeoutAgentError());
-    // A start that provably reached no agent before that agent restarted is
-    // admitted again, to the new connection, within the same deadline. The
+    // A start that provably reached no agent before its connection was
+    // replaced is admitted again, to the new connection, within the same deadline. The
     // earlier attempt keeps its own destination; nothing is rebound.
     for (let readmissions = 0; ; readmissions += 1) {
       let executionTimeoutMs = 0;
@@ -1383,7 +1384,8 @@ export class SelfhostedSession {
     let adoptedCommandId: string | null = null;
     let ownershipTransferPending = false;
     let terminalProof = false;
-    // The start reached no agent before that agent restarted: it never ran.
+    // The start reached no agent before its connection was replaced: it
+    // never ran.
     let notDispatched = false;
     const retainedOutput: {
       stdout: string[];
@@ -3049,8 +3051,8 @@ function mediaTypeFromPath(path: string): string | undefined {
   return undefined;
 }
 
-/** How many times an exec whose start reached no agent before that agent
- *  restarted is admitted again. */
+/** How many times an exec whose start reached no agent before its
+ *  connection was replaced is admitted again. */
 const SELFHOSTED_EXEC_READMISSIONS_MAX = 2;
 
 /** The op stream reports a start that provably reached no agent before the

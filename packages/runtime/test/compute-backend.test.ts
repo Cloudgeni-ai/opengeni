@@ -1668,7 +1668,7 @@ describe("an operation whose agent restarts", () => {
       () => undefined,
       (caught: unknown) => caught,
     );
-    expect(String(error)).toMatch(/restarted/);
+    expect(String(error)).toMatch(/was replaced/);
     // Well inside the exec's own 30 s timeout and the 120 s recovery allowance.
     expect(Date.now() - startedAt).toBeLessThan(3_000);
     expect(fabric.wakes).toBe(0);

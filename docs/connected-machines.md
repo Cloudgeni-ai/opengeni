@@ -76,13 +76,14 @@ Retrying stops early when the agent process a request was sent to is replaced.
 While an attempt waits for its reply (every second, from Opengeni's own records,
 never by contacting the agent) and after each failed attempt, the requester
 checks the enrollment's live connection instance (an unknown answer counts as
-unchanged), so a request a host holds for a gone agent ends too. Once a new connection has
-replaced the request's (the agent restarted, or a compute sandbox's VM booted
-fresh), nothing will ever answer the old subject, so the request ends at once
-with `agent_offline`: "The machine's agent restarted before this request
-reached it, so it did not run." when no attempt reached a responder, otherwise
-"The machine's agent restarted while this request was in flight, so its outcome
-is unknown." A request that reached no responder is re-admitted to the new
+unchanged), so a request a host holds for an agent that no longer holds the
+connection ends too. Once a new connection has replaced the request's (the
+agent restarted, a second process took over, or a compute sandbox's VM booted
+fresh), the request ends at once with `agent_offline`: "The machine's agent was
+replaced before this request reached it, so it did not run." when no attempt
+reached a responder, otherwise "The machine's agent was replaced while this
+request was in flight, so its outcome is unknown." The texts say "replaced",
+not "restarted": a new connection does not tell which happened. A request that reached no responder is re-admitted to the new
 connection like any never-sent request, and a read whose outcome is unknown is
 read again; nothing else is re-sent, and the old subject is never rebound to the
 new connection. A replaced connection does not prove the old agent process
@@ -92,7 +93,7 @@ streaming exec that was started, or may have been, is not settled by the
 requester. It is handed to the session's command ledger with a stop request
 bound to its exact enrollment, connection instance and operation (the same
 adoption used when a machine stops answering), and the exec ends with
-`agent_offline`: "The machine's agent restarted while this command was running,
+`agent_offline`: "The machine's agent was replaced while this command was running,
 so its outcome is unknown: it may still be running, or it may have finished. A
 stop has been requested for it." A turn records it through its own adoption; a
 direct terminal or file request records it in the same ledger without a turn.

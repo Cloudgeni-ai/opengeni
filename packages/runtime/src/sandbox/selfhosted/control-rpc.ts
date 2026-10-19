@@ -55,9 +55,10 @@ export interface ControlRpc {
       timeoutMs: number;
       /** Whether the agent connection the subject names is still the
        * enrollment's live one. A transport asks it after an attempt fails;
-       * false means that agent process was replaced (it restarted), so nothing
-       * will ever answer the subject again: the transport stops retrying and
-       * answers with a connection-replaced AGENT_OFFLINE. Unknown is true. */
+       * false means another agent process holds the connection now, so the
+       * transport stops retrying on the subject and answers with a
+       * connection-replaced AGENT_OFFLINE. That does not prove the old process
+       * exited. Unknown is true. */
       connectionCurrent?: () => Promise<boolean>;
     },
   ): Promise<ControlResponse>;
@@ -125,10 +126,10 @@ export class SelfhostedControlError extends Error {
    *  (a post-send timeout is ambiguous — at-least-once — and must not be re-sent
    *  unless the op is read-only). Never set for an agent-returned error. */
   readonly neverSent: boolean;
-  /** The agent connection the request was sent to was replaced: that agent
-   *  process restarted, so whatever it was running is gone and the subject is
-   *  never answered again. Only the transport sets it (with `neverSent` when
-   *  the request reached no responder). */
+  /** The agent connection the request was sent to was replaced by another
+   *  agent process, so the transport stopped waiting on its subject. The old
+   *  process may still run what it was running. Only the transport sets it
+   *  (with `neverSent` when the request reached no responder). */
   readonly connectionReplaced: boolean;
   /** Exact inner control request that produced this failure. Safe opaque
    * correlation only; never a NATS subject, token, or machine credential. */
@@ -395,19 +396,20 @@ export function execDeadlineHint(seconds: number): string {
 export const NEVER_SENT_DETAIL_KEY = "_never_sent";
 
 /** The reserved `detail` key the transport sets to "1" when the agent
- *  connection a request was sent to was replaced by a new one (the agent
- *  restarted). `agentErrorToControlError` reads it into
+ *  connection a request was sent to was replaced by a new one.
+ *  `agentErrorToControlError` reads it into
  *  `SelfhostedControlError.connectionReplaced`. Reserved (never sent by the agent). */
 export const CONNECTION_REPLACED_DETAIL_KEY = "_connection_replaced";
 
 /** The synthesized AGENT_OFFLINE for a request whose agent connection was
- *  replaced: the agent restarted. `neverSent` when it reached no responder. */
+ *  replaced. Neutral about why: a restart and a second process taking over
+ *  look the same. `neverSent` when it reached no responder. */
 export function connectionReplacedAgentError(neverSent: boolean): AgentError {
   return {
     code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
     message: neverSent
-      ? "The machine's agent restarted before this request reached it, so it did not run."
-      : "The machine's agent restarted while this request was in flight, so its outcome is unknown.",
+      ? "The machine's agent was replaced before this request reached it, so it did not run."
+      : "The machine's agent was replaced while this request was in flight, so its outcome is unknown.",
     retryable: false,
     detail: {
       [CONNECTION_REPLACED_DETAIL_KEY]: "1",
@@ -419,11 +421,11 @@ export function connectionReplacedAgentError(neverSent: boolean): AgentError {
 /** A command whose agent connection was replaced while it ran. A new
  *  connection does not prove the old agent process is gone, so the command's
  *  outcome is unknown; the caller records a stop request for it. */
-export function commandOutcomeUnknownAfterRestartAgentError(): AgentError {
+export function commandOutcomeUnknownAfterReplacementAgentError(): AgentError {
   return {
     code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
     message:
-      "The machine's agent restarted while this command was running, so its outcome is " +
+      "The machine's agent was replaced while this command was running, so its outcome is " +
       "unknown: it may still be running, or it may have finished. A stop has been " +
       "requested for it.",
     retryable: false,

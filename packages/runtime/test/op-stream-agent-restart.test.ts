@@ -465,7 +465,7 @@ describe("an exec whose start outlives its wall", () => {
 
 function expectOutcomeUnknown(error: unknown): void {
   const text = String(error);
-  expect(text).toMatch(/restarted while this command was running, so its outcome is unknown/);
+  expect(text).toMatch(/was replaced while this command was running, so its outcome is unknown/);
   expect(text).toMatch(/may still be running, or it may have finished/);
   expect(text).toMatch(/A stop has been requested for it/);
   expect(text).not.toMatch(/did not survive|did not run/);

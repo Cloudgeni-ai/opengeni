@@ -136,7 +136,7 @@ function isNoResponder(response: ControlResponse): boolean {
   return (
     response.error?.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE &&
     response.error.detail?.[NEVER_SENT_DETAIL_KEY] === "1" &&
-    // A request whose agent restarted is answered, not resent.
+    // A request whose agent connection was replaced is answered, not resent.
     response.error.detail?.[CONNECTION_REPLACED_DETAIL_KEY] !== "1"
   );
 }
@@ -497,7 +497,8 @@ export class ComputeSandboxSession extends SelfhostedSession {
       environment: state.environment,
       resolveOperationAdmission,
       // Without waking anything: while a request waits and after a failed
-      // one, to tell a restarted agent (a new instance) from an unreachable one.
+      // one, to tell a replaced connection (a new instance) from an unreachable
+      // one.
       liveConnectionInstance: async () => (await resolveConnection())?.connectionInstanceId ?? null,
       ...(deps.controlTimeoutMs !== undefined ? { timeoutMs: deps.controlTimeoutMs } : {}),
       ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),

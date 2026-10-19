@@ -1518,7 +1518,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
       },
     );
     expect(res.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
-    expect(res.error?.message).toMatch(/restarted before this request reached it/);
+    expect(res.error?.message).toMatch(/was replaced before this request reached it/);
     expect(res.error?.detail[CONNECTION_REPLACED_DETAIL_KEY]).toBeDefined();
     // Well inside the transport's 120 s recovery allowance.
     expect(Date.now() - startedAt).toBeLessThan(2_000);
