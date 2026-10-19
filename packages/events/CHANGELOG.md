@@ -1,5 +1,14 @@
 # @opengeni/events
 
+## 4.1.4
+
+### Patch Changes
+
+- da09a6e: Recover pending Connected Machine requests immediately when the machine's control transport reconnects, preserving exact delivery identity and operation deadlines instead of waiting for a lost reply to time out.
+- Updated dependencies [b8d5b64]
+  - @opengeni/db@4.1.4
+  - @opengeni/contracts@4.1.4
+
 ## 4.1.3
 
 ### Patch Changes

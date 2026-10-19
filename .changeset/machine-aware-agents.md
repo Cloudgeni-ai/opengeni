@@ -1,7 +1,0 @@
----
-"@opengeni/api-router": patch
-"@opengeni/core": patch
-"@opengeni/runtime": patch
----
-
-Agents handle the person's own computers better. `sandboxes_list` describes the person's Connected Machines, so tool search finds it. Its description says to check the list before saying a computer cannot be reached, to use the only fitting machine without asking which, and to work on a machine by swapping to it, where staying afterwards is fine. Agents never mention internal terms, tool names or ids to the person. The `sandboxes_list` result carries a short notice: when no machine is connected, some are offline, or the computer the person means is not listed, it asks for one `capability_authorization_request` call for `api:connected-machine` instead of described setup steps. Opening the screen on a machine with no display now says this may not be the person's own computer and points to `sandboxes_list` and `sandbox_swap`, instead of leading the agent to tell the person their computer has no display. A `run_on` command that times out says it may be waiting on a dialog on the person's screen. Nothing tells agents to swap back any more: the wrong-machine message for computers and browsers only says to swap to the requested machine, and a swap to `session` on a deployment without a managed sandbox says to keep working on the current machine. `computer_open` says to swap to another machine to use its screen and to operate apps through the computer tools rather than `osascript`, which makes macOS ask for permission and hang.

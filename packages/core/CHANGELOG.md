@@ -1,5 +1,27 @@
 # @opengeni/core
 
+## 4.1.4
+
+### Patch Changes
+
+- 4c90154: Agents handle the person's own computers better. `sandboxes_list` describes the person's Connected Machines, so tool search finds it. Its description says to check the list before saying a computer cannot be reached, to use the only fitting machine without asking which, and to work on a machine by swapping to it, where staying afterwards is fine. Agents never mention internal terms, tool names or ids to the person. The `sandboxes_list` result carries a short notice: when no machine is connected, some are offline, or the computer the person means is not listed, it asks for one `capability_authorization_request` call for `api:connected-machine` instead of described setup steps. Opening the screen on a machine with no display now says this may not be the person's own computer and points to `sandboxes_list` and `sandbox_swap`, instead of leading the agent to tell the person their computer has no display. A `run_on` command that times out says it may be waiting on a dialog on the person's screen. Nothing tells agents to swap back any more: the wrong-machine message for computers and browsers only says to swap to the requested machine, and a swap to `session` on a deployment without a managed sandbox says to keep working on the current machine. `computer_open` says to swap to another machine to use its screen and to operate apps through the computer tools rather than `osascript`, which makes macOS ask for permission and hang.
+- Updated dependencies [b8d5b64]
+- Updated dependencies [4c90154]
+- Updated dependencies [da09a6e]
+- Updated dependencies [dfd0ce5]
+  - @opengeni/db@4.1.4
+  - @opengeni/runtime@4.1.4
+  - @opengeni/events@4.1.4
+  - @opengeni/documents@4.1.4
+  - @opengeni/capabilities@4.1.4
+  - @opengeni/codex@4.1.4
+  - @opengeni/config@4.1.4
+  - @opengeni/contracts@4.1.4
+  - @opengeni/network@4.1.4
+  - @opengeni/observability@4.1.4
+  - @opengeni/storage@4.1.4
+  - @opengeni/vaults@4.1.4
+
 ## 4.1.3
 
 ### Patch Changes
