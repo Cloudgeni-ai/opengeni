@@ -1,7 +1,11 @@
 import { CuaNativeTools } from "./native-tools";
 import type { ComputerNativeCallRequest } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
-import type { ComputerSessionCapabilities } from "@opengeni/contracts";
+import type {
+  ComputerLocator,
+  ComputerSessionCapabilities,
+  InteractionSemanticNodeValue,
+} from "@opengeni/contracts";
 import {
   ComputerBackendError,
   type ComputerBackend,
@@ -50,6 +54,11 @@ export class CuaComputerBackend implements ComputerBackend {
   private readonly cursorMotionSet = new Set<string>();
   private readonly targetsById = new Map<string, Target>();
   private readonly observations = new Map<string, ComputerBackendObservation>();
+  /** Recent semantic observations per window, newest last. A ref names the
+   * observation the model read it from; an action that omits its fence is
+   * checked against a fresh observation, which mints new refs, so the ref is
+   * resolved in the observation it came from and CUA validates its token. */
+  private readonly recentObservations = new Map<string, ComputerBackendObservation[]>();
   private readonly frames = new Map<string, Frame>();
   private tail: Promise<unknown> = Promise.resolve();
   private closing = false;
@@ -405,6 +414,11 @@ export class CuaComputerBackend implements ComputerBackend {
     this.observations.set(targetId, observation);
     while (this.observations.size > 32)
       this.observations.delete(this.observations.keys().next().value!);
+    const recent = (this.recentObservations.get(targetId) ?? []).slice(-(RECENT_OBSERVATIONS - 1));
+    this.recentObservations.delete(targetId);
+    this.recentObservations.set(targetId, [...recent, observation]);
+    while (this.recentObservations.size > 32)
+      this.recentObservations.delete(this.recentObservations.keys().next().value!);
     return observation;
   }
 
@@ -643,7 +657,7 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
       );
     if (action.type === "semantic") {
-      const node = locate(observed.roots, action.locator);
+      const node = this.locateObserved(command.targetId, observed, action.locator);
       if (!node.actions.includes(action.action))
         throw unsupported("CUA element does not advertise this semantic action");
       if (node.states.includes("disabled"))
@@ -721,6 +735,36 @@ export class CuaComputerBackend implements ComputerBackend {
     ];
   }
 
+  /** The element a locator names. A ref from an earlier observation of the
+   * same window resolves there (its token stays CUA's to accept or reject as
+   * stale); a ref seen nowhere says which observation is current. */
+  private locateObserved(
+    targetId: string,
+    observed: ComputerBackendObservation,
+    locator: ComputerLocator,
+  ): InteractionSemanticNodeValue {
+    try {
+      return locate(observed.roots, locator);
+    } catch (error) {
+      if (
+        locator.kind !== "ref" ||
+        !(error instanceof ComputerBackendError) ||
+        error.code !== "locator_not_found"
+      )
+        throw error;
+      for (const earlier of [...(this.recentObservations.get(targetId) ?? [])].reverse()) {
+        const node = earlier.roots.find((candidate) => candidate.ref === locator.ref);
+        if (node) return node;
+      }
+      throw new ComputerBackendError(
+        "locator_not_found",
+        `CUA ref ${locator.ref} is not in a recent observation of this window; observe it again and use a ref from the latest observation (${observed.observationId.split(":").pop()})`,
+        false,
+        false,
+      );
+    }
+  }
+
   /** Pointer and keyboard delivery. Linux owns an isolated seat, so viewer
    * input may focus within it. macOS posts events to the target process
    * without raising it. Windows delivers through SendInput after briefly
@@ -733,12 +777,22 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 }
 
+const RECENT_OBSERVATIONS = 4;
+
 const KEY_MODIFIERS: Record<
   "macos" | "windows" | "linux",
   { aliases: Record<string, string>; allowed: string[] }
 > = {
   macos: {
-    aliases: { meta: "cmd", control: "ctrl", alt: "option" },
+    aliases: {
+      meta: "cmd",
+      command: "cmd",
+      super: "cmd",
+      win: "cmd",
+      control: "ctrl",
+      alt: "option",
+      opt: "option",
+    },
     allowed: ["cmd", "ctrl", "option", "shift", "fn"],
   },
   windows: {
@@ -746,7 +800,14 @@ const KEY_MODIFIERS: Record<
     allowed: ["win", "ctrl", "alt", "shift"],
   },
   linux: {
-    aliases: { meta: "super", control: "ctrl", option: "alt" },
+    aliases: {
+      meta: "super",
+      cmd: "super",
+      command: "super",
+      win: "super",
+      control: "ctrl",
+      option: "alt",
+    },
     allowed: ["super", "ctrl", "alt", "shift"],
   },
 };

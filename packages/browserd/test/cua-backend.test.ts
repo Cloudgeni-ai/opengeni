@@ -717,6 +717,55 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a ref from an earlier observation of the window still resolves; an unknown one says what is current", async () => {
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const seen = await backend.observe(target.id);
+      // An action without fences is checked against a fresh observation,
+      // which mints new refs; the ref the model read still names its element.
+      const fresh = await backend.observe(target.id);
+      expect(fresh.roots[0]!.ref).not.toBe(seen.roots[0]!.ref);
+      await backend.dispatch({
+        ...command(fresh),
+        action: {
+          type: "semantic",
+          locator: { kind: "ref", ref: seen.roots[0]!.ref },
+          action: "invoke",
+        },
+      });
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
+      ).toMatchObject({
+        element_token: seen.roots[0]!.ref,
+      });
+      const latest = await backend.observe(target.id);
+      await expect(
+        backend.dispatch({
+          ...command(latest),
+          action: { type: "semantic", locator: { kind: "ref", ref: "s99:0" }, action: "invoke" },
+        }),
+      ).rejects.toMatchObject({
+        code: "locator_not_found",
+        message: `CUA ref s99:0 is not in a recent observation of this window; observe it again and use a ref from the latest observation (${latest.observationId.split(":").pop()})`,
+      });
+      // macOS accepts the usual names for the command key.
+      await backend.dispatch({
+        ...command(latest),
+        action: { type: "keyboard", action: "press", value: "super+n" },
+      });
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "press_key")?.args,
+      ).toMatchObject({
+        key: "n",
+        modifiers: ["cmd"],
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("unknown/partial delivery stays unknown; explicit refusal alone is safe", async () => {
     const fixture = new Fixture();
     for (const effect of ["partial", "suspected_noop", undefined]) {
@@ -730,6 +779,23 @@ describe("CUA desktop boundary", () => {
     fixture.mutation = result({ effect: "refused", code: "capture_not_found" }, true);
     await expect(callDesktop(fixture, "click", {}, true)).rejects.toMatchObject({
       code: "frame_stale",
+      dispatched: false,
+    });
+    // The failure carries CUA's own reason and hint, not only that it refused.
+    fixture.mutation = result(
+      {
+        effect: "refused",
+        refusal: {
+          code: "no_text_target",
+          message: "type_text did not synthesize character events",
+        },
+        hint: "Use press_key for single keys.",
+      },
+      true,
+    );
+    await expect(callDesktop(fixture, "type_text", {}, true)).rejects.toMatchObject({
+      message:
+        "CUA type_text refused the operation: type_text did not synthesize character events Use press_key for single keys.",
       dispatched: false,
     });
     fixture.callTool = async () => {

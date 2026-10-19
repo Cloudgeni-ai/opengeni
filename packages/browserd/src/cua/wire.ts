@@ -94,6 +94,33 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   background_delivery_unsupported: "unsupported",
 };
 
+const CUA_REASON_MAX_CHARS = 400;
+
+/** CUA's own explanation of a refused or unconfirmed action (why it refused,
+ * what to do instead), so the failure says more than that it failed. */
+function cuaFailureReason(result: ToolResult, data: Record<string, unknown>): string | null {
+  const message = (entry: unknown): unknown =>
+    entry !== null && typeof entry === "object"
+      ? ((entry as Record<string, unknown>).message ?? (entry as Record<string, unknown>).detail)
+      : undefined;
+  const candidates = [
+    message(data.refusal),
+    message(data.error),
+    message(result.action?.error),
+    data.message,
+    data.summary,
+    result.action?.summary,
+    result.text,
+  ];
+  const clean = (entry: unknown): string =>
+    typeof entry === "string" ? entry.replace(/\s+/gu, " ").trim() : "";
+  const reason = candidates.map(clean).find((entry) => entry.length > 0) ?? "";
+  const hint = clean(data.hint);
+  const full = hint && !reason.includes(hint) ? `${reason}${reason ? " " : ""}${hint}` : reason;
+  if (full.length === 0) return null;
+  return full.length > CUA_REASON_MAX_CHARS ? `${full.slice(0, CUA_REASON_MAX_CHARS - 1)}…` : full;
+}
+
 /** A failed/partial mutation is ambiguous unless CUA explicitly proves refusal. */
 export async function callDesktop(
   runtime: CuaDesktopRuntime,
@@ -145,9 +172,12 @@ export async function callDesktop(
           ? data.code
           : result.errorCode;
     const mapped = code ? errorCodes[code] : undefined;
+    const reason = cuaFailureReason(result, data);
     throw new ComputerBackendError(
       mutation && !refused ? "outcome_unknown" : (mapped ?? "driver_failed"),
-      `CUA ${name} ${refused ? "refused the operation" : "did not establish completion"}`,
+      `CUA ${name} ${refused ? "refused the operation" : "did not establish completion"}${
+        reason ? `: ${reason}` : ""
+      }`,
       false,
       mutation && !refused,
     );
