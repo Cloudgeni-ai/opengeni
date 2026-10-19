@@ -15,6 +15,8 @@ export {
 } from "./subscription-account-pools";
 export * from "./direct-model-provider";
 export * from "./artifact-catalog";
+export * from "./file-access";
+import { FileAccess } from "./file-access";
 export * from "./site-data";
 export * from "./site-publishing";
 export * from "./site-sql";
@@ -6357,7 +6359,13 @@ export type FileUploadStatus = z.infer<typeof FileUploadStatus>;
 
 export const FileAsset = /* @__PURE__ */ defineSchema(() =>
   z.object({
+    /** "personal" is Only me: only its owner can open it. */
     scope: z.enum(["workspace", "personal"]).optional(),
+    /**
+     * The person the file belongs to, who alone can share it or limit it to
+     * themselves. Null for older shared files and output made without a person.
+     */
+    ownerSubjectId: z.string().min(1).max(1024).nullable().optional(),
     id: z.string().uuid(),
     workspaceId: z.string().uuid(),
     status: FileStatus,
@@ -6370,6 +6378,8 @@ export const FileAsset = /* @__PURE__ */ defineSchema(() =>
     objectKey: z.string(),
     createdAt: z.string(),
     updatedAt: z.string(),
+    /** Present on upload, publish and sharing results: who can open the file. */
+    access: FileAccess.optional(),
   }),
 );
 export type FileAsset = z.infer<typeof FileAsset>;
@@ -6394,6 +6404,11 @@ export type FileListResponse = z.infer<typeof FileListResponse>;
 
 export const CreateFileUploadRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
+    /**
+     * Who can open the file: "personal" (Only me) or "workspace". Omitted, a
+     * person's upload is shared with the workspace and an agent's upload
+     * follows its chat (Only me in an Only me chat).
+     */
     scope: z.enum(["workspace", "personal"]).optional(),
     filename: z.string().min(1),
     contentType: z.string().min(1),
@@ -6411,6 +6426,8 @@ export const CreateFileUploadResponse = /* @__PURE__ */ defineSchema(() =>
     requiredHeaders: z.record(z.string(), z.string()),
     expiresAt: z.string(),
     maxSizeBytes: z.number().int().positive(),
+    /** Who will be able to open the file once it is uploaded. */
+    access: FileAccess.optional(),
   }),
 );
 export type CreateFileUploadResponse = z.infer<typeof CreateFileUploadResponse>;
@@ -6421,6 +6438,13 @@ export const CompleteFileUploadResponse = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type CompleteFileUploadResponse = z.infer<typeof CompleteFileUploadResponse>;
+
+export const UpdateFileVisibilityResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    file: FileAsset,
+  }),
+);
+export type UpdateFileVisibilityResponse = z.infer<typeof UpdateFileVisibilityResponse>;
 
 export const FileDownloadUrlResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({

@@ -56,6 +56,8 @@ export const RetainedOutputUnavailableReason = /* @__PURE__ */ defineSchema(() =
     "invalid_content",
     "oversized",
     "unsupported",
+    // The file exists but is Only me for someone else. Never says whose.
+    "private",
   ]),
 );
 export type RetainedOutputUnavailableReason = z.infer<typeof RetainedOutputUnavailableReason>;

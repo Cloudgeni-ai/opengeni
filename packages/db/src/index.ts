@@ -7688,6 +7688,12 @@ export type PrepareGeneratedWorkspaceFileInput = {
   bucket: string;
   objectKey: string;
   expiresAt: Date;
+  /**
+   * Who can open a newly prepared file: its private owner, or null for the
+   * workspace. Omitted, the scope's private-file owner decides, as before.
+   * An existing file keeps whatever audience its owner has since given it.
+   */
+  privateOwnerSubjectId?: string | null;
 };
 
 /**
@@ -7719,7 +7725,10 @@ export async function prepareGeneratedWorkspaceFile(
           tx as unknown as Database,
           sql`SELECT nullif(current_setting('opengeni.private_file_owner',true),'') AS owner`,
         );
-        const privateOwner = ownership?.owner ?? null;
+        const privateOwner =
+          input.privateOwnerSubjectId !== undefined
+            ? input.privateOwnerSubjectId
+            : (ownership?.owner ?? null);
         const [existing] = await tx
           .select({ file: schema.files, upload: schema.fileUploads })
           .from(schema.files)
@@ -7738,11 +7747,8 @@ export async function prepareGeneratedWorkspaceFile(
           .limit(1);
         if (existing) {
           assertGeneratedWorkspaceFileMatches(existing.file, existing.upload, input);
-          if (
-            JSON.stringify(existing.file.privateOwnerSubjectIds) !==
-            JSON.stringify(privateOwner ? [privateOwner] : null)
-          )
-            throw new Error("Generated file ownership changed");
+          // Row-level security already hid it unless this scope may open it;
+          // its owner may have shared or limited it since it was prepared.
           return {
             file: mapFile(existing.file),
             uploadId: existing.upload.id,
@@ -7839,6 +7845,122 @@ export async function requireFile(
     throw new Error(`File not found: ${fileId}`);
   }
   return file;
+}
+
+export type FileVisibilityChangeResult =
+  | { kind: "changed" | "unchanged"; file: FileAsset }
+  | { kind: "not_found" }
+  | { kind: "not_owner" }
+  | { kind: "not_changeable" };
+
+/** Session screenshots and spilled tool results expire with their sessions. */
+const UNSHAREABLE_FILE_OBJECT_KEY = /^workspaces\/[^/]+\/files\/[^/]+\/(retained|tool-results)\//u;
+
+/**
+ * Share one finished file with the workspace, or limit a file back to its
+ * owner. The file must already be visible to the caller's own scope. Only a
+ * private owner shares it, only its owner limits it, and the database trigger
+ * enforces the same two transitions. The change and its audit fact commit
+ * together. Whether the owner may make anything Only me is decided first by
+ * the caller.
+ */
+export async function updateFileVisibility(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    fileId: string;
+    visibility: "private" | "workspace";
+    /** The person changing it: the human caller, or the human an agent acts for. */
+    actorSubjectId: string;
+    /** Audit subject: the caller's own subject (an agent's technical subject). */
+    auditSubjectId: string;
+  },
+): Promise<FileVisibilityChangeResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(schema.files)
+        .where(
+          and(eq(schema.files.workspaceId, input.workspaceId), eq(schema.files.id, input.fileId)),
+        )
+        .for("update")
+        .limit(1);
+      if (!row) return { kind: "not_found" };
+      const current = row.privateOwnerSubjectIds ? "private" : "workspace";
+      if (current === input.visibility) return { kind: "unchanged", file: mapFile(row) };
+      if (row.status !== "ready" || UNSHAREABLE_FILE_OBJECT_KEY.test(row.objectKey))
+        return { kind: "not_changeable" };
+      const sharing = input.visibility === "workspace";
+      if (
+        sharing
+          ? !row.privateOwnerSubjectIds?.includes(input.actorSubjectId)
+          : row.ownerSubjectId !== input.actorSubjectId
+      )
+        return { kind: "not_owner" };
+      // The change runs as its owner's private-file identity, the one the
+      // row-level policies and the ownership trigger check, then restores the
+      // caller's own identity for the rest of the transaction.
+      const [previous] = await rawRows<{ owner: string | null }>(
+        tx,
+        sql`select current_setting('opengeni.private_file_owner', true) as owner`,
+      );
+      await rawRows(
+        tx,
+        sql`select set_config('opengeni.private_file_owner', ${input.actorSubjectId}::text, true)`,
+      );
+      const [updated] = await tx
+        .update(schema.files)
+        .set({
+          privateOwnerSubjectIds: sharing ? null : [input.actorSubjectId],
+          ownerSubjectId: sharing
+            ? (row.ownerSubjectId ?? input.actorSubjectId)
+            : input.actorSubjectId,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(schema.files.workspaceId, input.workspaceId), eq(schema.files.id, row.id)))
+        .returning();
+      await rawRows(
+        tx,
+        sql`select set_config('opengeni.private_file_owner', ${previous?.owner ?? ""}::text, true)`,
+      );
+      if (!updated) return { kind: "not_found" };
+      await recordAuditEvent(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.auditSubjectId,
+        action: "file.visibility.changed",
+        targetType: "workspace_file",
+        targetId: row.id,
+        metadata: { fileId: row.id, from: current, to: input.visibility },
+      });
+      return { kind: "changed", file: mapFile(updated) };
+    },
+  );
+}
+
+/**
+ * Whether a finished file exists in this workspace but is Only me for someone
+ * other than the caller. It reveals nothing else: no name, owner or content.
+ */
+export async function isFilePrivateToAnother(
+  db: Database,
+  input: { accountId: string; workspaceId: string; fileId: string },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      const [row] = await rawRows<{ private: boolean }>(
+        tx,
+        sql`select opengeni_private.file_private_to_another(${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.fileId}::uuid) as private`,
+      );
+      return row?.private === true;
+    },
+  );
 }
 
 /**
@@ -86186,6 +86308,10 @@ async function latestStartedSessionTurnRow(
 function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
   return {
     scope: row.privateOwnerSubjectIds ? "personal" : "workspace",
+    // Private files made before owners were recorded belong to their one private owner.
+    ownerSubjectId:
+      row.ownerSubjectId ??
+      (row.privateOwnerSubjectIds?.length === 1 ? row.privateOwnerSubjectIds[0]! : null),
     id: row.id,
     workspaceId: row.workspaceId,
     status: row.status as FileStatus,

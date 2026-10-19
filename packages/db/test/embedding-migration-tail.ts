@@ -330,5 +330,8 @@ export const embeddingMigrationTail = [
   "0851_personal_machine_session_tree.sql",
   // Temporarily disables the sessions fence trigger installed by withheld 0345.
   "0853_connected_machine_root_working_dirs.sql",
+  // Replaces the file ownership trigger from withheld 0461 and reads the file
+  // read-capability table from withheld 0499.
+  "0854_file_visibility.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];

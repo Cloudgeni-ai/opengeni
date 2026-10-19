@@ -2648,6 +2648,9 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.sandbox_file_publications FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.record_sandbox_file_publication(uuid,uuid,uuid,uuid) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.list_sandbox_file_publications(uuid,uuid,jsonb) FROM PUBLIC;
+      IF to_regprocedure('opengeni_private.file_private_to_another(uuid,uuid,uuid)') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION opengeni_private.file_private_to_another(uuid,uuid,uuid) FROM PUBLIC;
+      END IF;
     END IF;
     IF to_regclass('opengeni_private.artifact_catalog_pins') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.artifact_catalog_pins FROM %I', ${literal(role)});
