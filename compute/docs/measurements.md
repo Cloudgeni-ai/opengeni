@@ -2089,7 +2089,8 @@ bundle.
   5D92D48F0D9735322B308819C147864B, tq0w
   58AF8B143C30F4B701586F64DCD8B039 (`runs/r26c/compute-control.log`
   has the three lines).
-- Suite (21:14:30 to 21:16:18, `ONLY=background,sleep-saved`): 7 pass,
+- Suite (21:14:32.033 to 21:16:05.440 by `results.json`,
+  `ONLY=background,sleep-saved`): 7 pass,
   1 fail. Background passed: the finished command was read back by its
   id with its output and exit status 3, and the stopped one was gone
   2.4 s after the stop. The pager proof now requires the journal to
@@ -2107,3 +2108,159 @@ certificate script's tests and compute-host's tests.
 6c018d4be (a compute-host change to how a stream carried across a
 take-up ends its window) reached feat/compute-prod at 21:08, after r26
 and during r26c. Neither run's host bundle contains it.
+
+### r27: the final run
+
+r27 (2026-10-19; the chain started at 22:11:19, the suite ran from
+22:29:27.269 to 22:47:56.849 by `results.json`) is the run of every
+check, in full order, on the heads that go into the pull requests. It
+supersedes r26 as the final run:
+
+- compute feat/compute-lab fb947512b, which merges feat/compute-prod
+  f68686496. Over r26's 844cbfe73 it adds:
+  - cc7e52d26: the hosts step matches a certificate by its serial, and
+    the pager proof requires the host journal to show a paged restore;
+  - 973142f7d: the host's restart marker is written in one rename;
+  - 24bcb055a: a stream seen uncarried only after a take-up ends at the
+    next one;
+  - 0d4a922d2: the control service logs and answers the serial of each
+    host certificate it issues;
+  - 6c018d4be: a stream seen uncarried after a take-up ends on a window
+    of its own;
+  - e4a335d16: a compute-link test fix;
+  - 0f2ac77a4: only the VM process launched last proves or carries a
+    stream;
+  - f68686496: a launch that cannot close the connections an earlier VM
+    process left waiting fails as transient instead of starting the VM.
+- the backend feat/compute-backend 4987cc6d3. Over r26's 9850e5feb it
+  adds two merges of main (the second at 818284325), the compute
+  migrations renumbered to 0857-0862 after main's new 0856 (4b672c5bb),
+  and a test-only fix (4987cc6d3).
+
+The hosts' bundle, the guest image (with the agent of 4987cc6d3) and the
+control service were built from fb947512b. The fleet apply put the new
+bundle in the host template. API, worker and web were deployed from
+4987cc6d3 with `FRESH=1` (new Opengeni and control-service databases) at
+22:25:24 to 22:26:28. The hosts step then replaced the hosts with the new
+template, starting at 22:26:29. The control service issued the new
+hosts' certificates by instance identity token at 22:27:34 to 22:27:39.
+At 22:29:22 the hosts step found sbx-p4-e-host-j759, q2bl and xr3f live
+and matched each certificate, by its serial, to the deployed revision's
+issuance line. No renewal was needed. The model was the existing
+gpt-6.1-sol deployment. The chain ran as one launchd job:
+
+```sh
+. p4.env
+export OPENGENI_REF=4987cc6d3 COMPUTE_REF=fb947512b
+compute/e2e/env.sh build && compute/e2e/env.sh fleet &&
+  FRESH=1 compute/e2e/env.sh deploy && compute/e2e/env.sh hosts &&
+  RUN=r27 compute/e2e/env.sh suite
+```
+
+A first r27 chain on lab 39228f222 was stopped during its build, before
+the host bundle was made, when f68686496 arrived. Its build on the stack
+VM was stopped too, and nothing of it was deployed
+(`chain-r27-aborted-39228f222.log`).
+
+26 checks passed, none failed and one was not applicable (run-as:
+Opengeni offers no way to ask for it). The suite's verifier
+(`suite/verify.ts`, run by `env.sh suite`) agreed, and the chain ended
+with status 0 at 22:48:12.
+
+| check | r27 |
+| --- | --- |
+| create | first turn in 28.2 s |
+| background | read back by id with exit status 3; the stopped one unlisted and its process gone 2.3 s after the stop |
+| checkpoint | the terminal showed all 150 ticks across 2 checkpoints (22:31:16.84, 22:32:27.40); the command returned all 110 in order across 1 (22:31:16.84); longest quiet 1.4 s |
+| ui | file browser, terminal and desktop pass (Playwright) |
+| sleep-paused | paused in 0.3 s, woke in 0.2 s |
+| sleep-saved | saved in 6.9 s, woke in 0.4 s; the pager wrote `learned.json` 3.2 s after the paged restore ended, by the host's clock |
+| sleep-archived | archived in 16.2 s, woke in 0.6 s |
+| sleep-remote | remote in 19.3 s, woke in 8.8 s |
+| link-stream | 85 cycles in 172 s, 340 MiB in and 680 MiB out, every sha256 matching, across 2 checkpoints; saved in 11.4 s, woken by a read in 1.3 s, all 12 files matching both ways after |
+| vm-crash | the next command answered 5.1 s after the kill, generation 1 -> 2 on the same host, both writes kept, the program lost and the `programs_lost` alarm raised |
+| move | xr3f -> j759 in 24.3 s |
+| host-loss | back on xr3f 148.1 s after the stop, booted from files, the in-flight request ended as outcome unknown (HTTP 409) after 141.6 s |
+| delete | the compute sandbox gone 25.4 s after the delete |
+| connected-machine | online 3.1 s after connecting; exec in 0.1 s after 90 s idle |
+| cleanup | nothing left |
+
+(Host names drop the `sbx-p4-e-host-` prefix.)
+
+host-loss began at 22:41:26. At 22:43:22 it asked for
+sbx-p4-e-host-j759, where the sandbox had just moved, to stop.
+sbx-p4-e-host-xr3f logged "adopted from its files" and the
+`programs_lost` alarm for the sandbox at 22:45:40.940, then fetched the
+copy and booted it at 22:45:41. The boot gave a new guest boot id and a
+new agent connection instance, and the owner epoch went from 3 to 5. The
+program and the command in flight were gone and not run again. The
+archived and the checkpointed files were kept. The late write was lost.
+Either outcome was allowed for it: the suite saw the stop operation
+confirmed done 167.9 s after the last checkpoint it knew of began, past
+the time the next was due, so it could not rule out a later copy. That
+figure is when the stop was confirmed, not when the host stopped: the
+stop was asked for at 22:43:22, and j759's journal shows a checkpoint
+begun at 22:43:00.391 and finished at 22:43:19.360. The group recreated
+j759, and the control service issued that new instance a certificate by
+identity token at 22:46:51. No run logged a warning that the guest did
+not write its disks out before a pause.
+
+Nothing woke the sandbox that the run did not ask for. The hosts'
+journals (xr3f's and the lost j759's) hold 14 wake-path steps, four of
+them fetch steps. They hold ten completed wakes (transitions into
+running):
+
+- seven by `agent_link`, each the suite's own request. `api.log` has an
+  "a request wakes a sleeping sandbox" line just before each. Its six
+  other such lines came while a wake was under way or during the
+  host-loss adoption, from 22:45:22 to 22:45:43;
+- three by the control service: the boot at creation, the move's
+  restore on j759 and the host-loss boot on xr3f.
+
+No step was caused by housekeeping.
+
+Streams across launches, the subject of 6c018d4be, 0f2ac77a4 and
+f68686496:
+
+- The host agent logs at info. The debug line "an agent-link connection
+  from an earlier VM process; closing it" therefore appears in no
+  journal, and its absence says nothing either way.
+- No journal has an "an agent-link stream cannot go on" line, a
+  protocol error, a connection without a hello, or a failure to close
+  waiting connections at a launch.
+- After link-stream's restore from saved, the guest's console shows
+  "lost this sandbox's connections" +0, and all 12 files matched both
+  ways. The streams the guest kept were taken up again.
+- The host ended streams the guest no longer had in two sweeps:
+  - "ended=2" on xr3f at 22:40:42, after vm-crash killed the VM process;
+  - "ended=1" on j759 at 22:42:10, after host-loss's wake from remote
+    following the move.
+
+  r24 and r26 show the same two sweeps, with 2 and 2.
+- After host-loss the guest booted from files, so it had no streams
+  left to take up. The first commands after the move and after the
+  adoption answered.
+
+r27 runs live what r26 did not. The rolled hosts ran 973142f7d,
+24bcb055a, 6c018d4be, 0f2ac77a4 and f68686496 through every sleep level,
+vm-crash, the move and host-loss. cc7e52d26 and 0d4a922d2 ran in the
+hosts step and the pager proof, as in r26c.
+
+The gap r24 names remains: the recovery of an output release whose
+exchange failed was not exercised live (the same tests cover it). The
+overlay-network option of the GCP module (off by default) was not in
+this run.
+
+The figures are the rows of `runs/r27/results.md` (and `results.json`).
+The other evidence is also in `runs/r27/`:
+
+- the stop: `suite.log`;
+- the adoption and the alarm: `host-sbx-p4-e-host-xr3f.log`;
+- the lost host's journal:
+  `host-sbx-p4-e-host-j759@3935725393893074894.log`;
+- the steps and the stream sweeps: the `compute.step` events and the
+  `compute_host::resume` lines of the `host-*.log` journals;
+- the wake lines: `api.log`;
+- the certificates: `compute-control.log`;
+- the hosts step: `hosts.log`;
+- the UI screenshots: `ui-*.png`.
