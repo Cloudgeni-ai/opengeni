@@ -149,9 +149,12 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   queue_head_position: { why: "its own queue", expected: fresh(0) },
   queue_tail_position: { why: "its own queue", expected: fresh(0) },
   sandbox_group_id: { why: "its own sandbox group", expected: equalsForkId },
-  active_sandbox_id: { why: "its own sandbox", expected: fresh(null) },
-  active_epoch: { why: "its own sandbox", expected: fresh(0) },
-  working_dir: { why: "its own sandbox", expected: fresh(null) },
+  // The source here runs in its own group sandbox. A source on a Connected
+  // Machine forks onto that machine through the route fence instead
+  // (session-fork-machine-postgres.test.ts).
+  active_sandbox_id: { why: "route to its own group sandbox", expected: fresh(null) },
+  active_epoch: { why: "its own route fence", expected: fresh(0) },
+  working_dir: { why: "follows the route", expected: fresh(null) },
   codex_last_credential_id: { why: "its own measurements", expected: fresh(null) },
   last_input_tokens: { why: "its own measurements", expected: fresh(null) },
   compact_requested: { why: "its own measurements", expected: fresh(false) },
