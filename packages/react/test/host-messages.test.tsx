@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { TOOL_STEP_IDS } from "../src/timeline/tool-steps";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -195,6 +196,11 @@ describe("English catalog", () => {
         const source = readFileSync(join(root, file), "utf8");
         for (const match of source.matchAll(/["'`]([A-Za-z0-9_.]+)["'`]/g)) used.add(match[1]!);
       }
+    }
+    // Tool step keys are built from the step ids (`timeline.toolStep.<step>.<phase>`).
+    for (const step of TOOL_STEP_IDS) {
+      used.add(`timeline.toolStep.${step}.running`);
+      used.add(`timeline.toolStep.${step}.done`);
     }
     const unused = entries
       .map(([key]) => key)
