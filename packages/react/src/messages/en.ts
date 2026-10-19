@@ -1289,7 +1289,7 @@ export const englishMessages = {
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
   "lib.format.now": "now",
   "lib.format.outOfCreditsThisWorkspace":
-    "Out of credits for this model. Add credits to continue; the conversation is preserved.",
+    "Your remaining credits don't cover this model. Choose a model they cover or add credits. The conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
   "lib.format.providerBlockedRequestDetail": "The model provider blocked this request. {detail}",
   "lib.format.reconcileBeforeRetry":
@@ -1317,7 +1317,7 @@ export const englishMessages = {
   "lib.format.workspaceUsageLimitReachedAn":
     "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.",
   "lib.format.yourOrganizationDoesnTHave":
-    "Your organization doesn't have enough credits to send this message. Add credits or choose a model with another payment source. Your message and attachments are saved.",
+    "Your remaining credits don't cover this model. Choose a model they cover or add credits. Your message and attachments are saved.",
   "lib.providerRecovery.anImageFromEarlierIn":
     "An image from earlier in this conversation can't be read from storage",
   "lib.providerRecovery.aRequiredMcpServerIs": "A required MCP server is unreachable",
@@ -1765,7 +1765,7 @@ export const englishMessages = {
   "modelPolicy.freeCredits": "Free credits",
   "modelPolicy.freeInThisDeployment": "Free in this deployment",
   "modelPolicy.models": "Models",
-  "modelPolicy.needsCredits": "Needs credits",
+  "modelPolicy.needsCredits": "Not covered by your credits",
   "modelPolicy.notEntitled": "Not entitled",
   "modelPolicy.opengeniCredits": "Opengeni credits",
   "modelPolicy.opengeniCreditsAutomaticManagedRoute": "Opengeni credits · automatic managed route",

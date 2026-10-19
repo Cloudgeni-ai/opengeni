@@ -1,4 +1,5 @@
 import type { LatencyMode, ReasoningEffort } from "@opengeni/sdk";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import {
   coerceReasoningEffortForModel,
   findPickerRow,
@@ -30,17 +31,40 @@ export function freeCreditGap(
 ): FreeCreditGap | null {
   const current = findPickerRow(rows, model);
   if (current?.catalog.creditFunding !== "unavailable") return null;
+  const gap = creditCoverageGap(rows, model, current.label, options);
+  return gap.covered.length > 0 ? gap : null;
+}
+
+/**
+ * The API refused a Send or a new chat because no credit pays for its model.
+ * The refusal is authoritative even while the catalog still reports older
+ * funding, so the gap is named whether or not other models are covered.
+ */
+export function creditRefusalGap(
+  rows: PickerModelRow[],
+  model: string,
+  options: { selectedModel?: string | null; preferredModel?: string | null } = {},
+): FreeCreditGap {
+  const label = findPickerRow(rows, model)?.label ?? modelDisplayName(model);
+  return creditCoverageGap(rows, model, label, options);
+}
+
+function creditCoverageGap(
+  rows: PickerModelRow[],
+  model: string,
+  modelLabel: string,
+  options: { selectedModel?: string | null; preferredModel?: string | null },
+): FreeCreditGap {
   const covered = rows.filter(
     (row) => row.id !== model && row.selectable && row.catalog.creditFunding === "promotional",
   );
-  if (covered.length === 0) return null;
   const { selectedModel, preferredModel } = options;
   const preferred = preferredModel ? covered.findIndex((row) => row.id === preferredModel) : -1;
   if (preferred > 0) covered.unshift(...covered.splice(preferred, 1));
   const selected =
     selectedModel && selectedModel !== model ? findPickerRow(rows, selectedModel) : null;
   return {
-    modelLabel: current.label,
+    modelLabel,
     covered: covered.map((row) => ({ id: row.id, label: row.label })),
     selectionUsable: Boolean(
       selected?.selectable && selected.catalog.creditFunding !== "unavailable",

@@ -86,7 +86,9 @@ export function OrganizationCreditBalance({
               <p className="mt-0.5 text-xs leading-[18px] text-fg-muted">
                 {general < 0
                   ? "Future purchases cover prior usage first."
-                  : "For models and platform usage."}
+                  : general === 0 && balance.promotionalCredits?.length
+                    ? "Other models need general credit."
+                    : "For any model and platform usage."}
               </p>
             </div>
             <span className="shrink-0 text-sm font-medium text-fg tabular-nums">

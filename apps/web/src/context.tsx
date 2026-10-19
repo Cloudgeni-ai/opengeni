@@ -2136,7 +2136,8 @@ export function RootRouteComponent() {
               outcomeUnknown,
             })
           : false;
-        if (isPaymentRequiredError(problem)) {
+        // A caller that handles the refusal shows it inline instead of the dialog.
+        if (isPaymentRequiredError(problem) && handled !== true) {
           const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
           setCreditRequired({
             workspaceId,

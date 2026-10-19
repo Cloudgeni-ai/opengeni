@@ -30,7 +30,8 @@ import { useMessageSenderRenderer } from "@/components/session/message-senders";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { useSessionStartupTimeline } from "@/lib/session-startup-timeline";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
-import { coveredModelChoice, freeCreditGap } from "@/lib/free-credit-gap";
+import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "@/lib/free-credit-gap";
+import { isPaymentRequiredError } from "@/lib/model-access";
 import { timelineShowsFailure } from "@/lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import { useStreamHealthTelemetry } from "@/lib/stream-health";
@@ -339,6 +340,13 @@ const SubagentTree = lazy(() =>
 const LazyFailedSessionBanner = lazy(() =>
   import("@/components/session/failed-session-banner").then((module) => ({
     default: module.FailedSessionBanner,
+  })),
+);
+
+// Only a refused Send shows it, so it stays out of the direct session bundle.
+const LazyCreditRefusalNotice = lazy(() =>
+  import("@/components/credits/credit-refusal-notice").then((module) => ({
+    default: module.CreditRefusalNotice,
   })),
 );
 
@@ -2085,6 +2093,13 @@ function SessionChatPane(props: {
   const [refusedModel, setRefusedModel] = useState<{ sessionId: string; model: string } | null>(
     null,
   );
+  // The API's credit refusal of a Send: no remaining credit pays for that model.
+  // It stays above the composer until a message is accepted or it is dismissed.
+  const [creditRefusal, setCreditRefusal] = useState<{
+    sessionId: string;
+    model: string;
+    message: string;
+  } | null>(null);
   useEffect(() => {
     const onFocusRequest = (event: Event) => {
       const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
@@ -2643,6 +2658,7 @@ function SessionChatPane(props: {
     // host-owned upload/repository queue in sync once those inputs are
     // accepted too; the immutable input snapshot preserves later additions.
     onSent: (_text, input) => {
+      setCreditRefusal(null);
       attachments.removeReadyFiles(
         (input.resources ?? []).flatMap((resource) =>
           resource.kind === "file" ? [resource.fileId] : [],
@@ -2660,6 +2676,15 @@ function SessionChatPane(props: {
         if (refused) setRefusedModel({ sessionId: props.session.id, model: refused });
         void modelCatalog.refresh();
         setModelPickerSession(props.session.id);
+      }
+      // Re-read funding so the notice and picker name what the credit covers now.
+      if (isPaymentRequiredError(error)) {
+        setCreditRefusal({
+          sessionId: props.session.id,
+          model: refusedModelId(error, input) ?? props.session.model,
+          message: error.message,
+        });
+        void modelCatalog.refresh();
       }
     },
   });
@@ -3237,6 +3262,15 @@ function SessionChatPane(props: {
     ],
   );
 
+  const canBuyCredits =
+    context.clientConfig.billingMode === "stripe" &&
+    Boolean(workspaceAccountId) &&
+    hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
+  const canConnectModel = hasWorkspacePermission(
+    context.accessContext,
+    props.session.workspaceId,
+    "connections:write",
+  );
   const failureRecovery =
     !props.hasNewer &&
     props.failure &&
@@ -3264,20 +3298,8 @@ function SessionChatPane(props: {
             freeCreditGap={creditGap}
             onChooseModel={chooseCoveredModel}
             workspaceId={props.session.workspaceId}
-            canBuyCredits={
-              context.clientConfig.billingMode === "stripe" &&
-              Boolean(workspaceAccountId) &&
-              hasAccountPermission(
-                context.accessContext,
-                workspaceAccountId ?? "",
-                "billing:manage",
-              )
-            }
-            canConnectModel={hasWorkspacePermission(
-              context.accessContext,
-              props.session.workspaceId,
-              "connections:write",
-            )}
+            canBuyCredits={canBuyCredits}
+            canConnectModel={canConnectModel}
             sandboxRecovery={
               needsSandboxRecoveryCheck(props.session, props.failure.structuralSandboxFailure)
                 ? {
@@ -3335,6 +3357,38 @@ function SessionChatPane(props: {
         </Suspense>
       </FailureRecoveryBoundary>
     ) : null;
+  // A refused Send names its model, the models the credit still covers, and the
+  // next step above the composer. The credit-stop banner already says this.
+  const sessionCreditRefusal =
+    creditRefusal?.sessionId === props.session.id &&
+    !terminal &&
+    !(failureRecovery && props.creditExhausted)
+      ? creditRefusal
+      : null;
+  // The plain refusal text shows while the notice chunk loads or if it fails.
+  const creditRefusalFallback = sessionCreditRefusal ? (
+    <p role="alert" className="px-1.5 text-sm text-fg-muted">
+      {sessionCreditRefusal.message}
+    </p>
+  ) : null;
+  const creditRefusalNotice = sessionCreditRefusal ? (
+    <FailureRecoveryBoundary key={props.session.id} fallback={creditRefusalFallback}>
+      <Suspense fallback={creditRefusalFallback}>
+        <LazyCreditRefusalNotice
+          gap={creditRefusalGap(modelCatalog.rows, sessionCreditRefusal.model, {
+            selectedModel: composerPolicy?.model,
+            preferredModel: modelCatalog.defaultSelection?.model,
+          })}
+          message={sessionCreditRefusal.message}
+          workspaceId={props.session.workspaceId}
+          canBuyCredits={canBuyCredits}
+          canConnectModel={canConnectModel}
+          onChooseModel={modelPickerDisabled ? undefined : chooseCoveredModel}
+          onDismiss={() => setCreditRefusal(null)}
+        />
+      </Suspense>
+    </FailureRecoveryBoundary>
+  ) : null;
 
   const modelRecovery = props.hasNewer
     ? null
@@ -3696,6 +3750,7 @@ function SessionChatPane(props: {
                 header={
                   unavailableModelNotice ||
                   usageLimitNotice ||
+                  creditRefusalNotice ||
                   (machineAccess && !machineAccess.isOwner) ? (
                     <>
                       {!(
@@ -3717,6 +3772,9 @@ function SessionChatPane(props: {
                       ) : null}
                       {unavailableModelNotice}
                       {usageLimitNotice}
+                      {creditRefusalNotice ? (
+                        <div className="px-2 pt-2">{creditRefusalNotice}</div>
+                      ) : null}
                     </>
                   ) : null
                 }

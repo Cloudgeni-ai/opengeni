@@ -9,6 +9,7 @@ import { modelUsesCredits } from "@/lib/model-policy";
 import { hasAccountPermission } from "@/lib/permissions";
 import { currentPageReturnTo, returnToSearch } from "@/lib/return-to";
 import { CREDIT_BALANCE_CHANGED } from "@/lib/credit-balance-events";
+import { creditBalanceSplitLabel } from "@/lib/credit-coverage";
 import type { ClientConfig } from "@/types";
 
 /* ----------------------------------------------------------------------------
@@ -26,7 +27,10 @@ export function deploymentBillsCredits(config: Pick<ClientConfig, "billingMode" 
 export interface OpenGeniCredits {
   /** False on deployments without credits: no row, and credits don't count as a payer. */
   visible: boolean;
-  /** "$12.40 left", "No credits left", or null while unknown or unreadable. */
+  /**
+   * "$12.40 left", "No credits left", "$0.00 for any model · $100.00 for
+   * selected models", or null while unknown or unreadable.
+   */
   balanceLabel: string | null;
   /** Billing admins: the row opens organization Billing. */
   canOpenBilling: boolean;
@@ -66,7 +70,11 @@ export function useOpenGeniCredits(organizationId: string | undefined): OpenGeni
           balanceMicros > 0
             ? `${formatMoneyMicros(balanceMicros, currency)} left`
             : "No credits left";
-        if (billing.balance.plan) {
+        // Scoped credit only pays for some models: say how much any model can use.
+        const split = creditBalanceSplitLabel(billing.balance);
+        if (split) {
+          label = split;
+        } else if (billing.balance.plan) {
           const catalog = await client.getBillingSubscriptionPlans({ accountId }).catch(() => null);
           if (catalog?.plan) {
             const remaining = billing.balance.plan.creditRemainingMicros;

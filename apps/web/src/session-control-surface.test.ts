@@ -167,7 +167,7 @@ describe("session control surface architecture", () => {
 
   test("offers failed-session model recovery to Personal workspace connection owners", async () => {
     const route = await source("routes/session.tsx");
-    const recoveryGateStart = route.indexOf("canConnectModel={hasWorkspacePermission(");
+    const recoveryGateStart = route.indexOf("const canConnectModel = hasWorkspacePermission(");
     const recoveryGate = route.slice(recoveryGateStart, recoveryGateStart + 240);
 
     expect(recoveryGateStart).toBeGreaterThan(-1);
