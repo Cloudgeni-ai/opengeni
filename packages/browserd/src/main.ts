@@ -338,22 +338,121 @@ export function defaultMaxBrowserSessions(memoryBytes: number): number {
   );
 }
 
-/** Physical memory, or a container's own cgroup limit when that is lower. */
+/**
+ * Physical memory, or the tightest memory limit of this process's cgroup and
+ * its ancestors when that is lower. A browser controller started inside a
+ * service or container cgroup is bound by every limit above it, not just the
+ * one at the cgroup mount root. Each memory hierarchy is located through the
+ * mount table, which says which cgroup a mount shows and where; a membership
+ * outside a mount's root is not described by that mount and is skipped.
+ */
 export function machineMemoryBytes(
   physicalBytes: number = totalmem(),
   readLimit: (path: string) => string = (path) => readFileSync(path, "utf8"),
 ): number {
-  for (const path of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
+  let lowest = physicalBytes;
+  const consider = (path: string) => {
     try {
       const value = readLimit(path).trim();
-      if (!/^[0-9]+$/u.test(value)) continue;
+      // "max" (cgroup v2) means unlimited.
+      if (!/^[0-9]+$/u.test(value)) return;
       const limit = Number(value);
-      if (Number.isSafeInteger(limit) && limit > 0 && limit < physicalBytes) return limit;
+      // cgroup v1 reports "unlimited" as a huge sentinel, past the safe range.
+      if (Number.isSafeInteger(limit) && limit > 0 && limit < lowest) lowest = limit;
     } catch {
-      // Not in a memory-limited cgroup namespace.
+      // No limit file at this level.
+    }
+  };
+  const read = (path: string) => {
+    try {
+      return readLimit(path);
+    } catch {
+      return null;
+    }
+  };
+  const membership = read("/proc/self/cgroup");
+  const mounts = read("/proc/self/mountinfo");
+  if (membership === null || mounts === null) {
+    // No per-process view (not Linux, or /proc is hidden): only the
+    // conventional mount roots can apply.
+    consider("/sys/fs/cgroup/memory.max");
+    consider("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+    return lowest;
+  }
+  // v2: "0::<path>"; v1: "<id>:<controllers>:<path>".
+  let unified: string | null = null;
+  let v1Memory: string | null = null;
+  for (const line of membership.split("\n")) {
+    const match = /^[0-9]+:([^:]*):(.*)$/u.exec(line.trim());
+    if (!match) continue;
+    const [, controllers, path] = match as unknown as [string, string, string];
+    if (controllers === "") unified = path;
+    else if (controllers.split(",").includes("memory")) v1Memory = path;
+  }
+  for (const mount of cgroupMounts(mounts)) {
+    const membershipPath = mount.version === 2 ? unified : v1Memory;
+    if (membershipPath === null) continue;
+    const file = mount.version === 2 ? "memory.max" : "memory.limit_in_bytes";
+    for (const directory of cgroupAncestors(mount, membershipPath)) {
+      consider(`${directory}/${file}`);
     }
   }
-  return physicalBytes;
+  return lowest;
+}
+
+type CgroupMount = { version: 1 | 2; root: string; mountPoint: string };
+
+/** cgroup v2 mounts and cgroup v1 memory mounts from a mountinfo table. */
+function cgroupMounts(mountinfo: string): CgroupMount[] {
+  const mounts: CgroupMount[] = [];
+  for (const line of mountinfo.split("\n")) {
+    const separator = line.indexOf(" - ");
+    if (separator < 0) continue;
+    const fields = line.slice(0, separator).split(" ");
+    const [fsType, , superOptions = ""] = line.slice(separator + 3).split(" ");
+    const root = fields[3];
+    const mountPoint = fields[4];
+    if (!root || !mountPoint) continue;
+    const version =
+      fsType === "cgroup2"
+        ? 2
+        : fsType === "cgroup" && superOptions.split(",").includes("memory")
+          ? 1
+          : null;
+    if (version === null) continue;
+    mounts.push({
+      version,
+      root: unescapeMountField(root),
+      mountPoint: unescapeMountField(mountPoint),
+    });
+  }
+  return mounts;
+}
+
+/** mountinfo escapes space, tab, newline and backslash as octal. */
+function unescapeMountField(value: string): string {
+  return value.replace(/\\([0-7]{3})/gu, (_, octal: string) =>
+    String.fromCharCode(parseInt(octal, 8)),
+  );
+}
+
+/**
+ * The directories of a cgroup and each ancestor down to the mount, innermost
+ * first, or none when the cgroup is not inside what the mount shows.
+ */
+function cgroupAncestors(mount: CgroupMount, path: string): string[] {
+  const split = (value: string) => value.split("/").filter((segment) => segment !== "");
+  const segments = split(path);
+  const root = split(mount.root);
+  if (segments.some((segment) => segment === "." || segment === "..")) return [];
+  if (root.some((segment, index) => segments[index] !== segment)) return [];
+  const relative = segments.slice(root.length);
+  const base = mount.mountPoint.replace(/\/+$/u, "");
+  const directories: string[] = [];
+  for (let depth = relative.length; depth >= 0; depth -= 1) {
+    directories.push(depth === 0 ? base || "/" : `${base}/${relative.slice(0, depth).join("/")}`);
+  }
+  return directories;
 }
 
 function environmentInteger(

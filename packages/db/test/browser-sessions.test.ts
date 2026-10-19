@@ -8,6 +8,7 @@ import {
   bindBrowserSessionNetworkRouteAuthority,
   bootstrapWorkspace,
   BrowserSessionNotFoundError,
+  BrowserCapacitySuspendClaimRejectedError,
   BrowserSessionOperationConflictError,
   BrowserSessionStateError,
   ComputerSessionStateError,
@@ -304,6 +305,59 @@ describe("durable BrowserSession lifecycle", () => {
         placement: { kind: "connected_machine", sandboxId: crypto.randomUUID() },
       }),
     ).toEqual([]);
+  });
+
+  test("a capacity save claims a browser only while it is still idle on the same controller", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const idle = await activeBrowser(scope);
+    const used = await activeBrowser(scope);
+    const moved = await activeBrowser(scope);
+    for (const browser of [idle, used, moved]) {
+      await shared!.admin`
+        update browser_sessions set last_used_at = now() - interval '20 minutes'
+        where workspace_id = ${scope.workspaceId} and id = ${browser.session.id}`;
+    }
+    const claimFor = (browser: typeof idle) => ({
+      idleBefore: new Date(Date.now() - 5 * 60_000),
+      placementInstanceId: "placement:test",
+      controllerGeneration: browser.session.controller!.controllerGeneration,
+    });
+    const suspend = (browser: typeof idle, claim = claimFor(browser)) =>
+      prepareBrowserSessionSuspend(client.db, {
+        ...scope,
+        browserSessionId: browser.session.id,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: "system:browser-capacity",
+        capacityClaim: claim,
+      });
+
+    // Used again after it was picked: refused, nothing written.
+    const usedClaim = claimFor(used);
+    await shared!.admin`
+      update browser_sessions set last_used_at = now()
+      where workspace_id = ${scope.workspaceId} and id = ${used.session.id}`;
+    await expect(suspend(used, usedClaim)).rejects.toBeInstanceOf(
+      BrowserCapacitySuspendClaimRejectedError,
+    );
+    // Rebound to another controller generation since it was picked: refused.
+    await expect(
+      suspend(moved, { ...claimFor(moved), controllerGeneration: crypto.randomUUID() }),
+    ).rejects.toBeInstanceOf(BrowserCapacitySuspendClaimRejectedError);
+    for (const browser of [used, moved]) {
+      const current = await getBrowserSessionControlRecord(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        browserSessionId: browser.session.id,
+      });
+      expect(current.session.lifecycle).toBe("active");
+    }
+
+    // Still idle: claimed. A second concurrent claim does not count it again.
+    const claimed = await suspend(idle);
+    expect(claimed.operation.state).toBe("prepared");
+    expect(claimed.session.lifecycle).toBe("suspending");
+    await expect(suspend(idle)).rejects.toBeInstanceOf(BrowserCapacitySuspendClaimRejectedError);
   });
 
   test("replays a legacy Lightpanda create with corrected screenshot capabilities", async () => {

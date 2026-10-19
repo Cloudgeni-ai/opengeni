@@ -148,6 +148,11 @@ export class BrowserSessionStateError extends Error {
   readonly name = "BrowserSessionStateError";
 }
 
+/** A capacity save's candidate no longer qualifies; nothing was written. */
+export class BrowserCapacitySuspendClaimRejectedError extends Error {
+  readonly name = "BrowserCapacitySuspendClaimRejectedError";
+}
+
 export type PrepareBrowserSessionCreateInput = {
   accountId: string;
   workspaceId: string;
@@ -183,6 +188,18 @@ export type PrepareBrowserSessionLifecycleInput = Omit<
   PrepareBrowserSessionEndInput,
   "expectedLifecycle" | "expectedControllerGeneration" | "expectedFailureCode"
 >;
+
+/**
+ * What a capacity save claims: the browser it picked as idle, exactly as it
+ * was picked. Under the browser's row lock the save goes ahead only while the
+ * browser is still active on that controller, still unused since the cutoff,
+ * and has no operation in flight.
+ */
+export type BrowserCapacitySuspendClaim = {
+  idleBefore: Date;
+  placementInstanceId: string;
+  controllerGeneration: string;
+};
 
 export type BrowserPrivateCheckpointAuthority = {
   artifactId: string;
@@ -1657,12 +1674,52 @@ export async function failBrowserSessionOperation(
 
 export async function prepareBrowserSessionSuspend(
   db: Database,
-  input: PrepareBrowserSessionLifecycleInput,
+  input: PrepareBrowserSessionLifecycleInput & {
+    /** Set for a capacity save; see {@link BrowserCapacitySuspendClaim}. A
+     * browser that no longer qualifies, including one already suspended by
+     * another save, is refused with BrowserCapacitySuspendClaimRejectedError. */
+    capacityClaim?: BrowserCapacitySuspendClaim;
+  },
 ): Promise<BrowserSessionMutationResponseValue> {
+  const claim = input.capacityClaim;
   return await prepareBrowserSessionLifecycleTransition(db, input, {
     kind: "suspend",
     terminalLifecycle: "suspended",
     targetLifecycle: "suspending",
+    ...(claim
+      ? {
+          claim: async (tx: Database, row: BrowserSessionRow) => {
+            if (
+              row.lifecycle !== "active" ||
+              row.placementInstanceId !== claim.placementInstanceId ||
+              row.controllerGeneration !== claim.controllerGeneration ||
+              !row.lastUsedAt ||
+              row.lastUsedAt.getTime() >= claim.idleBefore.getTime()
+            ) {
+              throw new BrowserCapacitySuspendClaimRejectedError(
+                "BrowserSession is no longer idle on this controller",
+              );
+            }
+            const [inFlight] = await tx
+              .select({ operationId: schema.interactionOperations.operationId })
+              .from(schema.interactionOperations)
+              .where(
+                and(
+                  eq(schema.interactionOperations.workspaceId, row.workspaceId),
+                  eq(schema.interactionOperations.resourceKind, "browser_session"),
+                  eq(schema.interactionOperations.resourceId, row.id),
+                  inArray(schema.interactionOperations.state, ["prepared", "dispatched"]),
+                ),
+              )
+              .limit(1);
+            if (inFlight) {
+              throw new BrowserCapacitySuspendClaimRejectedError(
+                "BrowserSession has an operation in flight",
+              );
+            }
+          },
+        }
+      : {}),
     assertReady: (row) => {
       if (row.lifecycle !== "active" || !controllerFromRow(row)) {
         throw new BrowserSessionStateError("Only an active BrowserSession can be suspended");
@@ -1857,6 +1914,8 @@ async function prepareBrowserSessionLifecycleTransition(
     terminalLifecycle: "suspended" | "active";
     targetLifecycle: "suspending" | "restoring";
     assertReady: (row: BrowserSessionRow) => void;
+    /** Checked under the row lock before anything is written. */
+    claim?: (tx: Database, row: BrowserSessionRow) => Promise<void>;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
   const digest = lifecycleRequestDigest(
@@ -1892,6 +1951,7 @@ async function prepareBrowserSessionLifecycleTransition(
             });
           }
 
+          if (transition.claim) await transition.claim(tx, row);
           const terminal = row.lifecycle === transition.terminalLifecycle;
           if (!terminal) transition.assertReady(row);
           const now = new Date();
