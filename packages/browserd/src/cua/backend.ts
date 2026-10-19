@@ -34,7 +34,7 @@ type Frame = {
   windowHeight: number;
 };
 type Operation = {
-  name: "click" | "drag" | "scroll" | "set_value" | "type_text" | "press_key";
+  name: "click" | "drag" | "scroll" | "set_value" | "type_text" | "press_key" | "hotkey";
   args: Record<string, unknown>;
 };
 
@@ -741,13 +741,30 @@ export class CuaComputerBackend implements ComputerBackend {
     const modifiers = keys.map((modifier) => modifierAliases[modifier] ?? modifier);
     if (modifiers.some((modifier) => !allowedModifiers.includes(modifier)))
       throw unsupported("CUA keyboard modifier is unsupported");
+    const named = key === "enter" ? "return" : key;
+    // Keys posted to a background Mac app never reach its menus, so a
+    // shortcut such as cmd+s would report success and do nothing. CUA's
+    // hotkey runs the menu item behind the shortcut through accessibility
+    // instead, and refuses when macOS keeps that item disabled.
+    if (this.identity.platform === "macos" && modifiers.length > 0)
+      return [
+        {
+          name: "hotkey",
+          args: {
+            ...args,
+            ...focused,
+            keys: [...modifiers, named],
+            delivery_mode: this.inputDelivery(),
+          },
+        },
+      ];
     return [
       {
         name: "press_key",
         args: {
           ...args,
           ...focused,
-          key: key === "enter" ? "return" : key,
+          key: named,
           modifiers,
           delivery_mode: this.inputDelivery(),
         },

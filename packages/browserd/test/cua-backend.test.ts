@@ -750,16 +750,49 @@ describe("CUA desktop boundary", () => {
         code: "locator_not_found",
         message: `CUA ref s99:0 is not in a recent observation of this window; observe it again and use a ref from the latest observation (${latest.observationId.split(":").pop()})`,
       });
-      // macOS accepts the usual names for the command key.
+      // macOS accepts the usual names for the command key, and a shortcut goes
+      // through CUA's hotkey, which reaches a background app's menus.
       await backend.dispatch({
         ...command(latest),
         action: { type: "keyboard", action: "press", value: "super+n" },
       });
       expect(
-        [...fixture.calls].reverse().find((call) => call.name === "press_key")?.args,
+        [...fixture.calls].reverse().find((call) => call.name === "hotkey")?.args,
       ).toMatchObject({
-        key: "n",
-        modifiers: ["cmd"],
+        pid: 42,
+        window_id: 1,
+        keys: ["cmd", "n"],
+        delivery_mode: "background",
+      });
+      // A single key is still a key press.
+      await backend.dispatch({
+        ...command(await backend.observe(target.id)),
+        action: { type: "keyboard", action: "press", value: "Enter" },
+      });
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "press_key")?.args,
+      ).toMatchObject({ key: "return", modifiers: [] });
+      // A menu item macOS keeps disabled in the background is refused, clearly.
+      fixture.mutation = result(
+        {
+          effect: "refused",
+          refusal: {
+            code: "background_unavailable",
+            message: "Save is disabled while TextEdit is in the background",
+          },
+        },
+        true,
+      );
+      await expect(
+        backend.dispatch({
+          ...command(await backend.observe(target.id)),
+          action: { type: "keyboard", action: "press", value: "cmd+s" },
+        }),
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message:
+          "CUA hotkey refused the operation: Save is disabled while TextEdit is in the background",
       });
     } finally {
       await backend.close();
