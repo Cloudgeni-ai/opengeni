@@ -1565,10 +1565,10 @@ message InventoryOperation {
   // The OpStart.connection_generation the op was admitted under; 0 when an
   // older Opengeni started it.
   uint64 connection_generation = 2;
-  // The op exited and its output is retained, unreleased.
+  // The op exited and its output is retained, unreleased. How long ago is
+  // deliberately not reported: age never shows that anyone consumed it.
   bool complete = 3;
-  // For a complete op, the time since it exited, in milliseconds.
-  uint64 completed_age_ms = 4;
+  reserved 4;
 }
 
 // The control plane's ack of an AgentEvent (e.g. a HeartbeatAck).

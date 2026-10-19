@@ -18,6 +18,20 @@ const REPLACEMENT_CHECK_MS = 1_000;
  * longer come back that way. Never sent by an agent. */
 export const AGENT_LINK_LOST_HEADER = "Opengeni-Agent-Link-Lost";
 
+/** Marks a housekeeping request that must never wake its sandbox. A compute
+ * host delivers it only while the sandbox runs and its agent holds the
+ * subscription, never counts it as activity and never queues it; otherwise
+ * it answers it itself with AGENT_UNANSWERED_HEADER. A Connected Machine's
+ * agent simply receives it. */
+export const NO_WAKE_HEADER = "Opengeni-No-Wake";
+
+/** The header of the empty reply a compute host gives a no-wake request it
+ * did not hand to the agent: "asleep" (the sandbox is not running), "away"
+ * (the agent does not hold the subscription) or "busy" (too many requests
+ * outstanding). Only the host says it; it strips it from anything the agent
+ * publishes. */
+export const AGENT_UNANSWERED_HEADER = "Opengeni-Agent-Unanswered";
+
 /** The link that carried a request to its agent ended before the answer
  * came back. The request may have been delivered, so it is never "never
  * sent"; a replayable request is delivered again at once. */

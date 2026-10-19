@@ -54,10 +54,12 @@ export async function connectedRunnerReleaseMode(
  * while that runner is live from the command: one answered `OpRelease`, then
  * the release is recorded, so nothing about the command is left for a later
  * pass to send the runner. `OpRelease` is idempotent, so an inventory answer
- * releasing the same output meanwhile is harmless. "unsupported" when the
- * runner does not report its inventory: the reconciler releases it with an
- * attach and a final ACK. A failure throws; the runner's own inventory then
- * recovers the release while it is talking.
+ * releasing the same output meanwhile is harmless. It is sent without waking:
+ * "not_answered" when the runner did not answer (its sandbox fell asleep, or
+ * it is away), which records nothing, and the runner's own inventory releases
+ * it when it next talks. "unsupported" when the runner does not report its
+ * inventory: the reconciler releases it with an attach and a final ACK. A
+ * failure throws; the runner's inventory recovers that too.
  */
 export async function releaseStoredConnectedCommandOutput(
   db: Database,
@@ -67,7 +69,7 @@ export async function releaseStoredConnectedCommandOutput(
     controlRpc: ControlRpc;
     controlTimeoutMs: number;
   },
-): Promise<"released" | "not_retained" | "unsupported" | "retired"> {
+): Promise<"released" | "not_retained" | "not_answered" | "unsupported" | "retired"> {
   const { command } = input;
   const mode = await connectedRunnerReleaseMode(db, command);
   if (mode !== "inventory") return mode === "retired" ? "retired" : "unsupported";
@@ -82,6 +84,7 @@ export async function releaseStoredConnectedCommandOutput(
     exitSeq: input.exitSeq,
     controlTimeoutMs: input.controlTimeoutMs,
   });
+  if (outcome === "not_answered") return outcome;
   await recordConnectedCommandOutputRelease(db, { ...command, exitSeq: input.exitSeq });
   return outcome;
 }

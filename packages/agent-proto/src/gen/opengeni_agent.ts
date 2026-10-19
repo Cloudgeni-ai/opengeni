@@ -2532,10 +2532,11 @@ export interface InventoryOperation {
    * older Opengeni started it.
    */
   connectionGeneration: string;
-  /** The op exited and its output is retained, unreleased. */
+  /**
+   * The op exited and its output is retained, unreleased. How long ago is
+   * deliberately not reported: age never shows that anyone consumed it.
+   */
   complete: boolean;
-  /** For a complete op, the time since it exited, in milliseconds. */
-  completedAgeMs: string;
 }
 
 /** The control plane's ack of an AgentEvent (e.g. a HeartbeatAck). */
@@ -17721,7 +17722,7 @@ export const OperationInventory: MessageFns<OperationInventory> = {
 };
 
 function createBaseInventoryOperation(): InventoryOperation {
-  return { opId: "", connectionGeneration: "0", complete: false, completedAgeMs: "0" };
+  return { opId: "", connectionGeneration: "0", complete: false };
 }
 
 export const InventoryOperation: MessageFns<InventoryOperation> = {
@@ -17734,9 +17735,6 @@ export const InventoryOperation: MessageFns<InventoryOperation> = {
     }
     if (message.complete !== false) {
       writer.uint32(24).bool(message.complete);
-    }
-    if (message.completedAgeMs !== "0") {
-      writer.uint32(32).uint64(message.completedAgeMs);
     }
     return writer;
   },
@@ -17772,14 +17770,6 @@ export const InventoryOperation: MessageFns<InventoryOperation> = {
           message.complete = reader.bool();
           continue;
         }
-        case 4: {
-          if (tag !== 32) {
-            break;
-          }
-
-          message.completedAgeMs = reader.uint64().toString();
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -17802,11 +17792,6 @@ export const InventoryOperation: MessageFns<InventoryOperation> = {
         ? globalThis.String(object.connection_generation)
         : "0",
       complete: isSet(object.complete) ? globalThis.Boolean(object.complete) : false,
-      completedAgeMs: isSet(object.completedAgeMs)
-        ? globalThis.String(object.completedAgeMs)
-        : isSet(object.completed_age_ms)
-        ? globalThis.String(object.completed_age_ms)
-        : "0",
     };
   },
 
@@ -17821,9 +17806,6 @@ export const InventoryOperation: MessageFns<InventoryOperation> = {
     if (message.complete !== false) {
       obj.complete = message.complete;
     }
-    if (message.completedAgeMs !== "0") {
-      obj.completedAgeMs = message.completedAgeMs;
-    }
     return obj;
   },
 
@@ -17835,7 +17817,6 @@ export const InventoryOperation: MessageFns<InventoryOperation> = {
     message.opId = object.opId ?? "";
     message.connectionGeneration = object.connectionGeneration ?? "0";
     message.complete = object.complete ?? false;
-    message.completedAgeMs = object.completedAgeMs ?? "0";
     return message;
   },
 };

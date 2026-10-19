@@ -42,7 +42,7 @@ import {
   recordConnectedCommandOutputConsumption,
 } from "@opengeni/db/session-background-commands";
 import { connect, createNatsEventBus, type NatsConnection } from "@opengeni/events";
-import { NatsControlRpc } from "@opengeni/runtime/sandbox";
+import { AGENT_UNANSWERED_HEADER, NatsControlRpc, NO_WAKE_HEADER } from "@opengeni/runtime/sandbox";
 import {
   acquireSharedTestDatabase,
   freePort,
@@ -58,6 +58,7 @@ import { handleHelloPayload } from "../../apps/api/src/sandbox/metrics-ingestion
 import type { ApiWebSocketConnection } from "../../apps/api/src/api-websocket";
 import {
   reconcileConnectedCommandOutputReleases,
+  reconcileConnectedMachineBackgroundCommands,
   releaseClaimedConnectedCommandOutput,
 } from "../../apps/worker/src/activities/sandbox-lease";
 import type { GatewayFrame } from "../../apps/api/src/sandbox/compute-link-frames";
@@ -803,6 +804,11 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       link.send({ t: "sub", s: 1, sid: 9, subject: `${scope}.rpc.>` });
       await Bun.sleep(100);
 
+      // The host, as compute-link behaves: while the sandbox sleeps, it
+      // answers a no-wake request itself ("asleep") and the agent never gets
+      // it; any other request would wake the sandbox, and is recorded.
+      let hostAsleep = false;
+      const woke: string[] = [];
       // The agent: it keeps each op's output through its exit frame (seq 2)
       // until a release for exactly that frame, which it confirms in its
       // answer; a released op answers released from then on.
@@ -811,6 +817,11 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       stops.push(
         answerRequests(link, 1, (frame) => {
           if (frame.sid !== 7 && frame.sid !== 9) return null;
+          if (hostAsleep) {
+            if (frame.headers?.some(([name, value]) => name === NO_WAKE_HEADER && value === "1"))
+              return { payload: new Uint8Array(0), headers: [[AGENT_UNANSWERED_HEADER, "asleep"]] };
+            woke.push(frame.subject);
+          }
           const request = ControlRequest.decode(frame.payload);
           // The transport's replay negotiation.
           if (request.op?.$case === "ping")
@@ -911,6 +922,7 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
             where workspace_id=${workspaceId!} and sandbox_group_id=${session.sandboxGroupId}`
         )[0]!.compute_asleep_since;
       const power = async (state: "asleep" | "awake") => {
+        hostAsleep = state === "asleep";
         link.send({ t: "state", s: 1, state });
         const deadline = Date.now() + 5_000;
         while (((await asleepSince()) === null) !== (state === "awake")) {
@@ -925,6 +937,13 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       const reaperObservability = { incrementCounter: () => {}, warn: () => {} } as never;
       const reaper = () =>
         reconcileConnectedCommandOutputReleases(
+          db,
+          reaperSettings,
+          reaperObservability,
+          bus as never,
+        );
+      const commandReconciler = () =>
+        reconcileConnectedMachineBackgroundCommands(
           db,
           reaperSettings,
           reaperObservability,
@@ -946,7 +965,7 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       /** The agent reports completed ops (with how long ago they completed)
        * and reads the answer off its ack subscription. */
       let reportId = 0;
-      const report = async (operations: Array<[opId: string, completedAgeMs: number]>) => {
+      const report = async (operations: string[]) => {
         reportId += 1;
         const answered = link.next(
           (frame) => frame.t === "msg" && frame.s === 1 && frame.sid === 8,
@@ -964,11 +983,10 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
                 reportId: String(reportId),
                 page: 0,
                 pages: 1,
-                operations: operations.map(([opId, completedAgeMs]) => ({
+                operations: operations.map((opId) => ({
                   opId,
                   connectionGeneration: "1",
                   complete: true,
-                  completedAgeMs: String(completedAgeMs),
                 })),
               },
             },
@@ -986,6 +1004,7 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
           await due();
           const mark = link.frames.length;
           await reaper();
+          await commandReconciler();
           await Bun.sleep(100);
           expect(forwarded(mark)).toEqual([]);
         }
@@ -1048,6 +1067,49 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       expect(forwarded(mark)).toEqual([]);
       expect((await stored(raced.commandId)).output_release_observed_at).toBeInstanceOf(Date);
 
+      // The sandbox fell asleep just as another output was stored. Its
+      // release goes out without waking, over the real bus with its header:
+      // the host answers it itself, the agent never gets it, and nothing is
+      // recorded. The agent's own inventory releases it later.
+      const dozed = await consumed();
+      requests.length = 0;
+      const dozedMark = link.frames.length;
+      expect(
+        await releaseStoredConnectedCommandOutput(db, {
+          command: dozed,
+          exitSeq: "2",
+          controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
+          controlTimeoutMs: 2_000,
+        }),
+      ).toBe("not_answered");
+      const dozedFrames = forwarded(dozedMark) as Array<Extract<GatewayFrame, { t: "msg" }>>;
+      expect(dozedFrames).toHaveLength(1);
+      expect(dozedFrames[0]!.headers).toContainEqual([NO_WAKE_HEADER, "1"]);
+      expect(requests).toEqual([]);
+      expect((await stored(dozed.commandId)).output_release_observed_at).toBeNull();
+
+      // Its agent pushed a command's completion, and the process collecting
+      // it died. Housekeeping recovers it once, without waking: the host
+      // answers "asleep", nothing is recorded, and the command is left to
+      // the agent, so later passes send nothing at all.
+      const pushedId = crypto.randomUUID();
+      const pushedOp = `op-${pushedId}`;
+      await shared!
+        .admin`insert into session_background_commands(id,account_id,workspace_id,session_id,provider,state,control_workspace_id,enrollment_id,connection_instance_id,op_id,reconcile_after,completion_notified_at)
+        values (${pushedId},${accountId},${workspaceId!},${session.id},'connected_machine','running',${workspaceId!},${agent.agentId},${instance},${pushedOp},'2000-01-01T00:00:00Z'::timestamptz,now())`;
+      const recoveryMark = link.frames.length;
+      await commandReconciler();
+      await Bun.sleep(100);
+      const recovery = forwarded(recoveryMark) as Array<Extract<GatewayFrame, { t: "msg" }>>;
+      expect(recovery).toHaveLength(1);
+      expect(ControlRequest.decode(recovery[0]!.payload).op?.$case).toBe("opQuery");
+      expect(recovery[0]!.headers).toContainEqual([NO_WAKE_HEADER, "1"]);
+      expect(requests).toEqual([]);
+      const leftToAgent = await stored(pushedId);
+      expect(leftToAgent.state).toBe("running");
+      expect(leftToAgent.last_reconcile_outcome).toBe("provider_unanswered");
+      expect(leftToAgent.completion_notified_at).toBeNull();
+
       // One process died between storing an output and releasing it, another
       // between a command's exit and storing its output. While the sandbox
       // sleeps, housekeeping passes send it nothing at all.
@@ -1065,12 +1127,11 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       // recorded) and keeps the output Opengeni never stored, which it starts
       // collecting while the agent talks (this agent refuses to replay it).
       await power("awake");
-      expect(
-        await report([
-          [orphan.opId, 60_000],
-          [unstored.opId, 60_000],
-        ]),
-      ).toEqual([orphan.opId]);
+      expect(await report([orphan.opId, dozed.opId, unstored.opId])).toEqual([
+        orphan.opId,
+        dozed.opId,
+      ]);
+      expect((await stored(dozed.commandId)).output_release_observed_at).toBeInstanceOf(Date);
       const recovered = await stored(orphan.commandId);
       expect(recovered.output_release_observed_at).toBeInstanceOf(Date);
       expect(recovered.output_unavailable_at).toBeNull();
@@ -1091,8 +1152,21 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
 
       // Once that output is stored, the next report ends it too.
       await store(unstored);
-      expect(await report([[unstored.opId, 120_000]])).toEqual([unstored.opId]);
+      expect(await report([unstored.opId])).toEqual([unstored.opId]);
       expect((await stored(unstored.commandId)).output_release_observed_at).toBeInstanceOf(Date);
+
+      // The agent's report of the pushed command takes over its recovery
+      // while it talks: its exit is collected (this agent refuses to replay,
+      // so the collection is only attempted), and the command stays running.
+      requests.length = 0;
+      expect(await report([pushedOp])).toEqual([]);
+      const pushedDeadline = Date.now() + 10_000;
+      while (!requests.includes("opAttach")) {
+        if (Date.now() > pushedDeadline) throw new Error("the report did not collect");
+        await Bun.sleep(50);
+      }
+      expect((await stored(pushedId)).state).toBe("running");
+      await shared!.admin`delete from session_background_commands where id=${pushedId}`;
 
       // Nothing is left: later passes send nothing, awake or asleep, and
       // Opengeni never sent a final ACK (the agent's ack subscription carried
@@ -1102,7 +1176,9 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
       await power("asleep");
       await passesSendNothing();
       expect(requests).toEqual([]);
-      expect(acks()).toHaveLength(2);
+      expect(acks()).toHaveLength(3);
+      // No request ever woke the sleeping sandbox.
+      expect(woke).toEqual([]);
       link.close();
     } finally {
       for (const stop of stops) stop();
@@ -1227,7 +1303,6 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
                   opId,
                   connectionGeneration: String(startedOn),
                   complete: false,
-                  completedAgeMs: "0",
                 })),
               },
             },

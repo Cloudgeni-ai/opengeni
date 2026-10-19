@@ -42,6 +42,8 @@ function rig(
     ledger?: "turn" | "direct" | "failing";
     /** Delay of the nth admission (0-based). */
     admissionDelayMs?: (call: number) => number;
+    /** The connection generation the nth admission (0-based) reads; 1. */
+    generationAt?: (call: number) => number;
   } = {},
 ) {
   const state = { live: OLD, gone: new Set<string>() };
@@ -146,8 +148,10 @@ function rig(
     execTimeoutMs: options.execTimeoutMs ?? 5_000,
     retryClock: { sleep: async () => {}, jitter: () => 0.5 },
     resolveOperationAdmission: async () => {
-      const delay = options.admissionDelayMs?.(admissions++) ?? 0;
+      const call = admissions++;
+      const delay = options.admissionDelayMs?.(call) ?? 0;
       if (delay > 0) await Bun.sleep(delay);
+      const generation = String(options.generationAt?.(call) ?? 1);
       return {
         connectionInstanceId: state.live,
         workspaceRoot: ROOT,
@@ -159,7 +163,13 @@ function rig(
         },
         operationResourcePolicySupported: true,
         operationCpuQuotaSupported: true,
-        opStream: { transport, ackIntervalMs: 20, silenceTimeoutMs: 120, reconnectHoldMs: 600 },
+        opStream: {
+          transport,
+          ackIntervalMs: 20,
+          silenceTimeoutMs: 120,
+          reconnectHoldMs: 600,
+          connectionGeneration: generation,
+        },
       };
     },
     ...(options.ledger === "direct"
@@ -708,6 +718,62 @@ function expectOutcomeUnknown(
   if (!expected.startConfirmed) expect(text).not.toMatch(/while this command was running/);
   expect(text).not.toMatch(/did not survive|did not run/);
 }
+
+describe("an exec whose connection changes hands and comes back before its start", () => {
+  // A, then B, then A: the same agent process holds the connection again,
+  // under a newer generation than the one the exec was admitted under.
+  const startGenerations = (requests: { request: ControlRequest }[]) =>
+    requests.flatMap((r) =>
+      r.request.op?.$case === "opStart" ? [r.request.op.opStart.connectionGeneration] : [],
+    );
+
+  test("a start no attempt delivered is admitted again under the new generation", async () => {
+    // Admission 0 reads generation 1; by the revalidation just before the
+    // start (admission 1), B held the connection and A took it back (3).
+    const { session, runners, requests } = rig({
+      generationAt: (call) => (call === 0 ? 1 : 3),
+    });
+    runners.get(OLD)!.script("call_aba:0", { frames: [], exit: { exitCode: 0 } });
+    const result = await runWithToolCallCorrelation("call_aba", () =>
+      session.exec({ cmd: "true" }),
+    );
+    expect(result.exitCode).toBe(0);
+    // Started once, on A, under the generation A holds now: A's inventory
+    // will report it as current, so it is never taken for an orphan.
+    expect(startGenerations(requests)).toEqual(["3"]);
+  });
+
+  test("a start that may have reached the agent under the old generation is never sent under the new one", async () => {
+    let held = false;
+    const context = rig({
+      controlTimeoutMs: 200,
+      goneHolds: true,
+      // The first start goes out under 1 and is held unanswered (it may have
+      // arrived); before the retry, the connection changed hands and came
+      // back (3).
+      generationAt: (call) => (call <= 1 ? 1 : 3),
+      onRequest: (request) => {
+        if (request.op?.$case === "opStart" && !held) {
+          held = true;
+          context.loseHost();
+          setTimeout(() => context.relink(), 250);
+        }
+      },
+    });
+    const { session, requests } = context;
+    const error = await runWithToolCallCorrelation("call_aba_sent", () =>
+      session.exec({ cmd: "touch once" }),
+    ).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    // Not known to be delivered: its outcome is unknown, in the existing words.
+    expect(String(error)).toContain(
+      "The machine's agent was replaced before this command's outcome was known",
+    );
+    expect(startGenerations(requests)).toEqual(["1"]);
+  });
+});
 
 describe("an exec whose start is held by a link that ends", () => {
   // As a direct terminal exec runs on a compute sandbox whose host link drops:

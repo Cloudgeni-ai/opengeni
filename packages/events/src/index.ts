@@ -530,8 +530,9 @@ export interface RequestConnection {
     subject: string,
     payload: Uint8Array,
     /** resendOn opts into identical redelivery on that subject's notifications
-     * and local reconnect. Only safe reads or journaled deliveries may opt in. */
-    opts: { timeout: number; resendOn?: string },
+     * and local reconnect. Only safe reads or journaled deliveries may opt in.
+     * `headers` are the request headers of a plain (non-resending) request. */
+    opts: { timeout: number; resendOn?: string; headers?: Record<string, string> },
   ): Promise<RequestReply>;
 }
 
@@ -750,7 +751,7 @@ export async function createNatsEventBus(
             requestObservers.add(observer);
             return () => requestObservers.delete(observer);
           })
-        : requestReply(nc, subject, payload, opts.timeout),
+        : requestReply(nc, subject, payload, opts.timeout, opts.headers),
   };
   const opStreamConnection: OpStreamConnection = {
     subscribe: (subject) => nc.subscribe(subject),
@@ -1265,8 +1266,17 @@ async function requestReply(
   subject: string,
   payload: Uint8Array,
   timeout: number,
+  requestHeaders?: Record<string, string>,
 ): Promise<RequestReply> {
-  const msg: Msg = await nc.request(subject, payload, { timeout });
+  let sent: ReturnType<typeof natsHeaders> | undefined;
+  for (const [name, value] of Object.entries(requestHeaders ?? {})) {
+    sent ??= natsHeaders();
+    sent.set(name, value);
+  }
+  const msg: Msg = await nc.request(subject, payload, {
+    timeout,
+    ...(sent ? { headers: sent } : {}),
+  });
   return { data: msg.data, ...(msg.headers ? { headers: msg.headers } : {}) };
 }
 

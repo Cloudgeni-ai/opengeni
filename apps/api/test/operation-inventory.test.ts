@@ -25,7 +25,6 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { ingestConnectedCommandCompletion } from "../src/sandbox/command-completion";
 import { handleAgentEventPayload } from "../src/sandbox/metrics-ingestion";
 import { decideInventoryPage, type ReportedOperation } from "../src/sandbox/operation-inventory";
-import { OP_START_RESEND_HORIZON_MS } from "@opengeni/runtime/sandbox";
 
 // A runner reports what it still runs or retains, on each connection and while
 // it holds output nobody released; Opengeni answers in the same exchange which
@@ -159,10 +158,9 @@ function answerChannel() {
   return { bus, sent };
 }
 
-type Reported = [opId: string, generation: number, completedAgeMs?: number];
+type Reported = [opId: string, generation: number, state?: "complete"];
 
-/** One inventory page, delivered exactly as the events subscription does. An
- * op with a completion age has completed. */
+/** One inventory page, delivered exactly as the events subscription does. */
 async function report(
   machine: Machine,
   bus: EventBus,
@@ -179,11 +177,10 @@ async function report(
         page: 0,
         pages: 1,
         operations: operations.map(
-          ([opId, generation, completedAgeMs]): InventoryOperation => ({
+          ([opId, generation, state]): InventoryOperation => ({
             opId,
             connectionGeneration: String(generation),
-            complete: completedAgeMs !== undefined,
-            completedAgeMs: String(completedAgeMs ?? 0),
+            complete: state === "complete",
           }),
         ),
       },
@@ -312,6 +309,26 @@ test("a plain reconnect of the same process keeps its generation, so nothing it 
   expect(answers(sent).map((answer) => answer.endOpIds)).toEqual([[]]);
 });
 
+test("a foreground op's output that nobody released is kept while its generation is current, however long ago it completed", async () => {
+  // The reviewer's case: a foreground op completed 900,001 ms ago (past the
+  // start-resend horizon) and its release never happened. No durable record
+  // shows its consumer finished, and age is not consumption (the runner no
+  // longer even reports it), so it is kept; a takeover ends it.
+  const machine = await seedMachine();
+  const { bus, sent } = answerChannel();
+  const instance = crypto.randomUUID();
+  const opId = `foreground-${crypto.randomUUID()}`;
+  expect(await claim(machine, instance)).toBe(1);
+  await report(machine, bus, instance, [[opId, 1, "complete"]]);
+  expect(answers(sent).map((answer) => answer.endOpIds)).toEqual([[]]);
+  sent.length = 0;
+  // Another process takes the connection, then this one takes it back.
+  expect(await claim(machine, crypto.randomUUID())).toBe(2);
+  expect(await claim(machine, instance)).toBe(3);
+  await report(machine, bus, instance, [[opId, 1, "complete"]]);
+  expect(answers(sent).map((answer) => answer.endOpIds)).toEqual([[opId]]);
+});
+
 test("output Opengeni has not stored is never ended: it is collected, and ended once stored", async () => {
   const machine = await seedMachine();
   const { bus, sent } = answerChannel();
@@ -329,9 +346,9 @@ test("output Opengeni has not stored is never ended: it is collected, and ended 
   // this test transport cannot replay, so nothing is stored), the running one
   // is kept, the lost one is ended.
   await report(machine, bus, instance, [
-    [unstored, 1, 5_000],
-    [running, 1, 5_000],
-    [lost, 1, 5_000],
+    [unstored, 1, "complete"],
+    [running, 1, "complete"],
+    [lost, 1, "complete"],
   ]);
   expect(answers(sent).map((answer) => answer.endOpIds)).toEqual([[lost]]);
   sent.length = 0;
@@ -342,7 +359,7 @@ test("output Opengeni has not stored is never ended: it is collected, and ended 
 
   // Once stored, the same report ends it and records the release.
   await shared.admin`update session_background_commands set output_consumed_at = now(), output_exit_seq = '5', output_attach_generation = '1' where op_id = ${unstored}`;
-  await report(machine, bus, instance, [[unstored, 1, 6_000]]);
+  await report(machine, bus, instance, [[unstored, 1, "complete"]]);
   expect(answers(sent).map((answer) => answer.endOpIds)).toEqual([[unstored]]);
   const [stored] = await shared.admin<
     Array<{ released: Date | null }>
@@ -434,7 +451,7 @@ test("classification is exact to the runner process and carries each command's o
   ).rejects.toThrow("At most");
 });
 
-test("the decision: custody for a command, the OpStart generation and age for anything else", () => {
+test("the decision: custody for a command, the OpStart generation for anything else, never age", () => {
   const command = (
     state: "running" | "stopping" | "exited" | "lost",
     custody: { consumed?: boolean; released?: boolean; unavailable?: boolean } = {},
@@ -453,11 +470,10 @@ test("the decision: custody for a command, the OpStart generation and age for an
     outputReleased: custody.released ?? false,
     outputUnavailable: custody.unavailable ?? false,
   });
-  const op = (opId: string, generation: string, completedAgeMs?: number): ReportedOperation => ({
+  const op = (opId: string, generation: string, complete = false): ReportedOperation => ({
     opId,
     connectionGeneration: generation,
-    complete: completedAgeMs !== undefined,
-    completedAgeMs: String(completedAgeMs ?? 0),
+    complete,
   });
   const decide = (
     operations: ReportedOperation[],
@@ -480,34 +496,35 @@ test("the decision: custody for a command, the OpStart generation and age for an
 
   // A command row decides by custody, whatever generation the op reports.
   expect(decide([op("x", "1")], { x: [command("running")] })).toEqual(none);
-  expect(decide([op("x", "3", 10)], { x: [command("stopping")] })).toEqual({
+  expect(decide([op("x", "3", true)], { x: [command("stopping")] })).toEqual({
     ...none,
     collectCompletions: ["x"],
   });
-  expect(decide([op("x", "3", 10)], { x: [command("exited")] })).toEqual({
+  expect(decide([op("x", "3", true)], { x: [command("exited")] })).toEqual({
     ...none,
     collectOutputs: ["c"],
   });
-  // Not stored: kept even when the op is long past the resend horizon.
-  expect(
-    decide([op("x", "1", OP_START_RESEND_HORIZON_MS * 2)], { x: [command("exited")] }),
-  ).toEqual({ ...none, collectOutputs: ["c"] });
+  // Not stored: kept, whatever generation it reports.
+  expect(decide([op("x", "1", true)], { x: [command("exited")] })).toEqual({
+    ...none,
+    collectOutputs: ["c"],
+  });
   expect(decide([op("x", "3")], { x: [command("exited")] })).toEqual(none);
-  expect(decide([op("x", "3", 10)], { x: [command("exited", { consumed: true })] })).toEqual({
+  expect(decide([op("x", "3", true)], { x: [command("exited", { consumed: true })] })).toEqual({
     ...none,
     end: ["x"],
     released: ["c"],
   });
   expect(
-    decide([op("x", "3", 10)], { x: [command("exited", { consumed: true, released: true })] }),
+    decide([op("x", "3", true)], { x: [command("exited", { consumed: true, released: true })] }),
   ).toEqual({ ...none, end: ["x"] });
-  expect(decide([op("x", "3", 10)], { x: [command("exited", { unavailable: true })] })).toEqual({
+  expect(decide([op("x", "3", true)], { x: [command("exited", { unavailable: true })] })).toEqual({
     ...none,
     end: ["x"],
   });
   expect(decide([op("x", "3")], { x: [command("lost")] })).toEqual({ ...none, end: ["x"] });
   // With several rows, one in flight or one still owed its output decides.
-  expect(decide([op("x", "3", 10)], { x: [command("lost"), command("exited")] })).toEqual({
+  expect(decide([op("x", "3", true)], { x: [command("lost"), command("exited")] })).toEqual({
     ...none,
     collectOutputs: ["c"],
   });
@@ -517,15 +534,10 @@ test("the decision: custody for a command, the OpStart generation and age for an
   expect(
     decide([op("earlier", "1"), op("current", "3"), op("older", "0"), op("empty", "")]).end,
   ).toEqual(["earlier"]);
-  // A completed one also ends once no OpStart can still reach it.
+  // A completed one is ended by the same rule, never for being old.
   expect(
-    decide([
-      op("young", "3", OP_START_RESEND_HORIZON_MS - 1),
-      op("old", "3", OP_START_RESEND_HORIZON_MS),
-      op("older", "0", OP_START_RESEND_HORIZON_MS),
-      op("earlier", "2", 1),
-    ]).end,
-  ).toEqual(["old", "older", "earlier"]);
+    decide([op("current", "3", true), op("older", "0", true), op("earlier", "2", true)]).end,
+  ).toEqual(["earlier"]);
   // Generations compare as 64-bit integers, not strings.
   expect(decide([op("big", "18446744073709551614")], {}, "18446744073709551615").end).toEqual([
     "big",

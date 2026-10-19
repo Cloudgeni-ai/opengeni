@@ -168,7 +168,6 @@ impl Inventory {
                 op_id: op.wire.clone(),
                 connection_generation: self.generation_of(&op.op),
                 complete: op.completed_at_ms.is_some(),
-                completed_age_ms: op.completed_at_ms.map_or(0, |at| now_ms.saturating_sub(at)),
             })
             .collect();
         let chunks: Vec<Vec<v1::InventoryOperation>> = if operations.is_empty() {
@@ -282,18 +281,11 @@ mod tests {
         }
     }
 
-    fn reported(pages: &[v1::OperationInventory]) -> Vec<(String, u64, bool, u64)> {
+    fn reported(pages: &[v1::OperationInventory]) -> Vec<(String, u64, bool)> {
         pages
             .iter()
             .flat_map(|page| page.operations.iter())
-            .map(|op| {
-                (
-                    op.op_id.clone(),
-                    op.connection_generation,
-                    op.complete,
-                    op.completed_age_ms,
-                )
-            })
+            .map(|op| (op.op_id.clone(), op.connection_generation, op.complete))
             .collect()
     }
 
@@ -313,16 +305,16 @@ mod tests {
         assert_eq!(
             reported(&pages),
             vec![
-                ("early".to_string(), 7, false, 0),
-                ("older".to_string(), 0, false, 0),
-                ("done".to_string(), 0, true, 600),
+                ("early".to_string(), 7, false),
+                ("older".to_string(), 0, false),
+                ("done".to_string(), 0, true),
             ]
         );
         // Nothing is learned from an answer: a lost answer leaves the
         // generation exactly as admitted.
         inventory.begin_connection("link");
         let pages = inventory.pending_pages("link", 2_000, || vec![early.clone()]);
-        assert_eq!(reported(&pages), vec![("early".to_string(), 7, false, 0)]);
+        assert_eq!(reported(&pages), vec![("early".to_string(), 7, false)]);
         assert_eq!(inventory.generation_of(&early.op), 7);
     }
 
@@ -403,7 +395,7 @@ mod tests {
         assert_eq!(inventory.pending_pages("link", 60_000, done), no_pages());
         assert_eq!(inventory.pending_pages("link", 69_999, done), no_pages());
         let again = inventory.pending_pages("link", 70_000, done);
-        assert_eq!(reported(&again), vec![("job".to_string(), 0, true, 60_000)]);
+        assert_eq!(reported(&again), vec![("job".to_string(), 0, true)]);
         assert_ne!(again[0].report_id, pages[0].report_id);
         // Unanswered, the same pages repeat; answered, the backoff holds.
         let repeat = inventory.pending_pages("link", 71_000, || unreachable!("pending"));

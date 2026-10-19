@@ -147,10 +147,11 @@ connection:
   collecting releases it in the same exchange.
 - An operation without a command (foreground work, or a command deleted with
   its chat) is ended when it started under an earlier generation than the
-  current one. A completed one is also ended once it completed longer ago than
-  any start can still reach the agent (`OP_START_RESEND_HORIZON_MS`). A running
-  one is never ended for its age. One an older Opengeni started carries
-  generation 0 and is kept.
+  current one, because its requester can no longer address it. Otherwise it is
+  kept, running or completed, however long ago it completed: no durable record
+  shows that a foreground requester finished with its output, and age never
+  shows it either, so the agent's own retention bound limits what it keeps. One
+  an older Opengeni started carries generation 0 and is kept.
 
 The agent cancels what it runs and drops what it retains; none of it runs again
 or writes into a settled record. So a process that comes back after another
@@ -158,6 +159,21 @@ process took its connection stops what Opengeni settled meanwhile, whatever
 happened to the chats. The agent starts every such exchange, so none reaches an
 agent that is not talking, such as a sleeping compute sandbox. An agent that
 does not report keeps the earlier behaviour.
+
+Requests Opengeni sends on its own behalf rather than for a call (the release
+of stored output, the collection of output an inventory answer kept, and the
+reconciler's recovery query to a runner that reports its inventory) carry the
+`Opengeni-No-Wake` header. A compute host delivers such a request only while
+the sandbox runs and its agent holds the link, and otherwise answers it itself
+with `Opengeni-Agent-Unanswered` (`asleep`, `away` or `busy`) without waking
+the sandbox; a Connected Machine agent simply receives it. When such a request
+goes unanswered (that header, no responders, a lost link or a timeout),
+Opengeni records nothing and leaves the work to the agent's next inventory. The
+reconciler asks a reporting runner once: after one unanswered query it defers
+the command (outcome `provider_unanswered`) and does not claim it again until
+the agent reports it, the command is stopped, or its runner is retired. A
+Connected Machine never sleeps, so its answered queries continue on each pass
+as before.
 
 A stop can reach an agent before the start it stops, for example when the
 start sat on a link that ended and is delivered again. The agent then refuses

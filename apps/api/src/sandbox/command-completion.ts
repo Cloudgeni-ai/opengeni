@@ -32,6 +32,7 @@ import {
   subjectFor,
   replayConnectedCommandOutput,
   connectedCommandExitProof,
+  withoutWaking,
 } from "@opengeni/runtime/sandbox";
 
 /**
@@ -144,6 +145,9 @@ export type ConnectedCommandCollectionDeps = {
   releaseRpc?: ControlRpc | undefined;
 };
 
+/** Collection is housekeeping: its attach is sent without waking. When the
+ * runner does not answer (its sandbox fell asleep), the collection fails and
+ * records nothing; the runner reports the op again while it is talking. */
 function connectedCommandOutputReader(
   identity: { controlWorkspaceId: string; enrollmentId: string; connectionInstanceId: string },
   deps: ConnectedCommandCollectionDeps,
@@ -157,7 +161,7 @@ function connectedCommandOutputReader(
     agentId: identity.enrollmentId,
     connectionInstanceId: identity.connectionInstanceId,
     epoch: 0,
-    controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
+    controlRpc: withoutWaking(new NatsControlRpc(async () => bus.getRequestConnection())),
     rpcSubject: subjectFor(
       identity.controlWorkspaceId,
       identity.enrollmentId,

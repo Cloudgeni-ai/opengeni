@@ -14,7 +14,7 @@
  */
 
 import type { AgentLinkNats } from "@opengeni/events";
-import { AGENT_LINK_LOST_HEADER } from "@opengeni/runtime/sandbox";
+import { AGENT_LINK_LOST_HEADER, NO_WAKE_HEADER } from "@opengeni/runtime/sandbox";
 import type { ApiWebSocketConnection, ApiWebSocketLike } from "../api-websocket";
 import {
   AGENT_LINK_PROTOCOL,
@@ -783,15 +783,24 @@ class AgentLink implements ApiWebSocketConnection {
               return;
             }
             // Only a request (a message with a reply subject) wakes a sleeping
-            // sandbox at its host; any other message waits there until the
-            // agent next runs. Name each waker: an idle sandbox should get none.
+            // sandbox at its host, and not a no-wake one, which the host
+            // answers itself; any other message waits there until the agent
+            // next runs. Name each waker: an idle sandbox should get none.
             if (session.reportedAsleep === true) {
               const attributes = {
                 agentId: session.claim.agentId,
                 sandboxId: session.sandboxId,
                 subject: message.subject,
               };
-              if (message.reply) {
+              const noWake = message.headers?.some(
+                ([name]) => name.toLowerCase() === NO_WAKE_HEADER.toLowerCase(),
+              );
+              if (message.reply && noWake) {
+                this.gateway.options.logger?.debug?.(
+                  "compute gateway: a no-wake request to a sleeping sandbox, which its host answers without waking it",
+                  { ...attributes, reply: message.reply },
+                );
+              } else if (message.reply) {
                 this.gateway.options.logger?.info(
                   "compute gateway: a request wakes a sleeping sandbox",
                   {

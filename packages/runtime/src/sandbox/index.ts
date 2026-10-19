@@ -550,11 +550,21 @@ export {
   execDeadlineHint,
   NEVER_SENT_DETAIL_KEY,
   CONNECTION_REPLACED_DETAIL_KEY,
+  AGENT_UNANSWERED_DETAIL_KEY,
+  agentNotAnsweredReason,
+  isAgentNotAnswered,
+  requestWithoutWaking,
+  withoutWaking,
+  type NoWakeReply,
   connectionReplacedAgentError,
   type NatsRequestConnection,
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
-export { AGENT_LINK_LOST_HEADER } from "./selfhosted/control-replay";
+export {
+  AGENT_LINK_LOST_HEADER,
+  AGENT_UNANSWERED_HEADER,
+  NO_WAKE_HEADER,
+} from "./selfhosted/control-replay";
 // The transport-agnostic per-op observation seam (out-of-band telemetry — metrics
 // + machine.* events; the op-engine's op-stream client emits through this too).
 export type { SelfhostedOpObserver, SelfhostedOpObservation } from "./selfhosted/op-observer";

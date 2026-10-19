@@ -65,6 +65,17 @@ reaper only rechecks the obligation in the database, and settles it there once
 the sandbox's enrollment is revoked or another agent process holds its
 connection, because that agent retains nothing.
 
+Every request Opengeni sends on its own behalf (the release itself, the
+collection of output an inventory answer kept, and the reconciler's recovery
+query) is a no-wake request (`Opengeni-No-Wake: 1`). The host delivers it only
+while the sandbox runs and its agent holds the link, and otherwise answers
+`Opengeni-Agent-Unanswered` itself, so housekeeping never wakes a sandbox. An
+unanswered release or collection records nothing and is left to the agent's
+next inventory; an unanswered recovery query defers its command
+(`provider_unanswered`) until the agent reports again, so nothing contacts the
+sandbox or its host again on a timer. The gateway logs such a request to a
+sandbox it last saw asleep at debug, never as a wake.
+
 Every compute agent serves `OpRelease` and reports its operation inventory
 (`capabilities.op_release`). A compute
 sandbox runs the agent from its image and never updates it in place, and

@@ -959,10 +959,12 @@ export class SelfhostedSession {
   /** A proven-unstarted op-stream retry may reuse its stable op id, but it must
    * not reuse mutable authorization or silently retarget the command. Require a
    * fresh admission for the exact same physical route and effective policy;
-   * callers can start a later operation against a newly resolved route. */
+   * callers can start a later operation against a newly resolved route. Returns
+   * the route's current connection generation, which the start compares with
+   * the one it was admitted under. */
   private async revalidateCommandAdmission(
     expected: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const current = await this.admitCommand();
     const samePolicy =
       current.resourcePolicy?.memoryMaxBytes === expected.resourcePolicy?.memoryMaxBytes &&
@@ -982,6 +984,7 @@ export class SelfhostedSession {
         fenced: true,
       });
     }
+    return current.opStream?.connectionGeneration;
   }
 
   /** Whether `admission`'s connection is still the agent's live one (see

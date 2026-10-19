@@ -8,7 +8,6 @@ import {
 } from "@opengeni/db/session-background-commands";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
-import { OP_START_RESEND_HORIZON_MS } from "@opengeni/runtime/sandbox";
 import {
   collectConnectedCommandCompletion,
   collectExitedConnectedCommandOutput,
@@ -21,7 +20,6 @@ export type ReportedOperation = {
   /** The connection generation its OpStart carried; "0" when unknown. */
   connectionGeneration: string;
   complete: boolean;
-  completedAgeMs: string;
 };
 
 /** What Opengeni does about one inventory page. */
@@ -59,14 +57,15 @@ function decidingRow(
  *   release recorded; exited with output recorded unavailable, or lost: ended;
  * - exited with output never stored: kept, and a completed op's output is
  *   collected now. Nothing is dropped before Opengeni has custody of it.
- * Without a row (foreground work, or a command deleted with its chat):
- * - running: ended only when it started on an earlier connection generation
- *   than the current one (a different process held the connection since, and
- *   every requester was answered). Never on age: foreground work may
- *   legitimately run for hours. Generation 0 (an older Opengeni) is kept;
- * - completed: ended when it started on an earlier generation, or when it
- *   exited longer ago than any OpStart can still reach the runner, so no
- *   requester can still be reading it.
+ * Without a row (foreground work, or a command deleted with its chat) there
+ * is no durable record that anyone finished with the op: a foreground
+ * consumer's progress lives only in its own run. So such an op, running or
+ * completed, is ended only when it started on an earlier connection
+ * generation than the current one: a different process held the connection
+ * since, so no requester can still address it. Never on age: foreground
+ * work may legitimately run for hours, and an old output is not a consumed
+ * one. Generation 0 (an older Opengeni) is kept; the runner's own retention
+ * bounds what it keeps.
  */
 export function decideInventoryPage(input: {
   operations: readonly ReportedOperation[];
@@ -96,10 +95,7 @@ export function decideInventoryPage(input: {
       continue;
     }
     const startedOn = BigInt(operation.connectionGeneration || "0");
-    const earlier = startedOn > 0n && startedOn < current;
-    const expired =
-      operation.complete && BigInt(operation.completedAgeMs || "0") >= OP_START_RESEND_HORIZON_MS;
-    if (earlier || expired) decision.end.push(operation.opId);
+    if (startedOn > 0n && startedOn < current) decision.end.push(operation.opId);
   }
   return decision;
 }

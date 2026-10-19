@@ -4,7 +4,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { AgentLinkNats, AgentLinkNatsMessage } from "@opengeni/events";
-import { AGENT_LINK_LOST_HEADER } from "@opengeni/runtime/sandbox";
+import { AGENT_LINK_LOST_HEADER, NO_WAKE_HEADER } from "@opengeni/runtime/sandbox";
 import { testSettings } from "@opengeni/testing";
 import type { ApiWebSocketConnection, ApiWebSocketLike } from "../src/api-websocket";
 import { startComputeAgentGateway } from "../src/sandbox/compute-gateway-boot";
@@ -572,7 +572,7 @@ describe("agent gateway sessions", () => {
     expect(powerCalls()).toEqual(["power:sbx-1:awake", "power:sbx-1:asleep", "power:sbx-1:awake"]);
   });
 
-  test("a request to a sleeping sandbox is logged as its waker; a plain message is not", async () => {
+  test("a request to a sleeping sandbox is logged as its waker; a plain message or a no-wake request is not", async () => {
     const logged: { level: string; message: string; attributes: unknown }[] = [];
     const { send, settle, nats } = await gatewayWithLink({
       logger: {
@@ -605,6 +605,14 @@ describe("agent gateway sessions", () => {
       reply: "_INBOX.2",
       data: new Uint8Array([3]),
     });
+    // A no-wake request does not: its host answers it without waking the
+    // sandbox, so it is only noted at debug.
+    subscription!.deliver({
+      subject: `${SCOPE}.rpc`,
+      reply: "_INBOX.3",
+      headers: [[NO_WAKE_HEADER, "1"]],
+      data: new Uint8Array([4]),
+    });
     const attributes = { agentId: AGENT, sandboxId: "sbx-1", subject: `${SCOPE}.rpc` };
     expect(logged).toEqual([
       {
@@ -616,6 +624,12 @@ describe("agent gateway sessions", () => {
         level: "info",
         message: "compute gateway: a request wakes a sleeping sandbox",
         attributes: { ...attributes, reply: "_INBOX.2" },
+      },
+      {
+        level: "debug",
+        message:
+          "compute gateway: a no-wake request to a sleeping sandbox, which its host answers without waking it",
+        attributes: { ...attributes, reply: "_INBOX.3" },
       },
     ]);
   });

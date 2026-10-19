@@ -53,9 +53,11 @@ import {
 import {
   agentErrorToControlError,
   commandOutcomeUnknownAfterReplacementAgentError,
+  isAgentNotAnswered,
   NEVER_SENT_DETAIL_KEY,
   SelfhostedControlError,
   timeoutAgentError,
+  withoutWaking,
   type ControlRpc,
 } from "./control-rpc";
 import { selfhostedRetryBackoffMs, type SelfhostedRetryClock } from "./retry-policy";
@@ -151,8 +153,10 @@ export interface OpStreamExecClientDeps {
   resourcePolicy?: OperationResourcePolicy;
   /** Revalidate the exact live route/authority immediately before every
    * physical OpStart dispatch. An already-accepted or outcome-ambiguous
-   * operation never calls this hook again. */
-  revalidateBeforeStartRetry?: () => void | Promise<void>;
+   * operation never calls this hook again. It returns the connection
+   * generation the route holds now, when known: the connection may have
+   * changed hands and come back to this same process (A, then B, then A). */
+  revalidateBeforeStartRetry?: () => string | undefined | void | Promise<string | undefined | void>;
   /** Whether the pinned connection instance is still the agent's live one;
    * see ControlRpc. Once it is not, another agent process holds the
    * connection, and the op's outcome is unknown to this client. */
@@ -291,13 +295,25 @@ export async function cancelSelfhostedOp(input: ExactSelfhostedOpControlInput): 
  * "not_retained" when it no longer kept the op for another reason. Either way
  * nothing is left on the runner for a later pass to observe. Any other answer
  * (still running, or a different terminal frame) released nothing and throws.
+ * It is housekeeping, sent without waking (`requestWithoutWaking`):
+ * "not_answered" when the agent did not answer, which records nothing; the
+ * agent's own operation inventory releases it later, while it is talking.
  * Never starts, cancels or replays anything. */
 export async function releaseSelfhostedOpOutput(
   input: ExactSelfhostedOpControlInput & { exitSeq: string },
-): Promise<"released" | "not_retained"> {
+): Promise<"released" | "not_retained" | "not_answered"> {
   if (!/^[1-9][0-9]{0,19}$/.test(input.exitSeq) || BigInt(input.exitSeq) > 18446744073709551615n)
     throw protocolError("op-stream release: invalid retained frontier");
-  const status = await exactSelfhostedOpControl(input, { release: input.exitSeq });
+  let status: OpStatus;
+  try {
+    status = await exactSelfhostedOpControl(
+      { ...input, controlRpc: withoutWaking(input.controlRpc) },
+      { release: input.exitSeq },
+    );
+  } catch (error) {
+    if (isAgentNotAnswered(error)) return "not_answered";
+    throw error;
+  }
   if (status.state !== OpState.OP_STATE_LOST)
     throw protocolError("op-stream release: durable exit frontier disagrees with runner");
   return status.lostReason === OpLostReason.OP_LOST_REASON_RELEASED ? "released" : "not_retained";
@@ -675,11 +691,13 @@ export class OpStreamExecClient {
     await Promise.all(releasing);
   }
 
-  /** Release one durably stored op on its runner (`OpRelease`). A failed or
-   *  disagreeing answer keeps it for a later durability hook. */
+  /** Release one durably stored op on its runner (`OpRelease`, sent without
+   *  waking). An unanswered, failed or disagreeing release keeps it for this
+   *  client's next durability hook, which only real work reaches; the
+   *  runner's own inventory covers it otherwise. */
   private async releaseSettled(op: SettledOp): Promise<void> {
     try {
-      await releaseSelfhostedOpOutput({
+      const outcome = await releaseSelfhostedOpOutput({
         controlRpc: this.deps.controlRpc,
         rpcSubject: this.deps.rpcSubject,
         opId: op.opId,
@@ -687,6 +705,7 @@ export class OpStreamExecClient {
         controlTimeoutMs: this.deps.controlTimeoutMs,
         ...(this.deps.connectionCurrent ? { connectionCurrent: this.deps.connectionCurrent } : {}),
       });
+      if (outcome === "not_answered") return;
     } catch {
       return;
     }
@@ -1088,12 +1107,23 @@ class OpConsumer {
       this.startAbandoned ||
       (deadlineAt > 0 && Date.now() >= deadlineAt) ||
       Date.now() > lastAttemptAt;
+    // The generation this op is started under, sent in every attempt.
+    let startGeneration = this.deps.connectionGeneration ?? "0";
     for (;;) {
       if (refused()) throw this.startTimeoutError();
       // Subscription setup can yield after the caller's initial admission.
       // Close that window, and the equivalent proven-unstarted retry windows,
       // at the last boundary before bytes can reach the provider.
-      await this.deps.revalidateBeforeStartRetry?.();
+      const generation = await this.deps.revalidateBeforeStartRetry?.();
+      if (typeof generation === "string" && generation !== startGeneration) {
+        // The connection changed hands since admission and this process holds
+        // it again under a new generation. A start no attempt delivered is
+        // admitted again under it. One an attempt may have delivered went out
+        // under the old generation and its outcome is unknown: it is not sent
+        // again under another.
+        if (this.startMaybeDelivered) throw agentReplacedOutcomeUnknownError(this.startConfirmed);
+        startGeneration = generation;
+      }
       // The wall or the deadline may have ended the call meanwhile: a caller
       // told that it timed out never has its command started afterwards.
       if (refused()) throw this.startTimeoutError();
@@ -1109,7 +1139,7 @@ class OpConsumer {
               // budget; host clock skew shifts it — a known wire caveat).
               deadlineMs: absoluteDeadline,
               originId: this.deps.rpcSubject,
-              connectionGeneration: this.deps.connectionGeneration ?? "0",
+              connectionGeneration: startGeneration,
             },
           },
           this.opId,

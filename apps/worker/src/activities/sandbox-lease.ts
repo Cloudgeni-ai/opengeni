@@ -173,6 +173,8 @@ import {
   ComputeControlClient,
   wakeComputeSandboxOnNoResponders,
   isOpTombstone,
+  isAgentNotAnswered,
+  withoutWaking,
   createComputeOrphanSweepProgress,
   reconcileStaleComputeEnrollments,
   sweepComputeOrphans,
@@ -1380,6 +1382,7 @@ type ConnectedCommandReconciliationOutcome =
   | "claim_failed"
   | "provider_running"
   | "provider_offline"
+  | "provider_unanswered"
   | "provider_error"
   | "proof_exited"
   | "proof_lost"
@@ -1640,7 +1643,16 @@ function connectedCommandControlOptions(
 
 /** Reconcile commands only against the immutable physical locator copied at
  * adoption. A successor enrollment connection is intentionally irrelevant: no
- * query or cancellation is ever rebound to it. */
+ * query or cancellation is ever rebound to it.
+ *
+ * Recovering a running command on a runner that reports its own operation
+ * inventory (every compute agent, and a Connected Machine advertising
+ * `op_release`) is housekeeping: its query and output replay are sent without
+ * waking, once. When the runner does not answer, nothing is recorded and the
+ * command is left to that runner, which reports the op again in its
+ * inventory while it is talking; a compute sandbox's running command is then
+ * not claimed again until such a report, a stop or the runner's retirement.
+ * A stop is the user's own request and is delivered as before. */
 export async function reconcileConnectedMachineBackgroundCommands(
   db: ActivityServices["db"],
   settings: ActivityServices["settings"],
@@ -1651,6 +1663,8 @@ export async function reconcileConnectedMachineBackgroundCommands(
   const dueBefore = new Date();
   const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
   const offlineConnections = new Set<string>();
+  const unansweredConnections = new Set<string>();
+  const runnerModes = new Map<string, Promise<ConnectedRunnerReleaseMode | null>>();
   const firstConnectionProbes = new Map<string, Promise<void>>();
   // Drain the fixed due frontier with the existing concurrency. Yield to the
   // remaining maintenance work each period; retries belong to a later sweep.
@@ -1686,9 +1700,29 @@ export async function reconcileConnectedMachineBackgroundCommands(
         claim.enrollmentId,
         claim.connectionInstanceId,
       ]);
+      let housekeeping = false;
+      if (!proof && claim.state === "running") {
+        let mode = runnerModes.get(connectionKey);
+        if (!mode) {
+          mode = connectedRunnerReleaseMode(db, claim).catch(() => null);
+          runnerModes.set(connectionKey, mode);
+        }
+        housekeeping = (await mode) === "inventory";
+      }
+      const rpc = housekeeping ? withoutWaking(controlRpc) : controlRpc;
       if (!proof) {
         const firstProbe = firstConnectionProbes.get(connectionKey);
         if (firstProbe) await firstProbe;
+        if (housekeeping && unansweredConnections.has(connectionKey)) {
+          await deferConnectedCommandClaim(
+            db,
+            settings,
+            observability,
+            claim,
+            "provider_unanswered",
+          );
+          return;
+        }
         if (offlineConnections.has(connectionKey)) {
           await deferConnectedCommandClaim(db, settings, observability, claim, "provider_offline");
           return;
@@ -1706,7 +1740,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
         try {
           proof = await probeConnectedMachineBackgroundCommand(
             claim,
-            controlRpc,
+            rpc,
             Math.min(
               settings.sandboxSelfhostedControlTimeoutMs,
               RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
@@ -1722,7 +1756,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
               agentId: claim.enrollmentId,
               connectionInstanceId: claim.connectionInstanceId,
               epoch: 0,
-              controlRpc,
+              controlRpc: rpc,
               rpcSubject: subjectFor(
                 claim.controlWorkspaceId,
                 claim.enrollmentId,
@@ -1758,6 +1792,18 @@ export async function reconcileConnectedMachineBackgroundCommands(
             return;
           }
         } catch (error) {
+          if (housekeeping && isAgentNotAnswered(error)) {
+            // Once: the runner's inventory takes over from here.
+            unansweredConnections.add(connectionKey);
+            await deferConnectedCommandClaim(
+              db,
+              settings,
+              observability,
+              claim,
+              "provider_unanswered",
+            );
+            return;
+          }
           const offline =
             error instanceof SelfhostedControlError &&
             (error.agentOffline || error.reason === "agent_reconnecting" || error.draining);
@@ -2116,7 +2162,12 @@ async function deferConnectedCommandClaim(
   settings: ActivityServices["settings"],
   observability: ActivityServices["observability"],
   claim: ConnectedMachineBackgroundCommandClaim,
-  outcome: "provider_running" | "provider_offline" | "provider_error" | "settlement_failed",
+  outcome:
+    | "provider_running"
+    | "provider_offline"
+    | "provider_unanswered"
+    | "provider_error"
+    | "settlement_failed",
 ): Promise<void> {
   const retryAfterMs = connectedCommandReconciliationRetryMs(
     claim.reconcileAttempts,
@@ -2128,6 +2179,8 @@ async function deferConnectedCommandClaim(
         claim,
         outcome,
         retryAfterMs,
+        // The runner reports the op again; until then nothing is due.
+        leaveToRunner: outcome === "provider_unanswered",
       }))
     ) {
       throw new Error("Connected command defer lost its exact claim");
